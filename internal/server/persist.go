@@ -15,7 +15,7 @@ import (
 
 	"github.com/go-webauthn/webauthn/webauthn"
 
-	"github.com/shazow/apron/servers/go/internal/store"
+	"github.com/apron-chat/apron-server-go/internal/store"
 )
 
 // Persistence writes the server's state through to a store.Store. Every

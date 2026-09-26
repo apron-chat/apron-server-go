@@ -1,11 +1,17 @@
-# Go reference backend
+# apron-server-go
+
+The Go reference backend for the [Apron](https://github.com/shazow/apron) chat
+protocol. It moved here, with its history, from `servers/go` in
+[shazow/apron](https://github.com/shazow/apron), which keeps the protocol and
+the shared test fixtures; see [DEVELOPMENT.md](DEVELOPMENT.md) to run it with
+the [web client](https://github.com/apron-chat/apron-web) and the tests.
 
 `cmd/aprond` serves the reference Apron backend: it implements protocol v6
-([PROTOCOL.md](../../PROTOCOL.md)), every capability and liveness ping, but
+([PROTOCOL.md](https://github.com/shazow/apron/blob/main/PROTOCOL.md)), every capability and liveness ping, but
 not the designs under consideration, multiplexing
-([Appendix C.2](../../PROTOCOL.md#c2-multiplexing-envelope))
+([Appendix C.2](https://github.com/shazow/apron/blob/main/PROTOCOL.md#c2-multiplexing-envelope))
 and WebRTC
-([Appendix C.1](../../PROTOCOL.md#c1-webrtc-signaling-for-audio-video-and-peer-to-peer-connections)).
+([Appendix C.1](https://github.com/shazow/apron/blob/main/PROTOCOL.md#c1-webrtc-signaling-for-audio-video-and-peer-to-peer-connections)).
 State is kept in a store, by default a SQLite database in the user data
 directory, so rooms, history, passkey users, sessions, uploads, and push
 registrations survive a restart; see [Storage](#storage).
@@ -347,7 +353,7 @@ without the embed.
   writer gets `413`); the server then publishes the kept text as `text` in
   place of `url`, and both URLs stop working. Saving the message without the
   embed ends the stream (the writer gets `410`).
-- **Avatars** ([PROTOCOL.md §4.6.6](../../PROTOCOL.md#466-avatars)): the `/avatar` command with one `upload`
+- **Avatars** ([PROTOCOL.md §4.6.6](https://github.com/shazow/apron/blob/main/PROTOCOL.md#466-avatars)): the `/avatar` command with one `upload`
   embed returns a write URL. A PNG, JPEG, GIF, or WebP of at most 2 MiB
   becomes the sender's `avatar`, followed by a `user` notification; replacing
   or removing the avatar deletes the upload.
@@ -364,7 +370,7 @@ distinct emoji per user are `invalid_params`.
 
 ## Commands
 
-`command` ([PROTOCOL.md §4.8](../../PROTOCOL.md#48-command)) takes the params of a new message, in
+`command` ([PROTOCOL.md §4.8](https://github.com/shazow/apron/blob/main/PROTOCOL.md#48-command)) takes the params of a new message, in
 `general` without `room_id`, and is never logged, broadcast, or saved;
 `message_id` and `deleted` are `invalid_params`, as are text that does not
 start with `/` and unknown commands (`Unknown command /foo; try /help`).
@@ -456,7 +462,7 @@ Use explicit settings for an HTTPS deployment (origins refer to the page running
 the frontend, which may differ from the WebSocket server):
 
 ```sh
-go run ./cmd/aprond --static-dir ../../.apron-web/build \
+go run ./cmd/aprond --static-dir .apron-web/build \
   --origin https://chat.example.com \
   --webauthn.rp-id chat.example.com \
   --webauthn.origin https://chat.example.com
@@ -494,7 +500,7 @@ recovery are future work.
 ### Example WebAuthn exchange
 
 These examples define the Go server's bearer-token policy alongside the canonical
-protocol exchange ([PROTOCOL.md §4.9](../../PROTOCOL.md#49-webauthn-authentication)). All steps use `auth` requests with fresh IDs
+protocol exchange ([PROTOCOL.md §4.9](https://github.com/shazow/apron/blob/main/PROTOCOL.md#49-webauthn-authentication)). All steps use `auth` requests with fresh IDs
 over the same WebSocket; no HTTP authentication endpoints are needed.
 
 | `params.action` and `params.step` | Other parameters | Result |

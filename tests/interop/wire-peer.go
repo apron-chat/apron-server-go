@@ -1,5 +1,5 @@
 // A loopback WebSocket peer controlled over HTTP by wire fixture runners.
-// Run from servers/go to use the existing websocket dependency.
+// It builds with the repository's module, for the existing websocket dependency.
 package main
 
 import (

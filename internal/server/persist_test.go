@@ -14,7 +14,7 @@ import (
 	"github.com/coder/websocket"
 	"github.com/go-webauthn/webauthn/webauthn"
 
-	"github.com/shazow/apron/servers/go/internal/store"
+	"github.com/apron-chat/apron-server-go/internal/store"
 )
 
 // startWithStore starts a passkey-enabled server on a store and returns a

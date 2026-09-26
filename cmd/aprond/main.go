@@ -23,8 +23,8 @@ import (
 	"golang.org/x/net/netutil"
 	"golang.org/x/sync/errgroup"
 
-	"github.com/shazow/apron/servers/go/internal/server"
-	"github.com/shazow/apron/servers/go/internal/store"
+	"github.com/apron-chat/apron-server-go/internal/server"
+	"github.com/apron-chat/apron-server-go/internal/store"
 )
 
 // Options are the command line flags, which a TOML file given with

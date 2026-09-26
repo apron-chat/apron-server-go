@@ -34,7 +34,7 @@ npm test
 
 The config starts both services itself with `reuseExistingServer: false`:
 
-* Go server: `127.0.0.1:8080`, started from `servers/go` with `-addr`
+* Go server: `127.0.0.1:8080`, started from the repository root with `--addr`
 * Vite dev server: `127.0.0.1:5173`, started from `.apron-web`, a checkout of
   [apron-chat/apron-web](https://github.com/apron-chat/apron-web) that `make install`
   clones (or a symlink to your own)
@@ -52,7 +52,7 @@ deleted`.
 
 ## Shared session fixtures
 
-`npm run test:wire` runs `../fixtures/wire/session` against the actual
+`npm run test:wire` runs `../../testdata/apron/tests/fixtures/wire/session` against the actual
 TypeScript `ChatClient` using Node.js WebSockets. It requires Node.js 24 and
 Go; no browser, Vite process, or example backend is started. The runner builds
 `wire-peer.go` using the existing Go module dependencies and starts it on a
@@ -63,7 +63,7 @@ The peer is a transport utility, not a protocol implementation or test oracle.
 Expected state resides exclusively in JSON fixtures. The runner normalizes
 client state and asserts it without querying UI elements or private fields.
 Both envelope forms run for every scenario variant. See
-[`../fixtures/wire/README.md`](../fixtures/wire/README.md) for the portable format.
+[`tests/fixtures/wire/README.md`](https://github.com/shazow/apron/blob/main/tests/fixtures/wire/README.md) in shazow/apron (checked out at `testdata/apron`) for the portable format.
 
 ## Rendering benchmarks
 

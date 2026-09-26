@@ -1,4 +1,4 @@
-module github.com/shazow/apron/servers/go
+module github.com/apron-chat/apron-server-go
 
 go 1.27.0
 

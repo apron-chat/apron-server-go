@@ -48,7 +48,7 @@ export default defineConfig({
 	webServer: [
 		{
 			command: 'go run ./cmd/aprond --store memory --addr 127.0.0.1:8080',
-			cwd: path.join(repositoryRoot, 'servers/go'),
+			cwd: repositoryRoot,
 			url: 'http://127.0.0.1:8080/healthz',
 			timeout: 120_000,
 			reuseExistingServer: false

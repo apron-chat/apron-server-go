@@ -22,7 +22,7 @@ import (
 	"github.com/coder/websocket"
 	"github.com/go-webauthn/webauthn/webauthn"
 
-	"github.com/shazow/apron/servers/go/internal/store"
+	"github.com/apron-chat/apron-server-go/internal/store"
 )
 
 const (

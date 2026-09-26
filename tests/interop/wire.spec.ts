@@ -40,7 +40,7 @@ const OPERATIONS = ['send', 'command', 'editMessage', 'moveMessage', 'deleteMess
 
 const directory = path.dirname(fileURLToPath(import.meta.url));
 const repository = path.resolve(directory, '../..');
-const fixtureDirectory = path.join(repository, 'tests/fixtures/wire/session');
+const fixtureDirectory = path.join(repository, 'testdata/apron/tests/fixtures/wire/session');
 const fixtures: Fixture[] = readdirSync(fixtureDirectory).filter((file) => file.endsWith('.json')).sort()
 	.map((file) => JSON.parse(readFileSync(path.join(fixtureDirectory, file), 'utf8')));
 
@@ -54,7 +54,7 @@ test.beforeAll(async () => {
 	scratch = mkdtempSync(path.join(directory, 'test-results/wire-peer-'));
 	const executable = path.join(scratch, 'peer');
 	execFileSync('go', ['build', '-o', executable, path.join(directory, 'wire-peer.go')], {
-		cwd: path.join(repository, 'servers/go'), timeout: 30_000
+		cwd: repository, timeout: 30_000
 	});
 	peer = spawn(executable, [], { stdio: ['ignore', 'pipe', 'inherit'] });
 	const lines = createInterface({ input: peer.stdout! });
@@ -91,7 +91,7 @@ async function control(route: string, body?: ObjectValue): Promise<Response> {
 
 const byString = (left: string, right: string) => left < right ? -1 : left > right ? 1 : 0;
 
-/** The room projection of tests/fixtures/wire/README.md, from the client's public snapshot. */
+/** The room projection of testdata/apron/tests/fixtures/wire/README.md, from the client's public snapshot. */
 function projectRoom(room: RoomSnapshot): ObjectValue {
 	const record = room.record;
 	const has = (key: string) => record !== undefined && Object.hasOwn(record, key);

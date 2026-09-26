@@ -1,21 +1,27 @@
-# Example implementations
+# Development
 
 The SvelteKit client and Go server implement the protocol independently. The
 server keeps rooms and history in memory; restarting it clears messages.
 
 ## Layout
 
+- The repository root is the Go module and the reference server, implementing
+  every capability in [PROTOCOL.md](https://github.com/shazow/apron/blob/main/PROTOCOL.md);
+  `cmd/aprond` is the executable and `internal` contains implementation
+  packages. See the [README](README.md).
 - [apron-chat/apron-web](https://github.com/apron-chat/apron-web): the
   SvelteKit and TypeScript web client, deployed at `https://web.apron.chat`.
   `make install` clones it into `.apron-web/` (ignored), where the browser
   tests, `make dev-web`, and `make run` use it; replace that directory with a
   symlink to work on your own checkout.
-- `servers/go`: Go module and the reference server, implementing every
-  capability in PROTOCOL.md; `cmd/aprond` is the executable and `internal`
-  contains implementation packages. See its [README](servers/go/README.md).
 - `tests/interop`: Playwright tests against real clients and the Go backend.
-- `tests/fixtures/wire`: portable JSON replay and session scenarios with
+- `testdata/apron`: a submodule of [shazow/apron](https://github.com/shazow/apron),
+  pinned to the protocol version this server implements. Its
+  `tests/fixtures/wire` holds portable JSON replay and session scenarios with
   expected protocol state; see its README for adapter requirements.
+  `make install` initializes it (or run `git submodule update --init`); to
+  follow protocol changes, check out a newer commit there and commit the
+  submodule.
 
 The public demo backend at `wss://server.apron.chat/`, a TypeScript Worker and
 SQLite Durable Object, lives in
@@ -70,18 +76,18 @@ page reloads require signing in again. Guest reconnects receive a new identity.
 Edit and delete permissions belong to the identity that created the message.
 Messages and passkey registrations are held in memory and lost on server restart.
 Use `localhost` for the default passkey configuration; see
-[`servers/go/README.md`](servers/go/README.md#passkeys) for deployment settings.
+[`README.md`](README.md#passkeys) for deployment settings.
 
 ## Threads
 
-A thread is a room with a `parent_room_id` (PROTOCOL.md [§3.4](PROTOCOL.md#34-rooms), [§4.3.4](PROTOCOL.md#434-creating-and-editing)). The
+A thread is a room with a `parent_room_id` (PROTOCOL.md [§3.4](https://github.com/shazow/apron/blob/main/PROTOCOL.md#34-rooms), [§4.3.4](https://github.com/shazow/apron/blob/main/PROTOCOL.md#434-creating-and-editing)). The
 client lists the rooms you have joined with `room_list`,
 threads included, with their members, sent right behind `auth` without waiting
-for its result ([§3.2](PROTOCOL.md#32-authentication)), and follows `room_update` from then on ([§4.3](PROTOCOL.md#43-rooms)). After
+for its result ([§3.2](https://github.com/shazow/apron/blob/main/PROTOCOL.md#32-authentication)), and follows `room_update` from then on ([§4.3](https://github.com/shazow/apron/blob/main/PROTOCOL.md#43-rooms)). After
 a dropped connection it resumes each room's history from where it stopped in
 the same way, and a resumed passkey session lists only the rooms that changed
 since. Member lists start from those listings and follow the `membership`
-records of joins and leaves ([§4.3.2](PROTOCOL.md#432-membership)), which also show in the room's
+records of joins and leaves ([§4.3.2](https://github.com/shazow/apron/blob/main/PROTOCOL.md#432-membership)), which also show in the room's
 timeline as quiet "Ada joined" lines, merged and netted out between messages so
 guest churn stays quiet. The sidebar lists top-level rooms; the
 open room's joined threads are listed under it, and every thread of the room,
@@ -125,8 +131,8 @@ is. Messages the server denies stay selected and the bar reports how many didn't
 move. Escape leaves select mode. Moved messages keep their reply references and
 reactions.
 
-Who a message mentions is its `body.mentions` ([PROTOCOL.md §3.5](PROTOCOL.md#35-messages)); in the text a
-mention follows the `@user_id` convention ([Appendix A.3](PROTOCOL.md#a3-mention-text)): a
+Who a message mentions is its `body.mentions` ([PROTOCOL.md §3.5](https://github.com/shazow/apron/blob/main/PROTOCOL.md#35-messages)); in the text a
+mention follows the `@user_id` convention ([Appendix A.3](https://github.com/shazow/apron/blob/main/PROTOCOL.md#a3-mention-text)): a
 known user renders as a chip with their current name, a room as a link, and
 unknown IDs as written, never inside code. A message whose `body.mentions` lists
 you tints its row and pulses once when it arrives (or an edit adds you), and
@@ -139,10 +145,10 @@ picked person, or a finished `@name` or `@user_id` that names exactly one of
 them, becomes a chip showing their name that is sent as `@user_id` and listed
 in `body.mentions`. Message headers show each sender as their name with the
 muted `@user_id` beside it, always when another user known to the client shows
-under the same name ([§3.3](PROTOCOL.md#33-identity)). A sender's name and avatar come from the latest
+under the same name ([§3.3](https://github.com/shazow/apron/blob/main/PROTOCOL.md#33-identity)). A sender's name and avatar come from the latest
 profile the server sent for them, else from the message itself.
 
-With cap `command` ([PROTOCOL.md §4.8](PROTOCOL.md#48-command)), composer text starting with one `/` is
+With cap `command` ([PROTOCOL.md §4.8](https://github.com/shazow/apron/blob/main/PROTOCOL.md#48-command)), composer text starting with one `/` is
 a command: the composer tags it, and Run sends it as a `command` request
 (`/nick`, `/join`, `/leave` and `/topic` map to `me`, `room_join`, `room_leave`
 and `room_set`), while `//` posts a message starting with `/`. Replies arrive as
@@ -195,7 +201,7 @@ and WebSocket endpoint from the same origin; no Node.js process is needed.
 `make run` builds the frontend, builds the Go executable, then starts it.
 Use `make serve` to run the existing build. Re-run `make run` after source changes;
 use the two development processes above for frontend hot reload.
-See `servers/go/README.md` for server flags and origin configuration.
+See `README.md` for server flags and origin configuration.
 
 ## Validate
 
