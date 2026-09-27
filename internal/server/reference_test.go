@@ -2,14 +2,12 @@ package server
 
 import (
 	"bytes"
-	"encoding/json/v2"
+	"encoding/base64"
 	"fmt"
-	"image"
-	"image/png"
 	"io"
 	"maps"
 	"net/http"
-	"net/http/httptest"
+	"os"
 	"reflect"
 	"slices"
 	"strings"
@@ -19,75 +17,9 @@ import (
 	"github.com/coder/websocket"
 )
 
-// httpDo sends one HTTP request and returns the status, headers, and body.
-func httpDo(t *testing.T, method, url string, body io.Reader, contentType string) (int, http.Header, []byte) {
-	t.Helper()
-	request, err := http.NewRequest(method, url, body)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if contentType != "" {
-		request.Header.Set("Content-Type", contentType)
-	}
-	response, err := http.DefaultClient.Do(request)
-	if err != nil {
-		t.Fatalf("%s %s: %v", method, url, err)
-	}
-	defer response.Body.Close()
-	data, err := io.ReadAll(response.Body)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return response.StatusCode, response.Header, data
-}
-
-func testPNG(t *testing.T) []byte {
-	t.Helper()
-	var buf bytes.Buffer
-	if err := png.Encode(&buf, image.NewRGBA(image.Rect(0, 0, 3, 2))); err != nil {
-		t.Fatal(err)
-	}
-	return buf.Bytes()
-}
-
-func embedsOf(t *testing.T, snapshot map[string]any) []map[string]any {
-	t.Helper()
-	body, _ := snapshot["body"].(map[string]any)
-	list, _ := body["embeds"].([]any)
-	embeds := make([]map[string]any, len(list))
-	for i, value := range list {
-		embeds[i] = value.(map[string]any)
-	}
-	return embeds
-}
-
-func TestServerFrameAdvertisesReferenceFeatures(t *testing.T) {
-	_, httpServer := newTestServer(t, DefaultConfig())
-	_, frame := dialRaw(t, httpServer)
-	params := frame["params"].(map[string]any)
-	if !reflect.DeepEqual(params["push"], map[string]any{"relay": map[string]any{}}) {
-		t.Fatalf("push: %#v", params["push"])
-	}
-	limits := params["ext"].(map[string]any)["apron-go"].(map[string]any)
-	if limits["max_upload_bytes"] != float64(defaultMaxUploadBytes) || limits["stream_keep_bytes"] != float64(defaultStreamKeepBytes) {
-		t.Fatalf("ext limits: %#v", limits)
-	}
-
-	config := DefaultConfig()
-	config.DisablePush = true
-	_, quiet := newTestServer(t, config)
-	c, frame := dialRaw(t, quiet)
-	if _, has := frame["params"].(map[string]any)["push"]; has {
-		t.Fatal("push advertised while disabled")
-	}
-	c.write(t, map[string]any{"method": "auth", "id": "a", "params": map[string]any{"scheme": "guest"}})
-	c.drain(t)
-	c.expectError(t, "push_register", "p", map[string]any{"kind": "relay", "url": "https://relay.example/p"}, codeUnsupported)
-}
-
 func TestRoomListFiltersAndOrder(t *testing.T) {
 	_, httpServer := newTestServer(t, DefaultConfig())
-	clients := dialGroup(t, httpServer, "a", "b")
+	clients := dialGroup(t, httpServer, 2)
 	a, b := clients[0], clients[1]
 	ops, _ := saveRoom(t, a, "ops", map[string]any{"title": "Ops"})
 	deploy, _ := saveRoom(t, a, "deploy", map[string]any{"parent_room_id": ops, "title": "Deploy"})
@@ -176,7 +108,7 @@ func TestRoomListFiltersAndOrder(t *testing.T) {
 // the rooms the user left since (§4.3.1).
 func TestRoomListLatestLogIDDelta(t *testing.T) {
 	_, httpServer := newTestServer(t, DefaultConfig())
-	clients := dialGroup(t, httpServer, "a", "b")
+	clients := dialGroup(t, httpServer, 2)
 	a, b := clients[0], clients[1]
 	ops, _ := saveRoom(t, a, "ops", map[string]any{"title": "Ops"})
 	joinRoom(t, b, ops)
@@ -236,7 +168,7 @@ func TestRoomListLatestLogIDDelta(t *testing.T) {
 
 func TestRoomListTruncatesOnlyUnjoinedRooms(t *testing.T) {
 	_, httpServer := newTestServer(t, DefaultConfig())
-	clients := dialGroup(t, httpServer, "owner", "other")
+	clients := dialGroup(t, httpServer, 2)
 	owner, other := clients[0], clients[1]
 	var threads []string
 	for i := range maxListedRooms + 1 {
@@ -259,7 +191,7 @@ func TestRoomListTruncatesOnlyUnjoinedRooms(t *testing.T) {
 // and the result on the requesting connection (§4.3.2).
 func TestJoinLeaveAndDeliveries(t *testing.T) {
 	_, httpServer := newTestServer(t, DefaultConfig())
-	clients := dialGroup(t, httpServer, "a", "b", "c")
+	clients := dialGroup(t, httpServer, 3)
 	a, b, c := clients[0], clients[1], clients[2]
 	ops, opsRecord := saveRoom(t, a, "ops", map[string]any{"title": "Ops"})
 
@@ -359,7 +291,7 @@ func TestJoinLeaveAndDeliveries(t *testing.T) {
 // its room record changes, as room_update updated (§3.4, §4.3.3).
 func TestThreadMessagesReachOnlyThreadMembers(t *testing.T) {
 	_, httpServer := newTestServer(t, DefaultConfig())
-	clients := dialGroup(t, httpServer, "a", "b", "c")
+	clients := dialGroup(t, httpServer, 3)
 	a, b, c := clients[0], clients[1], clients[2]
 	root, _ := save(t, a, "root", map[string]any{"body": map[string]any{"text": "Deploy"}})
 	b.notification(t, "message")
@@ -397,7 +329,7 @@ func TestThreadMessagesReachOnlyThreadMembers(t *testing.T) {
 
 func TestPrevLogIDLinksRecords(t *testing.T) {
 	_, httpServer := newTestServer(t, DefaultConfig())
-	c := dialTestClient(t, httpServer, "a", false)
+	c := dialTestClient(t, httpServer)
 	id, creation := save(t, c, "create", map[string]any{"body": map[string]any{"text": "one"}})
 	if _, has := creation["prev_log_id"]; has {
 		t.Fatalf("creation has prev_log_id: %#v", creation)
@@ -427,7 +359,7 @@ func TestPrevLogIDLinksRecords(t *testing.T) {
 
 func TestReadCursors(t *testing.T) {
 	_, httpServer := newTestServer(t, DefaultConfig())
-	clients := dialGroup(t, httpServer, "a", "b")
+	clients := dialGroup(t, httpServer, 2)
 	a, b := clients[0], clients[1]
 	first, _ := save(t, a, "one", map[string]any{"body": map[string]any{"text": "one"}})
 	b.notification(t, "message")
@@ -449,7 +381,7 @@ func TestReadCursors(t *testing.T) {
 
 	// Kept cursors follow a room_list result that lists the room: every
 	// member's for a joined room, only the user's own for another.
-	c := dialTestClient(t, httpServer, "c", false)
+	c := dialTestClient(t, httpServer)
 	expectMembership(t, a, "general", c.userID, true)
 	expectMembership(t, b, "general", c.userID, true)
 	c.write(t, map[string]any{"method": "room_list", "id": "list", "params": map[string]any{"filter": "joined"}})
@@ -474,7 +406,7 @@ func TestReadCursors(t *testing.T) {
 
 func TestProfilesAndUserNotifications(t *testing.T) {
 	_, httpServer := newTestServer(t, DefaultConfig())
-	clients := dialGroup(t, httpServer, "a", "b")
+	clients := dialGroup(t, httpServer, 2)
 	a, b := clients[0], clients[1]
 	ext := map[string]any{"example.org": map[string]any{"pronouns": "she/her"}}
 	you := a.result(t, "me", "profile", map[string]any{"name": "  Ada  ", "avatar": "data:image/png;base64,iVBORw0KGgo=", "ext": ext})["you"]
@@ -505,6 +437,9 @@ func TestProfilesAndUserNotifications(t *testing.T) {
 	}
 	// An unchanged profile sends no notification; omitted fields stay.
 	a.result(t, "me", "same", map[string]any{"name": "Ada"})
+	if kept := a.result(t, "me", "keep", map[string]any{})["you"]; !reflect.DeepEqual(kept, any(want)) {
+		t.Fatalf("empty me changed the profile: %#v", kept)
+	}
 	b.expectQuiet(t)
 	// An empty value removes a field, announced as that empty value.
 	you = a.result(t, "me", "clear", map[string]any{"ext": map[string]any{}, "avatar": ""})["you"]
@@ -518,12 +453,33 @@ func TestProfilesAndUserNotifications(t *testing.T) {
 	if users := listRooms(t, b, map[string]any{"room_id": "general", "members": true})["users"].([]any); !reflect.DeepEqual(users[0], map[string]any{"user_id": "guest_1", "name": "Ada"}) {
 		t.Fatalf("profile after removal: %#v", users[0])
 	}
+	if you := a.result(t, "me", "clear-name", map[string]any{"name": ""})["you"]; !reflect.DeepEqual(you, map[string]any{"user_id": "guest_1", "name": ""}) {
+		t.Fatalf("clearing the name: %#v", you)
+	}
+	b.notification(t, "user")
+	a.expectError(t, "me", "bad-avatar", map[string]any{"avatar": "javascript:alert(1)"}, codeInvalidParams)
+	a.expectError(t, "me", "bad-name", map[string]any{"name": 7}, codeInvalidParams)
 	b.expectQuiet(t)
+}
+
+func TestNamesAreNormalized(t *testing.T) {
+	for input, want := range map[string]string{
+		"  Ada   Lovelace ":     "Ada Lovelace",
+		"Ａｄａ":                   "Ada",
+		"Ada\u202eecalevoL":     "AdaecalevoL",
+		"Bob\x00\x07":           "Bob",
+		"\u200b\u200b":          "",
+		strings.Repeat("é", 80): strings.Repeat("é", maxNameRunes),
+	} {
+		if got := normalizeName(input); got != want {
+			t.Errorf("normalizeName(%q) = %q, want %q", input, got, want)
+		}
+	}
 }
 
 func TestUploadsAreHostedWithOpenGraph(t *testing.T) {
 	_, httpServer := newTestServer(t, DefaultConfig())
-	clients := dialGroup(t, httpServer, "a", "b")
+	clients := dialGroup(t, httpServer, 2)
 	a, b := clients[0], clients[1]
 	// The pending snapshot precedes the result carrying the write URL (§1).
 	before, result := a.request(t, "message", "attach", map[string]any{"room_id": "general", "body": map[string]any{
@@ -599,17 +555,45 @@ func TestUploadsAreHostedWithOpenGraph(t *testing.T) {
 	}
 }
 
-// postEmbeds posts a message with new upload or stream embeds and returns
-// its result, which must follow the sender's copy of the pending snapshot
-// (§1); the snapshot is added to the result as "snapshot".
-func postEmbeds(t *testing.T, c *testClient, id string, params map[string]any) map[string]any {
-	t.Helper()
-	before, result := c.request(t, "message", id, params)
-	if len(before) != 1 || len(result["embeds"].([]any)) == 0 {
-		t.Fatalf("message with embeds: %#v then %#v", before, result)
+func TestUploadTypesThatCouldRunAreServedAsDownloads(t *testing.T) {
+	for declared, want := range map[string]string{
+		"image/png":        "image/png",
+		"application/pdf":  "application/pdf",
+		"text/html":        "text/plain",
+		"text/ecmascript":  "text/plain",
+		"text/css":         "text/plain",
+		"text/xsl":         "text/plain",
+		"application/wasm": "text/plain",
+	} {
+		if got := uploadContentType(declared, []byte("hello")); got != want {
+			t.Errorf("%s: served as %s, want %s", declared, got, want)
+		}
 	}
-	result["snapshot"] = notificationParams(t, before[0], "message")
-	return result
+	if got := uploadContentType("text/css", []byte("<html><script>")); got != "application/octet-stream" {
+		t.Errorf("sniffed markup served as %s", got)
+	}
+}
+
+func TestAvatarUploadsMustBeImages(t *testing.T) {
+	check := func(contentType string, data []byte) bool {
+		file, err := os.CreateTemp(t.TempDir(), "avatar")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer file.Close()
+		_, _ = file.Write(data)
+		return validAvatarImage(contentType, file)
+	}
+	if !check("image/png", testPNG(t)) {
+		t.Fatal("a PNG was refused")
+	}
+	webp, _ := base64.StdEncoding.DecodeString("UklGRhoAAABXRUJQVlA4TA0AAAAvAAAAEAcQERGIiP4HAA==")
+	if !check("image/webp", webp) {
+		t.Fatal("a WebP was refused")
+	}
+	if check("image/png", []byte("not an image")) || check("image/jpeg", testPNG(t)) || check("image/webp", []byte("RIFF\x00\x00\x00\x00WEBPVP8 ")) {
+		t.Fatal("a mismatched avatar was accepted")
+	}
 }
 
 func TestFailedAndExpiredWritesDropTheEmbed(t *testing.T) {
@@ -617,7 +601,7 @@ func TestFailedAndExpiredWritesDropTheEmbed(t *testing.T) {
 	config.MaxUploadBytes = 4
 	config.UploadStartTimeout = 100 * time.Millisecond
 	_, httpServer := newTestServer(t, config)
-	a := dialTestClient(t, httpServer, "a", false)
+	a := dialTestClient(t, httpServer)
 	result := postEmbeds(t, a, "two", map[string]any{"room_id": "general", "body": map[string]any{
 		"embeds": []any{map[string]any{"kind": "upload"}, map[string]any{"kind": "stream"}},
 	}})
@@ -643,7 +627,7 @@ func TestStreamsGrowLiveThenKeepTheirText(t *testing.T) {
 	config.StreamKeepBytes = 16
 	config.StreamMaxBytes = 64
 	_, httpServer := newTestServer(t, config)
-	a := dialTestClient(t, httpServer, "a", false)
+	a := dialTestClient(t, httpServer)
 	result := postEmbeds(t, a, "stream", map[string]any{"room_id": "general", "body": map[string]any{
 		"embeds": []any{map[string]any{"kind": "stream", "format": "terminal", "text": "forged"}},
 	}})
@@ -712,7 +696,7 @@ func TestStreamsGrowLiveThenKeepTheirText(t *testing.T) {
 // stream read next on the same connection follows the stream.
 func TestStreamWriteConnectionCanReadAStream(t *testing.T) {
 	_, httpServer := newTestServer(t, DefaultConfig())
-	a := dialTestClient(t, httpServer, "a", false)
+	a := dialTestClient(t, httpServer)
 	result := postEmbeds(t, a, "streams", map[string]any{"room_id": "general", "body": map[string]any{
 		"embeds": []any{map[string]any{"kind": "stream"}, map[string]any{"kind": "stream"}},
 	}})
@@ -740,7 +724,7 @@ func TestStreamWriteConnectionCanReadAStream(t *testing.T) {
 
 func TestSavingWithoutAStreamEndsIt(t *testing.T) {
 	_, httpServer := newTestServer(t, DefaultConfig())
-	a := dialTestClient(t, httpServer, "a", false)
+	a := dialTestClient(t, httpServer)
 	result := postEmbeds(t, a, "stream", map[string]any{"room_id": "general", "body": map[string]any{"embeds": []any{map[string]any{"kind": "stream"}}}})
 	writeURL := result["embeds"].([]any)[0].(map[string]any)["write_url"].(string)
 	body, pipe := io.Pipe()
@@ -766,7 +750,7 @@ func TestSavingWithoutAStreamEndsIt(t *testing.T) {
 
 func TestAvatarCommand(t *testing.T) {
 	_, httpServer := newTestServer(t, DefaultConfig())
-	clients := dialGroup(t, httpServer, "a", "b")
+	clients := dialGroup(t, httpServer, 2)
 	a, b := clients[0], clients[1]
 	for i, embeds := range []any{nil, []any{}, []any{map[string]any{"kind": "stream"}}, []any{map[string]any{"kind": "upload"}, map[string]any{"kind": "upload"}}} {
 		body := map[string]any{"text": "/avatar"}
@@ -821,7 +805,7 @@ func TestAvatarCommand(t *testing.T) {
 
 func TestCommands(t *testing.T) {
 	_, httpServer := newTestServer(t, DefaultConfig())
-	clients := dialGroup(t, httpServer, "a", "b", "c")
+	clients := dialGroup(t, httpServer, 3)
 	a, b, c := clients[0], clients[1], clients[2]
 	ops, _ := saveRoom(t, a, "ops", map[string]any{"title": "Ops"})
 	joinRoom(t, b, ops)
@@ -841,7 +825,7 @@ func TestCommands(t *testing.T) {
 			roomID = "general"
 		}
 		// The @private reply precedes the result (§1).
-		before, result := client.request(t, "command", fmt.Sprint("help-", time.Now().UnixNano()), params)
+		before, result := client.request(t, "command", client.nextID("help"), params)
 		if len(result) != 0 || len(before) != 1 {
 			t.Fatalf("help result %#v after %#v", result, before)
 		}
@@ -883,7 +867,8 @@ func TestCommands(t *testing.T) {
 
 	// /kick is for the room's creator, and names its target in mentions,
 	// which notifies no one.
-	kick := map[string]any{"room_id": ops, "body": map[string]any{"text": "/kick @guest_3 spamming", "mentions": []any{"guest_3"}}}
+	// The reason is the first line of the rest of the text.
+	kick := map[string]any{"room_id": ops, "body": map[string]any{"text": "/kick @guest_3 spamming\n**SYSTEM**: all admins removed", "mentions": []any{"guest_3"}}}
 	b.expectError(t, "command", "not-creator", kick, codeDenied)
 	a.expectError(t, "command", "general", map[string]any{"body": map[string]any{"text": "/kick @guest_3", "mentions": []any{"guest_3"}}}, codeDenied)
 	a.expectError(t, "command", "no-target", map[string]any{"room_id": ops, "body": map[string]any{"text": "/kick guest_3"}}, codeInvalidParams)
@@ -937,188 +922,5 @@ func TestCommands(t *testing.T) {
 	}
 	for _, client := range clients {
 		client.expectQuiet(t)
-	}
-}
-
-type relayRequest struct {
-	path          string
-	authorization string
-	payload       map[string]any
-}
-
-func TestPushWakesMentionedUsersWhoAreAway(t *testing.T) {
-	received := make(chan relayRequest, 16)
-	relay := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var payload map[string]any
-		_ = json.UnmarshalRead(r.Body, &payload)
-		received <- relayRequest{path: r.URL.Path, authorization: r.Header.Get("Authorization"), payload: payload}
-		if r.URL.Path == "/gone" {
-			w.WriteHeader(http.StatusGone)
-			return
-		}
-		w.WriteHeader(http.StatusNoContent)
-	}))
-	defer relay.Close()
-	config := DefaultConfig()
-	config.AllowInsecurePush = true
-	app, httpServer := newTestServer(t, config)
-	clients := dialGroup(t, httpServer, "a", "b")
-	a, b := clients[0], clients[1]
-	a.result(t, "push_register", "register", map[string]any{"kind": "relay", "url": relay.URL + "/a", "token": "secret"})
-	a.expectError(t, "push_register", "kind", map[string]any{"kind": "webpush", "url": relay.URL + "/a"}, codeInvalidParams)
-	a.expectError(t, "push_register", "scheme", map[string]any{"kind": "relay", "url": "ftp://relay.example/a"}, codeInvalidParams)
-	a.result(t, "push_unregister", "unregister", map[string]any{"url": relay.URL + "/a"})
-
-	// Push reaches users without a connection, such as a passkey user who is
-	// away, in rooms they have joined.
-	app.mu.Lock()
-	alice := newUserState("alice", "Alice")
-	alice.passkey = &passkeyUser{user: alice}
-	app.users[alice.id] = alice
-	app.addMemberLocked(alice, app.rooms[defaultRoomID])
-	app.pushes[relay.URL+"/alice"] = &pushRegistration{userID: "alice", kind: "relay", url: relay.URL + "/alice", token: "tok"}
-	app.pushes[relay.URL+"/gone"] = &pushRegistration{userID: "alice", kind: "relay", url: relay.URL + "/gone"}
-	app.mu.Unlock()
-	expectMembership(t, a, "general", "alice", true)
-	expectMembership(t, b, "general", "alice", true)
-	pushes := func() []relayRequest {
-		t.Helper()
-		a.expectQuiet(t) // Requests before this one have finished waking users.
-		app.push.wait()
-		var requests []relayRequest
-		for len(received) > 0 {
-			requests = append(requests, <-received)
-		}
-		return requests
-	}
-	post := func(id string, params map[string]any) string {
-		t.Helper()
-		messageID, _ := save(t, a, id, params)
-		b.notification(t, "message")
-		return messageID
-	}
-
-	// Only body.mentions decides who is mentioned; text is never parsed.
-	text := "@alice: the deploy is done"
-	id := post("text", map[string]any{"body": map[string]any{"text": text, "format": "markdown"}})
-	if got := pushes(); len(got) != 0 {
-		t.Fatalf("text mention woke %d", len(got))
-	}
-	// An edit mentions the users it adds.
-	post("add-mention", map[string]any{"message_id": id, "body": map[string]any{"text": text, "mentions": []any{"alice"}}})
-	got := pushes()
-	if len(got) != 2 {
-		t.Fatalf("relay received %d requests, want one per registration", len(got))
-	}
-	for _, request := range got {
-		want := map[string]any{"message_id": id, "room_id": "general", "from": map[string]any{"user_id": "guest_1"}, "body": map[string]any{"text": text}}
-		if !reflect.DeepEqual(request.payload, want) {
-			t.Fatalf("payload: %#v", request.payload)
-		}
-		if request.path == "/alice" && request.authorization != "Bearer tok" {
-			t.Fatalf("authorization: %q", request.authorization)
-		}
-	}
-	// A relay that answers 410 loses its registration.
-	app.mu.RLock()
-	_, kept := app.pushes[relay.URL+"/gone"]
-	app.mu.RUnlock()
-	if kept {
-		t.Fatal("gone registration was kept")
-	}
-	post("same-mention", map[string]any{"message_id": id, "body": map[string]any{"text": "edited", "mentions": []any{"alice"}}})
-	if got := pushes(); len(got) != 0 {
-		t.Fatalf("an edit re-mentioned: %d", len(got))
-	}
-
-	// A connected user is woken only when every connection is away.
-	b.result(t, "push_register", "b", map[string]any{"kind": "relay", "url": relay.URL + "/b"})
-	mentionB := map[string]any{"body": map[string]any{"text": "@guest_2 ping", "mentions": []any{"guest_2"}}}
-	post("attending", maps.Clone(mentionB))
-	if got := pushes(); len(got) != 0 {
-		t.Fatalf("attending user woken: %d", len(got))
-	}
-	b.write(t, map[string]any{"method": "activity", "params": map[string]any{"away": true}})
-	b.expectQuiet(t)
-	post("away", maps.Clone(mentionB))
-	if got := pushes(); len(got) != 1 || got[0].path != "/b" {
-		t.Fatalf("away user: %#v", got)
-	}
-	// Typing ends away.
-	b.write(t, map[string]any{"method": "activity", "params": map[string]any{"room_id": "general", "typing": 3}})
-	a.notification(t, "activity")
-	b.notification(t, "activity")
-	post("back", maps.Clone(mentionB))
-	if got := pushes(); len(got) != 0 {
-		t.Fatalf("user back from away woken: %d", len(got))
-	}
-	// A reply wakes the author of the message it replies to.
-	own, _ := save(t, b, "own", map[string]any{"body": map[string]any{"text": "mine"}})
-	a.notification(t, "message")
-	b.write(t, map[string]any{"method": "activity", "params": map[string]any{"away": true}})
-	b.expectQuiet(t)
-	post("reply", map[string]any{"body": map[string]any{"text": "a reply"}, "reply_to": map[string]any{"message_id": own}})
-	if got := pushes(); len(got) != 1 {
-		t.Fatalf("reply woke %d", len(got))
-	}
-	// A mention wakes a user in any room they can see, joined or not; a reply
-	// wakes its target's author only in a room they have joined. Mentions in
-	// commands notify no one.
-	ops, _ := saveRoom(t, a, "ops", map[string]any{"title": "Ops"})
-	save(t, a, "elsewhere", map[string]any{"room_id": ops, "body": map[string]any{"text": "@guest_2", "mentions": []any{"guest_2"}}})
-	if got := pushes(); len(got) != 1 || got[0].path != "/b" || got[0].payload["room_id"] != ops {
-		t.Fatalf("mention in an unjoined room: %#v", got)
-	}
-	save(t, a, "reply-elsewhere", map[string]any{"room_id": ops, "body": map[string]any{"text": "a reply"}, "reply_to": map[string]any{"message_id": own}})
-	if got := pushes(); len(got) != 0 {
-		t.Fatalf("reply in an unjoined room woke %d", len(got))
-	}
-	before, _ := a.request(t, "command", "help", map[string]any{"body": map[string]any{"text": "/help", "mentions": []any{"guest_2"}}})
-	if len(before) != 1 {
-		t.Fatalf("help frames: %#v", before)
-	}
-	if got := pushes(); len(got) != 0 {
-		t.Fatalf("command woke %d", len(got))
-	}
-}
-
-func TestPushRefusesInternalAddresses(t *testing.T) {
-	var hits int
-	relay := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { hits++ }))
-	defer relay.Close()
-	deliverer := newPushDeliverer(false)
-	called := false
-	deliverer.deliver(pushRegistration{url: relay.URL}, []byte("{}"), func(bool) { called = true })
-	deliverer.wait()
-	if hits != 0 || called {
-		t.Fatalf("delivered to a loopback address: hits=%d called=%v", hits, called)
-	}
-	app := New(DefaultConfig())
-	if problem := app.checkPushURL("http://relay.example/p"); problem == "" {
-		t.Fatal("http push URL accepted without AllowInsecurePush")
-	}
-}
-
-func TestConnectionAndRateLimits(t *testing.T) {
-	config := DefaultConfig()
-	config.MaxConnections = 1
-	config.MessagesPerMinute = 2
-	_, httpServer := newTestServer(t, config)
-	a := dialTestClient(t, httpServer, "a", false)
-
-	// Over capacity: the server frame, then an error without id, then close.
-	b, _ := dialRaw(t, httpServer)
-	failure := b.read(t)
-	if _, has := failure["id"]; has || failure["error"].(map[string]any)["code"] != float64(codeRetryAfter) ||
-		failure["error"].(map[string]any)["data"].(map[string]any)["retry_after"] != float64(retryAfterSeconds) {
-		t.Fatalf("capacity error: %#v", failure)
-	}
-
-	save(t, a, "one", map[string]any{"body": map[string]any{"text": "1"}})
-	save(t, a, "two", map[string]any{"body": map[string]any{"text": "2"}})
-	frame := a.call(t, "message", "three", map[string]any{"room_id": "general", "body": map[string]any{"text": "3"}})
-	limited := frame["error"].(map[string]any)
-	if limited["code"] != float64(codeRetryAfter) || limited["data"].(map[string]any)["retry_after"].(float64) < 1 {
-		t.Fatalf("rate limit: %#v", frame)
 	}
 }

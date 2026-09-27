@@ -2,11 +2,9 @@ package server
 
 import (
 	"context"
-	"encoding/json/v2"
 	"fmt"
 	"maps"
 	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -18,33 +16,10 @@ import (
 	"github.com/coder/websocket"
 )
 
-type testClient struct {
-	ws               *websocket.Conn
-	passkeyChallenge string
-	fences           int
-	// userID is the identity the guest was assigned at auth.
-	userID string
-}
-
-func newTestServer(t *testing.T, config Config) (*Server, *httptest.Server) {
-	t.Helper()
-	app := New(config)
-	httpServer := httptest.NewServer(app.Handler())
-	t.Cleanup(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-		if err := app.Shutdown(ctx); err != nil {
-			t.Errorf("shutdown: %v", err)
-		}
-		cancel()
-		httpServer.Close()
-	})
-	return app, httpServer
-}
-
 func TestShutdownClosesConnections(t *testing.T) {
 	app, httpServer := newTestServer(t, DefaultConfig())
-	closed := dialTestClient(t, httpServer, "closed", false)
-	active := dialTestClient(t, httpServer, "active", false)
+	closed := dialTestClient(t, httpServer)
+	active := dialTestClient(t, httpServer)
 	_ = closed.ws.Close(websocket.StatusNormalClosure, "finished")
 	// The closed guest's leave is logged in general.
 	expectMembership(t, active, "general", closed.userID, false)
@@ -72,454 +47,9 @@ func TestShutdownClosesConnections(t *testing.T) {
 	}
 }
 
-func dialRaw(t *testing.T, httpServer *httptest.Server) (*testClient, map[string]any) {
-	t.Helper()
-	wsURL := "ws" + httpServer.URL[len("http"):] + "/ws"
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	ws, _, err := websocket.Dial(ctx, wsURL, nil)
-	cancel()
-	if err != nil {
-		t.Fatalf("dial: %v", err)
-	}
-	ws.SetReadLimit(1 << 24)
-	c := &testClient{ws: ws}
-	t.Cleanup(func() { _ = ws.Close(websocket.StatusNormalClosure, "test finished") })
-	serverFrame := c.read(t)
-	if serverFrame["method"] != "server" {
-		t.Fatalf("first frame = %#v, want server announcement", serverFrame)
-	}
-	return c, serverFrame
-}
-
-// dialTestClient signs in a new guest. The guest's join to general is a
-// logged membership, delivered to its connection before the auth result;
-// nothing follows the result: clients list their rooms with room_list.
-func dialTestClient(t *testing.T, httpServer *httptest.Server, id string, full bool) *testClient {
-	t.Helper()
-	c, _ := dialRaw(t, httpServer)
-	auth := map[string]any{
-		"method": "auth",
-		"id":     id,
-		"params": map[string]any{"scheme": "guest"},
-	}
-	if full {
-		auth["jsonrpc"] = "2.0"
-	}
-	c.write(t, auth)
-	membership := c.notification(t, "membership")
-	result := c.read(t)
-	if result["id"] != id {
-		t.Fatalf("auth result = %#v, want id %q", result, id)
-	}
-	if full && result["jsonrpc"] != "2.0" {
-		t.Fatalf("full auth result = %#v, want jsonrpc 2.0", result)
-	}
-	c.userID = result["result"].(map[string]any)["you"].(map[string]any)["user_id"].(string)
-	checkMembership(t, membership, "general", c.userID, true)
-	c.expectQuiet(t)
-	return c
-}
-
-// dialGroup signs in one guest per id, in order. New guests join general, so
-// each earlier guest reads the later ones' memberships.
-func dialGroup(t *testing.T, httpServer *httptest.Server, ids ...string) []*testClient {
-	t.Helper()
-	clients := make([]*testClient, 0, len(ids))
-	for i, id := range ids {
-		c := dialTestClient(t, httpServer, id, false)
-		if c.userID != fmt.Sprintf("guest_%d", i+1) {
-			t.Fatalf("guest %q was assigned %q", id, c.userID)
-		}
-		for _, earlier := range clients {
-			expectMembership(t, earlier, "general", c.userID, true)
-		}
-		clients = append(clients, c)
-	}
-	return clients
-}
-
-// expectMembership reads a live membership notification: one entry, for
-// userID in roomID. It returns the notification's params.
-func expectMembership(t *testing.T, c *testClient, roomID, userID string, joined bool) map[string]any {
-	t.Helper()
-	params := c.notification(t, "membership")
-	checkMembership(t, params, roomID, userID, joined)
-	return params
-}
-
-// checkMembership checks a live membership record's shape.
-func checkMembership(t *testing.T, params map[string]any, roomID, userID string, joined bool) {
-	t.Helper()
-	members, ok := params["members"].([]any)
-	if !ok || len(members) != 1 || len(params) != 3 || params["room_id"] != roomID {
-		t.Fatalf("membership = %#v, want one entry in %s", params, roomID)
-	}
-	parseID(t, params["log_id"])
-	entry := members[0].(map[string]any)
-	user, _ := entry["user"].(map[string]any)
-	if len(entry) != 2 || user["user_id"] != userID || entry["joined"] != joined {
-		t.Fatalf("membership entry = %#v, want %s joined=%v", entry, userID, joined)
-	}
-}
-
-// listRooms sends room_list and returns its result.
-func listRooms(t *testing.T, c *testClient, params map[string]any) map[string]any {
-	t.Helper()
-	return c.result(t, "room_list", fmt.Sprintf("list-%d", time.Now().UnixNano()), params)
-}
-
-// roomIDs lists the room_id of each room record in a room_list array.
-func roomIDs(t *testing.T, value any) []string {
-	t.Helper()
-	list, ok := value.([]any)
-	if !ok {
-		t.Fatalf("room list %#v is not an array", value)
-	}
-	ids := make([]string, len(list))
-	for i, entry := range list {
-		ids[i] = entry.(map[string]any)["room_id"].(string)
-	}
-	return ids
-}
-
-// drain returns every frame queued before a fence request's reply.
-func (c *testClient) drain(t *testing.T) []map[string]any {
-	t.Helper()
-	c.fences++
-	id := fmt.Sprintf("fence-%d", c.fences)
-	c.write(t, map[string]any{"method": "fence", "id": id})
-	frames := make([]map[string]any, 0)
-	for {
-		frame := c.read(t)
-		if frame["id"] == id {
-			return frames
-		}
-		frames = append(frames, frame)
-	}
-}
-
-func (c *testClient) expectQuiet(t *testing.T) {
-	t.Helper()
-	if frames := c.drain(t); len(frames) != 0 {
-		t.Fatalf("unexpected frames: %#v", frames)
-	}
-}
-
-func (c *testClient) write(t *testing.T, value any) {
-	t.Helper()
-	payload, err := json.Marshal(value)
-	if err != nil {
-		t.Fatalf("marshal frame: %v", err)
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	if err := c.ws.Write(ctx, websocket.MessageText, payload); err != nil {
-		t.Fatalf("write frame: %v", err)
-	}
-}
-
-func (c *testClient) read(t *testing.T) map[string]any {
-	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	_, payload, err := c.ws.Read(ctx)
-	if err != nil {
-		t.Fatalf("read frame: %v", err)
-	}
-	var frame map[string]any
-	if err := json.Unmarshal(payload, &frame); err != nil {
-		t.Fatalf("decode frame %q: %v", payload, err)
-	}
-	return frame
-}
-
-// call sends a request and returns its reply frame, which must come next.
-func (c *testClient) call(t *testing.T, method, id string, params map[string]any) map[string]any {
-	t.Helper()
-	c.write(t, map[string]any{"method": method, "id": id, "params": params})
-	frame := c.read(t)
-	if frame["id"] != id {
-		t.Fatalf("%s reply = %#v, want id %q", method, frame, id)
-	}
-	return frame
-}
-
-// request sends a request and returns the notifications that precede its
-// reply, then its result.
-func (c *testClient) request(t *testing.T, method, id string, params map[string]any) ([]map[string]any, map[string]any) {
-	t.Helper()
-	c.write(t, map[string]any{"method": method, "id": id, "params": params})
-	var before []map[string]any
-	for {
-		frame := c.read(t)
-		if frame["id"] == nil {
-			before = append(before, frame)
-			continue
-		}
-		result, ok := frame["result"].(map[string]any)
-		if frame["id"] != id || !ok {
-			t.Fatalf("%s reply = %#v after %#v, want a result for %q", method, frame, before, id)
-		}
-		return before, result
-	}
-}
-
-func (c *testClient) result(t *testing.T, method, id string, params map[string]any) map[string]any {
-	t.Helper()
-	frame := c.call(t, method, id, params)
-	result, ok := frame["result"].(map[string]any)
-	if !ok {
-		t.Fatalf("%s failed: %#v", method, frame)
-	}
-	return result
-}
-
-func (c *testClient) expectError(t *testing.T, method, id string, params map[string]any, code int) {
-	t.Helper()
-	frame := c.call(t, method, id, params)
-	failure, ok := frame["error"].(map[string]any)
-	if !ok || failure["code"] != float64(code) {
-		t.Fatalf("%s %s: %#v, want error %d", method, id, frame, code)
-	}
-}
-
-// notification reads the next frame and requires it to be the named notification.
-func (c *testClient) notification(t *testing.T, method string) map[string]any {
-	t.Helper()
-	frame := c.read(t)
-	return notificationParams(t, frame, method)
-}
-
-// notificationParams requires a frame to be the named notification and
-// returns its params.
-func notificationParams(t *testing.T, frame map[string]any, method string) map[string]any {
-	t.Helper()
-	params, ok := frame["params"].(map[string]any)
-	if frame["method"] != method || !ok || frame["id"] != nil {
-		t.Fatalf("frame = %#v, want %s notification", frame, method)
-	}
-	return params
-}
-
-// methods names each frame's method, or "reply" for a reply.
-func methods(frames []map[string]any) []string {
-	names := make([]string, len(frames))
-	for i, frame := range frames {
-		names[i], _ = frame["method"].(string)
-		if names[i] == "" {
-			names[i] = "reply"
-		}
-	}
-	return names
-}
-
-// save sends a message request and returns the result ID and the sender's
-// copy of the broadcast snapshot, which precedes the result (§1).
-func save(t *testing.T, c *testClient, requestID string, params map[string]any) (string, map[string]any) {
-	t.Helper()
-	if _, ok := params["room_id"]; !ok {
-		params["room_id"] = "general"
-	}
-	before, result := c.request(t, "message", requestID, params)
-	id, ok := result["message_id"].(string)
-	if !ok || len(before) != 1 {
-		t.Fatalf("message result %#v after %#v, want one broadcast first", result, before)
-	}
-	snapshot := notificationParams(t, before[0], "message")
-	if snapshot["message_id"] != id || snapshot["room_id"] != params["room_id"] {
-		t.Fatalf("result and snapshot disagree: %#v vs %#v", result, snapshot)
-	}
-	if _, wrapped := snapshot["message"]; wrapped {
-		t.Fatalf("snapshot is not flat: %#v", snapshot)
-	}
-	if len(result) != 1 {
-		t.Fatalf("message result: %#v", result)
-	}
-	return id, snapshot
-}
-
-// saveRoom sends room_set and returns the room ID and the record of the
-// room_update that precedes the result: joined for a new room, followed by
-// the creator's membership, or updated for an edit. The joined record's
-// members are checked and removed, so it compares with updated records.
-func saveRoom(t *testing.T, c *testClient, requestID string, params map[string]any) (string, map[string]any) {
-	t.Helper()
-	before, result := c.request(t, "room_set", requestID, params)
-	_, editing := params["room_id"]
-	want := []string{"room_update", "membership"}
-	if editing {
-		want = want[:1]
-	}
-	if !reflect.DeepEqual(methods(before), want) {
-		t.Fatalf("room_set frames = %#v, want %v", before, want)
-	}
-	var record map[string]any
-	if editing {
-		record = updateRecord(t, before[0], "updated")
-	} else {
-		record = joinedRecord(t, before[0], c.userID)
-		membership := notificationParams(t, before[1], "membership")
-		checkMembership(t, membership, record["room_id"].(string), c.userID, true)
-		if membership["log_id"] != record["latest_log_id"] || parseID(t, membership["log_id"]) <= parseID(t, record["log_id"]) {
-			t.Fatalf("creator membership %#v does not follow the room record %#v", membership, record)
-		}
-		if members := memberIDs(record); !reflect.DeepEqual(members, []string{c.userID}) {
-			t.Fatalf("new room members: %v", members)
-		}
-		delete(record, "members")
-	}
-	if len(result) != 1 || result["room_id"] != record["room_id"] {
-		t.Fatalf("room_set result %#v disagrees with %#v", result, record)
-	}
-	return record["room_id"].(string), record
-}
-
-// joinRoom sends room_join and returns the room record of the room_update
-// joined that follows the membership and precedes the result. The record
-// keeps its members.
-func joinRoom(t *testing.T, c *testClient, roomID string) map[string]any {
-	t.Helper()
-	before, result := c.request(t, "room_join", fmt.Sprintf("join-%d", time.Now().UnixNano()), map[string]any{"room_id": roomID})
-	if !reflect.DeepEqual(methods(before), []string{"membership", "room_update"}) || len(result) != 0 {
-		t.Fatalf("room_join %s: %#v then %#v", roomID, before, result)
-	}
-	checkMembership(t, notificationParams(t, before[0], "membership"), roomID, c.userID, true)
-	record := joinedRecord(t, before[1], c.userID)
-	if record["room_id"] != roomID || record["latest_log_id"] != before[0]["params"].(map[string]any)["log_id"] {
-		t.Fatalf("room_join %s record: %#v", roomID, record)
-	}
-	return record
-}
-
-// leaveRoom sends room_leave and checks the membership and room_update left
-// that precede its result.
-func leaveRoom(t *testing.T, c *testClient, roomID string) {
-	t.Helper()
-	before, result := c.request(t, "room_leave", fmt.Sprintf("leave-%d", time.Now().UnixNano()), map[string]any{"room_id": roomID})
-	if !reflect.DeepEqual(methods(before), []string{"membership", "room_update"}) || len(result) != 0 {
-		t.Fatalf("room_leave %s: %#v then %#v", roomID, before, result)
-	}
-	checkMembership(t, notificationParams(t, before[0], "membership"), roomID, c.userID, false)
-	if left := updateRecord(t, before[1], "left"); !reflect.DeepEqual(left, map[string]any{"room_id": roomID}) {
-		t.Fatalf("room_update left: %#v", left)
-	}
-}
-
-// roomUpdated reads a room_update notification and returns its one record
-// in field; a joined record keeps its members.
-func roomUpdated(t *testing.T, c *testClient, field string) map[string]any {
-	t.Helper()
-	frame := c.read(t)
-	if field == "joined" {
-		return joinedRecord(t, frame, "")
-	}
-	return updateRecord(t, frame, field)
-}
-
-// updateRecord requires a room_update carrying one record in field alone.
-func updateRecord(t *testing.T, frame map[string]any, field string) map[string]any {
-	t.Helper()
-	update := notificationParams(t, frame, "room_update")
-	records, ok := update[field].([]any)
-	if !ok || len(records) != 1 || len(update) != 1 {
-		t.Fatalf("room_update = %#v, want one %s record", update, field)
-	}
-	return records[0].(map[string]any)
-}
-
-// joinedRecord requires a room_update joined carrying one record with its
-// members, and users holding each member's current object once. A non-empty
-// member must be among them.
-func joinedRecord(t *testing.T, frame map[string]any, member string) map[string]any {
-	t.Helper()
-	update := notificationParams(t, frame, "room_update")
-	records, ok := update["joined"].([]any)
-	if !ok || len(records) != 1 || len(update) != 2 {
-		t.Fatalf("room_update = %#v, want one joined record and users", update)
-	}
-	record := records[0].(map[string]any)
-	members := memberIDs(record)
-	var users []string
-	for _, user := range update["users"].([]any) {
-		users = append(users, user.(map[string]any)["user_id"].(string))
-	}
-	if !reflect.DeepEqual(members, users) || (member != "" && !slices.Contains(members, member)) {
-		t.Fatalf("joined members %v with users %v, want %q among them", members, users, member)
-	}
-	return record
-}
-
-// memberIDs lists the user_ids of a room record's members.
-func memberIDs(entry map[string]any) []string {
-	ids := []string{}
-	for _, member := range entry["members"].([]any) {
-		ids = append(ids, member.(map[string]any)["user_id"].(string))
-	}
-	return ids
-}
-
-// react sets reactions and returns the broadcast that precedes the result.
-func react(t *testing.T, c *testClient, requestID, messageID string, emojis ...string) map[string]any {
-	t.Helper()
-	list := make([]any, len(emojis))
-	for i, emoji := range emojis {
-		list[i] = emoji
-	}
-	before, result := c.request(t, "reactions", requestID, map[string]any{"message_id": messageID, "emojis": list})
-	if len(result) != 0 || len(before) != 1 {
-		t.Fatalf("reactions result %#v after %#v, want one broadcast first", result, before)
-	}
-	return notificationParams(t, before[0], "reactions")
-}
-
-func historyPage(t *testing.T, c *testClient, roomID string, params map[string]any) map[string]any {
-	t.Helper()
-	params["room_id"] = roomID
-	return c.result(t, "history", fmt.Sprintf("h-%d", time.Now().UnixNano()), params)
-}
-
-// logIDs lists the log_ids of a history array, empty when it is omitted.
-func logIDs(t *testing.T, page map[string]any, key string) []string {
-	t.Helper()
-	raw, present := page[key]
-	if !present {
-		return []string{}
-	}
-	list, ok := raw.([]any)
-	if !ok || len(list) == 0 {
-		t.Fatalf("history %s is not a non-empty array: %#v", key, page)
-	}
-	ids := make([]string, len(list))
-	for i, value := range list {
-		ids[i] = value.(map[string]any)["log_id"].(string)
-	}
-	return ids
-}
-
-// records returns a history array, empty when it is omitted.
-func records(t *testing.T, page map[string]any, key string) []any {
-	t.Helper()
-	logIDs(t, page, key)
-	list, _ := page[key].([]any)
-	return list
-}
-
-func parseID(t *testing.T, value any) int64 {
-	t.Helper()
-	text, ok := value.(string)
-	if !ok {
-		t.Fatalf("log id %#v is not a string", value)
-	}
-	id, err := strconv.ParseInt(text, 10, 64)
-	if err != nil || id <= 0 {
-		t.Fatalf("log id %q is not a positive integer", text)
-	}
-	return id
-}
-
-func TestServerFrameAndGuestAuth(t *testing.T) {
+func TestServerFrame(t *testing.T) {
 	_, httpServer := newTestServer(t, DefaultConfig())
-	c, frame := dialRaw(t, httpServer)
+	_, frame := dialRaw(t, httpServer)
 	params := frame["params"].(map[string]any)
 	if params["protocol"] != float64(6) || params["ping"] != float64(30) {
 		t.Fatalf("protocol and ping: %#v", params)
@@ -530,7 +60,28 @@ func TestServerFrameAndGuestAuth(t *testing.T) {
 	if !reflect.DeepEqual(params["auth"], []any{"guest"}) {
 		t.Fatalf("auth: %#v", params["auth"])
 	}
+	if !reflect.DeepEqual(params["push"], map[string]any{"relay": map[string]any{}}) {
+		t.Fatalf("push: %#v", params["push"])
+	}
+	limits := params["ext"].(map[string]any)["apron-go"].(map[string]any)
+	if limits["max_upload_bytes"] != float64(defaultMaxUploadBytes) || limits["stream_keep_bytes"] != float64(defaultStreamKeepBytes) {
+		t.Fatalf("ext limits: %#v", limits)
+	}
 
+	config := DefaultConfig()
+	config.DisablePush = true
+	_, quiet := newTestServer(t, config)
+	c, frame := dialRaw(t, quiet)
+	if _, has := frame["params"].(map[string]any)["push"]; has {
+		t.Fatal("push advertised while disabled")
+	}
+	guestAuth(t, c)
+	c.expectError(t, "push_register", "p", map[string]any{"kind": "relay", "url": "https://relay.example/p"}, codeUnsupported)
+}
+
+func TestGuestAuth(t *testing.T) {
+	_, httpServer := newTestServer(t, DefaultConfig())
+	c, _ := dialRaw(t, httpServer)
 	c.expectError(t, "message", "early", map[string]any{"room_id": "general", "body": map[string]any{}}, codeDenied)
 	c.expectError(t, "auth", "bad-scheme", map[string]any{"scheme": "password"}, codeUnsupported)
 	// The new guest's join to general is a logged membership, delivered to
@@ -565,23 +116,6 @@ func TestServerFrameAndGuestAuth(t *testing.T) {
 		t.Fatalf("general = %#v with users %#v, want %#v", general, listed["users"], want)
 	}
 	c.expectQuiet(t)
-
-	you = c.result(t, "me", "rename", map[string]any{"name": "Grace", "avatar": "https://example.com/a.png"})["you"].(map[string]any)
-	if !reflect.DeepEqual(you, map[string]any{"user_id": "guest_1", "name": "Grace", "avatar": "https://example.com/a.png"}) {
-		t.Fatalf("rename: %#v", you)
-	}
-	c.expectError(t, "me", "bad-avatar", map[string]any{"avatar": "javascript:alert(1)"}, codeInvalidParams)
-	you = c.result(t, "me", "keep", map[string]any{})["you"].(map[string]any)
-	if you["name"] != "Grace" || you["avatar"] != "https://example.com/a.png" {
-		t.Fatalf("empty me changed the profile: %#v", you)
-	}
-	// Removed fields come back as their empty values.
-	you = c.result(t, "me", "clear", map[string]any{"name": "", "avatar": ""})["you"].(map[string]any)
-	if !reflect.DeepEqual(you, map[string]any{"user_id": "guest_1", "name": "", "avatar": ""}) {
-		t.Fatalf("clearing the name: %#v", you)
-	}
-	c.expectError(t, "me", "bad-name", map[string]any{"name": 7}, codeInvalidParams)
-	c.expectQuiet(t)
 }
 
 func TestAuthHonorsRequestedUserIDs(t *testing.T) {
@@ -601,7 +135,7 @@ func TestAuthHonorsRequestedUserIDs(t *testing.T) {
 	// mentionable set, and anything in the counter's guest_ namespace are not
 	// honored; each such auth takes the next guest number.
 	next := 1
-	for i, requested := range []string{"ada", "ADA", "@server", "general", "1724803200042", "bad id", "trailing.", "", "guest_1", "guest_99", "GUEST_98", "Guest_7", "guest_05", "guest_abc", "guest_"} {
+	for i, requested := range []string{"ada", "ADA", "@server", "general", "General", "1724803200042", "bad id", "trailing.", "", "guest_1", "guest_99", "GUEST_98", "Guest_7", "guest_05", "guest_abc", "guest_"} {
 		want := fmt.Sprintf("guest_%d", next)
 		if got := auth(fmt.Sprint("r", i), map[string]any{"user_id": requested}); got != want {
 			t.Fatalf("requested %q was assigned %q, want %q", requested, got, want)
@@ -630,7 +164,7 @@ func TestAuthHonorsRequestedUserIDs(t *testing.T) {
 
 func TestGuestNumbersAreSequentialAndNeverReused(t *testing.T) {
 	_, httpServer := newTestServer(t, DefaultConfig())
-	clients := dialGroup(t, httpServer, "a", "b", "c")
+	clients := dialGroup(t, httpServer, 3)
 	// Retire guest_1: its last connection closes, and guest_2 sees the leave.
 	if err := clients[0].ws.Close(websocket.StatusNormalClosure, "bye"); err != nil {
 		t.Fatalf("close: %v", err)
@@ -639,7 +173,7 @@ func TestGuestNumbersAreSequentialAndNeverReused(t *testing.T) {
 		expectMembership(t, observer, "general", "guest_1", false)
 	}
 	// Neither a new guest nor a request for the retired ID gets guest_1.
-	d := dialTestClient(t, httpServer, "d", false)
+	d := dialTestClient(t, httpServer)
 	if d.userID != "guest_4" {
 		t.Fatalf("guest after a retirement was assigned %q", d.userID)
 	}
@@ -688,7 +222,7 @@ func TestLivenessPing(t *testing.T) {
 		}
 	}
 	// One that never pinged stays open while it answers WebSocket pings.
-	quiet := dialTestClient(t, httpServer, "quiet", false)
+	quiet := dialTestClient(t, httpServer)
 	for deadline := time.Now().Add(500 * time.Millisecond); time.Now().Before(deadline); {
 		quiet.expectQuiet(t)
 	}
@@ -749,7 +283,7 @@ func TestAuthIsABarrier(t *testing.T) {
 
 func TestUnimplementedAndUnknownMethodsAreUnsupported(t *testing.T) {
 	_, httpServer := newTestServer(t, DefaultConfig())
-	c := dialTestClient(t, httpServer, "a", false)
+	c := dialTestClient(t, httpServer)
 	for _, method := range []string{"frobnicate", "room_teleport"} {
 		c.expectError(t, method, method, map[string]any{"room_id": "general"}, codeUnsupported)
 	}
@@ -758,8 +292,8 @@ func TestUnimplementedAndUnknownMethodsAreUnsupported(t *testing.T) {
 
 func TestMessageSnapshotsReplaceEditableState(t *testing.T) {
 	_, httpServer := newTestServer(t, DefaultConfig())
-	owner := dialTestClient(t, httpServer, "a", true)
-	observer := dialTestClient(t, httpServer, "b", false)
+	owner := dialTestClient(t, httpServer)
+	observer := dialTestClient(t, httpServer)
 	expectMembership(t, owner, "general", observer.userID, true)
 	owner.result(t, "me", "name", map[string]any{"name": "Alice"})
 	if renamed := observer.notification(t, "user"); !reflect.DeepEqual(renamed, map[string]any{"new": map[string]any{"user_id": "guest_1", "name": "Alice"}}) {
@@ -825,7 +359,7 @@ func TestMessageSnapshotsReplaceEditableState(t *testing.T) {
 
 func TestLogIDsFormOneSequenceAcrossRoomsAndKinds(t *testing.T) {
 	_, httpServer := newTestServer(t, DefaultConfig())
-	c := dialTestClient(t, httpServer, "a", false)
+	c := dialTestClient(t, httpServer)
 	last := parseID(t, listRooms(t, c, map[string]any{"room_id": "general"})["joined"].([]any)[0].(map[string]any)["log_id"])
 	check := func(label string, value any) {
 		t.Helper()
@@ -849,7 +383,7 @@ func TestLogIDsFormOneSequenceAcrossRoomsAndKinds(t *testing.T) {
 
 func TestRepliesMayCrossRooms(t *testing.T) {
 	_, httpServer := newTestServer(t, DefaultConfig())
-	c := dialTestClient(t, httpServer, "a", false)
+	c := dialTestClient(t, httpServer)
 	body := map[string]any{"text": "hello"}
 	root, _ := save(t, c, "root", map[string]any{"body": body})
 	ops, _ := saveRoom(t, c, "ops", map[string]any{"title": "Ops"})
@@ -894,7 +428,7 @@ func TestRepliesMayCrossRooms(t *testing.T) {
 
 func TestRoomSetCreatesAndEditsRoomsAndThreads(t *testing.T) {
 	_, httpServer := newTestServer(t, DefaultConfig())
-	clients := dialGroup(t, httpServer, "a", "b")
+	clients := dialGroup(t, httpServer, 2)
 	c, observer := clients[0], clients[1]
 	intro, introSnapshot := save(t, c, "intro", map[string]any{"body": map[string]any{"text": "Deploy status\nsecond line", "format": "markdown"}})
 	observer.notification(t, "message")
@@ -999,34 +533,59 @@ func TestRoomSetCreatesAndEditsRoomsAndThreads(t *testing.T) {
 }
 
 // Deleting a thread's intro message redacts the copies embedded in the
-// thread's room records, both logged ones and the current record room_list returns.
-func TestDeletingAnIntroMessageRedactsRoomRecords(t *testing.T) {
+// thread's room records, both logged ones and the current record room_list
+// returns, and replaces a title derived from it with the default.
+func TestDeletingAnIntroMessage(t *testing.T) {
 	_, httpServer := newTestServer(t, DefaultConfig())
-	c := dialTestClient(t, httpServer, "a", false)
-	id, _ := save(t, c, "intro", map[string]any{"body": map[string]any{"text": "secret"}})
-	thread, _ := saveRoom(t, c, "thread", map[string]any{"parent_room_id": "general", "intro_message": map[string]any{"message_id": id}})
-	_, _ = saveRoom(t, c, "rename", map[string]any{"room_id": thread, "title": "Renamed", "intro_message": map[string]any{"message_id": id}})
-	_, _ = save(t, c, "delete", map[string]any{"message_id": id, "deleted": true})
+	clients := dialGroup(t, httpServer, 2)
+	a, b := clients[0], clients[1]
+	id, _ := save(t, a, "intro", map[string]any{"body": map[string]any{"text": "Secret line\nmore"}})
+	b.notification(t, "message")
+	thread, record := saveRoom(t, a, "thread", map[string]any{"parent_room_id": "general", "intro_message": map[string]any{"message_id": id}})
+	roomUpdated(t, b, "updated")
+	// An edit without a title derives it again.
+	_, edited := saveRoom(t, a, "edit", map[string]any{"room_id": thread, "intro_message": map[string]any{"message_id": id}})
+	roomUpdated(t, b, "updated")
+	if record["title"] != "Secret line" || edited["title"] != "Secret line" {
+		t.Fatalf("derived titles: %#v then %#v", record, edited)
+	}
 
+	// The deletion is followed by the thread's new default title.
+	before, _ := a.request(t, "message", "delete", map[string]any{"room_id": "general", "message_id": id, "deleted": true})
+	if got := methods(before); !reflect.DeepEqual(got, []string{"message", "room_update"}) {
+		t.Fatalf("frames before the delete result: %v", got)
+	}
+	deletion := notificationParams(t, before[0], "message")
+	if updated := updateRecord(t, before[1], "updated"); updated["room_id"] != thread || updated["title"] != defaultThreadTitle {
+		t.Fatalf("title after delete: %#v", updated)
+	}
+	b.notification(t, "message")
+	if updated := roomUpdated(t, b, "updated"); updated["title"] != defaultThreadTitle {
+		t.Fatalf("parent member's update: %#v", updated)
+	}
+
+	// The retitling is logged too. Every record carries the intro redacted:
+	// the two earlier ones as a tombstone at the creation snapshot's log_id.
 	tombstone := map[string]any{"message_id": id, "log_id": id, "room_id": "general", "from": map[string]any{"user_id": "guest_1"}, "deleted": true}
-	rooms := historyPage(t, c, thread, map[string]any{})["rooms"].([]any)
-	if len(rooms) != 2 {
+	rooms := records(t, historyPage(t, b, thread, map[string]any{}), "rooms")
+	if len(rooms) != 3 {
 		t.Fatalf("thread room records: %#v", rooms)
 	}
-	for _, record := range rooms {
-		if intro := record.(map[string]any)["intro_message"]; !reflect.DeepEqual(intro, tombstone) {
-			t.Fatalf("logged intro_message = %#v, want %#v", intro, tombstone)
+	for i, intro := range []any{tombstone, tombstone, deletion} {
+		logged := rooms[i].(map[string]any)
+		if logged["title"] != defaultThreadTitle || !reflect.DeepEqual(logged["intro_message"], intro) {
+			t.Fatalf("logged record %d after delete = %#v, want title %q and intro %#v", i, logged, defaultThreadTitle, intro)
 		}
 	}
-	listed := listRooms(t, c, map[string]any{"parent_room_id": "general"})["joined"].([]any)
-	if intro := listed[0].(map[string]any)["intro_message"].(map[string]any); intro["deleted"] != true || intro["body"] != nil {
+	listed := listRooms(t, a, map[string]any{"parent_room_id": "general"})["joined"].([]any)
+	if intro := listed[0].(map[string]any)["intro_message"]; !reflect.DeepEqual(intro, any(deletion)) {
 		t.Fatalf("listed intro_message: %#v", intro)
 	}
 }
 
 func TestMoveAppearsInBothRoomsAndCarriesReactions(t *testing.T) {
 	_, httpServer := newTestServer(t, DefaultConfig())
-	clients := dialGroup(t, httpServer, "a", "b")
+	clients := dialGroup(t, httpServer, 2)
 	author, reactor := clients[0], clients[1]
 	body := map[string]any{"text": "move me"}
 	id, created := save(t, author, "create", map[string]any{"body": body})
@@ -1122,7 +681,7 @@ func TestMoveAppearsInBothRoomsAndCarriesReactions(t *testing.T) {
 
 func TestReactions(t *testing.T) {
 	_, httpServer := newTestServer(t, DefaultConfig())
-	c := dialTestClient(t, httpServer, "a", false)
+	c := dialTestClient(t, httpServer)
 	id, _ := save(t, c, "create", map[string]any{"body": map[string]any{"text": "react to me"}})
 
 	set := react(t, c, "set", id, "👍", "🎉", "👍")
@@ -1146,10 +705,6 @@ func TestReactions(t *testing.T) {
 	cleared := react(t, c, "clear", id)
 	if sets := cleared["reactions"].([]any); len(sets) != 1 || len(sets[0].(map[string]any)["emojis"].([]any)) != 0 {
 		t.Fatalf("clear broadcast: %#v", cleared)
-	}
-	// Reaction sets carry no prev_log_id (§2).
-	if _, has := cleared["prev_log_id"]; has {
-		t.Fatalf("reaction set with prev_log_id: %#v", cleared)
 	}
 	c.result(t, "reactions", "clear-again", map[string]any{"message_id": id, "emojis": []any{}})
 	c.expectQuiet(t)
@@ -1180,7 +735,7 @@ func TestReactions(t *testing.T) {
 
 func TestHistoryPaginatesAcrossRecordKinds(t *testing.T) {
 	_, httpServer := newTestServer(t, DefaultConfig())
-	c := dialTestClient(t, httpServer, "a", false)
+	c := dialTestClient(t, httpServer)
 	listed := listRooms(t, c, map[string]any{"filter": "joined"})["joined"].([]any)[0].(map[string]any)
 	generalID, joinID := listed["log_id"].(string), listed["latest_log_id"].(string)
 	id, message := save(t, c, "m1", map[string]any{"body": map[string]any{"text": "one"}})
@@ -1281,16 +836,13 @@ func TestHistoryPaginatesAcrossRecordKinds(t *testing.T) {
 // the source room in prev_room_id, whose log holds the earlier snapshots.
 func TestHistorySingleRecordWalksPrevLogID(t *testing.T) {
 	_, httpServer := newTestServer(t, DefaultConfig())
-	c := dialTestClient(t, httpServer, "a", false)
+	c := dialTestClient(t, httpServer)
 	id, created := save(t, c, "create", map[string]any{"body": map[string]any{"text": "one"}})
 	_, edited := save(t, c, "edit", map[string]any{"message_id": id, "body": map[string]any{"text": "two"}})
 	save(t, c, "other", map[string]any{"body": map[string]any{"text": "unrelated"}})
 	thread, _ := saveRoom(t, c, "thread", map[string]any{"parent_room_id": "general", "title": "Moved"})
 	_, moved := save(t, c, "move", map[string]any{"message_id": id, "room_id": thread, "body": map[string]any{"text": "three"}})
 	_, latest := save(t, c, "edit-again", map[string]any{"message_id": id, "room_id": thread, "body": map[string]any{"text": "four"}})
-	if moved["prev_room_id"] != "general" || latest["prev_room_id"] != nil {
-		t.Fatalf("prev_room_id: move %#v, then %#v", moved, latest)
-	}
 
 	var walked []any
 	var rooms []string
@@ -1323,7 +875,7 @@ func TestHistorySingleRecordWalksPrevLogID(t *testing.T) {
 
 func TestInvalidSavesLeaveStateUnchanged(t *testing.T) {
 	_, httpServer := newTestServer(t, DefaultConfig())
-	c := dialTestClient(t, httpServer, "a", false)
+	c := dialTestClient(t, httpServer)
 	id, _ := save(t, c, "create", map[string]any{"body": map[string]any{"text": "hello"}})
 	for i, params := range []map[string]any{
 		{"body": map[string]any{}, "deleted": true},
@@ -1359,7 +911,7 @@ func TestInvalidSavesLeaveStateUnchanged(t *testing.T) {
 // text and no embeds is neither logged nor broadcast.
 func TestDefaultRoomAndEmptyMessages(t *testing.T) {
 	_, httpServer := newTestServer(t, DefaultConfig())
-	c := dialTestClient(t, httpServer, "a", false)
+	c := dialTestClient(t, httpServer)
 	before, result := c.request(t, "message", "default", map[string]any{"body": map[string]any{"text": "hi"}})
 	if snapshot := notificationParams(t, before[0], "message"); len(before) != 1 || snapshot["room_id"] != "general" || snapshot["message_id"] != result["message_id"] {
 		t.Fatalf("default room snapshot: %#v", snapshot)
@@ -1381,10 +933,10 @@ func TestDefaultRoomAndEmptyMessages(t *testing.T) {
 }
 
 func TestRequestDeduplication(t *testing.T) {
-	_, httpServer := newTestServer(t, DefaultConfig())
-	c := dialTestClient(t, httpServer, "a", false)
+	app, httpServer := newTestServer(t, DefaultConfig())
+	c := dialTestClient(t, httpServer)
 	thread, _ := saveRoom(t, c, "thread", map[string]any{"parent_room_id": "general", "title": "Deploy"})
-	c.write(t, map[string]any{"jsonrpc": "2.0", "method": "room_set", "id": "thread", "params": map[string]any{"title": "Deploy", "parent_room_id": "general"}})
+	c.write(t, map[string]any{"method": "room_set", "id": "thread", "params": map[string]any{"title": "Deploy", "parent_room_id": "general"}})
 	if c.read(t)["result"].(map[string]any)["room_id"] != thread {
 		t.Fatal("room retry minted another ID")
 	}
@@ -1404,11 +956,27 @@ func TestRequestDeduplication(t *testing.T) {
 	if len(records(t, page, "messages")) != 1 || page["last_log_id"] != move["log_id"] {
 		t.Fatalf("retry appended log entries: %#v", page)
 	}
+
+	// Reads are not kept: a finished history runs again under the same ID.
+	first := c.result(t, "history", "read", map[string]any{"room_id": thread})
+	save(t, c, "post", map[string]any{"room_id": thread, "body": map[string]any{"text": "new"}})
+	second := c.result(t, "history", "read", map[string]any{"room_id": thread})
+	if len(logIDs(t, second, "messages")) != len(logIDs(t, first, "messages"))+1 {
+		t.Fatalf("a finished read was answered from the cache: %#v", second)
+	}
+	app.mu.RLock()
+	defer app.mu.RUnlock()
+	if entry := app.users[c.userID].dedup.get("read"); entry != nil {
+		t.Fatal("history result kept for deduplication")
+	}
+	if entry := app.users[c.userID].dedup.get("post"); entry == nil {
+		t.Fatal("message result not kept for deduplication")
+	}
 }
 
-func TestNotificationsDoNotReceiveRepliesAndHealth(t *testing.T) {
+func TestNotificationsGetNoReplies(t *testing.T) {
 	_, httpServer := newTestServer(t, DefaultConfig())
-	c := dialTestClient(t, httpServer, "a", false)
+	c := dialTestClient(t, httpServer)
 	c.write(t, map[string]any{"method": "unknown_notification"})
 	c.write(t, map[string]any{"method": "message", "params": []any{}})
 	c.write(t, map[string]any{"method": "me", "params": map[string]any{"name": nil}})
@@ -1431,56 +999,39 @@ func TestNotificationsDoNotReceiveRepliesAndHealth(t *testing.T) {
 	if response["id"] != "n1" {
 		t.Fatalf("notification produced a response before me: %#v", response)
 	}
-
-	responseHTTP, err := http.Get(httpServer.URL + "/healthz")
-	if err != nil {
-		t.Fatalf("health request: %v", err)
-	}
-	defer responseHTTP.Body.Close()
-	if responseHTTP.StatusCode != http.StatusOK {
-		t.Fatalf("health status = %d", responseHTTP.StatusCode)
-	}
 }
 
-func TestStaticDirectoryAndOrigins(t *testing.T) {
-	staticDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(staticDir, "index.html"), []byte("ok"), 0o644); err != nil {
-		t.Fatal(err)
+func TestHTTPEndpoints(t *testing.T) {
+	dir := t.TempDir()
+	for name, content := range map[string]string{"index.html": "app", ".env": "SECRET=1", "assets/app.js": "js"} {
+		path := filepath.Join(dir, name)
+		_ = os.MkdirAll(filepath.Dir(path), 0o755)
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
 	}
 	config := DefaultConfig()
-	config.StaticDir = staticDir
-	app := New(config)
-	httpServer := httptest.NewServer(app.Handler())
-	t.Cleanup(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-		_ = app.Shutdown(ctx)
-		cancel()
-		httpServer.Close()
-	})
-	response, err := http.Get(httpServer.URL + "/")
-	if err != nil {
-		t.Fatal(err)
-	}
-	response.Body.Close()
-	if response.StatusCode != http.StatusOK {
-		t.Fatalf("static status = %d", response.StatusCode)
+	config.StaticDir = dir
+	_, httpServer := newTestServer(t, config)
+	// The static directory serves files, but not dotfiles or listings.
+	for path, want := range map[string]int{"/healthz": 200, "/": 200, "/assets/app.js": 200, "/.env": 404, "/assets/": 404} {
+		if status, _, _ := httpDo(t, http.MethodGet, httpServer.URL+path, nil, ""); status != want {
+			t.Errorf("GET %s: %d, want %d", path, status, want)
+		}
 	}
 
 	// The HTTP request host is authorized by coder/websocket; a configured origin
 	// outside the allowlist is rejected during the WebSocket handshake.
-	wsURL := "ws" + httpServer.URL[len("http"):]
-	badOrigin := "https://untrusted.example"
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	_, _, err = websocket.Dial(ctx, wsURL+"/ws", &websocket.DialOptions{HTTPHeader: http.Header{"Origin": []string{badOrigin}}})
-	cancel()
-	if err == nil {
+	defer cancel()
+	if _, _, err := websocket.Dial(ctx, wsURL(httpServer), &websocket.DialOptions{HTTPHeader: http.Header{"Origin": {"https://untrusted.example"}}}); err == nil {
 		t.Fatal("untrusted origin unexpectedly connected")
 	}
 }
 
 func TestActivityRelaysTypingWithInlineIdentity(t *testing.T) {
 	_, httpServer := newTestServer(t, DefaultConfig())
-	c := dialTestClient(t, httpServer, "a", false)
+	c := dialTestClient(t, httpServer)
 	thread, _ := saveRoom(t, c, "thread", map[string]any{"parent_room_id": "general"})
 	c.write(t, map[string]any{"method": "activity", "params": map[string]any{"room_id": thread, "typing": 8, "from": map[string]any{"user_id": "forged"}}})
 	params := c.notification(t, "activity")

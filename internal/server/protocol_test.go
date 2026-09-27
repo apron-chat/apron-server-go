@@ -26,3 +26,18 @@ func TestMalformedFrames(t *testing.T) {
 		})
 	}
 }
+
+// Unknown envelope keys are ignored (PROTOCOL.md §1), jsonrpc included, so a
+// JSON-RPC 2.0 client's frames parse whatever version they name.
+func TestUnknownEnvelopeKeysAreIgnored(t *testing.T) {
+	for _, input := range []string{
+		`{"jsonrpc":"2.0","method":"history","id":"x"}`,
+		`{"jsonrpc":"1.0","method":"history","id":"x"}`,
+		`{"jsonrpc":2,"method":"history","id":"x","extra":{}}`,
+	} {
+		req, err := parseRequest([]byte(input))
+		if err != nil || req.method != "history" || req.id != "x" {
+			t.Fatalf("%s: %#v, %#v", input, req, err)
+		}
+	}
+}
