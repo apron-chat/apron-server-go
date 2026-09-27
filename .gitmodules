@@ -1,0 +1,4 @@
+[submodule "testdata/apron"]
+	path = testdata/apron
+	url = https://github.com/shazow/apron.git
+	shallow = true
