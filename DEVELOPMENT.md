@@ -8,7 +8,7 @@ server keeps rooms and history in memory; restarting it clears messages.
 - The repository root is the Go module and the reference server, implementing
   every capability in [PROTOCOL.md](https://github.com/shazow/apron/blob/main/PROTOCOL.md);
   `cmd/aprond` is the executable and `internal` contains implementation
-  packages. See the [README](README.md).
+  packages. See [SERVER.md](SERVER.md).
 - [apron-chat/apron-web](https://github.com/apron-chat/apron-web): the
   SvelteKit and TypeScript web client, deployed at `https://web.apron.chat`.
   `make install` clones it into `.apron-web/` (ignored), where the browser
@@ -76,7 +76,7 @@ page reloads require signing in again. Guest reconnects receive a new identity.
 Edit and delete permissions belong to the identity that created the message.
 Messages and passkey registrations are held in memory and lost on server restart.
 Use `localhost` for the default passkey configuration; see
-[`README.md`](README.md#passkeys) for deployment settings.
+[SERVER.md](SERVER.md#passkeys) for deployment settings.
 
 ## Threads
 
@@ -201,7 +201,7 @@ and WebSocket endpoint from the same origin; no Node.js process is needed.
 `make run` builds the frontend, builds the Go executable, then starts it.
 Use `make serve` to run the existing build. Re-run `make run` after source changes;
 use the two development processes above for frontend hot reload.
-See `README.md` for server flags and origin configuration.
+See [SERVER.md](SERVER.md) for server flags and origin configuration.
 
 ## Validate
 
