@@ -1,7 +1,6 @@
 package server
 
 import (
-	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -9,7 +8,6 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json/v2"
-	"net/http"
 	"net/http/httptest"
 	"reflect"
 	"testing"
@@ -22,29 +20,21 @@ import (
 
 const testPasskeyOrigin = "http://localhost:5173"
 
-func passkeyTestServer(t *testing.T) (*Server, *httptest.Server) {
+// testWebAuthn is the relying party the passkey tests use, on localhost.
+func testWebAuthn(t *testing.T) *webauthn.WebAuthn {
 	t.Helper()
 	w, err := webauthn.New(&webauthn.Config{RPID: "localhost", RPDisplayName: "Apron", RPOrigins: []string{testPasskeyOrigin}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	config := DefaultConfig()
-	config.WebAuthn = w
-	return newTestServer(t, config)
+	return w
 }
 
-func passkeyTestClient(t *testing.T, server *httptest.Server, origin string) *testClient {
+func passkeyTestServer(t *testing.T) (*Server, *httptest.Server) {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	ws, _, err := websocket.Dial(ctx, "ws"+server.URL[len("http"):]+"/ws", &websocket.DialOptions{HTTPHeader: http.Header{"Origin": {origin}}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = ws.Close(websocket.StatusNormalClosure, "test done") })
-	c := &testClient{ws: ws}
-	c.read(t)
-	return c
+	config := DefaultConfig()
+	config.WebAuthn = testWebAuthn(t)
+	return newTestServer(t, config)
 }
 
 func passkeyCall(t *testing.T, c *testClient, id, action, step string, extra map[string]any) map[string]any {
@@ -175,19 +165,6 @@ func (a *testAuthenticator) assertion(t *testing.T, options map[string]any, orig
 	}
 }
 
-// guestAuth signs c in as a guest and returns the auth result, which follows
-// the membership of the guest's join to general.
-func guestAuth(t *testing.T, c *testClient) map[string]any {
-	t.Helper()
-	before, result := c.request(t, "auth", "guest", map[string]any{"scheme": "guest"})
-	c.userID = result["you"].(map[string]any)["user_id"].(string)
-	if len(before) != 1 {
-		t.Fatalf("frames before the guest auth result: %#v", before)
-	}
-	checkMembership(t, notificationParams(t, before[0], "membership"), "general", c.userID, true)
-	return result
-}
-
 func registerTestPasskey(t *testing.T, c *testClient, a *testAuthenticator) map[string]any {
 	t.Helper()
 	guest := guestAuth(t, c)["you"].(map[string]any)["user_id"]
@@ -206,11 +183,11 @@ func registerTestPasskey(t *testing.T, c *testClient, a *testAuthenticator) map[
 
 func TestPasskeyRegistrationLoginAndSession(t *testing.T) {
 	app, httpServer := passkeyTestServer(t)
-	owner := passkeyTestClient(t, httpServer, testPasskeyOrigin)
+	owner, _ := dialOrigin(t, httpServer, testPasskeyOrigin)
 	a := newTestAuthenticator(t)
 	registered := registerTestPasskey(t, owner, a)
 	identity := registered["you"].(map[string]any)["user_id"]
-	other := passkeyTestClient(t, httpServer, testPasskeyOrigin)
+	other, _ := dialOrigin(t, httpServer, testPasskeyOrigin)
 	options := passkeyResult(t, passkeyCall(t, other, "begin", "login", "begin", nil))
 	publicKey := passkeyPublicKey(t, options)
 	if _, ok := publicKey["allowCredentials"]; ok {
@@ -227,7 +204,7 @@ func TestPasskeyRegistrationLoginAndSession(t *testing.T) {
 	}
 	// Even the identical request ID cannot replay a completed ceremony.
 	passkeyDenied(t, passkeyCall(t, other, "finish", "login", "finish", finish))
-	resumed := passkeyTestClient(t, httpServer, testPasskeyOrigin)
+	resumed, _ := dialOrigin(t, httpServer, testPasskeyOrigin)
 	token := loggedIn["token"].(string)
 	result := passkeyResult(t, passkeyCall(t, resumed, "resume", "token", "", map[string]any{"token": token}))
 	if result["you"].(map[string]any)["user_id"] != identity {
@@ -236,7 +213,7 @@ func TestPasskeyRegistrationLoginAndSession(t *testing.T) {
 	// Token sign-out is local to the client: drop the connection and reconnect.
 	// The server retains the token until its normal expiry.
 	_ = resumed.ws.Close(websocket.StatusNormalClosure, "signed out")
-	reconnected := passkeyTestClient(t, httpServer, testPasskeyOrigin)
+	reconnected, _ := dialOrigin(t, httpServer, testPasskeyOrigin)
 	result = passkeyResult(t, passkeyCall(t, reconnected, "resume", "token", "", map[string]any{"token": token}))
 	if result["you"].(map[string]any)["user_id"] != identity {
 		t.Fatal("reconnect changed identity")
@@ -249,7 +226,7 @@ func TestPasskeyRegistrationLoginAndSession(t *testing.T) {
 		app.sessions[key] = session
 	}
 	app.mu.Unlock()
-	renewed := passkeyTestClient(t, httpServer, testPasskeyOrigin)
+	renewed, _ := dialOrigin(t, httpServer, testPasskeyOrigin)
 	result = passkeyResult(t, passkeyCall(t, renewed, "resume", "token", "", map[string]any{"token": token}))
 	if result["token"] != token {
 		t.Fatalf("resume did not return the presented token: %#v", result["token"])
@@ -269,7 +246,7 @@ func TestPasskeyRegistrationLoginAndSession(t *testing.T) {
 	passkeyDenied(t, passkeyCall(t, reconnected, "expired", "token", "", map[string]any{"token": registered["token"]}))
 }
 
-func TestAddingPasskeyPreservesStoredNickname(t *testing.T) {
+func TestAddingPasskeyPreservesStoredName(t *testing.T) {
 	for _, renameDuringRegistration := range []bool{false, true} {
 		name := "rename before registration"
 		if renameDuringRegistration {
@@ -277,19 +254,19 @@ func TestAddingPasskeyPreservesStoredNickname(t *testing.T) {
 		}
 		t.Run(name, func(t *testing.T) {
 			_, httpServer := passkeyTestServer(t)
-			owner := passkeyTestClient(t, httpServer, testPasskeyOrigin)
+			owner, _ := dialOrigin(t, httpServer, testPasskeyOrigin)
 			original := newTestAuthenticator(t)
 			registered := registerTestPasskey(t, owner, original)
-			other := passkeyTestClient(t, httpServer, testPasskeyOrigin)
+			other, _ := dialOrigin(t, httpServer, testPasskeyOrigin)
 			passkeyResult(t, passkeyCall(t, other, "resume", "token", "", map[string]any{"token": registered["token"]}))
 			rename := func() {
-				owner.write(t, map[string]any{"method": "me", "id": "rename", "params": map[string]any{"name": "Updated nickname"}})
+				owner.write(t, map[string]any{"method": "me", "id": "rename", "params": map[string]any{"name": "Updated name"}})
 				result := passkeyResult(t, owner.read(t))
-				if result["you"].(map[string]any)["name"] != "Updated nickname" {
+				if result["you"].(map[string]any)["name"] != "Updated name" {
 					t.Fatalf("rename was not accepted: %#v", result)
 				}
 				// The same user's other connection learns of the change.
-				if you := other.notification(t, "user")["you"].(map[string]any); you["name"] != "Updated nickname" {
+				if you := other.notification(t, "user")["you"].(map[string]any); you["name"] != "Updated name" {
 					t.Fatalf("other connection's user notification: %#v", you)
 				}
 			}
@@ -307,14 +284,14 @@ func TestAddingPasskeyPreservesStoredNickname(t *testing.T) {
 			assertIdentity := func(result map[string]any) {
 				t.Helper()
 				you := result["you"].(map[string]any)
-				if you["user_id"] != registered["you"].(map[string]any)["user_id"] || you["name"] != "Updated nickname" {
+				if you["user_id"] != registered["you"].(map[string]any)["user_id"] || you["name"] != "Updated name" {
 					t.Fatalf("registration lost the stored identity: %#v", you)
 				}
 			}
 			assertIdentity(result)
-			// Both credentials must restore the accepted nickname on fresh connections.
+			// Both credentials must restore the accepted name on fresh connections.
 			for _, authenticator := range []*testAuthenticator{original, additional} {
-				fresh := passkeyTestClient(t, httpServer, testPasskeyOrigin)
+				fresh, _ := dialOrigin(t, httpServer, testPasskeyOrigin)
 				options := passkeyResult(t, passkeyCall(t, fresh, "login-begin", "login", "begin", nil))
 				result := passkeyResult(t, passkeyCall(t, fresh, "login-finish", "login", "finish", map[string]any{
 					"credential": authenticator.assertion(t, options, testPasskeyOrigin, "localhost", 0x05),
@@ -328,7 +305,7 @@ func TestAddingPasskeyPreservesStoredNickname(t *testing.T) {
 func TestPasskeyRejectsInvalidProofs(t *testing.T) {
 	app, httpServer := passkeyTestServer(t)
 	a := newTestAuthenticator(t)
-	owner := passkeyTestClient(t, httpServer, testPasskeyOrigin)
+	owner, _ := dialOrigin(t, httpServer, testPasskeyOrigin)
 	registerTestPasskey(t, owner, a)
 	for _, test := range []struct {
 		name, origin, rpID string
@@ -340,14 +317,14 @@ func TestPasskeyRejectsInvalidProofs(t *testing.T) {
 		{"no user presence", testPasskeyOrigin, "localhost", 0x04},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			c := passkeyTestClient(t, httpServer, testPasskeyOrigin)
+			c, _ := dialOrigin(t, httpServer, testPasskeyOrigin)
 			options := passkeyResult(t, passkeyCall(t, c, "begin", "login", "begin", nil))
 			proof := a.assertion(t, options, test.origin, test.rpID, test.flags)
 			passkeyDenied(t, passkeyCall(t, c, "finish", "login", "finish", map[string]any{"credential": proof}))
 			passkeyDenied(t, passkeyCall(t, c, "retry", "login", "finish", map[string]any{"credential": proof}))
 		})
 	}
-	c := passkeyTestClient(t, httpServer, testPasskeyOrigin)
+	c, _ := dialOrigin(t, httpServer, testPasskeyOrigin)
 	first := passkeyResult(t, passkeyCall(t, c, "first", "login", "begin", nil))
 	second := passkeyResult(t, passkeyCall(t, c, "second", "login", "begin", nil))
 	proof := a.assertion(t, first, testPasskeyOrigin, "localhost", 0x05)
@@ -358,7 +335,7 @@ func TestPasskeyRejectsInvalidProofs(t *testing.T) {
 	passkeyResult(t, passkeyCall(t, c, "current", "login", "finish", map[string]any{
 		"challenge_id": second["challenge_id"], "credential": current,
 	}))
-	other := passkeyTestClient(t, httpServer, testPasskeyOrigin)
+	other, _ := dialOrigin(t, httpServer, testPasskeyOrigin)
 	passkeyDenied(t, passkeyCall(t, other, "cross-connection", "login", "finish", map[string]any{
 		"challenge_id": first["challenge_id"], "credential": proof,
 	}))
@@ -372,13 +349,13 @@ func TestPasskeyRejectsInvalidProofs(t *testing.T) {
 	app.mu.Unlock()
 	passkeyDenied(t, passkeyCall(t, c, "expired", "login", "finish", map[string]any{"credential": a.assertion(t, options, testPasskeyOrigin, "localhost", 0x05)}))
 	passkeyDenied(t, passkeyCall(t, other, "unauth-register", "register", "begin", nil))
-	wrongOrigin := passkeyTestClient(t, httpServer, "http://localhost:9999")
+	wrongOrigin, _ := dialOrigin(t, httpServer, "http://localhost:9999")
 	passkeyDenied(t, passkeyCall(t, wrongOrigin, "origin", "login", "begin", nil))
 }
 
 func TestPasskeyRejectsInvalidRegistration(t *testing.T) {
 	app, httpServer := passkeyTestServer(t)
-	c := passkeyTestClient(t, httpServer, testPasskeyOrigin)
+	c, _ := dialOrigin(t, httpServer, testPasskeyOrigin)
 	guestAuth(t, c)
 	a := newTestAuthenticator(t)
 	options := passkeyResult(t, passkeyCall(t, c, "begin", "register", "begin", nil))
@@ -404,11 +381,11 @@ func TestPasskeyRejectsInvalidRegistration(t *testing.T) {
 // it are denied (§3.2); a verified finish lets the ones behind it run.
 func TestPasskeyBeginIsNoBarrierPass(t *testing.T) {
 	_, httpServer := passkeyTestServer(t)
-	owner := passkeyTestClient(t, httpServer, testPasskeyOrigin)
+	owner, _ := dialOrigin(t, httpServer, testPasskeyOrigin)
 	a := newTestAuthenticator(t)
 	registerTestPasskey(t, owner, a)
 
-	c := passkeyTestClient(t, httpServer, testPasskeyOrigin)
+	c, _ := dialOrigin(t, httpServer, testPasskeyOrigin)
 	c.write(t, map[string]any{"method": "auth", "id": "begin", "params": map[string]any{"scheme": "webauthn", "action": "login", "step": "begin"}})
 	c.write(t, map[string]any{"method": "room_list", "id": "list", "params": map[string]any{"filter": "joined"}})
 	options := passkeyResult(t, c.read(t))
@@ -428,7 +405,7 @@ func TestPasskeyBeginIsNoBarrierPass(t *testing.T) {
 
 func TestPasskeyNotificationsDoNotRunCeremonies(t *testing.T) {
 	_, httpServer := passkeyTestServer(t)
-	c := passkeyTestClient(t, httpServer, testPasskeyOrigin)
+	c, _ := dialOrigin(t, httpServer, testPasskeyOrigin)
 	guestAuth(t, c)
 	a := newTestAuthenticator(t)
 	options := passkeyResult(t, passkeyCall(t, c, "begin", "register", "begin", nil))
@@ -447,12 +424,12 @@ func TestPasskeyNotificationsDoNotRunCeremonies(t *testing.T) {
 	}
 }
 
-func TestPasskeyCanonicalMalformedFields(t *testing.T) {
+func TestPasskeyMalformedFields(t *testing.T) {
 	_, httpServer := passkeyTestServer(t)
-	c := passkeyTestClient(t, httpServer, testPasskeyOrigin)
+	c, _ := dialOrigin(t, httpServer, testPasskeyOrigin)
 	guestAuth(t, c)
 
-	// Canonical actions require a valid step and reject unknown action names.
+	// Actions require a valid step and reject unknown action names.
 	for id, params := range map[string]map[string]any{
 		"unknown-action": {"scheme": "webauthn", "action": "other", "step": "begin"},
 		"no-step":        {"scheme": "webauthn", "action": "register"},
@@ -498,11 +475,11 @@ func TestPasskeyCanonicalMalformedFields(t *testing.T) {
 
 func TestSignInReplacesGuestAndDeduplicatesPerUser(t *testing.T) {
 	_, httpServer := passkeyTestServer(t)
-	owner := passkeyTestClient(t, httpServer, testPasskeyOrigin)
+	owner, _ := dialOrigin(t, httpServer, testPasskeyOrigin)
 	registered := registerTestPasskey(t, owner, newTestAuthenticator(t))
-	observer := passkeyTestClient(t, httpServer, testPasskeyOrigin)
+	observer, _ := dialOrigin(t, httpServer, testPasskeyOrigin)
 	guestAuth(t, observer)
-	switcher := passkeyTestClient(t, httpServer, testPasskeyOrigin)
+	switcher, _ := dialOrigin(t, httpServer, testPasskeyOrigin)
 	guest := guestAuth(t, switcher)["you"].(map[string]any)
 	guestID := guest["user_id"].(string)
 	// Each guest's join to general reaches general's members.

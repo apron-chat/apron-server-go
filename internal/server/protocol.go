@@ -25,10 +25,9 @@ type rpcError struct {
 }
 
 type rpcResponse struct {
-	JSONRPC string    `json:"jsonrpc,omitempty"`
-	ID      any       `json:"id,omitzero"`
-	Result  any       `json:"result,omitzero"`
-	Error   *rpcError `json:"error,omitzero"`
+	ID     any       `json:"id,omitzero"`
+	Result any       `json:"result,omitzero"`
+	Error  *rpcError `json:"error,omitzero"`
 }
 
 type request struct {
@@ -36,7 +35,6 @@ type request struct {
 	params map[string]jsontext.Value
 	id     string
 	hasID  bool
-	full   bool
 }
 
 func parseRequest(payload []byte) (request, *rpcError) {
@@ -56,14 +54,6 @@ func parseRequest(payload []byte) (request, *rpcError) {
 			req.hasID = false
 			return req, &rpcError{Code: codeInvalidRequest, Message: "Request id must be a string"}
 		}
-	}
-
-	if raw, ok := object["jsonrpc"]; ok {
-		var version string
-		if err := json.Unmarshal(raw, &version); err != nil || version != "2.0" {
-			return req, &rpcError{Code: codeInvalidRequest, Message: "Invalid JSON-RPC version"}
-		}
-		req.full = true
 	}
 
 	rawMethod, ok := object["method"]
@@ -99,22 +89,14 @@ func requestFingerprint(req request) string {
 	return req.method + "\x00" + canonicalParams(req.params)
 }
 
-func response(id string, full bool, result any) rpcResponse {
-	r := rpcResponse{ID: id, Result: result}
-	if full {
-		r.JSONRPC = "2.0"
-	}
-	return r
+func response(id string, result any) rpcResponse {
+	return rpcResponse{ID: id, Result: result}
 }
 
 // errorResponse builds an error reply. A nil id omits "id", as for errors not
 // tied to a request (PROTOCOL.md §1.1).
-func errorResponse(id any, full bool, e *rpcError) rpcResponse {
-	r := rpcResponse{ID: id, Error: e}
-	if full {
-		r.JSONRPC = "2.0"
-	}
-	return r
+func errorResponse(id any, e *rpcError) rpcResponse {
+	return rpcResponse{ID: id, Error: e}
 }
 
 func invalidParams(format string, args ...any) *rpcError {

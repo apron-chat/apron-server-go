@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
-	"github.com/go-webauthn/webauthn/webauthn"
 
 	"github.com/apron-chat/apron-server-go/internal/store"
 )
@@ -21,12 +20,8 @@ import (
 // function that shuts it down, closing the store.
 func startWithStore(t *testing.T, s store.Store, uploadDir string) (*Server, *httptest.Server, func()) {
 	t.Helper()
-	w, err := webauthn.New(&webauthn.Config{RPID: "localhost", RPDisplayName: "Apron", RPOrigins: []string{testPasskeyOrigin}})
-	if err != nil {
-		t.Fatal(err)
-	}
 	config := DefaultConfig()
-	config.WebAuthn = w
+	config.WebAuthn = testWebAuthn(t)
 	config.Store = s
 	config.UploadDir = uploadDir
 	app, err := Open(config)
@@ -52,30 +47,34 @@ func startWithStore(t *testing.T, s store.Store, uploadDir string) (*Server, *ht
 }
 
 func TestStateSurvivesRestart(t *testing.T) {
-	for name, open := range map[string]func(t *testing.T, path string) store.Store{
-		"memory": func(t *testing.T, path string) store.Store {
-			// The same Memory is reused across the restart below.
-			return sharedMemory
+	// Each opener returns a function that opens the same store again after a
+	// restart.
+	for name, opener := range map[string]func() func(t *testing.T, path string) store.Store{
+		"memory": func() func(*testing.T, string) store.Store {
+			memory := store.NewMemory()
+			return func(*testing.T, string) store.Store { return memory }
 		},
-		"sqlite": func(t *testing.T, path string) store.Store {
-			s, err := store.OpenSQLite(path)
-			if err != nil {
-				t.Fatal(err)
+		"sqlite": func() func(*testing.T, string) store.Store {
+			return func(t *testing.T, path string) store.Store {
+				s, err := store.OpenSQLite(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return s
 			}
-			return s
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
-			sharedMemory = store.NewMemory()
+			open := opener()
 			dir := t.TempDir()
 			dbPath, uploadDir := filepath.Join(dir, "aprond.db"), filepath.Join(dir, "uploads")
 
 			app, httpServer, stop := startWithStore(t, open(t, dbPath), uploadDir)
-			owner := passkeyTestClient(t, httpServer, testPasskeyOrigin)
+			owner, _ := dialOrigin(t, httpServer, testPasskeyOrigin)
 			registered := registerTestPasskey(t, owner, newTestAuthenticator(t))
 			ownerID := registered["you"].(map[string]any)["user_id"].(string)
 			token := registered["token"].(string)
-			guest := dialTestClient(t, httpServer, "guest", false)
+			guest := dialTestClient(t, httpServer)
 			owner.drain(t)
 
 			hello, _ := save(t, owner, "hello", map[string]any{"body": map[string]any{"text": "Hello <world> & all"}})
@@ -99,18 +98,8 @@ func TestStateSurvivesRestart(t *testing.T) {
 
 			// The guest leaves first, so that shutdown changes nothing more.
 			_ = guest.ws.Close(websocket.StatusNormalClosure, "bye")
-			for deadline := time.Now().Add(2 * time.Second); ; time.Sleep(10 * time.Millisecond) {
-				app.mu.RLock()
-				retired := app.users[guest.userID] == nil
-				app.mu.RUnlock()
-				if retired {
-					break
-				}
-				if time.Now().After(deadline) {
-					t.Fatal("guest not retired")
-				}
-			}
-			owner.drain(t)
+			expectMembership(t, owner, "general", guest.userID, false)
+			owner.expectQuiet(t)
 			// Every change reached the store: after shutdown it holds exactly
 			// the state the server had.
 			app.mu.Lock()
@@ -149,7 +138,7 @@ func TestStateSurvivesRestart(t *testing.T) {
 			}
 
 			_, httpServer, _ = startWithStore(t, open(t, dbPath), uploadDir)
-			resumed := passkeyTestClient(t, httpServer, testPasskeyOrigin)
+			resumed, _ := dialOrigin(t, httpServer, testPasskeyOrigin)
 			result := passkeyResult(t, passkeyCall(t, resumed, "resume", "token", "", map[string]any{"token": token}))
 			if result["you"].(map[string]any)["user_id"] != ownerID {
 				t.Fatalf("resumed as %v, want %s", result["you"], ownerID)
@@ -180,7 +169,7 @@ func TestStateSurvivesRestart(t *testing.T) {
 				t.Fatalf("upload after restart: %d", status)
 			}
 			// Guest IDs are never reissued, across restarts too.
-			if next := dialTestClient(t, httpServer, "next", false); next.userID == guest.userID {
+			if next := dialTestClient(t, httpServer); next.userID == guest.userID {
 				t.Fatalf("guest ID %s reissued", next.userID)
 			}
 			// A new message's log_id follows every restored record.
@@ -193,14 +182,12 @@ func TestStateSurvivesRestart(t *testing.T) {
 	}
 }
 
-var sharedMemory *store.Memory
-
 // TestRestoreAfterACrash restores a store written while a guest was
 // connected and an upload was pending, as after a crash: the guest is
 // retired and the pending embed leaves its message.
 func TestRestoreAfterACrash(t *testing.T) {
 	app, httpServer, _ := startWithStore(t, store.NewMemory(), t.TempDir())
-	guest := dialTestClient(t, httpServer, "guest", false)
+	guest := dialTestClient(t, httpServer)
 	pending := postEmbeds(t, guest, "pending", map[string]any{"room_id": "general", "body": map[string]any{"text": "soon", "embeds": []any{map[string]any{"kind": "upload"}}}})
 	app.mu.Lock()
 	crashed := store.NewMemory()
@@ -216,7 +203,7 @@ func TestRestoreAfterACrash(t *testing.T) {
 	if guestKept {
 		t.Fatal("a guest outlived the restart")
 	}
-	c := dialTestClient(t, httpServer, "after", false)
+	c := dialTestClient(t, httpServer)
 	page := historyPage(t, c, "general", map[string]any{})
 	messages := records(t, page, "messages")
 	last := messages[len(messages)-1].(map[string]any)

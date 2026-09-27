@@ -211,7 +211,7 @@ func (p *peer) readLoop() {
 		p.h.framesIn.Add(1)
 		p.h.bytesIn.Add(int64(len(data)))
 		// The server marshals notifications from maps, so "method" is always
-		// the first key; replies are structs that start with jsonrpc or id.
+		// the first key; replies are structs that start with id.
 		if rest, ok := bytes.CutPrefix(data, notificationPrefix); ok {
 			if end := bytes.IndexByte(rest, '"'); end >= 0 && p.notify != nil {
 				p.notify(string(rest[:end]), data)

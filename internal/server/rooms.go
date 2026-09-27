@@ -561,7 +561,7 @@ func (s *Server) listRooms(c *client, req request) (any, bool, *rpcError) {
 	if withMembers {
 		result["users"] = profiles(users)
 	}
-	frames := []any{response(req.id, req.full, result)}
+	frames := []any{response(req.id, result)}
 	for _, r := range slices.Concat(joined, others) {
 		frames = append(frames, s.cursorFramesLocked(u, r)...)
 	}
@@ -700,7 +700,7 @@ func (s *Server) history(c *client, req request) (any, bool, *rpcError) {
 	// The records are already JSON: the reply is assembled from them without
 	// decoding or re-encoding.
 	if req.hasID {
-		c.enqueue(rawResponse(req.id, req.full, result))
+		c.enqueue(rawResponse(req.id, result))
 	}
 	return result, true, nil
 }

@@ -295,13 +295,9 @@ func rawNotification(method string, params jsontext.Value) jsontext.Value {
 
 // rawResponse renders a result reply around a result that is already JSON,
 // as response would with the decoded result.
-func rawResponse(id string, full bool, result []byte) jsontext.Value {
-	payload := make([]byte, 0, len(id)+len(result)+40)
-	payload = append(payload, '{')
-	if full {
-		payload = append(payload, `"jsonrpc":"2.0",`...)
-	}
-	payload = append(payload, `"id":`...)
+func rawResponse(id string, result []byte) jsontext.Value {
+	payload := make([]byte, 0, len(id)+len(result)+24)
+	payload = append(payload, `{"id":`...)
 	payload = strconv.AppendQuote(payload, id)
 	payload = append(payload, `,"result":`...)
 	payload = append(payload, result...)
@@ -754,7 +750,7 @@ func (c *client) stopConnection() {
 // (PROTOCOL.md §1.1), after the frames already queued, then closes the
 // connection.
 func (c *client) closeWithError(e *rpcError) {
-	payload := encodeJSON(errorResponse(nil, false, e))
+	payload := encodeJSON(errorResponse(nil, e))
 	if payload == nil || !c.closing.CompareAndSwap(false, true) {
 		return
 	}
@@ -802,11 +798,11 @@ func (c *client) enqueueBatch(values ...any) bool {
 }
 
 func (c *client) sendResult(req request, result any) {
-	c.enqueue(response(req.id, req.full, result))
+	c.enqueue(response(req.id, result))
 }
 
 func (c *client) sendError(req request, err *rpcError) {
-	c.enqueue(errorResponse(req.id, req.full, err))
+	c.enqueue(errorResponse(req.id, err))
 }
 
 // operation is a request handler. When it succeeds and has already queued its
@@ -849,7 +845,7 @@ func (s *Server) processFrame(c *client, payload []byte) {
 		if req.hasID {
 			c.sendError(req, parseErr)
 		} else {
-			c.enqueue(errorResponse(nil, req.full, parseErr))
+			c.enqueue(errorResponse(nil, parseErr))
 		}
 		return
 	}
