@@ -98,3 +98,23 @@ func TestTLSDomainIsThePublicURL(t *testing.T) {
 		t.Fatalf("config: public URL %q, passkeys %v", config.PublicURL, config.WebAuthn != nil)
 	}
 }
+
+func TestWelcomeAndRoles(t *testing.T) {
+	options, _ := parse(t, "--welcome", "Sign in with **email**.", "--role", "admin=ada", "--role", "moderator = bob", "--role", "admin=carol")
+	config, err := serverConfig(*options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.Welcome != "Sign in with **email**." {
+		t.Fatalf("welcome: %q", config.Welcome)
+	}
+	if want := map[string][]string{"admin": {"ada", "carol"}, "moderator": {"bob"}}; !reflect.DeepEqual(config.Roles, want) {
+		t.Fatalf("roles: %v", config.Roles)
+	}
+	for _, grant := range []string{"admin", "=ada", "admin="} {
+		options, _ := parse(t, "--role", grant)
+		if _, err := serverConfig(*options); err == nil {
+			t.Errorf("accepted --role %q", grant)
+		}
+	}
+}

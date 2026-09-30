@@ -14,6 +14,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"syscall"
 	"time"
 
@@ -44,6 +45,8 @@ type Options struct {
 	MessagesPerMinute      int      `long:"messages-per-minute" description:"Burst of new messages, room_set requests, and /avatar commands per user, refilled over a minute; 0 is unlimited"`
 	DebugAddr              string   `long:"debug-addr" description:"Listen address for unauthenticated pprof and expvar under /debug/, such as 127.0.0.1:6060; empty disables"`
 	Store                  string   `long:"store" description:"Where state is kept: sqlite:<path> for a SQLite database, or memory to keep nothing across restarts"`
+	Welcome                string   `long:"welcome" description:"Markdown clients show on their sign-in screen (server.welcome), such as how this server's sign-in methods fit together"`
+	Roles                  []string `long:"role" description:"Grant a role to an account as role=user_id, such as admin=ada; repeat for more. admin and moderator may remove others from rooms"`
 
 	WebAuthn struct {
 		RPID    string   `long:"rp-id" default:"localhost" description:"Passkey relying party domain; empty disables passkeys"`
@@ -116,6 +119,18 @@ func serverConfig(options Options) (server.Config, error) {
 	}
 	config.MaxConnections = options.MaxConnections
 	config.MessagesPerMinute = options.MessagesPerMinute
+	config.Welcome = options.Welcome
+	for _, grant := range options.Roles {
+		role, holder, ok := strings.Cut(grant, "=")
+		role, holder = strings.TrimSpace(role), strings.TrimSpace(holder)
+		if !ok || role == "" || holder == "" {
+			return config, fmt.Errorf("invalid --role %q: use role=user_id, such as admin=ada", grant)
+		}
+		if config.Roles == nil {
+			config.Roles = make(map[string][]string)
+		}
+		config.Roles[role] = append(config.Roles[role], holder)
+	}
 	config.DisablePush = options.Push.Disable
 	config.AllowInsecurePush = options.Push.AllowInsecure
 	config.UploadDir = options.Upload.Dir

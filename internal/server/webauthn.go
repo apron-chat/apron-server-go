@@ -227,6 +227,11 @@ func (s *Server) finishPasskeyCeremony(c *client, req request, action string, w 
 		user.credentials = append(user.credentials, *credential)
 		c.user.passkey = user
 		s.touchUser(c.user.id)
+		if s.grantRolesLocked(c.user) {
+			// A guest that becomes an account takes the roles its user_id
+			// was granted.
+			s.notifyProfileLocked(c.user, c)
+		}
 		s.passkeys[c.user.id] = user
 		s.credentials[string(credential.ID)] = user
 	} else {

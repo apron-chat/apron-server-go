@@ -28,12 +28,17 @@ const (
 // userState is everything the server keeps for one user_id across its
 // connections: the profile (§3.3), joined rooms (§4.3.2), request
 // deduplication (§1.2), and push registrations (§4.7). Guest users
-// are retired when their last connection closes; passkey users persist.
+// are retired when their last connection closes; accounts (passkey users)
+// persist.
 type userState struct {
 	id     string
 	name   string
 	avatar string
 	ext    map[string]any
+	// roles are the server roles (§3.3) Config.Roles grants the account,
+	// sorted; guests have none. They are derived from the configuration, not
+	// stored.
+	roles []string
 	// avatarEmbed is the hosted /avatar upload behind avatar, if any.
 	avatarEmbed *embedState
 
@@ -77,12 +82,26 @@ func (u *userState) from() map[string]any {
 	return u.fromValue
 }
 
+// account reports whether the user signed in with a credential, so it
+// persists across connections and restarts, rather than being a guest.
+func (u *userState) account() bool {
+	return u.passkey != nil
+}
+
+// hasRole reports whether the user holds a server role.
+func (u *userState) hasRole(role string) bool {
+	return slices.Contains(u.roles, role)
+}
+
 // profile is the complete current user object for you, user, and users
 // (§3.3).
 func (u *userState) profile() map[string]any {
 	value := maps.Clone(u.from())
 	if u.avatar != "" {
 		value["avatar"] = u.avatar
+	}
+	if len(u.roles) > 0 {
+		value["roles"] = slices.Clone(u.roles)
 	}
 	if len(u.ext) > 0 {
 		value["ext"] = cloneObject(u.ext)
@@ -200,7 +219,7 @@ func requestable(id string) bool {
 func (s *Server) assignUserIDLocked(requested string) string {
 	claim := func(id string) bool {
 		key := strings.ToLower(id)
-		if s.usedIDs[key] || s.roomNamedLocked(id) {
+		if s.usedIDs[key] || s.roomNamedLocked(id) || s.grantedIDs[key] {
 			return false
 		}
 		s.usedIDs[key] = true
@@ -302,7 +321,7 @@ func (s *Server) attachLocked(c *client, user *userState) {
 	}
 	c.user = user
 	user.clients[c] = struct{}{}
-	if previous == nil || len(previous.clients) > 0 || previous.passkey != nil {
+	if previous == nil || len(previous.clients) > 0 || previous.account() {
 		return
 	}
 	sharers := s.sharersLocked(previous)
@@ -323,7 +342,7 @@ func (s *Server) detachLocked(c *client) {
 	}
 	delete(user.clients, c)
 	c.user = nil
-	if len(user.clients) == 0 && user.passkey == nil {
+	if len(user.clients) == 0 && !user.account() {
 		s.retireLocked(user)
 	}
 }
@@ -421,7 +440,8 @@ func withRemoved(profile map[string]any, removed []string) map[string]any {
 // current value, an omitted one stays, and an empty value ("" or {}) removes
 // the field, which the result and notifications carry as that empty value.
 // Names are trimmed and capped; avatars must be https: URLs or small image
-// data: URLs, or the current avatar unchanged.
+// data: URLs, or the current avatar unchanged. roles are not settable, and
+// like other unknown fields are ignored.
 func (s *Server) updateProfile(c *client, req request) (any, bool, *rpcError) {
 	name, err := parseString(req.params, "name", false)
 	if err != nil {
@@ -484,4 +504,25 @@ func (s *Server) updateProfile(c *client, req request) (any, bool, *rpcError) {
 func jsonEqual(a, b any) bool {
 	left, right := encodeJSON(a), encodeJSON(b)
 	return left != nil && right != nil && string(left) == string(right)
+}
+
+// grantRolesLocked sets the roles Config.Roles grants an account, by its
+// user_id, and reports whether they changed. Guests hold no roles, so a
+// granted user_id taken by a guest grants nothing until it is an account;
+// assignUserIDLocked never hands out a granted user_id that was never used.
+func (s *Server) grantRolesLocked(u *userState) bool {
+	var roles []string
+	if u.account() {
+		for role, holders := range s.config.Roles {
+			if slices.ContainsFunc(holders, func(holder string) bool { return strings.EqualFold(holder, u.id) }) {
+				roles = append(roles, role)
+			}
+		}
+		slices.Sort(roles)
+	}
+	if slices.Equal(roles, u.roles) {
+		return false
+	}
+	u.roles = roles
+	return true
 }

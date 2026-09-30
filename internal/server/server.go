@@ -106,6 +106,13 @@ type Config struct {
 	MaxConnections int
 	// MessagesPerMinute bounds each user's new messages; 0 is unlimited.
 	MessagesPerMinute int
+	// Welcome is server.welcome (§3.2): Markdown shown on the sign-in
+	// screen. Empty omits it.
+	Welcome string
+	// Roles grants server roles (§3.3), such as "admin", to accounts: each
+	// role lists the user_ids that hold it. Roles are shown beside names;
+	// "admin" and "moderator" may also remove others from rooms (§4.3.2).
+	Roles map[string][]string
 }
 
 func DefaultConfig() Config {
@@ -330,7 +337,10 @@ type Server struct {
 	users map[string]*userState
 	// usedIDs holds every user_id ever assigned, lowercased, so none is
 	// reissued (§3.3).
-	usedIDs     map[string]bool
+	usedIDs map[string]bool
+	// grantedIDs holds the user_ids Config.Roles names, lowercased, which
+	// are never assigned to a new identity unless already used.
+	grantedIDs  map[string]bool
 	guestNumber uint64
 	embedNumber uint64
 	embeds      map[string]*embedState
@@ -388,6 +398,7 @@ func Open(config Config) (*Server, error) {
 		clients:     make(map[*client]struct{}),
 		users:       make(map[string]*userState),
 		usedIDs:     make(map[string]bool),
+		grantedIDs:  make(map[string]bool),
 		embeds:      make(map[string]*embedState),
 		writes:      make(map[string]*embedState),
 		uploads:     list.New(),
@@ -398,6 +409,11 @@ func Open(config Config) (*Server, error) {
 		dirty:       newDirtySet(),
 		storeWrites: make(chan []store.Entry, storeQueue),
 		storeDone:   make(chan struct{}),
+	}
+	for _, holders := range config.Roles {
+		for _, holder := range holders {
+			s.grantedIDs[strings.ToLower(holder)] = true
+		}
 	}
 	s.ops = s.operations()
 	s.push = newPushDeliverer(config.AllowInsecurePush)
@@ -642,6 +658,9 @@ func (s *Server) serverParams() map[string]any {
 	}
 	if !s.config.DisablePush {
 		params["push"] = map[string]any{"relay": map[string]any{}}
+	}
+	if s.config.Welcome != "" {
+		params["welcome"] = s.config.Welcome
 	}
 	return params
 }

@@ -568,7 +568,7 @@ func (s *Server) restoreLocked() (map[string]bool, error) {
 		if err := decode(entrySession, id, raw, &stored); err != nil {
 			return nil, err
 		}
-		if u := s.users[stored.User]; u != nil && u.passkey != nil && now.Before(stored.Expires) {
+		if u := s.users[stored.User]; u != nil && u.account() && now.Before(stored.Expires) {
 			s.sessions[[32]byte(key)] = passkeySession{user: u.passkey, origin: stored.Origin, expires: stored.Expires}
 		} else {
 			s.touchSession([32]byte(key))
@@ -580,8 +580,10 @@ func (s *Server) restoreLocked() (map[string]bool, error) {
 	// Nothing is connected yet: guests are retired as if their last
 	// connections had just closed, and writes that had not finished fail.
 	for _, id := range slices.Sorted(maps.Keys(s.users)) {
-		if u := s.users[id]; u.passkey == nil {
+		if u := s.users[id]; !u.account() {
 			s.retireLocked(u)
+		} else {
+			s.grantRolesLocked(u)
 		}
 	}
 	for _, id := range slices.Sorted(maps.Keys(s.embeds)) {
