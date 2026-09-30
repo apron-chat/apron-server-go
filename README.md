@@ -39,7 +39,8 @@ aprond --static-dir .apron-web/build \
   --role admin=you@example.com
 ```
 
-In development email codes are not sent but written to the server log.
+Email sign-in is off unless `--email.sender` is set; `make dev-server` and
+`make run` use `--email.sender log`, which writes codes to the server log.
 
 Run `aprond --help` for every flag, or `aprond --print-config > aprond.toml`
 to start a config file.

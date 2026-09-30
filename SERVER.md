@@ -34,8 +34,10 @@ Defaults:
   member-listing limits
 - seeded default room: `general` (title `General`)
 - authentication (`server.auth`, in this order): WebAuthn passkeys, email
-  codes (written to the server log, not sent), bearer-token resume, and
-  `guest`
+  codes when `--email.sender` is set (off by default), bearer-token resume,
+  and `guest`; `server.signup` lists the schemes that start an identity on
+  a connection that has none, `email` and `guest`, since a passkey is
+  registered to an identity already signed in and a token resumes one
 - passkey RP ID: `localhost`; frontend origins: `http://localhost:5173` and
   `http://localhost:8080`
 - no `server.welcome` and no roles
@@ -74,18 +76,21 @@ Flags (`aprond --help` lists them all):
   over a minute. The excess gets `retry_after` with `data.retry_after` in
   seconds. Edits, reactions, and activity are not counted.
 - `--max-listed-members <n>` (1000) bounds the `members` of one room in
-  `room_list` and `room_update` `joined`; see
+  `room_list` and `room_update` `joined`, `0` for no bound; see
   [Rooms](#rooms-threads-and-membership).
 - `--welcome <markdown>` sets `server.welcome`, which clients show on their
   sign-in screen, such as "Chat as a guest, or sign in with email to keep
   your name. Codes expire after 10 minutes."
-- `--role <role>=<user_id or email>` (repeat for more) grants a role to an
-  account; see [Identity and profiles](#identity-and-profiles).
+- `--role <role>=<user_id or email>` (repeat for more) grants a role, which
+  is lowercased, to an account; see [Identity and profiles](#identity-and-profiles).
 - `--email.sender` chooses how [email sign-in](#email-sign-in) codes are
-  delivered: `log` (the default) writes them to the server log for
-  development, `smtp` sends them through `--email.smtp-addr host:port` from
-  `--email.from`, with `--email.smtp-user` and `--email.smtp-password` when
-  the relay needs them, and `none` turns email sign-in off.
+  delivered: `none` (the default) turns email sign-in off; `smtp` sends them
+  through `--email.smtp-addr host:port` from `--email.from`, with
+  `--email.smtp-user` and `--email.smtp-password` when the relay needs them,
+  and requires STARTTLS unless `--email.smtp-insecure`; `log` writes them to
+  the server log, for development, where anyone who reads the log can sign
+  in as anyone, so it is refused with `--public-url` or `--tls.domain`.
+  `make dev-server` and `make run` pass `--email.sender log`.
   `--email.link-url` is the page a code's link opens (default
   `--public-url`; without either, emails carry only the code).
 - `--webauthn.rp-id <domain>` (`localhost`) and `--webauthn.origin <origin>`
@@ -149,10 +154,14 @@ republished without the embed.
 
 A store written by a protocol v6 server is migrated at the first start and
 written back: a room's `intro_message` becomes its `description`, the text
-of the intro message (for each logged room record, the snapshot it embedded;
-for the current record, the message's current text; none for a deleted
+of the intro snapshot each logged room record embedded (none for a deleted
 message), and messages from `@room`, `@server`, and `@private` become
-messages from `~room`, `~server`, and `~private`.
+messages from `~room`, `~server`, and `~private`. A plain-text intro is
+escaped as Markdown, since descriptions are Markdown by convention, and the
+room's current record becomes its latest logged one, so both carry the same
+description at the same `log_id`. The description is a copy: unlike the v6
+intro, it stays when the message is later deleted, which only redacts the
+message itself.
 
 ## Connections and liveness
 
@@ -202,11 +211,12 @@ they are not in.
 (`guest_1`, `guest_2`, …) and honors an optional requested `name`. A
 requested `user_id` is honored when it starts with a letter, uses only
 `[A-Za-z0-9_.-]` (ending in a letter, digit, or `_`; at most 64 characters),
-does not start with `guest_` in any case, names no room (ignoring case), was never
+does not start with `guest_` or `user_` in any case, names no room (ignoring case), was never
 assigned, ignoring case, and is not granted a role (`--role`); otherwise the
 guest gets the next unused `guest_<n>`. So no user is ever given a
 `user_id` starting with `~`, which are the system identities `~room` and
-`~private` ([Commands](#commands)). The `guest_` namespace belongs to the counter: a request such as
+`~private` ([Commands](#commands)). The `guest_` namespace belongs to the
+guest counter, and `user_` to that of email accounts: a request such as
 `guest_7`, `GUEST_7`, `guest_07` or `guest_x` is refused rather than taking a
 number out of sequence or impersonating a counter-assigned guest. Every guest
 `auth` takes exactly one counter value unless its requested ID is honored, so
@@ -220,10 +230,13 @@ restarts. `--role` grants them roles, such as
 `--role admin=ada --role moderator=bob@example.com`, by `user_id` or email
 address. Roles are sent in current user objects (below), sorted, and are
 shown beside names; `admin` and `moderator` may also remove people from
-rooms. Guests hold no roles, and a granted `user_id` that was never used is
-never given to a guest, so nobody can claim it and then register a passkey.
-Roles follow the configuration: they change with a restart, or when a
-guest becomes an account.
+rooms. Role names are lowercased, so `--role Admin=ada` grants `admin`.
+Guests hold no roles. A `user_id` granted a role but never used is reserved:
+no guest or new account is given it, so nobody can claim it and then add a
+passkey or address to inherit the role. So a grant by `user_id` applies to
+accounts that already exist; grant a new admin by email address. Roles
+follow the configuration: they change with a restart, or when a guest
+becomes an account.
 
 `me` merges into the caller's profile: a given field replaces its value, an
 omitted field is unchanged, and an empty value removes it. `roles` cannot be
@@ -270,10 +283,14 @@ private.
 
 A room created with `private: true` is private for good: its record carries
 `private: true`, and it is visible only to its members. A user sees a room
-when, going from the room to its parent and on up, they are a member of a
-room before reaching a private one: so members always see their own rooms, a
-thread of a private room is visible to that room's members (and hidden from
-everyone else), and a private thread only to its own members. To anyone else
+when they are a member of every private room among the room and the rooms
+it is a thread of: so a thread of a private room is visible only to that
+room's members, members of the thread included, and a private thread of a
+private room only to members of both. Someone can be added to a thread of a
+private room only once they are in that room. Leaving or being removed from
+a private room loses its threads at every depth: the user leaves those they
+joined, which stops their deliveries, and their connections receive
+`room_update` `left` for the others. To anyone else
 a private room, its threads, and their messages are unknown: every request
 naming them (`history`, `room_list`, `room_join`, `room_leave`, `room_set`,
 `message`, `command`, `activity`, `reactions`, and a `reply_to` or
@@ -281,6 +298,13 @@ naming them (`history`, `room_list`, `room_join`, `room_leave`, `room_set`,
 unknown ID, and `room_list` never lists them. An author removed from a
 private room can no longer edit or delete their messages there. Mentions in
 a private room wake only its members.
+
+A message cannot move to a room that some who can see its current room
+cannot see (`denied`): a move snapshot is logged in and delivered to both
+rooms and names both, so it would show them the other room's `room_id` and
+the message. So a message moves from a public room only to a public room,
+and from a private room or its threads to rooms visible to all their
+members, such as its public threads or any public room.
 
 Every membership change is a logged record in the room's log, delivered to
 the room's members before and after the change (so to the joining or leaving
@@ -603,34 +627,57 @@ With both nil only guest authentication is enabled.
 ## Email sign-in
 
 With email sign-in ([PROTOCOL.md §4.10](https://github.com/shazow/apron/blob/main/PROTOCOL.md#410-email-authentication)),
-`server.auth` lists `email`. An `auth` with `scheme: "email"` and `email`
-asks for a code and returns `{}`, whether or not the address has an account;
-it signs nobody in, so requests pipelined behind it are `denied` on a
-connection not yet signed in. The code is six digits, valid for ten minutes
-and only for that address; a sign-in consumes it, a newer code replaces it,
-and five wrong attempts invalidate it. Codes are kept in memory only. One
-address gets a code at most every 30 seconds, and one connection may ask
-for five, then one every two minutes; beyond either the request is
-`retry_after`. Addresses are compared lowercased, and one with a display
-name is `invalid_params`.
+`server.auth` and `server.signup` list `email`. An `auth` with
+`scheme: "email"` and `email` asks for a code and returns `{}`, whether or
+not the address has an account; it signs nobody in, so requests pipelined
+behind it are `denied` on a connection not yet signed in. The code is six
+digits, valid for ten minutes and only for that address; a sign-in consumes
+it, a newer code replaces it, and five wrong attempts invalidate it. Codes
+are kept in memory only. Addresses are compared lowercased; one with a
+display name, an address literal such as `a@[10.0.0.5]`, or a domain
+without a dot such as `a@localhost` is `invalid_params`.
 
-The same `auth` with `token` set to the code signs in, on whichever
-connection presents it, and returns `{you, token}`; an unknown, expired, or
-used code is `denied`. A known address signs in to its account. An address
-new to the server is added to the connection's identity when it has none
-yet, so a guest becomes an account and keeps its `user_id`, rooms, and
-messages, as when adding a passkey. Otherwise it becomes a new account,
-which takes a requested `user_id` by the guests' rules or else `user_<n>`,
-honors a requested `name`, and joins `general`, delivered before the result.
-Email accounts are kept like passkey users, and an account may have both.
-The address is never sent to clients.
+Limits keep codes from being guessed or sent in floods, and each answers
+`retry_after`, whether or not the address has an account. Per address, in
+any hour: at most six codes, at least 30 seconds apart, and at most ten
+wrong codes across all of them. Past ten, even the right code is `denied`
+with `data.retry_after`, and no code is sent, until the oldest wrong code is
+an hour old, so a guesser gets ten tries an hour against a million codes.
+The price is that anyone can keep one address from signing in with email by
+guessing wrong ten times an hour; a passkey or a kept token still works.
+Per connection: five codes, then one every two minutes. At most 10,000
+addresses may have a code or a budget in use at once.
+
+The same `auth` with `token` set to the code signs in on the connection that
+presents it and returns `{you, token}`; an unknown, expired, or used code is
+`denied`.
+
+- On a connection not signed in, a known address signs in to its account.
+  An address new to the server becomes a new account, which takes a
+  requested `user_id` by the guests' rules or else `user_<n>`, honors a
+  requested `name`, and joins `general`, delivered before the result.
+- On a connection already signed in, the code adds the address to that
+  identity (§4.10), so a guest becomes an account and keeps its `user_id`,
+  rooms, and messages, but only when that same identity asked for the code
+  while signed in. A code asked for by anyone else is `denied` there, and so
+  is an address another account holds, which is never moved, or a second
+  address for an account that has one. A code proves only that its
+  presenter reads the mail; without this rule, a sign-in link for an
+  attacker's address, opened by someone signed in, would give the attacker
+  that person's account. To sign in with another address, sign out first.
+
+Email accounts are kept like passkey users, and an account may have both: a
+passkey registered on a signed-in connection is added to that account
+(§4.9). The address is never sent to clients.
 
 The email carries the code and, when `--email.link-url` (or `--public-url`)
-is set, a link to that page with the address and code in the fragment, such
-as `https://chat.example/#email=ada%40example.com&token=418092`, which
-clients read to sign in. `--email.sender log`, the default, writes codes and
-links to the server log instead of sending them, and warns at start; use
-`smtp` in a deployment:
+is set, a link to that page with the address, the code, and, with
+`--public-url`, this server's WebSocket URL in the fragment, form-encoded
+and in that order:
+`https://chat.example/#email=ada%40example.com&token=418092&server=wss%3A%2F%2Fchat.example%2Fws`.
+A client reads it to sign in, on a new connection, to the server named.
+The log sender, for development, writes codes and links to the server log
+instead of sending them; use `smtp` in a deployment:
 
 ```sh
 aprond --public-url https://chat.example.com \
@@ -639,6 +686,11 @@ aprond --public-url https://chat.example.com \
   --email.smtp-user chat@example.com --email.smtp-password "$SMTP_PASSWORD"
 ```
 
-The SMTP sender uses STARTTLS when the relay offers it; a user name and
-password are sent only over TLS or to `localhost`. Embedding applications
-provide any other delivery by implementing `server.EmailSender`.
+The SMTP sender requires STARTTLS unless `--email.smtp-insecure` is set, for
+a relay on the same host, and bounds each delivery, connection included, to
+30 seconds. Embedding applications provide any other delivery by
+implementing `server.EmailSender`.
+
+Invitation tokens that sign up several people
+([PROTOCOL.md Appendix B](https://github.com/shazow/apron/blob/main/PROTOCOL.md#appendix-b--valid-scenarios-informative))
+are not implemented: a token here always resumes one account.

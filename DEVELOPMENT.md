@@ -79,10 +79,10 @@ Use `localhost` for the default passkey configuration; see
 [SERVER.md](SERVER.md#passkeys) for deployment settings.
 
 The Go server also offers email sign-in. In development it sends no email:
-`make dev-server` writes each code, and a sign-in link when `--public-url` or
-`--email.link-url` is set, to its log (`--email.sender log`). Signing in with
-a new address as a guest keeps the guest's identity, as adding a passkey
-does; see [SERVER.md](SERVER.md#email-sign-in). `--welcome` sets the text
+`make dev-server` and `make run` pass `--email.sender log`, which writes each
+code, and a sign-in link when `--email.link-url` is set, to the server's log.
+Adding an address while signed in as a guest keeps the guest's identity, as
+adding a passkey does; see [SERVER.md](SERVER.md#email-sign-in). `--welcome` sets the text
 the sign-in screen shows, and `--role admin=<user_id or email>` grants a
 role, shown as a badge, that may remove people from any room.
 
