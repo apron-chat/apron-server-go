@@ -374,7 +374,7 @@ func TestRolesAndWelcome(t *testing.T) {
 	opsRoom, _ := saveRoom(t, ada, "ops", map[string]any{"title": "Ops"})
 	before, _ := guest.request(t, "room_join", "join-ops", map[string]any{"room_id": opsRoom})
 	var joinedRoles any
-	for _, user := range notificationParams(t, before[1], "room_update")["users"].([]any) {
+	for _, user := range notificationParams(t, before[0], "room_update")["users"].([]any) {
 		if user.(map[string]any)["user_id"] == adaID {
 			joinedRoles = user.(map[string]any)["roles"]
 		}
@@ -386,8 +386,7 @@ func TestRolesAndWelcome(t *testing.T) {
 	// An admin may remove others from any room they can see.
 	room, _ := saveRoom(t, guest, "room", map[string]any{"title": "Mine"})
 	ada.result(t, "room_leave", "remove", map[string]any{"room_id": room, "user_id": guest.userID})
-	expectMembership(t, guest, room, guest.userID, false)
-	roomUpdated(t, guest, "left")
+	expectLeft(t, guest, room, guest.userID)
 	guest.expectError(t, "room_leave", "remove-admin", map[string]any{"room_id": "general", "user_id": adaID}, codeDenied)
 }
 

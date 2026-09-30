@@ -498,7 +498,7 @@ func (s *Server) authenticateEmail(c *client, req request) (any, *rpcError) {
 		// A new account joins the default room, as a new guest does, and
 		// the join reaches this connection before the result.
 		s.attachLocked(c, user)
-		s.addMemberLocked(user, s.rooms[defaultRoomID])
+		s.joinDefaultRoomLocked(user)
 	}
 	return s.signInLocked(c, req, user, now)
 }

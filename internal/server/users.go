@@ -296,11 +296,9 @@ func (s *Server) authenticate(c *client, req request) (any, *rpcError) {
 	s.users[user.id] = user
 	s.touchUser(user.id)
 	s.attachLocked(c, user)
-	// A new guest joins the default room, so their room list is not empty.
-	// The join is a logged membership, delivered to general's members, this
-	// connection included, before the result (§1, §4.3.2); the client lists
-	// the room with room_list rather than being sent a room_update.
-	s.addMemberLocked(user, s.rooms[defaultRoomID])
+	// A new guest joins the default room, so their room list is not empty,
+	// and the membership reaches this connection before the result (§1).
+	s.joinDefaultRoomLocked(user)
 	result := map[string]any{"you": user.profile()}
 	if req.hasID {
 		c.sendResult(req, result)

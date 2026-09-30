@@ -233,21 +233,20 @@ func TestJoinLeaveAndDeliveries(t *testing.T) {
 	a.expectQuiet(t)
 	b.expectError(t, "room_join", "missing", map[string]any{"room_id": "missing"}, codeInvalidParams)
 
-	// Leaving: the membership goes to the members and the leaver, then the
-	// leaver gets room_update left, then the result; a result sent after the
-	// leave reflects it.
+	// Leaving: the leaver's connections get room_update with left and the
+	// membership, the other members the membership alone, then the result;
+	// a result sent after the leave reflects it.
 	b.write(t, map[string]any{"method": "room_leave", "id": "leave", "params": map[string]any{"room_id": ops}})
 	b.write(t, map[string]any{"method": "room_list", "id": "after-leave", "params": map[string]any{"filter": "joined"}})
 	frames := b.drain(t)
-	if !reflect.DeepEqual(methods(frames), []string{"membership", "room_update", "reply", "reply"}) ||
-		!reflect.DeepEqual(frames[1]["params"], map[string]any{"left": []any{map[string]any{"room_id": ops}}}) {
+	if !reflect.DeepEqual(methods(frames), []string{"room_update", "reply", "reply"}) {
 		t.Fatalf("leave frames: %#v", frames)
 	}
-	checkMembership(t, frames[0]["params"].(map[string]any), ops, "guest_2", false)
-	if got := roomIDs(t, frames[3]["result"].(map[string]any)["joined"]); !reflect.DeepEqual(got, []string{"general"}) {
+	leave := checkLeft(t, frames[0], ops, "guest_2")
+	if got := roomIDs(t, frames[2]["result"].(map[string]any)["joined"]); !reflect.DeepEqual(got, []string{"general"}) {
 		t.Fatalf("joined after leave: %v", got)
 	}
-	if left := expectMembership(t, a, ops, "guest_2", false); !reflect.DeepEqual(left, frames[0]["params"]) {
+	if left := expectMembership(t, a, ops, "guest_2", false); !reflect.DeepEqual(left, leave) {
 		t.Fatalf("member's copy of the leave: %#v", left)
 	}
 	save(t, a, "after", map[string]any{"room_id": ops, "body": map[string]any{"text": "gone"}})
@@ -877,20 +876,18 @@ func TestCommands(t *testing.T) {
 	for _, client := range clients {
 		client.expectQuiet(t)
 	}
-	// The removal is a logged leave for the room's members, the removed user
-	// included, then room_update left for the removed user and a ~room notice
-	// for the rest, all before the result (§1, §4.8).
+	// The removal is a logged leave: the removed user's connections get
+	// room_update with left and the membership, the room's other members the
+	// membership alone and then a ~room notice, all before the result (§1,
+	// §4.8).
 	before, result := a.request(t, "command", "kick", kick)
-	if len(result) != 0 || !reflect.DeepEqual(methods(before), []string{"membership", "message"}) {
+	if len(result) != 0 || !reflect.DeepEqual(methods(before), []string{"room_update", "message"}) {
 		t.Fatalf("kick frames %#v then %#v", before, result)
 	}
-	removal := notificationParams(t, before[0], "membership")
+	removal := membershipOnly(t, before[0])
 	checkMembership(t, removal, ops, "guest_3", false)
-	if kicked := expectMembership(t, c, ops, "guest_3", false); !reflect.DeepEqual(kicked, removal) {
+	if kicked := expectLeft(t, c, ops, "guest_3"); !reflect.DeepEqual(kicked, removal) {
 		t.Fatalf("removed user's membership %#v differs from %#v", kicked, removal)
-	}
-	if left := roomUpdated(t, c, "left"); !reflect.DeepEqual(left, map[string]any{"room_id": ops}) {
-		t.Fatalf("kicked user's update: %#v", left)
 	}
 	notice := notificationParams(t, before[1], "message")
 	if observed := expectMembership(t, b, ops, "guest_3", false); !reflect.DeepEqual(observed, removal) {
@@ -939,7 +936,11 @@ func TestPrivateRoomsAndMembershipByUserID(t *testing.T) {
 		t.Fatalf("private room record: %#v", record)
 	}
 	secret, _ := save(t, a, "secret", map[string]any{"room_id": room, "body": map[string]any{"text": "just us"}})
-	thread, _ := saveRoom(t, a, "thread", map[string]any{"parent_room_id": room, "description": "Plans"})
+	thread, _ := saveRoom(t, a, "thread", map[string]any{"parent_room_id": room, "description": "Plans", "private": false})
+	// A thread created without private takes its parent's (§4.3.4).
+	if _, inherited := saveRoom(t, a, "inherits", map[string]any{"parent_room_id": room}); inherited["private"] != true {
+		t.Fatalf("thread of a private room: %#v", inherited)
+	}
 	// A private thread in a public room: its record does not reach the
 	// parent's members.
 	aside, asideRecord := saveRoom(t, a, "aside", map[string]any{"parent_room_id": "general", "private": true})
@@ -976,12 +977,13 @@ func TestPrivateRoomsAndMembershipByUserID(t *testing.T) {
 	a.expectError(t, "room_join", "unknown-user", map[string]any{"room_id": room, "user_id": "nobody"}, codeInvalidParams)
 	a.expectError(t, "room_join", "empty-user", map[string]any{"room_id": room, "user_id": ""}, codeInvalidParams)
 	before, result := a.request(t, "room_join", "add", map[string]any{"room_id": room, "user_id": "guest_2"})
-	if len(result) != 0 || !reflect.DeepEqual(methods(before), []string{"membership"}) {
+	if len(result) != 0 || !reflect.DeepEqual(methods(before), []string{"room_update"}) {
 		t.Fatalf("adding a member: %#v then %#v", before, result)
 	}
-	checkMembership(t, notificationParams(t, before[0], "membership"), room, "guest_2", true)
-	expectMembership(t, b, room, "guest_2", true)
-	if joined := joinedRecord(t, b.read(t), "guest_2"); joined["room_id"] != room || joined["private"] != true {
+	checkMembership(t, membershipOnly(t, before[0]), room, "guest_2", true)
+	added := b.read(t)
+	checkMembership(t, membershipOf(t, added), room, "guest_2", true)
+	if joined := joinedRecord(t, added, "guest_2"); joined["room_id"] != room || joined["private"] != true {
 		t.Fatalf("added member's room_update: %#v", joined)
 	}
 	if messages := records(t, historyPage(t, b, room, map[string]any{}), "messages"); len(messages) != 1 {
@@ -999,7 +1001,7 @@ func TestPrivateRoomsAndMembershipByUserID(t *testing.T) {
 	a.expectError(t, "room_join", "outsider", map[string]any{"room_id": thread, "user_id": "guest_3"}, codeDenied)
 	joinRoom(t, b, thread)
 	expectMembership(t, a, thread, "guest_2", true)
-	other, _ := saveRoom(t, a, "other-thread", map[string]any{"parent_room_id": room, "title": "Other"})
+	other, _ := saveRoom(t, a, "other-thread", map[string]any{"parent_room_id": room, "title": "Other", "private": false})
 	if update := roomUpdated(t, b, "updated"); update["room_id"] != other {
 		t.Fatalf("new thread for a member of its private room: %#v", update)
 	}
@@ -1028,20 +1030,14 @@ func TestPrivateRoomsAndMembershipByUserID(t *testing.T) {
 	// Removing someone else is for the room's creator and moderators.
 	b.expectError(t, "room_leave", "remove-creator", map[string]any{"room_id": room, "user_id": "guest_1"}, codeDenied)
 	before, result = a.request(t, "room_leave", "remove", map[string]any{"room_id": room, "user_id": "guest_2"})
-	if len(result) != 0 || !reflect.DeepEqual(methods(before), []string{"membership", "membership"}) {
+	if len(result) != 0 || !reflect.DeepEqual(methods(before), []string{"room_update", "room_update"}) {
 		t.Fatalf("removing a member: %#v then %#v", before, result)
 	}
 	// Losing the private room loses its threads: the removed member leaves
 	// the one they joined, and is told of it.
-	checkMembership(t, notificationParams(t, before[1], "membership"), thread, "guest_2", false)
-	expectMembership(t, b, room, "guest_2", false)
-	if left := roomUpdated(t, b, "left"); !reflect.DeepEqual(left, map[string]any{"room_id": room}) {
-		t.Fatalf("removed member's update: %#v", left)
-	}
-	expectMembership(t, b, thread, "guest_2", false)
-	if left := roomUpdated(t, b, "left"); !reflect.DeepEqual(left, map[string]any{"room_id": thread}) {
-		t.Fatalf("removed member's thread update: %#v", left)
-	}
+	checkMembership(t, membershipOnly(t, before[1]), thread, "guest_2", false)
+	expectLeft(t, b, room, "guest_2")
+	expectLeft(t, b, thread, "guest_2")
 	if left := roomUpdated(t, b, "left"); !reflect.DeepEqual(left, map[string]any{"room_id": other}) {
 		t.Fatalf("removed member's update for a thread they had not joined: %#v", left)
 	}
@@ -1106,13 +1102,13 @@ func TestLeavingAPrivateRoomHidesOnlyWhatWasVisible(t *testing.T) {
 	room, _ := saveRoom(t, a, "room", map[string]any{"title": "P", "private": true})
 	a.request(t, "room_join", "add", map[string]any{"room_id": room, "user_id": b.userID})
 	b.drain(t)
-	public, _ := saveRoom(t, a, "public", map[string]any{"parent_room_id": room, "title": "Public"})
+	public, _ := saveRoom(t, a, "public", map[string]any{"parent_room_id": room, "title": "Public", "private": false})
 	nested, _ := saveRoom(t, a, "nested", map[string]any{"parent_room_id": public, "title": "Nested"})
 	aside, _ := saveRoom(t, a, "aside", map[string]any{"parent_room_id": room, "title": "Aside", "private": true})
 	saveRoom(t, a, "inside-aside", map[string]any{"parent_room_id": aside, "title": "Inside"})
 	shared, _ := saveRoom(t, a, "shared", map[string]any{"parent_room_id": room, "title": "Shared", "private": true})
 	a.request(t, "room_join", "add-shared", map[string]any{"room_id": shared, "user_id": b.userID})
-	inShared, _ := saveRoom(t, a, "in-shared", map[string]any{"parent_room_id": shared, "title": "In shared"})
+	inShared, _ := saveRoom(t, a, "in-shared", map[string]any{"parent_room_id": shared, "title": "In shared", "private": false})
 	b.drain(t)
 	a.drain(t)
 

@@ -496,7 +496,7 @@ func TestSignInReplacesGuestAndDeduplicatesPerUser(t *testing.T) {
 	if !reflect.DeepEqual(result["you"], registered["you"]) || len(before) != 1 {
 		t.Fatalf("sign-in %#v after %#v", result, before)
 	}
-	leave := notificationParams(t, before[0], "membership")
+	leave := membershipOnly(t, before[0])
 	checkMembership(t, leave, "general", guestID, false)
 	for _, member := range []*testClient{owner, observer} {
 		if observed := expectMembership(t, member, "general", guestID, false); !reflect.DeepEqual(observed, leave) {

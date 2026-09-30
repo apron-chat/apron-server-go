@@ -101,7 +101,7 @@ func TestGuestAuth(t *testing.T) {
 	if you["user_id"] != "guest_1" || you["name"] != "Ada" || len(before) != 1 {
 		t.Fatalf("guest identity %#v after %#v", you, before)
 	}
-	membership := notificationParams(t, before[0], "membership")
+	membership := membershipOnly(t, before[0])
 	wantMembership := map[string]any{
 		"log_id": membership["log_id"], "room_id": "general",
 		"members": []any{map[string]any{"user": map[string]any{"user_id": "guest_1", "name": "Ada"}, "joined": true}},
@@ -251,10 +251,10 @@ func TestAuthIsABarrier(t *testing.T) {
 	for len(frames) < 6 {
 		frames = append(frames, c.read(t))
 	}
-	if got := methods(frames); !reflect.DeepEqual(got, []string{"membership", "reply", "reply", "reply", "message", "reply"}) {
+	if got := methods(frames); !reflect.DeepEqual(got, []string{"room_update", "reply", "reply", "reply", "message", "reply"}) {
 		t.Fatalf("pipelined frames: %v", got)
 	}
-	membership := notificationParams(t, frames[0], "membership")
+	membership := membershipOnly(t, frames[0])
 	for i, id := range []string{"auth", "list", "history"} {
 		if frames[i+1]["id"] != id || frames[i+1]["result"] == nil {
 			t.Fatalf("reply %d = %#v, want a result for %s", i, frames[i+1], id)

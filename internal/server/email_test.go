@@ -123,7 +123,7 @@ func TestEmailSignIn(t *testing.T) {
 	if len(before) != 1 {
 		t.Fatalf("frames before the sign-in result: %#v", before)
 	}
-	checkMembership(t, notificationParams(t, before[0], "membership"), "general", "ada", true)
+	checkMembership(t, membershipOnly(t, before[0]), "general", "ada", true)
 	// A code works once.
 	third, _ := dialRaw(t, httpServer)
 	third.expectError(t, "auth", "reuse", map[string]any{"scheme": "email", "email": "ada@example.com", "token": message.Code}, codeDenied)

@@ -93,8 +93,30 @@ func guestAuth(t *testing.T, c *testClient) map[string]any {
 	if len(before) != 1 {
 		t.Fatalf("frames before the guest auth result: %#v", before)
 	}
-	checkMembership(t, notificationParams(t, before[0], "membership"), "general", c.userID, true)
+	checkMembership(t, membershipOnly(t, before[0]), "general", c.userID, true)
 	return result
+}
+
+// membershipOf returns the one membership record of a room_update frame
+// (§4.3.3).
+func membershipOf(t *testing.T, frame map[string]any) map[string]any {
+	t.Helper()
+	update := notificationParams(t, frame, "room_update")
+	records, ok := update["membership"].([]any)
+	if !ok || len(records) != 1 {
+		t.Fatalf("room_update = %#v, want one membership record", update)
+	}
+	return records[0].(map[string]any)
+}
+
+// membershipOnly returns the membership record of a room_update that
+// carries nothing else, as the room's other members receive it.
+func membershipOnly(t *testing.T, frame map[string]any) map[string]any {
+	t.Helper()
+	if update := notificationParams(t, frame, "room_update"); len(update) != 1 {
+		t.Fatalf("room_update = %#v, want its membership alone", update)
+	}
+	return membershipOf(t, frame)
 }
 
 // dialTestClient signs in a new guest. The guest's join to general is a
@@ -126,13 +148,34 @@ func dialGroup(t *testing.T, httpServer *httptest.Server, n int) []*testClient {
 	return clients
 }
 
-// expectMembership reads a live membership notification: one entry, for
-// userID in roomID. It returns the notification's params.
+// expectMembership reads a room_update carrying only a membership record:
+// one entry, for userID in roomID, as the room's other members receive it.
+// It returns the record.
 func expectMembership(t *testing.T, c *testClient, roomID, userID string, joined bool) map[string]any {
 	t.Helper()
-	params := c.notification(t, "membership")
+	params := membershipOnly(t, c.read(t))
 	checkMembership(t, params, roomID, userID, joined)
 	return params
+}
+
+// expectLeft reads the room_update that tells a user's connection it left or
+// was removed from roomID: left and the membership. It returns the record.
+func expectLeft(t *testing.T, c *testClient, roomID, userID string) map[string]any {
+	t.Helper()
+	return checkLeft(t, c.read(t), roomID, userID)
+}
+
+// checkLeft checks a room_update with left for roomID and the leave of
+// userID, and returns the membership record.
+func checkLeft(t *testing.T, frame map[string]any, roomID, userID string) map[string]any {
+	t.Helper()
+	update := notificationParams(t, frame, "room_update")
+	if len(update) != 2 || !reflect.DeepEqual(update["left"], []any{map[string]any{"room_id": roomID}}) {
+		t.Fatalf("room_update = %#v, want left %s and its membership", update, roomID)
+	}
+	membership := membershipOf(t, frame)
+	checkMembership(t, membership, roomID, userID, false)
+	return membership
 }
 
 // checkMembership checks a live membership record's shape.
@@ -333,19 +376,17 @@ func saveRoom(t *testing.T, c *testClient, requestID string, params map[string]a
 	t.Helper()
 	before, result := c.request(t, "room_set", requestID, params)
 	_, editing := params["room_id"]
-	want := []string{"room_update", "membership"}
-	if editing {
-		want = want[:1]
-	}
-	if !reflect.DeepEqual(methods(before), want) {
-		t.Fatalf("room_set frames = %#v, want %v", before, want)
+	if !reflect.DeepEqual(methods(before), []string{"room_update"}) {
+		t.Fatalf("room_set frames = %#v, want one room_update", before)
 	}
 	var record map[string]any
 	if editing {
 		record = updateRecord(t, before[0], "updated")
 	} else {
+		// The creator receives the room with its members and the creator's
+		// membership in one room_update (§4.3.4).
 		record = joinedRecord(t, before[0], c.userID)
-		membership := notificationParams(t, before[1], "membership")
+		membership := membershipOf(t, before[0])
 		checkMembership(t, membership, record["room_id"].(string), c.userID, true)
 		if membership["log_id"] != record["latest_log_id"] || parseID(t, membership["log_id"]) <= parseID(t, record["log_id"]) {
 			t.Fatalf("creator membership %#v does not follow the room record %#v", membership, record)
@@ -367,12 +408,13 @@ func saveRoom(t *testing.T, c *testClient, requestID string, params map[string]a
 func joinRoom(t *testing.T, c *testClient, roomID string) map[string]any {
 	t.Helper()
 	before, result := c.request(t, "room_join", c.nextID("join"), map[string]any{"room_id": roomID})
-	if !reflect.DeepEqual(methods(before), []string{"membership", "room_update"}) || len(result) != 0 {
+	if !reflect.DeepEqual(methods(before), []string{"room_update"}) || len(result) != 0 {
 		t.Fatalf("room_join %s: %#v then %#v", roomID, before, result)
 	}
-	checkMembership(t, notificationParams(t, before[0], "membership"), roomID, c.userID, true)
-	record := joinedRecord(t, before[1], c.userID)
-	if record["room_id"] != roomID || record["latest_log_id"] != before[0]["params"].(map[string]any)["log_id"] {
+	membership := membershipOf(t, before[0])
+	checkMembership(t, membership, roomID, c.userID, true)
+	record := joinedRecord(t, before[0], c.userID)
+	if record["room_id"] != roomID || record["latest_log_id"] != membership["log_id"] {
 		t.Fatalf("room_join %s record: %#v", roomID, record)
 	}
 	return record
@@ -383,13 +425,10 @@ func joinRoom(t *testing.T, c *testClient, roomID string) map[string]any {
 func leaveRoom(t *testing.T, c *testClient, roomID string) {
 	t.Helper()
 	before, result := c.request(t, "room_leave", c.nextID("leave"), map[string]any{"room_id": roomID})
-	if !reflect.DeepEqual(methods(before), []string{"membership", "room_update"}) || len(result) != 0 {
+	if !reflect.DeepEqual(methods(before), []string{"room_update"}) || len(result) != 0 {
 		t.Fatalf("room_leave %s: %#v then %#v", roomID, before, result)
 	}
-	checkMembership(t, notificationParams(t, before[0], "membership"), roomID, c.userID, false)
-	if left := updateRecord(t, before[1], "left"); !reflect.DeepEqual(left, map[string]any{"room_id": roomID}) {
-		t.Fatalf("room_update left: %#v", left)
-	}
+	checkLeft(t, before[0], roomID, c.userID)
 }
 
 // roomUpdated reads a room_update notification and returns its one record
@@ -417,7 +456,8 @@ func joinedRecord(t *testing.T, frame map[string]any, member string) map[string]
 	t.Helper()
 	update := notificationParams(t, frame, "room_update")
 	records, ok := update["joined"].([]any)
-	if !ok || len(records) != 1 || len(update) != 2 {
+	_, withMembership := update["membership"]
+	if !ok || len(records) != 1 || (len(update) != 2 && !(withMembership && len(update) == 3)) {
 		t.Fatalf("room_update = %#v, want one joined record and users", update)
 	}
 	record := records[0].(map[string]any)
