@@ -13,6 +13,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -110,7 +111,7 @@ type Config struct {
 	MessagesPerMinute int
 	// MaxListedMembers bounds a room's members in room_list and room_update
 	// joined; a larger room lists its most recently active members and
-	// member_count (§4.3.1).
+	// member_count (§4.3.1). 0 is unlimited.
 	MaxListedMembers int
 	// Welcome is server.welcome (§3.2): Markdown shown on the sign-in
 	// screen. Empty omits it.
@@ -196,9 +197,6 @@ func (c Config) withDefaults() Config {
 	}
 	if c.StreamMaxDuration <= 0 {
 		c.StreamMaxDuration = defaults.StreamMaxDuration
-	}
-	if c.MaxListedMembers <= 0 {
-		c.MaxListedMembers = defaults.MaxListedMembers
 	}
 	c.PublicURL = strings.TrimRight(c.PublicURL, "/")
 	return c
@@ -391,10 +389,10 @@ type Server struct {
 	passkeys    map[string]*passkeyUser
 	credentials map[string]*passkeyUser
 	sessions    map[[32]byte]session
-	// emails maps sign-in addresses to their accounts; emailCodes holds
-	// each address's outstanding code, in memory only.
-	emails     map[string]*userState
-	emailCodes map[string]*emailCode
+	// emails maps sign-in addresses to their accounts; emailAddresses holds
+	// each address's outstanding code and budgets, in memory only.
+	emails         map[string]*userState
+	emailAddresses map[string]*emailAddress
 	// mailing tracks email deliveries in progress, which Shutdown awaits.
 	mailing sync.WaitGroup
 
@@ -421,25 +419,25 @@ func Open(config Config) (*Server, error) {
 		config.Store = store.NewMemory()
 	}
 	s := &Server{
-		config:      config,
-		rooms:       make(map[string]*roomState),
-		messages:    make(map[string]*messageState),
-		clients:     make(map[*client]struct{}),
-		users:       make(map[string]*userState),
-		usedIDs:     make(map[string]bool),
-		grantedIDs:  make(map[string]bool),
-		embeds:      make(map[string]*embedState),
-		writes:      make(map[string]*embedState),
-		uploads:     list.New(),
-		pushes:      make(map[string]*pushRegistration),
-		passkeys:    make(map[string]*passkeyUser),
-		credentials: make(map[string]*passkeyUser),
-		sessions:    make(map[[32]byte]session),
-		emails:      make(map[string]*userState),
-		emailCodes:  make(map[string]*emailCode),
-		dirty:       newDirtySet(),
-		storeWrites: make(chan []store.Entry, storeQueue),
-		storeDone:   make(chan struct{}),
+		config:         config,
+		rooms:          make(map[string]*roomState),
+		messages:       make(map[string]*messageState),
+		clients:        make(map[*client]struct{}),
+		users:          make(map[string]*userState),
+		usedIDs:        make(map[string]bool),
+		grantedIDs:     make(map[string]bool),
+		embeds:         make(map[string]*embedState),
+		writes:         make(map[string]*embedState),
+		uploads:        list.New(),
+		pushes:         make(map[string]*pushRegistration),
+		passkeys:       make(map[string]*passkeyUser),
+		credentials:    make(map[string]*passkeyUser),
+		sessions:       make(map[[32]byte]session),
+		emails:         make(map[string]*userState),
+		emailAddresses: make(map[string]*emailAddress),
+		dirty:          newDirtySet(),
+		storeWrites:    make(chan []store.Entry, storeQueue),
+		storeDone:      make(chan struct{}),
 	}
 	for _, holders := range config.Roles {
 		for _, holder := range holders {
@@ -676,6 +674,14 @@ func (s *Server) serverParams() map[string]any {
 		authSchemes = append(authSchemes, "token")
 	}
 	authSchemes = append(authSchemes, "guest")
+	// signup (§3.2) lists the schemes that start an identity on a
+	// connection that has none: guest, and email for an address new to the
+	// server. A passkey is registered to an identity already signed in and a
+	// token resumes one, so they only sign in.
+	signup := []string{"guest"}
+	if s.config.EmailSender != nil {
+		signup = []string{"email", "guest"}
+	}
 	params := map[string]any{
 		"protocol": 7,
 		"name":     "apron-go/7",
@@ -701,6 +707,9 @@ func (s *Server) serverParams() map[string]any {
 	}
 	if s.config.Welcome != "" {
 		params["welcome"] = s.config.Welcome
+	}
+	if !slices.Equal(signup, authSchemes) {
+		params["signup"] = signup
 	}
 	return params
 }

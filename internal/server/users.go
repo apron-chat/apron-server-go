@@ -206,11 +206,13 @@ var requestableUserID = regexp.MustCompile(`^[A-Za-z](?:[A-Za-z0-9_.-]{0,62}[A-Z
 // counts the guests the server has admitted.
 const guestIDPrefix = "guest_"
 
-// requestable reports whether a guest may request id: it has the requestable
-// shape and lies outside the counter's guest_ namespace.
+// requestable reports whether a user may request id: it has the requestable
+// shape and lies outside the counters' guest_ and user_ namespaces.
 func requestable(id string) bool {
-	if len(id) >= len(guestIDPrefix) && strings.EqualFold(id[:len(guestIDPrefix)], guestIDPrefix) {
-		return false
+	for _, prefix := range []string{guestIDPrefix, accountIDPrefix} {
+		if len(id) >= len(prefix) && strings.EqualFold(id[:len(prefix)], prefix) {
+			return false
+		}
 	}
 	return requestableUserID.MatchString(id)
 }

@@ -58,8 +58,8 @@ func TestServerFrame(t *testing.T) {
 	if !reflect.DeepEqual(params["caps"], []any{"history", "edit", "rooms", "reactions", "activity", "embed:upload", "embed:stream", "command"}) {
 		t.Fatalf("caps: %#v", params["caps"])
 	}
-	if !reflect.DeepEqual(params["auth"], []any{"guest"}) {
-		t.Fatalf("auth: %#v", params["auth"])
+	if _, has := params["signup"]; !reflect.DeepEqual(params["auth"], []any{"guest"}) || has {
+		t.Fatalf("auth: %#v, signup: %#v", params["auth"], params["signup"])
 	}
 	if !reflect.DeepEqual(params["push"], map[string]any{"relay": map[string]any{}}) {
 		t.Fatalf("push: %#v", params["push"])
@@ -69,7 +69,17 @@ func TestServerFrame(t *testing.T) {
 		t.Fatalf("ext limits: %#v", limits)
 	}
 
+	// Passkeys and tokens only sign in, so signup lists the schemes that
+	// start an identity.
 	config := DefaultConfig()
+	config.WebAuthn = testWebAuthn(t)
+	_, passkeys := newTestServer(t, config)
+	_, frame = dialRaw(t, passkeys)
+	if params := frame["params"].(map[string]any); !reflect.DeepEqual(params["auth"], []any{"webauthn", "token", "guest"}) || !reflect.DeepEqual(params["signup"], []any{"guest"}) {
+		t.Fatalf("passkey schemes: %#v", params)
+	}
+
+	config = DefaultConfig()
 	config.DisablePush = true
 	_, quiet := newTestServer(t, config)
 	c, frame := dialRaw(t, quiet)
@@ -136,7 +146,7 @@ func TestAuthHonorsRequestedUserIDs(t *testing.T) {
 	// mentionable set, and anything in the counter's guest_ namespace are not
 	// honored; each such auth takes the next guest number.
 	next := 1
-	for i, requested := range []string{"ada", "ADA", "@server", "~server", "~alice", "general", "General", "1724803200042", "bad id", "trailing.", "", "guest_1", "guest_99", "GUEST_98", "Guest_7", "guest_05", "guest_abc", "guest_"} {
+	for i, requested := range []string{"ada", "ADA", "@server", "~server", "~alice", "general", "General", "1724803200042", "bad id", "trailing.", "", "guest_1", "guest_99", "GUEST_98", "Guest_7", "guest_05", "guest_abc", "guest_", "user_1", "USER_x"} {
 		want := fmt.Sprintf("guest_%d", next)
 		if got := auth(fmt.Sprint("r", i), map[string]any{"user_id": requested}); got != want {
 			t.Fatalf("requested %q was assigned %q, want %q", requested, got, want)
