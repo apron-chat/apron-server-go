@@ -46,6 +46,7 @@ type Options struct {
 	MaxListedMembers       int      `long:"max-listed-members" default:"1000" description:"Members listed per room in room_list and room_update; a larger room lists its most recently active ones and member_count. 0 is unlimited"`
 	DebugAddr              string   `long:"debug-addr" description:"Listen address for unauthenticated pprof and expvar under /debug/, such as 127.0.0.1:6060; empty disables"`
 	Store                  string   `long:"store" description:"Where state is kept: sqlite:<path> for a SQLite database, or memory to keep nothing across restarts"`
+	ClientIPHeader         string   `long:"client-ip-header" description:"Request header a reverse proxy puts the client's address in, such as X-Forwarded-For (its last entry) or X-Real-IP, for per-client limits; set only behind a proxy that sets it"`
 	Welcome                string   `long:"welcome" description:"Markdown clients show on their sign-in screen (server.welcome), such as how this server's sign-in methods fit together"`
 	Roles                  []string `long:"role" description:"Grant a role to an account as role=user_id or role=email, such as admin=ada; repeat for more. admin and moderator may remove others from rooms"`
 
@@ -65,7 +66,7 @@ type Options struct {
 		Sender       string `long:"sender" default:"none" choice:"none" choice:"smtp" choice:"log" description:"How email sign-in codes are delivered: none disables email sign-in, smtp sends them, log writes them to the server log (development only; refused with --public-url or --tls.domain)"`
 		LinkURL      string `long:"link-url" description:"Page that sign-in links in emails open, such as https://chat.example/, with the address and code in its fragment (default: --public-url; empty sends codes without links)"`
 		From         string `long:"from" description:"Sender address of sign-in emails, for --email.sender smtp"`
-		SMTPAddr     string `long:"smtp-addr" description:"SMTP relay as host:port, for --email.sender smtp; STARTTLS is used when offered"`
+		SMTPAddr     string `long:"smtp-addr" description:"SMTP relay as host:port, for --email.sender smtp: STARTTLS is required (such as :587), or TLS from the start on port 465"`
 		SMTPUser     string `long:"smtp-user" description:"SMTP user name; empty sends without authentication"`
 		SMTPPassword string `long:"smtp-password" description:"SMTP password"`
 		SMTPInsecure bool   `long:"smtp-insecure" description:"Send through a relay that does not offer STARTTLS, in cleartext (a relay on the same host only)"`
@@ -132,6 +133,7 @@ func serverConfig(options Options) (server.Config, error) {
 	config.MessagesPerMinute = options.MessagesPerMinute
 	config.MaxListedMembers = options.MaxListedMembers
 	config.Welcome = options.Welcome
+	config.ClientIPHeader = options.ClientIPHeader
 	for _, grant := range options.Roles {
 		role, holder, ok := strings.Cut(grant, "=")
 		role, holder = strings.ToLower(strings.TrimSpace(role)), strings.TrimSpace(holder)

@@ -81,13 +81,18 @@ Flags (`aprond --help` lists them all):
 - `--welcome <markdown>` sets `server.welcome`, which clients show on their
   sign-in screen, such as "Chat as a guest, or sign in with email to keep
   your name. Codes expire after 10 minutes."
+- `--client-ip-header <header>`, behind a reverse proxy, names the header
+  that carries the client's address, such as `X-Forwarded-For` (its last
+  entry) or `X-Real-IP`, for the per-client limits of email sign-in; set it
+  only when the proxy sets that header, since clients can send it too.
 - `--role <role>=<user_id or email>` (repeat for more) grants a role, which
   is lowercased, to an account; see [Identity and profiles](#identity-and-profiles).
 - `--email.sender` chooses how [email sign-in](#email-sign-in) codes are
   delivered: `none` (the default) turns email sign-in off; `smtp` sends them
   through `--email.smtp-addr host:port` from `--email.from`, with
   `--email.smtp-user` and `--email.smtp-password` when the relay needs them,
-  and requires STARTTLS unless `--email.smtp-insecure`; `log` writes them to
+  and requires STARTTLS unless `--email.smtp-insecure` (on port 465 it
+  speaks TLS from the start); `log` writes them to
   the server log, for development, where anyone who reads the log can sign
   in as anyone, so it is refused with `--public-url` or `--tls.domain`.
   `make dev-server` and `make run` pass `--email.sender log`.
@@ -154,12 +159,11 @@ republished without the embed.
 
 A store written by a protocol v6 server is migrated at the first start and
 written back: a room's `intro_message` becomes its `description`, the text
-of the intro snapshot each logged room record embedded (none for a deleted
-message), and messages from `@room`, `@server`, and `@private` become
+of the intro snapshot each logged room record embedded, except that the
+current record and the latest logged one take the message's current text,
+as v6 showed it (none for a deleted message), and messages from `@room`, `@server`, and `@private` become
 messages from `~room`, `~server`, and `~private`. A plain-text intro is
-escaped as Markdown, since descriptions are Markdown by convention, and the
-room's current record becomes its latest logged one, so both carry the same
-description at the same `log_id`. The description is a copy: unlike the v6
+escaped as Markdown, since descriptions are Markdown by convention. The description is a copy: unlike the v6
 intro, it stays when the message is later deleted, which only redacts the
 message itself.
 
@@ -290,7 +294,8 @@ private room only to members of both. Someone can be added to a thread of a
 private room only once they are in that room. Leaving or being removed from
 a private room loses its threads at every depth: the user leaves those they
 joined, which stops their deliveries, and their connections receive
-`room_update` `left` for the others. To anyone else
+`room_update` `left`, once, for the others they could see, never for a
+private thread they were not in. To anyone else
 a private room, its threads, and their messages are unknown: every request
 naming them (`history`, `room_list`, `room_join`, `room_leave`, `room_set`,
 `message`, `command`, `activity`, `reactions`, and a `reply_to` or
@@ -304,7 +309,12 @@ cannot see (`denied`): a move snapshot is logged in and delivered to both
 rooms and names both, so it would show them the other room's `room_id` and
 the message. So a message moves from a public room only to a public room,
 and from a private room or its threads to rooms visible to all their
-members, such as its public threads or any public room.
+members, such as its public threads or any public room. A move out to where
+more people can see the message leaves out `prev_room_id`, so it does not
+name the private room to them, but its reactions go with it, showing who in
+the private room reacted. For the same reason a reply cannot quote a
+message that some who see the reply cannot see (`denied`): `reply_to` would
+name it.
 
 Every membership change is a logged record in the room's log, delivered to
 the room's members before and after the change (so to the joining or leaving
@@ -629,49 +639,73 @@ With both nil only guest authentication is enabled.
 With email sign-in ([PROTOCOL.md §4.10](https://github.com/shazow/apron/blob/main/PROTOCOL.md#410-email-authentication)),
 `server.auth` and `server.signup` list `email`. An `auth` with
 `scheme: "email"` and `email` asks for a code and returns `{}`, whether or
-not the address has an account; it signs nobody in, so requests pipelined
-behind it are `denied` on a connection not yet signed in. The code is six
-digits, valid for ten minutes and only for that address; a sign-in consumes
-it, a newer code replaces it, and five wrong attempts invalidate it. Codes
-are kept in memory only. Addresses are compared lowercased; one with a
-display name, an address literal such as `a@[10.0.0.5]`, or a domain
-without a dot such as `a@localhost` is `invalid_params`.
+not the address has an account. It changes no authentication: on a
+connection not yet signed in, requests pipelined behind it are `denied`, and
+on one signed in they run as before. So does a denied code. A code is six
+digits, valid for ten minutes, and consumed by its use; five wrong attempts
+invalidate it. Codes are kept in memory only. Addresses are compared
+lowercased; one with a display name, an address literal such as
+`a@[10.0.0.5]`, or a domain without a dot such as `a@localhost` is
+`invalid_params`, and so is a malformed `name` or `user_id`, which leaves
+the code usable.
 
-Limits keep codes from being guessed or sent in floods, and each answers
-`retry_after`, whether or not the address has an account. Per address, in
-any hour: at most six codes, at least 30 seconds apart, and at most ten
-wrong codes across all of them. Past ten, even the right code is `denied`
-with `data.retry_after`, and no code is sent, until the oldest wrong code is
-an hour old, so a guesser gets ten tries an hour against a million codes.
-The price is that anyone can keep one address from signing in with email by
-guessing wrong ten times an hour; a passkey or a kept token still works.
-Per connection: five codes, then one every two minutes. At most 10,000
-addresses may have a code or a budget in use at once.
+There are two kinds of code, and neither stands in for the other:
 
-The same `auth` with `token` set to the code signs in on the connection that
-presents it and returns `{you, token}`; an unknown, expired, or used code is
-`denied`.
+- **Sign-in codes**, asked for on a connection not signed in. A newer one
+  replaces the address's earlier one. Presented on a connection not signed
+  in, a known address signs in to its account; an address new to the server
+  becomes a new account, which takes a requested `user_id` by the guests'
+  rules or else `user_<n>`, honors a requested `name`, and joins `general`,
+  delivered before the result. The result is `{you, token}`. Presented on a
+  connection signed in, a sign-in code is `denied`: it changes nothing.
+- **Add codes**, asked for on a connection signed in, add the address to that
+  account (§4.10): a guest becomes an account and keeps its `user_id`, rooms,
+  and messages. An account has one outstanding add code, replaced by its
+  next request, and others' requests for the address do not touch it. It is
+  accepted only on a connection signed in as that account, any of its
+  connections, and denied anywhere else, so it never signs anyone in. It is
+  sent only when the address could be added: no other account holds it,
+  which is never moved, and the account has no address yet; otherwise the
+  request still answers `{}` and the code, never sent, is `denied`. Its
+  email has no link. The result is `{you}`, and a `token` too when the
+  connection had none, as a guest's has not.
 
-- On a connection not signed in, a known address signs in to its account.
-  An address new to the server becomes a new account, which takes a
-  requested `user_id` by the guests' rules or else `user_<n>`, honors a
-  requested `name`, and joins `general`, delivered before the result.
-- On a connection already signed in, the code adds the address to that
-  identity (§4.10), so a guest becomes an account and keeps its `user_id`,
-  rooms, and messages, but only when that same identity asked for the code
-  while signed in. A code asked for by anyone else is `denied` there, and so
-  is an address another account holds, which is never moved, or a second
-  address for an account that has one. A code proves only that its
-  presenter reads the mail; without this rule, a sign-in link for an
-  attacker's address, opened by someone signed in, would give the attacker
-  that person's account. To sign in with another address, sign out first.
+A code proves only that its presenter reads the address's mail, not that the
+address belongs to whoever is signed in. Without this split, someone could
+ask for a code for their own address, get a person who is signed in to
+present it through a link, and then sign in to that person's account with
+it. To sign in with another address, use a new connection (sign out in the
+client).
+
+Limits keep codes from being guessed or sent in floods. Each answers
+`retry_after` (`-32002`, with `data.retry_after` in seconds; PROTOCOL.md
+§1.1), whether or not the address has an account:
+
+- Per client (the connection's IP address, or its IPv6 /64; with
+  `--client-ip-header` behind a reverse proxy, the address the proxy
+  reports): ten codes, then one every three minutes; ten wrong codes, then
+  one every six minutes, across every address, which bounds untargeted
+  guessing to about ten guesses an hour per client against a million codes.
+- Per address, in any hour: six codes at least 30 seconds apart, and thirty
+  wrong codes from anyone. Past thirty, codes for the address are refused,
+  the right one included, until the oldest wrong code is an hour old.
+- Per connection: five codes, then one every two minutes.
+- At most sixteen deliveries at once.
+
+The server tracks at most 10,000 addresses and 100,000 clients, forgetting
+the least recently used past that, so a full table refuses no one. Two
+risks remain. Guessers spread over many clients can still keep one address
+from email sign-in, thirty wrong codes an hour, though they gain only thirty
+guesses an hour against it; a passkey or a kept token still signs in. And a
+flood over more than 10,000 addresses from many clients makes the server
+forget older budgets.
 
 Email accounts are kept like passkey users, and an account may have both: a
 passkey registered on a signed-in connection is added to that account
 (§4.9). The address is never sent to clients.
 
-The email carries the code and, when `--email.link-url` (or `--public-url`)
-is set, a link to that page with the address, the code, and, with
+A sign-in code's email carries the code and, when `--email.link-url` (or
+`--public-url`) is set, a link to that page with the address, the code, and, with
 `--public-url`, this server's WebSocket URL in the fragment, form-encoded
 and in that order:
 `https://chat.example/#email=ada%40example.com&token=418092&server=wss%3A%2F%2Fchat.example%2Fws`.
@@ -687,8 +721,8 @@ aprond --public-url https://chat.example.com \
 ```
 
 The SMTP sender requires STARTTLS unless `--email.smtp-insecure` is set, for
-a relay on the same host, and bounds each delivery, connection included, to
-30 seconds. Embedding applications provide any other delivery by
+a relay on the same host, or speaks TLS from the start to a relay on port
+465, and bounds each delivery, connection included, to 30 seconds. Embedding applications provide any other delivery by
 implementing `server.EmailSender`.
 
 Invitation tokens that sign up several people

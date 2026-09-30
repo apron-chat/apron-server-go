@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/tls"
 	"errors"
 	"fmt"
@@ -14,9 +15,9 @@ import (
 	"github.com/apron-chat/apron-server-go/internal/server"
 )
 
-// smtpSender sends email sign-in codes through an SMTP relay. It requires
-// STARTTLS unless insecure is set, and authenticates with PLAIN when a user
-// is given. Every delivery is bounded by its context's deadline, the
+// smtpSender sends email sign-in codes through an SMTP relay. On port 465 it
+// speaks TLS from the start; otherwise it requires STARTTLS unless insecure
+// is set. It authenticates with PLAIN when a user is given. Every delivery is bounded by its context's deadline, the
 // connection included.
 type smtpSender struct {
 	addr     string
@@ -39,21 +40,43 @@ func newSMTPSender(addr, from, username, password string, insecure bool) (*smtpS
 	return &smtpSender{addr: addr, host: host, from: parsed.String(), username: username, password: password, insecure: insecure}, nil
 }
 
+// messageDomain is the domain of the sender address, for Message-ID.
+func (s *smtpSender) messageDomain() string {
+	parsed, err := mail.ParseAddress(s.from)
+	if err != nil {
+		return s.host
+	}
+	_, domain, _ := strings.Cut(parsed.Address, "@")
+	return domain
+}
+
 // message renders a sign-in email.
 func (s *smtpSender) message(m server.SignInEmail) []byte {
 	var message strings.Builder
 	fmt.Fprintf(&message, "From: %s\r\n", s.from)
 	fmt.Fprintf(&message, "To: %s\r\n", m.To)
-	fmt.Fprintf(&message, "Subject: Your sign-in code is %s\r\n", m.Code)
+	subject := "Your sign-in code is %s"
+	if m.Add {
+		subject = "Your code to add this address is %s"
+	}
+	fmt.Fprintf(&message, "Subject: "+subject+"\r\n", m.Code)
 	fmt.Fprintf(&message, "Date: %s\r\n", time.Now().Format(time.RFC1123Z))
+	fmt.Fprintf(&message, "Message-ID: <%s@%s>\r\n", rand.Text(), s.messageDomain())
 	message.WriteString("MIME-Version: 1.0\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n")
 	message.WriteString(strings.ReplaceAll(m.Text(), "\n", "\r\n"))
 	return []byte(message.String())
 }
 
 func (s *smtpSender) SendSignInCode(ctx context.Context, m server.SignInEmail) error {
-	var dialer net.Dialer
-	conn, err := dialer.DialContext(ctx, "tcp", s.addr)
+	var conn net.Conn
+	var err error
+	_, port, _ := net.SplitHostPort(s.addr)
+	implicitTLS := port == "465"
+	if implicitTLS {
+		conn, err = (&tls.Dialer{Config: &tls.Config{ServerName: s.host}}).DialContext(ctx, "tcp", s.addr)
+	} else {
+		conn, err = (&net.Dialer{}).DialContext(ctx, "tcp", s.addr)
+	}
 	if err != nil {
 		return err
 	}
@@ -71,11 +94,11 @@ func (s *smtpSender) SendSignInCode(ctx context.Context, m server.SignInEmail) e
 		return err
 	}
 	defer client.Close()
-	if ok, _ := client.Extension("STARTTLS"); ok {
+	if ok, _ := client.Extension("STARTTLS"); !implicitTLS && ok {
 		if err := client.StartTLS(&tls.Config{ServerName: s.host}); err != nil {
 			return err
 		}
-	} else if !s.insecure {
+	} else if !implicitTLS && !s.insecure {
 		return errors.New("the SMTP relay does not offer STARTTLS; set --email.smtp-insecure to send in cleartext")
 	}
 	if s.username != "" {
