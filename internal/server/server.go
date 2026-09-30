@@ -8,6 +8,7 @@ import (
 	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"io/fs"
+	"maps"
 	"net"
 	"net/http"
 	"net/url"
@@ -955,7 +956,8 @@ func (s *Server) processFrame(c *client, payload []byte) {
 		return
 	}
 	// Requests deduplicate per user (§1.2): a duplicate waits for the original,
-	// even one running on another connection, and replies with its outcome.
+	// even one running on another connection, and replies with its outcome,
+	// brought up to date with the current state.
 	var entry *dedupEntry
 	if req.hasID {
 		fingerprint := sha256.Sum256([]byte(requestFingerprint(req)))
@@ -969,7 +971,10 @@ func (s *Server) processFrame(c *client, payload []byte) {
 			if prior.err != nil {
 				c.sendError(req, prior.err)
 			} else {
-				c.sendResult(req, prior.result)
+				s.mu.Lock()
+				result := s.currentResultLocked(user, req.method, prior.result)
+				c.sendResult(req, result)
+				s.unlock()
 			}
 			return
 		}
@@ -998,6 +1003,38 @@ func (s *Server) processFrame(c *client, payload []byte) {
 		close(entry.done)
 		s.unlock()
 	}
+}
+
+// currentResultLocked brings a duplicate's result up to date (§1.2): `me`
+// answers with the current profile, and a message result lists only the
+// write URLs that are still unused. Other results name what the request
+// made, which does not change.
+func (s *Server) currentResultLocked(u *userState, method string, result any) any {
+	switch method {
+	case "me":
+		return map[string]any{"you": u.profile()}
+	case "message", "command":
+		original, ok := result.(map[string]any)
+		if !ok || original["embeds"] == nil {
+			return result
+		}
+		current := maps.Clone(original)
+		var writes []any
+		for _, value := range asList(original["embeds"]) {
+			written, _ := value.(map[string]any)
+			id, _ := written["embed_id"].(string)
+			if e := s.embeds[id]; e != nil && !e.started && !e.removed && s.writes[e.token] == e {
+				writes = append(writes, written)
+			}
+		}
+		if len(writes) == 0 {
+			delete(current, "embeds")
+		} else {
+			current["embeds"] = writes
+		}
+		return current
+	}
+	return result
 }
 
 // nextIDLocked returns the next log_id in the server-wide sequence: the commit

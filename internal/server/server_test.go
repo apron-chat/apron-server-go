@@ -942,6 +942,15 @@ func TestRequestDeduplication(t *testing.T) {
 		t.Fatalf("retry appended log entries: %#v", page)
 	}
 
+	// A duplicate is not run again, and its result reflects the current
+	// state (§1.2): a retried rename answers with the name set since.
+	c.result(t, "me", "rename", map[string]any{"name": "First"})
+	c.result(t, "me", "rename-again", map[string]any{"name": "Second"})
+	if you := c.result(t, "me", "rename", map[string]any{"name": "First"})["you"].(map[string]any); you["name"] != "Second" {
+		t.Fatalf("retried me: %#v", you)
+	}
+	c.expectQuiet(t)
+
 	// Reads are not kept: a finished history runs again under the same ID.
 	first := c.result(t, "history", "read", map[string]any{"room_id": thread})
 	save(t, c, "post", map[string]any{"room_id": thread, "body": map[string]any{"text": "new"}})

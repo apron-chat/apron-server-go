@@ -104,8 +104,10 @@ func (u *userState) profile() map[string]any {
 	if u.avatar != "" {
 		value["avatar"] = u.avatar
 	}
-	if len(u.roles) > 0 {
-		value["roles"] = slices.Clone(u.roles)
+	// An account's roles are always sent, [] when it has none, so a role
+	// taken away clears the one a client kept (§3.3); guests hold none.
+	if len(u.roles) > 0 || u.account() {
+		value["roles"] = append([]string{}, u.roles...)
 	}
 	if len(u.ext) > 0 {
 		value["ext"] = cloneObject(u.ext)

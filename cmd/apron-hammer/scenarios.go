@@ -128,30 +128,43 @@ func newOrderCheck(h *hammer) *orderCheck {
 	return &orderCheck{h: h, last: make(map[string]int64)}
 }
 
-// notify runs on the peer's read goroutine.
+// notify runs on the peer's read goroutine. Memberships arrive in
+// room_update membership.
 func (o *orderCheck) notify(method string, frame []byte) {
-	if method != "message" && method != "reactions" && method != "membership" {
-		return
+	type record struct {
+		RoomID string `json:"room_id"`
+		LogID  string `json:"log_id"`
 	}
 	var f struct {
 		Params struct {
-			RoomID string `json:"room_id"`
-			LogID  string `json:"log_id"`
+			record
+			Membership []record `json:"membership"`
 		} `json:"params"`
+	}
+	switch method {
+	case "message", "reactions", "room_update":
+	default:
+		return
 	}
 	if err := json.Unmarshal(frame, &f); err != nil {
 		o.h.protocolViolation("%s notification: %v", method, err)
 		return
 	}
-	id, err := strconv.ParseInt(f.Params.LogID, 10, 64)
-	if err != nil {
-		o.h.protocolViolation("%s notification log_id %q", method, f.Params.LogID)
-		return
+	records := f.Params.Membership
+	if method != "room_update" {
+		records = []record{f.Params.record}
 	}
-	if id <= o.last[f.Params.RoomID] {
-		o.h.protocolViolation("room %s log_id %d after %d", f.Params.RoomID, id, o.last[f.Params.RoomID])
+	for _, r := range records {
+		id, err := strconv.ParseInt(r.LogID, 10, 64)
+		if err != nil {
+			o.h.protocolViolation("%s notification log_id %q", method, r.LogID)
+			return
+		}
+		if id <= o.last[r.RoomID] {
+			o.h.protocolViolation("room %s log_id %d after %d", r.RoomID, id, o.last[r.RoomID])
+		}
+		o.last[r.RoomID] = id
 	}
-	o.last[f.Params.RoomID] = id
 	if method == "message" {
 		o.messages.Add(1)
 	}
@@ -561,7 +574,7 @@ func stream(ctx context.Context, p *peer, messages chan []byte) error {
 		return err
 	}
 	body, writer := io.Pipe()
-	request, _ := http.NewRequestWithContext(ctx, http.MethodPost, written.Embeds[0].WriteURL, body)
+	request, _ := http.NewRequestWithContext(ctx, http.MethodPut, written.Embeds[0].WriteURL, body)
 	request.Header.Set("Content-Type", "text/plain")
 	posted := make(chan error, 1)
 	go func() {
@@ -569,7 +582,7 @@ func stream(ctx context.Context, p *peer, messages chan []byte) error {
 		if err == nil {
 			response.Body.Close()
 			if response.StatusCode != http.StatusNoContent {
-				err = fmt.Errorf("stream POST: %s", response.Status)
+				err = fmt.Errorf("stream PUT: %s", response.Status)
 			}
 		}
 		posted <- err

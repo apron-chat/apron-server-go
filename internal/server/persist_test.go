@@ -318,8 +318,8 @@ func TestRolesAndWelcome(t *testing.T) {
 	}
 	registered := registerTestPasskey(t, ada, newTestAuthenticator(t))
 	adaID := registered["you"].(map[string]any)["user_id"].(string)
-	if _, has := registered["you"].(map[string]any)["roles"]; has {
-		t.Fatalf("roles without configuration: %#v", registered)
+	if roles := registered["you"].(map[string]any)["roles"]; !reflect.DeepEqual(roles, []any{}) {
+		t.Fatalf("an account without roles: %#v", registered)
 	}
 	stop()
 
