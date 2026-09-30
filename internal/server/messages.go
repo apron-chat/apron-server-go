@@ -97,14 +97,14 @@ func (s *Server) saveMessage(c *client, req request) (any, bool, *rpcError) {
 	defer s.unlock()
 	u := c.user
 	c.away = false
-	destination := s.rooms[roomID]
+	destination := s.visibleRoomLocked(u, roomID)
 	if destination == nil {
 		return nil, false, invalidParams("Unknown room %q", roomID)
 	}
 	from := u.from()
 	var current *messageState
 	if replacing {
-		current = s.messages[messageID]
+		current = s.visibleMessageLocked(u, messageID)
 		if current == nil {
 			return nil, false, invalidParams("Unknown message %q", messageID)
 		}
@@ -114,7 +114,7 @@ func (s *Server) saveMessage(c *client, req request) (any, bool, *rpcError) {
 		from = current.from
 	}
 	if hasReply {
-		if _, exists := s.messages[replyID]; !exists || (replacing && replyID == messageID) {
+		if s.visibleMessageLocked(u, replyID) == nil || (replacing && replyID == messageID) {
 			return nil, false, invalidParams("reply_to must name another existing message")
 		}
 	}
@@ -215,6 +215,9 @@ func (s *Server) commitSnapshotLocked(m *messageState, snapshot map[string]any, 
 	}
 	m.logID = logID
 	m.roomID = destination.id
+	if !moved && len(m.records) == 0 && destination.members[m.owner] != nil {
+		destination.active[m.owner] = logID
+	}
 	record := newLogRecord(logID, kindMessage, snapshot)
 	m.records = append(m.records, record)
 	s.touchMessage(m)
@@ -400,11 +403,11 @@ func (s *Server) react(c *client, req request) (any, bool, *rpcError) {
 	}
 	s.mu.Lock()
 	defer s.unlock()
-	m := s.messages[messageID]
+	u := c.user
+	m := s.visibleMessageLocked(u, messageID)
 	if m == nil {
 		return nil, false, invalidParams("Unknown message %q", messageID)
 	}
-	u := c.user
 	if !sameEmojiSet(m.reactions[u.id].emojis, emojis) {
 		s.touchMessage(m)
 		from := u.from()

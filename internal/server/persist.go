@@ -119,6 +119,8 @@ type storedCursor struct {
 
 type storedRoom struct {
 	Parent      string                  `json:"parent,omitzero"`
+	Private     bool                    `json:"private,omitzero"`
+	Active      map[string]int64        `json:"active,omitzero"`
 	Record      map[string]any          `json:"record"`
 	RecordLogID int64                   `json:"record_log_id"`
 	CreatedID   int64                   `json:"created_id"`
@@ -306,6 +308,8 @@ func (s *Server) storedRoomLocked(r *roomState) storedRoom {
 		LatestID:    r.latestID,
 		Members:     slices.Sorted(maps.Keys(r.members)),
 		Creator:     r.creator,
+		Private:     r.private,
+		Active:      r.active,
 	}
 	if r.parent != nil {
 		stored.Parent = r.parent.id
@@ -433,9 +437,12 @@ func (s *Server) restoreLocked() (map[string]bool, error) {
 			return nil, err
 		}
 		storedRooms[id] = stored
+		if stored.Active == nil {
+			stored.Active = make(map[string]int64)
+		}
 		s.rooms[id] = &roomState{
 			id: id, record: stored.Record, recordLogID: stored.RecordLogID, createdID: stored.CreatedID,
-			latestID: stored.LatestID, creator: stored.Creator,
+			latestID: stored.LatestID, creator: stored.Creator, private: stored.Private, active: stored.Active,
 			members: make(map[string]*userState), reads: make(map[string]readCursor),
 		}
 	}

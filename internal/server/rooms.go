@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"encoding/json/jsontext"
 	"encoding/json/v2"
+	"fmt"
 	"maps"
 	"slices"
 	"strconv"
@@ -16,12 +17,15 @@ const maxListedRooms = 200
 
 // roomState is a room's current record, its log, and its members. Every room,
 // including threads (rooms with parent_room_id), is visible to every
-// authenticated user; members are the users who have joined it and receive
-// its deliveries (§3.4, §4.3.2).
+// authenticated user, except that a private room and its threads are visible
+// only to their members (§4.3.4); members are the users who have joined it
+// and receive its deliveries (§3.4, §4.3.2).
 type roomState struct {
 	id       string
 	parent   *roomState
 	children []*roomState
+	// private is fixed at creation and kept in record as "private": true.
+	private bool
 	// record holds the latest logged room record.
 	record      map[string]any
 	recordLogID int64
@@ -29,6 +33,10 @@ type roomState struct {
 	latestID    int64
 	log         []*logRecord
 	members     map[string]*userState
+	// active maps each member to the log_id of their latest join or new
+	// message in the room, which ranks members when a listing truncates
+	// them (§4.3.1).
+	active map[string]int64
 	// creator is the user_id that created the room, empty for the seeded
 	// room; only the creator may /kick (§4.8).
 	creator string
@@ -40,6 +48,45 @@ type readCursor struct {
 	from      map[string]any
 	messageID string
 	id        int64
+}
+
+// visibleTo reports whether u may see the room (§4.3.4): a member always
+// does; anyone else unless the room, or a room it is a thread of, is
+// private and u is not in it. Invisible rooms are answered like unknown ones.
+func (r *roomState) visibleTo(u *userState) bool {
+	for room := r; room != nil; room = room.parent {
+		if room.members[u.id] != nil {
+			return true
+		}
+		if room.private {
+			return false
+		}
+	}
+	return true
+}
+
+// visibleRoomLocked returns the room named id if u may see it, or nil.
+func (s *Server) visibleRoomLocked(u *userState, id string) *roomState {
+	if r := s.rooms[id]; r != nil && r.visibleTo(u) {
+		return r
+	}
+	return nil
+}
+
+// visibleMessageLocked returns the message named id if u may see the room
+// it is in, or nil.
+func (s *Server) visibleMessageLocked(u *userState, id string) *messageState {
+	if m := s.messages[id]; m != nil && s.rooms[m.roomID].visibleTo(u) {
+		return m
+	}
+	return nil
+}
+
+// mayRemove reports whether u may remove others from r, with /kick or
+// room_leave's user_id (§4.3.2, §4.8): the room's creator, or a user with
+// the admin or moderator role.
+func (r *roomState) mayRemove(u *userState) bool {
+	return r.creator == u.id || u.hasRole("admin") || u.hasRole("moderator")
 }
 
 // deliveryFields returns the room's log head and the inclusive lower bound of
@@ -144,7 +191,9 @@ func (s *Server) addMemberLocked(u *userState, r *roomState) bool {
 	s.touchRoom(r)
 	s.touchUser(u.id)
 	delete(u.leftAt, r.id)
-	s.deliverLocked(s.logMembershipLocked(u, r, true), r)
+	membership := s.logMembershipLocked(u, r, true)
+	r.active[u.id] = r.latestID
+	s.deliverLocked(membership, r)
 	return true
 }
 
@@ -160,23 +209,39 @@ func (s *Server) joinLocked(u *userState, r *roomState) bool {
 }
 
 // joinedUpdateLocked renders room_update joined for r: its record with its
-// complete members, as bare user objects, and their current objects in
-// `users` (§4.3.3).
+// members, as bare user objects, and their current objects in `users`
+// (§4.3.3).
 func (s *Server) joinedUpdateLocked(r *roomState) jsontext.Value {
 	record := s.roomParamsLocked(r)
-	record["members"] = memberRefs(r)
-	return notification("room_update", map[string]any{"joined": []any{record}, "users": profiles(r.members)})
+	listed := s.addMembersLocked(record, r)
+	return notification("room_update", map[string]any{"joined": []any{record}, "users": profiles(listed)})
 }
 
-// memberRefs lists a room's members as user objects carrying only user_id,
-// ordered by user_id.
-func memberRefs(r *roomState) []any {
-	ids := slices.Sorted(maps.Keys(r.members))
+// addMembersLocked adds a room's members to its record as bare user
+// objects, ordered by user_id, and returns them. A room with more than
+// Config.MaxListedMembers lists only its most recently active members and
+// adds member_count, the total (§4.3.1).
+func (s *Server) addMembersLocked(record map[string]any, r *roomState) map[string]*userState {
+	ids := slices.Collect(maps.Keys(r.members))
+	listed := r.members
+	if limit := s.config.MaxListedMembers; len(ids) > limit {
+		slices.SortFunc(ids, func(a, b string) int {
+			return cmp.Or(cmp.Compare(r.active[b], r.active[a]), cmp.Compare(a, b))
+		})
+		ids = ids[:limit]
+		listed = make(map[string]*userState, limit)
+		for _, id := range ids {
+			listed[id] = r.members[id]
+		}
+		record["member_count"] = len(r.members)
+	}
+	slices.Sort(ids)
 	refs := make([]any, len(ids))
 	for i, id := range ids {
 		refs[i] = map[string]any{"user_id": id}
 	}
-	return refs
+	record["members"] = refs
+	return listed
 }
 
 // leaveLocked removes u from r (§4.3.2): the logged membership goes to the
@@ -191,21 +256,25 @@ func (s *Server) leaveLocked(u *userState, r *roomState) bool {
 	s.touchRoom(r)
 	s.touchUser(u.id)
 	delete(r.members, u.id)
+	delete(r.active, u.id)
 	u.send(roomUpdate("left", map[string]any{"room_id": r.id}))
 	return true
 }
 
 // commitRoomLocked logs a room record holding fields, the client fields other
-// than parent_room_id. An unknown roomID creates the room; an empty one names
-// it by its creation log_id.
-func (s *Server) commitRoomLocked(roomID string, parent *roomState, fields map[string]any) *roomState {
+// than parent_room_id and private. An unknown roomID creates the room, private
+// if asked; an empty one names it by its creation log_id.
+func (s *Server) commitRoomLocked(roomID string, parent *roomState, private bool, fields map[string]any) *roomState {
 	logID := s.nextIDLocked()
 	r := s.rooms[roomID]
 	if r == nil {
 		if roomID == "" {
 			roomID = formatID(logID)
 		}
-		r = &roomState{id: roomID, parent: parent, createdID: logID, members: make(map[string]*userState), reads: make(map[string]readCursor)}
+		r = &roomState{
+			id: roomID, parent: parent, private: private, createdID: logID,
+			members: make(map[string]*userState), active: make(map[string]int64), reads: make(map[string]readCursor),
+		}
 		s.rooms[roomID] = r
 		if parent != nil {
 			parent.children = append(parent.children, r)
@@ -218,6 +287,9 @@ func (s *Server) commitRoomLocked(roomID string, parent *roomState, fields map[s
 	if r.parent != nil {
 		record["parent_room_id"] = r.parent.id
 	}
+	if r.private {
+		record["private"] = true
+	}
 	maps.Copy(record, fields)
 	r.record = record
 	r.recordLogID = logID
@@ -226,10 +298,11 @@ func (s *Server) commitRoomLocked(roomID string, parent *roomState, fields map[s
 }
 
 // announceRoomLocked sends a room's current record as room_update updated to
-// its members, the parent's members for a thread, and editor, if any.
+// its members, the parent's members for a thread that is not private, and
+// editor, if any.
 func (s *Server) announceRoomLocked(r *roomState, editor *userState) {
 	audience := maps.Clone(r.members)
-	if r.parent != nil {
+	if r.parent != nil && !r.private {
 		maps.Copy(audience, r.parent.members)
 	}
 	if editor != nil {
@@ -242,15 +315,16 @@ func (s *Server) announceRoomLocked(r *roomState, editor *userState) {
 }
 
 // setRoom creates a room (no room_id) or replaces an existing room's client
-// fields (§4.3.4). parent_room_id is fixed at creation and ignored on
-// updates. Any authenticated user may create rooms and threads and update any
-// room's client fields.
+// fields (§4.3.4). parent_room_id and private are fixed at creation and
+// ignored on updates. Any authenticated user may create rooms and threads and
+// update any room they can see.
 //
 // A new room joins only its creator, logging the creator's membership: the
 // creator's connections receive room_update joined, then the membership,
-// then the result. A new thread goes to the parent's other members as
-// room_update updated, without joining them. An edit goes as updated to the
-// room's members, to the parent's members for a thread, and to the editor.
+// then the result. A new thread that is not private goes to the parent's
+// other members as room_update updated, without joining them. An edit goes
+// as updated to the room's members, to the parent's members for a thread
+// that is not private, and to the editor.
 func (s *Server) setRoom(c *client, req request) (any, bool, *rpcError) {
 	_, updating := req.params["room_id"]
 	var roomID, parentID string
@@ -284,19 +358,23 @@ func (s *Server) setRoom(c *client, req request) (any, bool, *rpcError) {
 	if err != nil {
 		return nil, false, err
 	}
+	private, err := parseBool(req.params, "private", false)
+	if err != nil {
+		return nil, false, err
+	}
 
 	s.mu.Lock()
 	defer s.unlock()
 	u := c.user
 	var parent *roomState
 	if updating {
-		existing := s.rooms[roomID]
+		existing := s.visibleRoomLocked(u, roomID)
 		if existing == nil {
 			return nil, false, invalidParams("Unknown room %q", roomID)
 		}
 		parent = existing.parent
 	} else if parentID != "" {
-		if parent = s.rooms[parentID]; parent == nil {
+		if parent = s.visibleRoomLocked(u, parentID); parent == nil {
 			return nil, false, invalidParams("Unknown parent room %q", parentID)
 		}
 	}
@@ -317,7 +395,7 @@ func (s *Server) setRoom(c *client, req request) (any, bool, *rpcError) {
 	if ext != nil {
 		fields["ext"] = ext
 	}
-	r := s.commitRoomLocked(roomID, parent, fields)
+	r := s.commitRoomLocked(roomID, parent, private, fields)
 	if !updating {
 		r.creator = u.id
 	}
@@ -332,9 +410,11 @@ func (s *Server) setRoom(c *client, req request) (any, bool, *rpcError) {
 		r.members[u.id] = u
 		s.touchUser(u.id)
 		membership := s.logMembershipLocked(u, r, true)
+		r.active[u.id] = r.latestID
 		u.send(s.joinedUpdateLocked(r))
 		s.deliverLocked(membership, r)
-		if parent != nil {
+		// A private thread's record goes only to its own members.
+		if parent != nil && !r.private {
 			frame := roomUpdate("updated", s.roomParamsLocked(r))
 			for id, member := range parent.members {
 				if id != u.id {
@@ -426,13 +506,13 @@ func (s *Server) listRooms(c *client, req request) (any, bool, *rpcError) {
 	var candidates []*roomState
 	switch {
 	case hasRoom:
-		r := s.rooms[roomID]
+		r := s.visibleRoomLocked(u, roomID)
 		if r == nil {
 			return nil, false, invalidParams("Unknown room %q", roomID)
 		}
 		candidates = []*roomState{r}
 	case hasParent:
-		parent := s.rooms[parentID]
+		parent := s.visibleRoomLocked(u, parentID)
 		if parent == nil {
 			return nil, false, invalidParams("Unknown parent room %q", parentID)
 		}
@@ -455,8 +535,9 @@ func (s *Server) listRooms(c *client, req request) (any, bool, *rpcError) {
 			left = append(left, r)
 		}
 		// Without parent_room_id or room_id, unjoined threads are left to
-		// their parent's listing.
-		if wantOthers && (hasRoom || hasParent || r.parent == nil) {
+		// their parent's listing. Private rooms are listed only to their
+		// members.
+		if wantOthers && (hasRoom || hasParent || r.parent == nil) && r.visibleTo(u) {
 			others = append(others, r)
 		}
 	}
@@ -476,8 +557,7 @@ func (s *Server) listRooms(c *client, req request) (any, bool, *rpcError) {
 		for i, r := range rooms {
 			entry := s.roomParamsLocked(r)
 			if withMembers {
-				entry["members"] = memberRefs(r)
-				maps.Copy(users, r.members)
+				maps.Copy(users, s.addMembersLocked(entry, r))
 			}
 			entries[i] = entry
 		}
@@ -522,22 +602,36 @@ func profiles(users map[string]*userState) []any {
 }
 
 // joinRoom joins a visible room (§4.3.2): the logged membership goes to the
-// room's members, the user's connections included, then room_update joined
-// to the user's connections, then the result. Joining a room already joined
-// logs nothing and re-sends room_update joined to the calling connection
-// only.
+// room's members, the joining user's connections included, then room_update
+// joined to the joining user's connections, then the result. Joining a room
+// already joined logs nothing and re-sends room_update joined to the calling
+// connection only.
+//
+// With the user_id of another user, a member of the room adds that user,
+// which is how people are brought into a private room; adding a member
+// changes nothing.
 func (s *Server) joinRoom(c *client, req request) (any, bool, *rpcError) {
-	roomID, err := parseString(req.params, "room_id", true)
+	roomID, targetID, hasTarget, err := parseMembershipParams(req.params)
 	if err != nil {
 		return nil, false, err
 	}
 	s.mu.Lock()
 	defer s.unlock()
-	r := s.rooms[roomID]
+	u := c.user
+	r := s.visibleRoomLocked(u, roomID)
 	if r == nil {
 		return nil, false, invalidParams("Unknown room %q", roomID)
 	}
-	if !s.joinLocked(c.user, r) {
+	target := u
+	if hasTarget && targetID != u.id {
+		if r.members[u.id] == nil {
+			return nil, false, &rpcError{Code: codeDenied, Message: fmt.Sprintf("Join %s before adding others to it", r.title())}
+		}
+		if target = s.users[targetID]; target == nil {
+			return nil, false, invalidParams("Unknown user %q", targetID)
+		}
+	}
+	if !s.joinLocked(target, r) && target == u {
 		c.enqueue(s.joinedUpdateLocked(r))
 	}
 	result := map[string]any{}
@@ -549,20 +643,33 @@ func (s *Server) joinRoom(c *client, req request) (any, bool, *rpcError) {
 
 // leaveRoom leaves a room (§4.3.2): the logged membership goes to the room's
 // members, the leaving user's connections included, then room_update left to
-// the user's connections, then the result. The room stays visible in
-// room_list. Leaving a room not joined changes nothing.
+// the leaving user's connections, then the result. The room stays visible in
+// room_list unless it is private. Leaving a room not joined changes nothing.
+//
+// With the user_id of another user, it removes that user, which the room's
+// creator and users with the admin or moderator role may do.
 func (s *Server) leaveRoom(c *client, req request) (any, bool, *rpcError) {
-	roomID, err := parseString(req.params, "room_id", true)
+	roomID, targetID, hasTarget, err := parseMembershipParams(req.params)
 	if err != nil {
 		return nil, false, err
 	}
 	s.mu.Lock()
 	defer s.unlock()
-	r := s.rooms[roomID]
+	u := c.user
+	r := s.visibleRoomLocked(u, roomID)
 	if r == nil {
 		return nil, false, invalidParams("Unknown room %q", roomID)
 	}
-	s.leaveLocked(c.user, r)
+	target := u
+	if hasTarget && targetID != u.id {
+		if !r.mayRemove(u) {
+			return nil, false, &rpcError{Code: codeDenied, Message: fmt.Sprintf("Only the creator of %s or a moderator can remove people from it", r.title())}
+		}
+		if target = s.users[targetID]; target == nil {
+			return nil, false, invalidParams("Unknown user %q", targetID)
+		}
+	}
+	s.leaveLocked(target, r)
 	result := map[string]any{}
 	if req.hasID {
 		c.sendResult(req, result)
@@ -570,12 +677,28 @@ func (s *Server) leaveRoom(c *client, req request) (any, bool, *rpcError) {
 	return result, true, nil
 }
 
+// parseMembershipParams reads room_join and room_leave params: room_id and
+// an optional user_id (§4.3.2).
+func parseMembershipParams(params map[string]jsontext.Value) (roomID, userID string, hasUser bool, err *rpcError) {
+	if roomID, err = parseString(params, "room_id", true); err != nil {
+		return "", "", false, err
+	}
+	if userID, err = parseString(params, "user_id", false); err != nil {
+		return "", "", false, err
+	}
+	_, hasUser = params["user_id"]
+	if hasUser && userID == "" {
+		return "", "", false, invalidParams("user_id must be a non-empty string")
+	}
+	return roomID, userID, hasUser, nil
+}
+
 // history returns a window of one room's log (§4.1), the default room's
 // without room_id. limit counts records of every kind; the slice is
 // partitioned into rooms, messages, reactions, and membership, each omitted
 // when empty. The server retains all records and does not compact, and it
-// discards no prefix, so it never appends a full-member record. Every room is
-// visible, so history needs no membership.
+// discards no prefix, so it never appends a full-member record. History needs
+// no membership, only a room the user can see.
 //
 // A move snapshot is in both rooms' logs and names the source room in
 // prev_room_id, so a window bounded to one log_id (after == before) in the
@@ -604,7 +727,7 @@ func (s *Server) history(c *client, req request) (any, bool, *rpcError) {
 
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	r := s.rooms[roomID]
+	r := s.visibleRoomLocked(c.user, roomID)
 	if r == nil {
 		return nil, false, invalidParams("Unknown room %q", roomID)
 	}
@@ -772,11 +895,11 @@ func (s *Server) activity(c *client, req request) (any, bool, *rpcError) {
 	s.mu.Lock()
 	defer s.unlock()
 	inRoom := typing != nil || hasRead
-	r := s.rooms[roomID]
+	r := s.visibleRoomLocked(c.user, roomID)
 	if inRoom && r == nil {
 		return nil, false, invalidParams("Unknown room %q", roomID)
 	}
-	if hasRead && s.messages[readID] == nil {
+	if hasRead && s.visibleMessageLocked(c.user, readID) == nil {
 		return nil, false, invalidParams("Unknown read_message_id %q", readID)
 	}
 	result := map[string]any{}

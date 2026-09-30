@@ -39,8 +39,8 @@ func init() {
 			run: (*Server).avatarCommand,
 		},
 		{
-			name: "kick", usage: "/kick @user [reason]", help: "remove someone from this room (its creator only)",
-			available: func(u *userState, r *roomState) bool { return r.creator == u.id },
+			name: "kick", usage: "/kick @user [reason]", help: "remove someone from this room (its creator or a moderator)",
+			available: func(u *userState, r *roomState) bool { return r.mayRemove(u) },
 			run:       (*Server).kickCommand,
 		},
 	}
@@ -91,11 +91,11 @@ func (s *Server) command(c *client, req request) (any, bool, *rpcError) {
 	s.mu.Lock()
 	defer s.unlock()
 	c.away = false
-	r := s.rooms[roomID]
+	r := s.visibleRoomLocked(c.user, roomID)
 	if r == nil {
 		return nil, false, invalidParams("Unknown room %q", roomID)
 	}
-	if hasReply && s.messages[replyID] == nil {
+	if hasReply && s.visibleMessageLocked(c.user, replyID) == nil {
 		return nil, false, invalidParams("reply_to must name an existing message")
 	}
 	for _, command := range serverCommands {
@@ -177,15 +177,16 @@ const maxKickReasonRunes = 200
 // kickCommand removes the one mentioned user from the room: the room's
 // members, the target included, receive the logged leave membership
 // (§4.3.2), the target room_update left, and the remaining members a ~room
-// notice with the reason. Only the room's creator may kick.
+// notice with the reason. Only the room's creator and admins or moderators
+// may kick.
 func (s *Server) kickCommand(c *client, r *roomState, body map[string]any, args string) (map[string]any, *rpcError) {
 	u := c.user
 	targets := mentions(body)
 	if len(targets) != 1 {
 		return nil, invalidParams("Usage: /kick @user [reason], mentioning exactly one user")
 	}
-	if r.creator != u.id {
-		return nil, &rpcError{Code: codeDenied, Message: fmt.Sprintf("Only the creator of %s can remove people from it", r.title())}
+	if !r.mayRemove(u) {
+		return nil, &rpcError{Code: codeDenied, Message: fmt.Sprintf("Only the creator of %s or a moderator can remove people from it", r.title())}
 	}
 	target := r.members[targets[0]]
 	if target == nil {

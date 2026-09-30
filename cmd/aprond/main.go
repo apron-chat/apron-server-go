@@ -43,6 +43,7 @@ type Options struct {
 	MaxConnections         int      `long:"max-connections" description:"Maximum concurrent WebSockets; 0 is unlimited"`
 	MaxListenerConnections int      `long:"max-listener-connections" description:"Maximum concurrent TCP connections on the listener, HTTP included; 0 is unlimited"`
 	MessagesPerMinute      int      `long:"messages-per-minute" description:"Burst of new messages, room_set requests, and /avatar commands per user, refilled over a minute; 0 is unlimited"`
+	MaxListedMembers       int      `long:"max-listed-members" default:"1000" description:"Members listed per room in room_list and room_update; a larger room lists its most recently active ones and member_count"`
 	DebugAddr              string   `long:"debug-addr" description:"Listen address for unauthenticated pprof and expvar under /debug/, such as 127.0.0.1:6060; empty disables"`
 	Store                  string   `long:"store" description:"Where state is kept: sqlite:<path> for a SQLite database, or memory to keep nothing across restarts"`
 	Welcome                string   `long:"welcome" description:"Markdown clients show on their sign-in screen (server.welcome), such as how this server's sign-in methods fit together"`
@@ -119,6 +120,7 @@ func serverConfig(options Options) (server.Config, error) {
 	}
 	config.MaxConnections = options.MaxConnections
 	config.MessagesPerMinute = options.MessagesPerMinute
+	config.MaxListedMembers = options.MaxListedMembers
 	config.Welcome = options.Welcome
 	for _, grant := range options.Roles {
 		role, holder, ok := strings.Cut(grant, "=")

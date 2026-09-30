@@ -46,6 +46,7 @@ const (
 	defaultStreamKeepBytes          = 64 << 10
 	defaultStreamMaxBytes     int64 = 16 << 20
 	defaultStreamMaxDuration        = time.Hour
+	defaultMaxListedMembers         = 1000
 	// retryAfterSeconds is the delay suggested by connection-level
 	// retry_after errors (capacity and shutdown).
 	retryAfterSeconds = 30
@@ -106,6 +107,10 @@ type Config struct {
 	MaxConnections int
 	// MessagesPerMinute bounds each user's new messages; 0 is unlimited.
 	MessagesPerMinute int
+	// MaxListedMembers bounds a room's members in room_list and room_update
+	// joined; a larger room lists its most recently active members and
+	// member_count (§4.3.1).
+	MaxListedMembers int
 	// Welcome is server.welcome (§3.2): Markdown shown on the sign-in
 	// screen. Empty omits it.
 	Welcome string
@@ -132,6 +137,7 @@ func DefaultConfig() Config {
 		StreamKeepBytes:       defaultStreamKeepBytes,
 		StreamMaxBytes:        defaultStreamMaxBytes,
 		StreamMaxDuration:     defaultStreamMaxDuration,
+		MaxListedMembers:      defaultMaxListedMembers,
 	}
 }
 
@@ -181,6 +187,9 @@ func (c Config) withDefaults() Config {
 	}
 	if c.StreamMaxDuration <= 0 {
 		c.StreamMaxDuration = defaults.StreamMaxDuration
+	}
+	if c.MaxListedMembers <= 0 {
+		c.MaxListedMembers = defaults.MaxListedMembers
 	}
 	c.PublicURL = strings.TrimRight(c.PublicURL, "/")
 	return c
@@ -430,7 +439,7 @@ func Open(config Config) (*Server, error) {
 	if s.rooms[defaultRoomID] == nil {
 		// The seeded default room has a logged creation record like any
 		// other room, so its history_log_id is never null.
-		s.commitRoomLocked(defaultRoomID, nil, map[string]any{"title": "General"})
+		s.commitRoomLocked(defaultRoomID, nil, false, map[string]any{"title": "General"})
 	}
 	s.removeStaleUploads(files)
 	s.unlock()
@@ -654,6 +663,7 @@ func (s *Server) serverParams() map[string]any {
 			"max_stream_seconds":        int(s.config.StreamMaxDuration / time.Second),
 			"messages_per_minute":       s.config.MessagesPerMinute,
 			"write_url_timeout_seconds": int(s.config.UploadStartTimeout / time.Second),
+			"max_listed_members":        s.config.MaxListedMembers,
 		}},
 	}
 	if !s.config.DisablePush {

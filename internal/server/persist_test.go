@@ -91,7 +91,7 @@ func TestStateSurvivesRestart(t *testing.T) {
 			gone, _ := save(t, owner, "gone", map[string]any{"body": map[string]any{"text": "Secret first line\nmore"}})
 			guest.drain(t)
 			thread, _ := saveRoom(t, owner, "thread", map[string]any{"parent_room_id": "general", "description": "Hello thread"})
-			ops, _ := saveRoom(t, owner, "ops", map[string]any{"title": "Ops"})
+			ops, _ := saveRoom(t, owner, "ops", map[string]any{"title": "Ops", "private": true})
 			owner.request(t, "message", "delete", map[string]any{"room_id": "general", "message_id": gone, "deleted": true})
 			attached := postEmbeds(t, owner, "attach", map[string]any{"room_id": ops, "body": map[string]any{"text": "file", "embeds": []any{map[string]any{"kind": "upload", "title": "dots.png"}}}})
 			writeURL := attached["embeds"].([]any)[0].(map[string]any)["write_url"].(string)
@@ -176,9 +176,12 @@ func TestStateSurvivesRestart(t *testing.T) {
 				t.Fatalf("upload after restart: %d", status)
 			}
 			// Guest IDs are never reissued, across restarts too.
-			if next := dialTestClient(t, httpServer); next.userID == guest.userID {
+			next := dialTestClient(t, httpServer)
+			if next.userID == guest.userID {
 				t.Fatalf("guest ID %s reissued", next.userID)
 			}
+			// A private room stays private.
+			next.expectError(t, "history", "private", map[string]any{"room_id": ops}, codeInvalidParams)
 			// A new message's log_id follows every restored record.
 			resumed.drain(t)
 			id, _ := save(t, resumed, "after", map[string]any{"body": map[string]any{"text": "after"}})
@@ -359,4 +362,10 @@ func TestRolesAndWelcome(t *testing.T) {
 	if !reflect.DeepEqual(snapshot["from"], map[string]any{"user_id": adaID, "name": "Ada"}) {
 		t.Fatalf("recorded sender: %#v", snapshot["from"])
 	}
+	// An admin may remove others from any room they can see.
+	room, _ := saveRoom(t, guest, "room", map[string]any{"title": "Mine"})
+	ada.result(t, "room_leave", "remove", map[string]any{"room_id": room, "user_id": guest.userID})
+	expectMembership(t, guest, room, guest.userID, false)
+	roomUpdated(t, guest, "left")
+	guest.expectError(t, "room_leave", "remove-admin", map[string]any{"room_id": "general", "user_id": adaID}, codeDenied)
 }
