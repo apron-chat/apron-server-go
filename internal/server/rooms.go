@@ -50,19 +50,57 @@ type readCursor struct {
 	id        int64
 }
 
-// visibleTo reports whether u may see the room (§4.3.4): a member always
-// does; anyone else unless the room, or a room it is a thread of, is
-// private and u is not in it. Invisible rooms are answered like unknown ones.
+// visibleTo reports whether u may see the room (§4.3.4): unless u is a
+// member of the room and of every private room it is a thread of, at any
+// depth, it is invisible, and answered like an unknown one. So a thread of a
+// private room is hidden from everyone outside that room, members of the
+// thread included.
 func (r *roomState) visibleTo(u *userState) bool {
 	for room := r; room != nil; room = room.parent {
-		if room.members[u.id] != nil {
-			return true
-		}
-		if room.private {
+		if room.private && room.members[u.id] == nil {
 			return false
 		}
 	}
 	return true
+}
+
+// audience is who can see the room: everyone, or, for a private room or a
+// thread of one, the users in every private room on the way up.
+func (r *roomState) audience() (everyone bool, users map[string]*userState) {
+	for room := r; room != nil; room = room.parent {
+		if !room.private {
+			continue
+		}
+		if users == nil {
+			users = maps.Clone(room.members)
+			continue
+		}
+		for id := range users {
+			if room.members[id] == nil {
+				delete(users, id)
+			}
+		}
+	}
+	return users == nil, users
+}
+
+// revealsTo reports whether a record in r, such as a move snapshot naming
+// another room, would reach someone who cannot see to.
+func (r *roomState) revealsTo(to *roomState) bool {
+	toEveryone, toUsers := to.audience()
+	if toEveryone {
+		return false
+	}
+	everyone, users := r.audience()
+	if everyone {
+		return true
+	}
+	for id := range users {
+		if toUsers[id] == nil {
+			return true
+		}
+	}
+	return false
 }
 
 // visibleRoomLocked returns the room named id if u may see it, or nil.
@@ -224,7 +262,7 @@ func (s *Server) joinedUpdateLocked(r *roomState) jsontext.Value {
 func (s *Server) addMembersLocked(record map[string]any, r *roomState) map[string]*userState {
 	ids := slices.Collect(maps.Keys(r.members))
 	listed := r.members
-	if limit := s.config.MaxListedMembers; len(ids) > limit {
+	if limit := s.config.MaxListedMembers; limit > 0 && len(ids) > limit {
 		slices.SortFunc(ids, func(a, b string) int {
 			return cmp.Or(cmp.Compare(r.active[b], r.active[a]), cmp.Compare(a, b))
 		})
@@ -258,7 +296,31 @@ func (s *Server) leaveLocked(u *userState, r *roomState) bool {
 	delete(r.members, u.id)
 	delete(r.active, u.id)
 	u.send(roomUpdate("left", map[string]any{"room_id": r.id}))
+	if r.private {
+		s.hideThreadsLocked(u, r)
+	}
 	return true
+}
+
+// hideThreadsLocked follows u leaving the private room r: u can no longer see
+// its threads, at any depth, so u leaves those it joined, which stops their
+// deliveries, and u's connections receive room_update left for the others,
+// which they may know from room_update updated (§4.3.3).
+func (s *Server) hideThreadsLocked(u *userState, r *roomState) {
+	var hidden []any
+	var walk func(*roomState)
+	walk = func(room *roomState) {
+		for _, thread := range room.children {
+			if !s.leaveLocked(u, thread) {
+				hidden = append(hidden, map[string]any{"room_id": thread.id})
+			}
+			walk(thread)
+		}
+	}
+	walk(r)
+	if len(hidden) > 0 {
+		u.send(roomUpdate("left", hidden...))
+	}
 }
 
 // commitRoomLocked logs a room record holding fields, the client fields other
@@ -629,6 +691,11 @@ func (s *Server) joinRoom(c *client, req request) (any, bool, *rpcError) {
 		}
 		if target = s.users[targetID]; target == nil {
 			return nil, false, invalidParams("Unknown user %q", targetID)
+		}
+		// Adding someone to a thread of a private room takes adding them to
+		// that room first.
+		if r.parent != nil && !r.parent.visibleTo(target) {
+			return nil, false, &rpcError{Code: codeDenied, Message: fmt.Sprintf("Add %s to the private room %s is in first", targetID, r.title())}
 		}
 	}
 	if !s.joinLocked(target, r) && target == u {

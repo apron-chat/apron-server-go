@@ -111,6 +111,13 @@ func (s *Server) saveMessage(c *client, req request) (any, bool, *rpcError) {
 		if current.owner != u.id {
 			return nil, false, &rpcError{Code: codeDenied, Message: "Only the author may edit, move, or delete this message"}
 		}
+		// A move snapshot is logged in both rooms and names both, so a
+		// message may not move to a room that some who see its room cannot
+		// see, such as a private room: the move would show them its room_id
+		// and the message.
+		if source := s.rooms[current.roomID]; source != destination && source.revealsTo(destination) {
+			return nil, false, &rpcError{Code: codeDenied, Message: "A message cannot move to a room that fewer people can see"}
+		}
 		from = current.from
 	}
 	if hasReply {

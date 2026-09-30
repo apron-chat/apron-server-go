@@ -994,6 +994,30 @@ func TestPrivateRoomsAndMembershipByUserID(t *testing.T) {
 	// Adding a member again changes nothing.
 	a.result(t, "room_join", "again", map[string]any{"room_id": room, "user_id": "guest_2"})
 	b.expectQuiet(t)
+	// Its threads are for its members: someone outside it cannot be added
+	// to one.
+	a.expectError(t, "room_join", "outsider", map[string]any{"room_id": thread, "user_id": "guest_3"}, codeDenied)
+	joinRoom(t, b, thread)
+	expectMembership(t, a, thread, "guest_2", true)
+	other, _ := saveRoom(t, a, "other-thread", map[string]any{"parent_room_id": room, "title": "Other"})
+	if update := roomUpdated(t, b, "updated"); update["room_id"] != other {
+		t.Fatalf("new thread for a member of its private room: %#v", update)
+	}
+
+	// A message may not move where fewer people can see it, which would
+	// show them the private room; within the same audience, or to a wider
+	// one, it may.
+	public, _ := save(t, a, "public", map[string]any{"body": map[string]any{"text": "in general"}})
+	b.notification(t, "message")
+	c.notification(t, "message")
+	a.expectError(t, "message", "into-private", map[string]any{"message_id": public, "room_id": room, "body": map[string]any{"text": "in general"}}, codeDenied)
+	moved, _ := save(t, a, "into-thread", map[string]any{"message_id": secret, "room_id": thread, "body": map[string]any{"text": "just us"}})
+	b.notification(t, "message")
+	if moved != secret {
+		t.Fatalf("moved message: %s", moved)
+	}
+	a.expectError(t, "message", "into-aside", map[string]any{"message_id": secret, "room_id": aside, "body": map[string]any{"text": "just us"}}, codeDenied)
+	c.expectQuiet(t)
 	// private is fixed at creation.
 	_, edited := saveRoom(t, b, "edit", map[string]any{"room_id": room, "title": "DM", "private": false})
 	if edited["private"] != true {
@@ -1004,14 +1028,28 @@ func TestPrivateRoomsAndMembershipByUserID(t *testing.T) {
 	// Removing someone else is for the room's creator and moderators.
 	b.expectError(t, "room_leave", "remove-creator", map[string]any{"room_id": room, "user_id": "guest_1"}, codeDenied)
 	before, result = a.request(t, "room_leave", "remove", map[string]any{"room_id": room, "user_id": "guest_2"})
-	if len(result) != 0 || !reflect.DeepEqual(methods(before), []string{"membership"}) {
+	if len(result) != 0 || !reflect.DeepEqual(methods(before), []string{"membership", "membership"}) {
 		t.Fatalf("removing a member: %#v then %#v", before, result)
 	}
+	// Losing the private room loses its threads: the removed member leaves
+	// the one they joined, and is told of it.
+	checkMembership(t, notificationParams(t, before[1], "membership"), thread, "guest_2", false)
 	expectMembership(t, b, room, "guest_2", false)
 	if left := roomUpdated(t, b, "left"); !reflect.DeepEqual(left, map[string]any{"room_id": room}) {
 		t.Fatalf("removed member's update: %#v", left)
 	}
-	b.expectError(t, "history", "after-removal", map[string]any{"room_id": room}, codeInvalidParams)
+	expectMembership(t, b, thread, "guest_2", false)
+	if left := roomUpdated(t, b, "left"); !reflect.DeepEqual(left, map[string]any{"room_id": thread}) {
+		t.Fatalf("removed member's thread update: %#v", left)
+	}
+	if left := roomUpdated(t, b, "left"); !reflect.DeepEqual(left, map[string]any{"room_id": other}) {
+		t.Fatalf("removed member's update for a thread they had not joined: %#v", left)
+	}
+	for _, roomID := range []string{room, thread} {
+		b.expectError(t, "history", b.nextID("after-removal"), map[string]any{"room_id": roomID}, codeInvalidParams)
+	}
+	save(t, a, "after", map[string]any{"room_id": thread, "body": map[string]any{"text": "without b"}})
+	b.expectQuiet(t)
 	// Removing someone not in the room changes nothing.
 	a.result(t, "room_leave", "remove-again", map[string]any{"room_id": room, "user_id": "guest_2"})
 	for _, client := range clients {
@@ -1040,6 +1078,15 @@ func TestMemberListsAreTruncatedWithMemberCount(t *testing.T) {
 	general := entry[0].(map[string]any)
 	if general["member_count"] != float64(3) || !reflect.DeepEqual(memberIDs(general), []string{"guest_1", "guest_3"}) || len(listed["users"].([]any)) != 2 {
 		t.Fatalf("truncated listing: %#v", listed)
+	}
+	// 0 lists every member.
+	unlimited := DefaultConfig()
+	unlimited.MaxListedMembers = 0
+	_, other := newTestServer(t, unlimited)
+	everyone := dialGroup(t, other, 3)
+	all := listRooms(t, everyone[0], map[string]any{"room_id": "general", "members": true})["joined"].([]any)[0].(map[string]any)
+	if _, has := all["member_count"]; has || len(memberIDs(all)) != 3 {
+		t.Fatalf("unlimited listing: %#v", all)
 	}
 	// A room within the bound carries no member_count.
 	ops, _ := saveRoom(t, clients[0], "ops", map[string]any{"title": "Ops"})
