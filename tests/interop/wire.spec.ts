@@ -18,8 +18,8 @@ type Step =
 	| { moveMessage: { as: string; message_id: string; room: string } }
 	| { deleteMessage: { as: string; message_id: string } }
 	| { react: { as: string; message_id: string; emojis: string[] } }
-	| { createRoom: { as: string; parent_room_id?: string; title?: string; intro_message_id?: string } }
-	| { updateRoom: { as: string; room: string; title?: string | null; intro_message_id?: string | null } }
+	| { createRoom: { as: string; parent_room_id?: string; title?: string; description?: string } }
+	| { updateRoom: { as: string; room: string; title?: string | null; description?: string | null } }
 	| { joinRoom: { as: string; room: string } }
 	| { leaveRoom: { as: string; room: string } }
 	| { listRooms: { as: string; parent_room_id?: string } }
@@ -100,7 +100,7 @@ function projectRoom(room: RoomSnapshot): ObjectValue {
 		...(has('log_id') ? { log_id: record!.log_id } : {}),
 		...(has('parent_room_id') ? { parent_room_id: record!.parent_room_id } : {}),
 		...(has('title') ? { title: record!.title } : {}),
-		...(record?.intro_message ? { intro_message: { message_id: record.intro_message.message_id } } : {}),
+		...(has('description') ? { description: record!.description } : {}),
 		...(has('ext') ? { ext: record!.ext } : {}),
 		messages: room.timeline.order.map((id) => {
 			const reactions = room.timeline.reactions[id];
@@ -234,17 +234,17 @@ for (const fixture of fixtures) {
 								const { as, message_id, emojis } = step.react;
 								track(as, client.react(message_id, emojis).promise);
 							} else if ('createRoom' in step) {
-								const { as, parent_room_id, title, intro_message_id } = step.createRoom;
+								const { as, parent_room_id, title, description } = step.createRoom;
 								track(as, client.createRoom({
 									...(parent_room_id !== undefined ? { parentRoomId: parent_room_id } : {}),
 									...(title !== undefined ? { title } : {}),
-									...(intro_message_id !== undefined ? { introMessageId: intro_message_id } : {})
+									...(description !== undefined ? { description } : {})
 								}).promise);
 							} else if ('updateRoom' in step) {
 								const { as, room, ...patch } = step.updateRoom;
 								track(as, client.updateRoom(room, {
 									...(Object.hasOwn(patch, 'title') ? { title: patch.title } : {}),
-									...(Object.hasOwn(patch, 'intro_message_id') ? { introMessageId: patch.intro_message_id } : {})
+									...(Object.hasOwn(patch, 'description') ? { description: patch.description } : {})
 								}).promise);
 							} else if ('joinRoom' in step) {
 								track(step.joinRoom.as, client.joinRoom(step.joinRoom.room).promise);
