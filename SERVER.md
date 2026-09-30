@@ -666,7 +666,10 @@ malformed `name` or `user_id`, which leaves the proposal usable.
 
 A connection has one pending proposal, and a new one replaces it. It lasts
 ten minutes, is consumed when approved, and five wrong tokens on its
-connection invalidate it. Proposals are kept in memory only.
+connection invalidate it. It is dropped when the connection's identity
+changes (a guest `auth`, a token resume, an approval), so an addition
+proposed by one account cannot be approved by another. Proposals are kept
+in memory only.
 
 - **Signing in**, proposed on a connection not signed in. The email carries
   a six-digit code, which works only on the proposing connection, and, when
@@ -675,9 +678,12 @@ connection invalidate it. Proposals are kept in memory only.
   one the link opens. Approving it signs the presenting connection in, which
   must not be signed in already: a known address to its account, an address
   new to the server to a new account, which takes a requested `user_id`
-  (from the approval, else the proposal) by the guests' rules or else
-  `user_<n>`, honors a requested `name`, and joins `general`, delivered
-  before the result. The result is `{you, token}`. Either token presented on
+  by the guests' rules or else `user_<n>`, honors a requested `name`, and
+  joins `general`, delivered before the result. The `name` and `user_id`
+  requested come from the approval, else, only when the proposing
+  connection approves, from the proposal: a link opened elsewhere is the
+  address's owner reading the email, whose account the proposer must not
+  name. The result is `{you, token}`. Either token presented on
   a signed-in connection is `denied`, and the proposal stays.
 - **Adding** the address, proposed on a connection signed in, guests
   included. The email carries only the code, which works only on the
@@ -698,7 +704,9 @@ Limits keep proposals from flooding anyone with email. Each answers
 `retry_after` (`-32002`, with `data.retry_after` in seconds; PROTOCOL.md
 §1.1), whether or not the address has an account:
 
-- Per address: emails at least 30 seconds apart, and six an hour.
+- Per address: proposals at least 30 seconds apart, and six an hour,
+  counting the additions that send nothing, so the limit reads the same
+  whether or not the address has an account.
 - Per client (the connection's IP address, or its IPv6 /64; with
   `--client-ip-header` behind a reverse proxy, the address the proxy
   reports): ten proposals, then one every three minutes.
@@ -706,18 +714,19 @@ Limits keep proposals from flooding anyone with email. Each answers
 - At most sixteen deliveries at once, and 10,000 outstanding links.
 
 A code can be guessed only on the connection that proposed it, five tries a
-proposal, and each proposal emails its address, so the per-address limit
-bounds guessing to thirty tries an hour against a million codes; a link
+proposal, and each proposal counts against its address, so the
+per-address limit bounds guessing to thirty tries an hour against a million codes; a link
 token cannot be guessed.
 
 The server tracks at most 10,000 addresses and 100,000 clients. A proposal
-that is refused records nothing, and an address is tracked only once an
-email is sent to it. When a table is full, the server forgets the least
+that is refused records nothing; one accepted is tracked under its
+address, whether or not an email was sent, since that is what the
+per-address limit counts. When a table is full, the server forgets the least
 recently used entry whose limit has lapsed, an address with no email in the
 last hour or a client whose budget is full again; when it finds none, a new
-proposal is `retry_after`. Filling the address table takes 10,000 emails
-actually sent, which the per-client limits spread over hundreds of clients
-in an hour.
+proposal is `retry_after`. Filling the address table takes 10,000
+accepted proposals, which the per-client limits spread over hundreds of
+clients in an hour.
 
 Email accounts are kept like passkey users, and an account may have both: a
 passkey registered on a signed-in connection is added to that account

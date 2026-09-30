@@ -126,7 +126,8 @@ type emailProposal struct {
 }
 
 // emailAddress is what the server keeps about one address, in memory only:
-// the emails sent to it in the last emailWindow. Entries are kept in least
+// the proposals accepted for it in the last emailWindow, emailed or not, so
+// its limit reads the same whether or not it has an account. Entries are kept in least
 // recently used order.
 type emailAddress struct {
 	email   string
@@ -437,7 +438,9 @@ func (s *Server) proposeEmailLocked(c *client, req request, email, name, request
 		}
 	}
 	if state == nil {
-		// The entry is made only for an email that is sent.
+		// The entry is made only for a proposal that is accepted, emailed
+		// or not: an addition sends nothing for an address with an
+		// account, and must count the same as one that does.
 		if state = s.email.createAddress(email, now); state == nil {
 			return nil, busy
 		}
@@ -555,11 +558,16 @@ func (s *Server) approveEmailLocked(c *client, req request, token, name, request
 	s.dropProposalLocked(p)
 	user := s.emails[p.email]
 	if user == nil {
-		if name == "" {
-			name = p.name
-		}
-		if requested == "" {
-			requested = p.userID
+		// A proposal's own name and user_id apply only on its connection: a
+		// link opened elsewhere is someone reading the email, whose account
+		// the proposer must not name.
+		if c == p.owner {
+			if name == "" {
+				name = p.name
+			}
+			if requested == "" {
+				requested = p.userID
+			}
 		}
 		user = newUserState(s.assignAccountIDLocked(requested), normalizeName(name))
 		user.email = p.email

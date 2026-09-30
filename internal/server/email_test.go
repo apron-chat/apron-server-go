@@ -339,6 +339,68 @@ func TestEmailAdditions(t *testing.T) {
 	}
 }
 
+// A proposal's name and user_id apply only when its own connection
+// approves it: a link opened on another connection is the address's owner
+// reading the email, whose new account the proposer must not name.
+func TestEmailProposalsNameOnlyTheirOwnApprovals(t *testing.T) {
+	_, mailbox, httpServer := emailTestServer(t, nil)
+	squatter, _ := dialRaw(t, httpServer)
+	if result := squatter.result(t, "auth", "propose", map[string]any{"scheme": "email", "email": "victim@example.com", "user_id": "squatted", "name": "Squatter"}); len(result) != 0 {
+		t.Fatalf("proposal result: %#v", result)
+	}
+	victim, _ := dialRaw(t, httpServer)
+	_, result := signInByEmail(t, victim, linkToken(t, mailbox.receive(t)), nil)
+	if you := result["you"].(map[string]any); you["user_id"] == "squatted" || you["name"] == "Squatter" || !strings.HasPrefix(you["user_id"].(string), accountIDPrefix) {
+		t.Fatalf("the proposer named the victim's account: %#v", you)
+	}
+
+	// On the proposing connection, the proposal's own values apply.
+	proposer, _ := dialRaw(t, httpServer)
+	if result := proposer.result(t, "auth", "propose", map[string]any{"scheme": "email", "email": "carol@example.com", "user_id": "carol", "name": "Carol"}); len(result) != 0 {
+		t.Fatalf("proposal result: %#v", result)
+	}
+	_, result = signInByEmail(t, proposer, mailbox.receive(t).Code, nil)
+	if you := result["you"].(map[string]any); you["user_id"] != "carol" || you["name"] != "Carol" {
+		t.Fatalf("the proposal's own values: %#v", you)
+	}
+}
+
+// A connection's pending proposal is dropped when its identity changes, so
+// an addition proposed by one account cannot be approved by another, nor a
+// sign-in link used once its connection signed in some other way.
+func TestEmailProposalsEndWithTheirIdentity(t *testing.T) {
+	app, mailbox, httpServer := emailTestServer(t, func(config *Config) { config.WebAuthn = testWebAuthn(t) })
+	other, _ := dialOrigin(t, httpServer, testPasskeyOrigin)
+	token, _ := registerTestPasskey(t, other, newTestAuthenticator(t))["token"].(string)
+	if token == "" {
+		t.Fatal("no token for the second account")
+	}
+	c, _ := dialOrigin(t, httpServer, testPasskeyOrigin)
+	registerTestPasskey(t, c, newTestAuthenticator(t))
+	c.drain(t)
+	propose(t, c, "first@example.com")
+	code := mailbox.receive(t).Code
+	resumed := c.result(t, "auth", "switch", map[string]any{"scheme": "token", "token": token})
+	if resumed["you"].(map[string]any)["user_id"] != other.userID {
+		t.Fatalf("switching accounts: %#v", resumed)
+	}
+	c.expectError(t, "auth", "after-switch", map[string]any{"scheme": "email", "token": code}, codeDenied)
+	app.mu.RLock()
+	added := app.emails["first@example.com"]
+	app.mu.RUnlock()
+	if added != nil {
+		t.Fatalf("the address was added to %s", added.id)
+	}
+
+	// A sign-in proposal ends when its connection signs in as a guest.
+	fresh, _ := dialRaw(t, httpServer)
+	propose(t, fresh, "fresh@example.com")
+	link := linkToken(t, mailbox.receive(t))
+	guestAuth(t, fresh)
+	reader, _ := dialRaw(t, httpServer)
+	reader.expectError(t, "auth", "stale-link", map[string]any{"scheme": "email", "token": link}, codeDenied)
+}
+
 // A passkey account adds an address on the connection that proposed it.
 func TestEmailAddsToAPasskeyAccount(t *testing.T) {
 	app, mailbox, httpServer := emailTestServer(t, func(config *Config) { config.WebAuthn = testWebAuthn(t) })

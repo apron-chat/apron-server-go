@@ -333,6 +333,11 @@ func (s *Server) attachLocked(c *client, user *userState) {
 	if previous != nil {
 		delete(previous.clients, c)
 	}
+	// A pending email proposal was made by the previous identity: an
+	// addition must not be approved as the next one (§4.10).
+	if c.proposal != nil {
+		s.dropProposalLocked(c.proposal)
+	}
 	c.user = user
 	user.clients[c] = struct{}{}
 	if previous == nil || len(previous.clients) > 0 || previous.account() {
