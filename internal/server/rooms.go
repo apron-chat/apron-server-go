@@ -303,18 +303,26 @@ func (s *Server) leaveLocked(u *userState, r *roomState) bool {
 }
 
 // hideThreadsLocked follows u leaving the private room r: u can no longer see
-// its threads, at any depth, so u leaves those it joined, which stops their
-// deliveries, and u's connections receive room_update left for the others,
-// which they may know from room_update updated (§4.3.3).
+// the threads it could see there, at any depth, so u leaves those it joined,
+// which stops their deliveries, and u's connections receive room_update left
+// for the others, which they may know from room_update updated (§4.3.3). A
+// private thread u was not in was never visible to u, so it and its threads
+// are passed over, and one u was in is left, which hides its own threads.
 func (s *Server) hideThreadsLocked(u *userState, r *roomState) {
 	var hidden []any
 	var walk func(*roomState)
 	walk = func(room *roomState) {
 		for _, thread := range room.children {
-			if !s.leaveLocked(u, thread) {
-				hidden = append(hidden, map[string]any{"room_id": thread.id})
+			switch {
+			case thread.private && thread.members[u.id] == nil:
+			case thread.private:
+				s.leaveLocked(u, thread)
+			default:
+				if !s.leaveLocked(u, thread) {
+					hidden = append(hidden, map[string]any{"room_id": thread.id})
+				}
+				walk(thread)
 			}
-			walk(thread)
 		}
 	}
 	walk(r)

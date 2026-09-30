@@ -1095,3 +1095,62 @@ func TestMemberListsAreTruncatedWithMemberCount(t *testing.T) {
 		t.Fatalf("untruncated listing: %#v", opsEntry)
 	}
 }
+
+// Leaving a private room sends room_update left once for each thread the
+// user could see there, and nothing about private threads they were never
+// in, whose room_ids stay unknown to them.
+func TestLeavingAPrivateRoomHidesOnlyWhatWasVisible(t *testing.T) {
+	_, httpServer := newTestServer(t, DefaultConfig())
+	clients := dialGroup(t, httpServer, 2)
+	a, b := clients[0], clients[1]
+	room, _ := saveRoom(t, a, "room", map[string]any{"title": "P", "private": true})
+	a.request(t, "room_join", "add", map[string]any{"room_id": room, "user_id": b.userID})
+	b.drain(t)
+	public, _ := saveRoom(t, a, "public", map[string]any{"parent_room_id": room, "title": "Public"})
+	nested, _ := saveRoom(t, a, "nested", map[string]any{"parent_room_id": public, "title": "Nested"})
+	aside, _ := saveRoom(t, a, "aside", map[string]any{"parent_room_id": room, "title": "Aside", "private": true})
+	saveRoom(t, a, "inside-aside", map[string]any{"parent_room_id": aside, "title": "Inside"})
+	shared, _ := saveRoom(t, a, "shared", map[string]any{"parent_room_id": room, "title": "Shared", "private": true})
+	a.request(t, "room_join", "add-shared", map[string]any{"room_id": shared, "user_id": b.userID})
+	inShared, _ := saveRoom(t, a, "in-shared", map[string]any{"parent_room_id": shared, "title": "In shared"})
+	b.drain(t)
+	a.drain(t)
+
+	before, _ := b.request(t, "room_leave", "leave", map[string]any{"room_id": room})
+	var left []string
+	for _, frame := range before {
+		if frame["method"] != "room_update" {
+			continue
+		}
+		for _, entry := range frame["params"].(map[string]any)["left"].([]any) {
+			left = append(left, entry.(map[string]any)["room_id"].(string))
+		}
+	}
+	slices.Sort(left)
+	want := []string{room, public, nested, shared, inShared}
+	slices.Sort(want)
+	if !reflect.DeepEqual(left, want) {
+		t.Fatalf("left %v, want %v (not %s)", left, want, aside)
+	}
+}
+
+// A message moved out of a private room to where more people can see it
+// does not name the private room, and a reply cannot quote a message that
+// some who see the reply cannot see.
+func TestMovesAndRepliesOutOfPrivateRooms(t *testing.T) {
+	_, httpServer := newTestServer(t, DefaultConfig())
+	clients := dialGroup(t, httpServer, 2)
+	a, b := clients[0], clients[1]
+	room, _ := saveRoom(t, a, "room", map[string]any{"title": "P", "private": true})
+	id, _ := save(t, a, "secret", map[string]any{"room_id": room, "body": map[string]any{"text": "now public"}})
+	a.expectError(t, "message", "reply", map[string]any{"body": map[string]any{"text": "re"}, "reply_to": map[string]any{"message_id": id}}, codeDenied)
+	_, moved := save(t, a, "move", map[string]any{"message_id": id, "room_id": "general", "body": map[string]any{"text": "now public"}})
+	seen := b.notification(t, "message")
+	if _, has := seen["prev_room_id"]; has || !reflect.DeepEqual(seen, moved) {
+		t.Fatalf("move out of a private room: %#v", seen)
+	}
+	// Within the same audience a reply may quote it.
+	save(t, a, "inner", map[string]any{"room_id": room, "body": map[string]any{"text": "inner"}})
+	inner, _ := save(t, a, "inner-2", map[string]any{"room_id": room, "body": map[string]any{"text": "inner"}})
+	save(t, a, "quote", map[string]any{"room_id": room, "body": map[string]any{"text": "re"}, "reply_to": map[string]any{"message_id": inner}})
+}

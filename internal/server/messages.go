@@ -121,8 +121,14 @@ func (s *Server) saveMessage(c *client, req request) (any, bool, *rpcError) {
 		from = current.from
 	}
 	if hasReply {
-		if s.visibleMessageLocked(u, replyID) == nil || (replacing && replyID == messageID) {
+		target := s.visibleMessageLocked(u, replyID)
+		if target == nil || (replacing && replyID == messageID) {
 			return nil, false, invalidParams("reply_to must name another existing message")
+		}
+		// A reply names its target's message_id to everyone who sees the
+		// reply, so it may not name a message some of them cannot see.
+		if destination.revealsTo(s.rooms[target.roomID]) {
+			return nil, false, &rpcError{Code: codeDenied, Message: "A reply cannot quote a message that fewer people can see"}
 		}
 	}
 	if !replacing {
@@ -217,8 +223,13 @@ func (s *Server) commitSnapshotLocked(m *messageState, snapshot map[string]any, 
 	rooms := []*roomState{destination}
 	moved := m.roomID != "" && m.roomID != destination.id
 	if moved {
-		rooms = []*roomState{s.rooms[m.roomID], destination}
-		snapshot["prev_room_id"] = m.roomID
+		source := s.rooms[m.roomID]
+		rooms = []*roomState{source, destination}
+		// A move out of a room that some who see the destination cannot see,
+		// such as a private one, does not name it to them.
+		if !destination.revealsTo(source) {
+			snapshot["prev_room_id"] = m.roomID
+		}
 	}
 	m.logID = logID
 	m.roomID = destination.id
