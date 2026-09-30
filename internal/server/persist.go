@@ -9,8 +9,10 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/go-webauthn/webauthn/webauthn"
@@ -624,6 +626,21 @@ func (s *Server) removeStaleUploads(keep map[string]bool) {
 	}
 }
 
+// escapeMarkdown writes plain text as Markdown that renders as the same text:
+// inline markup characters are backslash-escaped everywhere, and block
+// markers (headings, quotes, list items, rules) at the start of a line.
+func escapeMarkdown(text string) string {
+	text = markdownInline.ReplaceAllString(text, `\$0`)
+	text = markdownBlock.ReplaceAllString(text, `$1\$2`)
+	return markdownOrdered.ReplaceAllString(text, `$1\$2`)
+}
+
+var (
+	markdownInline  = regexp.MustCompile("[\\\\`*_\\[\\]<>~|]")
+	markdownBlock   = regexp.MustCompile(`(?m)^([ \t]*)([#>+=-])`)
+	markdownOrdered = regexp.MustCompile(`(?m)^([ \t]*\d+)([.)])`)
+)
+
 // legacySystemIDs maps protocol v6 system identities to their v7 names
 // (Appendix A.1).
 var legacySystemIDs = map[string]string{"@server": "~server", "@room": roomNoticeID, "@private": privateNoticeID}
@@ -632,17 +649,22 @@ var legacySystemIDs = map[string]string{"@server": "~server", "@room": roomNotic
 // place: the rewritten entries are written back with the first batch.
 //
 //   - A room's intro_message becomes its description (§3.4): the text of
-//     the intro snapshot a logged room record embedded, and for a room's
-//     current record the text of the message's current snapshot. A deleted
-//     or empty intro leaves no description.
+//     the intro snapshot each logged room record embedded, escaped as
+//     Markdown when it was plain text, and the current record becomes the
+//     latest logged one. A deleted or empty intro leaves no description.
+//     The description is a copy: deleting the message later does not
+//     change it.
 //   - Messages from @server, @room, and @private are from ~server, ~room,
 //     and ~private (Appendix A.1).
 func (s *Server) migrateV6Locked(records map[int64]*logRecord, stored map[int64]storedRecord) {
 	introText := func(snapshot map[string]any) string {
 		body, _ := snapshot["body"].(map[string]any)
 		text, _ := body["text"].(string)
-		if snapshot["deleted"] == true {
+		if snapshot["deleted"] == true || strings.TrimSpace(text) == "" {
 			return ""
+		}
+		if body["format"] != "markdown" {
+			return escapeMarkdown(text)
 		}
 		return text
 	}
@@ -664,16 +686,15 @@ func (s *Server) migrateV6Locked(records map[int64]*logRecord, stored map[int64]
 		s.touchRecord(record)
 	}
 	for _, r := range s.rooms {
-		intro, ok := r.record["intro_message"].(map[string]any)
-		if !ok {
+		if _, ok := r.record["intro_message"]; !ok {
 			continue
 		}
-		delete(r.record, "intro_message")
-		id, _ := intro["message_id"].(string)
-		if m := s.messages[id]; m != nil {
-			if text := introText(m.snapshot()); text != "" {
-				r.record["description"] = text
-			}
+		// The current record is the latest logged one, migrated above, so
+		// the two agree at the same log_id.
+		if latest := records[r.recordLogID]; latest != nil && latest.kind == kindRoom {
+			r.record = latest.value()
+		} else {
+			delete(r.record, "intro_message")
 		}
 		s.touchRoom(r)
 	}

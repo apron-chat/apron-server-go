@@ -243,7 +243,7 @@ func TestRestoreMigratesProtocolV6State(t *testing.T) {
 	entry := func(kind, id, value string) store.Entry {
 		return store.Entry{Kind: kind, ID: id, Value: []byte(value)}
 	}
-	intro := `{"body":{"text":"Why the deploy failed"},"from":{"user_id":"alice"},"log_id":"1000","message_id":"1000","room_id":"general"}`
+	intro := `{"body":{"text":"Why *the* deploy failed\n- 4pm"},"from":{"user_id":"alice"},"log_id":"1000","message_id":"1000","room_id":"general"}`
 	edited := `{"body":{"text":"Why the 4pm deploy failed"},"from":{"user_id":"alice"},"log_id":"1003","message_id":"1000","prev_log_id":"1000","room_id":"general"}`
 	notice := `{"body":{"text":"@bob was removed by @alice"},"from":{"name":"General","user_id":"@room"},"log_id":"1002","message_id":"1002","room_id":"general"}`
 	if err := v6.Apply([]store.Entry{
@@ -263,15 +263,19 @@ func TestRestoreMigratesProtocolV6State(t *testing.T) {
 	check := func(httpServer *httptest.Server) {
 		t.Helper()
 		c := dialTestClient(t, httpServer)
-		// The logged record takes the intro snapshot it embedded; the current
-		// record the message's current text.
+		// The logged record takes the text of the intro snapshot it embedded,
+		// escaped as Markdown since it was plain text, and the current
+		// record, at the same log_id, agrees with it.
 		rooms := records(t, historyPage(t, c, "1001", map[string]any{}), "rooms")
-		want := map[string]any{"log_id": "1001", "parent_room_id": "general", "room_id": "1001", "title": "Why the deploy failed", "description": "Why the deploy failed"}
+		want := map[string]any{"log_id": "1001", "parent_room_id": "general", "room_id": "1001", "title": "Why the deploy failed", "description": "Why \\*the\\* deploy failed\n\\- 4pm"}
 		if len(rooms) != 1 || !reflect.DeepEqual(rooms[0], any(want)) {
 			t.Fatalf("migrated room records: %#v", rooms)
 		}
 		listed := listRooms(t, c, map[string]any{"room_id": "1001"})["not_joined"].([]any)
-		if room := listed[0].(map[string]any); room["description"] != "Why the 4pm deploy failed" || room["intro_message"] != nil {
+		room := listed[0].(map[string]any)
+		delete(room, "latest_log_id")
+		delete(room, "history_log_id")
+		if !reflect.DeepEqual(room, want) {
 			t.Fatalf("migrated current record: %#v", room)
 		}
 		messages := records(t, historyPage(t, c, "general", map[string]any{}), "messages")
@@ -362,10 +366,38 @@ func TestRolesAndWelcome(t *testing.T) {
 	if !reflect.DeepEqual(snapshot["from"], map[string]any{"user_id": adaID, "name": "Ada"}) {
 		t.Fatalf("recorded sender: %#v", snapshot["from"])
 	}
+	// room_update joined carries them too.
+	ada.userID = adaID
+	opsRoom, _ := saveRoom(t, ada, "ops", map[string]any{"title": "Ops"})
+	before, _ := guest.request(t, "room_join", "join-ops", map[string]any{"room_id": opsRoom})
+	var joinedRoles any
+	for _, user := range notificationParams(t, before[1], "room_update")["users"].([]any) {
+		if user.(map[string]any)["user_id"] == adaID {
+			joinedRoles = user.(map[string]any)["roles"]
+		}
+	}
+	if !reflect.DeepEqual(joinedRoles, []any{"admin", "moderator"}) {
+		t.Fatalf("room_update joined users: %#v", before)
+	}
+	ada.drain(t)
 	// An admin may remove others from any room they can see.
 	room, _ := saveRoom(t, guest, "room", map[string]any{"title": "Mine"})
 	ada.result(t, "room_leave", "remove", map[string]any{"room_id": room, "user_id": guest.userID})
 	expectMembership(t, guest, room, guest.userID, false)
 	roomUpdated(t, guest, "left")
 	guest.expectError(t, "room_leave", "remove-admin", map[string]any{"room_id": "general", "user_id": adaID}, codeDenied)
+}
+
+func TestEscapeMarkdown(t *testing.T) {
+	for text, want := range map[string]string{
+		"plain words":            "plain words",
+		"*bold* _it_ `code` [x]": `\*bold\* \_it\_ \` + "`" + `code\` + "`" + ` \[x\]`,
+		"# title\n> quote\n- item\n  + sub\n1. one\n2) two": "\\# title\n\\> quote\n\\- item\n  \\+ sub\n1\\. one\n2\\) two",
+		"a - b 1. c <tag> ~x~ |p|":                          `a - b 1. c \<tag\> \~x\~ \|p\|`,
+		`back\slash`:                                        `back\\slash`,
+	} {
+		if got := escapeMarkdown(text); got != want {
+			t.Errorf("escapeMarkdown(%q) = %q, want %q", text, got, want)
+		}
+	}
 }
