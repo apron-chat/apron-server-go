@@ -37,7 +37,7 @@ Defaults:
   codes with `--email.enable` (off by default), bearer-token resume,
   and `guest`; `server.signup` lists every one but `token`, which only
   resumes an account: a guest who registers a passkey or adds an address
-  becomes an account, and an email code for a new address creates one
+  becomes an account, and an email sign-in with a new address creates one
 - passkey RP ID: `localhost`; frontend origins: `http://localhost:5173` and
   `http://localhost:8080`
 - no `server.welcome` and no roles
@@ -155,7 +155,7 @@ state and reactions, read cursors, accounts (passkey and email users) with
 their credentials, addresses, profiles, memberships, and push registrations,
 unexpired sessions, finished uploads and their files, and the `log_id`,
 guest, account, and embed counters, so no `log_id` or `user_id` is reused.
-What does not: connections, request deduplication, email sign-in codes, and
+What does not: connections, request deduplication, email proposals, and
 live streams. Guests exist only while connected, so at start every guest
 left in the store is retired as if its last connection had just closed,
 logging its leaves; a write that had not finished fails, and its message is
@@ -257,7 +257,8 @@ capped at 64 characters; `avatar` must be an `https:` URL or a
 (at most 16 KiB of JSON) replaces the profile extension object. The result's `you` and the `user`
 notifications carry removed fields as their empty values (`""`, `{}`).
 Current user objects (`you`, `new` in `user`, and `users` in `room_list` and
-`room_update`) carry `avatar`, `ext`, and `roles`; recorded objects (`from` in messages
+`room_update`) carry `avatar`, `ext`, and `roles`, an account's `roles` always,
+`[]` when it holds none, so a role taken away clears it (§3.3); recorded objects (`from` in messages
 and reactions, `user` in memberships) carry only `user_id` and `name` as they
 were when logged. Room `members` are bare `{user_id}` objects whose complete
 objects are in the accompanying `users`.
@@ -279,9 +280,11 @@ server does not push a room list at
 sign-in: after `auth` the client lists its rooms with `room_list`, and later
 changes arrive as `room_update`. `auth` is a barrier: each
 connection's frames are processed one at a time, so requests sent right
-behind `auth`, such as `room_list` and `history`, run as the new identity, and
-are `denied` if the `auth` failed, or was a WebAuthn `begin` step or an email
-code request on a connection not yet signed in.
+behind `auth`, such as `room_list` and `history`, run with the authentication
+the `auth` left (§3.2). An `auth` that authenticates nothing, such as a
+failure, a WebAuthn `begin` step, or an email proposal, leaves it unchanged:
+requests behind it are `denied` on a connection not yet signed in, and run
+as before on one that is.
 
 A connection receives records only for the rooms its user has joined. A
 thread is a room like any other: its messages, reactions, and memberships go
@@ -290,7 +293,10 @@ when it is created or edited, as `room_update` `updated`, unless the thread is
 private.
 
 A room created with `private: true` is private for good: its record carries
-`private: true`, and it is visible only to its members. A user sees a room
+`private: true`, and it is visible only to its members. This server fixes
+`private` at creation (§4.3.4 lets it), so an edit keeps it whether it names
+it or not. A thread created without `private` takes its parent's, so a
+thread of a private room is private unless created with `private: false`. A user sees a room
 when they are a member of every private room among the room and the rooms
 it is a thread of: so a thread of a private room is visible only to that
 room's members, members of the thread included, and a private thread of a
@@ -323,10 +329,15 @@ the private room reacted. For the same reason a reply cannot quote a
 message that some who see the reply cannot see (`denied`): `reply_to` would
 name it.
 
-Every membership change is a logged record in the room's log, delivered to
-the room's members before and after the change (so to the joining or leaving
-user too) and returned in `history`'s `membership` array:
-`{"log_id", "room_id", "members": [{"user": {user_id, name}, "joined": true|false}]}`.
+Every membership change is a logged record in the room's log,
+`{"log_id", "room_id", "members": [{"user": {user_id, name}, "joined": true|false}]}`,
+returned in `history`'s `membership` array and delivered live in
+`room_update` `membership` (§4.3.3): the joining user's connections get one
+`room_update` with the room in `joined`, its `members` and `users`, and the
+membership; the leaving or removed user's get `left` and the membership;
+the room's other members get the membership alone. A new identity's join to
+`general` reaches its connection as the membership alone, before the `auth`
+result, since the client lists its rooms with `room_list`.
 The server logs memberships for every user, guests included: a new guest's
 join to `general` at `auth` (delivered to its connection before the `auth`
 result), `room_join` and `room_leave` (for oneself or another user), the
@@ -345,7 +356,7 @@ account's join to `general`, and a guest's leaves when it is retired.
   neither. `members` is complete unless the room has more than
   `--max-listed-members` (1000) members: then it lists that many, the most
   recently active (by their latest join or new message in the room), and the
-  room carries `member_count`, the total. The same holds for `room_update`
+  room carries `member_count`, the number of users who have joined it. The same holds for `room_update`
   `joined`. With `latest_log_id`, only rooms whose `latest_log_id` is greater
   are listed, and a result with `joined` also carries `left` (present even
   when empty): `[{room_id}]` of the rooms among those listed the user left or
@@ -354,18 +365,15 @@ account's join to `general`, and a guest's leaves when it is retired.
   the result, the server sends the read cursors it keeps for the listed rooms
   as `activity`: every member's for a joined room, only the caller's own for
   another.
-- `room_join` and `room_leave` take a `room_id` and return `{}`. Joining sends
-  the membership, then `room_update` `joined` with the room record, its
-  `members`, and `users` to the user's connections, then the result; joining
-  a room already joined logs nothing and re-sends `room_update` `joined` to
-  the calling connection only. Leaving sends the membership, then
-  `room_update` `left`, then the result; leaving a room not joined changes
-  nothing. Joining or leaving a room does not affect its threads, and no
+- `room_join` and `room_leave` take a `room_id` and return `{}` after the
+  `room_update`s above; joining a room already joined logs nothing and
+  re-sends `room_update` `joined` to the calling connection only, and
+  leaving a room not joined changes nothing. Joining or leaving a room does not affect its threads, and no
   `~room` messages are posted for joins and leaves.
 - With a `user_id` of another user, `room_join` adds that user and
-  `room_leave` removes them: the membership goes to the room's members, the
-  target's connections then get `room_update` `joined` or `left`, and the
-  caller the result. Any member of a room may add someone to it, which is how
+  `room_leave` removes them, delivered as any join or leave: the target's
+  connections get `joined` or `left` with the membership, the room's other
+  members, the caller among them, the membership alone. Any member of a room may add someone to it, which is how
   people join a private room; only the room's creator and users with the
   `admin` or `moderator` role may remove someone (`denied` otherwise). The
   user must exist (a connected guest or an account), or it is
@@ -373,12 +381,12 @@ account's join to `general`, and a guest's leaves when it is retired.
 - `room_set` without `room_id` creates a room (optional `parent_room_id`,
   `private`, `title`, `description`, `ext`) and joins only its creator,
   logging the room record and then the creator's membership; the creator's
-  connections receive `room_update` `joined` (with `members` and `users`, and
-  `latest_log_id` already the membership's), then the membership, then the
-  result. A new thread that is not private goes to the parent's other members
+  connections receive one `room_update` with the room in `joined` (with
+  `members` and `users`, and `latest_log_id` already the membership's) and
+  the membership, then the result. A new thread that is not private goes to the parent's other members
   as `room_update` `updated`, without joining them. With `room_id` it
   replaces every client field except `parent_room_id` and `private`, which
-  are fixed at creation, and omitted fields are cleared; the edit goes as
+  are fixed at creation and kept, and other omitted fields are cleared; the edit goes as
   `room_update` `updated` to the room's members, to the parent's members for
   a thread that is not private, and to the editor. Both return
   `{"room_id": ...}` after the `room_update`. Any authenticated user may
@@ -441,8 +449,8 @@ sent by clients is dropped: the server describes only media it hosts.
 
 New `upload` and `stream` embeds get a one-time write URL, listed in the
 `message` result as `embeds: [{embed_id, kind, write_url}]`, which follows the
-pending snapshot's broadcast. The sender PUTs
-or POSTs the content there. A write URL expires after five minutes unused,
+pending snapshot's broadcast. The sender PUTs the content there (§4.6.3);
+`POST`, which earlier versions allowed, is still accepted. A write URL expires after five minutes unused,
 and a write that never starts or fails is finished by publishing the message
 without the embed.
 
@@ -498,9 +506,9 @@ replies arrive before its result. Commands:
   the room. Only the room's creator and users with the `admin` or
   `moderator` role may kick (`denied` otherwise, so only they can kick in
   `general`). The removal is a logged leave membership with the
-  target as `user`, delivered to the room's members, the target included;
-  the target then receives `room_update` `left`, and the remaining members a
-  logged `~room` message (`from: {user_id: "~room", name: <room title>}`),
+  target as `user`: the target's connections receive `room_update` with
+  `left` and the membership, and the remaining members the membership alone
+  and then a logged `~room` message (`from: {user_id: "~room", name: <room title>}`),
   such as `@guest_3 was removed by @guest_1: spamming`. The reason is the first line
   of the rest of the text, at most 200 characters.
 
@@ -547,8 +555,11 @@ Frames must be I-JSON ([RFC 7493](https://www.rfc-editor.org/rfc/rfc7493)):
 a frame repeating an object key or holding invalid UTF-8 is a parse error.
 The server encodes JSON with `encoding/json/v2` and needs Go 1.27.
 
-Request IDs deduplicate per user, across all of that user's connections: a
-retry returns the original result without re-executing or rebroadcasting, a
+Request `id`s must be strings (§1). They deduplicate per user, across all
+of that user's connections: a retry is not executed or broadcast again, and
+its result reflects the current state (§1.2): a retried `me` answers with
+the current profile, a retried `message` or `command` lists only the write
+URLs still unused, and other results name what the request made. A
 concurrent duplicate waits for the original, and reuse with a different
 method or params is `invalid_params`. The latest 1,024 IDs per user are kept;
 failed requests are not cached, and neither are `history` and `room_list`,
@@ -645,85 +656,79 @@ With both nil only guest authentication is enabled.
 
 With email sign-in ([PROTOCOL.md §4.10](https://github.com/shazow/apron/blob/main/PROTOCOL.md#410-email-authentication)),
 `server.auth` and `server.signup` list `email`. An `auth` with
-`scheme: "email"` and `email` asks for a code and returns `{}`, whether or
-not the address has an account. It changes no authentication: on a
-connection not yet signed in, requests pipelined behind it are `denied`, and
-on one signed in they run as before. So does a denied code. A code is six
-digits, valid for ten minutes, and consumed by its use; five wrong attempts
-invalidate it. Codes are kept in memory only. Addresses are compared
-lowercased; one with a display name, an address literal such as
-`a@[10.0.0.5]`, or a domain without a dot such as `a@localhost` is
-`invalid_params`, and so is a malformed `name` or `user_id`, which leaves
-the code usable.
+`scheme: "email"` and `email` **proposes**, and one with `token`
+**approves**. A proposal returns `{}`, whether or not the address has an
+account, and authenticates nothing, so requests behind it keep the
+connection's authentication (§3.2). Addresses are compared lowercased; one
+with a display name, an address literal such as `a@[10.0.0.5]`, or a
+domain without a dot such as `a@localhost` is `invalid_params`, and so is a
+malformed `name` or `user_id`, which leaves the proposal usable.
 
-There are two kinds of code, and neither stands in for the other:
+A connection has one pending proposal, and a new one replaces it. It lasts
+ten minutes, is consumed when approved, and five wrong tokens on its
+connection invalidate it. Proposals are kept in memory only.
 
-- **Sign-in codes**, asked for on a connection not signed in. A newer one
-  replaces the address's earlier one. Presented on a connection not signed
-  in, a known address signs in to its account; an address new to the server
-  becomes a new account, which takes a requested `user_id` by the guests'
-  rules or else `user_<n>`, honors a requested `name`, and joins `general`,
-  delivered before the result. The result is `{you, token}`. Presented on a
-  connection signed in, a sign-in code is `denied`: it changes nothing.
-- **Add codes**, asked for on a connection signed in, add the address to that
-  account (§4.10): a guest becomes an account and keeps its `user_id`, rooms,
-  and messages. An account has one outstanding add code, replaced by its
-  next request, and others' requests for the address do not touch it. It is
-  accepted only on a connection signed in as that account, any of its
-  connections, and denied anywhere else, so it never signs anyone in. It is
-  sent only when the address could be added: no other account holds it,
-  which is never moved, and the account has no address yet; otherwise the
-  request still answers `{}` and the code, never sent, is `denied`. Its
-  email has no link. The result is `{you}`, and a `token` too when the
-  connection had none, as a guest's has not.
+- **Signing in**, proposed on a connection not signed in. The email carries
+  a six-digit code, which works only on the proposing connection, and, when
+  `--email.link-url` (or `--public-url`) is set, a link with a long token
+  (130 random bits), which works on any connection not signed in, such as
+  one the link opens. Approving it signs the presenting connection in, which
+  must not be signed in already: a known address to its account, an address
+  new to the server to a new account, which takes a requested `user_id`
+  (from the approval, else the proposal) by the guests' rules or else
+  `user_<n>`, honors a requested `name`, and joins `general`, delivered
+  before the result. The result is `{you, token}`. Either token presented on
+  a signed-in connection is `denied`, and the proposal stays.
+- **Adding** the address, proposed on a connection signed in, guests
+  included. The email carries only the code, which works only on the
+  proposing connection: a link would let someone propose adding their
+  victim's address to their own account and have the victim approve it by
+  clicking. It is sent only when the address could be added: no account
+  holds it, which is never moved, and the proposing account has no address
+  yet; otherwise the proposal still answers `{}`, and the code, never sent,
+  is `denied`. Approving adds the address to the proposing account, which a
+  guest becomes an account by, keeping its `user_id`, rooms, and messages,
+  and returns `{}`, with a `user` notification when the account's roles
+  change. A guest that added an address signs in with it later.
 
-A code proves only that its presenter reads the address's mail, not that the
-address belongs to whoever is signed in. Without this split, someone could
-ask for a code for their own address, get a person who is signed in to
-present it through a link, and then sign in to that person's account with
-it. To sign in with another address, use a new connection (sign out in the
-client).
+A sign-in link proves only that its presenter read the mail, so it never
+adds an address, and an addition's code never signs anyone in.
 
-Limits keep codes from being guessed or sent in floods. Each answers
+Limits keep proposals from flooding anyone with email. Each answers
 `retry_after` (`-32002`, with `data.retry_after` in seconds; PROTOCOL.md
 §1.1), whether or not the address has an account:
 
+- Per address: emails at least 30 seconds apart, and six an hour.
 - Per client (the connection's IP address, or its IPv6 /64; with
   `--client-ip-header` behind a reverse proxy, the address the proxy
-  reports): ten codes, then one every three minutes; ten wrong codes, then
-  one every six minutes, across every address, which bounds untargeted
-  guessing to about ten guesses an hour per client against a million codes.
-- Per address, in any hour: six codes at least 30 seconds apart, and thirty
-  wrong codes from anyone. Past thirty, codes for the address are refused,
-  the right one included, until the oldest wrong code is an hour old.
-- Per connection: five codes, then one every two minutes.
-- At most sixteen deliveries at once.
+  reports): ten proposals, then one every three minutes.
+- Per connection: five proposals, then one every two minutes.
+- At most sixteen deliveries at once, and 10,000 outstanding links.
 
-The server tracks at most 10,000 addresses and 100,000 clients. A request
-that is refused records nothing, and an address is tracked only once a
-code is sent to it or a wrong code is tried against it. When a table is
-full, the server forgets the least recently used entry that holds nothing
-that matters: for an address, only past send times, never a live code or
-wrong codes of the last hour; for a client, one whose budgets are full
-again. When it finds none, a new code request is `retry_after`. Filling the
-address table that way takes 10,000 codes actually sent, or wrong codes
-tried, which the per-client limits spread over hundreds of clients
-in an hour, so it needs many clients each spending its own budget.
+A code can be guessed only on the connection that proposed it, five tries a
+proposal, and each proposal emails its address, so the per-address limit
+bounds guessing to thirty tries an hour against a million codes; a link
+token cannot be guessed.
 
-Guessers spread over many clients can still keep one address from email
-sign-in, thirty wrong codes an hour, though they gain only thirty guesses an
-hour against it; a passkey or a kept token still signs in.
+The server tracks at most 10,000 addresses and 100,000 clients. A proposal
+that is refused records nothing, and an address is tracked only once an
+email is sent to it. When a table is full, the server forgets the least
+recently used entry whose limit has lapsed, an address with no email in the
+last hour or a client whose budget is full again; when it finds none, a new
+proposal is `retry_after`. Filling the address table takes 10,000 emails
+actually sent, which the per-client limits spread over hundreds of clients
+in an hour.
 
 Email accounts are kept like passkey users, and an account may have both: a
 passkey registered on a signed-in connection is added to that account
 (§4.9). The address is never sent to clients.
 
-A sign-in code's email carries the code and, when `--email.link-url` (or
-`--public-url`) is set, a link to that page with the address, the code, and, with
-`--public-url`, this server's WebSocket URL in the fragment, form-encoded
-and in that order:
-`https://chat.example/#email=ada%40example.com&token=418092&server=wss%3A%2F%2Fchat.example%2Fws`.
-A client reads it to sign in, on a new connection, to the server named.
+A sign-in link opens that page with the token in the fragment, and, with
+`--public-url`, this server's WebSocket URL (§4.10's suggested convention),
+form-encoded:
+`https://chat.example/#token=Hk41x9…&server=wss%3A%2F%2Fchat.example%2Fws`.
+A client reads it to sign in, on a connection not signed in, to the server
+named.
 The log sender, for development, writes codes and links to the server log
 instead of sending them; use `smtp` in a deployment:
 
