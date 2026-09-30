@@ -8,6 +8,7 @@ import (
 	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"io/fs"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -124,6 +125,11 @@ type Config struct {
 	// EmailSender enables email sign-in (§4.10) and delivers its codes; nil
 	// disables it. LogEmailSender logs codes, for development.
 	EmailSender EmailSender
+	// ClientIPHeader names the request header a reverse proxy puts the
+	// client's address in, such as X-Forwarded-For (its last entry is
+	// used) or X-Real-IP, for per-client rate limits. Empty uses the
+	// connection's own address. Set it only behind a proxy that sets it.
+	ClientIPHeader string
 	// EmailLinkURL is the page sign-in links open, such as
 	// https://chat.example/, with the address and code in its fragment.
 	// Empty sends codes without a link.
@@ -318,9 +324,11 @@ type client struct {
 	origin   string
 	ceremony *passkeyCeremony
 	token    [32]byte
-	// emailSends limits the email sign-in codes requested on the
-	// connection. Guarded by server.mu.
+	// emailSends limits the email codes requested on the connection, and
+	// clientKey names its client address for the limits of all its
+	// connections (email.go). Guarded by server.mu.
 	emailSends *rate.Limiter
+	clientKey  string
 	// away reports that nobody is attending the connection (§4.4). Guarded
 	// by server.mu.
 	away bool
@@ -389,10 +397,10 @@ type Server struct {
 	passkeys    map[string]*passkeyUser
 	credentials map[string]*passkeyUser
 	sessions    map[[32]byte]session
-	// emails maps sign-in addresses to their accounts; emailAddresses holds
-	// each address's outstanding code and budgets, in memory only.
-	emails         map[string]*userState
-	emailAddresses map[string]*emailAddress
+	// emails maps sign-in addresses to their accounts; email holds the
+	// outstanding codes and budgets, in memory only.
+	emails map[string]*userState
+	email  emailState
 	// mailing tracks email deliveries in progress, which Shutdown awaits.
 	mailing sync.WaitGroup
 
@@ -419,25 +427,25 @@ func Open(config Config) (*Server, error) {
 		config.Store = store.NewMemory()
 	}
 	s := &Server{
-		config:         config,
-		rooms:          make(map[string]*roomState),
-		messages:       make(map[string]*messageState),
-		clients:        make(map[*client]struct{}),
-		users:          make(map[string]*userState),
-		usedIDs:        make(map[string]bool),
-		grantedIDs:     make(map[string]bool),
-		embeds:         make(map[string]*embedState),
-		writes:         make(map[string]*embedState),
-		uploads:        list.New(),
-		pushes:         make(map[string]*pushRegistration),
-		passkeys:       make(map[string]*passkeyUser),
-		credentials:    make(map[string]*passkeyUser),
-		sessions:       make(map[[32]byte]session),
-		emails:         make(map[string]*userState),
-		emailAddresses: make(map[string]*emailAddress),
-		dirty:          newDirtySet(),
-		storeWrites:    make(chan []store.Entry, storeQueue),
-		storeDone:      make(chan struct{}),
+		config:      config,
+		rooms:       make(map[string]*roomState),
+		messages:    make(map[string]*messageState),
+		clients:     make(map[*client]struct{}),
+		users:       make(map[string]*userState),
+		usedIDs:     make(map[string]bool),
+		grantedIDs:  make(map[string]bool),
+		embeds:      make(map[string]*embedState),
+		writes:      make(map[string]*embedState),
+		uploads:     list.New(),
+		pushes:      make(map[string]*pushRegistration),
+		passkeys:    make(map[string]*passkeyUser),
+		credentials: make(map[string]*passkeyUser),
+		sessions:    make(map[[32]byte]session),
+		emails:      make(map[string]*userState),
+		email:       newEmailState(),
+		dirty:       newDirtySet(),
+		storeWrites: make(chan []store.Entry, storeQueue),
+		storeDone:   make(chan struct{}),
 	}
 	for _, holders := range config.Roles {
 		for _, holder := range holders {
@@ -590,12 +598,13 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	ws.SetReadLimit(s.config.ReadLimit)
 
 	c := &client{
-		server:  s,
-		ws:      ws,
-		out:     make(chan outboundBatch, s.config.OutgoingQueue),
-		done:    make(chan struct{}),
-		origin:  r.Header.Get("Origin"),
-		baseURL: s.baseURL(r),
+		server:    s,
+		ws:        ws,
+		out:       make(chan outboundBatch, s.config.OutgoingQueue),
+		done:      make(chan struct{}),
+		origin:    r.Header.Get("Origin"),
+		clientKey: clientKey(s.clientIP(r)),
+		baseURL:   s.baseURL(r),
 	}
 	go c.writeLoop()
 	go c.pingLoop()
@@ -646,6 +655,22 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		// is read, which makes auth a barrier (§3.2).
 		s.processFrame(c, payload)
 	}
+}
+
+// clientIP is the address of the client that opened a request: the last
+// entry of Config.ClientIPHeader when set, else the connection's address.
+func (s *Server) clientIP(r *http.Request) string {
+	if header := s.config.ClientIPHeader; header != "" {
+		values := strings.Split(r.Header.Get(header), ",")
+		if ip := strings.TrimSpace(values[len(values)-1]); ip != "" {
+			return ip
+		}
+	}
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr
+	}
+	return host
 }
 
 // baseURL is the configured PublicURL or the scheme and host the WebSocket

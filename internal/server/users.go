@@ -532,7 +532,7 @@ func (s *Server) grantRolesLocked(u *userState) bool {
 			if slices.ContainsFunc(holders, func(holder string) bool {
 				return strings.EqualFold(holder, u.id) || (u.email != "" && strings.EqualFold(holder, u.email))
 			}) {
-				roles = append(roles, role)
+				roles = append(roles, strings.ToLower(role))
 			}
 		}
 		slices.Sort(roles)
