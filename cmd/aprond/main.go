@@ -65,7 +65,7 @@ type Options struct {
 	Email struct {
 		Enable       bool   `long:"enable" description:"Offer email sign-in (off by default)"`
 		Sender       string `long:"sender" default:"smtp" choice:"smtp" choice:"log" description:"How email sign-in codes are delivered, with --email.enable: smtp sends them, log writes them to the server log (development only; refused with --public-url or --tls.domain)"`
-		LinkURL      string `long:"link-url" description:"Page that sign-in links in emails open, such as https://chat.example/, with the address and code in its fragment (default: --public-url; empty sends codes without links)"`
+		LinkURL      string `long:"link-url" description:"Page that sign-in links in emails open, such as https://chat.example/, with a sign-in token in its fragment (default: --public-url; empty sends codes without links)"`
 		From         string `long:"from" description:"Sender address of sign-in emails, for --email.sender smtp"`
 		SMTPAddr     string `long:"smtp-addr" description:"SMTP relay as host:port, for --email.sender smtp: STARTTLS is required (such as :587), or TLS from the start on port 465"`
 		SMTPUser     string `long:"smtp-user" description:"SMTP user name; empty sends without authentication"`

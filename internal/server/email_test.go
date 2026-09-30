@@ -51,101 +51,62 @@ func emailTestServer(t *testing.T, configure func(*Config)) (*Server, testMailbo
 	return app, mailbox, httpServer
 }
 
-// requestCode asks for a code for email on c, which must be answered with {}.
-func requestCode(t *testing.T, c *testClient, email string) {
+// propose proposes an email sign-in or addition on c, which must be answered
+// with {} (§4.10).
+func propose(t *testing.T, c *testClient, email string) {
 	t.Helper()
-	if result := c.result(t, "auth", c.nextID("code"), map[string]any{"scheme": "email", "email": email}); len(result) != 0 {
-		t.Fatalf("code request result: %#v", result)
+	if result := c.result(t, "auth", c.nextID("propose"), map[string]any{"scheme": "email", "email": email}); len(result) != 0 {
+		t.Fatalf("proposal result: %#v", result)
 	}
 }
 
-// emailSignIn signs c in with a code and returns the notifications before
-// the result, then the result.
-func emailSignIn(t *testing.T, c *testClient, email, code string, extra map[string]any) ([]map[string]any, map[string]any) {
+// approve approves a proposal on c with token and returns the notifications
+// before the result, then the result.
+func approve(t *testing.T, c *testClient, token string, extra map[string]any) ([]map[string]any, map[string]any) {
 	t.Helper()
-	params := map[string]any{"scheme": "email", "email": email, "token": code}
+	params := map[string]any{"scheme": "email", "token": token}
 	for key, value := range extra {
 		params[key] = value
 	}
-	before, result := c.request(t, "auth", c.nextID("email"), params)
+	return c.request(t, "auth", c.nextID("approve"), params)
+}
+
+// signInByEmail approves a sign-in and returns the notifications before the
+// result, then the result, which must carry you and a token.
+func signInByEmail(t *testing.T, c *testClient, token string, extra map[string]any) ([]map[string]any, map[string]any) {
+	t.Helper()
+	before, result := approve(t, c, token, extra)
 	if _, ok := result["token"].(string); !ok {
-		t.Fatalf("email sign-in result without a token: %#v", result)
+		t.Fatalf("sign-in result without a token: %#v", result)
 	}
 	c.userID = result["you"].(map[string]any)["user_id"].(string)
 	return before, result
 }
 
-func TestEmailSignIn(t *testing.T) {
-	app, mailbox, httpServer := emailTestServer(t, func(config *Config) { config.PublicURL = "https://chat.example/app/" })
-	requester, frame := dialRaw(t, httpServer)
-	params := frame["params"].(map[string]any)
-	if !reflect.DeepEqual(params["auth"], []any{"email", "token", "guest"}) || !reflect.DeepEqual(params["signup"], []any{"email", "guest"}) {
-		t.Fatalf("auth schemes: %#v, signup %#v", params["auth"], params["signup"])
+// linkToken is the token in a sign-in email's link.
+func linkToken(t *testing.T, message SignInEmail) string {
+	t.Helper()
+	_, fragment, _ := strings.Cut(message.Link, "#token=")
+	token, _, _ := strings.Cut(fragment, "&")
+	if token == "" {
+		t.Fatalf("no link token in %q", message.Link)
 	}
-
-	// Asking for a code authenticates nothing, so requests behind it are
-	// denied; the address is normalized.
-	requester.write(t, map[string]any{"method": "auth", "id": "code", "params": map[string]any{"scheme": "email", "email": " Ada@Example.com "}})
-	requester.write(t, map[string]any{"method": "room_list", "id": "list", "params": map[string]any{}})
-	if reply := requester.read(t); reply["id"] != "code" || len(reply["result"].(map[string]any)) != 0 {
-		t.Fatalf("code request reply: %#v", reply)
-	}
-	if reply := requester.read(t); reply["id"] != "list" || reply["error"].(map[string]any)["code"] != float64(codeDenied) {
-		t.Fatalf("request behind a code request: %#v", reply)
-	}
-	message := mailbox.receive(t)
-	if message.To != "ada@example.com" || len(message.Code) != 6 || strings.Trim(message.Code, "0123456789") != "" {
-		t.Fatalf("sent: %#v", message)
-	}
-	// The link is built from the configured page, with the address, the
-	// code, and this server's WebSocket URL in its fragment, in that order.
-	want := "https://chat.example/login#email=ada%40example.com&token=" + message.Code + "&server=wss%3A%2F%2Fchat.example%2Fapp%2Fws"
-	if message.Link != want {
-		t.Fatalf("link %q, want %q", message.Link, want)
-	}
-	if !strings.Contains(message.Text(), message.Code) || !strings.Contains(message.Text(), message.Link) {
-		t.Fatalf("text: %q", message.Text())
-	}
-	// Another code for the address so soon is retry_after.
-	requester.expectError(t, "auth", "again", map[string]any{"scheme": "email", "email": "ada@example.com"}, codeRetryAfter)
-	requester.expectError(t, "auth", "invalid", map[string]any{"scheme": "email", "email": "Ada <ada@example.com>"}, codeInvalidParams)
-	requester.expectError(t, "auth", "missing", map[string]any{"scheme": "email"}, codeInvalidParams)
-
-	// The sign-in happens on the connection that presents the code: a new
-	// account, which joins general like a new guest, before the result.
-	reader, _ := dialRaw(t, httpServer)
-	reader.expectError(t, "auth", "wrong", map[string]any{"scheme": "email", "email": "ada@example.com", "token": "wrong"}, codeDenied)
-	reader.expectError(t, "auth", "other", map[string]any{"scheme": "email", "email": "bob@example.com", "token": message.Code}, codeDenied)
-	before, result := emailSignIn(t, reader, "ada@example.com", message.Code, map[string]any{"name": "Ada", "user_id": "ada"})
-	if you := result["you"].(map[string]any); you["user_id"] != "ada" || you["name"] != "Ada" {
-		t.Fatalf("new account: %#v", result)
-	}
-	if len(before) != 1 {
-		t.Fatalf("frames before the sign-in result: %#v", before)
-	}
-	checkMembership(t, membershipOnly(t, before[0]), "general", "ada", true)
-	// A code works once.
-	third, _ := dialRaw(t, httpServer)
-	third.expectError(t, "auth", "reuse", map[string]any{"scheme": "email", "email": "ada@example.com", "token": message.Code}, codeDenied)
-	// The bearer token resumes the account on later connections.
-	resumed := third.result(t, "auth", "resume", map[string]any{"scheme": "token", "token": result["token"]})
-	if resumed["you"].(map[string]any)["user_id"] != "ada" || resumed["token"] != result["token"] {
-		t.Fatalf("token resume: %#v", resumed)
-	}
-	// Signing in again with the address finds the same account.
-	setCode(app, "ada@example.com", "123456", time.Minute)
-	fourth, _ := dialRaw(t, httpServer)
-	if _, again := emailSignIn(t, fourth, "ada@example.com", "123456", map[string]any{"user_id": "other"}); again["you"].(map[string]any)["user_id"] != "ada" {
-		t.Fatalf("second sign-in: %#v", again)
-	}
+	return token
 }
 
-// setCode gives an address an outstanding sign-in code that expires after
-// ttl.
-func setCode(app *Server, email, code string, ttl time.Duration) {
+// pendingCode is the code of the proposal pending on a connection of
+// userID, which may not have been sent.
+func pendingCode(t *testing.T, app *Server, userID string) string {
+	t.Helper()
 	app.mu.Lock()
 	defer app.mu.Unlock()
-	app.email.createAddress(email, time.Now()).signIn = &emailCode{code: code, expires: time.Now().Add(ttl)}
+	for c := range app.clients {
+		if c.user != nil && c.user.id == userID && c.proposal != nil {
+			return c.proposal.code
+		}
+	}
+	t.Fatalf("no proposal pending for %s", userID)
+	return ""
 }
 
 // ageSends moves an address's sends back by d, as if time had passed.
@@ -157,19 +118,6 @@ func ageSends(app *Server, email string, d time.Duration) {
 			state.sends[i] = state.sends[i].Add(-d)
 		}
 	}
-}
-
-// addCode is the add code an account has outstanding, which is not sent
-// when the address could not be added.
-func addCode(t *testing.T, app *Server, userID string) string {
-	t.Helper()
-	app.mu.Lock()
-	defer app.mu.Unlock()
-	add := app.email.adds[userID]
-	if add == nil {
-		t.Fatalf("no add code for %s", userID)
-	}
-	return add.code
 }
 
 // dialFrom connects as a client at ip, for a server that reads
@@ -188,17 +136,88 @@ func dialFrom(t *testing.T, httpServer *httptest.Server, ip string) *testClient 
 	return c
 }
 
-// A code request is answered with the same {} and nothing else whether or
-// not the address has an account.
-func TestEmailCodeRequestsDoNotRevealAccounts(t *testing.T) {
+func TestEmailSignIn(t *testing.T) {
+	app, mailbox, httpServer := emailTestServer(t, func(config *Config) { config.PublicURL = "https://chat.example/app/" })
+	proposer, frame := dialRaw(t, httpServer)
+	params := frame["params"].(map[string]any)
+	if !reflect.DeepEqual(params["auth"], []any{"email", "token", "guest"}) || !reflect.DeepEqual(params["signup"], []any{"email", "guest"}) {
+		t.Fatalf("auth schemes: %#v, signup %#v", params["auth"], params["signup"])
+	}
+
+	// A proposal authenticates nothing, so on a connection not signed in the
+	// requests behind it are still denied; the address is normalized.
+	proposer.write(t, map[string]any{"method": "auth", "id": "propose", "params": map[string]any{"scheme": "email", "email": " Ada@Example.com "}})
+	proposer.write(t, map[string]any{"method": "room_list", "id": "list", "params": map[string]any{}})
+	if reply := proposer.read(t); reply["id"] != "propose" || len(reply["result"].(map[string]any)) != 0 {
+		t.Fatalf("proposal reply: %#v", reply)
+	}
+	if reply := proposer.read(t); reply["id"] != "list" || reply["error"].(map[string]any)["code"] != float64(codeDenied) {
+		t.Fatalf("request behind a proposal: %#v", reply)
+	}
+	message := mailbox.receive(t)
+	if message.To != "ada@example.com" || message.Add || len(message.Code) != 6 || strings.Trim(message.Code, "0123456789") != "" {
+		t.Fatalf("sent: %#v", message)
+	}
+	// The link is built from the configured page, with an unguessable token
+	// and this server's WebSocket URL in its fragment, and no address.
+	link := linkToken(t, message)
+	want := "https://chat.example/login#token=" + link + "&server=wss%3A%2F%2Fchat.example%2Fapp%2Fws"
+	if message.Link != want || len(link) < 26 || strings.Contains(message.Link, "ada") {
+		t.Fatalf("link %q, want %q", message.Link, want)
+	}
+	if !strings.Contains(message.Text(), message.Code) || !strings.Contains(message.Text(), message.Link) {
+		t.Fatalf("text: %q", message.Text())
+	}
+	// Another proposal for the address so soon is retry_after.
+	proposer.expectError(t, "auth", "again", map[string]any{"scheme": "email", "email": "ada@example.com"}, codeRetryAfter)
+	proposer.expectError(t, "auth", "invalid", map[string]any{"scheme": "email", "email": "Ada <ada@example.com>"}, codeInvalidParams)
+	proposer.expectError(t, "auth", "missing", map[string]any{"scheme": "email"}, codeInvalidParams)
+
+	// The code works only on the proposing connection; the link token on
+	// any connection not signed in, which it signs in: a new account, which
+	// joins general, before the result.
+	reader, _ := dialRaw(t, httpServer)
+	reader.expectError(t, "auth", "code-elsewhere", map[string]any{"scheme": "email", "token": message.Code}, codeDenied)
+	reader.expectError(t, "auth", "wrong", map[string]any{"scheme": "email", "token": "wrong"}, codeDenied)
+	before, result := signInByEmail(t, reader, link, map[string]any{"name": "Ada", "user_id": "ada"})
+	if you := result["you"].(map[string]any); you["user_id"] != "ada" || you["name"] != "Ada" {
+		t.Fatalf("new account: %#v", result)
+	}
+	if len(before) != 1 {
+		t.Fatalf("frames before the sign-in result: %#v", before)
+	}
+	checkMembership(t, membershipOnly(t, before[0]), "general", "ada", true)
+	// The proposal is consumed: neither token works again.
+	third, _ := dialRaw(t, httpServer)
+	third.expectError(t, "auth", "reuse", map[string]any{"scheme": "email", "token": link}, codeDenied)
+	proposer.expectError(t, "auth", "code-after", map[string]any{"scheme": "email", "token": message.Code}, codeDenied)
+	// The bearer token resumes the account on later connections.
+	resumed := third.result(t, "auth", "resume", map[string]any{"scheme": "token", "token": result["token"]})
+	if resumed["you"].(map[string]any)["user_id"] != "ada" || resumed["token"] != result["token"] {
+		t.Fatalf("token resume: %#v", resumed)
+	}
+	// Signing in again with the code, on the proposing connection, finds
+	// the same account.
+	ageSends(app, "ada@example.com", time.Minute)
+	fourth, _ := dialRaw(t, httpServer)
+	propose(t, fourth, "ada@example.com")
+	if _, again := signInByEmail(t, fourth, mailbox.receive(t).Code, map[string]any{"user_id": "other"}); again["you"].(map[string]any)["user_id"] != "ada" {
+		t.Fatalf("second sign-in: %#v", again)
+	}
+}
+
+// A proposal is answered with the same {} and nothing else whether or not
+// the address has an account.
+func TestEmailProposalsDoNotRevealAccounts(t *testing.T) {
 	app, mailbox, httpServer := emailTestServer(t, nil)
-	setCode(app, "ada@example.com", "123456", time.Minute)
 	c, _ := dialRaw(t, httpServer)
-	emailSignIn(t, c, "ada@example.com", "123456", nil)
+	propose(t, c, "ada@example.com")
+	signInByEmail(t, c, mailbox.receive(t).Code, nil)
+	ageSends(app, "ada@example.com", time.Minute)
 	var replies [][]map[string]any
 	for _, email := range []string{"ada@example.com", "nobody@example.com"} {
 		asker, _ := dialRaw(t, httpServer)
-		before, result := asker.request(t, "auth", "code", map[string]any{"scheme": "email", "email": email})
+		before, result := asker.request(t, "auth", "propose", map[string]any{"scheme": "email", "email": email})
 		asker.expectQuiet(t)
 		replies = append(replies, append(before, result))
 		mailbox.receive(t)
@@ -208,14 +227,14 @@ func TestEmailCodeRequestsDoNotRevealAccounts(t *testing.T) {
 	}
 }
 
-// A code request, or a denied code, changes no authentication, so on a
+// A proposal, or a denied approval, changes no authentication, so on a
 // connection signed in the requests behind it run as before (§3.2).
 func TestEmailRequestsLeaveAuthenticationAlone(t *testing.T) {
 	_, mailbox, httpServer := emailTestServer(t, nil)
 	c := dialTestClient(t, httpServer)
 	for _, params := range []map[string]any{
 		{"scheme": "email", "email": "ada@example.com"},
-		{"scheme": "email", "email": "ada@example.com", "token": "000000"},
+		{"scheme": "email", "token": "000000"},
 	} {
 		auth, list := c.nextID("auth"), c.nextID("list")
 		c.write(t, map[string]any{"method": "auth", "id": auth, "params": params})
@@ -232,12 +251,12 @@ func TestEmailRequestsLeaveAuthenticationAlone(t *testing.T) {
 	}
 }
 
-// On a signed-in connection a code only adds the address to that account,
-// and only a code that account asked for: a sign-in link for an attacker's
-// address, presented by a signed-in victim, is denied, so the attacker
-// cannot later sign in as the victim. An account's add code has no link, is
-// not replaced by others' requests for the address, and never signs in.
-func TestEmailCodesAddToTheAccountThatAskedForThem(t *testing.T) {
+// On a signed-in connection a proposal is to add the address to that
+// account, by a code only that connection can present, whose email has no
+// link. A sign-in link presented by someone signed in is denied, so an
+// attacker's link cannot join the attacker's address to their account, and
+// an address is never taken from another account.
+func TestEmailAdditions(t *testing.T) {
 	app, mailbox, httpServer := emailTestServer(t, func(config *Config) {
 		config.WebAuthn = testWebAuthn(t)
 		config.Roles = map[string][]string{"admin": {"victim@example.com"}}
@@ -248,56 +267,54 @@ func TestEmailCodesAddToTheAccountThatAskedForThem(t *testing.T) {
 	diary, _ := saveRoom(t, victim, "diary", map[string]any{"title": "Diary", "private": true})
 	secret, _ := save(t, victim, "secret", map[string]any{"room_id": diary, "body": map[string]any{"text": "my secret"}})
 
-	// The takeover: the attacker's code, presented by the signed-in victim,
-	// is denied and changes nothing.
+	// The attacker's sign-in link, presented by the signed-in victim, is
+	// denied and changes nothing; it still signs its own proposer in, to an
+	// account of its own.
 	attacker, _ := dialRaw(t, httpServer)
-	requestCode(t, attacker, "mallory@evil.example")
-	code := mailbox.receive(t).Code
-	victim.expectError(t, "auth", "link", map[string]any{"scheme": "email", "email": "mallory@evil.example", "token": code}, codeDenied)
-	app.mu.RLock()
-	stolen := app.emails["mallory@evil.example"]
-	app.mu.RUnlock()
-	if stolen != nil {
-		t.Fatalf("the attacker's address was added to %s", stolen.id)
-	}
-	// The code still signs its own requester in, to an account of its own.
+	propose(t, attacker, "mallory@evil.example")
+	link := linkToken(t, mailbox.receive(t))
+	victim.expectError(t, "auth", "link", map[string]any{"scheme": "email", "token": link}, codeDenied)
 	later, _ := dialRaw(t, httpServer)
-	if _, result := emailSignIn(t, later, "mallory@evil.example", code, nil); result["you"].(map[string]any)["user_id"] == victim.userID {
+	if _, result := signInByEmail(t, later, link, nil); result["you"].(map[string]any)["user_id"] == victim.userID {
 		t.Fatalf("the attacker became the victim: %#v", result)
 	}
 	later.expectError(t, "history", "diary", map[string]any{"room_id": diary}, codeInvalidParams)
 	victim.drain(t)
-	// Nor can an account take another account's address: no code is sent,
-	// and the one kept is denied.
-	ageSends(app, "mallory@evil.example", time.Hour)
-	requestCode(t, victim, "mallory@evil.example")
-	victim.expectError(t, "auth", "owned", map[string]any{"scheme": "email", "email": "mallory@evil.example", "token": addCode(t, app, victim.userID)}, codeDenied)
 
-	// The victim asks to add their own address: the email has no link.
-	requestCode(t, victim, "victim@example.com")
+	// Nor can an account take another account's address: nothing is sent,
+	// and the pending code is denied.
+	ageSends(app, "mallory@evil.example", time.Hour)
+	propose(t, victim, "mallory@evil.example")
+	approveOwned := pendingCode(t, app, victim.userID)
+	victim.expectError(t, "auth", "owned", map[string]any{"scheme": "email", "token": approveOwned}, codeDenied)
+
+	// The victim proposes adding their own address: the email has no link.
+	propose(t, victim, "victim@example.com")
 	message := mailbox.receive(t)
 	if !message.Add || message.Link != "" || !strings.Contains(message.Text(), "add this address") {
-		t.Fatalf("add code email: %#v", message)
+		t.Fatalf("addition email: %#v", message)
 	}
-	// Someone else asking for a code for the address meanwhile does not
-	// replace it, and the add code signs nobody in elsewhere.
+	// Someone else's proposal for the address does not touch it, and the
+	// code works on no other connection.
 	ageSends(app, "victim@example.com", time.Minute)
 	other, _ := dialRaw(t, httpServer)
-	requestCode(t, other, "victim@example.com")
+	propose(t, other, "victim@example.com")
 	mailbox.receive(t)
-	other.expectError(t, "auth", "elsewhere", map[string]any{"scheme": "email", "email": "victim@example.com", "token": message.Code}, codeDenied)
-	// It adds the address to the guest, which becomes an account keeping
-	// its messages, with the roles its address was granted and a token to
-	// come back with.
-	before, result := emailSignIn(t, victim, "victim@example.com", message.Code, nil)
-	you := result["you"].(map[string]any)
-	if you["user_id"] != victim.userID || !reflect.DeepEqual(you["roles"], []any{"admin"}) || len(before) != 0 {
-		t.Fatalf("adding an address: %#v after %#v", result, before)
+	other.expectError(t, "auth", "elsewhere", map[string]any{"scheme": "email", "token": message.Code}, codeDenied)
+	// Approving adds the address to the guest, which becomes an account
+	// keeping its messages, with the roles its address was granted: {} and
+	// a user notification with the new roles.
+	before, result := approve(t, victim, message.Code, nil)
+	if len(result) != 0 || len(before) != 1 {
+		t.Fatalf("approving an addition: %#v after %#v", result, before)
+	}
+	if you := notificationParams(t, before[0], "user")["you"].(map[string]any); !reflect.DeepEqual(you["roles"], []any{"admin"}) {
+		t.Fatalf("profile after the addition: %#v", you)
 	}
 	save(t, victim, "edit", map[string]any{"message_id": secret, "room_id": diary, "body": map[string]any{"text": "still mine"}})
 	// An account holds one address.
-	requestCode(t, victim, "second@example.com")
-	victim.expectError(t, "auth", "second", map[string]any{"scheme": "email", "email": "second@example.com", "token": addCode(t, app, victim.userID)}, codeDenied)
+	propose(t, victim, "second@example.com")
+	victim.expectError(t, "auth", "second", map[string]any{"scheme": "email", "token": pendingCode(t, app, victim.userID)}, codeDenied)
 
 	// A passkey registration on the signed-in account adds the passkey to
 	// it (§4.9), and signs in to it later.
@@ -316,27 +333,21 @@ func TestEmailCodesAddToTheAccountThatAskedForThem(t *testing.T) {
 	// The address signs in on a connection not signed in.
 	ageSends(app, "victim@example.com", time.Hour)
 	fresh, _ := dialRaw(t, httpServer)
-	requestCode(t, fresh, "victim@example.com")
-	if _, again := emailSignIn(t, fresh, "victim@example.com", mailbox.receive(t).Code, nil); again["you"].(map[string]any)["user_id"] != victim.userID {
+	propose(t, fresh, "victim@example.com")
+	if _, again := signInByEmail(t, fresh, mailbox.receive(t).Code, nil); again["you"].(map[string]any)["user_id"] != victim.userID {
 		t.Fatalf("sign-in with the account's address: %#v", again)
 	}
 }
 
-// A passkey account adds an address with a code asked for on one of its
-// connections and presented on another; the result keeps the connection's
-// token.
+// A passkey account adds an address on the connection that proposed it.
 func TestEmailAddsToAPasskeyAccount(t *testing.T) {
 	app, mailbox, httpServer := emailTestServer(t, func(config *Config) { config.WebAuthn = testWebAuthn(t) })
 	owner, _ := dialOrigin(t, httpServer, testPasskeyOrigin)
 	registered := registerTestPasskey(t, owner, newTestAuthenticator(t))
 	ownerID := registered["you"].(map[string]any)["user_id"]
 	owner.drain(t)
-	requestCode(t, owner, "owner@example.com")
-	second, _ := dialOrigin(t, httpServer, testPasskeyOrigin)
-	passkeyResult(t, passkeyCall(t, second, "resume", "token", "", map[string]any{"token": registered["token"]}))
-	second.drain(t)
-	result := second.result(t, "auth", "add", map[string]any{"scheme": "email", "email": "owner@example.com", "token": mailbox.receive(t).Code})
-	if result["you"].(map[string]any)["user_id"] != ownerID || result["token"] != nil {
+	propose(t, owner, "owner@example.com")
+	if _, result := approve(t, owner, mailbox.receive(t).Code, nil); len(result) != 0 {
 		t.Fatalf("adding an address to a passkey account: %#v", result)
 	}
 	app.mu.RLock()
@@ -346,36 +357,52 @@ func TestEmailAddsToAPasskeyAccount(t *testing.T) {
 	}
 }
 
-func TestEmailCodesExpireAndLockOut(t *testing.T) {
+func TestEmailProposalsExpireAndAreInvalidated(t *testing.T) {
 	app, mailbox, httpServer := emailTestServer(t, nil)
 	c, _ := dialRaw(t, httpServer)
-	requestCode(t, c, "ada@example.com")
-	first := mailbox.receive(t).Code
-	// A newer code replaces the older one.
-	ageSends(app, "ada@example.com", time.Minute)
-	requestCode(t, c, "ada@example.com")
-	second := mailbox.receive(t).Code
-	if first != second {
-		c.expectError(t, "auth", "old", map[string]any{"scheme": "email", "email": "ada@example.com", "token": first}, codeDenied)
+	propose(t, c, "ada@example.com")
+	first := mailbox.receive(t)
+	// A newer proposal replaces the older one, its link included.
+	propose(t, c, "bob@example.com")
+	second := mailbox.receive(t)
+	if first.Code != second.Code {
+		c.expectError(t, "auth", "old", map[string]any{"scheme": "email", "token": first.Code}, codeDenied)
 	}
-	// A few failed attempts invalidate the code.
+	c.expectError(t, "auth", "old-link", map[string]any{"scheme": "email", "token": linkToken(t, first)}, codeDenied)
+	// A few wrong tokens invalidate it.
 	for range maxEmailAttempts - 2 {
-		c.expectError(t, "auth", c.nextID("wrong"), map[string]any{"scheme": "email", "email": "ada@example.com", "token": "wrong"}, codeDenied)
+		c.expectError(t, "auth", c.nextID("wrong"), map[string]any{"scheme": "email", "token": "wrong"}, codeDenied)
 	}
-	c.expectError(t, "auth", "last-wrong", map[string]any{"scheme": "email", "email": "ada@example.com", "token": "nope"}, codeDenied)
-	c.expectError(t, "auth", "invalidated", map[string]any{"scheme": "email", "email": "ada@example.com", "token": second}, codeDenied)
-	// An expired code is denied.
-	setCode(app, "ada@example.com", "123456", -time.Second)
-	c.expectError(t, "auth", "expired", map[string]any{"scheme": "email", "email": "ada@example.com", "token": "123456"}, codeDenied)
-	// A connection may ask for only a few codes.
-	for i := range emailSendsPerConnection - 2 {
-		requestCode(t, c, "user"+string(rune('a'+i))+"@example.com")
+	c.expectError(t, "auth", "last-wrong", map[string]any{"scheme": "email", "token": "nope"}, codeDenied)
+	c.expectError(t, "auth", "invalidated", map[string]any{"scheme": "email", "token": second.Code}, codeDenied)
+	// An expired proposal is denied.
+	propose(t, c, "carol@example.com")
+	expired := mailbox.receive(t)
+	app.mu.Lock()
+	for client := range app.clients {
+		if client.proposal != nil {
+			client.proposal.expires = time.Now().Add(-time.Second)
+		}
+	}
+	app.mu.Unlock()
+	c.expectError(t, "auth", "expired", map[string]any{"scheme": "email", "token": expired.Code}, codeDenied)
+	// A connection may propose only a few times.
+	for i := range emailSendsPerConnection - 3 {
+		propose(t, c, fmt.Sprintf("user%d@example.com", i))
+		mailbox.receive(t)
 	}
 	c.expectError(t, "auth", "flood", map[string]any{"scheme": "email", "email": "flood@example.com"}, codeRetryAfter)
-	// A valid code is kept when the rest of the request is invalid.
-	setCode(app, "bob@example.com", "123456", time.Minute)
-	c.expectError(t, "auth", "bad-name", map[string]any{"scheme": "email", "email": "bob@example.com", "token": "123456", "name": 7}, codeInvalidParams)
-	emailSignIn(t, c, "bob@example.com", "123456", nil)
+	// A valid token is kept when the rest of the request is invalid.
+	other, _ := dialRaw(t, httpServer)
+	propose(t, other, "dave@example.com")
+	code := mailbox.receive(t).Code
+	other.expectError(t, "auth", "bad-name", map[string]any{"scheme": "email", "token": code, "name": 7}, codeInvalidParams)
+	signInByEmail(t, other, code, nil)
+	// A sign-in code on a connection signed in is denied.
+	signedIn := dialTestClient(t, httpServer)
+	fresh, _ := dialRaw(t, httpServer)
+	propose(t, fresh, "erin@example.com")
+	signedIn.expectError(t, "auth", "signed-in", map[string]any{"scheme": "email", "token": linkToken(t, mailbox.receive(t))}, codeDenied)
 	// Email sign-in is not offered without a sender.
 	_, plain := newTestServer(t, DefaultConfig())
 	guest, _ := dialRaw(t, plain)
@@ -383,72 +410,53 @@ func TestEmailCodesExpireAndLockOut(t *testing.T) {
 	guest.expectError(t, "auth", "token", map[string]any{"scheme": "token", "token": "x"}, codeUnsupported)
 }
 
-// Wrong codes count against the guesser, tightly, and against the address,
-// loosely, across codes; past either budget codes are retry_after. Codes
-// sent are limited per address and per client, deliveries in progress are
-// bounded, and a full table forgets its least recent address rather than
-// refusing anyone.
-func TestEmailBudgets(t *testing.T) {
+// Emails are limited per address and per client, deliveries in progress
+// are bounded, refused proposals leave nothing behind, and a full table
+// forgets only entries whose limits have lapsed.
+func TestEmailSendLimits(t *testing.T) {
 	app, _, httpServer := emailTestServer(t, func(config *Config) { config.ClientIPHeader = "X-Forwarded-For" })
-	wrong := func(c *testClient, email string) map[string]any {
-		t.Helper()
-		setCode(app, email, "123456", time.Minute)
-		return c.call(t, "auth", c.nextID("wrong"), map[string]any{"scheme": "email", "email": email, "token": "000000"})["error"].(map[string]any)
-	}
-	// One client gets clientFailureBurst wrong codes, whatever the address.
-	guesser := dialFrom(t, httpServer, "198.51.100.1")
-	for i := range clientFailureBurst {
-		if failure := wrong(guesser, fmt.Sprintf("a%d@example.com", i)); failure["code"] != float64(codeDenied) {
-			t.Fatalf("wrong code %d: %#v", i, failure)
-		}
-	}
-	if failure := wrong(guesser, "b@example.com"); failure["code"] != float64(codeRetryAfter) {
-		t.Fatalf("past the client's budget: %#v", failure)
-	}
-	// Another client guessing the same address still may, until the
-	// address's own budget runs out; then even its right code waits.
-	for i := 0; i < maxAddressFailuresPerWindow; i++ {
-		c := dialFrom(t, httpServer, fmt.Sprintf("198.51.100.%d", 10+i/clientFailureBurst))
-		if failure := wrong(c, "target@example.com"); failure["code"] != float64(codeDenied) {
-			t.Fatalf("wrong code %d for the address: %#v", i, failure)
-		}
-	}
-	owner := dialFrom(t, httpServer, "192.0.2.1")
-	setCode(app, "target@example.com", "123456", time.Minute)
-	locked := owner.call(t, "auth", "locked", map[string]any{"scheme": "email", "email": "target@example.com", "token": "123456"})["error"].(map[string]any)
-	if locked["code"] != float64(codeRetryAfter) || locked["data"].(map[string]any)["retry_after"].(float64) < 3000 {
-		t.Fatalf("locked address: %#v", locked)
-	}
-	owner.expectError(t, "auth", "no-code", map[string]any{"scheme": "email", "email": "target@example.com"}, codeRetryAfter)
-	// Guesses without an outstanding code cost nothing.
-	for range clientFailureBurst + 1 {
-		owner.expectError(t, "auth", owner.nextID("guess"), map[string]any{"scheme": "email", "email": "nocode@example.com", "token": "123456"}, codeDenied)
-	}
-
-	// At most maxEmailSendsPerWindow codes an hour to one address.
+	// At most maxEmailSendsPerWindow emails an hour to one address.
 	for i := range maxEmailSendsPerWindow {
-		requestCode(t, dialFrom(t, httpServer, fmt.Sprintf("203.0.113.%d", i)), "carol@example.com")
+		propose(t, dialFrom(t, httpServer, fmt.Sprintf("203.0.113.%d", i)), "carol@example.com")
 		ageSends(app, "carol@example.com", emailResendInterval)
 	}
 	dialFrom(t, httpServer, "203.0.113.100").expectError(t, "auth", "capped", map[string]any{"scheme": "email", "email": "carol@example.com"}, codeRetryAfter)
-	// One client asks for at most clientSendBurst codes, across connections.
+	// One client proposes at most clientSendBurst times, across connections.
 	for i := range clientSendBurst {
-		requestCode(t, dialFrom(t, httpServer, "198.51.100.200"), fmt.Sprintf("c%d@example.com", i))
+		propose(t, dialFrom(t, httpServer, "198.51.100.200"), fmt.Sprintf("c%d@example.com", i))
 	}
-	dialFrom(t, httpServer, "198.51.100.200").expectError(t, "auth", "client-sends", map[string]any{"scheme": "email", "email": "d@example.com"}, codeRetryAfter)
+	flooder := dialFrom(t, httpServer, "198.51.100.200")
+	flooder.expectError(t, "auth", "client-sends", map[string]any{"scheme": "email", "email": "d@example.com"}, codeRetryAfter)
+	// Refused proposals are not tracked.
+	app.mu.Lock()
+	before := len(app.email.addresses)
+	app.mu.Unlock()
+	for i := range 100 {
+		flooder.call(t, "auth", fmt.Sprintf("refused-%d", i), map[string]any{"scheme": "email", "email": fmt.Sprintf("junk%d@example.com", i)})
+	}
+	app.mu.Lock()
+	after := len(app.email.addresses)
+	app.mu.Unlock()
+	if after != before {
+		t.Fatalf("refused proposals made %d entries", after-before)
+	}
 
-	// A full table forgets its least recently used address.
+	// A full table forgets an address whose emails are older than the
+	// window, and refuses when every entry is within it.
 	app.mu.Lock()
 	for i := 0; len(app.email.addresses) < maxTrackedEmailState; i++ {
 		app.email.createAddress(fmt.Sprintf("filler%d@example.com", i), time.Now()).sends = []time.Time{time.Now()}
 	}
 	app.mu.Unlock()
-	requestCode(t, dialFrom(t, httpServer, "192.0.2.50"), "late@example.com")
+	dialFrom(t, httpServer, "192.0.2.50").expectError(t, "auth", "full", map[string]any{"scheme": "email", "email": "late@example.com"}, codeRetryAfter)
+	ageSends(app, "filler0@example.com", time.Hour)
+	propose(t, dialFrom(t, httpServer, "192.0.2.51"), "late@example.com")
 	app.mu.Lock()
-	full := len(app.email.addresses)
+	_, kept := app.email.addresses["filler0@example.com"]
+	_, keptLive := app.email.addresses["filler1@example.com"]
 	app.mu.Unlock()
-	if full != maxTrackedEmailState {
-		t.Fatalf("table size %d", full)
+	if kept || !keptLive {
+		t.Fatalf("eviction: lapsed kept %v, live kept %v", kept, keptLive)
 	}
 }
 
@@ -463,7 +471,7 @@ func (m blockingMailbox) SendSignInCode(ctx context.Context, _ SignInEmail) erro
 	return nil
 }
 
-// Deliveries in progress are bounded; past the bound a request waits.
+// Deliveries in progress are bounded; past the bound a proposal waits.
 func TestEmailDeliveriesAreBounded(t *testing.T) {
 	mailbox := blockingMailbox{release: make(chan struct{})}
 	_, _, httpServer := emailTestServer(t, func(config *Config) {
@@ -472,9 +480,48 @@ func TestEmailDeliveriesAreBounded(t *testing.T) {
 	})
 	defer close(mailbox.release)
 	for i := range maxConcurrentEmailSends {
-		requestCode(t, dialFrom(t, httpServer, fmt.Sprintf("198.51.100.%d", i)), fmt.Sprintf("q%d@example.com", i))
+		propose(t, dialFrom(t, httpServer, fmt.Sprintf("198.51.100.%d", i)), fmt.Sprintf("q%d@example.com", i))
 	}
 	dialFrom(t, httpServer, "192.0.2.1").expectError(t, "auth", "busy", map[string]any{"scheme": "email", "email": "busy@example.com"}, codeRetryAfter)
+}
+
+// Email accounts, their addresses, their tokens, and the roles granted to
+// their addresses survive a restart; so does a guest that added an address,
+// which signs in with it afterwards.
+func TestEmailAccountsPersist(t *testing.T) {
+	kept := store.NewMemory()
+	mailbox := make(testMailbox, 4)
+	configure := func(config *Config) {
+		config.EmailSender = mailbox
+		config.Roles = map[string][]string{"admin": {"Ada@example.com"}}
+	}
+	_, httpServer, stop := startWith(t, kept, t.TempDir(), configure)
+	c, _ := dialRaw(t, httpServer)
+	propose(t, c, "ada@example.com")
+	_, result := signInByEmail(t, c, mailbox.receive(t).Code, nil)
+	you := result["you"].(map[string]any)
+	if you["user_id"] != "user_1" || !reflect.DeepEqual(you["roles"], []any{"admin"}) {
+		t.Fatalf("sign-in: %#v", result)
+	}
+	guest := dialTestClient(t, httpServer)
+	id, _ := save(t, guest, "hello", map[string]any{"body": map[string]any{"text": "hello"}})
+	propose(t, guest, "bob@example.com")
+	approve(t, guest, mailbox.receive(t).Code, nil)
+	stop()
+
+	_, httpServer, _ = startWith(t, kept, t.TempDir(), configure)
+	c, _ = dialRaw(t, httpServer)
+	resumed := c.result(t, "auth", "resume", map[string]any{"scheme": "token", "token": result["token"]})
+	if resumed["you"].(map[string]any)["user_id"] != "user_1" || !reflect.DeepEqual(resumed["you"].(map[string]any)["roles"], []any{"admin"}) {
+		t.Fatalf("resumed after restart: %#v", resumed)
+	}
+	back, _ := dialRaw(t, httpServer)
+	propose(t, back, "bob@example.com")
+	if _, again := signInByEmail(t, back, mailbox.receive(t).Code, nil); again["you"].(map[string]any)["user_id"] != guest.userID {
+		t.Fatalf("the guest's address after restart: %#v", again)
+	}
+	back.drain(t)
+	save(t, back, "edit", map[string]any{"message_id": id, "body": map[string]any{"text": "edited"}})
 }
 
 func TestNormalizeEmail(t *testing.T) {
@@ -493,114 +540,6 @@ func TestNormalizeEmail(t *testing.T) {
 		if got := normalizeEmail(value); got != want {
 			t.Errorf("normalizeEmail(%q) = %q, want %q", value, got, want)
 		}
-	}
-}
-
-// Email accounts, their addresses, their tokens, and the roles granted to
-// their addresses survive a restart.
-func TestEmailAccountsPersistWithRoles(t *testing.T) {
-	kept := store.NewMemory()
-	mailbox := make(testMailbox, 4)
-	configure := func(config *Config) {
-		config.EmailSender = mailbox
-		config.Roles = map[string][]string{"admin": {"Ada@example.com"}}
-	}
-	_, httpServer, stop := startWith(t, kept, t.TempDir(), configure)
-	c, _ := dialRaw(t, httpServer)
-	requestCode(t, c, "ada@example.com")
-	_, result := emailSignIn(t, c, "ada@example.com", mailbox.receive(t).Code, nil)
-	you := result["you"].(map[string]any)
-	if you["user_id"] != "user_1" || !reflect.DeepEqual(you["roles"], []any{"admin"}) {
-		t.Fatalf("sign-in: %#v", result)
-	}
-	stop()
-
-	_, httpServer, _ = startWith(t, kept, t.TempDir(), configure)
-	c, _ = dialRaw(t, httpServer)
-	resumed := c.result(t, "auth", "resume", map[string]any{"scheme": "token", "token": result["token"]})
-	if resumed["you"].(map[string]any)["user_id"] != "user_1" || !reflect.DeepEqual(resumed["you"].(map[string]any)["roles"], []any{"admin"}) {
-		t.Fatalf("resumed after restart: %#v", resumed)
-	}
-	other, _ := dialRaw(t, httpServer)
-	requestCode(t, other, "ada@example.com")
-	if _, again := emailSignIn(t, other, "ada@example.com", mailbox.receive(t).Code, nil); again["you"].(map[string]any)["user_id"] != "user_1" {
-		t.Fatalf("sign-in after restart: %#v", again)
-	}
-}
-
-// A guest who adds an address becomes an account that survives a restart,
-// with its token and the roles its address was granted.
-func TestEmailGuestBecomesAnAccountAcrossRestarts(t *testing.T) {
-	kept := store.NewMemory()
-	mailbox := make(testMailbox, 4)
-	configure := func(config *Config) {
-		config.EmailSender = mailbox
-		config.Roles = map[string][]string{"admin": {"ada@example.com"}}
-	}
-	_, httpServer, stop := startWith(t, kept, t.TempDir(), configure)
-	guest := dialTestClient(t, httpServer)
-	id, _ := save(t, guest, "hello", map[string]any{"body": map[string]any{"text": "hello"}})
-	requestCode(t, guest, "ada@example.com")
-	_, result := emailSignIn(t, guest, "ada@example.com", mailbox.receive(t).Code, nil)
-	if result["you"].(map[string]any)["user_id"] != guest.userID {
-		t.Fatalf("adding an address: %#v", result)
-	}
-	stop()
-
-	_, httpServer, _ = startWith(t, kept, t.TempDir(), configure)
-	c, _ := dialRaw(t, httpServer)
-	resumed := c.result(t, "auth", "resume", map[string]any{"scheme": "token", "token": result["token"]})
-	if you := resumed["you"].(map[string]any); you["user_id"] != guest.userID || !reflect.DeepEqual(you["roles"], []any{"admin"}) {
-		t.Fatalf("resumed after restart: %#v", resumed)
-	}
-	c.userID = guest.userID
-	c.drain(t)
-	save(t, c, "edit", map[string]any{"message_id": id, "body": map[string]any{"text": "edited"}})
-}
-
-// Refused code requests leave no entries behind, and a full table never
-// forgets a live code or a lock: a flood of requests for other addresses
-// from one client leaves the victim's code and a locked address as they
-// were. A table full of live codes refuses new requests instead.
-func TestEmailFloodKeepsCodesAndLocks(t *testing.T) {
-	app, mailbox, httpServer := emailTestServer(t, func(config *Config) { config.ClientIPHeader = "X-Forwarded-For" })
-	victim := dialFrom(t, httpServer, "192.0.2.1")
-	requestCode(t, victim, "victim@example.com")
-	code := mailbox.receive(t).Code
-	for i := 0; i < maxAddressFailuresPerWindow; i++ {
-		c := dialFrom(t, httpServer, fmt.Sprintf("198.51.100.%d", 10+i/clientFailureBurst))
-		setCode(app, "target@example.com", "123456", time.Minute)
-		c.call(t, "auth", c.nextID("wrong"), map[string]any{"scheme": "email", "email": "target@example.com", "token": "000000"})
-	}
-
-	attacker := dialFrom(t, httpServer, "203.0.113.66")
-	for i := 0; i < maxTrackedEmailState+10; i++ {
-		attacker.call(t, "auth", fmt.Sprintf("flood-%d", i), map[string]any{"scheme": "email", "email": fmt.Sprintf("junk%d@example.com", i)})
-	}
-	app.mu.Lock()
-	entries := len(app.email.addresses)
-	app.mu.Unlock()
-	if entries > 10 {
-		t.Fatalf("refused requests left %d entries", entries)
-	}
-	dialFrom(t, httpServer, "192.0.2.77").expectError(t, "auth", "locked", map[string]any{"scheme": "email", "email": "target@example.com"}, codeRetryAfter)
-	emailSignIn(t, victim, "victim@example.com", code, nil)
-
-	// A table full of live codes forgets none of them.
-	app.mu.Lock()
-	for i := 0; len(app.email.addresses) < maxTrackedEmailState; i++ {
-		app.email.createAddress(fmt.Sprintf("live%d@example.com", i), time.Now())
-	}
-	for _, state := range app.email.addresses {
-		state.signIn = &emailCode{code: "1", expires: time.Now().Add(time.Minute)}
-	}
-	app.mu.Unlock()
-	dialFrom(t, httpServer, "192.0.2.99").expectError(t, "auth", "full", map[string]any{"scheme": "email", "email": "late@example.com"}, codeRetryAfter)
-	app.mu.Lock()
-	_, kept := app.email.addresses["live0@example.com"]
-	app.mu.Unlock()
-	if !kept {
-		t.Fatal("a live code was forgotten")
 	}
 }
 
