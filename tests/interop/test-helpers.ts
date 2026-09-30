@@ -108,13 +108,15 @@ export async function moveMessage(page: Page, message: Locator, destination: str
 	await expect(bar).toHaveCount(0);
 }
 
-/** Opens the React palette from a message's toolbar and toggles one emoji. */
+/** Words that find each emoji the tests react with in the picker's search. */
+const EMOJI_SEARCH: Record<string, string> = {
+	'👍': 'thumbs up', '❤️': 'red heart', '😂': 'joy', '🎉': 'tada', '😮': 'open mouth', '😢': 'cry', '👀': 'eyes', '✅': 'check mark button'
+};
+
+/** Opens the full emoji picker from a message's React action and toggles one emoji. */
 export async function reactTo(message: Locator, emoji: string): Promise<void> {
 	await (await messageAction(message, 'React')).click();
-	const palette = message.getByTestId('reaction-palette');
-	await expect(palette).toBeVisible();
-	await palette.getByRole('button', { name: `React with ${emoji}`, exact: true }).click();
-	await expect(palette).toHaveCount(0);
+	await pickFromEmojiPicker(message.page(), EMOJI_SEARCH[emoji] ?? emoji, emoji);
 }
 
 /** The reaction chip for one emoji under a message. */
