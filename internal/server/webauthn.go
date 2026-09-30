@@ -45,8 +45,10 @@ type passkeyCeremony struct {
 	expires     time.Time
 }
 
-type passkeySession struct {
-	user    *passkeyUser
+// session is a bearer token's sign-in (§3.2): the account it resumes, bound
+// to the frontend origin that signed in.
+type session struct {
+	user    *userState
 	origin  string
 	expires time.Time
 }
@@ -227,6 +229,11 @@ func (s *Server) finishPasskeyCeremony(c *client, req request, action string, w 
 		user.credentials = append(user.credentials, *credential)
 		c.user.passkey = user
 		s.touchUser(c.user.id)
+		if s.grantRolesLocked(c.user) {
+			// A guest that becomes an account takes the roles its user_id
+			// was granted.
+			s.notifyProfileLocked(c.user, c)
+		}
 		s.passkeys[c.user.id] = user
 		s.credentials[string(credential.ID)] = user
 	} else {
@@ -256,17 +263,24 @@ func (s *Server) finishPasskeyCeremony(c *client, req request, action string, w 
 			}
 		}
 	}
+	return s.signInLocked(c, req, user.user, now)
+}
+
+// signInLocked makes an account the connection's identity after a passkey
+// or email sign-in, with a new bearer token for later connections in the
+// result (§3.2). The connection's previous token is forgotten.
+func (s *Server) signInLocked(c *client, req request, user *userState, now time.Time) (any, *rpcError) {
 	delete(s.sessions, c.token)
 	s.touchSession(c.token)
 	secret := make([]byte, 32)
 	if _, err := rand.Read(secret); err != nil {
-		return nil, &rpcError{Code: codeInternalError, Message: "Unable to create passkey session"}
+		return nil, &rpcError{Code: codeInternalError, Message: "Unable to create a sign-in session"}
 	}
 	token := base64.RawURLEncoding.EncodeToString(secret)
 	c.token = sha256.Sum256([]byte(token))
-	s.sessions[c.token] = passkeySession{user: user, origin: c.origin, expires: now.Add(sessionLifetime)}
+	s.sessions[c.token] = session{user: user, origin: c.origin, expires: now.Add(sessionLifetime)}
 	s.touchSession(c.token)
-	return s.finishPasskey(c, req, user, token)
+	return s.switchUserLocked(c, req, user, map[string]any{"token": token}), nil
 }
 
 // pruneSessionsLocked forgets expired sessions.
@@ -279,10 +293,10 @@ func (s *Server) pruneSessionsLocked(now time.Time) {
 	}
 }
 
-// authenticateToken resumes a passkey session through the protocol's token
-// scheme. Keeping this outside the WebAuthn action space preserves §4.9's
-// register/login action grammar while retaining the example server's bearer
-// token policy.
+// authenticateToken resumes a passkey or email sign-in through the
+// protocol's token scheme (§3.2). Keeping this outside the WebAuthn action
+// space preserves §4.9's register/login action grammar while retaining the
+// example server's bearer token policy.
 func (s *Server) authenticateToken(c *client, req request) (any, *rpcError) {
 	now := time.Now()
 	if !req.hasID {
@@ -300,16 +314,17 @@ func (s *Server) authenticateToken(c *client, req request) (any, *rpcError) {
 	key := sha256.Sum256([]byte(token))
 	session, ok := s.sessions[key]
 	if !ok || session.origin != c.origin || !now.Before(session.expires) {
-		return nil, &rpcError{Code: codeDenied, Message: "Session expired; sign in with your passkey"}
+		return nil, &rpcError{Code: codeDenied, Message: "Session expired; sign in again"}
 	}
 	// Each successful resume renews the session for a full lifetime, so an
 	// active user is never forced back through a ceremony. The token itself is
-	// not rotated: several tabs may share one persisted token.
+	// not rotated, since several tabs may share one persisted token: the
+	// result carries the presented token, which clients keep as the latest.
 	session.expires = now.Add(sessionLifetime)
 	s.sessions[key] = session
 	s.touchSession(key)
 	c.token = key
-	return s.finishPasskey(c, req, session.user, token)
+	return s.switchUserLocked(c, req, session.user, map[string]any{"token": token}), nil
 }
 
 // parsePasskeyCredential performs only wire-shape validation. A syntactically
@@ -394,10 +409,4 @@ func parsePasskeyCredential(params map[string]jsontext.Value, action string) ([]
 		return nil, invalidParams("credential is invalid")
 	}
 	return encoded, nil
-}
-
-// finishPasskey makes the passkey's user the connection's identity. Passkey
-// users are never retired, so their profile and joined rooms persist.
-func (s *Server) finishPasskey(c *client, req request, user *passkeyUser, token string) (any, *rpcError) {
-	return s.switchUserLocked(c, req, user.user, map[string]any{"token": token}), nil
 }

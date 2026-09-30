@@ -53,10 +53,16 @@ export async function waitForDeletedMessage(page: Page, eventId: string): Promis
  * history and thread cards fill in, or when a tall message has to be scrolled to its toolbar.
  */
 export async function messageAction(message: Locator, name: string): Promise<Locator> {
-	await message.hover();
-	await message.focus();
 	const button = message.getByRole('button', { name, exact: true });
-	await expect(button).toBeVisible();
+	// The message may still be moving as the feed fills in, which fails a
+	// hover ("element is not stable") or hides the toolbar again: retry the
+	// reveal until the button shows.
+	await expect(async () => {
+		await message.scrollIntoViewIfNeeded({ timeout: 2_000 });
+		await message.hover({ timeout: 2_000 });
+		await message.focus({ timeout: 2_000 });
+		await expect(button).toBeVisible({ timeout: 1_000 });
+	}).toPass({ timeout: 15_000 });
 	return button;
 }
 
@@ -108,13 +114,15 @@ export async function moveMessage(page: Page, message: Locator, destination: str
 	await expect(bar).toHaveCount(0);
 }
 
-/** Opens the React palette from a message's toolbar and toggles one emoji. */
+/** Words that find each emoji the tests react with in the picker's search. */
+const EMOJI_SEARCH: Record<string, string> = {
+	'👍': 'thumbs up', '❤️': 'red heart', '😂': 'joy', '🎉': 'tada', '😮': 'open mouth', '😢': 'cry', '👀': 'eyes', '✅': 'check mark button'
+};
+
+/** Opens the full emoji picker from a message's React action and toggles one emoji. */
 export async function reactTo(message: Locator, emoji: string): Promise<void> {
 	await (await messageAction(message, 'React')).click();
-	const palette = message.getByTestId('reaction-palette');
-	await expect(palette).toBeVisible();
-	await palette.getByRole('button', { name: `React with ${emoji}`, exact: true }).click();
-	await expect(palette).toHaveCount(0);
+	await pickFromEmojiPicker(message.page(), EMOJI_SEARCH[emoji] ?? emoji, emoji);
 }
 
 /** The reaction chip for one emoji under a message. */

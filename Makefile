@@ -42,8 +42,11 @@ test-interop:
 test-wire: $(FIXTURES)
 	npm --prefix tests/interop run test:wire
 
+# aprond serves this build itself (serve, run, test-perf), so it connects to
+# its own origin's /ws and loads media from it: the web client's
+# .env.production otherwise points builds at wss://server.apron.chat/.
 build-web:
-	npm --prefix $(WEB) run build
+	VITE_DEFAULT_SERVER_URL= VITE_TRUSTED_MEDIA_ORIGINS= npm --prefix $(WEB) run build
 
 build: build-web
 	go build -o build/aprond ./cmd/aprond

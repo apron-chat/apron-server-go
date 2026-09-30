@@ -6,6 +6,7 @@ import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
 import { expect, test } from '@playwright/test';
 import { ChatClient, DEFAULT_ROOM_ID, userIn, type RoomSnapshot } from '../../.apron-web/src/lib/protocol/client';
+import type { Identity } from '../../.apron-web/src/lib/protocol/types';
 
 type ObjectValue = Record<string, unknown>;
 type Step =
@@ -18,8 +19,8 @@ type Step =
 	| { moveMessage: { as: string; message_id: string; room: string } }
 	| { deleteMessage: { as: string; message_id: string } }
 	| { react: { as: string; message_id: string; emojis: string[] } }
-	| { createRoom: { as: string; parent_room_id?: string; title?: string; intro_message_id?: string } }
-	| { updateRoom: { as: string; room: string; title?: string | null; intro_message_id?: string | null } }
+	| { createRoom: { as: string; parent_room_id?: string; title?: string; description?: string } }
+	| { updateRoom: { as: string; room: string; title?: string | null; description?: string | null } }
 	| { joinRoom: { as: string; room: string } }
 	| { leaveRoom: { as: string; room: string } }
 	| { listRooms: { as: string; parent_room_id?: string } }
@@ -100,7 +101,7 @@ function projectRoom(room: RoomSnapshot): ObjectValue {
 		...(has('log_id') ? { log_id: record!.log_id } : {}),
 		...(has('parent_room_id') ? { parent_room_id: record!.parent_room_id } : {}),
 		...(has('title') ? { title: record!.title } : {}),
-		...(record?.intro_message ? { intro_message: { message_id: record.intro_message.message_id } } : {}),
+		...(has('description') ? { description: record!.description } : {}),
 		...(has('ext') ? { ext: record!.ext } : {}),
 		messages: room.timeline.order.map((id) => {
 			const reactions = room.timeline.reactions[id];
@@ -112,6 +113,23 @@ function projectRoom(room: RoomSnapshot): ObjectValue {
 	};
 }
 
+/**
+ * A message's sender as the fixtures project it (README "Session state"):
+ * the rendered user, less any field its kept object holds as cleared (an
+ * empty value, "", [], {}), which is omitted rather than taken from `from`.
+ */
+function senderOf(snapshot: ReturnType<ChatClient['snapshot']>, from: Identity): Identity {
+	const rendered = userIn(snapshot, from);
+	let id = from.user_id;
+	for (let hops = 0; hops < 8 && snapshot.userAliases[id] !== undefined; hops += 1) id = snapshot.userAliases[id];
+	const kept = snapshot.users[id] ?? snapshot.users[from.user_id];
+	if (!kept) return rendered;
+	const cleared = (value: unknown) => value === '' || (Array.isArray(value) && value.length === 0) ||
+		(isObject(value) && Object.keys(value).length === 0);
+	return Object.fromEntries(Object.entries(rendered)
+		.filter(([key]) => key === 'user_id' || !(Object.hasOwn(kept, key) && cleared(kept[key])))) as Identity;
+}
+
 function logicalState(client: ChatClient, operations: Record<string, string>): ObjectValue {
 	const snapshot = client.snapshot();
 	// The default room before its `room_id` is known is the client's own placeholder, not a room;
@@ -119,7 +137,7 @@ function logicalState(client: ChatClient, operations: Record<string, string>): O
 	const rooms = snapshot.rooms.filter((room) => room.id !== DEFAULT_ROOM_ID && room.joined);
 	return JSON.parse(JSON.stringify({
 		you: snapshot.you ?? null,
-		caps: [...(snapshot.server?.caps ?? [])].sort(byString),
+		capabilities: [...(snapshot.server?.capabilities ?? [])].sort(byString),
 		rooms: [...rooms].sort((left, right) => byString(left.id, right.id)).map(projectRoom),
 		typing: snapshot.typing
 			.map((entry) => ({ room_id: entry.room, from: entry.from }))
@@ -127,7 +145,7 @@ function logicalState(client: ChatClient, operations: Record<string, string>): O
 		users: Object.fromEntries(Object.keys(snapshot.users).sort(byString).map((id) => [id, snapshot.users[id]])),
 		members: Object.fromEntries(rooms.filter((room) => room.members !== undefined).sort((left, right) => byString(left.id, right.id))
 			.map((room) => [room.id, room.members!.map((member) => member.user_id).sort(byString)])),
-		senders: Object.fromEntries(rooms.flatMap((room) => room.timeline.order.map((id) => [id, userIn(snapshot, room.timeline.events[id].from)]))),
+		senders: Object.fromEntries(rooms.flatMap((room) => room.timeline.order.map((id) => [id, senderOf(snapshot, room.timeline.events[id].from)]))),
 		notices: snapshot.rooms.flatMap((room) => room.notices)
 			.sort((left, right) => left.at - right.at || byString(left.key, right.key))
 			.map(({ room_id, from, body }) => ({ room_id, from, ...(body ? { body } : {}) })),
@@ -234,17 +252,17 @@ for (const fixture of fixtures) {
 								const { as, message_id, emojis } = step.react;
 								track(as, client.react(message_id, emojis).promise);
 							} else if ('createRoom' in step) {
-								const { as, parent_room_id, title, intro_message_id } = step.createRoom;
+								const { as, parent_room_id, title, description } = step.createRoom;
 								track(as, client.createRoom({
 									...(parent_room_id !== undefined ? { parentRoomId: parent_room_id } : {}),
 									...(title !== undefined ? { title } : {}),
-									...(intro_message_id !== undefined ? { introMessageId: intro_message_id } : {})
+									...(description !== undefined ? { description } : {})
 								}).promise);
 							} else if ('updateRoom' in step) {
 								const { as, room, ...patch } = step.updateRoom;
 								track(as, client.updateRoom(room, {
 									...(Object.hasOwn(patch, 'title') ? { title: patch.title } : {}),
-									...(Object.hasOwn(patch, 'intro_message_id') ? { introMessageId: patch.intro_message_id } : {})
+									...(Object.hasOwn(patch, 'description') ? { description: patch.description } : {})
 								}).promise);
 							} else if ('joinRoom' in step) {
 								track(step.joinRoom.as, client.joinRoom(step.joinRoom.room).promise);

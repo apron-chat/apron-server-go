@@ -9,6 +9,8 @@ import (
 	"testing"
 
 	flags "github.com/jessevdk/go-flags"
+
+	"github.com/apron-chat/apron-server-go/internal/server"
 )
 
 func parse(t *testing.T, args ...string) (*Options, *flags.Parser) {
@@ -96,5 +98,75 @@ func TestTLSDomainIsThePublicURL(t *testing.T) {
 	}
 	if config.PublicURL != "https://chat.example" || config.WebAuthn != nil {
 		t.Fatalf("config: public URL %q, passkeys %v", config.PublicURL, config.WebAuthn != nil)
+	}
+}
+
+func TestWelcomeAndRoles(t *testing.T) {
+	options, _ := parse(t, "--welcome", "Sign in with **email**.", "--role", "admin=ada", "--role", "Moderator = bob", "--role", "admin=carol")
+	config, err := serverConfig(*options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.Welcome != "Sign in with **email**." {
+		t.Fatalf("welcome: %q", config.Welcome)
+	}
+	if want := map[string][]string{"admin": {"ada", "carol"}, "moderator": {"bob"}}; !reflect.DeepEqual(config.Roles, want) {
+		t.Fatalf("roles: %v", config.Roles)
+	}
+	for _, grant := range []string{"admin", "=ada", "admin="} {
+		options, _ := parse(t, "--role", grant)
+		if _, err := serverConfig(*options); err == nil {
+			t.Errorf("accepted --role %q", grant)
+		}
+	}
+}
+
+func TestEmailSenders(t *testing.T) {
+	// Email sign-in is off unless --email.enable is set, whatever the sender.
+	for _, args := range [][]string{
+		nil,
+		{"--email.sender", "log"},
+		{"--email.sender", "smtp", "--email.smtp-addr", "smtp.example:587", "--email.from", "chat@example.com"},
+	} {
+		options, _ := parse(t, args...)
+		config, err := serverConfig(*options)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if config.EmailSender != nil {
+			t.Fatalf("email sender %T without --email.enable: %v", config.EmailSender, args)
+		}
+	}
+	options, _ := parse(t, "--email.enable", "--email.sender", "log")
+	if config, err := serverConfig(*options); err != nil || config.EmailSender != (server.LogEmailSender{}) || config.EmailLinkURL != "" {
+		t.Fatalf("log sender %T, link %q, error %v", config.EmailSender, config.EmailLinkURL, err)
+	}
+	// The log sender is for development: a public server refuses it.
+	for _, args := range [][]string{
+		{"--email.enable", "--email.sender", "log", "--public-url", "https://chat.example"},
+		{"--email.enable", "--email.sender", "log", "--tls.domain", "chat.example"},
+	} {
+		options, _ := parse(t, args...)
+		if _, err := serverConfig(*options); err == nil {
+			t.Errorf("accepted %v", args)
+		}
+	}
+	// smtp is the default sender.
+	options, _ = parse(t, "--email.enable", "--email.smtp-addr", "smtp.example:587", "--email.from", "Apron <chat@example.com>", "--public-url", "https://chat.example/")
+	config, err := serverConfig(*options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sender, ok := config.EmailSender.(*smtpSender); !ok || sender.addr != "smtp.example:587" || sender.insecure || config.EmailLinkURL != "https://chat.example/" {
+		t.Fatalf("smtp sender %#v, link %q", config.EmailSender, config.EmailLinkURL)
+	}
+	for _, args := range [][]string{
+		{"--email.enable", "--email.from", "chat@example.com"},
+		{"--email.enable", "--email.smtp-addr", "smtp.example:587"},
+	} {
+		options, _ := parse(t, args...)
+		if _, err := serverConfig(*options); err == nil {
+			t.Errorf("accepted %v", args)
+		}
 	}
 }

@@ -28,12 +28,20 @@ const (
 // userState is everything the server keeps for one user_id across its
 // connections: the profile (§3.3), joined rooms (§4.3.2), request
 // deduplication (§1.2), and push registrations (§4.7). Guest users
-// are retired when their last connection closes; passkey users persist.
+// are retired when their last connection closes; accounts (passkey users)
+// persist.
 type userState struct {
 	id     string
 	name   string
 	avatar string
 	ext    map[string]any
+	// email is the account's sign-in address (§4.10), lowercased; empty for
+	// guests and passkey users without one.
+	email string
+	// roles are the server roles (§3.3) Config.Roles grants the account,
+	// sorted; guests have none. They are derived from the configuration, not
+	// stored.
+	roles []string
 	// avatarEmbed is the hosted /avatar upload behind avatar, if any.
 	avatarEmbed *embedState
 
@@ -77,12 +85,29 @@ func (u *userState) from() map[string]any {
 	return u.fromValue
 }
 
+// account reports whether the user signed in with a credential, a passkey
+// or an email address, so it persists across connections and restarts,
+// rather than being a guest.
+func (u *userState) account() bool {
+	return u.passkey != nil || u.email != ""
+}
+
+// hasRole reports whether the user holds a server role.
+func (u *userState) hasRole(role string) bool {
+	return slices.Contains(u.roles, role)
+}
+
 // profile is the complete current user object for you, user, and users
 // (§3.3).
 func (u *userState) profile() map[string]any {
 	value := maps.Clone(u.from())
 	if u.avatar != "" {
 		value["avatar"] = u.avatar
+	}
+	// An account's roles are always sent, [] when it has none, so a role
+	// taken away clears the one a client kept (§3.3); guests hold none.
+	if len(u.roles) > 0 || u.account() {
+		value["roles"] = append([]string{}, u.roles...)
 	}
 	if len(u.ext) > 0 {
 		value["ext"] = cloneObject(u.ext)
@@ -183,11 +208,13 @@ var requestableUserID = regexp.MustCompile(`^[A-Za-z](?:[A-Za-z0-9_.-]{0,62}[A-Z
 // counts the guests the server has admitted.
 const guestIDPrefix = "guest_"
 
-// requestable reports whether a guest may request id: it has the requestable
-// shape and lies outside the counter's guest_ namespace.
+// requestable reports whether a user may request id: it has the requestable
+// shape and lies outside the counters' guest_ and user_ namespaces.
 func requestable(id string) bool {
-	if len(id) >= len(guestIDPrefix) && strings.EqualFold(id[:len(guestIDPrefix)], guestIDPrefix) {
-		return false
+	for _, prefix := range []string{guestIDPrefix, accountIDPrefix} {
+		if len(id) >= len(prefix) && strings.EqualFold(id[:len(prefix)], prefix) {
+			return false
+		}
 	}
 	return requestableUserID.MatchString(id)
 }
@@ -198,24 +225,27 @@ func requestable(id string) bool {
 // takes exactly one counter value: with guest_ requests refused, only the
 // counter assigns guest_<n>, so the skip over taken IDs is a safeguard.
 func (s *Server) assignUserIDLocked(requested string) string {
-	claim := func(id string) bool {
-		key := strings.ToLower(id)
-		if s.usedIDs[key] || s.roomNamedLocked(id) {
-			return false
-		}
-		s.usedIDs[key] = true
-		s.touchUsedID(key)
-		return true
-	}
-	if requestable(requested) && claim(requested) {
+	if requestable(requested) && s.claimUserIDLocked(requested) {
 		return requested
 	}
 	for {
 		s.guestNumber++
-		if id := fmt.Sprintf("%s%d", guestIDPrefix, s.guestNumber); claim(id) {
+		if id := fmt.Sprintf("%s%d", guestIDPrefix, s.guestNumber); s.claimUserIDLocked(id) {
 			return id
 		}
 	}
+}
+
+// claimUserIDLocked marks id used and reports whether it was free: never
+// assigned, ignoring case, not a room's name, and not granted a role.
+func (s *Server) claimUserIDLocked(id string) bool {
+	key := strings.ToLower(id)
+	if s.usedIDs[key] || s.roomNamedLocked(id) || s.grantedIDs[key] {
+		return false
+	}
+	s.usedIDs[key] = true
+	s.touchUsedID(key)
+	return true
 }
 
 // roomNamedLocked reports whether id names a room, ignoring case, so a
@@ -235,8 +265,13 @@ func (s *Server) authenticate(c *client, req request) (any, *rpcError) {
 	switch scheme {
 	case "webauthn":
 		return s.authenticatePasskey(c, req)
+	case "email":
+		if s.config.EmailSender == nil {
+			return nil, &rpcError{Code: codeUnsupported, Message: "Email sign-in is disabled"}
+		}
+		return s.authenticateEmail(c, req)
 	case "token":
-		if s.config.WebAuthn == nil {
+		if s.config.WebAuthn == nil && s.config.EmailSender == nil {
 			return nil, &rpcError{Code: codeUnsupported, Message: "This server has no sign-in sessions; use guest"}
 		}
 		return s.authenticateToken(c, req)
@@ -263,11 +298,9 @@ func (s *Server) authenticate(c *client, req request) (any, *rpcError) {
 	s.users[user.id] = user
 	s.touchUser(user.id)
 	s.attachLocked(c, user)
-	// A new guest joins the default room, so their room list is not empty.
-	// The join is a logged membership, delivered to general's members, this
-	// connection included, before the result (§1, §4.3.2); the client lists
-	// the room with room_list rather than being sent a room_update.
-	s.addMemberLocked(user, s.rooms[defaultRoomID])
+	// A new guest joins the default room, so their room list is not empty,
+	// and the membership reaches this connection before the result (§1).
+	s.joinDefaultRoomLocked(user)
 	result := map[string]any{"you": user.profile()}
 	if req.hasID {
 		c.sendResult(req, result)
@@ -300,9 +333,14 @@ func (s *Server) attachLocked(c *client, user *userState) {
 	if previous != nil {
 		delete(previous.clients, c)
 	}
+	// A pending email proposal was made by the previous identity: an
+	// addition must not be approved as the next one (§4.10).
+	if c.proposal != nil {
+		s.dropProposalLocked(c.proposal)
+	}
 	c.user = user
 	user.clients[c] = struct{}{}
-	if previous == nil || len(previous.clients) > 0 || previous.passkey != nil {
+	if previous == nil || len(previous.clients) > 0 || previous.account() {
 		return
 	}
 	sharers := s.sharersLocked(previous)
@@ -323,7 +361,7 @@ func (s *Server) detachLocked(c *client) {
 	}
 	delete(user.clients, c)
 	c.user = nil
-	if len(user.clients) == 0 && user.passkey == nil {
+	if len(user.clients) == 0 && !user.account() {
 		s.retireLocked(user)
 	}
 }
@@ -421,7 +459,8 @@ func withRemoved(profile map[string]any, removed []string) map[string]any {
 // current value, an omitted one stays, and an empty value ("" or {}) removes
 // the field, which the result and notifications carry as that empty value.
 // Names are trimmed and capped; avatars must be https: URLs or small image
-// data: URLs, or the current avatar unchanged.
+// data: URLs, or the current avatar unchanged. roles are not settable, and
+// like other unknown fields are ignored.
 func (s *Server) updateProfile(c *client, req request) (any, bool, *rpcError) {
 	name, err := parseString(req.params, "name", false)
 	if err != nil {
@@ -484,4 +523,28 @@ func (s *Server) updateProfile(c *client, req request) (any, bool, *rpcError) {
 func jsonEqual(a, b any) bool {
 	left, right := encodeJSON(a), encodeJSON(b)
 	return left != nil && right != nil && string(left) == string(right)
+}
+
+// grantRolesLocked sets the roles Config.Roles grants an account, by its
+// user_id or email address, and reports whether they changed. Guests hold no
+// roles, so a granted user_id taken by a guest grants nothing until it is an
+// account; assignUserIDLocked never hands out a granted user_id that was
+// never used.
+func (s *Server) grantRolesLocked(u *userState) bool {
+	var roles []string
+	if u.account() {
+		for role, holders := range s.config.Roles {
+			if slices.ContainsFunc(holders, func(holder string) bool {
+				return strings.EqualFold(holder, u.id) || (u.email != "" && strings.EqualFold(holder, u.email))
+			}) {
+				roles = append(roles, strings.ToLower(role))
+			}
+		}
+		slices.Sort(roles)
+	}
+	if slices.Equal(roles, u.roles) {
+		return false
+	}
+	u.roles = roles
+	return true
 }

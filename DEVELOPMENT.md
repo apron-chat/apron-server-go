@@ -1,7 +1,8 @@
 # Development
 
 The SvelteKit client and Go server implement the protocol independently. The
-server keeps rooms and history in memory; restarting it clears messages.
+server keeps its state in a SQLite database by default (`--store memory`
+forgets it on restart); see [SERVER.md](SERVER.md#storage).
 
 ## Layout
 
@@ -60,7 +61,7 @@ Open `http://localhost:5173`. The development server proxies `/ws` to
 To use the Cloudflare demo backend locally, run it from
 [apron-chat/apron-server-cloudflare](https://github.com/apron-chat/apron-server-cloudflare)
 with `npx wrangler dev --port 8080` instead of `make dev-server`. The web
-client, the Go server, and the worker speak protocol v6; the worker does so
+client, the Go server, and the worker speak protocol v7; the worker does so
 within the demo's budgets and policies (only threads under `general` can be
 created, guests only read until they sign in with a passkey, and guests'
 memberships are not logged, so its `room_list` ignores `latest_log_id`). A
@@ -74,9 +75,17 @@ editor's Sign-in row to retain that identity and its message ownership, and
 screen). Passkey sessions resume after transport disconnects;
 page reloads require signing in again. Guest reconnects receive a new identity.
 Edit and delete permissions belong to the identity that created the message.
-Messages and passkey registrations are held in memory and lost on server restart.
 Use `localhost` for the default passkey configuration; see
 [SERVER.md](SERVER.md#passkeys) for deployment settings.
+
+The Go server also offers email sign-in, off unless `--email.enable` is set.
+To try it without sending email, run
+`go run ./cmd/aprond --email.enable --email.sender log`, which writes each
+code, and a sign-in link when `--email.link-url` is set, to the server's log.
+Adding an address while signed in as a guest keeps the guest's identity, as
+adding a passkey does; see [SERVER.md](SERVER.md#email-sign-in). `--welcome` sets the text
+the sign-in screen shows, and `--role admin=<user_id or email>` grants a
+role, shown as a badge, that may remove people from any room.
 
 ## Threads
 
@@ -98,24 +107,21 @@ Join, and replying joins it first. The cards of threads you haven't joined
 refresh when the room is opened or its threads are listed, with `room_list`
 and the room as `parent_room_id`. Start a thread from any message in a room (Start
 thread in its toolbar; cap `rooms`): the client creates a room under the
-current one with `room_set`, titled after the message's first line, with the
-message as its `intro_message`, which joins you to it. The message stays where
-it is. In the room feed it is shown as its thread's card; inside the thread it
-leads the timeline, pinned under the header and rendered like any message,
-followed by an "N replies" divider. A thread opens once its `room_update`
+current one with `room_set`, titled after the message's first line, whose
+`description` carries the gist ([§3.4](https://github.com/shazow/apron/blob/main/PROTOCOL.md#34-rooms)), which joins you to it; by
+convention the thread's first message replies to the message it started
+from. The message stays where it is. A thread opens once its `room_update`
 arrives. Drafts and reply targets are kept for each room, and a thread is a room
-of its own.
+of its own. See [apron-web's README](https://github.com/apron-chat/apron-web#readme)
+for how threads and their descriptions are shown.
 
-Thread cards preview up to three lines of the intro message, with its author,
-when it is available (not deleted and not empty), and otherwise the latest
-loaded message on one line. Threads load their own history (`history` on the
+Threads load their own history (`history` on the
 thread's `room_id`) when opened, newest page first, so message counts in the
-sidebar and on cards appear once a thread has loaded. A thread with more than a
-page of replies opens at its latest ones with "N+ replies"; scrolling back
-loads older pages until its intro, and the count becomes exact. The Edit button in a thread's header (cap
-`rooms`) opens a popover for its title; the save is a `room_set` request with the
-thread's `room_id` that resubmits `intro_message` and `ext` unchanged. Any
-authenticated user may create threads and edit their titles on the Go example;
+sidebar and on cards appear once a thread has loaded. The room settings
+edit a room's title and description (`/topic` sets the description); the save
+is a `room_set` request with the room's `room_id` that resubmits the other
+fields and `ext` unchanged. Any
+authenticated user may create threads and edit rooms on the Go example;
 the Cloudflare demo allows creating threads but denies editing its permanent
 `general` room, and a denied request is reported like any other error.
 
@@ -124,7 +130,7 @@ Your messages move through select mode (cap `edit`): shift-click one (or press
 shift-click another to fill the range, then pick a thread (or, from inside a
 thread, the room) or start a new thread from the selection bar that takes the
 composer's place. A move is a `message` save with the destination's `room_id`;
-each message is a separate save. A new thread is created first, introduced by
+each message is a separate save. A new thread is created first, described by
 the earliest picked message and titled after it, and the moves go out once the
 server has named it; the thread then opens. Other moves leave the pane where it
 is. Messages the server denies stay selected and the bar reports how many didn't
@@ -151,11 +157,11 @@ profile the server sent for them, else from the message itself.
 With cap `command` ([PROTOCOL.md §4.8](https://github.com/shazow/apron/blob/main/PROTOCOL.md#48-command)), composer text starting with one `/` is
 a command: the composer tags it, and Run sends it as a `command` request
 (`/nick`, `/join`, `/leave` and `/topic` map to `me`, `room_join`, `room_leave`
-and `room_set`), while `//` posts a message starting with `/`. Replies arrive as
-`@private` notices without a `message_id`, shown only to you for the session
+and `room_set` with `description`), while `//` posts a message starting with `/`. Replies arrive as
+`~private` notices without a `message_id`, shown only to you for the session
 with a dashed outline; a failed command's error shows the same way. The Go
 server offers `/help`, `/avatar` with an attached image, and `/kick @user
-[reason]` for a room's creator.
+[reason]` for a room's creator, admins, and moderators.
 
 Use a message's Reply action to reference it in a new message. `reply_to` may
 name a message in any room, so a reply in a thread can quote a message in the
@@ -178,13 +184,13 @@ reacted, and clicking it adds or removes your reaction. Each change sends your
 complete emoji set for that message with `reactions`. Tombstones hide their
 reactions.
 
-The Go server keeps rooms, threads, reactions, and uploads in memory. A new
-guest has joined `general`; other rooms are joined from Browse rooms, and
-threads from More threads…, a thread's Join, or by replying in it. A thread's
-members are only those who joined it (its creator first), independent of its
-parent room. Empty
-threads remain available; deleting or moving their intro message does not
-remove them. With the Go server the client also sends attachments and
+A new guest on the Go server has joined `general`; other rooms are joined
+from Browse rooms, and threads from More threads…, a thread's Join, or by
+replying in it. A thread's members are only those who joined it (its creator
+first), independent of its parent room. Empty threads remain available;
+deleting or moving the message they were started from does not remove them.
+Private rooms and private threads are visible only to their members, who add
+others with `room_join` and a `user_id`. With the Go server the client also sends attachments and
 voice clips, shows live streams, sets avatars, marks where you stopped reading,
 and browses, joins, and leaves rooms; see
 [apron-web's README](https://github.com/apron-chat/apron-web#readme). The interop suite's

@@ -14,6 +14,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"syscall"
 	"time"
 
@@ -42,8 +43,12 @@ type Options struct {
 	MaxConnections         int      `long:"max-connections" description:"Maximum concurrent WebSockets; 0 is unlimited"`
 	MaxListenerConnections int      `long:"max-listener-connections" description:"Maximum concurrent TCP connections on the listener, HTTP included; 0 is unlimited"`
 	MessagesPerMinute      int      `long:"messages-per-minute" description:"Burst of new messages, room_set requests, and /avatar commands per user, refilled over a minute; 0 is unlimited"`
+	MaxListedMembers       int      `long:"max-listed-members" default:"1000" description:"Members listed per room in room_list and room_update; a larger room lists its most recently active ones and member_count. 0 is unlimited"`
 	DebugAddr              string   `long:"debug-addr" description:"Listen address for unauthenticated pprof and expvar under /debug/, such as 127.0.0.1:6060; empty disables"`
 	Store                  string   `long:"store" description:"Where state is kept: sqlite:<path> for a SQLite database, or memory to keep nothing across restarts"`
+	ClientIPHeader         string   `long:"client-ip-header" description:"Request header a reverse proxy puts the client's address in, such as X-Forwarded-For (its last entry) or X-Real-IP, for per-client limits; set only behind a proxy that sets it"`
+	Welcome                string   `long:"welcome" description:"Markdown clients show on their sign-in screen (server.welcome), such as how this server's sign-in methods fit together"`
+	Roles                  []string `long:"role" description:"Grant a role to an account as role=user_id or role=email, such as admin=ada; repeat for more. admin and moderator may remove others from rooms"`
 
 	WebAuthn struct {
 		RPID    string   `long:"rp-id" default:"localhost" description:"Passkey relying party domain; empty disables passkeys"`
@@ -56,6 +61,17 @@ type Options struct {
 		MaxMessageMB int64  `long:"max-message-mb" default:"20" description:"Maximum total size of one message's uploads, in MiB"`
 		MaxStorageMB int64  `long:"max-storage-mb" default:"1000" description:"Total size of hosted uploads, in MiB, beyond which the oldest are removed from their messages"`
 	} `group:"Uploads" namespace:"upload"`
+
+	Email struct {
+		Enable       bool   `long:"enable" description:"Offer email sign-in (off by default)"`
+		Sender       string `long:"sender" default:"smtp" choice:"smtp" choice:"log" description:"How email sign-in codes are delivered, with --email.enable: smtp sends them, log writes them to the server log (development only; refused with --public-url or --tls.domain)"`
+		LinkURL      string `long:"link-url" description:"Page that sign-in links in emails open, such as https://chat.example/, with a sign-in token in its fragment (default: --public-url; empty sends codes without links)"`
+		From         string `long:"from" description:"Sender address of sign-in emails, for --email.sender smtp"`
+		SMTPAddr     string `long:"smtp-addr" description:"SMTP relay as host:port, for --email.sender smtp: STARTTLS is required (such as :587), or TLS from the start on port 465"`
+		SMTPUser     string `long:"smtp-user" description:"SMTP user name; empty sends without authentication"`
+		SMTPPassword string `long:"smtp-password" description:"SMTP password"`
+		SMTPInsecure bool   `long:"smtp-insecure" description:"Send through a relay that does not offer STARTTLS, in cleartext (a relay on the same host only)"`
+	} `group:"Email sign-in" namespace:"email"`
 
 	Push struct {
 		Disable       bool `long:"disable" description:"Do not offer push registration"`
@@ -116,6 +132,20 @@ func serverConfig(options Options) (server.Config, error) {
 	}
 	config.MaxConnections = options.MaxConnections
 	config.MessagesPerMinute = options.MessagesPerMinute
+	config.MaxListedMembers = options.MaxListedMembers
+	config.Welcome = options.Welcome
+	config.ClientIPHeader = options.ClientIPHeader
+	for _, grant := range options.Roles {
+		role, holder, ok := strings.Cut(grant, "=")
+		role, holder = strings.ToLower(strings.TrimSpace(role)), strings.TrimSpace(holder)
+		if !ok || role == "" || holder == "" {
+			return config, fmt.Errorf("invalid --role %q: use role=user_id, such as admin=ada", grant)
+		}
+		if config.Roles == nil {
+			config.Roles = make(map[string][]string)
+		}
+		config.Roles[role] = append(config.Roles[role], holder)
+	}
 	config.DisablePush = options.Push.Disable
 	config.AllowInsecurePush = options.Push.AllowInsecure
 	config.UploadDir = options.Upload.Dir
@@ -124,6 +154,25 @@ func serverConfig(options Options) (server.Config, error) {
 	config.MaxUploadStorageBytes = options.Upload.MaxStorageMB << 20
 	if len(options.Origins) > 0 {
 		config.OriginPatterns = options.Origins
+	}
+	switch {
+	case !options.Email.Enable:
+		// Email sign-in is a feature flag, off by default.
+	case options.Email.Sender == "log":
+		if options.PublicURL != "" || len(options.TLS.Domains) > 0 {
+			return config, errors.New("--email.sender log writes sign-in codes to the server log, so anyone who reads it can sign in as anyone; it is for development and refused with --public-url or --tls.domain: use --email.sender smtp")
+		}
+		config.EmailSender = server.LogEmailSender{}
+	case options.Email.Sender == "smtp":
+		sender, err := newSMTPSender(options.Email.SMTPAddr, options.Email.From, options.Email.SMTPUser, options.Email.SMTPPassword, options.Email.SMTPInsecure)
+		if err != nil {
+			return config, err
+		}
+		config.EmailSender = sender
+	}
+	config.EmailLinkURL = options.Email.LinkURL
+	if config.EmailLinkURL == "" {
+		config.EmailLinkURL = config.PublicURL
 	}
 	if options.WebAuthn.RPID != "" {
 		var err error
@@ -227,6 +276,9 @@ func run(logger *slog.Logger, options Options) error {
 		serve("debug server", newServer(debugHandler()), listener)
 	}
 	logger.Info("serving", "store", options.Store, "static_dir", options.StaticDir, "upload_dir", options.Upload.Dir)
+	if options.Email.Enable && options.Email.Sender == "log" {
+		logger.Warn("email sign-in codes are written to this log, not sent; use --email.sender smtp in a deployment")
+	}
 
 	group.Go(func() error {
 		<-ctx.Done()

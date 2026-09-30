@@ -8,11 +8,14 @@ import (
 	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"io/fs"
+	"maps"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -21,6 +24,7 @@ import (
 
 	"github.com/coder/websocket"
 	"github.com/go-webauthn/webauthn/webauthn"
+	"golang.org/x/time/rate"
 
 	"github.com/apron-chat/apron-server-go/internal/store"
 )
@@ -46,6 +50,7 @@ const (
 	defaultStreamKeepBytes          = 64 << 10
 	defaultStreamMaxBytes     int64 = 16 << 20
 	defaultStreamMaxDuration        = time.Hour
+	defaultMaxListedMembers         = 1000
 	// retryAfterSeconds is the delay suggested by connection-level
 	// retry_after errors (capacity and shutdown).
 	retryAfterSeconds = 30
@@ -106,6 +111,30 @@ type Config struct {
 	MaxConnections int
 	// MessagesPerMinute bounds each user's new messages; 0 is unlimited.
 	MessagesPerMinute int
+	// MaxListedMembers bounds a room's members in room_list and room_update
+	// joined; a larger room lists its most recently active members and
+	// member_count (§4.3.1). 0 is unlimited.
+	MaxListedMembers int
+	// Welcome is server.welcome (§3.2): Markdown shown on the sign-in
+	// screen. Empty omits it.
+	Welcome string
+	// Roles grants server roles (§3.3), such as "admin", to accounts: each
+	// role lists the user_ids or email addresses that hold it. Roles are
+	// shown beside names; "admin" and "moderator" may also remove others
+	// from rooms (§4.3.2).
+	Roles map[string][]string
+	// EmailSender enables email sign-in (§4.10) and delivers its codes; nil
+	// disables it. LogEmailSender logs codes, for development.
+	EmailSender EmailSender
+	// ClientIPHeader names the request header a reverse proxy puts the
+	// client's address in, such as X-Forwarded-For (its last entry is
+	// used) or X-Real-IP, for per-client rate limits. Empty uses the
+	// connection's own address. Set it only behind a proxy that sets it.
+	ClientIPHeader string
+	// EmailLinkURL is the page sign-in links open, such as
+	// https://chat.example/, with the address and code in its fragment.
+	// Empty sends codes without a link.
+	EmailLinkURL string
 }
 
 func DefaultConfig() Config {
@@ -125,6 +154,7 @@ func DefaultConfig() Config {
 		StreamKeepBytes:       defaultStreamKeepBytes,
 		StreamMaxBytes:        defaultStreamMaxBytes,
 		StreamMaxDuration:     defaultStreamMaxDuration,
+		MaxListedMembers:      defaultMaxListedMembers,
 	}
 }
 
@@ -196,16 +226,10 @@ const (
 // modified, so a reader may hold it after releasing s.mu. A record is
 // referenced from the log of every room it belongs to, so a move snapshot
 // appears in both the source and destination room logs (§4.1).
-//
-// A room record's intro_message is not copied into raw: intro points at the
-// message snapshot current at commit time, and wire splices that snapshot's
-// raw in when the record is sent, so redacting the snapshot redacts every
-// room record embedding it.
 type logRecord struct {
-	id    int64
-	kind  recordKind
-	raw   jsontext.Value
-	intro *logRecord
+	id   int64
+	kind recordKind
+	raw  jsontext.Value
 	// rooms are the rooms whose logs hold the record.
 	rooms []string
 }
@@ -214,28 +238,6 @@ type logRecord struct {
 // server-built strings, maps, and slices, so encoding cannot fail.
 func newLogRecord(id int64, kind recordKind, value map[string]any) *logRecord {
 	return &logRecord{id: id, kind: kind, raw: encodeJSON(value)}
-}
-
-// appendWire appends the record as sent on the wire to buf.
-func (r *logRecord) appendWire(buf []byte) []byte {
-	if r.intro == nil {
-		return append(buf, r.raw...)
-	}
-	buf = append(buf, r.raw[:len(r.raw)-1]...)
-	if len(r.raw) > 2 {
-		buf = append(buf, ',')
-	}
-	buf = append(buf, `"intro_message":`...)
-	buf = append(buf, r.intro.raw...)
-	return append(buf, '}')
-}
-
-// wireLen is the length of the record as sent on the wire.
-func (r *logRecord) wireLen() int {
-	if r.intro == nil {
-		return len(r.raw)
-	}
-	return len(r.raw) + len(r.intro.raw) + len(`,"intro_message":`)
 }
 
 // jsonOptions encode deterministically, sorting object keys, and keep
@@ -323,6 +325,13 @@ type client struct {
 	origin   string
 	ceremony *passkeyCeremony
 	token    [32]byte
+	// emailSends limits the email proposals made on the connection,
+	// proposal is its pending one, and clientKey names its client address
+	// for the limits of all its connections (email.go). Guarded by
+	// server.mu.
+	emailSends *rate.Limiter
+	proposal   *emailProposal
+	clientKey  string
 	// away reports that nobody is attending the connection (§4.4). Guarded
 	// by server.mu.
 	away bool
@@ -358,10 +367,15 @@ type Server struct {
 	users map[string]*userState
 	// usedIDs holds every user_id ever assigned, lowercased, so none is
 	// reissued (§3.3).
-	usedIDs     map[string]bool
+	usedIDs map[string]bool
+	// grantedIDs holds the user_ids Config.Roles names, lowercased, which
+	// are never assigned to a new identity unless already used.
+	grantedIDs  map[string]bool
 	guestNumber uint64
-	embedNumber uint64
-	embeds      map[string]*embedState
+	// accountNumber numbers the user_<n> of new email accounts.
+	accountNumber uint64
+	embedNumber   uint64
+	embeds        map[string]*embedState
 	// writes maps an unused or in-progress write token to its embed.
 	writes map[string]*embedState
 	// uploads lists finished uploads, oldest first, for eviction beyond
@@ -385,7 +399,13 @@ type Server struct {
 	closed      bool
 	passkeys    map[string]*passkeyUser
 	credentials map[string]*passkeyUser
-	sessions    map[[32]byte]passkeySession
+	sessions    map[[32]byte]session
+	// emails maps sign-in addresses to their accounts; email holds the
+	// outstanding codes and budgets, in memory only.
+	emails map[string]*userState
+	email  emailState
+	// mailing tracks email deliveries in progress, which Shutdown awaits.
+	mailing sync.WaitGroup
 
 	ops         map[string]operation
 	push        *pushDeliverer
@@ -416,16 +436,24 @@ func Open(config Config) (*Server, error) {
 		clients:     make(map[*client]struct{}),
 		users:       make(map[string]*userState),
 		usedIDs:     make(map[string]bool),
+		grantedIDs:  make(map[string]bool),
 		embeds:      make(map[string]*embedState),
 		writes:      make(map[string]*embedState),
 		uploads:     list.New(),
 		pushes:      make(map[string]*pushRegistration),
 		passkeys:    make(map[string]*passkeyUser),
 		credentials: make(map[string]*passkeyUser),
-		sessions:    make(map[[32]byte]passkeySession),
+		sessions:    make(map[[32]byte]session),
+		emails:      make(map[string]*userState),
+		email:       newEmailState(),
 		dirty:       newDirtySet(),
 		storeWrites: make(chan []store.Entry, storeQueue),
 		storeDone:   make(chan struct{}),
+	}
+	for _, holders := range config.Roles {
+		for _, holder := range holders {
+			s.grantedIDs[strings.ToLower(holder)] = true
+		}
 	}
 	s.ops = s.operations()
 	s.push = newPushDeliverer(config.AllowInsecurePush)
@@ -442,7 +470,7 @@ func Open(config Config) (*Server, error) {
 	if s.rooms[defaultRoomID] == nil {
 		// The seeded default room has a logged creation record like any
 		// other room, so its history_log_id is never null.
-		s.commitRoomLocked(defaultRoomID, nil, map[string]any{"title": "General"})
+		s.commitRoomLocked(defaultRoomID, nil, false, map[string]any{"title": "General"})
 	}
 	s.removeStaleUploads(files)
 	s.unlock()
@@ -535,6 +563,7 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	go func() {
 		s.connections.Wait()
 		s.push.wait()
+		s.mailing.Wait()
 		s.mu.Lock()
 		s.closeStoreLocked()
 		s.mu.Unlock()
@@ -572,12 +601,13 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	ws.SetReadLimit(s.config.ReadLimit)
 
 	c := &client{
-		server:  s,
-		ws:      ws,
-		out:     make(chan outboundBatch, s.config.OutgoingQueue),
-		done:    make(chan struct{}),
-		origin:  r.Header.Get("Origin"),
-		baseURL: s.baseURL(r),
+		server:    s,
+		ws:        ws,
+		out:       make(chan outboundBatch, s.config.OutgoingQueue),
+		done:      make(chan struct{}),
+		origin:    r.Header.Get("Origin"),
+		clientKey: clientKey(s.clientIP(r)),
+		baseURL:   s.baseURL(r),
 	}
 	go c.writeLoop()
 	go c.pingLoop()
@@ -630,6 +660,32 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// clientIP is the address of the client that opened a request: with
+// Config.ClientIPHeader, the last entry across every line of that header,
+// which the proxy in front added itself (a client can send earlier ones),
+// without a port; else, or when that is not an IP address, the
+// connection's own address.
+func (s *Server) clientIP(r *http.Request) string {
+	remote, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		remote = r.RemoteAddr
+	}
+	header := s.config.ClientIPHeader
+	if header == "" {
+		return remote
+	}
+	values := strings.Split(strings.Join(r.Header.Values(header), ","), ",")
+	entry := strings.TrimSpace(values[len(values)-1])
+	if host, _, err := net.SplitHostPort(entry); err == nil {
+		entry = host
+	}
+	entry = strings.TrimSuffix(strings.TrimPrefix(entry, "["), "]")
+	if net.ParseIP(entry) == nil {
+		return remote
+	}
+	return entry
+}
+
 // baseURL is the configured PublicURL or the scheme and host the WebSocket
 // request arrived on.
 func (s *Server) baseURL(r *http.Request) string {
@@ -645,16 +701,27 @@ func (s *Server) baseURL(r *http.Request) string {
 
 // serverParams is the `server` frame (PROTOCOL.md §3.1).
 func (s *Server) serverParams() map[string]any {
-	authSchemes := []string{"guest"}
+	var authSchemes []string
 	if s.config.WebAuthn != nil {
-		authSchemes = []string{"webauthn", "token", "guest"}
+		authSchemes = append(authSchemes, "webauthn")
 	}
+	if s.config.EmailSender != nil {
+		authSchemes = append(authSchemes, "email")
+	}
+	if len(authSchemes) > 0 {
+		authSchemes = append(authSchemes, "token")
+	}
+	authSchemes = append(authSchemes, "guest")
+	// signup (§3.2) lists the schemes that can create an account: every
+	// one but token, which only resumes one. A passkey registered by a
+	// guest makes the guest an account, and email and guest start one.
+	signup := slices.DeleteFunc(slices.Clone(authSchemes), func(scheme string) bool { return scheme == "token" })
 	params := map[string]any{
-		"protocol": 6,
-		"name":     "apron-go/6",
-		"caps":     []string{"history", "edit", "rooms", "reactions", "activity", "embed:upload", "embed:stream", "command"},
-		"auth":     authSchemes,
-		"ping":     max(1, int(s.config.PingInterval/time.Second)),
+		"apron":        7,
+		"agent":        "apron-go/7",
+		"capabilities": []string{"history", "edit", "rooms", "reactions", "activity", "embed:upload", "embed:stream", "command"},
+		"auth":         authSchemes,
+		"ping":         max(1, int(s.config.PingInterval/time.Second)),
 		"ext": map[string]any{"apron-go": map[string]any{
 			"max_frame_bytes":           s.config.ReadLimit,
 			"max_history_limit":         maxHistoryPageSize,
@@ -666,10 +733,17 @@ func (s *Server) serverParams() map[string]any {
 			"max_stream_seconds":        int(s.config.StreamMaxDuration / time.Second),
 			"messages_per_minute":       s.config.MessagesPerMinute,
 			"write_url_timeout_seconds": int(s.config.UploadStartTimeout / time.Second),
+			"max_listed_members":        s.config.MaxListedMembers,
 		}},
 	}
 	if !s.config.DisablePush {
 		params["push"] = map[string]any{"relay": map[string]any{}}
+	}
+	if s.config.Welcome != "" {
+		params["welcome"] = s.config.Welcome
+	}
+	if !slices.Equal(signup, authSchemes) {
+		params["signup"] = signup
 	}
 	return params
 }
@@ -884,7 +958,8 @@ func (s *Server) processFrame(c *client, payload []byte) {
 		return
 	}
 	// Requests deduplicate per user (§1.2): a duplicate waits for the original,
-	// even one running on another connection, and replies with its outcome.
+	// even one running on another connection, and replies with its outcome,
+	// brought up to date with the current state.
 	var entry *dedupEntry
 	if req.hasID {
 		fingerprint := sha256.Sum256([]byte(requestFingerprint(req)))
@@ -898,7 +973,10 @@ func (s *Server) processFrame(c *client, payload []byte) {
 			if prior.err != nil {
 				c.sendError(req, prior.err)
 			} else {
-				c.sendResult(req, prior.result)
+				s.mu.Lock()
+				result := s.currentResultLocked(user, req.method, prior.result)
+				c.sendResult(req, result)
+				s.unlock()
 			}
 			return
 		}
@@ -927,6 +1005,38 @@ func (s *Server) processFrame(c *client, payload []byte) {
 		close(entry.done)
 		s.unlock()
 	}
+}
+
+// currentResultLocked brings a duplicate's result up to date (§1.2): `me`
+// answers with the current profile, and a message result lists only the
+// write URLs that are still unused. Other results name what the request
+// made, which does not change.
+func (s *Server) currentResultLocked(u *userState, method string, result any) any {
+	switch method {
+	case "me":
+		return map[string]any{"you": u.profile()}
+	case "message", "command":
+		original, ok := result.(map[string]any)
+		if !ok || original["embeds"] == nil {
+			return result
+		}
+		current := maps.Clone(original)
+		var writes []any
+		for _, value := range asList(original["embeds"]) {
+			written, _ := value.(map[string]any)
+			id, _ := written["embed_id"].(string)
+			if e := s.embeds[id]; e != nil && !e.started && !e.removed && s.writes[e.token] == e {
+				writes = append(writes, written)
+			}
+		}
+		if len(writes) == 0 {
+			delete(current, "embeds")
+		} else {
+			current["embeds"] = writes
+		}
+		return current
+	}
+	return result
 }
 
 // nextIDLocked returns the next log_id in the server-wide sequence: the commit

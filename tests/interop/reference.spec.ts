@@ -198,11 +198,11 @@ test.describe('reference features against the Go server', () => {
 		await expect(page.getByTestId('command-tag')).toHaveText('Command');
 		await run.click();
 		await expect(field).toHaveText('');
-		// The server's reply is a @private notice: never stored, marked as yours alone.
+		// The server's reply is a ~private notice: never stored, marked as yours alone.
 		const help = page.getByTestId('notice').filter({ hasText: '/avatar' }).last();
 		await expect(help).toBeVisible();
 		await expect(help).toHaveClass(/ap-notice-private/);
-		await expect(help.locator('.ap-notice-title')).toHaveText('System message to you (@private)');
+		await expect(help.locator('.ap-notice-title')).toHaveText('System message to you (~private)');
 		await expect(help).not.toHaveAttribute('data-message-id');
 
 		// A failed command shows its error the same way and gives the draft back.
@@ -278,14 +278,14 @@ test.describe('reference features against the Go server', () => {
 			// The reader goes to the thread; what arrives in General meanwhile is new to them.
 			await openThread(pageB, threadId);
 			await pageA.getByRole('button', { name: 'Back to room', exact: true }).click();
-			await sendMessage(pageA, `${token} unread in @general`);
+			await sendMessage(pageA, `${token} unread in #general`);
 			await pageB.getByRole('button', { name: 'Back to room', exact: true }).click();
 			const unread = await waitForMessage(pageB, `${token} unread`);
 			const divider = pageB.getByTestId('new-divider');
 			await expect(divider).toHaveText('New');
 			expect(await divider.evaluate((node, id) => node.nextElementSibling?.getAttribute('data-message-id') === id, await unread.getAttribute('data-message-id'))).toBe(true);
-			// `@general` names the room: a link, not a person.
-			await expect(unread.locator('button.ap-mention-room[data-room-id="general"]')).toHaveText('General');
+			// `#general` names the room: a link, not a person.
+			await expect(unread.locator('button.ap-mention-room[data-room-id="general"]')).toHaveText('#General');
 
 			// Mentions name a user_id; the chip shows their current name.
 			await setDisplayName(pageB, `${token}-reader`);

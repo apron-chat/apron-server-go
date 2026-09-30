@@ -28,10 +28,6 @@ type messageState struct {
 	reactions map[string]reactionSet
 	// records are every logged snapshot, for redaction; the last is current.
 	records []*logRecord
-	// titleRecords are the room records whose title was derived from this
-	// message's text, and titledRooms their rooms, for redaction.
-	titleRecords []*logRecord
-	titledRooms  []*roomState
 }
 
 // currentRaw is the JSON of the message's current snapshot.
@@ -101,25 +97,38 @@ func (s *Server) saveMessage(c *client, req request) (any, bool, *rpcError) {
 	defer s.unlock()
 	u := c.user
 	c.away = false
-	destination := s.rooms[roomID]
+	destination := s.visibleRoomLocked(u, roomID)
 	if destination == nil {
 		return nil, false, invalidParams("Unknown room %q", roomID)
 	}
 	from := u.from()
 	var current *messageState
 	if replacing {
-		current = s.messages[messageID]
+		current = s.visibleMessageLocked(u, messageID)
 		if current == nil {
 			return nil, false, invalidParams("Unknown message %q", messageID)
 		}
 		if current.owner != u.id {
 			return nil, false, &rpcError{Code: codeDenied, Message: "Only the author may edit, move, or delete this message"}
 		}
+		// A move snapshot is logged in both rooms and names both, so a
+		// message may not move to a room that some who see its room cannot
+		// see, such as a private room: the move would show them its room_id
+		// and the message.
+		if source := s.rooms[current.roomID]; source != destination && source.revealsTo(destination) {
+			return nil, false, &rpcError{Code: codeDenied, Message: "A message cannot move to a room that fewer people can see"}
+		}
 		from = current.from
 	}
 	if hasReply {
-		if _, exists := s.messages[replyID]; !exists || (replacing && replyID == messageID) {
+		target := s.visibleMessageLocked(u, replyID)
+		if target == nil || (replacing && replyID == messageID) {
 			return nil, false, invalidParams("reply_to must name another existing message")
+		}
+		// A reply names its target's message_id to everyone who sees the
+		// reply, so it may not name a message some of them cannot see.
+		if destination.revealsTo(s.rooms[target.roomID]) {
+			return nil, false, &rpcError{Code: codeDenied, Message: "A reply cannot quote a message that fewer people can see"}
 		}
 	}
 	if !replacing {
@@ -214,11 +223,19 @@ func (s *Server) commitSnapshotLocked(m *messageState, snapshot map[string]any, 
 	rooms := []*roomState{destination}
 	moved := m.roomID != "" && m.roomID != destination.id
 	if moved {
-		rooms = []*roomState{s.rooms[m.roomID], destination}
-		snapshot["prev_room_id"] = m.roomID
+		source := s.rooms[m.roomID]
+		rooms = []*roomState{source, destination}
+		// A move out of a room that some who see the destination cannot see,
+		// such as a private one, does not name it to them.
+		if !destination.revealsTo(source) {
+			snapshot["prev_room_id"] = m.roomID
+		}
 	}
 	m.logID = logID
 	m.roomID = destination.id
+	if !moved && len(m.records) == 0 && destination.members[m.owner] != nil {
+		destination.active[m.owner] = logID
+	}
 	record := newLogRecord(logID, kindMessage, snapshot)
 	m.records = append(m.records, record)
 	s.touchMessage(m)
@@ -242,15 +259,12 @@ func (s *Server) republishLocked(m *messageState, edit func(body map[string]any)
 }
 
 // redactLocked rewrites a deleted message's earlier snapshots into
-// tombstones at their original log_ids (§4.2). Room records embed intro
-// snapshots by reference, so their intro_message copies follow; thread
-// titles taken from the message's text are replaced.
+// tombstones at their original log_ids (§4.2).
 func (s *Server) redactLocked(m *messageState) {
 	for _, record := range m.records {
 		record.rewrite(tombstone)
 		s.touchRecord(record)
 	}
-	s.untitleLocked(m)
 }
 
 func tombstone(snapshot map[string]any) {
@@ -309,7 +323,7 @@ func validMessageID(id string) bool {
 	return true
 }
 
-// parseMessageRef reads a message reference (reply_to, intro_message). Clients
+// parseMessageRef reads a message reference (reply_to). Clients
 // send bare references; any other keys, such as an echoed snapshot, are ignored.
 func parseMessageRef(params map[string]jsontext.Value, name string) (string, bool, *rpcError) {
 	raw, present := params[name]
@@ -407,11 +421,11 @@ func (s *Server) react(c *client, req request) (any, bool, *rpcError) {
 	}
 	s.mu.Lock()
 	defer s.unlock()
-	m := s.messages[messageID]
+	u := c.user
+	m := s.visibleMessageLocked(u, messageID)
 	if m == nil {
 		return nil, false, invalidParams("Unknown message %q", messageID)
 	}
-	u := c.user
 	if !sameEmojiSet(m.reactions[u.id].emojis, emojis) {
 		s.touchMessage(m)
 		from := u.from()

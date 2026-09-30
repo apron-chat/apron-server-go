@@ -144,6 +144,12 @@ func TestPushWakesMentionedUsersWhoAreAway(t *testing.T) {
 	if got := pushes(); len(got) != 0 {
 		t.Fatalf("reply in an unjoined room woke %d", len(got))
 	}
+	// A mention in a private room wakes only its members (§4.3.4).
+	hidden, _ := saveRoom(t, a, "hidden", map[string]any{"title": "Hidden", "private": true})
+	save(t, a, "hidden-mention", map[string]any{"room_id": hidden, "body": map[string]any{"text": "@guest_2", "mentions": []any{"guest_2"}}})
+	if got := pushes(); len(got) != 0 {
+		t.Fatalf("mention in a private room woke a non-member: %#v", got)
+	}
 	before, _ := a.request(t, "command", "help", map[string]any{"body": map[string]any{"text": "/help", "mentions": []any{"guest_2"}}})
 	if len(before) != 1 {
 		t.Fatalf("help frames: %#v", before)
