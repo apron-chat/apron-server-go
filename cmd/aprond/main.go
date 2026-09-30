@@ -43,7 +43,7 @@ type Options struct {
 	MaxConnections         int      `long:"max-connections" description:"Maximum concurrent WebSockets; 0 is unlimited"`
 	MaxListenerConnections int      `long:"max-listener-connections" description:"Maximum concurrent TCP connections on the listener, HTTP included; 0 is unlimited"`
 	MessagesPerMinute      int      `long:"messages-per-minute" description:"Burst of new messages, room_set requests, and /avatar commands per user, refilled over a minute; 0 is unlimited"`
-	MaxListedMembers       int      `long:"max-listed-members" default:"1000" description:"Members listed per room in room_list and room_update; a larger room lists its most recently active ones and member_count"`
+	MaxListedMembers       int      `long:"max-listed-members" default:"1000" description:"Members listed per room in room_list and room_update; a larger room lists its most recently active ones and member_count. 0 is unlimited"`
 	DebugAddr              string   `long:"debug-addr" description:"Listen address for unauthenticated pprof and expvar under /debug/, such as 127.0.0.1:6060; empty disables"`
 	Store                  string   `long:"store" description:"Where state is kept: sqlite:<path> for a SQLite database, or memory to keep nothing across restarts"`
 	Welcome                string   `long:"welcome" description:"Markdown clients show on their sign-in screen (server.welcome), such as how this server's sign-in methods fit together"`
@@ -62,12 +62,13 @@ type Options struct {
 	} `group:"Uploads" namespace:"upload"`
 
 	Email struct {
-		Sender       string `long:"sender" default:"log" choice:"log" choice:"smtp" choice:"none" description:"How email sign-in codes are delivered: log prints them to the server log (development only), smtp sends them, none disables email sign-in"`
+		Sender       string `long:"sender" default:"none" choice:"none" choice:"smtp" choice:"log" description:"How email sign-in codes are delivered: none disables email sign-in, smtp sends them, log writes them to the server log (development only; refused with --public-url or --tls.domain)"`
 		LinkURL      string `long:"link-url" description:"Page that sign-in links in emails open, such as https://chat.example/, with the address and code in its fragment (default: --public-url; empty sends codes without links)"`
 		From         string `long:"from" description:"Sender address of sign-in emails, for --email.sender smtp"`
 		SMTPAddr     string `long:"smtp-addr" description:"SMTP relay as host:port, for --email.sender smtp; STARTTLS is used when offered"`
 		SMTPUser     string `long:"smtp-user" description:"SMTP user name; empty sends without authentication"`
 		SMTPPassword string `long:"smtp-password" description:"SMTP password"`
+		SMTPInsecure bool   `long:"smtp-insecure" description:"Send through a relay that does not offer STARTTLS, in cleartext (a relay on the same host only)"`
 	} `group:"Email sign-in" namespace:"email"`
 
 	Push struct {
@@ -133,7 +134,7 @@ func serverConfig(options Options) (server.Config, error) {
 	config.Welcome = options.Welcome
 	for _, grant := range options.Roles {
 		role, holder, ok := strings.Cut(grant, "=")
-		role, holder = strings.TrimSpace(role), strings.TrimSpace(holder)
+		role, holder = strings.ToLower(strings.TrimSpace(role)), strings.TrimSpace(holder)
 		if !ok || role == "" || holder == "" {
 			return config, fmt.Errorf("invalid --role %q: use role=user_id, such as admin=ada", grant)
 		}
@@ -153,9 +154,12 @@ func serverConfig(options Options) (server.Config, error) {
 	}
 	switch options.Email.Sender {
 	case "log":
+		if options.PublicURL != "" || len(options.TLS.Domains) > 0 {
+			return config, errors.New("--email.sender log writes sign-in codes to the server log, so anyone who reads it can sign in as anyone; it is for development and refused with --public-url or --tls.domain: use --email.sender smtp")
+		}
 		config.EmailSender = server.LogEmailSender{}
 	case "smtp":
-		sender, err := newSMTPSender(options.Email.SMTPAddr, options.Email.From, options.Email.SMTPUser, options.Email.SMTPPassword)
+		sender, err := newSMTPSender(options.Email.SMTPAddr, options.Email.From, options.Email.SMTPUser, options.Email.SMTPPassword, options.Email.SMTPInsecure)
 		if err != nil {
 			return config, err
 		}

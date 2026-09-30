@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
+	"errors"
 	"fmt"
 	"net"
 	"net/mail"
@@ -12,31 +14,33 @@ import (
 	"github.com/apron-chat/apron-server-go/internal/server"
 )
 
-// smtpSender sends email sign-in codes through an SMTP relay, upgrading to
-// TLS when the relay offers STARTTLS. Authentication, when a user is given,
-// is PLAIN, which net/smtp sends only over TLS or to localhost.
+// smtpSender sends email sign-in codes through an SMTP relay. It requires
+// STARTTLS unless insecure is set, and authenticates with PLAIN when a user
+// is given. Every delivery is bounded by its context's deadline, the
+// connection included.
 type smtpSender struct {
 	addr     string
+	host     string
 	from     string
 	username string
 	password string
+	insecure bool
 }
 
-func newSMTPSender(addr, from, username, password string) (*smtpSender, error) {
+func newSMTPSender(addr, from, username, password string, insecure bool) (*smtpSender, error) {
 	host, _, err := net.SplitHostPort(addr)
 	if err != nil || host == "" {
 		return nil, fmt.Errorf("invalid --email.smtp-addr %q: use host:port, such as smtp.example.com:587", addr)
 	}
-	if parsed, err := mail.ParseAddress(from); err != nil || from == "" {
+	parsed, err := mail.ParseAddress(from)
+	if err != nil || from == "" {
 		return nil, fmt.Errorf("invalid --email.from %q: an email address is required", from)
-	} else {
-		from = parsed.String()
 	}
-	return &smtpSender{addr: addr, from: from, username: username, password: password}, nil
+	return &smtpSender{addr: addr, host: host, from: parsed.String(), username: username, password: password, insecure: insecure}, nil
 }
 
-func (s *smtpSender) SendSignInCode(ctx context.Context, m server.SignInEmail) error {
-	sender, _ := mail.ParseAddress(s.from)
+// message renders a sign-in email.
+func (s *smtpSender) message(m server.SignInEmail) []byte {
 	var message strings.Builder
 	fmt.Fprintf(&message, "From: %s\r\n", s.from)
 	fmt.Fprintf(&message, "To: %s\r\n", m.To)
@@ -44,17 +48,58 @@ func (s *smtpSender) SendSignInCode(ctx context.Context, m server.SignInEmail) e
 	fmt.Fprintf(&message, "Date: %s\r\n", time.Now().Format(time.RFC1123Z))
 	message.WriteString("MIME-Version: 1.0\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n")
 	message.WriteString(strings.ReplaceAll(m.Text(), "\n", "\r\n"))
-	var auth smtp.Auth
-	if s.username != "" {
-		host, _, _ := net.SplitHostPort(s.addr)
-		auth = smtp.PlainAuth("", s.username, s.password, host)
-	}
-	done := make(chan error, 1)
-	go func() { done <- smtp.SendMail(s.addr, auth, sender.Address, []string{m.To}, []byte(message.String())) }()
-	select {
-	case err := <-done:
+	return []byte(message.String())
+}
+
+func (s *smtpSender) SendSignInCode(ctx context.Context, m server.SignInEmail) error {
+	var dialer net.Dialer
+	conn, err := dialer.DialContext(ctx, "tcp", s.addr)
+	if err != nil {
 		return err
-	case <-ctx.Done():
-		return ctx.Err()
 	}
+	defer conn.Close()
+	if deadline, ok := ctx.Deadline(); ok {
+		_ = conn.SetDeadline(deadline)
+	}
+	// Closing the connection when the context ends interrupts any exchange
+	// still waiting on the relay.
+	stop := context.AfterFunc(ctx, func() { _ = conn.Close() })
+	defer stop()
+
+	client, err := smtp.NewClient(conn, s.host)
+	if err != nil {
+		return err
+	}
+	defer client.Close()
+	if ok, _ := client.Extension("STARTTLS"); ok {
+		if err := client.StartTLS(&tls.Config{ServerName: s.host}); err != nil {
+			return err
+		}
+	} else if !s.insecure {
+		return errors.New("the SMTP relay does not offer STARTTLS; set --email.smtp-insecure to send in cleartext")
+	}
+	if s.username != "" {
+		// net/smtp sends PLAIN credentials only over TLS or to localhost.
+		if err := client.Auth(smtp.PlainAuth("", s.username, s.password, s.host)); err != nil {
+			return err
+		}
+	}
+	sender, _ := mail.ParseAddress(s.from)
+	if err := client.Mail(sender.Address); err != nil {
+		return err
+	}
+	if err := client.Rcpt(m.To); err != nil {
+		return err
+	}
+	w, err := client.Data()
+	if err != nil {
+		return err
+	}
+	if _, err := w.Write(s.message(m)); err != nil {
+		return err
+	}
+	if err := w.Close(); err != nil {
+		return err
+	}
+	return client.Quit()
 }

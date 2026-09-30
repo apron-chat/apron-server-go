@@ -102,7 +102,7 @@ func TestTLSDomainIsThePublicURL(t *testing.T) {
 }
 
 func TestWelcomeAndRoles(t *testing.T) {
-	options, _ := parse(t, "--welcome", "Sign in with **email**.", "--role", "admin=ada", "--role", "moderator = bob", "--role", "admin=carol")
+	options, _ := parse(t, "--welcome", "Sign in with **email**.", "--role", "admin=ada", "--role", "Moderator = bob", "--role", "admin=carol")
 	config, err := serverConfig(*options)
 	if err != nil {
 		t.Fatal(err)
@@ -122,24 +122,35 @@ func TestWelcomeAndRoles(t *testing.T) {
 }
 
 func TestEmailSenders(t *testing.T) {
+	// Email sign-in is off unless a sender is chosen.
 	options, _ := parse(t)
 	config, err := serverConfig(*options)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, logs := config.EmailSender.(server.LogEmailSender); !logs || config.EmailLinkURL != "" {
-		t.Fatalf("default email sender %T, link %q", config.EmailSender, config.EmailLinkURL)
+	if config.EmailSender != nil {
+		t.Fatalf("default email sender: %T", config.EmailSender)
 	}
-	options, _ = parse(t, "--email.sender", "none")
-	if config, _ := serverConfig(*options); config.EmailSender != nil {
-		t.Fatalf("disabled email sender: %T", config.EmailSender)
+	options, _ = parse(t, "--email.sender", "log")
+	if config, err := serverConfig(*options); err != nil || config.EmailSender != (server.LogEmailSender{}) || config.EmailLinkURL != "" {
+		t.Fatalf("log sender %T, link %q, error %v", config.EmailSender, config.EmailLinkURL, err)
+	}
+	// The log sender is for development: a public server refuses it.
+	for _, args := range [][]string{
+		{"--email.sender", "log", "--public-url", "https://chat.example"},
+		{"--email.sender", "log", "--tls.domain", "chat.example"},
+	} {
+		options, _ := parse(t, args...)
+		if _, err := serverConfig(*options); err == nil {
+			t.Errorf("accepted %v", args)
+		}
 	}
 	options, _ = parse(t, "--email.sender", "smtp", "--email.smtp-addr", "smtp.example:587", "--email.from", "Apron <chat@example.com>", "--public-url", "https://chat.example/")
 	config, err = serverConfig(*options)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if sender, ok := config.EmailSender.(*smtpSender); !ok || sender.addr != "smtp.example:587" || config.EmailLinkURL != "https://chat.example/" {
+	if sender, ok := config.EmailSender.(*smtpSender); !ok || sender.addr != "smtp.example:587" || sender.insecure || config.EmailLinkURL != "https://chat.example/" {
 		t.Fatalf("smtp sender %#v, link %q", config.EmailSender, config.EmailLinkURL)
 	}
 	for _, args := range [][]string{

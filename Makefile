@@ -22,7 +22,7 @@ dev-web:
 	npm --prefix $(WEB) run dev -- --host 127.0.0.1 --port 5173 --strictPort
 
 dev-server:
-	go run ./cmd/aprond
+	go run ./cmd/aprond --email.sender log
 
 check:
 	go vet ./...
@@ -49,7 +49,7 @@ build: build-web
 	go build -o build/aprond ./cmd/aprond
 
 serve:
-	./build/aprond --static-dir $(WEB)/build
+	./build/aprond --static-dir $(WEB)/build --email.sender log
 
 run: build
 	$(MAKE) serve
