@@ -145,7 +145,7 @@ func TestEmailSignIn(t *testing.T) {
 func setCode(app *Server, email, code string, ttl time.Duration) {
 	app.mu.Lock()
 	defer app.mu.Unlock()
-	app.email.address(email, time.Now(), true).signIn = &emailCode{code: code, expires: time.Now().Add(ttl)}
+	app.email.createAddress(email, time.Now()).signIn = &emailCode{code: code, expires: time.Now().Add(ttl)}
 }
 
 // ageSends moves an address's sends back by d, as if time had passed.
@@ -440,7 +440,7 @@ func TestEmailBudgets(t *testing.T) {
 	// A full table forgets its least recently used address.
 	app.mu.Lock()
 	for i := 0; len(app.email.addresses) < maxTrackedEmailState; i++ {
-		app.email.address(fmt.Sprintf("filler%d@example.com", i), time.Now(), true).sends = []time.Time{time.Now()}
+		app.email.createAddress(fmt.Sprintf("filler%d@example.com", i), time.Now()).sends = []time.Time{time.Now()}
 	}
 	app.mu.Unlock()
 	requestCode(t, dialFrom(t, httpServer, "192.0.2.50"), "late@example.com")
@@ -556,4 +556,86 @@ func TestEmailGuestBecomesAnAccountAcrossRestarts(t *testing.T) {
 	c.userID = guest.userID
 	c.drain(t)
 	save(t, c, "edit", map[string]any{"message_id": id, "body": map[string]any{"text": "edited"}})
+}
+
+// Refused code requests leave no entries behind, and a full table never
+// forgets a live code or a lock: a flood of requests for other addresses
+// from one client leaves the victim's code and a locked address as they
+// were. A table full of live codes refuses new requests instead.
+func TestEmailFloodKeepsCodesAndLocks(t *testing.T) {
+	app, mailbox, httpServer := emailTestServer(t, func(config *Config) { config.ClientIPHeader = "X-Forwarded-For" })
+	victim := dialFrom(t, httpServer, "192.0.2.1")
+	requestCode(t, victim, "victim@example.com")
+	code := mailbox.receive(t).Code
+	for i := 0; i < maxAddressFailuresPerWindow; i++ {
+		c := dialFrom(t, httpServer, fmt.Sprintf("198.51.100.%d", 10+i/clientFailureBurst))
+		setCode(app, "target@example.com", "123456", time.Minute)
+		c.call(t, "auth", c.nextID("wrong"), map[string]any{"scheme": "email", "email": "target@example.com", "token": "000000"})
+	}
+
+	attacker := dialFrom(t, httpServer, "203.0.113.66")
+	for i := 0; i < maxTrackedEmailState+10; i++ {
+		attacker.call(t, "auth", fmt.Sprintf("flood-%d", i), map[string]any{"scheme": "email", "email": fmt.Sprintf("junk%d@example.com", i)})
+	}
+	app.mu.Lock()
+	entries := len(app.email.addresses)
+	app.mu.Unlock()
+	if entries > 10 {
+		t.Fatalf("refused requests left %d entries", entries)
+	}
+	dialFrom(t, httpServer, "192.0.2.77").expectError(t, "auth", "locked", map[string]any{"scheme": "email", "email": "target@example.com"}, codeRetryAfter)
+	emailSignIn(t, victim, "victim@example.com", code, nil)
+
+	// A table full of live codes forgets none of them.
+	app.mu.Lock()
+	for i := 0; len(app.email.addresses) < maxTrackedEmailState; i++ {
+		app.email.createAddress(fmt.Sprintf("live%d@example.com", i), time.Now())
+	}
+	for _, state := range app.email.addresses {
+		state.signIn = &emailCode{code: "1", expires: time.Now().Add(time.Minute)}
+	}
+	app.mu.Unlock()
+	dialFrom(t, httpServer, "192.0.2.99").expectError(t, "auth", "full", map[string]any{"scheme": "email", "email": "late@example.com"}, codeRetryAfter)
+	app.mu.Lock()
+	_, kept := app.email.addresses["live0@example.com"]
+	app.mu.Unlock()
+	if !kept {
+		t.Fatal("a live code was forgotten")
+	}
+}
+
+// The client address comes from the last entry across every line of the
+// configured header, without a port, else from the connection.
+func TestClientIPFromAProxyHeader(t *testing.T) {
+	s := &Server{config: Config{ClientIPHeader: "X-Forwarded-For"}}
+	for _, test := range []struct {
+		lines []string
+		want  string
+	}{
+		{nil, "10.0.0.1"},
+		{[]string{"203.0.113.7"}, "203.0.113.7"},
+		{[]string{"6.6.6.6, 203.0.113.7"}, "203.0.113.7"},
+		{[]string{"6.6.6.6", "203.0.113.7"}, "203.0.113.7"},
+		{[]string{"6.6.6.6", "198.51.100.1, 203.0.113.7:4711"}, "203.0.113.7"},
+		{[]string{"[2001:db8::1]:4711"}, "2001:db8::1"},
+		{[]string{"2001:db8::2"}, "2001:db8::2"},
+		{[]string{"garbage-x"}, "10.0.0.1"},
+		{[]string{"203.0.113.7, "}, "10.0.0.1"},
+	} {
+		r := httptest.NewRequest("GET", "/ws", nil)
+		r.RemoteAddr = "10.0.0.1:5555"
+		for _, line := range test.lines {
+			r.Header.Add("X-Forwarded-For", line)
+		}
+		if got := s.clientIP(r); got != test.want {
+			t.Errorf("clientIP(%q) = %q, want %q", test.lines, got, test.want)
+		}
+	}
+	plain := &Server{}
+	r := httptest.NewRequest("GET", "/ws", nil)
+	r.RemoteAddr = "10.0.0.1:5555"
+	r.Header.Set("X-Forwarded-For", "203.0.113.7")
+	if got := plain.clientIP(r); got != "10.0.0.1" {
+		t.Errorf("without a header configured: %q", got)
+	}
 }

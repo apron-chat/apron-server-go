@@ -155,6 +155,14 @@ func (a *emailAddress) prune(now time.Time) bool {
 	return a.signIn == nil && len(a.sends) == 0 && len(a.failures) == 0
 }
 
+// sendTimes is the address's sends in the window, none for no entry.
+func (a *emailAddress) sendTimes() []time.Time {
+	if a == nil {
+		return nil
+	}
+	return a.sends
+}
+
 // lockedFor is how long codes for the address stay refused after its
 // budget of wrong codes ran out, or 0.
 func (a *emailAddress) lockedFor(now time.Time) time.Duration {
@@ -199,40 +207,63 @@ func newEmailState() emailState {
 	}
 }
 
-// address returns the state of an address, pruned, creating it if create is
-// set; nil when there is none to keep.
-func (e *emailState) address(email string, now time.Time, create bool) *emailAddress {
+// address returns the state of an address, pruned, or nil when there is
+// none to keep. It creates nothing: a request that is refused leaves no
+// trace in the table.
+func (e *emailState) address(email string, now time.Time) *emailAddress {
 	a := e.addresses[email]
-	if a != nil && a.prune(now) && !create {
+	if a == nil {
+		return nil
+	}
+	if a.prune(now) {
 		e.addressLRU.Remove(a.element)
 		delete(e.addresses, email)
 		return nil
-	}
-	if a == nil {
-		if !create {
-			return nil
-		}
-		if len(e.addresses) >= maxTrackedEmailState {
-			oldest := e.addressLRU.Back()
-			e.addressLRU.Remove(oldest)
-			delete(e.addresses, oldest.Value.(*emailAddress).email)
-		}
-		a = &emailAddress{email: email}
-		a.element = e.addressLRU.PushFront(a)
-		e.addresses[email] = a
 	}
 	e.addressLRU.MoveToFront(a.element)
 	return a
 }
 
-// client returns the budget of a client address, creating it.
-func (e *emailState) client(key string) *emailClient {
+// createAddress returns the state of an address, creating it. When the
+// table is full it forgets the least recently used entry that holds only
+// send times, never one with a live code or wrong codes in the window, and
+// returns nil when it finds none, so a request is refused rather than
+// erasing anyone's code or lock.
+func (e *emailState) createAddress(email string, now time.Time) *emailAddress {
+	if a := e.address(email, now); a != nil {
+		return a
+	}
+	if len(e.addresses) >= maxTrackedEmailState && !evict(e.addressLRU, evictionScan, func(value any) bool {
+		a := value.(*emailAddress)
+		if a.prune(now); a.signIn != nil || len(a.failures) > 0 {
+			return false
+		}
+		delete(e.addresses, a.email)
+		return true
+	}) {
+		return nil
+	}
+	a := &emailAddress{email: email}
+	a.element = e.addressLRU.PushFront(a)
+	e.addresses[email] = a
+	return a
+}
+
+// client returns the budget of a client address, creating it. When the
+// table is full it forgets the least recently used client whose budgets are
+// full again, and returns nil when it finds none.
+func (e *emailState) client(key string, now time.Time) *emailClient {
 	c := e.clients[key]
 	if c == nil {
-		if len(e.clients) >= maxTrackedClients {
-			oldest := e.clientLRU.Back()
-			e.clientLRU.Remove(oldest)
-			delete(e.clients, oldest.Value.(*emailClient).key)
+		if len(e.clients) >= maxTrackedClients && !evict(e.clientLRU, evictionScan, func(value any) bool {
+			old := value.(*emailClient)
+			if old.sends.TokensAt(now) < clientSendBurst || old.failures.TokensAt(now) < clientFailureBurst {
+				return false
+			}
+			delete(e.clients, old.key)
+			return true
+		}) {
+			return nil
 		}
 		c = &emailClient{
 			key:      key,
@@ -244,6 +275,22 @@ func (e *emailState) client(key string) *emailClient {
 	}
 	e.clientLRU.MoveToFront(c.element)
 	return c
+}
+
+// evictionScan bounds how many of the least recently used entries a full
+// table looks at for one it may forget.
+const evictionScan = 256
+
+// evict removes the least recently used element of lru, among the last
+// scan, that forget accepts, and reports whether there was one.
+func evict(lru *list.List, scan int, forget func(value any) bool) bool {
+	for element := lru.Back(); element != nil && scan > 0; element, scan = element.Prev(), scan-1 {
+		if forget(element.Value) {
+			lru.Remove(element)
+			return true
+		}
+	}
+	return false
 }
 
 // wait is how long until limiter allows one more event, or 0.
@@ -372,12 +419,16 @@ func (s *Server) authenticateEmail(c *client, req request) (any, *rpcError) {
 		return nil, err
 	}
 	now := time.Now()
-	budget := s.email.client(c.clientKey)
+	busy := retryAfter("Too many sign-ins in progress; try again shortly", emailResendInterval)
+	budget := s.email.client(c.clientKey, now)
+	if budget == nil {
+		return nil, busy
+	}
 	if _, has := req.params["token"]; !has {
 		return s.sendEmailCodeLocked(c, req, email, budget, now)
 	}
 
-	state := s.email.address(email, now, false)
+	state := s.email.address(email, now)
 	if wait := state.lockedFor(now); wait > 0 {
 		return nil, retryAfter("Too many wrong codes for this address; try again later", wait)
 	}
@@ -399,8 +450,14 @@ func (s *Server) authenticateEmail(c *client, req request) (any, *rpcError) {
 	right, spent := pending.guess(code)
 	if !right {
 		budget.failures.AllowN(now, 1)
-		state = s.email.address(email, now, true)
-		state.failures = append(state.failures, now)
+		if state == nil {
+			// An add code's address may have no entry yet; if the table
+			// has no room, the guesser's own budget still counted it.
+			state = s.email.createAddress(email, now)
+		}
+		if state != nil {
+			state.failures = append(state.failures, now)
+		}
 		if spent {
 			if c.user != nil {
 				delete(s.email.adds, c.user.id)
@@ -458,8 +515,8 @@ func (s *Server) authenticateEmail(c *client, req request) (any, *rpcError) {
 // maxConcurrentEmailSends deliveries run at once. Beyond any of these the
 // request is retry_after, whether or not the address has an account.
 func (s *Server) sendEmailCodeLocked(c *client, req request, email string, budget *emailClient, now time.Time) (any, *rpcError) {
-	state := s.email.address(email, now, true)
-	if n := len(state.sends); n > 0 {
+	state := s.email.address(email, now)
+	if n := len(state.sendTimes()); n > 0 {
 		if wait := state.sends[n-1].Add(emailResendInterval).Sub(now); wait > 0 {
 			return nil, retryAfter("A code was just sent to this address; try again shortly", wait)
 		}
@@ -478,6 +535,12 @@ func (s *Server) sendEmailCodeLocked(c *client, req request, email string, budge
 	}
 	if delay := wait(c.emailSends, now); delay > 0 {
 		return nil, retryAfter("Too many codes requested; try again later", delay)
+	}
+	if state == nil {
+		// The entry is made only for a code that is sent.
+		if state = s.email.createAddress(email, now); state == nil {
+			return nil, retryAfter("Too many sign-ins in progress; try again shortly", emailResendInterval)
+		}
 	}
 	select {
 	case s.email.slots <- struct{}{}:
