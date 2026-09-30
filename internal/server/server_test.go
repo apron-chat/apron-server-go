@@ -69,13 +69,12 @@ func TestServerFrame(t *testing.T) {
 		t.Fatalf("ext limits: %#v", limits)
 	}
 
-	// Passkeys and tokens only sign in, so signup lists the schemes that
-	// start an identity.
+	// A token only signs in, so signup lists the other schemes.
 	config := DefaultConfig()
 	config.WebAuthn = testWebAuthn(t)
 	_, passkeys := newTestServer(t, config)
 	_, frame = dialRaw(t, passkeys)
-	if params := frame["params"].(map[string]any); !reflect.DeepEqual(params["auth"], []any{"webauthn", "token", "guest"}) || !reflect.DeepEqual(params["signup"], []any{"guest"}) {
+	if params := frame["params"].(map[string]any); !reflect.DeepEqual(params["auth"], []any{"webauthn", "token", "guest"}) || !reflect.DeepEqual(params["signup"], []any{"webauthn", "guest"}) {
 		t.Fatalf("passkey schemes: %#v", params)
 	}
 

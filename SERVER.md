@@ -35,9 +35,9 @@ Defaults:
 - seeded default room: `general` (title `General`)
 - authentication (`server.auth`, in this order): WebAuthn passkeys, email
   codes when `--email.sender` is set (off by default), bearer-token resume,
-  and `guest`; `server.signup` lists the schemes that start an identity on
-  a connection that has none, `email` and `guest`, since a passkey is
-  registered to an identity already signed in and a token resumes one
+  and `guest`; `server.signup` lists every one but `token`, which only
+  resumes an account: a guest who registers a passkey or adds an address
+  becomes an account, and an email code for a new address creates one
 - passkey RP ID: `localhost`; frontend origins: `http://localhost:5173` and
   `http://localhost:8080`
 - no `server.welcome` and no roles

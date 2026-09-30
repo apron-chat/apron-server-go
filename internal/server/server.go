@@ -674,14 +674,10 @@ func (s *Server) serverParams() map[string]any {
 		authSchemes = append(authSchemes, "token")
 	}
 	authSchemes = append(authSchemes, "guest")
-	// signup (§3.2) lists the schemes that start an identity on a
-	// connection that has none: guest, and email for an address new to the
-	// server. A passkey is registered to an identity already signed in and a
-	// token resumes one, so they only sign in.
-	signup := []string{"guest"}
-	if s.config.EmailSender != nil {
-		signup = []string{"email", "guest"}
-	}
+	// signup (§3.2) lists the schemes that can create an account: every
+	// one but token, which only resumes one. A passkey registered by a
+	// guest makes the guest an account, and email and guest start one.
+	signup := slices.DeleteFunc(slices.Clone(authSchemes), func(scheme string) bool { return scheme == "token" })
 	params := map[string]any{
 		"protocol": 7,
 		"name":     "apron-go/7",
