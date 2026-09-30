@@ -4,9 +4,9 @@
 open chat protocol over WebSockets.**
 
 `aprond` is a single Go binary that implements every capability of Apron
-protocol v6: rooms and threads, full history, edits and replies, reactions,
-file uploads and live streams, commands, push notifications, and passkey
-sign-in. It keeps its state in SQLite, can serve a web client from the same
+protocol v7: rooms, threads, and private rooms, full history, edits and
+replies, reactions, file uploads and live streams, commands, push
+notifications, roles, and passkey and email sign-in. It keeps its state in SQLite, can serve a web client from the same
 port, and can fetch its own TLS certificates.
 
 ## Quick start
@@ -24,7 +24,7 @@ make install   # fetch the web client and its dependencies
 make run       # build both, then serve them on http://localhost:8080
 ```
 
-A public deployment with HTTPS and passkeys looks like:
+A public deployment with HTTPS, passkeys, and email sign-in looks like:
 
 ```sh
 go install github.com/apron-chat/apron-server-go/cmd/aprond@latest
@@ -33,8 +33,13 @@ aprond --static-dir .apron-web/build \
   --public-url https://chat.example.com \
   --origin https://chat.example.com \
   --webauthn.rp-id chat.example.com \
-  --webauthn.origin https://chat.example.com
+  --webauthn.origin https://chat.example.com \
+  --email.sender smtp --email.from chat@example.com \
+  --email.smtp-addr smtp.example.com:587 \
+  --role admin=you@example.com
 ```
+
+In development email codes are not sent but written to the server log.
 
 Run `aprond --help` for every flag, or `aprond --print-config > aprond.toml`
 to start a config file.

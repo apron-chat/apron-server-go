@@ -1,13 +1,13 @@
 # aprond
 
-`cmd/aprond` serves the reference Apron backend: it implements protocol v6
-([PROTOCOL.md](https://github.com/shazow/apron/blob/main/PROTOCOL.md)), every capability and liveness ping, but
-not the designs under consideration, multiplexing
-([Appendix C.2](https://github.com/shazow/apron/blob/main/PROTOCOL.md#c2-multiplexing-envelope))
-and WebRTC
-([Appendix C.1](https://github.com/shazow/apron/blob/main/PROTOCOL.md#c1-webrtc-signaling-for-audio-video-and-peer-to-peer-connections)).
+`cmd/aprond` serves the reference Apron backend: it implements protocol v7
+([PROTOCOL.md](https://github.com/shazow/apron/blob/main/PROTOCOL.md)), every capability, private rooms,
+roles, passkey and email sign-in, and liveness ping, but not the designs
+under consideration in
+[Appendix C](https://github.com/shazow/apron/blob/main/PROTOCOL.md#appendix-c--under-consideration):
+WebRTC, multiplexing, and the actions embed.
 State is kept in a store, by default a SQLite database in the user data
-directory, so rooms, history, passkey users, sessions, uploads, and push
+directory, so rooms, history, accounts, sessions, uploads, and push
 registrations survive a restart; see [Storage](#storage).
 
 This document describes how the server is configured and how it behaves where
@@ -30,11 +30,15 @@ Defaults:
 - capabilities: `history`, `edit`, `rooms`, `reactions`, `activity`,
   `embed:upload`, `embed:stream`, `command`; push kind `relay`
   (`server.push`); `server.ping`: 30 seconds
-- `server.ext["apron-go"]`: frame, history, upload, avatar, and stream limits
+- `server.ext["apron-go"]`: frame, history, upload, avatar, stream, and
+  member-listing limits
 - seeded default room: `general` (title `General`)
-- authentication: WebAuthn passkeys, bearer-token resume, and `guest`
+- authentication (`server.auth`, in this order): WebAuthn passkeys, email
+  codes (written to the server log, not sent), bearer-token resume, and
+  `guest`
 - passkey RP ID: `localhost`; frontend origins: `http://localhost:5173` and
   `http://localhost:8080`
+- no `server.welcome` and no roles
 
 Flags (`aprond --help` lists them all):
 
@@ -69,6 +73,21 @@ Flags (`aprond --help` lists them all):
   requests, and `/avatar` commands together: a burst of `n`, refilled evenly
   over a minute. The excess gets `retry_after` with `data.retry_after` in
   seconds. Edits, reactions, and activity are not counted.
+- `--max-listed-members <n>` (1000) bounds the `members` of one room in
+  `room_list` and `room_update` `joined`; see
+  [Rooms](#rooms-threads-and-membership).
+- `--welcome <markdown>` sets `server.welcome`, which clients show on their
+  sign-in screen, such as "Chat as a guest, or sign in with email to keep
+  your name. Codes expire after 10 minutes."
+- `--role <role>=<user_id or email>` (repeat for more) grants a role to an
+  account; see [Identity and profiles](#identity-and-profiles).
+- `--email.sender` chooses how [email sign-in](#email-sign-in) codes are
+  delivered: `log` (the default) writes them to the server log for
+  development, `smtp` sends them through `--email.smtp-addr host:port` from
+  `--email.from`, with `--email.smtp-user` and `--email.smtp-password` when
+  the relay needs them, and `none` turns email sign-in off.
+  `--email.link-url` is the page a code's link opens (default
+  `--public-url`; without either, emails carry only the code).
 - `--webauthn.rp-id <domain>` (`localhost`) and `--webauthn.origin <origin>`
   (repeat for more; `http://localhost:5173` and `http://localhost:8080`)
   configure passkeys; `--webauthn.rp-id ''` disables them.
@@ -118,14 +137,22 @@ backend only keeps entries and applies batches:
 - `memory` keeps them in the process; a new server starts empty.
 
 What survives a restart: rooms and threads with their complete logs, message
-state and reactions, read cursors, passkey users with their credentials,
-profiles, memberships, and push registrations, unexpired sessions, finished
-uploads and their files, and the `log_id`, guest, and embed counters, so no
-`log_id` or `user_id` is reused. What does not: connections, request
-deduplication, and live streams. Guests exist only while connected, so at
-start every guest left in the store is retired as if its last connection had
-just closed, logging its leaves; a write that had not finished fails, and
-its message is republished without the embed.
+state and reactions, read cursors, accounts (passkey and email users) with
+their credentials, addresses, profiles, memberships, and push registrations,
+unexpired sessions, finished uploads and their files, and the `log_id`,
+guest, account, and embed counters, so no `log_id` or `user_id` is reused.
+What does not: connections, request deduplication, email sign-in codes, and
+live streams. Guests exist only while connected, so at start every guest
+left in the store is retired as if its last connection had just closed,
+logging its leaves; a write that had not finished fails, and its message is
+republished without the embed.
+
+A store written by a protocol v6 server is migrated at the first start and
+written back: a room's `intro_message` becomes its `description`, the text
+of the intro message (for each logged room record, the snapshot it embedded;
+for the current record, the message's current text; none for a deleted
+message), and messages from `@room`, `@server`, and `@private` become
+messages from `~room`, `~server`, and `~private`.
 
 ## Connections and liveness
 
@@ -165,8 +192,9 @@ reply is assembled from them without decoding them. Records keep the user
 objects they were logged with. A window bounded to one `log_id` (`after` equal to
 `before`) returns exactly that record from the room's log, so a client walks a
 message's edits back through `prev_log_id`, asking the room in `prev_room_id`
-after a move. Every room is visible, so any user may page any room's history,
-joined or not.
+after a move. Any user may page the history of any room they can see,
+joined or not: every room but [private](#rooms-threads-and-membership) rooms
+they are not in.
 
 ## Identity and profiles
 
@@ -174,9 +202,11 @@ joined or not.
 (`guest_1`, `guest_2`, …) and honors an optional requested `name`. A
 requested `user_id` is honored when it starts with a letter, uses only
 `[A-Za-z0-9_.-]` (ending in a letter, digit, or `_`; at most 64 characters),
-does not start with `guest_` in any case, names no room (ignoring case), and was never
-assigned, ignoring case; otherwise the guest gets the next unused
-`guest_<n>`. The `guest_` namespace belongs to the counter: a request such as
+does not start with `guest_` in any case, names no room (ignoring case), was never
+assigned, ignoring case, and is not granted a role (`--role`); otherwise the
+guest gets the next unused `guest_<n>`. So no user is ever given a
+`user_id` starting with `~`, which are the system identities `~room` and
+`~private` ([Commands](#commands)). The `guest_` namespace belongs to the counter: a request such as
 `guest_7`, `GUEST_7`, `guest_07` or `guest_x` is refused rather than taking a
 number out of sequence or impersonating a counter-assigned guest. Every guest
 `auth` takes exactly one counter value unless its requested ID is honored, so
@@ -184,8 +214,20 @@ the latest guest number is roughly how many guests the process has admitted
 (the counter is in memory and starts over with the process). No `user_id` is
 ever reissued.
 
+Accounts are users who signed in with a passkey or an email address; they
+keep their profile, rooms, and push registrations across connections and
+restarts. `--role` grants them roles, such as
+`--role admin=ada --role moderator=bob@example.com`, by `user_id` or email
+address. Roles are sent in current user objects (below), sorted, and are
+shown beside names; `admin` and `moderator` may also remove people from
+rooms. Guests hold no roles, and a granted `user_id` that was never used is
+never given to a guest, so nobody can claim it and then register a passkey.
+Roles follow the configuration: they change with a restart, or when a
+guest becomes an account.
+
 `me` merges into the caller's profile: a given field replaces its value, an
-omitted field is unchanged, and an empty value removes it. `name` is prepared
+omitted field is unchanged, and an empty value removes it. `roles` cannot be
+set and, like other unknown fields, is ignored. `name` is prepared
 with the PRECIS Nickname profile (RFC 8266: compatibility characters are
 mapped, runs of spaces folded, and the ends trimmed), after invisible
 characters such as controls and bidirectional overrides are dropped, and is
@@ -194,7 +236,7 @@ capped at 64 characters; `avatar` must be an `https:` URL or a
 (at most 16 KiB of JSON) replaces the profile extension object. The result's `you` and the `user`
 notifications carry removed fields as their empty values (`""`, `{}`).
 Current user objects (`you`, `new` in `user`, and `users` in `room_list` and
-`room_update`) carry `avatar` and `ext`; recorded objects (`from` in messages
+`room_update`) carry `avatar`, `ext`, and `roles`; recorded objects (`from` in messages
 and reactions, `user` in memberships) carry only `user_id` and `name` as they
 were when logged. Room `members` are bare `{user_id}` objects whose complete
 objects are in the accompanying `users`.
@@ -207,23 +249,38 @@ connection, the guest is retired: a leave is logged in every room it had
 joined, and then those who shared a room with it receive `user` with `new` and
 `old`. A guest whose last connection closes is retired the same way, with a
 logged leave for each room; its `user_id` is never reissued, so its records
-stay consistent. Passkey users keep their profile, rooms, and push
-registrations across connections.
+stay consistent. Accounts are never retired.
 
 ## Rooms, threads, and membership
 
-Every room is visible to every user. The server does not push a room list at
+Every room is visible to every user, except private rooms (below). The
+server does not push a room list at
 sign-in: after `auth` the client lists its rooms with `room_list`, and later
 changes arrive as `room_update`. `auth` is a barrier: each
 connection's frames are processed one at a time, so requests sent right
 behind `auth`, such as `room_list` and `history`, run as the new identity, and
-are `denied` if the `auth` failed or was a WebAuthn `begin` step on a
-connection not yet signed in.
+are `denied` if the `auth` failed, or was a WebAuthn `begin` step or an email
+code request on a connection not yet signed in.
 
 A connection receives records only for the rooms its user has joined. A
 thread is a room like any other: its messages, reactions, and memberships go
 only to its members, while members of its parent room receive its room record
-when it is created or edited, as `room_update` `updated`.
+when it is created or edited, as `room_update` `updated`, unless the thread is
+private.
+
+A room created with `private: true` is private for good: its record carries
+`private: true`, and it is visible only to its members. A user sees a room
+when, going from the room to its parent and on up, they are a member of a
+room before reaching a private one: so members always see their own rooms, a
+thread of a private room is visible to that room's members (and hidden from
+everyone else), and a private thread only to its own members. To anyone else
+a private room, its threads, and their messages are unknown: every request
+naming them (`history`, `room_list`, `room_join`, `room_leave`, `room_set`,
+`message`, `command`, `activity`, `reactions`, and a `reply_to` or
+`read_message_id` naming a message in one) is `invalid_params`, as for an
+unknown ID, and `room_list` never lists them. An author removed from a
+private room can no longer edit or delete their messages there. Mentions in
+a private room wake only its members.
 
 Every membership change is a logged record in the room's log, delivered to
 the room's members before and after the change (so to the joining or leaving
@@ -231,8 +288,9 @@ user too) and returned in `history`'s `membership` array:
 `{"log_id", "room_id", "members": [{"user": {user_id, name}, "joined": true|false}]}`.
 The server logs memberships for every user, guests included: a new guest's
 join to `general` at `auth` (delivered to its connection before the `auth`
-result), `room_join`, `room_leave`, the creator's join when `room_set` creates
-a room, a `/kick` removal, and a guest's leaves when it is retired.
+result), `room_join` and `room_leave` (for oneself or another user), the
+creator's join when `room_set` creates a room, a `/kick` removal, a new email
+account's join to `general`, and a guest's leaves when it is retired.
 
 - `room_list` answers with `joined` (every joined room at any depth, never
   truncated) and `not_joined` (visible unjoined rooms: top-level ones, or
@@ -241,9 +299,13 @@ a room, a `/kick` removal, and a guest's leaves when it is retired.
   `not_joined`, or `all`, the default) leaves out the other array; an array
   it asks for is present even when empty. `parent_room_id` lists that room's
   threads; `room_id` lists one room and overrides `parent_room_id`. With
-  `members: true` every listed room carries its complete `members`, and the
-  result carries `users`, each member's current object once; without it,
-  neither. With `latest_log_id`, only rooms whose `latest_log_id` is greater
+  `members: true` every listed room carries its `members`, and the
+  result carries `users`, each listed member's current object once; without it,
+  neither. `members` is complete unless the room has more than
+  `--max-listed-members` (1000) members: then it lists that many, the most
+  recently active (by their latest join or new message in the room), and the
+  room carries `member_count`, the total. The same holds for `room_update`
+  `joined`. With `latest_log_id`, only rooms whose `latest_log_id` is greater
   are listed, and a result with `joined` also carries `left` (present even
   when empty): `[{room_id}]` of the rooms among those listed the user left or
   was removed from since then. Such a room is also in `not_joined` when the
@@ -258,28 +320,34 @@ a room, a `/kick` removal, and a guest's leaves when it is retired.
   the calling connection only. Leaving sends the membership, then
   `room_update` `left`, then the result; leaving a room not joined changes
   nothing. Joining or leaving a room does not affect its threads, and no
-  `@room` messages are posted for joins and leaves.
+  `~room` messages are posted for joins and leaves.
+- With a `user_id` of another user, `room_join` adds that user and
+  `room_leave` removes them: the membership goes to the room's members, the
+  target's connections then get `room_update` `joined` or `left`, and the
+  caller the result. Any member of a room may add someone to it, which is how
+  people join a private room; only the room's creator and users with the
+  `admin` or `moderator` role may remove someone (`denied` otherwise). The
+  user must exist (a connected guest or an account), or it is
+  `invalid_params`; adding a member or removing a non-member changes nothing.
 - `room_set` without `room_id` creates a room (optional `parent_room_id`,
-  `title`, `intro_message`, `ext`) and joins only its creator, logging the
-  room record and then the creator's membership; the creator's connections
-  receive `room_update` `joined` (with `members` and `users`, and
+  `private`, `title`, `description`, `ext`) and joins only its creator,
+  logging the room record and then the creator's membership; the creator's
+  connections receive `room_update` `joined` (with `members` and `users`, and
   `latest_log_id` already the membership's), then the membership, then the
-  result. A new thread goes to the parent's other members as `room_update`
-  `updated`, without joining them. With `room_id` it replaces every client
-  field except `parent_room_id`, which is fixed at creation, and omitted
-  fields are cleared; the edit goes as `room_update` `updated` to the room's
-  members, to the parent's members for a thread, and to the editor. Both
-  return `{"room_id": ...}` after the `room_update`. Any authenticated user
-  may create top-level rooms or threads (nested threads are allowed) and edit
-  any room. A thread saved without a title is titled from the first line of
-  its intro message, or `Thread`; deleting that message replaces such a
-  title with `Thread`, in the room's current record and in the records that
-  carried it. `intro_message` is stored as a reference, and room records
-  embed the referenced message's snapshot: a room's current record the
-  current one, and a logged room record the one current when it was logged,
-  held by reference, so deleting the message redacts it there too.
-- Posting does not require joining: a poster who has not joined gets the
-  result but not the broadcast.
+  result. A new thread that is not private goes to the parent's other members
+  as `room_update` `updated`, without joining them. With `room_id` it
+  replaces every client field except `parent_room_id` and `private`, which
+  are fixed at creation, and omitted fields are cleared; the edit goes as
+  `room_update` `updated` to the room's members, to the parent's members for
+  a thread that is not private, and to the editor. Both return
+  `{"room_id": ...}` after the `room_update`. Any authenticated user may
+  create top-level rooms or threads (nested threads are allowed) and edit
+  any room they can see, such as a bot keeping a thread's `description`
+  current. `description` is a string of at most 16 KiB, Markdown by
+  convention; the server never parses it. A thread saved without a title is
+  titled from the first line of its description, or `Thread`.
+- Posting does not require joining a room one can see: a poster who has not
+  joined gets the result but not the broadcast.
 
 On the requesting connection, every notification a request causes comes
 before its result, and every result is queued while the state it describes
@@ -304,13 +372,14 @@ Edits, deletion, and moves require the creating identity. A missing
 `body.format` means `plain`. Posting to a room does not join it.
 
 Deletion is a save with `deleted: true` and yields a tombstone without `body`.
-The server then redacts the message: its earlier snapshots, and copies of them
-embedded as `intro_message` in logged room records, become tombstones at their
-original `log_id`s, and the content of its hosted embeds is deleted.
+The server then redacts the message: its earlier snapshots become tombstones
+at their original `log_id`s, and the content of its hosted embeds is deleted.
 
 `reply_to` is a bare `{"message_id": ...}` reference on input and in
-snapshots. It may name a message in any room, including a tombstone, but not
-the message itself.
+snapshots. It may name a message in any room the sender can see, including a
+tombstone, but not the message itself. A thread started from a message
+carries that message in its first reply's `reply_to`, by the clients'
+convention; the server keeps no other link between them.
 
 A save with a different `room_id` moves the message. The destination must
 exist. The move snapshot is logged in and delivered to both rooms, so it
@@ -374,23 +443,24 @@ distinct emoji per user are `invalid_params`.
 `general` without `room_id`, and is never logged, broadcast, or saved;
 `message_id` and `deleted` are `invalid_params`, as are text that does not
 start with `/` and unknown commands (`Unknown command /foo; try /help`).
-Mentions in commands notify no one. A command's effects and `@private`
+Mentions in commands notify no one. A command's effects and `~private`
 replies arrive before its result. Commands:
 
-- `/help` sends the calling connection a `@private` notice
-  (`from: {user_id: "@private", name: "System message to you"}`, Markdown, no `message_id`
+- `/help` sends the calling connection, and only that connection, a
+  `~private` notice
+  (`from: {user_id: "~private", name: "System message to you"}`, Markdown, no `message_id`
   or `log_id`, not logged) in the command's room, listing the commands the
   sender may use there, and returns `{}`.
 - `/avatar` with exactly one `upload` embed returns
   `{"embeds": [{embed_id, kind, write_url}]}`; see Avatars above.
 - `/kick @user [reason]` removes the one user named in `body.mentions` from
-  the room. Only the room's creator may kick (`denied` otherwise, so nobody
-  can kick in `general`). The removal is a logged leave membership with the
+  the room. Only the room's creator and users with the `admin` or
+  `moderator` role may kick (`denied` otherwise, so only they can kick in
+  `general`). The removal is a logged leave membership with the
   target as `user`, delivered to the room's members, the target included;
   the target then receives `room_update` `left`, and the remaining members a
-  logged `@room` message (`from: {user_id: "@room", name: <room title>}`, or
-  `Thread` for a thread titled from its intro message), such as
-  `@guest_3 was removed by @guest_1: spamming`. The reason is the first line
+  logged `~room` message (`from: {user_id: "~room", name: <room title>}`),
+  such as `@guest_3 was removed by @guest_1: spamming`. The reason is the first line
   of the rest of the text, at most 200 characters.
 
 ## Activity
@@ -412,13 +482,13 @@ that connection, or the connection closing.
 registering it again replaces it, even another user's: the URL names a
 device, which may sign in as someone else; a user may hold ten. `push_unregister` removes the caller's
 registration for a `url`. Registrations belong to the user, so they matter for
-passkey users; a guest's end with the guest.
+accounts; a guest's end with the guest.
 
 A new message wakes the users listed in `body.mentions` and the author of the
 message it replies to; an edit wakes only the users it adds to
 `body.mentions`. Text is never parsed for mentions. A mention wakes a user in
-any room, since every room is visible; a reply wakes its target's author only
-in a room they have joined. Either way, a user is woken only when every
+any room they can see, so in a private room only its members; a reply wakes
+its target's author only in a room they have joined. Either way, a user is woken only when every
 connection of theirs is away or gone. The server POSTs the push payload (the message without `log_id`,
 `format`, or `embeds`, text truncated to 1,000 characters) to each of their
 endpoints with `token` as bearer. Deliveries run in the background, apart
@@ -483,14 +553,16 @@ requests are not cached for replay.
 User presence and verification are required; login updates the credential's
 signature counter and flags and rejects a clone warning.
 
-Successful registration or login returns an opaque bearer token for automatic
-transport reconnection. Tokens last twelve hours, are stored hashed on the server,
-and are bound to the frontend origin. The example client keeps its token only in
-memory; a page reload requires signing in again. Sign-out drops the local token
-and reconnects. Already authenticated connections and disconnected clients
-retain their server-side token until it expires. An expired token requires
-another passkey login.
-
+Successful registration or login, like an [email sign-in](#email-sign-in),
+returns an opaque bearer token for `scheme: "token"` on later connections
+([PROTOCOL.md §3.2](https://github.com/shazow/apron/blob/main/PROTOCOL.md#32-authentication)).
+Tokens last twelve hours from their latest use, are stored hashed on the
+server, and are bound to the frontend origin. A token sign-in renews the
+token and answers with the same token rather than a replacement, since
+several tabs may share it; clients that keep the latest token keep it.
+Sign-out drops the local token and reconnects. Already authenticated
+connections and disconnected clients retain their server-side token until it
+expires. An expired token requires another passkey or email sign-in.
 
 Passkey users, their credentials, and unexpired tokens are kept in the store,
 so they survive a restart with the default SQLite store; with `--store memory`
@@ -525,4 +597,48 @@ should pause chat operations while switching identities and must start a new
 ceremony after a disconnect.
 
 Embedding applications opt in through `Config.WebAuthn`, using a validated
-`webauthn.WebAuthn` instance. A nil value leaves only guest authentication enabled.
+`webauthn.WebAuthn` instance, and `Config.EmailSender` for email sign-in.
+With both nil only guest authentication is enabled.
+
+## Email sign-in
+
+With email sign-in ([PROTOCOL.md §4.10](https://github.com/shazow/apron/blob/main/PROTOCOL.md#410-email-authentication)),
+`server.auth` lists `email`. An `auth` with `scheme: "email"` and `email`
+asks for a code and returns `{}`, whether or not the address has an account;
+it signs nobody in, so requests pipelined behind it are `denied` on a
+connection not yet signed in. The code is six digits, valid for ten minutes
+and only for that address; a sign-in consumes it, a newer code replaces it,
+and five wrong attempts invalidate it. Codes are kept in memory only. One
+address gets a code at most every 30 seconds, and one connection may ask
+for five, then one every two minutes; beyond either the request is
+`retry_after`. Addresses are compared lowercased, and one with a display
+name is `invalid_params`.
+
+The same `auth` with `token` set to the code signs in, on whichever
+connection presents it, and returns `{you, token}`; an unknown, expired, or
+used code is `denied`. A known address signs in to its account. An address
+new to the server is added to the connection's identity when it has none
+yet, so a guest becomes an account and keeps its `user_id`, rooms, and
+messages, as when adding a passkey. Otherwise it becomes a new account,
+which takes a requested `user_id` by the guests' rules or else `user_<n>`,
+honors a requested `name`, and joins `general`, delivered before the result.
+Email accounts are kept like passkey users, and an account may have both.
+The address is never sent to clients.
+
+The email carries the code and, when `--email.link-url` (or `--public-url`)
+is set, a link to that page with the address and code in the fragment, such
+as `https://chat.example/#email=ada%40example.com&token=418092`, which
+clients read to sign in. `--email.sender log`, the default, writes codes and
+links to the server log instead of sending them, and warns at start; use
+`smtp` in a deployment:
+
+```sh
+aprond --public-url https://chat.example.com \
+  --email.sender smtp --email.from "Apron <chat@example.com>" \
+  --email.smtp-addr smtp.example.com:587 \
+  --email.smtp-user chat@example.com --email.smtp-password "$SMTP_PASSWORD"
+```
+
+The SMTP sender uses STARTTLS when the relay offers it; a user name and
+password are sent only over TLS or to `localhost`. Embedding applications
+provide any other delivery by implementing `server.EmailSender`.
