@@ -53,10 +53,16 @@ export async function waitForDeletedMessage(page: Page, eventId: string): Promis
  * history and thread cards fill in, or when a tall message has to be scrolled to its toolbar.
  */
 export async function messageAction(message: Locator, name: string): Promise<Locator> {
-	await message.hover();
-	await message.focus();
 	const button = message.getByRole('button', { name, exact: true });
-	await expect(button).toBeVisible();
+	// The message may still be moving as the feed fills in, which fails a
+	// hover ("element is not stable") or hides the toolbar again: retry the
+	// reveal until the button shows.
+	await expect(async () => {
+		await message.scrollIntoViewIfNeeded({ timeout: 2_000 });
+		await message.hover({ timeout: 2_000 });
+		await message.focus({ timeout: 2_000 });
+		await expect(button).toBeVisible({ timeout: 1_000 });
+	}).toPass({ timeout: 15_000 });
 	return button;
 }
 
