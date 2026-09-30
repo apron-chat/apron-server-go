@@ -10,6 +10,7 @@ import (
 	"reflect"
 	"slices"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -51,7 +52,7 @@ func TestServerFrame(t *testing.T) {
 	_, httpServer := newTestServer(t, DefaultConfig())
 	_, frame := dialRaw(t, httpServer)
 	params := frame["params"].(map[string]any)
-	if params["protocol"] != float64(6) || params["ping"] != float64(30) {
+	if params["protocol"] != float64(7) || params["ping"] != float64(30) {
 		t.Fatalf("protocol and ping: %#v", params)
 	}
 	if !reflect.DeepEqual(params["caps"], []any{"history", "edit", "rooms", "reactions", "activity", "embed:upload", "embed:stream", "command"}) {
@@ -135,7 +136,7 @@ func TestAuthHonorsRequestedUserIDs(t *testing.T) {
 	// mentionable set, and anything in the counter's guest_ namespace are not
 	// honored; each such auth takes the next guest number.
 	next := 1
-	for i, requested := range []string{"ada", "ADA", "@server", "general", "General", "1724803200042", "bad id", "trailing.", "", "guest_1", "guest_99", "GUEST_98", "Guest_7", "guest_05", "guest_abc", "guest_"} {
+	for i, requested := range []string{"ada", "ADA", "@server", "~server", "~alice", "general", "General", "1724803200042", "bad id", "trailing.", "", "guest_1", "guest_99", "GUEST_98", "Guest_7", "guest_05", "guest_abc", "guest_"} {
 		want := fmt.Sprintf("guest_%d", next)
 		if got := auth(fmt.Sprint("r", i), map[string]any{"user_id": requested}); got != want {
 			t.Fatalf("requested %q was assigned %q, want %q", requested, got, want)
@@ -430,19 +431,18 @@ func TestRoomSetCreatesAndEditsRoomsAndThreads(t *testing.T) {
 	_, httpServer := newTestServer(t, DefaultConfig())
 	clients := dialGroup(t, httpServer, 2)
 	c, observer := clients[0], clients[1]
-	intro, introSnapshot := save(t, c, "intro", map[string]any{"body": map[string]any{"text": "Deploy status\nsecond line", "format": "markdown"}})
-	observer.notification(t, "message")
+	description := "Deploy status\n*second* line"
 
 	// A new thread joins its creator, logging the creator's membership; the
 	// parent's other members learn of it as updated, without joining. A
-	// thread without a title gets one from its intro message.
-	thread, record := saveRoom(t, c, "thread", map[string]any{"parent_room_id": "general", "intro_message": map[string]any{"message_id": intro}})
+	// thread without a title gets one from its description.
+	thread, record := saveRoom(t, c, "thread", map[string]any{"parent_room_id": "general", "description": description})
 	if observed := roomUpdated(t, observer, "updated"); !reflect.DeepEqual(observed, record) {
 		t.Fatalf("observer room %#v differs from %#v", observed, record)
 	}
 	want := map[string]any{
 		"room_id": thread, "log_id": thread, "parent_room_id": "general", "title": "Deploy status",
-		"intro_message": introSnapshot, "latest_log_id": record["latest_log_id"], "history_log_id": thread,
+		"description": description, "latest_log_id": record["latest_log_id"], "history_log_id": thread,
 	}
 	if !reflect.DeepEqual(record, want) {
 		t.Fatalf("thread record = %#v, want %#v", record, want)
@@ -465,7 +465,7 @@ func TestRoomSetCreatesAndEditsRoomsAndThreads(t *testing.T) {
 	if sameID != thread || updated["parent_room_id"] != "general" || updated["title"] != "Renamed" || !reflect.DeepEqual(updated["ext"], ext) {
 		t.Fatalf("thread update: %#v", updated)
 	}
-	if _, kept := updated["intro_message"]; kept || updated["history_log_id"] != thread || updated["latest_log_id"] != updated["log_id"] {
+	if _, kept := updated["description"]; kept || updated["history_log_id"] != thread || updated["latest_log_id"] != updated["log_id"] {
 		t.Fatalf("thread update fields: %#v", updated)
 	}
 	// A new top-level room joins only its creator.
@@ -508,8 +508,9 @@ func TestRoomSetCreatesAndEditsRoomsAndThreads(t *testing.T) {
 		{"parent_room_id": 12},
 		{"title": 12},
 		{"title": nil},
-		{"intro_message": map[string]any{"message_id": "999"}},
-		{"intro_message": intro},
+		{"description": 12},
+		{"description": nil},
+		{"description": strings.Repeat("x", maxDescriptionBytes+1)},
 		{"ext": []any{}},
 		{"ext": nil},
 	} {
@@ -518,68 +519,43 @@ func TestRoomSetCreatesAndEditsRoomsAndThreads(t *testing.T) {
 	c.expectQuiet(t)
 	observer.expectQuiet(t)
 
-	// Listed rooms embed the current intro snapshot.
-	_, _ = saveRoom(t, c, "intro-again", map[string]any{"room_id": thread, "title": "Renamed", "intro_message": map[string]any{"message_id": intro}})
-	roomUpdated(t, observer, "updated")
-	_, editedIntro := save(t, c, "edit-intro", map[string]any{"message_id": intro, "body": map[string]any{"text": "Deploy done"}})
-	observer.notification(t, "message")
+	// A description is set with room_set like any client field, such as by a
+	// bot keeping a thread's summary current, and listed rooms carry it.
+	summary := "Root cause: **expired cert**."
+	_, described := saveRoom(t, c, "describe", map[string]any{"room_id": thread, "title": "Renamed", "description": summary})
+	if observed := roomUpdated(t, observer, "updated"); !reflect.DeepEqual(observed, described) || described["description"] != summary {
+		t.Fatalf("description update %#v, observed %#v", described, observed)
+	}
 	listed := listRooms(t, observer, map[string]any{"room_id": thread})
 	if _, has := listed["joined"]; !has || len(listed["joined"].([]any)) != 0 {
 		t.Fatalf("observer has not joined the thread: %#v", listed)
 	}
-	if entry := listed["not_joined"].([]any)[0].(map[string]any); !reflect.DeepEqual(entry["intro_message"], any(editedIntro)) {
-		t.Fatalf("listed room did not embed the current intro snapshot: %#v", entry)
+	if entry := listed["not_joined"].([]any)[0].(map[string]any); entry["description"] != summary || entry["title"] != "Renamed" {
+		t.Fatalf("listed room: %#v", entry)
 	}
 }
 
-// Deleting a thread's intro message redacts the copies embedded in the
-// thread's room records, both logged ones and the current record room_list
-// returns, and replaces a title derived from it with the default.
-func TestDeletingAnIntroMessage(t *testing.T) {
+// A thread's description is independent of any message: deleting the
+// message a thread was started from changes none of its room records.
+func TestDeletingAThreadsFirstMessageKeepsItsRecord(t *testing.T) {
 	_, httpServer := newTestServer(t, DefaultConfig())
 	clients := dialGroup(t, httpServer, 2)
 	a, b := clients[0], clients[1]
-	id, _ := save(t, a, "intro", map[string]any{"body": map[string]any{"text": "Secret line\nmore"}})
+	id, _ := save(t, a, "root", map[string]any{"body": map[string]any{"text": "Secret line\nmore"}})
 	b.notification(t, "message")
-	thread, record := saveRoom(t, a, "thread", map[string]any{"parent_room_id": "general", "intro_message": map[string]any{"message_id": id}})
+	thread, record := saveRoom(t, a, "thread", map[string]any{"parent_room_id": "general", "description": "Why the deploy failed"})
 	roomUpdated(t, b, "updated")
-	// An edit without a title derives it again.
-	_, edited := saveRoom(t, a, "edit", map[string]any{"room_id": thread, "intro_message": map[string]any{"message_id": id}})
-	roomUpdated(t, b, "updated")
-	if record["title"] != "Secret line" || edited["title"] != "Secret line" {
-		t.Fatalf("derived titles: %#v then %#v", record, edited)
+	if record["title"] != "Why the deploy failed" {
+		t.Fatalf("derived title: %#v", record)
 	}
-
-	// The deletion is followed by the thread's new default title.
 	before, _ := a.request(t, "message", "delete", map[string]any{"room_id": "general", "message_id": id, "deleted": true})
-	if got := methods(before); !reflect.DeepEqual(got, []string{"message", "room_update"}) {
+	if got := methods(before); !reflect.DeepEqual(got, []string{"message"}) {
 		t.Fatalf("frames before the delete result: %v", got)
 	}
-	deletion := notificationParams(t, before[0], "message")
-	if updated := updateRecord(t, before[1], "updated"); updated["room_id"] != thread || updated["title"] != defaultThreadTitle {
-		t.Fatalf("title after delete: %#v", updated)
-	}
 	b.notification(t, "message")
-	if updated := roomUpdated(t, b, "updated"); updated["title"] != defaultThreadTitle {
-		t.Fatalf("parent member's update: %#v", updated)
-	}
-
-	// The retitling is logged too. Every record carries the intro redacted:
-	// the two earlier ones as a tombstone at the creation snapshot's log_id.
-	tombstone := map[string]any{"message_id": id, "log_id": id, "room_id": "general", "from": map[string]any{"user_id": "guest_1"}, "deleted": true}
 	rooms := records(t, historyPage(t, b, thread, map[string]any{}), "rooms")
-	if len(rooms) != 3 {
+	if len(rooms) != 1 || rooms[0].(map[string]any)["description"] != "Why the deploy failed" {
 		t.Fatalf("thread room records: %#v", rooms)
-	}
-	for i, intro := range []any{tombstone, tombstone, deletion} {
-		logged := rooms[i].(map[string]any)
-		if logged["title"] != defaultThreadTitle || !reflect.DeepEqual(logged["intro_message"], intro) {
-			t.Fatalf("logged record %d after delete = %#v, want title %q and intro %#v", i, logged, defaultThreadTitle, intro)
-		}
-	}
-	listed := listRooms(t, a, map[string]any{"parent_room_id": "general"})["joined"].([]any)
-	if intro := listed[0].(map[string]any)["intro_message"]; !reflect.DeepEqual(intro, any(deletion)) {
-		t.Fatalf("listed intro_message: %#v", intro)
 	}
 }
 
@@ -590,7 +566,7 @@ func TestMoveAppearsInBothRoomsAndCarriesReactions(t *testing.T) {
 	body := map[string]any{"text": "move me"}
 	id, created := save(t, author, "create", map[string]any{"body": body})
 	reactor.notification(t, "message")
-	thread, _ := saveRoom(t, author, "thread", map[string]any{"parent_room_id": "general", "intro_message": map[string]any{"message_id": id}})
+	thread, _ := saveRoom(t, author, "thread", map[string]any{"parent_room_id": "general", "description": "move me"})
 	roomUpdated(t, reactor, "updated")
 	joinRoom(t, reactor, thread)
 	expectMembership(t, author, thread, reactor.userID, true)

@@ -28,10 +28,6 @@ type messageState struct {
 	reactions map[string]reactionSet
 	// records are every logged snapshot, for redaction; the last is current.
 	records []*logRecord
-	// titleRecords are the room records whose title was derived from this
-	// message's text, and titledRooms their rooms, for redaction.
-	titleRecords []*logRecord
-	titledRooms  []*roomState
 }
 
 // currentRaw is the JSON of the message's current snapshot.
@@ -242,15 +238,12 @@ func (s *Server) republishLocked(m *messageState, edit func(body map[string]any)
 }
 
 // redactLocked rewrites a deleted message's earlier snapshots into
-// tombstones at their original log_ids (§4.2). Room records embed intro
-// snapshots by reference, so their intro_message copies follow; thread
-// titles taken from the message's text are replaced.
+// tombstones at their original log_ids (§4.2).
 func (s *Server) redactLocked(m *messageState) {
 	for _, record := range m.records {
 		record.rewrite(tombstone)
 		s.touchRecord(record)
 	}
-	s.untitleLocked(m)
 }
 
 func tombstone(snapshot map[string]any) {
@@ -309,7 +302,7 @@ func validMessageID(id string) bool {
 	return true
 }
 
-// parseMessageRef reads a message reference (reply_to, intro_message). Clients
+// parseMessageRef reads a message reference (reply_to). Clients
 // send bare references; any other keys, such as an echoed snapshot, are ignored.
 func parseMessageRef(params map[string]jsontext.Value, name string) (string, bool, *rpcError) {
 	raw, present := params[name]

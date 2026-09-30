@@ -5,10 +5,11 @@ import (
 	"strings"
 )
 
-// Scoped system identities (Appendix A.1).
+// Scoped system identities (Appendix A.1). user_ids starting with `~` are
+// reserved for them (Appendix A.3): requestableUserID never matches one.
 const (
-	roomNoticeID    = "@room"
-	privateNoticeID = "@private"
+	roomNoticeID    = "~room"
+	privateNoticeID = "~private"
 )
 
 // serverCommand is one command this server provides (§4.8).
@@ -112,8 +113,8 @@ func (s *Server) command(c *client, req request) (any, bool, *rpcError) {
 	return nil, false, invalidParams("Unknown command /%s; try /help", word)
 }
 
-// privateNotice renders a notice for one connection's user only: unlogged,
-// without message_id or log_id (Appendix A.1).
+// privateNotice renders a notice for the one connection it is queued on:
+// unlogged, without message_id or log_id (Appendix A.1).
 func privateNotice(r *roomState, text string) map[string]any {
 	return map[string]any{"method": "message", "params": map[string]any{
 		"room_id": r.id,
@@ -122,18 +123,12 @@ func privateNotice(r *roomState, text string) map[string]any {
 	}}
 }
 
-// postRoomNoticeLocked logs and delivers a message from @room to the room's
+// postRoomNoticeLocked logs and delivers a message from ~room to the room's
 // members (Appendix A.1). It mentions no one.
 func (s *Server) postRoomNoticeLocked(r *roomState, text string) {
 	logID := s.nextIDLocked()
 	messageID := formatID(logID)
-	name := r.title()
-	if r.titleFrom != "" {
-		// A title taken from a message's text is not repeated in records
-		// that deleting the message would not redact.
-		name = defaultThreadTitle
-	}
-	from := map[string]any{"user_id": roomNoticeID, "name": name}
+	from := map[string]any{"user_id": roomNoticeID, "name": r.title()}
 	m := &messageState{id: messageID, from: from, owner: roomNoticeID, reactions: make(map[string]reactionSet)}
 	s.messages[messageID] = m
 	s.commitSnapshotLocked(m, map[string]any{
@@ -145,7 +140,7 @@ func (s *Server) postRoomNoticeLocked(r *roomState, text string) {
 	}, logID)
 }
 
-// helpCommand replies with a @private notice listing the commands available
+// helpCommand replies with a ~private notice listing the commands available
 // to the sender in the room.
 func (s *Server) helpCommand(c *client, r *roomState, _ map[string]any, _ string) (map[string]any, *rpcError) {
 	var lines []string
@@ -181,7 +176,7 @@ const maxKickReasonRunes = 200
 
 // kickCommand removes the one mentioned user from the room: the room's
 // members, the target included, receive the logged leave membership
-// (§4.3.2), the target room_update left, and the remaining members a @room
+// (§4.3.2), the target room_update left, and the remaining members a ~room
 // notice with the reason. Only the room's creator may kick.
 func (s *Server) kickCommand(c *client, r *roomState, body map[string]any, args string) (map[string]any, *rpcError) {
 	u := c.user

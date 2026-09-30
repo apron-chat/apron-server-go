@@ -293,10 +293,10 @@ func TestThreadMessagesReachOnlyThreadMembers(t *testing.T) {
 	_, httpServer := newTestServer(t, DefaultConfig())
 	clients := dialGroup(t, httpServer, 3)
 	a, b, c := clients[0], clients[1], clients[2]
-	root, _ := save(t, a, "root", map[string]any{"body": map[string]any{"text": "Deploy"}})
+	save(t, a, "root", map[string]any{"body": map[string]any{"text": "Deploy"}})
 	b.notification(t, "message")
 	c.notification(t, "message")
-	thread, record := saveRoom(t, a, "thread", map[string]any{"parent_room_id": "general", "intro_message": map[string]any{"message_id": root}})
+	thread, record := saveRoom(t, a, "thread", map[string]any{"parent_room_id": "general", "description": "Deploy"})
 	for _, member := range []*testClient{b, c} {
 		if observed := roomUpdated(t, member, "updated"); !reflect.DeepEqual(observed, record) {
 			t.Fatalf("parent member's new thread %#v differs from %#v", observed, record)
@@ -814,7 +814,7 @@ func TestCommands(t *testing.T) {
 	expectMembership(t, a, ops, "guest_3", true)
 	expectMembership(t, b, ops, "guest_3", true)
 
-	// /help replies with a @private notice to the sender's connection, in
+	// /help replies with a ~private notice to the sender's connection, in
 	// the command's room, listing what the sender may use there.
 	help := func(client *testClient, roomID string) string {
 		t.Helper()
@@ -824,7 +824,7 @@ func TestCommands(t *testing.T) {
 		} else {
 			roomID = "general"
 		}
-		// The @private reply precedes the result (§1).
+		// The ~private reply precedes the result (§1).
 		before, result := client.request(t, "command", client.nextID("help"), params)
 		if len(result) != 0 || len(before) != 1 {
 			t.Fatalf("help result %#v after %#v", result, before)
@@ -832,7 +832,7 @@ func TestCommands(t *testing.T) {
 		notice := notificationParams(t, before[0], "message")
 		body := notice["body"].(map[string]any)
 		if _, has := notice["message_id"]; has || notice["log_id"] != nil || notice["room_id"] != roomID || body["format"] != "markdown" ||
-			!reflect.DeepEqual(notice["from"], map[string]any{"user_id": "@private", "name": "System message to you"}) {
+			!reflect.DeepEqual(notice["from"], map[string]any{"user_id": "~private", "name": "System message to you"}) {
 			t.Fatalf("help notice: %#v", notice)
 		}
 		return body["text"].(string)
@@ -878,7 +878,7 @@ func TestCommands(t *testing.T) {
 		client.expectQuiet(t)
 	}
 	// The removal is a logged leave for the room's members, the removed user
-	// included, then room_update left for the removed user and a @room notice
+	// included, then room_update left for the removed user and a ~room notice
 	// for the rest, all before the result (§1, §4.8).
 	before, result := a.request(t, "command", "kick", kick)
 	if len(result) != 0 || !reflect.DeepEqual(methods(before), []string{"membership", "message"}) {
@@ -901,11 +901,11 @@ func TestCommands(t *testing.T) {
 	}
 	want := map[string]any{
 		"message_id": notice["message_id"], "log_id": notice["message_id"], "room_id": ops,
-		"from": map[string]any{"user_id": "@room", "name": "Ops"},
+		"from": map[string]any{"user_id": "~room", "name": "Ops"},
 		"body": map[string]any{"text": "@guest_3 was removed by @guest_1: spamming"},
 	}
 	if !reflect.DeepEqual(notice, want) {
-		t.Fatalf("@room notice = %#v, want %#v", notice, want)
+		t.Fatalf("~room notice = %#v, want %#v", notice, want)
 	}
 	c.expectQuiet(t)
 	// The notice and the removal are logged; the command is not.

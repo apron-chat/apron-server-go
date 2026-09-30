@@ -22,7 +22,7 @@ type roomState struct {
 	id       string
 	parent   *roomState
 	children []*roomState
-	// record holds the latest logged room record with a bare intro_message.
+	// record holds the latest logged room record.
 	record      map[string]any
 	recordLogID int64
 	createdID   int64
@@ -32,9 +32,6 @@ type roomState struct {
 	// creator is the user_id that created the room, empty for the seeded
 	// room; only the creator may /kick (§4.8).
 	creator string
-	// titleFrom is the message_id of the intro message the current title was
-	// derived from, empty for a title the client chose.
-	titleFrom string
 	// reads holds each user's latest read cursor (§4.4).
 	reads map[string]readCursor
 }
@@ -80,17 +77,12 @@ func (s *Server) cursorFramesLocked(u *userState, r *roomState) []any {
 	return frames
 }
 
-// roomParamsLocked renders a room's current record with delivery fields, its
-// bare intro_message replaced by the message's current snapshot. Only the
-// top level is new: nested values are shared with records that are replaced
-// rather than modified, so the result may be encoded after s.mu is released.
+// roomParamsLocked renders a room's current record with delivery fields.
+// Only the top level is new: nested values are shared with records that are
+// replaced rather than modified, so the result may be encoded after s.mu is
+// released.
 func (s *Server) roomParamsLocked(r *roomState) map[string]any {
 	params := maps.Clone(r.record)
-	if intro, ok := params["intro_message"].(map[string]any); ok {
-		if m := s.messages[intro["message_id"].(string)]; m != nil {
-			params["intro_message"] = m.currentRaw()
-		}
-	}
 	maps.Copy(params, r.deliveryFields())
 	return params
 }
@@ -205,8 +197,7 @@ func (s *Server) leaveLocked(u *userState, r *roomState) bool {
 
 // commitRoomLocked logs a room record holding fields, the client fields other
 // than parent_room_id. An unknown roomID creates the room; an empty one names
-// it by its creation log_id. The logged record's intro_message embeds the
-// snapshot current at commit time.
+// it by its creation log_id.
 func (s *Server) commitRoomLocked(roomID string, parent *roomState, fields map[string]any) *roomState {
 	logID := s.nextIDLocked()
 	r := s.rooms[roomID]
@@ -230,16 +221,7 @@ func (s *Server) commitRoomLocked(roomID string, parent *roomState, fields map[s
 	maps.Copy(record, fields)
 	r.record = record
 	r.recordLogID = logID
-	value := maps.Clone(record)
-	delete(value, "intro_message")
-	logged := newLogRecord(logID, kindRoom, value)
-	if intro, ok := fields["intro_message"].(map[string]any); ok {
-		// The record embeds the intro snapshot current now, by reference, so
-		// deleting the intro message redacts it here too (§4.2).
-		m := s.messages[intro["message_id"].(string)]
-		logged.intro = m.records[len(m.records)-1]
-	}
-	s.appendLocked(logged, r)
+	s.appendLocked(newLogRecord(logID, kindRoom, record), r)
 	return r
 }
 
@@ -257,35 +239,6 @@ func (s *Server) announceRoomLocked(r *roomState, editor *userState) {
 	for _, member := range audience {
 		member.send(frame)
 	}
-}
-
-// untitleLocked replaces the titles derived from a deleted intro message:
-// the room records carrying one are redacted to the default thread title
-// (§4.2), and each room still titled by it gets a new record with the
-// default title.
-func (s *Server) untitleLocked(m *messageState) {
-	for _, record := range m.titleRecords {
-		record.rewrite(func(value map[string]any) {
-			value["title"] = defaultThreadTitle
-		})
-		s.touchRecord(record)
-	}
-	m.titleRecords = nil
-	s.touchMessage(m)
-	for _, r := range m.titledRooms {
-		if r.titleFrom != m.id {
-			continue
-		}
-		fields := maps.Clone(r.record)
-		for _, key := range []string{"room_id", "log_id", "prev_log_id", "parent_room_id"} {
-			delete(fields, key)
-		}
-		fields["title"] = defaultThreadTitle
-		r.titleFrom = ""
-		s.commitRoomLocked(r.id, r.parent, fields)
-		s.announceRoomLocked(r, nil)
-	}
-	m.titledRooms = nil
 }
 
 // setRoom creates a room (no room_id) or replaces an existing room's client
@@ -320,9 +273,12 @@ func (s *Server) setRoom(c *client, req request) (any, bool, *rpcError) {
 	if err != nil {
 		return nil, false, err
 	}
-	introID, hasIntro, err := parseMessageRef(req.params, "intro_message")
+	description, err := parseString(req.params, "description", false)
 	if err != nil {
 		return nil, false, err
+	}
+	if len(description) > maxDescriptionBytes {
+		return nil, false, invalidParams("description is at most %d bytes", maxDescriptionBytes)
 	}
 	ext, err := parseObject(req.params, "ext", false)
 	if err != nil {
@@ -344,26 +300,19 @@ func (s *Server) setRoom(c *client, req request) (any, bool, *rpcError) {
 			return nil, false, invalidParams("Unknown parent room %q", parentID)
 		}
 	}
-	if hasIntro && s.messages[introID] == nil {
-		return nil, false, invalidParams("Unknown intro_message %q", introID)
-	}
 	if err := s.admitPostLocked(u); err != nil {
 		return nil, false, err
 	}
 	fields := make(map[string]any)
-	titleFrom := ""
 	if title == "" && parent != nil {
 		// Servers title threads so clients unaware of parent_room_id render them.
-		title = s.threadTitleLocked(introID)
-		if title != defaultThreadTitle {
-			titleFrom = introID
-		}
+		title = threadTitle(description)
 	}
 	if title != "" {
 		fields["title"] = title
 	}
-	if hasIntro {
-		fields["intro_message"] = map[string]any{"message_id": introID}
+	if description != "" {
+		fields["description"] = description
 	}
 	if ext != nil {
 		fields["ext"] = ext
@@ -372,15 +321,7 @@ func (s *Server) setRoom(c *client, req request) (any, bool, *rpcError) {
 	if !updating {
 		r.creator = u.id
 	}
-	r.titleFrom = titleFrom
 	s.touchRoom(r)
-	if titleFrom != "" {
-		// Deleting the intro message removes the title taken from its text.
-		m := s.messages[titleFrom]
-		m.titleRecords = append(m.titleRecords, r.log[len(r.log)-1])
-		s.touchMessage(m)
-		m.titledRooms = append(m.titledRooms, r)
-	}
 	// Room updates precede the result, so the room is known when it arrives.
 	if updating {
 		s.announceRoomLocked(r, u)
@@ -412,25 +353,23 @@ func (s *Server) setRoom(c *client, req request) (any, bool, *rpcError) {
 const (
 	maxThreadTitleRunes = 60
 	defaultThreadTitle  = "Thread"
+	// maxDescriptionBytes bounds a room's description, which every room
+	// record carries.
+	maxDescriptionBytes = 16 << 10
 )
 
-// threadTitleLocked derives a default thread title from the intro message's
-// first line of text.
-func (s *Server) threadTitleLocked(introID string) string {
-	if m := s.messages[introID]; m != nil {
-		if body, ok := m.snapshot()["body"].(map[string]any); ok {
-			text, _ := body["text"].(string)
-			line, _, _ := strings.Cut(strings.TrimSpace(text), "\n")
-			line = strings.TrimSpace(line)
-			if runes := []rune(line); len(runes) > maxThreadTitleRunes {
-				line = strings.TrimSpace(string(runes[:maxThreadTitleRunes])) + "…"
-			}
-			if line != "" {
-				return line
-			}
-		}
+// threadTitle derives a default thread title from the first line of its
+// description, or defaultThreadTitle.
+func threadTitle(description string) string {
+	line, _, _ := strings.Cut(strings.TrimSpace(description), "\n")
+	line = strings.TrimSpace(line)
+	if runes := []rune(line); len(runes) > maxThreadTitleRunes {
+		line = strings.TrimSpace(string(runes[:maxThreadTitleRunes])) + "…"
 	}
-	return defaultThreadTitle
+	if line == "" {
+		return defaultThreadTitle
+	}
+	return line
 }
 
 // listRooms answers room_list (§4.3.1): the rooms matching its filters,
@@ -686,7 +625,7 @@ func (s *Server) history(c *client, req request) (any, bool, *rpcError) {
 		if !hasAfter {
 			k = len(matching) - 1 - i
 		}
-		if size += matching[k].wireLen(); size > maxHistoryReplyBytes && i > 0 {
+		if size += len(matching[k].raw); size > maxHistoryReplyBytes && i > 0 {
 			if hasAfter {
 				matching = matching[:k]
 			} else {
@@ -727,7 +666,7 @@ func renderHistory(r *roomState, matching []*logRecord, more bool, size int) []b
 			} else {
 				buf = append(buf, ',')
 			}
-			buf = record.appendWire(buf)
+			buf = append(buf, record.raw...)
 		}
 		if !first {
 			buf = append(buf, ']')

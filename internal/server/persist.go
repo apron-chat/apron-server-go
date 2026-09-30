@@ -105,8 +105,10 @@ type storedMeta struct {
 type storedRecord struct {
 	Kind  recordKind     `json:"kind"`
 	Raw   jsontext.Value `json:"raw"`
-	Intro int64          `json:"intro,omitzero"`
 	Rooms []string       `json:"rooms"`
+	// Intro is the log_id of the message snapshot a protocol v6 room record
+	// embedded as its intro_message; only migrateV6Locked reads it.
+	Intro int64 `json:"intro,omitzero"`
 }
 
 type storedCursor struct {
@@ -123,7 +125,6 @@ type storedRoom struct {
 	LatestID    int64                   `json:"latest_id"`
 	Members     []string                `json:"members"`
 	Creator     string                  `json:"creator,omitzero"`
-	TitleFrom   string                  `json:"title_from,omitzero"`
 	Reads       map[string]storedCursor `json:"reads,omitzero"`
 }
 
@@ -133,14 +134,12 @@ type storedReaction struct {
 }
 
 type storedMessage struct {
-	From         map[string]any            `json:"from"`
-	LogID        int64                     `json:"log_id"`
-	Owner        string                    `json:"owner"`
-	RoomID       string                    `json:"room_id"`
-	Reactions    map[string]storedReaction `json:"reactions,omitzero"`
-	Records      []int64                   `json:"records"`
-	TitleRecords []int64                   `json:"title_records,omitzero"`
-	TitledRooms  []string                  `json:"titled_rooms,omitzero"`
+	From      map[string]any            `json:"from"`
+	LogID     int64                     `json:"log_id"`
+	Owner     string                    `json:"owner"`
+	RoomID    string                    `json:"room_id"`
+	Reactions map[string]storedReaction `json:"reactions,omitzero"`
+	Records   []int64                   `json:"records"`
 }
 
 type storedPasskey struct {
@@ -256,11 +255,7 @@ func (s *Server) entriesLocked(d dirtySet) []store.Entry {
 		put(entryUsedID, id, true)
 	}
 	for r := range d.records {
-		stored := storedRecord{Kind: r.kind, Raw: r.raw, Rooms: r.rooms}
-		if r.intro != nil {
-			stored.Intro = r.intro.id
-		}
-		put(entryRecord, formatID(r.id), stored)
+		put(entryRecord, formatID(r.id), storedRecord{Kind: r.kind, Raw: r.raw, Rooms: r.rooms})
 	}
 	for id := range d.rooms {
 		if r := s.rooms[id]; r != nil {
@@ -311,7 +306,6 @@ func (s *Server) storedRoomLocked(r *roomState) storedRoom {
 		LatestID:    r.latestID,
 		Members:     slices.Sorted(maps.Keys(r.members)),
 		Creator:     r.creator,
-		TitleFrom:   r.titleFrom,
 	}
 	if r.parent != nil {
 		stored.Parent = r.parent.id
@@ -329,12 +323,6 @@ func storedMessageOf(m *messageState) storedMessage {
 	stored := storedMessage{From: m.from, LogID: m.logID, Owner: m.owner, RoomID: m.roomID}
 	for _, record := range m.records {
 		stored.Records = append(stored.Records, record.id)
-	}
-	for _, record := range m.titleRecords {
-		stored.TitleRecords = append(stored.TitleRecords, record.id)
-	}
-	for _, r := range m.titledRooms {
-		stored.TitledRooms = append(stored.TitledRooms, r.id)
 	}
 	if len(m.reactions) > 0 {
 		stored.Reactions = make(map[string]storedReaction, len(m.reactions))
@@ -437,11 +425,6 @@ func (s *Server) restoreLocked() (map[string]bool, error) {
 		records[logID] = &logRecord{id: logID, kind: stored.Kind, raw: stored.Raw, rooms: stored.Rooms}
 		storedRecords[logID] = stored
 	}
-	for logID, stored := range storedRecords {
-		if stored.Intro != 0 {
-			records[logID].intro = records[stored.Intro]
-		}
-	}
 
 	storedRooms := make(map[string]storedRoom)
 	for id, raw := range entries[entryRoom] {
@@ -452,7 +435,7 @@ func (s *Server) restoreLocked() (map[string]bool, error) {
 		storedRooms[id] = stored
 		s.rooms[id] = &roomState{
 			id: id, record: stored.Record, recordLogID: stored.RecordLogID, createdID: stored.CreatedID,
-			latestID: stored.LatestID, creator: stored.Creator, titleFrom: stored.TitleFrom,
+			latestID: stored.LatestID, creator: stored.Creator,
 			members: make(map[string]*userState), reads: make(map[string]readCursor),
 		}
 	}
@@ -490,16 +473,6 @@ func (s *Server) restoreLocked() (map[string]bool, error) {
 		for _, logID := range stored.Records {
 			if record := records[logID]; record != nil {
 				m.records = append(m.records, record)
-			}
-		}
-		for _, logID := range stored.TitleRecords {
-			if record := records[logID]; record != nil {
-				m.titleRecords = append(m.titleRecords, record)
-			}
-		}
-		for _, roomID := range stored.TitledRooms {
-			if r := s.rooms[roomID]; r != nil {
-				m.titledRooms = append(m.titledRooms, r)
 			}
 		}
 		if len(m.records) == 0 {
@@ -602,6 +575,8 @@ func (s *Server) restoreLocked() (map[string]bool, error) {
 		}
 	}
 
+	s.migrateV6Locked(records, storedRecords)
+
 	// Nothing is connected yet: guests are retired as if their last
 	// connections had just closed, and writes that had not finished fail.
 	for _, id := range slices.Sorted(maps.Keys(s.users)) {
@@ -625,5 +600,78 @@ func (s *Server) removeStaleUploads(keep map[string]bool) {
 		if !keep[name] {
 			_ = os.Remove(name)
 		}
+	}
+}
+
+// legacySystemIDs maps protocol v6 system identities to their v7 names
+// (Appendix A.1).
+var legacySystemIDs = map[string]string{"@server": "~server", "@room": roomNoticeID, "@private": privateNoticeID}
+
+// migrateV6Locked rewrites state stored by a protocol v6 server, once, in
+// place: the rewritten entries are written back with the first batch.
+//
+//   - A room's intro_message becomes its description (§3.4): the text of
+//     the intro snapshot a logged room record embedded, and for a room's
+//     current record the text of the message's current snapshot. A deleted
+//     or empty intro leaves no description.
+//   - Messages from @server, @room, and @private are from ~server, ~room,
+//     and ~private (Appendix A.1).
+func (s *Server) migrateV6Locked(records map[int64]*logRecord, stored map[int64]storedRecord) {
+	introText := func(snapshot map[string]any) string {
+		body, _ := snapshot["body"].(map[string]any)
+		text, _ := body["text"].(string)
+		if snapshot["deleted"] == true {
+			return ""
+		}
+		return text
+	}
+	for logID, entry := range stored {
+		record := records[logID]
+		if entry.Intro == 0 || record.kind != kindRoom {
+			continue
+		}
+		text := ""
+		if intro := records[entry.Intro]; intro != nil {
+			text = introText(intro.value())
+		}
+		record.rewrite(func(value map[string]any) {
+			delete(value, "intro_message")
+			if text != "" {
+				value["description"] = text
+			}
+		})
+		s.touchRecord(record)
+	}
+	for _, r := range s.rooms {
+		intro, ok := r.record["intro_message"].(map[string]any)
+		if !ok {
+			continue
+		}
+		delete(r.record, "intro_message")
+		id, _ := intro["message_id"].(string)
+		if m := s.messages[id]; m != nil {
+			if text := introText(m.snapshot()); text != "" {
+				r.record["description"] = text
+			}
+		}
+		s.touchRoom(r)
+	}
+	for _, m := range s.messages {
+		legacy := legacySystemIDs[m.owner]
+		if legacy == "" {
+			continue
+		}
+		m.owner = legacy
+		m.from = maps.Clone(m.from)
+		m.from["user_id"] = legacy
+		for _, record := range m.records {
+			record.rewrite(func(value map[string]any) {
+				if from, ok := value["from"].(map[string]any); ok {
+					from["user_id"] = legacy
+				}
+			})
+			s.touchRecord(record)
+		}
+		s.touchMessage(m)
 	}
 }

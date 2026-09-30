@@ -83,7 +83,7 @@ func TestStateSurvivesRestart(t *testing.T) {
 			owner.drain(t)
 			gone, _ := save(t, owner, "gone", map[string]any{"body": map[string]any{"text": "Secret first line\nmore"}})
 			guest.drain(t)
-			thread, _ := saveRoom(t, owner, "thread", map[string]any{"parent_room_id": "general", "intro_message": map[string]any{"message_id": hello}})
+			thread, _ := saveRoom(t, owner, "thread", map[string]any{"parent_room_id": "general", "description": "Hello thread"})
 			ops, _ := saveRoom(t, owner, "ops", map[string]any{"title": "Ops"})
 			owner.request(t, "message", "delete", map[string]any{"room_id": "general", "message_id": gone, "deleted": true})
 			attached := postEmbeds(t, owner, "attach", map[string]any{"room_id": ops, "body": map[string]any{"text": "file", "embeds": []any{map[string]any{"kind": "upload", "title": "dots.png"}}}})
@@ -221,4 +221,69 @@ func TestRestoreAfterACrash(t *testing.T) {
 	if !left {
 		t.Fatalf("no leave logged for the retired guest: %#v", membership)
 	}
+}
+
+// TestRestoreMigratesProtocolV6State restores entries as a protocol v6
+// server stored them: a thread whose intro_message was a message, embedded
+// by reference in its logged record, and a @room notice. The intro text
+// becomes the room's description and the notice is from ~room, in memory
+// and, rewritten once, in the store.
+func TestRestoreMigratesProtocolV6State(t *testing.T) {
+	v6 := store.NewMemory()
+	entry := func(kind, id, value string) store.Entry {
+		return store.Entry{Kind: kind, ID: id, Value: []byte(value)}
+	}
+	intro := `{"body":{"text":"Why the deploy failed"},"from":{"user_id":"alice"},"log_id":"1000","message_id":"1000","room_id":"general"}`
+	edited := `{"body":{"text":"Why the 4pm deploy failed"},"from":{"user_id":"alice"},"log_id":"1003","message_id":"1000","prev_log_id":"1000","room_id":"general"}`
+	notice := `{"body":{"text":"@bob was removed by @alice"},"from":{"name":"General","user_id":"@room"},"log_id":"1002","message_id":"1002","room_id":"general"}`
+	if err := v6.Apply([]store.Entry{
+		entry(entryMeta, "counters", `{"last_id":1003}`),
+		entry(entryRecord, "999", `{"kind":0,"raw":{"log_id":"999","room_id":"general","title":"General"},"rooms":["general"]}`),
+		entry(entryRecord, "1000", `{"kind":1,"raw":`+intro+`,"rooms":["general"]}`),
+		entry(entryRecord, "1001", `{"kind":0,"raw":{"log_id":"1001","parent_room_id":"general","room_id":"1001","title":"Why the deploy failed"},"intro":1000,"rooms":["1001"]}`),
+		entry(entryRecord, "1002", `{"kind":1,"raw":`+notice+`,"rooms":["general"]}`),
+		entry(entryRecord, "1003", `{"kind":1,"raw":`+edited+`,"rooms":["general"]}`),
+		entry(entryRoom, "general", `{"record":{"log_id":"999","room_id":"general","title":"General"},"record_log_id":999,"created_id":999,"latest_id":1003,"members":[]}`),
+		entry(entryRoom, "1001", `{"parent":"general","record":{"intro_message":{"message_id":"1000"},"log_id":"1001","parent_room_id":"general","room_id":"1001","title":"Why the deploy failed"},"record_log_id":1001,"created_id":1001,"latest_id":1001,"members":[],"title_from":"1000"}`),
+		entry(entryMessage, "1000", `{"from":{"user_id":"alice"},"log_id":1003,"owner":"alice","room_id":"general","records":[1000,1003],"titled_rooms":["1001"]}`),
+		entry(entryMessage, "1002", `{"from":{"name":"General","user_id":"@room"},"log_id":1002,"owner":"@room","room_id":"general","records":[1002]}`),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	check := func(httpServer *httptest.Server) {
+		t.Helper()
+		c := dialTestClient(t, httpServer)
+		// The logged record takes the intro snapshot it embedded; the current
+		// record the message's current text.
+		rooms := records(t, historyPage(t, c, "1001", map[string]any{}), "rooms")
+		want := map[string]any{"log_id": "1001", "parent_room_id": "general", "room_id": "1001", "title": "Why the deploy failed", "description": "Why the deploy failed"}
+		if len(rooms) != 1 || !reflect.DeepEqual(rooms[0], any(want)) {
+			t.Fatalf("migrated room records: %#v", rooms)
+		}
+		listed := listRooms(t, c, map[string]any{"room_id": "1001"})["not_joined"].([]any)
+		if room := listed[0].(map[string]any); room["description"] != "Why the 4pm deploy failed" || room["intro_message"] != nil {
+			t.Fatalf("migrated current record: %#v", room)
+		}
+		messages := records(t, historyPage(t, c, "general", map[string]any{}), "messages")
+		from := messages[1].(map[string]any)["from"]
+		if !reflect.DeepEqual(from, map[string]any{"user_id": "~room", "name": "General"}) {
+			t.Fatalf("migrated notice sender: %#v", messages)
+		}
+	}
+	_, httpServer, stop := startWithStore(t, v6, t.TempDir())
+	check(httpServer)
+	stop()
+	// The migration was written back: a second start finds only v7 state.
+	var legacy []string
+	_ = v6.Load(func(e store.Entry) error {
+		if bytes.Contains(e.Value, []byte("intro")) || bytes.Contains(e.Value, []byte(`"@room"`)) {
+			legacy = append(legacy, e.Kind+" "+e.ID)
+		}
+		return nil
+	})
+	if len(legacy) != 0 {
+		t.Fatalf("v6 state left in the store: %v", legacy)
+	}
+	_, httpServer, _ = startWithStore(t, v6, t.TempDir())
+	check(httpServer)
 }

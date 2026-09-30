@@ -196,16 +196,10 @@ const (
 // modified, so a reader may hold it after releasing s.mu. A record is
 // referenced from the log of every room it belongs to, so a move snapshot
 // appears in both the source and destination room logs (§4.1).
-//
-// A room record's intro_message is not copied into raw: intro points at the
-// message snapshot current at commit time, and wire splices that snapshot's
-// raw in when the record is sent, so redacting the snapshot redacts every
-// room record embedding it.
 type logRecord struct {
-	id    int64
-	kind  recordKind
-	raw   jsontext.Value
-	intro *logRecord
+	id   int64
+	kind recordKind
+	raw  jsontext.Value
 	// rooms are the rooms whose logs hold the record.
 	rooms []string
 }
@@ -214,28 +208,6 @@ type logRecord struct {
 // server-built strings, maps, and slices, so encoding cannot fail.
 func newLogRecord(id int64, kind recordKind, value map[string]any) *logRecord {
 	return &logRecord{id: id, kind: kind, raw: encodeJSON(value)}
-}
-
-// appendWire appends the record as sent on the wire to buf.
-func (r *logRecord) appendWire(buf []byte) []byte {
-	if r.intro == nil {
-		return append(buf, r.raw...)
-	}
-	buf = append(buf, r.raw[:len(r.raw)-1]...)
-	if len(r.raw) > 2 {
-		buf = append(buf, ',')
-	}
-	buf = append(buf, `"intro_message":`...)
-	buf = append(buf, r.intro.raw...)
-	return append(buf, '}')
-}
-
-// wireLen is the length of the record as sent on the wire.
-func (r *logRecord) wireLen() int {
-	if r.intro == nil {
-		return len(r.raw)
-	}
-	return len(r.raw) + len(r.intro.raw) + len(`,"intro_message":`)
 }
 
 // jsonOptions encode deterministically, sorting object keys, and keep
@@ -650,8 +622,8 @@ func (s *Server) serverParams() map[string]any {
 		authSchemes = []string{"webauthn", "token", "guest"}
 	}
 	params := map[string]any{
-		"protocol": 6,
-		"name":     "apron-go/6",
+		"protocol": 7,
+		"name":     "apron-go/7",
 		"caps":     []string{"history", "edit", "rooms", "reactions", "activity", "embed:upload", "embed:stream", "command"},
 		"auth":     authSchemes,
 		"ping":     max(1, int(s.config.PingInterval/time.Second)),
