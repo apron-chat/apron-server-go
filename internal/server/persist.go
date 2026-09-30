@@ -650,8 +650,9 @@ var legacySystemIDs = map[string]string{"@server": "~server", "@room": roomNotic
 //
 //   - A room's intro_message becomes its description (§3.4): the text of
 //     the intro snapshot each logged room record embedded, escaped as
-//     Markdown when it was plain text, and the current record becomes the
-//     latest logged one. A deleted or empty intro leaves no description.
+//     Markdown when it was plain text; the current record, and the latest
+//     logged one at the same log_id, take the message's current text, as
+//     v6 showed it. A deleted or empty intro leaves no description.
 //     The description is a copy: deleting the message later does not
 //     change it.
 //   - Messages from @server, @room, and @private are from ~server, ~room,
@@ -686,15 +687,31 @@ func (s *Server) migrateV6Locked(records map[int64]*logRecord, stored map[int64]
 		s.touchRecord(record)
 	}
 	for _, r := range s.rooms {
-		if _, ok := r.record["intro_message"]; !ok {
+		intro, ok := r.record["intro_message"].(map[string]any)
+		if !ok {
 			continue
 		}
-		// The current record is the latest logged one, migrated above, so
-		// the two agree at the same log_id.
+		// A v6 room's current record showed its intro message as it is now,
+		// so the current description is the message's current text, and the
+		// latest logged record, at the same log_id, is given it too.
+		text := ""
+		if id, _ := intro["message_id"].(string); s.messages[id] != nil {
+			text = introText(s.messages[id].snapshot())
+		}
+		delete(r.record, "intro_message")
+		delete(r.record, "description")
+		if text != "" {
+			r.record["description"] = text
+		}
 		if latest := records[r.recordLogID]; latest != nil && latest.kind == kindRoom {
-			r.record = latest.value()
-		} else {
-			delete(r.record, "intro_message")
+			latest.rewrite(func(value map[string]any) {
+				delete(value, "intro_message")
+				delete(value, "description")
+				if text != "" {
+					value["description"] = text
+				}
+			})
+			s.touchRecord(latest)
 		}
 		s.touchRoom(r)
 	}

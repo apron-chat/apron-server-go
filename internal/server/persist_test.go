@@ -247,14 +247,15 @@ func TestRestoreMigratesProtocolV6State(t *testing.T) {
 	edited := `{"body":{"text":"Why the 4pm deploy failed"},"from":{"user_id":"alice"},"log_id":"1003","message_id":"1000","prev_log_id":"1000","room_id":"general"}`
 	notice := `{"body":{"text":"@bob was removed by @alice"},"from":{"name":"General","user_id":"@room"},"log_id":"1002","message_id":"1002","room_id":"general"}`
 	if err := v6.Apply([]store.Entry{
-		entry(entryMeta, "counters", `{"last_id":1003}`),
+		entry(entryMeta, "counters", `{"last_id":1004}`),
 		entry(entryRecord, "999", `{"kind":0,"raw":{"log_id":"999","room_id":"general","title":"General"},"rooms":["general"]}`),
 		entry(entryRecord, "1000", `{"kind":1,"raw":`+intro+`,"rooms":["general"]}`),
 		entry(entryRecord, "1001", `{"kind":0,"raw":{"log_id":"1001","parent_room_id":"general","room_id":"1001","title":"Why the deploy failed"},"intro":1000,"rooms":["1001"]}`),
+		entry(entryRecord, "1004", `{"kind":0,"raw":{"log_id":"1004","prev_log_id":"1001","parent_room_id":"general","room_id":"1001","title":"Deploy"},"intro":1000,"rooms":["1001"]}`),
 		entry(entryRecord, "1002", `{"kind":1,"raw":`+notice+`,"rooms":["general"]}`),
 		entry(entryRecord, "1003", `{"kind":1,"raw":`+edited+`,"rooms":["general"]}`),
 		entry(entryRoom, "general", `{"record":{"log_id":"999","room_id":"general","title":"General"},"record_log_id":999,"created_id":999,"latest_id":1003,"members":[]}`),
-		entry(entryRoom, "1001", `{"parent":"general","record":{"intro_message":{"message_id":"1000"},"log_id":"1001","parent_room_id":"general","room_id":"1001","title":"Why the deploy failed"},"record_log_id":1001,"created_id":1001,"latest_id":1001,"members":[],"title_from":"1000"}`),
+		entry(entryRoom, "1001", `{"parent":"general","record":{"intro_message":{"message_id":"1000"},"log_id":"1004","prev_log_id":"1001","parent_room_id":"general","room_id":"1001","title":"Deploy"},"record_log_id":1004,"created_id":1001,"latest_id":1004,"members":[],"title_from":"1000"}`),
 		entry(entryMessage, "1000", `{"from":{"user_id":"alice"},"log_id":1003,"owner":"alice","room_id":"general","records":[1000,1003],"titled_rooms":["1001"]}`),
 		entry(entryMessage, "1002", `{"from":{"name":"General","user_id":"@room"},"log_id":1002,"owner":"@room","room_id":"general","records":[1002]}`),
 	}); err != nil {
@@ -263,12 +264,14 @@ func TestRestoreMigratesProtocolV6State(t *testing.T) {
 	check := func(httpServer *httptest.Server) {
 		t.Helper()
 		c := dialTestClient(t, httpServer)
-		// The logged record takes the text of the intro snapshot it embedded,
-		// escaped as Markdown since it was plain text, and the current
-		// record, at the same log_id, agrees with it.
+		// An earlier logged record takes the text of the intro snapshot it
+		// embedded, escaped as Markdown since it was plain text; the current
+		// record takes the message's current text, as v6 showed it, and so
+		// does the latest logged record, at the same log_id.
 		rooms := records(t, historyPage(t, c, "1001", map[string]any{}), "rooms")
-		want := map[string]any{"log_id": "1001", "parent_room_id": "general", "room_id": "1001", "title": "Why the deploy failed", "description": "Why \\*the\\* deploy failed\n\\- 4pm"}
-		if len(rooms) != 1 || !reflect.DeepEqual(rooms[0], any(want)) {
+		first := map[string]any{"log_id": "1001", "parent_room_id": "general", "room_id": "1001", "title": "Why the deploy failed", "description": "Why \\*the\\* deploy failed\n\\- 4pm"}
+		want := map[string]any{"log_id": "1004", "prev_log_id": "1001", "parent_room_id": "general", "room_id": "1001", "title": "Deploy", "description": "Why the 4pm deploy failed"}
+		if len(rooms) != 2 || !reflect.DeepEqual(rooms[0], any(first)) || !reflect.DeepEqual(rooms[1], any(want)) {
 			t.Fatalf("migrated room records: %#v", rooms)
 		}
 		listed := listRooms(t, c, map[string]any{"room_id": "1001"})["not_joined"].([]any)
