@@ -112,6 +112,18 @@ function projectRoom(room: RoomSnapshot): ObjectValue {
 	};
 }
 
+/**
+ * A user object without the fields it keeps as cleared. PROTOCOL.md §3.3
+ * has a client keep a cleared field's empty value ("", [], {}), so a
+ * recorded object cannot fill it in again; the fixtures project a cleared
+ * field as absent.
+ */
+function withoutCleared<T extends object>(user: T): T {
+	const empty = (value: unknown) => value === '' || (Array.isArray(value) && value.length === 0) ||
+		(isObject(value) && Object.keys(value).length === 0);
+	return Object.fromEntries(Object.entries(user).filter(([key, value]) => key === 'user_id' || !empty(value))) as T;
+}
+
 function logicalState(client: ChatClient, operations: Record<string, string>): ObjectValue {
 	const snapshot = client.snapshot();
 	// The default room before its `room_id` is known is the client's own placeholder, not a room;
@@ -124,10 +136,10 @@ function logicalState(client: ChatClient, operations: Record<string, string>): O
 		typing: snapshot.typing
 			.map((entry) => ({ room_id: entry.room, from: entry.from }))
 			.sort((left, right) => byString(left.room_id, right.room_id) || byString(left.from.user_id, right.from.user_id)),
-		users: Object.fromEntries(Object.keys(snapshot.users).sort(byString).map((id) => [id, snapshot.users[id]])),
+		users: Object.fromEntries(Object.keys(snapshot.users).sort(byString).map((id) => [id, withoutCleared(snapshot.users[id])])),
 		members: Object.fromEntries(rooms.filter((room) => room.members !== undefined).sort((left, right) => byString(left.id, right.id))
 			.map((room) => [room.id, room.members!.map((member) => member.user_id).sort(byString)])),
-		senders: Object.fromEntries(rooms.flatMap((room) => room.timeline.order.map((id) => [id, userIn(snapshot, room.timeline.events[id].from)]))),
+		senders: Object.fromEntries(rooms.flatMap((room) => room.timeline.order.map((id) => [id, withoutCleared(userIn(snapshot, room.timeline.events[id].from))]))),
 		notices: snapshot.rooms.flatMap((room) => room.notices)
 			.sort((left, right) => left.at - right.at || byString(left.key, right.key))
 			.map(({ room_id, from, body }) => ({ room_id, from, ...(body ? { body } : {}) })),
