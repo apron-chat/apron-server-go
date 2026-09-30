@@ -657,20 +657,30 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// clientIP is the address of the client that opened a request: the last
-// entry of Config.ClientIPHeader when set, else the connection's address.
+// clientIP is the address of the client that opened a request: with
+// Config.ClientIPHeader, the last entry across every line of that header,
+// which the proxy in front added itself (a client can send earlier ones),
+// without a port; else, or when that is not an IP address, the
+// connection's own address.
 func (s *Server) clientIP(r *http.Request) string {
-	if header := s.config.ClientIPHeader; header != "" {
-		values := strings.Split(r.Header.Get(header), ",")
-		if ip := strings.TrimSpace(values[len(values)-1]); ip != "" {
-			return ip
-		}
-	}
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	remote, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
-		return r.RemoteAddr
+		remote = r.RemoteAddr
 	}
-	return host
+	header := s.config.ClientIPHeader
+	if header == "" {
+		return remote
+	}
+	values := strings.Split(strings.Join(r.Header.Values(header), ","), ",")
+	entry := strings.TrimSpace(values[len(values)-1])
+	if host, _, err := net.SplitHostPort(entry); err == nil {
+		entry = host
+	}
+	entry = strings.TrimSuffix(strings.TrimPrefix(entry, "["), "]")
+	if net.ParseIP(entry) == nil {
+		return remote
+	}
+	return entry
 }
 
 // baseURL is the configured PublicURL or the scheme and host the WebSocket

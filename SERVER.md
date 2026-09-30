@@ -82,9 +82,13 @@ Flags (`aprond --help` lists them all):
   sign-in screen, such as "Chat as a guest, or sign in with email to keep
   your name. Codes expire after 10 minutes."
 - `--client-ip-header <header>`, behind a reverse proxy, names the header
-  that carries the client's address, such as `X-Forwarded-For` (its last
-  entry) or `X-Real-IP`, for the per-client limits of email sign-in; set it
-  only when the proxy sets that header, since clients can send it too.
+  that carries the client's address, such as `X-Forwarded-For` or
+  `X-Real-IP`, for the per-client limits of email sign-in. The server takes
+  the last entry across every line of the header, which the proxy in front
+  added itself, and drops a port; a value that is not an IP address falls
+  back to the connection's own. Set it only behind a proxy that adds that
+  header, since clients can send it too; without it, everyone behind the
+  proxy shares one client's limits.
 - `--role <role>=<user_id or email>` (repeat for more) grants a role, which
   is lowercased, to an account; see [Identity and profiles](#identity-and-profiles).
 - `--email.sender` chooses how [email sign-in](#email-sign-in) codes are
@@ -311,7 +315,10 @@ the message. So a message moves from a public room only to a public room,
 and from a private room or its threads to rooms visible to all their
 members, such as its public threads or any public room. A move out to where
 more people can see the message leaves out `prev_room_id`, so it does not
-name the private room to them, but its reactions go with it, showing who in
+name the private room to them. This deviates on purpose from PROTOCOL.md §2
+and §4.2, which say a move snapshot names its source room: readers of the
+destination cannot walk the message's earlier snapshots, which are in a
+room they cannot see anyway. Its reactions go with it, showing who in
 the private room reacted. For the same reason a reply cannot quote a
 message that some who see the reply cannot see (`denied`): `reply_to` would
 name it.
@@ -692,13 +699,20 @@ Limits keep codes from being guessed or sent in floods. Each answers
 - Per connection: five codes, then one every two minutes.
 - At most sixteen deliveries at once.
 
-The server tracks at most 10,000 addresses and 100,000 clients, forgetting
-the least recently used past that, so a full table refuses no one. Two
-risks remain. Guessers spread over many clients can still keep one address
-from email sign-in, thirty wrong codes an hour, though they gain only thirty
-guesses an hour against it; a passkey or a kept token still signs in. And a
-flood over more than 10,000 addresses from many clients makes the server
-forget older budgets.
+The server tracks at most 10,000 addresses and 100,000 clients. A request
+that is refused records nothing, and an address is tracked only once a
+code is sent to it or a wrong code is tried against it. When a table is
+full, the server forgets the least recently used entry that holds nothing
+that matters: for an address, only past send times, never a live code or
+wrong codes of the last hour; for a client, one whose budgets are full
+again. When it finds none, a new code request is `retry_after`. Filling the
+address table that way takes 10,000 codes actually sent, or wrong codes
+tried, which the per-client limits spread over hundreds of clients
+in an hour, so it needs many clients each spending its own budget.
+
+Guessers spread over many clients can still keep one address from email
+sign-in, thirty wrong codes an hour, though they gain only thirty guesses an
+hour against it; a passkey or a kept token still signs in.
 
 Email accounts are kept like passkey users, and an account may have both: a
 passkey registered on a signed-in connection is added to that account
