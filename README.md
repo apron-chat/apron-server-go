@@ -34,13 +34,14 @@ aprond --static-dir .apron-web/build \
   --origin https://chat.example.com \
   --webauthn.rp-id chat.example.com \
   --webauthn.origin https://chat.example.com \
-  --email.sender smtp --email.from chat@example.com \
+  --email.enable --email.from chat@example.com \
   --email.smtp-addr smtp.example.com:587 \
   --role admin=you@example.com
 ```
 
-Email sign-in is off unless `--email.sender` is set; `make dev-server` and
-`make run` use `--email.sender log`, which writes codes to the server log.
+Email sign-in is off unless `--email.enable` is set. To try it locally, run
+`go run ./cmd/aprond --email.enable --email.sender log`, which writes codes to
+the server log instead of sending them.
 
 Run `aprond --help` for every flag, or `aprond --print-config > aprond.toml`
 to start a config file.

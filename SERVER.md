@@ -34,7 +34,7 @@ Defaults:
   member-listing limits
 - seeded default room: `general` (title `General`)
 - authentication (`server.auth`, in this order): WebAuthn passkeys, email
-  codes when `--email.sender` is set (off by default), bearer-token resume,
+  codes with `--email.enable` (off by default), bearer-token resume,
   and `guest`; `server.signup` lists every one but `token`, which only
   resumes an account: a guest who registers a passkey or adds an address
   becomes an account, and an email code for a new address creates one
@@ -91,15 +91,15 @@ Flags (`aprond --help` lists them all):
   proxy shares one client's limits.
 - `--role <role>=<user_id or email>` (repeat for more) grants a role, which
   is lowercased, to an account; see [Identity and profiles](#identity-and-profiles).
-- `--email.sender` chooses how [email sign-in](#email-sign-in) codes are
-  delivered: `none` (the default) turns email sign-in off; `smtp` sends them
-  through `--email.smtp-addr host:port` from `--email.from`, with
+- `--email.enable` turns on [email sign-in](#email-sign-in), which is off
+  by default. `--email.sender` chooses how its codes are delivered: `smtp`
+  (the default) sends them through `--email.smtp-addr host:port` from `--email.from`, with
   `--email.smtp-user` and `--email.smtp-password` when the relay needs them,
   and requires STARTTLS unless `--email.smtp-insecure` (on port 465 it
   speaks TLS from the start); `log` writes them to
   the server log, for development, where anyone who reads the log can sign
   in as anyone, so it is refused with `--public-url` or `--tls.domain`.
-  `make dev-server` and `make run` pass `--email.sender log`.
+  To try it locally, add `--email.enable --email.sender log`.
   `--email.link-url` is the page a code's link opens (default
   `--public-url`; without either, emails carry only the code).
 - `--webauthn.rp-id <domain>` (`localhost`) and `--webauthn.origin <origin>`
@@ -729,7 +729,7 @@ instead of sending them; use `smtp` in a deployment:
 
 ```sh
 aprond --public-url https://chat.example.com \
-  --email.sender smtp --email.from "Apron <chat@example.com>" \
+  --email.enable --email.from "Apron <chat@example.com>" \
   --email.smtp-addr smtp.example.com:587 \
   --email.smtp-user chat@example.com --email.smtp-password "$SMTP_PASSWORD"
 ```

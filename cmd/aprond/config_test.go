@@ -122,31 +122,38 @@ func TestWelcomeAndRoles(t *testing.T) {
 }
 
 func TestEmailSenders(t *testing.T) {
-	// Email sign-in is off unless a sender is chosen.
-	options, _ := parse(t)
-	config, err := serverConfig(*options)
-	if err != nil {
-		t.Fatal(err)
+	// Email sign-in is off unless --email.enable is set, whatever the sender.
+	for _, args := range [][]string{
+		nil,
+		{"--email.sender", "log"},
+		{"--email.sender", "smtp", "--email.smtp-addr", "smtp.example:587", "--email.from", "chat@example.com"},
+	} {
+		options, _ := parse(t, args...)
+		config, err := serverConfig(*options)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if config.EmailSender != nil {
+			t.Fatalf("email sender %T without --email.enable: %v", config.EmailSender, args)
+		}
 	}
-	if config.EmailSender != nil {
-		t.Fatalf("default email sender: %T", config.EmailSender)
-	}
-	options, _ = parse(t, "--email.sender", "log")
+	options, _ := parse(t, "--email.enable", "--email.sender", "log")
 	if config, err := serverConfig(*options); err != nil || config.EmailSender != (server.LogEmailSender{}) || config.EmailLinkURL != "" {
 		t.Fatalf("log sender %T, link %q, error %v", config.EmailSender, config.EmailLinkURL, err)
 	}
 	// The log sender is for development: a public server refuses it.
 	for _, args := range [][]string{
-		{"--email.sender", "log", "--public-url", "https://chat.example"},
-		{"--email.sender", "log", "--tls.domain", "chat.example"},
+		{"--email.enable", "--email.sender", "log", "--public-url", "https://chat.example"},
+		{"--email.enable", "--email.sender", "log", "--tls.domain", "chat.example"},
 	} {
 		options, _ := parse(t, args...)
 		if _, err := serverConfig(*options); err == nil {
 			t.Errorf("accepted %v", args)
 		}
 	}
-	options, _ = parse(t, "--email.sender", "smtp", "--email.smtp-addr", "smtp.example:587", "--email.from", "Apron <chat@example.com>", "--public-url", "https://chat.example/")
-	config, err = serverConfig(*options)
+	// smtp is the default sender.
+	options, _ = parse(t, "--email.enable", "--email.smtp-addr", "smtp.example:587", "--email.from", "Apron <chat@example.com>", "--public-url", "https://chat.example/")
+	config, err := serverConfig(*options)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -154,8 +161,8 @@ func TestEmailSenders(t *testing.T) {
 		t.Fatalf("smtp sender %#v, link %q", config.EmailSender, config.EmailLinkURL)
 	}
 	for _, args := range [][]string{
-		{"--email.sender", "smtp", "--email.from", "chat@example.com"},
-		{"--email.sender", "smtp", "--email.smtp-addr", "smtp.example:587"},
+		{"--email.enable", "--email.from", "chat@example.com"},
+		{"--email.enable", "--email.smtp-addr", "smtp.example:587"},
 	} {
 		options, _ := parse(t, args...)
 		if _, err := serverConfig(*options); err == nil {

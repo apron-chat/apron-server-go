@@ -78,8 +78,9 @@ Edit and delete permissions belong to the identity that created the message.
 Use `localhost` for the default passkey configuration; see
 [SERVER.md](SERVER.md#passkeys) for deployment settings.
 
-The Go server also offers email sign-in. In development it sends no email:
-`make dev-server` and `make run` pass `--email.sender log`, which writes each
+The Go server also offers email sign-in, off unless `--email.enable` is set.
+To try it without sending email, run
+`go run ./cmd/aprond --email.enable --email.sender log`, which writes each
 code, and a sign-in link when `--email.link-url` is set, to the server's log.
 Adding an address while signed in as a guest keeps the guest's identity, as
 adding a passkey does; see [SERVER.md](SERVER.md#email-sign-in). `--welcome` sets the text

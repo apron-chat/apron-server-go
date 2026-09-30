@@ -63,7 +63,8 @@ type Options struct {
 	} `group:"Uploads" namespace:"upload"`
 
 	Email struct {
-		Sender       string `long:"sender" default:"none" choice:"none" choice:"smtp" choice:"log" description:"How email sign-in codes are delivered: none disables email sign-in, smtp sends them, log writes them to the server log (development only; refused with --public-url or --tls.domain)"`
+		Enable       bool   `long:"enable" description:"Offer email sign-in (off by default)"`
+		Sender       string `long:"sender" default:"smtp" choice:"smtp" choice:"log" description:"How email sign-in codes are delivered, with --email.enable: smtp sends them, log writes them to the server log (development only; refused with --public-url or --tls.domain)"`
 		LinkURL      string `long:"link-url" description:"Page that sign-in links in emails open, such as https://chat.example/, with the address and code in its fragment (default: --public-url; empty sends codes without links)"`
 		From         string `long:"from" description:"Sender address of sign-in emails, for --email.sender smtp"`
 		SMTPAddr     string `long:"smtp-addr" description:"SMTP relay as host:port, for --email.sender smtp: STARTTLS is required (such as :587), or TLS from the start on port 465"`
@@ -154,13 +155,15 @@ func serverConfig(options Options) (server.Config, error) {
 	if len(options.Origins) > 0 {
 		config.OriginPatterns = options.Origins
 	}
-	switch options.Email.Sender {
-	case "log":
+	switch {
+	case !options.Email.Enable:
+		// Email sign-in is a feature flag, off by default.
+	case options.Email.Sender == "log":
 		if options.PublicURL != "" || len(options.TLS.Domains) > 0 {
 			return config, errors.New("--email.sender log writes sign-in codes to the server log, so anyone who reads it can sign in as anyone; it is for development and refused with --public-url or --tls.domain: use --email.sender smtp")
 		}
 		config.EmailSender = server.LogEmailSender{}
-	case "smtp":
+	case options.Email.Sender == "smtp":
 		sender, err := newSMTPSender(options.Email.SMTPAddr, options.Email.From, options.Email.SMTPUser, options.Email.SMTPPassword, options.Email.SMTPInsecure)
 		if err != nil {
 			return config, err
@@ -273,8 +276,8 @@ func run(logger *slog.Logger, options Options) error {
 		serve("debug server", newServer(debugHandler()), listener)
 	}
 	logger.Info("serving", "store", options.Store, "static_dir", options.StaticDir, "upload_dir", options.Upload.Dir)
-	if options.Email.Sender == "log" {
-		logger.Warn("email sign-in codes are written to this log, not sent; use --email.sender smtp, or none, in a deployment")
+	if options.Email.Enable && options.Email.Sender == "log" {
+		logger.Warn("email sign-in codes are written to this log, not sent; use --email.sender smtp in a deployment")
 	}
 
 	group.Go(func() error {
