@@ -21,6 +21,7 @@ import (
 
 	"github.com/coder/websocket"
 	"github.com/go-webauthn/webauthn/webauthn"
+	"golang.org/x/time/rate"
 
 	"github.com/apron-chat/apron-server-go/internal/store"
 )
@@ -115,9 +116,17 @@ type Config struct {
 	// screen. Empty omits it.
 	Welcome string
 	// Roles grants server roles (§3.3), such as "admin", to accounts: each
-	// role lists the user_ids that hold it. Roles are shown beside names;
-	// "admin" and "moderator" may also remove others from rooms (§4.3.2).
+	// role lists the user_ids or email addresses that hold it. Roles are
+	// shown beside names; "admin" and "moderator" may also remove others
+	// from rooms (§4.3.2).
 	Roles map[string][]string
+	// EmailSender enables email sign-in (§4.10) and delivers its codes; nil
+	// disables it. LogEmailSender logs codes, for development.
+	EmailSender EmailSender
+	// EmailLinkURL is the page sign-in links open, such as
+	// https://chat.example/, with the address and code in its fragment.
+	// Empty sends codes without a link.
+	EmailLinkURL string
 }
 
 func DefaultConfig() Config {
@@ -311,6 +320,9 @@ type client struct {
 	origin   string
 	ceremony *passkeyCeremony
 	token    [32]byte
+	// emailSends limits the email sign-in codes requested on the
+	// connection. Guarded by server.mu.
+	emailSends *rate.Limiter
 	// away reports that nobody is attending the connection (§4.4). Guarded
 	// by server.mu.
 	away bool
@@ -351,8 +363,10 @@ type Server struct {
 	// are never assigned to a new identity unless already used.
 	grantedIDs  map[string]bool
 	guestNumber uint64
-	embedNumber uint64
-	embeds      map[string]*embedState
+	// accountNumber numbers the user_<n> of new email accounts.
+	accountNumber uint64
+	embedNumber   uint64
+	embeds        map[string]*embedState
 	// writes maps an unused or in-progress write token to its embed.
 	writes map[string]*embedState
 	// uploads lists finished uploads, oldest first, for eviction beyond
@@ -376,7 +390,13 @@ type Server struct {
 	closed      bool
 	passkeys    map[string]*passkeyUser
 	credentials map[string]*passkeyUser
-	sessions    map[[32]byte]passkeySession
+	sessions    map[[32]byte]session
+	// emails maps sign-in addresses to their accounts; emailCodes holds
+	// each address's outstanding code, in memory only.
+	emails     map[string]*userState
+	emailCodes map[string]*emailCode
+	// mailing tracks email deliveries in progress, which Shutdown awaits.
+	mailing sync.WaitGroup
 
 	ops         map[string]operation
 	push        *pushDeliverer
@@ -414,7 +434,9 @@ func Open(config Config) (*Server, error) {
 		pushes:      make(map[string]*pushRegistration),
 		passkeys:    make(map[string]*passkeyUser),
 		credentials: make(map[string]*passkeyUser),
-		sessions:    make(map[[32]byte]passkeySession),
+		sessions:    make(map[[32]byte]session),
+		emails:      make(map[string]*userState),
+		emailCodes:  make(map[string]*emailCode),
 		dirty:       newDirtySet(),
 		storeWrites: make(chan []store.Entry, storeQueue),
 		storeDone:   make(chan struct{}),
@@ -532,6 +554,7 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	go func() {
 		s.connections.Wait()
 		s.push.wait()
+		s.mailing.Wait()
 		s.mu.Lock()
 		s.closeStoreLocked()
 		s.mu.Unlock()
@@ -642,10 +665,17 @@ func (s *Server) baseURL(r *http.Request) string {
 
 // serverParams is the `server` frame (PROTOCOL.md §3.1).
 func (s *Server) serverParams() map[string]any {
-	authSchemes := []string{"guest"}
+	var authSchemes []string
 	if s.config.WebAuthn != nil {
-		authSchemes = []string{"webauthn", "token", "guest"}
+		authSchemes = append(authSchemes, "webauthn")
 	}
+	if s.config.EmailSender != nil {
+		authSchemes = append(authSchemes, "email")
+	}
+	if len(authSchemes) > 0 {
+		authSchemes = append(authSchemes, "token")
+	}
+	authSchemes = append(authSchemes, "guest")
 	params := map[string]any{
 		"protocol": 7,
 		"name":     "apron-go/7",

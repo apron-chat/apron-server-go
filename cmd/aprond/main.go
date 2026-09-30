@@ -61,6 +61,15 @@ type Options struct {
 		MaxStorageMB int64  `long:"max-storage-mb" default:"1000" description:"Total size of hosted uploads, in MiB, beyond which the oldest are removed from their messages"`
 	} `group:"Uploads" namespace:"upload"`
 
+	Email struct {
+		Sender       string `long:"sender" default:"log" choice:"log" choice:"smtp" choice:"none" description:"How email sign-in codes are delivered: log prints them to the server log (development only), smtp sends them, none disables email sign-in"`
+		LinkURL      string `long:"link-url" description:"Page that sign-in links in emails open, such as https://chat.example/, with the address and code in its fragment (default: --public-url; empty sends codes without links)"`
+		From         string `long:"from" description:"Sender address of sign-in emails, for --email.sender smtp"`
+		SMTPAddr     string `long:"smtp-addr" description:"SMTP relay as host:port, for --email.sender smtp; STARTTLS is used when offered"`
+		SMTPUser     string `long:"smtp-user" description:"SMTP user name; empty sends without authentication"`
+		SMTPPassword string `long:"smtp-password" description:"SMTP password"`
+	} `group:"Email sign-in" namespace:"email"`
+
 	Push struct {
 		Disable       bool `long:"disable" description:"Do not offer push registration"`
 		AllowInsecure bool `long:"allow-insecure" description:"Accept http and internal push endpoints (development only)"`
@@ -141,6 +150,20 @@ func serverConfig(options Options) (server.Config, error) {
 	config.MaxUploadStorageBytes = options.Upload.MaxStorageMB << 20
 	if len(options.Origins) > 0 {
 		config.OriginPatterns = options.Origins
+	}
+	switch options.Email.Sender {
+	case "log":
+		config.EmailSender = server.LogEmailSender{}
+	case "smtp":
+		sender, err := newSMTPSender(options.Email.SMTPAddr, options.Email.From, options.Email.SMTPUser, options.Email.SMTPPassword)
+		if err != nil {
+			return config, err
+		}
+		config.EmailSender = sender
+	}
+	config.EmailLinkURL = options.Email.LinkURL
+	if config.EmailLinkURL == "" {
+		config.EmailLinkURL = config.PublicURL
 	}
 	if options.WebAuthn.RPID != "" {
 		var err error
@@ -244,6 +267,9 @@ func run(logger *slog.Logger, options Options) error {
 		serve("debug server", newServer(debugHandler()), listener)
 	}
 	logger.Info("serving", "store", options.Store, "static_dir", options.StaticDir, "upload_dir", options.Upload.Dir)
+	if options.Email.Sender == "log" {
+		logger.Warn("email sign-in codes are written to this log, not sent; use --email.sender smtp, or none, in a deployment")
+	}
 
 	group.Go(func() error {
 		<-ctx.Done()

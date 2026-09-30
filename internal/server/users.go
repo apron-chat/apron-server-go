@@ -35,6 +35,9 @@ type userState struct {
 	name   string
 	avatar string
 	ext    map[string]any
+	// email is the account's sign-in address (§4.10), lowercased; empty for
+	// guests and passkey users without one.
+	email string
 	// roles are the server roles (§3.3) Config.Roles grants the account,
 	// sorted; guests have none. They are derived from the configuration, not
 	// stored.
@@ -82,10 +85,11 @@ func (u *userState) from() map[string]any {
 	return u.fromValue
 }
 
-// account reports whether the user signed in with a credential, so it
-// persists across connections and restarts, rather than being a guest.
+// account reports whether the user signed in with a credential, a passkey
+// or an email address, so it persists across connections and restarts,
+// rather than being a guest.
 func (u *userState) account() bool {
-	return u.passkey != nil
+	return u.passkey != nil || u.email != ""
 }
 
 // hasRole reports whether the user holds a server role.
@@ -217,24 +221,27 @@ func requestable(id string) bool {
 // takes exactly one counter value: with guest_ requests refused, only the
 // counter assigns guest_<n>, so the skip over taken IDs is a safeguard.
 func (s *Server) assignUserIDLocked(requested string) string {
-	claim := func(id string) bool {
-		key := strings.ToLower(id)
-		if s.usedIDs[key] || s.roomNamedLocked(id) || s.grantedIDs[key] {
-			return false
-		}
-		s.usedIDs[key] = true
-		s.touchUsedID(key)
-		return true
-	}
-	if requestable(requested) && claim(requested) {
+	if requestable(requested) && s.claimUserIDLocked(requested) {
 		return requested
 	}
 	for {
 		s.guestNumber++
-		if id := fmt.Sprintf("%s%d", guestIDPrefix, s.guestNumber); claim(id) {
+		if id := fmt.Sprintf("%s%d", guestIDPrefix, s.guestNumber); s.claimUserIDLocked(id) {
 			return id
 		}
 	}
+}
+
+// claimUserIDLocked marks id used and reports whether it was free: never
+// assigned, ignoring case, not a room's name, and not granted a role.
+func (s *Server) claimUserIDLocked(id string) bool {
+	key := strings.ToLower(id)
+	if s.usedIDs[key] || s.roomNamedLocked(id) || s.grantedIDs[key] {
+		return false
+	}
+	s.usedIDs[key] = true
+	s.touchUsedID(key)
+	return true
 }
 
 // roomNamedLocked reports whether id names a room, ignoring case, so a
@@ -254,8 +261,13 @@ func (s *Server) authenticate(c *client, req request) (any, *rpcError) {
 	switch scheme {
 	case "webauthn":
 		return s.authenticatePasskey(c, req)
+	case "email":
+		if s.config.EmailSender == nil {
+			return nil, &rpcError{Code: codeUnsupported, Message: "Email sign-in is disabled"}
+		}
+		return s.authenticateEmail(c, req)
 	case "token":
-		if s.config.WebAuthn == nil {
+		if s.config.WebAuthn == nil && s.config.EmailSender == nil {
 			return nil, &rpcError{Code: codeUnsupported, Message: "This server has no sign-in sessions; use guest"}
 		}
 		return s.authenticateToken(c, req)
@@ -507,14 +519,17 @@ func jsonEqual(a, b any) bool {
 }
 
 // grantRolesLocked sets the roles Config.Roles grants an account, by its
-// user_id, and reports whether they changed. Guests hold no roles, so a
-// granted user_id taken by a guest grants nothing until it is an account;
-// assignUserIDLocked never hands out a granted user_id that was never used.
+// user_id or email address, and reports whether they changed. Guests hold no
+// roles, so a granted user_id taken by a guest grants nothing until it is an
+// account; assignUserIDLocked never hands out a granted user_id that was
+// never used.
 func (s *Server) grantRolesLocked(u *userState) bool {
 	var roles []string
 	if u.account() {
 		for role, holders := range s.config.Roles {
-			if slices.ContainsFunc(holders, func(holder string) bool { return strings.EqualFold(holder, u.id) }) {
+			if slices.ContainsFunc(holders, func(holder string) bool {
+				return strings.EqualFold(holder, u.id) || (u.email != "" && strings.EqualFold(holder, u.email))
+			}) {
 				roles = append(roles, role)
 			}
 		}

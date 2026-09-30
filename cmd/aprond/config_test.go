@@ -9,6 +9,8 @@ import (
 	"testing"
 
 	flags "github.com/jessevdk/go-flags"
+
+	"github.com/apron-chat/apron-server-go/internal/server"
 )
 
 func parse(t *testing.T, args ...string) (*Options, *flags.Parser) {
@@ -115,6 +117,38 @@ func TestWelcomeAndRoles(t *testing.T) {
 		options, _ := parse(t, "--role", grant)
 		if _, err := serverConfig(*options); err == nil {
 			t.Errorf("accepted --role %q", grant)
+		}
+	}
+}
+
+func TestEmailSenders(t *testing.T) {
+	options, _ := parse(t)
+	config, err := serverConfig(*options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, logs := config.EmailSender.(server.LogEmailSender); !logs || config.EmailLinkURL != "" {
+		t.Fatalf("default email sender %T, link %q", config.EmailSender, config.EmailLinkURL)
+	}
+	options, _ = parse(t, "--email.sender", "none")
+	if config, _ := serverConfig(*options); config.EmailSender != nil {
+		t.Fatalf("disabled email sender: %T", config.EmailSender)
+	}
+	options, _ = parse(t, "--email.sender", "smtp", "--email.smtp-addr", "smtp.example:587", "--email.from", "Apron <chat@example.com>", "--public-url", "https://chat.example/")
+	config, err = serverConfig(*options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sender, ok := config.EmailSender.(*smtpSender); !ok || sender.addr != "smtp.example:587" || config.EmailLinkURL != "https://chat.example/" {
+		t.Fatalf("smtp sender %#v, link %q", config.EmailSender, config.EmailLinkURL)
+	}
+	for _, args := range [][]string{
+		{"--email.sender", "smtp", "--email.from", "chat@example.com"},
+		{"--email.sender", "smtp", "--email.smtp-addr", "smtp.example:587"},
+	} {
+		options, _ := parse(t, args...)
+		if _, err := serverConfig(*options); err == nil {
+			t.Errorf("accepted %v", args)
 		}
 	}
 }

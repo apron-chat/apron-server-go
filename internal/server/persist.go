@@ -96,10 +96,11 @@ func (s *Server) unlock() {
 }
 
 type storedMeta struct {
-	LastID      int64  `json:"last_id"`
-	GuestNumber uint64 `json:"guest_number"`
-	EmbedNumber uint64 `json:"embed_number"`
-	UploadSeq   int64  `json:"upload_seq"`
+	LastID        int64  `json:"last_id"`
+	GuestNumber   uint64 `json:"guest_number"`
+	AccountNumber uint64 `json:"account_number,omitzero"`
+	EmbedNumber   uint64 `json:"embed_number"`
+	UploadSeq     int64  `json:"upload_seq"`
 }
 
 type storedRecord struct {
@@ -156,6 +157,7 @@ type storedUser struct {
 	AvatarEmbed string           `json:"avatar_embed,omitzero"`
 	LeftAt      map[string]int64 `json:"left_at,omitzero"`
 	Passkey     *storedPasskey   `json:"passkey,omitzero"`
+	Email       string           `json:"email,omitzero"`
 }
 
 type storedSession struct {
@@ -187,6 +189,11 @@ type storedPush struct {
 	Token string `json:"token,omitzero"`
 }
 
+// metaLocked is the counters entry of the current state.
+func (s *Server) metaLocked() storedMeta {
+	return storedMeta{LastID: s.lastID, GuestNumber: s.guestNumber, AccountNumber: s.accountNumber, EmbedNumber: s.embedNumber, UploadSeq: s.uploadSeq}
+}
+
 func sessionID(key [32]byte) string { return hex.EncodeToString(key[:]) }
 
 // flushLocked queues the marked changes as one batch for the store writer.
@@ -196,7 +203,7 @@ func (s *Server) flushLocked() {
 		return
 	}
 	batch := s.entriesLocked(s.dirty)
-	meta := storedMeta{LastID: s.lastID, GuestNumber: s.guestNumber, EmbedNumber: s.embedNumber, UploadSeq: s.uploadSeq}
+	meta := s.metaLocked()
 	if meta != s.storedMeta {
 		s.storedMeta = meta
 		batch = append(batch, store.Entry{Kind: entryMeta, ID: "counters", Value: encodeJSON(meta)})
@@ -235,7 +242,7 @@ func (s *Server) dumpLocked() []store.Entry {
 	for url := range s.pushes {
 		all.pushes[url] = true
 	}
-	meta := storedMeta{LastID: s.lastID, GuestNumber: s.guestNumber, EmbedNumber: s.embedNumber, UploadSeq: s.uploadSeq}
+	meta := s.metaLocked()
 	return append(s.entriesLocked(all), store.Entry{Kind: entryMeta, ID: "counters", Value: encodeJSON(meta)})
 }
 
@@ -278,7 +285,7 @@ func (s *Server) entriesLocked(d dirtySet) []store.Entry {
 	}
 	for key := range d.sessions {
 		if session, ok := s.sessions[key]; ok {
-			put(entrySession, sessionID(key), storedSession{User: session.user.user.id, Origin: session.origin, Expires: session.expires})
+			put(entrySession, sessionID(key), storedSession{User: session.user.id, Origin: session.origin, Expires: session.expires})
 		} else {
 			del(entrySession, sessionID(key))
 		}
@@ -338,7 +345,7 @@ func storedMessageOf(m *messageState) storedMessage {
 }
 
 func storedUserOf(u *userState) storedUser {
-	stored := storedUser{Name: u.name, Avatar: u.avatar, Ext: u.ext, LeftAt: u.leftAt}
+	stored := storedUser{Name: u.name, Avatar: u.avatar, Ext: u.ext, LeftAt: u.leftAt, Email: u.email}
 	if u.avatarEmbed != nil {
 		stored.AvatarEmbed = u.avatarEmbed.id
 	}
@@ -412,7 +419,8 @@ func (s *Server) restoreLocked() (map[string]bool, error) {
 		if err := decode(entryMeta, "counters", raw, &s.storedMeta); err != nil {
 			return nil, err
 		}
-		s.lastID, s.guestNumber, s.embedNumber, s.uploadSeq = s.storedMeta.LastID, s.storedMeta.GuestNumber, s.storedMeta.EmbedNumber, s.storedMeta.UploadSeq
+		s.lastID, s.guestNumber, s.accountNumber = s.storedMeta.LastID, s.storedMeta.GuestNumber, s.storedMeta.AccountNumber
+		s.embedNumber, s.uploadSeq = s.storedMeta.EmbedNumber, s.storedMeta.UploadSeq
 	}
 	for id := range entries[entryUsedID] {
 		s.usedIDs[id] = true
@@ -497,6 +505,10 @@ func (s *Server) restoreLocked() (map[string]bool, error) {
 		storedUsers[id] = stored
 		u := newUserState(id, stored.Name)
 		u.avatar, u.ext = stored.Avatar, stored.Ext
+		if stored.Email != "" {
+			u.email = stored.Email
+			s.emails[stored.Email] = u
+		}
 		if stored.LeftAt != nil {
 			u.leftAt = stored.LeftAt
 		}
@@ -576,7 +588,7 @@ func (s *Server) restoreLocked() (map[string]bool, error) {
 			return nil, err
 		}
 		if u := s.users[stored.User]; u != nil && u.account() && now.Before(stored.Expires) {
-			s.sessions[[32]byte(key)] = passkeySession{user: u.passkey, origin: stored.Origin, expires: stored.Expires}
+			s.sessions[[32]byte(key)] = session{user: u, origin: stored.Origin, expires: stored.Expires}
 		} else {
 			s.touchSession([32]byte(key))
 		}
