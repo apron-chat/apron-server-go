@@ -52,11 +52,16 @@ func TestServerFrame(t *testing.T) {
 	_, httpServer := newTestServer(t, DefaultConfig())
 	_, frame := dialRaw(t, httpServer)
 	params := frame["params"].(map[string]any)
-	if params["protocol"] != float64(7) || params["ping"] != float64(30) {
-		t.Fatalf("protocol and ping: %#v", params)
+	if params["apron"] != float64(7) || params["agent"] != "apron-go/7" || params["ping"] != float64(30) {
+		t.Fatalf("version, agent, and ping: %#v", params)
 	}
-	if !reflect.DeepEqual(params["caps"], []any{"history", "edit", "rooms", "reactions", "activity", "embed:upload", "embed:stream", "command"}) {
-		t.Fatalf("caps: %#v", params["caps"])
+	for _, old := range []string{"protocol", "name", "caps"} {
+		if _, has := params[old]; has {
+			t.Fatalf("pre-0bf4a27 field %q: %#v", old, params)
+		}
+	}
+	if !reflect.DeepEqual(params["capabilities"], []any{"history", "edit", "rooms", "reactions", "activity", "embed:upload", "embed:stream", "command"}) {
+		t.Fatalf("capabilities: %#v", params["capabilities"])
 	}
 	if _, has := params["signup"]; !reflect.DeepEqual(params["auth"], []any{"guest"}) || has {
 		t.Fatalf("auth: %#v, signup: %#v", params["auth"], params["signup"])
@@ -96,7 +101,7 @@ func TestGuestAuth(t *testing.T) {
 	c.expectError(t, "auth", "bad-scheme", map[string]any{"scheme": "password"}, codeUnsupported)
 	// The new guest's join to general is a logged membership, delivered to
 	// its connection before the auth result (§1).
-	before, result := c.request(t, "auth", "auth", map[string]any{"scheme": "guest", "name": "Ada"})
+	before, result := c.request(t, "auth", "auth", map[string]any{"scheme": "guest", "name": "Ada", "agent": "apron-test/1"})
 	you := result["you"].(map[string]any)
 	if you["user_id"] != "guest_1" || you["name"] != "Ada" || len(before) != 1 {
 		t.Fatalf("guest identity %#v after %#v", you, before)

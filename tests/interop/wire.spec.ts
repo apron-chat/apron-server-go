@@ -6,6 +6,7 @@ import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
 import { expect, test } from '@playwright/test';
 import { ChatClient, DEFAULT_ROOM_ID, userIn, type RoomSnapshot } from '../../.apron-web/src/lib/protocol/client';
+import type { Identity } from '../../.apron-web/src/lib/protocol/types';
 
 type ObjectValue = Record<string, unknown>;
 type Step =
@@ -113,15 +114,20 @@ function projectRoom(room: RoomSnapshot): ObjectValue {
 }
 
 /**
- * A user object without the fields it keeps as cleared. PROTOCOL.md §3.3
- * has a client keep a cleared field's empty value ("", [], {}), so a
- * recorded object cannot fill it in again; the fixtures project a cleared
- * field as absent.
+ * A message's sender as the fixtures project it (README "Session state"):
+ * the rendered user, less any field its kept object holds as cleared (an
+ * empty value, "", [], {}), which is omitted rather than taken from `from`.
  */
-function withoutCleared<T extends object>(user: T): T {
-	const empty = (value: unknown) => value === '' || (Array.isArray(value) && value.length === 0) ||
+function senderOf(snapshot: ReturnType<ChatClient['snapshot']>, from: Identity): Identity {
+	const rendered = userIn(snapshot, from);
+	let id = from.user_id;
+	for (let hops = 0; hops < 8 && snapshot.userAliases[id] !== undefined; hops += 1) id = snapshot.userAliases[id];
+	const kept = snapshot.users[id] ?? snapshot.users[from.user_id];
+	if (!kept) return rendered;
+	const cleared = (value: unknown) => value === '' || (Array.isArray(value) && value.length === 0) ||
 		(isObject(value) && Object.keys(value).length === 0);
-	return Object.fromEntries(Object.entries(user).filter(([key, value]) => key === 'user_id' || !empty(value))) as T;
+	return Object.fromEntries(Object.entries(rendered)
+		.filter(([key]) => key === 'user_id' || !(Object.hasOwn(kept, key) && cleared(kept[key])))) as Identity;
 }
 
 function logicalState(client: ChatClient, operations: Record<string, string>): ObjectValue {
@@ -131,15 +137,15 @@ function logicalState(client: ChatClient, operations: Record<string, string>): O
 	const rooms = snapshot.rooms.filter((room) => room.id !== DEFAULT_ROOM_ID && room.joined);
 	return JSON.parse(JSON.stringify({
 		you: snapshot.you ?? null,
-		caps: [...(snapshot.server?.caps ?? [])].sort(byString),
+		capabilities: [...(snapshot.server?.capabilities ?? [])].sort(byString),
 		rooms: [...rooms].sort((left, right) => byString(left.id, right.id)).map(projectRoom),
 		typing: snapshot.typing
 			.map((entry) => ({ room_id: entry.room, from: entry.from }))
 			.sort((left, right) => byString(left.room_id, right.room_id) || byString(left.from.user_id, right.from.user_id)),
-		users: Object.fromEntries(Object.keys(snapshot.users).sort(byString).map((id) => [id, withoutCleared(snapshot.users[id])])),
+		users: Object.fromEntries(Object.keys(snapshot.users).sort(byString).map((id) => [id, snapshot.users[id]])),
 		members: Object.fromEntries(rooms.filter((room) => room.members !== undefined).sort((left, right) => byString(left.id, right.id))
 			.map((room) => [room.id, room.members!.map((member) => member.user_id).sort(byString)])),
-		senders: Object.fromEntries(rooms.flatMap((room) => room.timeline.order.map((id) => [id, withoutCleared(userIn(snapshot, room.timeline.events[id].from))]))),
+		senders: Object.fromEntries(rooms.flatMap((room) => room.timeline.order.map((id) => [id, senderOf(snapshot, room.timeline.events[id].from)]))),
 		notices: snapshot.rooms.flatMap((room) => room.notices)
 			.sort((left, right) => left.at - right.at || byString(left.key, right.key))
 			.map(({ room_id, from, body }) => ({ room_id, from, ...(body ? { body } : {}) })),

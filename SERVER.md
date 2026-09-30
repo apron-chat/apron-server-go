@@ -27,7 +27,8 @@ Defaults:
 - embed endpoints: `/write/<token>`, `/files/<embed_id>/<secret>`,
   `/streams/<embed_id>/<secret>`
 - WebSocket origins: `localhost`, `127.0.0.1`, and `::1` during development
-- capabilities: `history`, `edit`, `rooms`, `reactions`, `activity`,
+- `server` frame: `apron: 7`, `agent: "apron-go/7"`, and
+  `capabilities`: `history`, `edit`, `rooms`, `reactions`, `activity`,
   `embed:upload`, `embed:stream`, `command`; push kind `relay`
   (`server.push`); `server.ping`: 30 seconds
 - `server.ext["apron-go"]`: frame, history, upload, avatar, stream, and
@@ -214,6 +215,9 @@ joined or not: every room but [private](#rooms-threads-and-membership) rooms
 they are not in.
 
 ## Identity and profiles
+
+An `auth` request's `agent`, the client's implementation string, is
+accepted with any scheme and not used.
 
 `auth` with scheme `guest` assigns `guest_<n>` from a server-wide counter
 (`guest_1`, `guest_2`, …) and honors an optional requested `name`. A
