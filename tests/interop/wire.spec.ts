@@ -142,6 +142,19 @@ function pick(state: ObjectValue, expected: ObjectValue): ObjectValue {
 }
 
 /**
+ * The expected state with `rooms` in the order `logicalState` lists them,
+ * `room_id` string order (README "Session state"). The order is the
+ * runner's, not the client's, so this asserts nothing less; it keeps a
+ * fixture that lists rooms in another order, such as core-session.json
+ * listing "~ops" before "general", from failing on the order alone.
+ */
+function ordered(expected: ObjectValue): ObjectValue {
+	if (!Array.isArray(expected.rooms)) return expected;
+	const rooms = [...expected.rooms].sort((left, right) => byString(String(left?.room_id), String(right?.room_id)));
+	return { ...expected, rooms };
+}
+
+/**
  * The recursive subset of `actual` described by `expected`: objects keep the
  * listed keys, arrays and scalars compare exactly.
  */
@@ -263,13 +276,13 @@ for (const fixture of fixtures) {
 								unmatched.length = 0;
 								connection = await (await control('/next')).json();
 							} else if ('expect' in step) {
-								await expect.poll(() => pick(logicalState(client, operations), step.expect)).toEqual(step.expect);
+								await expect.poll(() => pick(logicalState(client, operations), step.expect)).toEqual(ordered(step.expect));
 							} else {
 								throw new Error(`Unknown fixture step: ${JSON.stringify(step)} (operations: ${OPERATIONS.join(', ')})`);
 							}
 						});
 					}
-					await expect.poll(() => pick(logicalState(client, operations), fixture.expected)).toEqual(fixture.expected);
+					await expect.poll(() => pick(logicalState(client, operations), fixture.expected)).toEqual(ordered(fixture.expected));
 				} finally {
 					client.stop();
 				}
