@@ -102,7 +102,7 @@ func guestAuth(t *testing.T, c *testClient) map[string]any {
 func membershipOf(t *testing.T, frame map[string]any) map[string]any {
 	t.Helper()
 	update := notificationParams(t, frame, "room_update")
-	records, ok := update["membership"].([]any)
+	records, ok := update["memberships"].([]any)
 	if !ok || len(records) != 1 {
 		t.Fatalf("room_update = %#v, want one membership record", update)
 	}
@@ -456,7 +456,7 @@ func joinedRecord(t *testing.T, frame map[string]any, member string) map[string]
 	t.Helper()
 	update := notificationParams(t, frame, "room_update")
 	records, ok := update["joined"].([]any)
-	_, withMembership := update["membership"]
+	_, withMembership := update["memberships"]
 	if !ok || len(records) != 1 || (len(update) != 2 && !(withMembership && len(update) == 3)) {
 		t.Fatalf("room_update = %#v, want one joined record and users", update)
 	}

@@ -202,7 +202,7 @@ func roomUpdate(field string, records ...any) jsontext.Value {
 
 // logMembershipLocked logs one membership record (§4.3.2) of u in r,
 // advancing the room's latest_log_id, and returns the record for delivery
-// in a room_update's membership (§4.3.3). The record carries u as a
+// in a room_update's memberships (§4.3.3). The record carries u as a
 // recorded object: user_id and name.
 func (s *Server) logMembershipLocked(u *userState, r *roomState, joined bool) jsontext.Value {
 	logID := s.nextIDLocked()
@@ -219,10 +219,10 @@ func (s *Server) logMembershipLocked(u *userState, r *roomState, joined bool) js
 }
 
 // deliverMembershipLocked sends a membership record to the room's members
-// but u, as room_update membership (§4.3.3); u's connections receive it
+// but u, as room_update memberships (§4.3.3); u's connections receive it
 // with the room_update that tells them of the change.
 func (s *Server) deliverMembershipLocked(membership jsontext.Value, r *roomState, u *userState) {
-	frame := roomUpdate("membership", membership)
+	frame := roomUpdate("memberships", membership)
 	for id, member := range r.members {
 		if id != u.id {
 			member.send(frame)
@@ -250,11 +250,11 @@ func (s *Server) addMemberLocked(u *userState, r *roomState) jsontext.Value {
 
 // joinDefaultRoomLocked joins a new identity to the default room, so its
 // room list is not empty. Its connections receive the membership alone, as
-// room_update membership before the auth result: the client lists its rooms
+// room_update memberships before the auth result: the client lists its rooms
 // with room_list (§4.3.1).
 func (s *Server) joinDefaultRoomLocked(u *userState) {
 	if membership := s.addMemberLocked(u, s.rooms[defaultRoomID]); membership != nil {
-		u.send(roomUpdate("membership", membership))
+		u.send(roomUpdate("memberships", membership))
 	}
 }
 
@@ -278,7 +278,7 @@ func (s *Server) joinedUpdateLocked(r *roomState, membership jsontext.Value) jso
 	listed := s.addMembersLocked(record, r)
 	params := map[string]any{"joined": []any{record}, "users": profiles(listed)}
 	if membership != nil {
-		params["membership"] = []any{membership}
+		params["memberships"] = []any{membership}
 	}
 	return notification("room_update", params)
 }
@@ -324,7 +324,7 @@ func (s *Server) leaveLocked(u *userState, r *roomState) bool {
 	s.touchUser(u.id)
 	delete(r.members, u.id)
 	delete(r.active, u.id)
-	u.send(notification("room_update", map[string]any{"left": []any{map[string]any{"room_id": r.id}}, "membership": []any{membership}}))
+	u.send(notification("room_update", map[string]any{"left": []any{map[string]any{"room_id": r.id}}, "memberships": []any{membership}}))
 	if r.private {
 		s.hideThreadsLocked(u, r)
 	}
@@ -883,7 +883,7 @@ func renderHistory(r *roomState, matching []*logRecord, more bool, size int) []b
 	for _, group := range []struct {
 		key  string
 		kind recordKind
-	}{{"rooms", kindRoom}, {"messages", kindMessage}, {"reactions", kindReactions}, {"membership", kindMembership}} {
+	}{{"rooms", kindRoom}, {"messages", kindMessage}, {"reactions", kindReactions}, {"memberships", kindMembership}} {
 		first := true
 		for _, record := range matching {
 			if record.kind != group.kind {

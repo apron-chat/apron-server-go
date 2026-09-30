@@ -199,7 +199,7 @@ included, and the server never needs the full-member record the spec asks for
 before discarding a prefix.
 
 `history` returns a window of one room's log, `general`'s without `room_id`,
-partitioned into `rooms`, `messages`, `reactions`, and `membership`; an empty
+partitioned into `rooms`, `messages`, `reactions`, and `memberships`; an empty
 array is omitted. `limit` (default 100, clamped to 1000) counts records of
 every kind, and `first_log_id`/`last_log_id` span all of them; an empty window
 has neither. A page also ends, with `more: true`, once its records reach
@@ -335,8 +335,8 @@ name it.
 
 Every membership change is a logged record in the room's log,
 `{"log_id", "room_id", "members": [{"user": {user_id, name}, "joined": true|false}]}`,
-returned in `history`'s `membership` array and delivered live in
-`room_update` `membership` (§4.3.3): the joining user's connections get one
+returned in `history`'s `memberships` array and delivered live in
+`room_update` `memberships` (§4.3.3): the joining user's connections get one
 `room_update` with the room in `joined`, its `members` and `users`, and the
 membership; the leaving or removed user's get `left` and the membership;
 the room's other members get the membership alone. A new identity's join to

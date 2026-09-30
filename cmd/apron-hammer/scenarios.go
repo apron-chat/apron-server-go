@@ -129,7 +129,7 @@ func newOrderCheck(h *hammer) *orderCheck {
 }
 
 // notify runs on the peer's read goroutine. Memberships arrive in
-// room_update membership.
+// room_update memberships.
 func (o *orderCheck) notify(method string, frame []byte) {
 	type record struct {
 		RoomID string `json:"room_id"`
@@ -138,7 +138,7 @@ func (o *orderCheck) notify(method string, frame []byte) {
 	var f struct {
 		Params struct {
 			record
-			Membership []record `json:"membership"`
+			Memberships []record `json:"memberships"`
 		} `json:"params"`
 	}
 	switch method {
@@ -150,7 +150,7 @@ func (o *orderCheck) notify(method string, frame []byte) {
 		o.h.protocolViolation("%s notification: %v", method, err)
 		return
 	}
-	records := f.Params.Membership
+	records := f.Params.Memberships
 	if method != "room_update" {
 		records = []record{f.Params.record}
 	}

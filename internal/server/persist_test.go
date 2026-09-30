@@ -159,7 +159,7 @@ func TestStateSurvivesRestart(t *testing.T) {
 				}
 				if room == "general" {
 					// The guest's leave is in the log.
-					membership := records(t, after, "membership")
+					membership := records(t, after, "memberships")
 					last := membership[len(membership)-1].(map[string]any)["members"].([]any)[0].(map[string]any)
 					if last["user"].(map[string]any)["user_id"] != guest.userID || last["joined"] != false {
 						t.Fatalf("guest after restart: %#v", last)
@@ -220,7 +220,7 @@ func TestRestoreAfterACrash(t *testing.T) {
 	if last["message_id"] != pending["message_id"] || len(embedsOf(t, last)) != 0 {
 		t.Fatalf("pending upload after restart: %#v", last)
 	}
-	membership := records(t, page, "membership")
+	membership := records(t, page, "memberships")
 	var left bool
 	for _, value := range membership {
 		for _, member := range value.(map[string]any)["members"].([]any) {

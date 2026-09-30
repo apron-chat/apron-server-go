@@ -276,7 +276,7 @@ func TestJoinLeaveAndDeliveries(t *testing.T) {
 	}
 	// history returns the room's memberships in log order.
 	var changes []string
-	for _, value := range records(t, historyPage(t, a, ops, map[string]any{}), "membership") {
+	for _, value := range records(t, historyPage(t, a, ops, map[string]any{}), "memberships") {
 		entry := value.(map[string]any)["members"].([]any)[0].(map[string]any)
 		changes = append(changes, fmt.Sprint(entry["user"].(map[string]any)["user_id"], " ", entry["joined"]))
 	}
@@ -349,7 +349,7 @@ func TestPrevLogIDLinksRecords(t *testing.T) {
 		t.Fatalf("reactions prev_log_id: %#v then %#v", first, second)
 	}
 	leaveRoom(t, c, room)
-	for _, value := range records(t, historyPage(t, c, room, map[string]any{}), "membership") {
+	for _, value := range records(t, historyPage(t, c, room, map[string]any{}), "memberships") {
 		if _, has := value.(map[string]any)["prev_log_id"]; has {
 			t.Fatalf("membership with prev_log_id: %#v", value)
 		}
@@ -910,7 +910,7 @@ func TestCommands(t *testing.T) {
 	if entries := records(t, page, "messages"); len(entries) != 1 || !reflect.DeepEqual(entries[0], any(notice)) {
 		t.Fatalf("ops history: %#v", entries)
 	}
-	if memberships := records(t, page, "membership"); !reflect.DeepEqual(memberships[len(memberships)-1], any(removal)) {
+	if memberships := records(t, page, "memberships"); !reflect.DeepEqual(memberships[len(memberships)-1], any(removal)) {
 		t.Fatalf("ops memberships: %#v", memberships)
 	}
 	// A retried command does not run again.

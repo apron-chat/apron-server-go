@@ -270,7 +270,7 @@ func TestAuthIsABarrier(t *testing.T) {
 		t.Fatalf("room_list behind auth: %#v", listed)
 	}
 	page := frames[3]["result"].(map[string]any)
-	if got := logIDs(t, page, "membership"); !reflect.DeepEqual(got, []string{membership["log_id"].(string)}) || page["latest_log_id"] != membership["log_id"] {
+	if got := logIDs(t, page, "memberships"); !reflect.DeepEqual(got, []string{membership["log_id"].(string)}) || page["latest_log_id"] != membership["log_id"] {
 		t.Fatalf("history behind auth: %#v", page)
 	}
 	if frames[5]["id"] != "post" || frames[4]["params"].(map[string]any)["message_id"] != frames[5]["result"].(map[string]any)["message_id"] {
@@ -503,14 +503,14 @@ func TestRoomSetCreatesAndEditsRoomsAndThreads(t *testing.T) {
 	if got := logIDs(t, page, "rooms"); !reflect.DeepEqual(got, []string{thread, updated["log_id"].(string)}) {
 		t.Fatalf("thread room records: %#v", page)
 	}
-	if got := logIDs(t, page, "membership"); !reflect.DeepEqual(got, []string{record["latest_log_id"].(string)}) {
+	if got := logIDs(t, page, "memberships"); !reflect.DeepEqual(got, []string{record["latest_log_id"].(string)}) {
 		t.Fatalf("thread memberships: %#v", page)
 	}
 	if _, has := page["messages"]; has || page["history_log_id"] != thread || page["latest_log_id"] != updated["log_id"] {
 		t.Fatalf("thread history: %#v", page)
 	}
 	general := historyPage(t, c, "general", map[string]any{})
-	if len(records(t, general, "rooms")) != 1 || len(records(t, general, "membership")) != 2 {
+	if len(records(t, general, "rooms")) != 1 || len(records(t, general, "memberships")) != 2 {
 		t.Fatalf("thread records leaked into the parent log: %#v", general)
 	}
 
@@ -742,7 +742,7 @@ func TestHistoryPaginatesAcrossRecordKinds(t *testing.T) {
 		t.Fatalf("full page bounds: %#v", full)
 	}
 	if !reflect.DeepEqual(logIDs(t, full, "rooms"), []string{all[0], all[4]}) ||
-		!reflect.DeepEqual(logIDs(t, full, "membership"), []string{all[1]}) ||
+		!reflect.DeepEqual(logIDs(t, full, "memberships"), []string{all[1]}) ||
 		!reflect.DeepEqual(logIDs(t, full, "messages"), []string{all[2], all[5]}) ||
 		!reflect.DeepEqual(logIDs(t, full, "reactions"), []string{all[3]}) {
 		t.Fatalf("partitioned page: %#v", full)
@@ -767,7 +767,7 @@ func TestHistoryPaginatesAcrossRecordKinds(t *testing.T) {
 	for pages := 0; ; pages++ {
 		page := historyPage(t, c, "general", map[string]any{"after": after, "limit": 2})
 		var ids []string
-		for _, key := range []string{"rooms", "membership", "messages", "reactions"} {
+		for _, key := range []string{"rooms", "memberships", "messages", "reactions"} {
 			ids = append(ids, logIDs(t, page, key)...)
 		}
 		if len(ids) == 0 || len(ids) > 2 || page["latest_log_id"] != all[5] {
