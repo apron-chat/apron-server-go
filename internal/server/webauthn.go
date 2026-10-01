@@ -15,7 +15,7 @@ import (
 )
 
 const passkeyLifetime = 2 * time.Minute
-const sessionLifetime = 12 * time.Hour
+const sessionLifetime = 30 * 24 * time.Hour
 
 type passkeyUser struct {
 	// handle and credentials are persisted with the user (persist.go).
@@ -34,6 +34,17 @@ func (u *passkeyUser) WebAuthnName() string {
 func (u *passkeyUser) WebAuthnDisplayName() string                { return u.WebAuthnName() }
 func (u *passkeyUser) WebAuthnCredentials() []webauthn.Credential { return u.credentials }
 
+// labelledPasskeyUser names a guest's new passkey after the display name the
+// registration asks for (§3.2 `name`), which the identity takes only once the
+// ceremony succeeds: password managers show the creation options' user name.
+type labelledPasskeyUser struct {
+	*passkeyUser
+	label string
+}
+
+func (u labelledPasskeyUser) WebAuthnName() string        { return u.label }
+func (u labelledPasskeyUser) WebAuthnDisplayName() string { return u.label }
+
 type passkeyCeremony struct {
 	challengeID string
 	action      string
@@ -41,8 +52,11 @@ type passkeyCeremony struct {
 	rpID        string
 	origin      string
 	user        *passkeyUser
-	data        *webauthn.SessionData
-	expires     time.Time
+	// name is the display name a guest's registration asked for, applied when
+	// it finishes; empty for a login, or a passkey added to an account.
+	name    string
+	data    *webauthn.SessionData
+	expires time.Time
 }
 
 // session is a bearer token's sign-in (§3.2): the account it resumes, bound
@@ -113,6 +127,7 @@ func (s *Server) beginPasskey(c *client, req request, action string, w *webauthn
 		data      *webauthn.SessionData
 		err       error
 		user      *passkeyUser
+		name      string
 	)
 	identityID := ""
 	if action == "register" {
@@ -124,6 +139,15 @@ func (s *Server) beginPasskey(c *client, req request, action string, w *webauthn
 		if user == nil {
 			user = &passkeyUser{user: c.user, handle: []byte(rand.Text())}
 		}
+		// A guest becoming an account may ask for its name with the begin (§3.2);
+		// a passkey added to an account keeps the account's name.
+		if !c.user.account() {
+			requested, rpcErr := parseString(req.params, "name", false)
+			if rpcErr != nil {
+				return nil, rpcErr
+			}
+			name = normalizeName(requested)
+		}
 		if len(user.credentials) >= 10 {
 			return nil, &rpcError{Code: codeDenied, Message: "This identity already has ten passkeys"}
 		}
@@ -131,7 +155,11 @@ func (s *Server) beginPasskey(c *client, req request, action string, w *webauthn
 		for _, credential := range user.credentials {
 			exclusions = append(exclusions, credential.Descriptor())
 		}
-		creation, data, err = w.BeginRegistration(user,
+		var registering webauthn.User = user
+		if name != "" {
+			registering = labelledPasskeyUser{user, name}
+		}
+		creation, data, err = w.BeginRegistration(registering,
 			webauthn.WithRegistrationOrigin(c.origin),
 			webauthn.WithResidentKeyRequirement(protocol.ResidentKeyRequirementRequired),
 			webauthn.WithAuthenticatorSelection(protocol.AuthenticatorSelection{
@@ -165,6 +193,7 @@ func (s *Server) beginPasskey(c *client, req request, action string, w *webauthn
 		rpID:        w.Config.RPID,
 		origin:      c.origin,
 		user:        user,
+		name:        name,
 		data:        data,
 		expires:     data.Expires,
 	}
@@ -229,9 +258,14 @@ func (s *Server) finishPasskeyCeremony(c *client, req request, action string, w 
 		user.credentials = append(user.credentials, *credential)
 		c.user.passkey = user
 		s.touchUser(c.user.id)
-		if s.grantRolesLocked(c.user) {
-			// A guest that becomes an account takes the roles its user_id
-			// was granted.
+		// The account takes the name its registration asked for.
+		renamed := ceremony.name != "" && ceremony.name != c.user.name
+		if renamed {
+			c.user.name = ceremony.name
+			c.user.fromValue = nil
+		}
+		// A guest that becomes an account takes the roles its user_id was granted.
+		if s.grantRolesLocked(c.user) || renamed {
 			s.notifyProfileLocked(c.user, c)
 		}
 		s.passkeys[c.user.id] = user

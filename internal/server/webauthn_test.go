@@ -246,6 +246,51 @@ func TestPasskeyRegistrationLoginAndSession(t *testing.T) {
 	passkeyDenied(t, passkeyCall(t, reconnected, "expired", "token", "", map[string]any{"token": registered["token"]}))
 }
 
+func TestRegistrationTakesRequestedName(t *testing.T) {
+	_, httpServer := passkeyTestServer(t)
+	c, _ := dialOrigin(t, httpServer, testPasskeyOrigin)
+	guest := guestAuth(t, c)["you"].(map[string]any)
+	userOf := func(options map[string]any) map[string]any {
+		t.Helper()
+		user, ok := passkeyPublicKey(t, options)["user"].(map[string]any)
+		if !ok {
+			t.Fatalf("creation options have no user: %#v", options)
+		}
+		return user
+	}
+
+	// A begin that is superseded changes nothing: the name applies only to the
+	// registration that finishes.
+	abandoned := passkeyResult(t, passkeyCall(t, c, "begin-abandoned", "register", "begin", map[string]any{"name": "Abandoned"}))
+	if userOf(abandoned)["name"] != "Abandoned" {
+		t.Fatalf("passkey not labelled with the requested name: %#v", userOf(abandoned))
+	}
+	options := passkeyResult(t, passkeyCall(t, c, "begin", "register", "begin", map[string]any{"name": "  Ada   Lovelace "}))
+	if user := userOf(options); user["name"] != "Ada Lovelace" || user["displayName"] != "Ada Lovelace" {
+		t.Fatalf("passkey not labelled with the normalized requested name: %#v", user)
+	}
+	a := newTestAuthenticator(t)
+	result := passkeyResult(t, passkeyCall(t, c, "finish", "register", "finish", map[string]any{"credential": a.registration(t, options, testPasskeyOrigin)}))
+	you := result["you"].(map[string]any)
+	if you["user_id"] != guest["user_id"] || you["name"] != "Ada Lovelace" {
+		t.Fatalf("registration did not keep the guest's identity with the requested name: %#v", you)
+	}
+
+	// Adding a passkey to an account keeps the account's name, whatever is asked.
+	other, _ := dialOrigin(t, httpServer, testPasskeyOrigin)
+	passkeyResult(t, passkeyCall(t, other, "resume", "token", "", map[string]any{"token": result["token"]}))
+	adding := passkeyResult(t, passkeyCall(t, other, "begin-add", "register", "begin", map[string]any{"name": "Someone else"}))
+	if userOf(adding)["name"] != "Ada Lovelace" {
+		t.Fatalf("added passkey not labelled with the account's name: %#v", userOf(adding))
+	}
+	added := passkeyResult(t, passkeyCall(t, other, "finish-add", "register", "finish", map[string]any{
+		"credential": newTestAuthenticator(t).registration(t, adding, testPasskeyOrigin),
+	}))
+	if name := added["you"].(map[string]any)["name"]; name != "Ada Lovelace" {
+		t.Fatalf("adding a passkey renamed the account: %#v", name)
+	}
+}
+
 func TestAddingPasskeyPreservesStoredName(t *testing.T) {
 	for _, renameDuringRegistration := range []bool{false, true} {
 		name := "rename before registration"
