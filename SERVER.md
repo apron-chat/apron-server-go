@@ -612,7 +612,7 @@ signature counter and flags and rejects a clone warning.
 Successful registration or login, like an [email sign-in](#email-sign-in),
 returns an opaque bearer token for `scheme: "token"` on later connections
 ([PROTOCOL.md §3.2](https://github.com/shazow/apron/blob/main/PROTOCOL.md#32-authentication)).
-Tokens last twelve hours from their latest use, are stored hashed on the
+Tokens last 30 days from their latest use, are stored hashed on the
 server, and are bound to the frontend origin. A token sign-in renews the
 token and answers with the same token rather than a replacement, since
 several tabs may share it; clients that keep the latest token keep it.
