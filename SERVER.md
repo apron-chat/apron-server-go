@@ -7,8 +7,9 @@ under consideration in
 [Appendix C](https://github.com/shazow/apron/blob/main/PROTOCOL.md#appendix-c--under-consideration):
 WebRTC, multiplexing, and the actions embed.
 State is kept in a store, by default a SQLite database in the user data
-directory, so rooms, history, accounts, sessions, uploads, and push
-registrations survive a restart; see [Storage](#storage).
+directory, so rooms, history, accounts, sessions, uploads, push
+registrations, and the status users set survive a restart; see
+[Storage](#storage).
 
 This document describes how the server is configured and how it behaves where
 the protocol leaves room for choice. To work on the server itself, see
@@ -29,8 +30,10 @@ Defaults:
 - WebSocket origins: `localhost`, `127.0.0.1`, and `::1` during development
 - `server` frame: `apron: 7`, `agent: "apron-go/7"`, and
   `capabilities`: `history`, `edit`, `rooms`, `reactions`, `activity`,
-  `embed:upload`, `embed:stream`, `command`; push kind `relay`
-  (`server.push`); `server.ping`: 30 seconds
+  `embed:upload`, `embed:stream`, `command`, `status`; `server.push`: kinds
+  `relay` and `webpush` (with the server's VAPID `key`) and `wake`:
+  `mentions`, `replies`, `private`, `joined`, `badge`; `server.ping`: 30
+  seconds
 - `server.ext["apron-go"]`: frame, history, upload, avatar, stream, and
   member-listing limits
 - seeded default room: `general` (title `General`)
@@ -117,7 +120,15 @@ Flags (`aprond --help` lists them all):
   affected message is republished without them. Avatars count toward the
   bound but are never removed.
 - `--push.disable` removes push; `--push.allow-insecure` accepts `http` and
-  internal push endpoints (development only).
+  internal push endpoints (development only). `--push.vapid-private-key`
+  sets the Web Push VAPID key, the P-256 private scalar in base64url as
+  `web-push generate-vapid-keys` prints it; without it the server generates
+  one at its first start and keeps it in the store, so it lasts as long as
+  the store (with `--store memory`, a restart makes a new key, and browsers
+  subscribe again). `--push.vapid-subject` is the contact push services
+  may use, a `mailto:` or `https:` URL (default `--public-url`; without
+  either, VAPID tokens carry no `sub`, which some push services refuse).
+  See [Push](#push).
 - `--tls.domain <domain>` (repeat for more) serves HTTPS itself, with
   certificates from Let's Encrypt, on `--tls.addr` (`:443`) in place of
   `--addr`, and answers ACME challenges and redirects to HTTPS on
@@ -153,11 +164,15 @@ backend only keeps entries and applies batches:
 
 What survives a restart: rooms and threads with their complete logs, message
 state and reactions, read cursors, accounts (passkey and email users) with
-their credentials, addresses, profiles, memberships, and push registrations,
-unexpired sessions, finished uploads and their files, and the `log_id`,
-guest, account, and embed counters, so no `log_id` or `user_id` is reused.
-What does not: connections, request deduplication, email proposals, and
-live streams. Guests exist only while connected, so at start every guest
+their credentials, addresses, profiles, memberships, push registrations
+(with their keys, `push_id`, scopes, and when they were last registered),
+and the status they set (`invisible`, mutes, and room mutes), unexpired
+sessions, finished uploads and their files, the VAPID key, and the
+`log_id`, guest, account, and embed counters, so no `log_id` or `user_id`
+is reused. What does not: connections and their `idle`, request
+deduplication, email proposals, live streams, and the unread count each
+push endpoint last received, so the first badge push after a restart is
+sent even when the count is unchanged. Guests exist only while connected, so at start every guest
 left in the store is retired as if its last connection had just closed,
 logging its leaves; a write that had not finished fails, and its message is
 republished without the embed.
@@ -180,7 +195,10 @@ without parsing, and a `ping` notification with other spacing is answered as
 well. It also pings at the WebSocket level every 30 seconds and closes a
 connection that does not answer within ten. A connection that sent liveness
 pings and then sent nothing for three ping intervals plus the timeout
-(100 seconds) is closed: its page is frozen or gone.
+(100 seconds) is closed: its page is frozen or gone. A connection that
+never sent a liveness ping and is silent as long counts as idle
+([Status](#status)) until its next frame of any kind: a client that does
+not report `status` thus shows idle while unused, and gets pushes.
 
 ## Log and history
 
@@ -262,7 +280,9 @@ capped at 64 characters; `avatar` must be an `https:` URL or a
 notifications carry removed fields as their empty values (`""`, `{}`).
 Current user objects (`you`, `new` in `user`, and `users` in `room_list` and
 `room_update`) carry `avatar`, `ext`, and `roles`, an account's `roles` always,
-`[]` when it holds none, so a role taken away clears it (§3.3); recorded objects (`from` in messages
+`[]` when it holds none, so a role taken away clears it (§3.3), and
+`status` ([Status](#status)); `you` also carries the user's remaining
+`mute`. Recorded objects (`from` in messages
 and reactions, `user` in memberships) carry only `user_id` and `name` as they
 were when logged. Room `members` are bare `{user_id}` objects whose complete
 objects are in the accompanying `users`.
@@ -522,36 +542,165 @@ replies arrive before its result. Commands:
 room (`general` without `room_id`) to the room's members. A read cursor must
 name an existing message and only moves forward; the server keeps each
 user's latest cursor per room and sends it after `room_list` lists the room.
-A frame that changes nothing relays nothing. `away` (boolean) marks the
-sending connection as unattended; it is never delivered, and ends with
-`away: false`, `typing`, `read_message_id`, a `message` or `command` from
-that connection, or the connection closing.
+A frame that changes nothing relays nothing. Typing goes only to the
+connections attending the room ([Status](#status)): not to idle ones, nor
+to those that said they attend another room. A read cursor goes to every
+connection of the room's members, without the typing when the same frame
+carries both. `away` is no longer part of `activity` and, like any unknown
+field, is ignored; `status` replaces it.
+
+## Status
+
+The `status` capability (§4.11) takes the `status` notification, before
+authentication too: `idle` applies to the connection at once, and the
+user's fields wait on the connection until it signs in (at most 16 frames,
+the oldest dropped), then apply without being echoed to that connection,
+whose `auth` result carries them in `you`. Each present field updates its
+state and absent fields leave it unchanged. A frame with a malformed field
+(`idle` or `invisible` not a boolean, `mute` not `true` or a whole number
+of seconds of at least 0) or, once signed in, a `room_id` the user cannot
+see changes nothing. `status` sent as a request, with an `id`, gets `{}`
+or that error.
+
+- `idle` is the connection's: `true` until `idle: false`, a `message` from
+  the connection (typing, read cursors, and commands do not end it), or
+  the connection closing. With `room_id`, `idle: false` says the connection
+  attends that room, and attends; `idle: true` says it no longer attends
+  that room, without attending another. A connection that never named a
+  room attends all of them.
+- `invisible` is the user's and lasts until changed, across connections
+  and restarts. A scoped `invisible` is ignored.
+- `mute` is the user's: seconds (at most a year), `true` until changed, or
+  `0` to end it, across connections and restarts. With `room_id` it mutes
+  that room; `0` ends the room's own mute, after which the room follows the
+  unscoped mute. A room is muted while either is in effect. A timed mute
+  ends by itself, announced as if the user had ended it.
+
+The server derives each user's `status` from them:
+
+- `online`: a connection of the user is attended, muted or not.
+- `dnd`: none is, and the user's unscoped mute is in effect.
+- `idle`: none is, and a connection (idle) or a live push registration can
+  notify the user.
+- `offline`: none of these, or the user is `invisible`.
+
+Every current user object carries `status`, so a listing shows it. A
+change goes as `user` `{new: {user_id, status}}` to those who share a room
+with the user, and as `you`, with `mute` when it changed (`0` when it
+ended), to the user's own connections; a new member who is not offline is
+announced to the room's other members the same way, since a membership
+carries only a recorded user. These changes go only to connections that
+have sent `status`, which is how a client shows it implements §4.11;
+others learn statuses from current objects alone. `status` in `you` is what
+others see, so it is `offline` while invisible. The remaining `mute` is
+echoed in `you` (the `auth` and `me` results and `user` notifications to
+the user) and never shown to others. A room mute is a field of the room
+records the user receives (§3.4): `room_list` entries, `room_update`
+`joined`, and `updated` when the room is edited carry the user's `mute` of
+that room while it is in effect, and a change to it sends the user's
+connections that have sent `status` the room's record in `room_update`
+`updated`, with `mute: 0` when it ended.
 
 ## Push
 
-`server.push` offers the `relay` kind. `push_register` takes
-`{kind: "relay", url, token?}`; `url` (at most 2,048 bytes) must be `https`
-(unless `--push.allow-insecure`) and identifies the registration, so
-registering it again replaces it, even another user's: the URL names a
-device, which may sign in as someone else; a user may hold ten. `push_unregister` removes the caller's
-registration for a `url`. Registrations belong to the user, so they matter for
-accounts; a guest's end with the guest.
+`server.push` offers the `relay` and `webpush` kinds, with the server's
+VAPID public key as `webpush.key`, and `wake`: `mentions`, `replies`,
+`private`, `joined`, and `badge`. `push_register` takes `{kind, url,
+push_id?, keys?, wake?}`, and `token` for `relay`:
 
-A new message wakes the users listed in `body.mentions` and the author of the
-message it replies to; an edit wakes only the users it adds to
-`body.mentions`. Text is never parsed for mentions. A mention wakes a user in
-any room they can see, so in a private room only its members; a reply wakes
-its target's author only in a room they have joined. Either way, a user is woken only when every
-connection of theirs is away or gone. The server POSTs the push payload (the message without `log_id`,
-`format`, or `embeds`, text truncated to 1,000 characters) to each of their
-endpoints with `token` as bearer. Deliveries run in the background, apart
-from message delivery, in a lane per relay host: at most 8 at once to one
-host and 32 in all, so a slow relay delays only pushes to itself. A user has
-at most 20 deliveries waiting or running and the server 1,024; beyond them a
-push is dropped. Deliveries connect only to public addresses: never loopback,
-private, link-local, shared (CGNAT, `100.64.0.0/10`), benchmarking, reserved,
-or IPv6 translation addresses. A relay answering `404` or `410` loses its
-registration.
+- `url` (at most 2,048 bytes) must be an absolute `https` URL (`http` too
+  with `--push.allow-insecure`) without credentials or whitespace; for
+  `webpush` it is the subscription's endpoint. Any other `kind` is
+  `invalid_params`.
+- `keys` is `{p256dh, auth}` in base64url, as `PushSubscription.toJSON()`
+  gives them: `p256dh` an uncompressed P-256 point on the curve, `auth` 16
+  bytes. `webpush` requires them; with them a `relay` gets the payload
+  encrypted as for `webpush`. A `webpush` registration ignores `token`.
+- `push_id` is 1 to 64 letters, digits, `_` or `-`, kept and repeated in
+  every payload to the registration.
+- `wake` is an array of at most 16 names of at most 64 bytes. Names this
+  server does not implement, `ext:` ones included, are ignored, so `[]` or
+  only unknown names wake for nothing; without `wake`, `mentions` and
+  `replies`.
+
+A registration belongs to the user and its `url`: registering a `url`
+again replaces the caller's registration of it, with its `push_id`, keys,
+and scopes, and renews it; another user's registration of the same `url`
+is their own, so a device that signs in as someone else gets both users'
+pushes until the first unregisters. `push_unregister` `{url}` removes the
+caller's registration, and answers `{}` for an unknown one. A user holds
+at most ten; another replaces the one least recently registered. A
+registration not registered again for 30 days expires: wakes skip and
+forget it, as does the next registration by the user, and a restart drops
+it. Guests may register; their registrations end with the guest.
+
+A new message wakes, by scope:
+
+- `mentions`: the users its `body.mentions` lists, in any room they can
+  see. Text is never parsed for mentions.
+- `replies`: the author of the message it replies to, in any room they can
+  see.
+- `joined`: the room's members.
+- `private`: the room's members, when the room is private or a thread of
+  one (visible to its members only).
+
+An edit wakes only the users it adds to `body.mentions` (scope
+`mentions`). Deletions, moves, reactions, and commands wake no one, nor
+does anyone's own message. A user is woken only when no connection of
+theirs is attended ([Status](#status)) and their unscoped mute is not in
+effect; in a room they muted, only `mentions` wakes them. Each live
+registration whose scopes include one of the user's reasons gets the
+payload, once.
+
+The payload is the JSON object `{push_id?, unread, message}`, at most
+3,072 bytes. `message` is the message without `log_id`: `message_id`,
+`room_id`, `from` as recorded, `reply_to`, and `body` with `text` cut to
+1,000 characters and `mentions`; never `format`, `embeds`, or `ext`. When
+it would be longer, `mentions` goes first, then `text` is cut to the
+longest prefix that fits, then `body` goes, `from` keeps only `user_id`,
+and `reply_to` goes, in turn.
+
+`unread` is the user's unread count for the registration's message scopes
+(the default scopes for a registration with only `badge`): messages by
+others, not deleted, after the user's read position in each room, that the
+scopes select, counting only mentions in a room the user muted. In a
+joined room the read position is the latest of the user's read cursor
+([Activity](#activity)), their join, and their latest message there. A
+room they have not joined counts only once a message there mentioned or
+replied to them, from that message, until their read cursor reaches the
+room's end. The count stops at 999, and each room's looks at its newest
+5,000 records. With `badge`, a `relay` registration also gets
+`{push_id?, unread}` without `message` whenever the count it last received
+changes without a new message: after the user reads, posts, leaves a room,
+or changes a mute, and after a message they counted is deleted. Badge
+pushes go to attended users too, since they update the user's other
+devices, but not to muted ones; `webpush` registrations get none, since a
+browser shows a notification for every push.
+
+Deliveries:
+
+- `relay`: a POST of the payload as JSON (`Content-Type:
+  application/json`), with `token` as bearer; with `keys`, the payload
+  encrypted as for `webpush` instead (`Content-Type:
+  application/octet-stream`, `Content-Encoding: aes128gcm`).
+- `webpush` ([RFC 8030](https://www.rfc-editor.org/rfc/rfc8030)): the
+  payload encrypted for the subscription as one `aes128gcm` record
+  ([RFC 8291](https://www.rfc-editor.org/rfc/rfc8291): a fresh P-256 key
+  and salt per push), with `Authorization: vapid t=<JWT>, k=<key>`
+  ([RFC 8292](https://www.rfc-editor.org/rfc/rfc8292): an ES256 token for
+  the endpoint's origin, valid for 12 hours, with `--push.vapid-subject`
+  as `sub`), `TTL: 86400`, and `Urgency: high` for mentions, replies, and
+  private rooms, `normal` otherwise.
+
+Deliveries run in the background, apart from message delivery, in a lane
+per push host: at most 8 at once to one host and 32 in all, so a slow host
+delays only pushes to itself. A user has at most 20 deliveries waiting or
+running and the server 1,024; beyond them a push is dropped. Redirects are
+not followed. Deliveries connect only to public addresses: never loopback,
+private, link-local, shared (CGNAT, `100.64.0.0/10`), benchmarking,
+reserved, or IPv6 translation addresses. An endpoint of either kind
+answering `404` or `410` loses its registration; other failures lose that
+push, which is not retried.
 
 ## Requests and errors
 
