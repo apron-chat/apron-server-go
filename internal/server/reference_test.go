@@ -62,7 +62,7 @@ func TestRoomListFiltersAndOrder(t *testing.T) {
 	if randomEntry := withMembers["not_joined"].([]any)[0].(map[string]any); !reflect.DeepEqual(memberIDs(randomEntry), []string{"guest_2"}) {
 		t.Fatalf("unjoined room members: %#v", randomEntry)
 	}
-	wantUsers := []any{map[string]any{"user_id": "guest_1", "name": "Ada"}, map[string]any{"user_id": "guest_2"}}
+	wantUsers := []any{map[string]any{"user_id": "guest_1", "name": "Ada", "status": "online"}, map[string]any{"user_id": "guest_2", "status": "online"}}
 	if !reflect.DeepEqual(withMembers["users"], wantUsers) {
 		t.Fatalf("users: %#v", withMembers["users"])
 	}
@@ -409,7 +409,7 @@ func TestProfilesAndUserNotifications(t *testing.T) {
 	a, b := clients[0], clients[1]
 	ext := map[string]any{"example.org": map[string]any{"pronouns": "she/her"}}
 	you := a.result(t, "me", "profile", map[string]any{"name": "  Ada  ", "avatar": "data:image/png;base64,iVBORw0KGgo=", "ext": ext})["you"]
-	want := map[string]any{"user_id": "guest_1", "name": "Ada", "avatar": "data:image/png;base64,iVBORw0KGgo=", "ext": ext}
+	want := map[string]any{"user_id": "guest_1", "name": "Ada", "avatar": "data:image/png;base64,iVBORw0KGgo=", "ext": ext, "status": "online"}
 	if !reflect.DeepEqual(you, any(want)) {
 		t.Fatalf("you = %#v", you)
 	}
@@ -442,17 +442,17 @@ func TestProfilesAndUserNotifications(t *testing.T) {
 	b.expectQuiet(t)
 	// An empty value removes a field, announced as that empty value.
 	you = a.result(t, "me", "clear", map[string]any{"ext": map[string]any{}, "avatar": ""})["you"]
-	cleared := map[string]any{"user_id": "guest_1", "name": "Ada", "avatar": "", "ext": map[string]any{}}
+	cleared := map[string]any{"user_id": "guest_1", "name": "Ada", "avatar": "", "ext": map[string]any{}, "status": "online"}
 	if !reflect.DeepEqual(you, any(cleared)) {
 		t.Fatalf("removal result: %#v", you)
 	}
 	if notice := b.notification(t, "user"); !reflect.DeepEqual(notice, map[string]any{"new": cleared}) {
 		t.Fatalf("removal notification: %#v", notice)
 	}
-	if users := listRooms(t, b, map[string]any{"room_id": "general", "members": true})["users"].([]any); !reflect.DeepEqual(users[0], map[string]any{"user_id": "guest_1", "name": "Ada"}) {
+	if users := listRooms(t, b, map[string]any{"room_id": "general", "members": true})["users"].([]any); !reflect.DeepEqual(users[0], map[string]any{"user_id": "guest_1", "name": "Ada", "status": "online"}) {
 		t.Fatalf("profile after removal: %#v", users[0])
 	}
-	if you := a.result(t, "me", "clear-name", map[string]any{"name": ""})["you"]; !reflect.DeepEqual(you, map[string]any{"user_id": "guest_1", "name": ""}) {
+	if you := a.result(t, "me", "clear-name", map[string]any{"name": ""})["you"]; !reflect.DeepEqual(you, map[string]any{"user_id": "guest_1", "name": "", "status": "online"}) {
 		t.Fatalf("clearing the name: %#v", you)
 	}
 	b.notification(t, "user")

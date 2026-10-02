@@ -28,6 +28,31 @@ type messageState struct {
 	reactions map[string]reactionSet
 	// records are every logged snapshot, for redaction; the last is current.
 	records []*logRecord
+	// cached is what push counting reads of the current snapshot, decoded
+	// once; nil until read, and after a new snapshot.
+	cached *messageInfo
+}
+
+// messageInfo is what unread counts (§4.7) read of a message's current
+// snapshot.
+type messageInfo struct {
+	deleted  bool
+	mentions []string
+	replyTo  string
+}
+
+// info returns what unread counts read of the current snapshot.
+func (m *messageState) info() *messageInfo {
+	if m.cached == nil {
+		snapshot := m.snapshot()
+		body, _ := snapshot["body"].(map[string]any)
+		info := &messageInfo{deleted: snapshot["deleted"] == true, mentions: mentions(body)}
+		if ref, ok := snapshot["reply_to"].(map[string]any); ok {
+			info.replyTo, _ = ref["message_id"].(string)
+		}
+		m.cached = info
+	}
+	return m.cached
 }
 
 // currentRaw is the JSON of the message's current snapshot.
@@ -96,7 +121,11 @@ func (s *Server) saveMessage(c *client, req request) (any, bool, *rpcError) {
 	s.mu.Lock()
 	defer s.unlock()
 	u := c.user
-	c.away = false
+	// A message from a connection ends its idle (§4.11).
+	if c.idle {
+		c.idle = false
+		s.statusChangedLocked(u, nil, false)
+	}
 	destination := s.visibleRoomLocked(u, roomID)
 	if destination == nil {
 		return nil, false, invalidParams("Unknown room %q", roomID)
@@ -199,6 +228,14 @@ func (s *Server) saveMessage(c *client, req request) (any, bool, *rpcError) {
 		s.commitReactionsLocked(current, current.reactionElements())
 	}
 	s.wakeLocked(current, snapshot, previous)
+	switch {
+	case !replacing:
+		// The author's own message moves their read position (§4.7).
+		s.badgeLocked(u, time.Now())
+	case deleted:
+		// The message no longer counts toward anyone's unread.
+		s.badgeRoomLocked(destination, previous)
+	}
 	result := map[string]any{"message_id": messageID}
 	if len(written) > 0 {
 		result["embeds"] = written
@@ -233,6 +270,7 @@ func (s *Server) commitSnapshotLocked(m *messageState, snapshot map[string]any, 
 	}
 	m.logID = logID
 	m.roomID = destination.id
+	m.cached = nil
 	if !moved && len(m.records) == 0 && destination.members[m.owner] != nil {
 		destination.active[m.owner] = logID
 	}

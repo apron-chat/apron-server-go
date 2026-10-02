@@ -74,8 +74,10 @@ type Options struct {
 	} `group:"Email sign-in" namespace:"email"`
 
 	Push struct {
-		Disable       bool `long:"disable" description:"Do not offer push registration"`
-		AllowInsecure bool `long:"allow-insecure" description:"Accept http and internal push endpoints (development only)"`
+		Disable         bool   `long:"disable" description:"Do not offer push registration"`
+		AllowInsecure   bool   `long:"allow-insecure" description:"Accept http and internal push endpoints (development only)"`
+		VAPIDPrivateKey string `long:"vapid-private-key" description:"Web Push VAPID private key, the P-256 scalar in base64url as web-push tools print it (default: one generated at the first start and kept in the store)"`
+		VAPIDSubject    string `long:"vapid-subject" description:"Contact push services may use, a mailto: or https: URL, sent with Web Push (default: --public-url)"`
 	} `group:"Push" namespace:"push"`
 
 	TLS struct {
@@ -148,6 +150,11 @@ func serverConfig(options Options) (server.Config, error) {
 	}
 	config.DisablePush = options.Push.Disable
 	config.AllowInsecurePush = options.Push.AllowInsecure
+	config.VAPIDPrivateKey = options.Push.VAPIDPrivateKey
+	config.VAPIDSubject = options.Push.VAPIDSubject
+	if subject := config.VAPIDSubject; subject != "" && !strings.HasPrefix(subject, "mailto:") && !strings.HasPrefix(subject, "https://") {
+		return config, fmt.Errorf("invalid --push.vapid-subject %q: use a mailto: or https: URL", subject)
+	}
 	config.UploadDir = options.Upload.Dir
 	config.MaxUploadBytes = options.Upload.MaxMB << 20
 	config.MaxMessageUploadBytes = options.Upload.MaxMessageMB << 20

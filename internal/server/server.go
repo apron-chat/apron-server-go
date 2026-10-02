@@ -107,6 +107,13 @@ type Config struct {
 	// AllowInsecurePush accepts http push endpoints and internal addresses.
 	// Use only for development and tests.
 	AllowInsecurePush bool
+	// VAPIDPrivateKey is the server's VAPID key for webpush (§4.7), the
+	// P-256 scalar in base64url. Empty uses the key kept in Store,
+	// generated at the first start.
+	VAPIDPrivateKey string
+	// VAPIDSubject is the contact push services may use, a mailto: or
+	// https: URL, sent in VAPID tokens. Empty uses PublicURL, if any.
+	VAPIDSubject string
 	// MaxConnections bounds concurrent WebSockets; 0 is unlimited.
 	MaxConnections int
 	// MessagesPerMinute bounds each user's new messages; 0 is unlimited.
@@ -332,9 +339,19 @@ type client struct {
 	emailSends *rate.Limiter
 	proposal   *emailProposal
 	clientKey  string
-	// away reports that nobody is attending the connection (§4.4). Guarded
-	// by server.mu.
-	away bool
+	// idle reports that nobody is attending the connection (§4.11);
+	// roomScoped reports that the client said which room it attends, room,
+	// empty for none. statusAware is set once the connection sends status,
+	// and pendingStatus holds the user's fields it sent before signing in.
+	// Guarded by server.mu.
+	idle          bool
+	room          string
+	roomScoped    bool
+	statusAware   bool
+	pendingStatus []statusUpdate
+	// silent is set while the connection has sent no frame for the silence
+	// pingLoop measures; it then counts as idle (§4.11).
+	silent atomic.Bool
 	// closing is set once the final batch is queued; later frames are dropped.
 	closing atomic.Bool
 	// pinged is set by the first liveness ping (§1); lastFrame is when the
@@ -407,8 +424,12 @@ type Server struct {
 	// mailing tracks email deliveries in progress, which Shutdown awaits.
 	mailing sync.WaitGroup
 
-	ops         map[string]operation
-	push        *pushDeliverer
+	ops  map[string]operation
+	push *pushDeliverer
+	// vapid is the webpush key (§4.7); vapidStored reports that it is the
+	// one kept in the store.
+	vapid       *vapidKey
+	vapidStored bool
 	connections sync.WaitGroup
 }
 
@@ -457,6 +478,17 @@ func Open(config Config) (*Server, error) {
 	}
 	s.ops = s.operations()
 	s.push = newPushDeliverer(config.AllowInsecurePush)
+	if config.VAPIDPrivateKey != "" {
+		key, err := parseVAPIDKey(config.VAPIDPrivateKey)
+		if err != nil {
+			return nil, err
+		}
+		s.vapid = key
+	}
+	s.push.subject = config.VAPIDSubject
+	if s.push.subject == "" && strings.HasPrefix(config.PublicURL, "https://") {
+		s.push.subject = config.PublicURL
+	}
 	s.openUploadDir()
 	go s.writeStore()
 	s.mu.Lock()
@@ -467,6 +499,7 @@ func Open(config Config) (*Server, error) {
 		s.mu.Unlock()
 		return nil, err
 	}
+	s.push.vapid = s.vapid
 	if s.rooms[defaultRoomID] == nil {
 		// The seeded default room has a logged creation record like any
 		// other room, so its history_log_id is never null.
@@ -609,6 +642,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		clientKey: clientKey(s.clientIP(r)),
 		baseURL:   s.baseURL(r),
 	}
+	c.lastFrame.Store(time.Now().UnixNano())
 	go c.writeLoop()
 	go c.pingLoop()
 	s.mu.Lock()
@@ -649,6 +683,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		c.lastFrame.Store(time.Now().UnixNano())
+		s.endSilence(c)
 		// The liveness ping has fixed bytes, answered without parsing (§1).
 		if bytes.Equal(payload, pingFrame) {
 			c.pong()
@@ -719,7 +754,7 @@ func (s *Server) serverParams() map[string]any {
 	params := map[string]any{
 		"apron":        7,
 		"agent":        "apron-go/7",
-		"capabilities": []string{"history", "edit", "rooms", "reactions", "activity", "embed:upload", "embed:stream", "command"},
+		"capabilities": []string{"history", "edit", "rooms", "reactions", "activity", "embed:upload", "embed:stream", "command", "status"},
 		"auth":         authSchemes,
 		"ping":         max(1, int(s.config.PingInterval/time.Second)),
 		"ext": map[string]any{"apron-go": map[string]any{
@@ -737,7 +772,11 @@ func (s *Server) serverParams() map[string]any {
 		}},
 	}
 	if !s.config.DisablePush {
-		params["push"] = map[string]any{"relay": map[string]any{}}
+		push := map[string]any{"relay": map[string]any{}, "wake": (messageScopes | wakeBadge).names()}
+		if s.vapid != nil {
+			push["webpush"] = map[string]any{"key": s.vapid.public}
+		}
+		params["push"] = push
 	}
 	if s.config.Welcome != "" {
 		params["welcome"] = s.config.Welcome
@@ -781,7 +820,9 @@ func (c *client) writeLoop() {
 // pingLoop pings at the WebSocket level, which finds dead transports, and
 // closes a connection whose client sent liveness pings (§1) and then fell
 // silent for three intervals: its page is frozen or gone even if the socket
-// is not. Three intervals leave room for background timer throttling.
+// is not. Three intervals leave room for background timer throttling. A
+// connection that never pinged and is as silent counts as idle until its
+// next frame (§4.11).
 func (c *client) pingLoop() {
 	config := c.server.config
 	ticker := time.NewTicker(config.PingInterval)
@@ -792,9 +833,12 @@ func (c *client) pingLoop() {
 		case <-c.done:
 			return
 		case <-ticker.C:
-			if c.pinged.Load() && time.Since(time.Unix(0, c.lastFrame.Load())) > silence {
-				c.stopConnection()
-				return
+			if time.Since(time.Unix(0, c.lastFrame.Load())) > silence {
+				if c.pinged.Load() {
+					c.stopConnection()
+					return
+				}
+				c.server.silenceIdle(c)
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), config.PingTimeout)
 			err := c.ws.Ping(ctx)
@@ -939,6 +983,12 @@ func (s *Server) processFrame(c *client, payload []byte) {
 		}
 		return
 	}
+	// status is accepted before authentication too, and applies once the
+	// connection signs in (§4.11).
+	if req.method == "status" {
+		s.status(c, req)
+		return
+	}
 
 	s.mu.Lock()
 	user := c.user
@@ -1014,7 +1064,7 @@ func (s *Server) processFrame(c *client, payload []byte) {
 func (s *Server) currentResultLocked(u *userState, method string, result any) any {
 	switch method {
 	case "me":
-		return map[string]any{"you": u.profile()}
+		return map[string]any{"you": u.you()}
 	case "message", "command":
 		original, ok := result.(map[string]any)
 		if !ok || original["embeds"] == nil {

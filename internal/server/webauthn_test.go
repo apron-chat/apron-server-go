@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json/v2"
+	"maps"
 	"net/http/httptest"
 	"reflect"
 	"testing"
@@ -549,7 +550,10 @@ func TestSignInReplacesGuestAndDeduplicatesPerUser(t *testing.T) {
 		}
 	}
 	notice := observer.notification(t, "user")
-	if !reflect.DeepEqual(notice, map[string]any{"new": registered["you"], "old": guest}) {
+	// The retired guest is offline.
+	retired := maps.Clone(guest)
+	retired["status"] = "offline"
+	if !reflect.DeepEqual(notice, map[string]any{"new": registered["you"], "old": retired}) {
 		t.Fatalf("user notification = %#v", notice)
 	}
 	owner.expectQuiet(t)

@@ -1,67 +1,142 @@
 package server
 
 import (
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/sha256"
 	"encoding/json/v2"
+	"io"
 	"maps"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"slices"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/apron-chat/apron-server-go/internal/store"
 )
 
 type relayRequest struct {
-	path          string
-	authorization string
-	payload       map[string]any
+	path    string
+	header  http.Header
+	body    []byte
+	payload map[string]any
 }
 
-func TestPushWakesMentionedUsersWhoAreAway(t *testing.T) {
-	received := make(chan relayRequest, 16)
-	relay := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var payload map[string]any
-		_ = json.UnmarshalRead(r.Body, &payload)
-		received <- relayRequest{path: r.URL.Path, authorization: r.Header.Get("Authorization"), payload: payload}
-		if r.URL.Path == "/gone" {
-			w.WriteHeader(http.StatusGone)
-			return
+// testRelay records the push deliveries it receives. A path ending in /gone
+// answers 410 and one ending in /missing 404.
+type testRelay struct {
+	*httptest.Server
+	received chan relayRequest
+}
+
+func newTestRelay(t *testing.T) *testRelay {
+	t.Helper()
+	relay := &testRelay{received: make(chan relayRequest, 64)}
+	relay.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		request := relayRequest{path: r.URL.Path, header: r.Header.Clone(), body: body}
+		if r.Header.Get("Content-Encoding") == "" {
+			_ = json.Unmarshal(body, &request.payload)
 		}
-		w.WriteHeader(http.StatusNoContent)
+		relay.received <- request
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/gone"):
+			w.WriteHeader(http.StatusGone)
+		case strings.HasSuffix(r.URL.Path, "/missing"):
+			w.WriteHeader(http.StatusNotFound)
+		default:
+			w.WriteHeader(http.StatusCreated)
+		}
 	}))
-	defer relay.Close()
+	t.Cleanup(relay.Close)
+	return relay
+}
+
+// pushes returns the deliveries made so far, sorted by path, after the
+// requests c sent before have finished waking users.
+func (relay *testRelay) pushes(t *testing.T, app *Server, c *testClient) []relayRequest {
+	t.Helper()
+	c.drain(t)
+	app.push.wait()
+	var requests []relayRequest
+	for len(relay.received) > 0 {
+		requests = append(requests, <-relay.received)
+	}
+	slices.SortStableFunc(requests, func(a, b relayRequest) int { return strings.Compare(a.path, b.path) })
+	return requests
+}
+
+// paths lists the paths of deliveries.
+func paths(requests []relayRequest) []string {
+	list := make([]string, len(requests))
+	for i, request := range requests {
+		list[i] = request.path
+	}
+	return list
+}
+
+func pushTestServer(t *testing.T) (*Server, *httptest.Server) {
+	t.Helper()
 	config := DefaultConfig()
 	config.AllowInsecurePush = true
-	app, httpServer := newTestServer(t, config)
+	return newTestServer(t, config)
+}
+
+// addAccount adds an account that has joined general and has no connection,
+// like a passkey user who is away. others are told of the join.
+func addAccount(t *testing.T, app *Server, id string, others ...*testClient) *userState {
+	t.Helper()
+	app.mu.Lock()
+	u := newUserState(id, strings.ToUpper(id[:1])+id[1:])
+	u.passkey = &passkeyUser{user: u}
+	app.users[u.id] = u
+	app.addMemberLocked(u, app.rooms[defaultRoomID])
+	app.unlock()
+	for _, other := range others {
+		expectMembership(t, other, "general", id, true)
+	}
+	return u
+}
+
+// addPush registers an endpoint for a user without a connection.
+func addPush(app *Server, u *userState, p pushRegistration) *pushRegistration {
+	app.mu.Lock()
+	defer app.unlock()
+	p.userID = u.id
+	if p.kind == "" {
+		p.kind = "relay"
+	}
+	if p.renewed.IsZero() {
+		p.renewed = time.Now()
+	}
+	p.lastUnread = -1
+	registration := &p
+	app.addPushLocked(u, registration)
+	return registration
+}
+
+// goIdle tells the server nobody attends c, and reads the status echo.
+func goIdle(t *testing.T, c *testClient) {
+	t.Helper()
+	c.write(t, map[string]any{"method": "status", "params": map[string]any{"idle": true}})
+	if you := c.notification(t, "user")["you"].(map[string]any); you["status"] != "idle" {
+		t.Fatalf("status echo: %#v", you)
+	}
+}
+
+func TestPushWakesMentionsAndRepliesOfIdleUsers(t *testing.T) {
+	relay := newTestRelay(t)
+	app, httpServer := pushTestServer(t)
 	clients := dialGroup(t, httpServer, 2)
 	a, b := clients[0], clients[1]
-	a.result(t, "push_register", "register", map[string]any{"kind": "relay", "url": relay.URL + "/a", "token": "secret"})
-	a.expectError(t, "push_register", "kind", map[string]any{"kind": "webpush", "url": relay.URL + "/a"}, codeInvalidParams)
-	a.expectError(t, "push_register", "scheme", map[string]any{"kind": "relay", "url": "ftp://relay.example/a"}, codeInvalidParams)
-	a.result(t, "push_unregister", "unregister", map[string]any{"url": relay.URL + "/a"})
-
-	// Push reaches users without a connection, such as a passkey user who is
-	// away, in rooms they have joined.
-	app.mu.Lock()
-	alice := newUserState("alice", "Alice")
-	alice.passkey = &passkeyUser{user: alice}
-	app.users[alice.id] = alice
-	app.addMemberLocked(alice, app.rooms[defaultRoomID])
-	app.pushes[relay.URL+"/alice"] = &pushRegistration{userID: "alice", kind: "relay", url: relay.URL + "/alice", token: "tok"}
-	app.pushes[relay.URL+"/gone"] = &pushRegistration{userID: "alice", kind: "relay", url: relay.URL + "/gone"}
-	app.mu.Unlock()
-	expectMembership(t, a, "general", "alice", true)
-	expectMembership(t, b, "general", "alice", true)
-	pushes := func() []relayRequest {
-		t.Helper()
-		a.expectQuiet(t) // Requests before this one have finished waking users.
-		app.push.wait()
-		var requests []relayRequest
-		for len(received) > 0 {
-			requests = append(requests, <-received)
-		}
-		return requests
-	}
+	alice := addAccount(t, app, "alice", a, b)
+	addPush(app, alice, pushRegistration{url: relay.URL + "/alice", token: "tok", pushID: "alice-phone", wake: defaultWake})
+	addPush(app, alice, pushRegistration{url: relay.URL + "/alice/gone", wake: defaultWake})
 	post := func(id string, params map[string]any) string {
 		t.Helper()
 		messageID, _ := save(t, a, id, params)
@@ -72,90 +147,651 @@ func TestPushWakesMentionedUsersWhoAreAway(t *testing.T) {
 	// Only body.mentions decides who is mentioned; text is never parsed.
 	text := "@alice: the deploy is done"
 	id := post("text", map[string]any{"body": map[string]any{"text": text, "format": "markdown"}})
-	if got := pushes(); len(got) != 0 {
+	if got := relay.pushes(t, app, a); len(got) != 0 {
 		t.Fatalf("text mention woke %d", len(got))
 	}
-	// An edit mentions the users it adds.
-	post("add-mention", map[string]any{"message_id": id, "body": map[string]any{"text": text, "mentions": []any{"alice"}}})
-	got := pushes()
-	if len(got) != 2 {
-		t.Fatalf("relay received %d requests, want one per registration", len(got))
+	// An edit wakes the users it adds to mentions, on every registration.
+	post("add-mention", map[string]any{"message_id": id, "body": map[string]any{"text": text, "format": "markdown", "mentions": []any{"alice"}}})
+	got := relay.pushes(t, app, a)
+	if !reflect.DeepEqual(paths(got), []string{"/alice", "/alice/gone"}) {
+		t.Fatalf("deliveries: %v", paths(got))
 	}
-	for _, request := range got {
-		want := map[string]any{"message_id": id, "room_id": "general", "from": map[string]any{"user_id": "guest_1"}, "body": map[string]any{"text": text}}
-		if !reflect.DeepEqual(request.payload, want) {
-			t.Fatalf("payload: %#v", request.payload)
-		}
-		if request.path == "/alice" && request.authorization != "Bearer tok" {
-			t.Fatalf("authorization: %q", request.authorization)
-		}
+	// The payload is the envelope (§4.7): push_id, unread, and the message
+	// without log_id, format, or embeds; the token is the bearer.
+	message := map[string]any{"message_id": id, "room_id": "general", "from": map[string]any{"user_id": "guest_1"}, "body": map[string]any{"text": text, "mentions": []any{"alice"}}}
+	if want := map[string]any{"push_id": "alice-phone", "unread": float64(1), "message": message}; !reflect.DeepEqual(got[0].payload, want) {
+		t.Fatalf("payload: %#v", got[0].payload)
 	}
-	// A relay that answers 410 loses its registration.
+	if got[0].header.Get("Authorization") != "Bearer tok" || got[0].header.Get("Content-Type") != "application/json" || got[0].header.Get("Content-Encoding") != "" {
+		t.Fatalf("relay headers: %v", got[0].header)
+	}
+	if want := map[string]any{"unread": float64(1), "message": message}; !reflect.DeepEqual(got[1].payload, want) || got[1].header.Get("Authorization") != "" {
+		t.Fatalf("payload without push_id or token: %#v %v", got[1].payload, got[1].header)
+	}
+	// An endpoint that answers 410 loses its registration.
 	app.mu.RLock()
-	_, kept := app.pushes[relay.URL+"/gone"]
+	_, kept := alice.pushes[relay.URL+"/alice/gone"]
 	app.mu.RUnlock()
 	if kept {
 		t.Fatal("gone registration was kept")
 	}
 	post("same-mention", map[string]any{"message_id": id, "body": map[string]any{"text": "edited", "mentions": []any{"alice"}}})
-	if got := pushes(); len(got) != 0 {
+	if got := relay.pushes(t, app, a); len(got) != 0 {
 		t.Fatalf("an edit re-mentioned: %d", len(got))
 	}
 
-	// A connected user is woken only when every connection is away.
+	// A connected user is woken only when no connection of theirs is
+	// attended (§4.11).
 	b.result(t, "push_register", "b", map[string]any{"kind": "relay", "url": relay.URL + "/b"})
 	mentionB := map[string]any{"body": map[string]any{"text": "@guest_2 ping", "mentions": []any{"guest_2"}}}
-	post("attending", maps.Clone(mentionB))
-	if got := pushes(); len(got) != 0 {
-		t.Fatalf("attending user woken: %d", len(got))
+	post("attended", maps.Clone(mentionB))
+	if got := relay.pushes(t, app, a); len(got) != 0 {
+		t.Fatalf("attended user woken: %d", len(got))
 	}
-	b.write(t, map[string]any{"method": "activity", "params": map[string]any{"away": true}})
-	b.expectQuiet(t)
-	post("away", maps.Clone(mentionB))
-	if got := pushes(); len(got) != 1 || got[0].path != "/b" {
-		t.Fatalf("away user: %#v", got)
+	goIdle(t, b)
+	post("idle", maps.Clone(mentionB))
+	if got := relay.pushes(t, app, a); !reflect.DeepEqual(paths(got), []string{"/b"}) || got[0].header.Get("Authorization") != "" {
+		t.Fatalf("idle user: %#v", got)
 	}
-	// Typing ends away.
+	// Typing does not end idle; a message from the connection does.
 	b.write(t, map[string]any{"method": "activity", "params": map[string]any{"room_id": "general", "typing": 3}})
 	a.notification(t, "activity")
-	b.notification(t, "activity")
+	post("still-idle", maps.Clone(mentionB))
+	if got := relay.pushes(t, app, a); len(got) != 1 {
+		t.Fatalf("typing ended idle: %d", len(got))
+	}
+	before, _ := b.request(t, "message", "own", map[string]any{"body": map[string]any{"text": "mine"}})
+	if got := methods(before); !reflect.DeepEqual(got, []string{"user", "message"}) || before[0]["params"].(map[string]any)["you"].(map[string]any)["status"] != "online" {
+		t.Fatalf("frames before a message from an idle connection: %#v", before)
+	}
+	own := before[1]["params"].(map[string]any)["message_id"].(string)
+	a.notification(t, "message")
 	post("back", maps.Clone(mentionB))
-	if got := pushes(); len(got) != 0 {
-		t.Fatalf("user back from away woken: %d", len(got))
+	if got := relay.pushes(t, app, a); len(got) != 0 {
+		t.Fatalf("user back from idle woken: %d", len(got))
 	}
 	// A reply wakes the author of the message it replies to.
-	own, _ := save(t, b, "own", map[string]any{"body": map[string]any{"text": "mine"}})
-	a.notification(t, "message")
-	b.write(t, map[string]any{"method": "activity", "params": map[string]any{"away": true}})
-	b.expectQuiet(t)
+	goIdle(t, b)
 	post("reply", map[string]any{"body": map[string]any{"text": "a reply"}, "reply_to": map[string]any{"message_id": own}})
-	if got := pushes(); len(got) != 1 {
-		t.Fatalf("reply woke %d", len(got))
+	if got := relay.pushes(t, app, a); len(got) != 1 || got[0].payload["message"].(map[string]any)["reply_to"] == nil {
+		t.Fatalf("reply: %#v", got)
 	}
-	// A mention wakes a user in any room they can see, joined or not; a reply
-	// wakes its target's author only in a room they have joined. Mentions in
-	// commands notify no one.
+	// Mentions and replies wake a user in any room they can see, joined or
+	// not. Mentions in commands notify no one.
 	ops, _ := saveRoom(t, a, "ops", map[string]any{"title": "Ops"})
 	save(t, a, "elsewhere", map[string]any{"room_id": ops, "body": map[string]any{"text": "@guest_2", "mentions": []any{"guest_2"}}})
-	if got := pushes(); len(got) != 1 || got[0].path != "/b" || got[0].payload["room_id"] != ops {
+	if got := relay.pushes(t, app, a); len(got) != 1 || got[0].payload["message"].(map[string]any)["room_id"] != ops {
 		t.Fatalf("mention in an unjoined room: %#v", got)
 	}
 	save(t, a, "reply-elsewhere", map[string]any{"room_id": ops, "body": map[string]any{"text": "a reply"}, "reply_to": map[string]any{"message_id": own}})
-	if got := pushes(); len(got) != 0 {
+	if got := relay.pushes(t, app, a); len(got) != 1 {
 		t.Fatalf("reply in an unjoined room woke %d", len(got))
 	}
 	// A mention in a private room wakes only its members (§4.3.4).
 	hidden, _ := saveRoom(t, a, "hidden", map[string]any{"title": "Hidden", "private": true})
 	save(t, a, "hidden-mention", map[string]any{"room_id": hidden, "body": map[string]any{"text": "@guest_2", "mentions": []any{"guest_2"}}})
-	if got := pushes(); len(got) != 0 {
+	if got := relay.pushes(t, app, a); len(got) != 0 {
 		t.Fatalf("mention in a private room woke a non-member: %#v", got)
 	}
-	before, _ := a.request(t, "command", "help", map[string]any{"body": map[string]any{"text": "/help", "mentions": []any{"guest_2"}}})
+	before, _ = a.request(t, "command", "help", map[string]any{"body": map[string]any{"text": "/help", "mentions": []any{"guest_2"}}})
 	if len(before) != 1 {
 		t.Fatalf("help frames: %#v", before)
 	}
-	if got := pushes(); len(got) != 0 {
+	if got := relay.pushes(t, app, a); len(got) != 0 {
 		t.Fatalf("command woke %d", len(got))
+	}
+}
+
+func TestPushRegistration(t *testing.T) {
+	app, httpServer := pushTestServer(t)
+	clients := dialGroup(t, httpServer, 2)
+	a, b := clients[0], clients[1]
+	_, keys := testSubscription(t)
+	endpoint := "https://push.example.net/s/abc"
+	for i, params := range []map[string]any{
+		{"kind": "ext:other", "url": endpoint},
+		{"kind": "relay"},
+		{"kind": "relay", "url": "ftp://relay.example/a"},
+		{"kind": "relay", "url": "/relative"},
+		{"kind": "relay", "url": "https://user:pass@relay.example/a"},
+		{"kind": "relay", "url": "https://relay.example/a b"},
+		{"kind": "relay", "url": "https://relay.example/" + strings.Repeat("a", maxPushURLBytes)},
+		{"kind": "relay", "url": endpoint, "token": 5},
+		{"kind": "relay", "url": endpoint, "push_id": ""},
+		{"kind": "relay", "url": endpoint, "push_id": "has space"},
+		{"kind": "relay", "url": endpoint, "push_id": "dot.ted"},
+		{"kind": "relay", "url": endpoint, "push_id": strings.Repeat("a", 65)},
+		{"kind": "relay", "url": endpoint, "push_id": 7},
+		{"kind": "relay", "url": endpoint, "keys": "abc"},
+		{"kind": "relay", "url": endpoint, "keys": map[string]any{"p256dh": keys["p256dh"]}},
+		{"kind": "relay", "url": endpoint, "keys": map[string]any{"p256dh": "AAAA", "auth": keys["auth"]}},
+		{"kind": "webpush", "url": endpoint},
+		{"kind": "webpush", "url": endpoint, "keys": map[string]any{"p256dh": keys["p256dh"], "auth": "AAAA"}},
+		{"kind": "relay", "url": endpoint, "wake": "mentions"},
+		{"kind": "relay", "url": endpoint, "wake": []any{"mentions", 5}},
+		{"kind": "relay", "url": endpoint, "wake": nil},
+		{"kind": "relay", "url": endpoint, "wake": []any{strings.Repeat("x", 65)}},
+		{"kind": "relay", "url": endpoint, "wake": make([]any, maxWakeScopes+1)},
+	} {
+		a.expectError(t, "push_register", "bad-"+formatID(int64(i)), params, codeInvalidParams)
+	}
+	registration := func(u string) *pushRegistration {
+		app.mu.RLock()
+		defer app.mu.RUnlock()
+		return app.users[u].pushes[endpoint]
+	}
+	// A registration belongs to its user and url: another user's of the
+	// same url is their own, and re-registering replaces only the caller's.
+	// Scopes the server does not implement are ignored.
+	a.result(t, "push_register", "webpush", map[string]any{"kind": "webpush", "url": endpoint, "keys": keys, "push_id": "t65S5XBst9bSDpjJ", "wake": []any{"mentions", "private", "ext:later", "unknown"}, "token": "ignored"})
+	b.result(t, "push_register", "relay", map[string]any{"kind": "relay", "url": endpoint, "token": "tok"})
+	first := registration(a.userID)
+	if first.kind != "webpush" || first.token != "" || first.pushID != "t65S5XBst9bSDpjJ" || first.wake != wakeMentions|wakePrivate || first.keys == nil {
+		t.Fatalf("webpush registration: %#v", first)
+	}
+	if other := registration(b.userID); other.kind != "relay" || other.token != "tok" || other.wake != defaultWake || other.keys != nil {
+		t.Fatalf("relay registration: %#v", other)
+	}
+	a.result(t, "push_register", "again", map[string]any{"kind": "relay", "url": endpoint, "keys": keys, "wake": []any{}})
+	if again := registration(a.userID); again == first || again.kind != "relay" || again.keys == nil || again.pushID != "" || again.wake != 0 || again.renewed.Before(first.renewed) {
+		t.Fatalf("re-registration: %#v", again)
+	}
+	// Unregistering removes only the caller's; an unknown url succeeds.
+	a.result(t, "push_unregister", "unregister", map[string]any{"url": endpoint})
+	a.result(t, "push_unregister", "unknown", map[string]any{"url": "https://push.example.net/never"})
+	if registration(a.userID) != nil || registration(b.userID) == nil {
+		t.Fatal("unregister removed the wrong registration")
+	}
+	a.expectError(t, "push_unregister", "no-url", map[string]any{}, codeInvalidParams)
+
+	// A user holds at most ten; another replaces the least recently
+	// registered, and registering a url again renews it.
+	for i := range maxPushesPerUser {
+		a.result(t, "push_register", "many-"+formatID(int64(i)), map[string]any{"kind": "relay", "url": endpoint + formatID(int64(i))})
+		time.Sleep(time.Millisecond)
+	}
+	a.result(t, "push_register", "renew", map[string]any{"kind": "relay", "url": endpoint + "0"})
+	a.result(t, "push_register", "eleventh", map[string]any{"kind": "relay", "url": endpoint + "new"})
+	app.mu.RLock()
+	var urls []string
+	for url := range app.users[a.userID].pushes {
+		urls = append(urls, strings.TrimPrefix(url, endpoint))
+	}
+	app.mu.RUnlock()
+	if len(urls) != maxPushesPerUser || slices.Contains(urls, "1") || !slices.Contains(urls, "0") || !slices.Contains(urls, "new") {
+		t.Fatalf("registrations after the eleventh: %v", urls)
+	}
+	a.expectQuiet(t)
+	b.expectQuiet(t)
+}
+
+// Wake scopes (§4.7): mentions, replies, private, joined; [] wakes for
+// nothing, and without wake the default is mentions and replies.
+func TestPushWakeScopes(t *testing.T) {
+	relay := newTestRelay(t)
+	app, httpServer := pushTestServer(t)
+	a := dialTestClient(t, httpServer)
+	carol := addAccount(t, app, "carol", a)
+	for name, wake := range map[string]wakeScope{
+		"default": defaultWake, "joined": wakeJoined, "private": wakePrivate, "replies": wakeReplies, "mentions": wakeMentions, "nothing": 0,
+	} {
+		addPush(app, carol, pushRegistration{url: relay.URL + "/" + name, wake: wake})
+	}
+	post := func(params map[string]any) string {
+		t.Helper()
+		id, _ := save(t, a, a.nextID("post"), params)
+		return id
+	}
+
+	// A message in a joined room wakes only joined.
+	post(map[string]any{"body": map[string]any{"text": "chatter"}})
+	if got := paths(relay.pushes(t, app, a)); !reflect.DeepEqual(got, []string{"/joined"}) {
+		t.Fatalf("joined room message woke %v", got)
+	}
+	// A mention wakes mentions and the default, and joined in a joined room.
+	post(map[string]any{"body": map[string]any{"text": "@carol", "mentions": []any{"carol"}}})
+	if got := paths(relay.pushes(t, app, a)); !reflect.DeepEqual(got, []string{"/default", "/joined", "/mentions"}) {
+		t.Fatalf("mention woke %v", got)
+	}
+	// A reply to carol's message wakes replies and the default.
+	app.mu.Lock()
+	logID := app.nextIDLocked()
+	own := formatID(logID)
+	m := &messageState{id: own, from: carol.from(), owner: carol.id, reactions: make(map[string]reactionSet)}
+	app.messages[own] = m
+	app.commitSnapshotLocked(m, map[string]any{"message_id": own, "log_id": own, "room_id": "general", "from": carol.from(), "body": map[string]any{"text": "carol's"}}, logID)
+	app.unlock()
+	a.notification(t, "message")
+	post(map[string]any{"body": map[string]any{"text": "re"}, "reply_to": map[string]any{"message_id": own}})
+	if got := paths(relay.pushes(t, app, a)); !reflect.DeepEqual(got, []string{"/default", "/joined", "/replies"}) {
+		t.Fatalf("reply woke %v", got)
+	}
+	// A message in a private room carol joined wakes private and joined,
+	// and so does one in a thread of it.
+	secret, _ := saveRoom(t, a, "secret", map[string]any{"title": "Secret", "private": true})
+	a.request(t, "room_join", "add-carol", map[string]any{"room_id": secret, "user_id": "carol"})
+	post(map[string]any{"room_id": secret, "body": map[string]any{"text": "psst"}})
+	if got := paths(relay.pushes(t, app, a)); !reflect.DeepEqual(got, []string{"/joined", "/private"}) {
+		t.Fatalf("private room message woke %v", got)
+	}
+	thread, _ := saveRoom(t, a, "thread", map[string]any{"parent_room_id": secret, "private": false})
+	a.request(t, "room_join", "add-carol-thread", map[string]any{"room_id": thread, "user_id": "carol"})
+	post(map[string]any{"room_id": thread, "body": map[string]any{"text": "in the thread"}})
+	if got := paths(relay.pushes(t, app, a)); !reflect.DeepEqual(got, []string{"/joined", "/private"}) {
+		t.Fatalf("private thread message woke %v", got)
+	}
+	// A room carol has not joined wakes neither joined nor private.
+	open, _ := saveRoom(t, a, "open", map[string]any{"title": "Open"})
+	post(map[string]any{"room_id": open, "body": map[string]any{"text": "elsewhere"}})
+	if got := relay.pushes(t, app, a); len(got) != 0 {
+		t.Fatalf("unjoined room message woke %v", paths(got))
+	}
+}
+
+// Muted users get no pushes; a muted room wakes only for mentions (§4.7,
+// §4.11).
+func TestPushRespectsMutes(t *testing.T) {
+	relay := newTestRelay(t)
+	app, httpServer := pushTestServer(t)
+	clients := dialGroup(t, httpServer, 2)
+	a, b := clients[0], clients[1]
+	b.result(t, "push_register", "all", map[string]any{"kind": "relay", "url": relay.URL + "/b", "wake": []any{"joined", "mentions"}})
+	goIdle(t, b)
+	post := func(params map[string]any) {
+		t.Helper()
+		save(t, a, a.nextID("post"), params)
+		b.notification(t, "message")
+	}
+	mention := map[string]any{"body": map[string]any{"text": "@guest_2", "mentions": []any{"guest_2"}}}
+	chatter := map[string]any{"body": map[string]any{"text": "chatter"}}
+
+	// A muted room wakes only for mentions.
+	b.write(t, map[string]any{"method": "status", "params": map[string]any{"room_id": "general", "mute": true}})
+	if record := roomUpdated(t, b, "updated"); record["room_id"] != "general" || record["mute"] != true {
+		t.Fatalf("room mute echo: %#v", record)
+	}
+	post(maps.Clone(chatter))
+	if got := relay.pushes(t, app, a); len(got) != 0 {
+		t.Fatalf("muted room woke %d", len(got))
+	}
+	post(maps.Clone(mention))
+	if got := relay.pushes(t, app, a); len(got) != 1 {
+		t.Fatalf("mention in a muted room woke %d", len(got))
+	}
+	b.write(t, map[string]any{"method": "status", "params": map[string]any{"room_id": "general", "mute": 0}})
+	if record := roomUpdated(t, b, "updated"); record["mute"] != float64(0) {
+		t.Fatalf("room unmute echo: %#v", record)
+	}
+	post(maps.Clone(chatter))
+	if got := relay.pushes(t, app, a); len(got) != 1 {
+		t.Fatalf("unmuted room woke %d", len(got))
+	}
+	// A muted user gets no pushes at all, mentions included.
+	b.write(t, map[string]any{"method": "status", "params": map[string]any{"mute": 3600}})
+	if you := b.notification(t, "user")["you"].(map[string]any); you["mute"] != float64(3600) || you["status"] != "dnd" {
+		t.Fatalf("mute echo: %#v", you)
+	}
+	post(maps.Clone(mention))
+	if got := relay.pushes(t, app, a); len(got) != 0 {
+		t.Fatalf("muted user woken %d", len(got))
+	}
+	b.write(t, map[string]any{"method": "status", "params": map[string]any{"mute": 0}})
+	if you := b.notification(t, "user")["you"].(map[string]any); you["mute"] != float64(0) || you["status"] != "idle" {
+		t.Fatalf("unmute echo: %#v", you)
+	}
+	post(maps.Clone(mention))
+	if got := relay.pushes(t, app, a); len(got) != 1 {
+		t.Fatalf("unmuted user woken %d", len(got))
+	}
+}
+
+// webpush deliveries are RFC 8291 ciphertext signed with VAPID (RFC 8292),
+// and so are relay deliveries with keys, with the relay's token.
+func TestWebPushDelivery(t *testing.T) {
+	relay := newTestRelay(t)
+	config := DefaultConfig()
+	config.AllowInsecurePush = true
+	config.PublicURL = "https://chat.example"
+	app, httpServer := newTestServer(t, config)
+	c, frame := dialRaw(t, httpServer)
+	guestAuth(t, c)
+	key := frame["params"].(map[string]any)["push"].(map[string]any)["webpush"].(map[string]any)["key"].(string)
+	browser, keys := testSubscription(t)
+	auth := mustDecode(t, keys["auth"].(string))
+	c.result(t, "push_register", "web", map[string]any{"kind": "webpush", "url": relay.URL + "/web", "keys": keys, "push_id": "web-1"})
+	c.result(t, "push_register", "relay", map[string]any{"kind": "relay", "url": relay.URL + "/relay", "keys": keys, "token": "tok", "push_id": "relay-1"})
+	goIdle(t, c)
+	poster := dialTestClient(t, httpServer)
+	expectMembership(t, c, "general", poster.userID, true)
+	// c sent status, so it learns that the new member is online (§4.11).
+	if joined := c.notification(t, "user"); !reflect.DeepEqual(joined, map[string]any{"new": map[string]any{"user_id": poster.userID, "status": "online"}}) {
+		t.Fatalf("status of a new member: %#v", joined)
+	}
+	save(t, poster, "mention", map[string]any{"body": map[string]any{"text": "hi @guest_1", "format": "markdown", "mentions": []any{"guest_1"}}})
+	c.notification(t, "message")
+	got := relay.pushes(t, app, poster)
+	if !reflect.DeepEqual(paths(got), []string{"/relay", "/web"}) {
+		t.Fatalf("deliveries: %v", paths(got))
+	}
+	for _, request := range got {
+		header := request.header
+		if header.Get("Content-Encoding") != "aes128gcm" || header.Get("Content-Type") != "application/octet-stream" {
+			t.Fatalf("%s headers: %v", request.path, header)
+		}
+		var payload map[string]any
+		if err := json.Unmarshal(decryptPush(t, request.body, browser, auth), &payload); err != nil {
+			t.Fatal(err)
+		}
+		want := map[string]any{"push_id": strings.TrimPrefix(request.path, "/") + "-1", "unread": float64(1), "message": map[string]any{
+			"message_id": payload["message"].(map[string]any)["message_id"], "room_id": "general", "from": map[string]any{"user_id": "guest_2"},
+			"body": map[string]any{"text": "hi @guest_1", "mentions": []any{"guest_1"}},
+		}}
+		if !reflect.DeepEqual(payload, want) {
+			t.Fatalf("%s payload: %#v", request.path, payload)
+		}
+	}
+	if relayHeader := got[0].header; relayHeader.Get("Authorization") != "Bearer tok" || relayHeader.Get("TTL") != "" {
+		t.Fatalf("relay headers: %v", relayHeader)
+	}
+	header := got[1].header
+	if header.Get("TTL") != "86400" || header.Get("Urgency") != "high" {
+		t.Fatalf("webpush headers: %v", header)
+	}
+	// The VAPID token is for the endpoint's origin, signed with the key the
+	// server frame advertises, with the public URL as its contact.
+	token, k, ok := strings.Cut(strings.TrimPrefix(header.Get("Authorization"), "vapid t="), ", k=")
+	if !ok || k != key {
+		t.Fatalf("Authorization: %q", header.Get("Authorization"))
+	}
+	parts := strings.Split(token, ".")
+	var claims map[string]any
+	if err := json.Unmarshal(mustDecode(t, parts[1]), &claims); err != nil {
+		t.Fatal(err)
+	}
+	if claims["aud"] != relay.URL || claims["sub"] != "https://chat.example" {
+		t.Fatalf("claims: %#v", claims)
+	}
+	public, err := ecdsa.ParseUncompressedPublicKey(elliptic.P256(), mustDecode(t, key))
+	if err != nil {
+		t.Fatal(err)
+	}
+	signature := mustDecode(t, parts[2])
+	digest := sha256.Sum256([]byte(parts[0] + "." + parts[1]))
+	if !ecdsa.Verify(public, digest[:], new(big.Int).SetBytes(signature[:32]), new(big.Int).SetBytes(signature[32:])) {
+		t.Fatal("VAPID signature does not verify with server.push.webpush.key")
+	}
+	// A subscription that answers 404 is removed, for any kind.
+	c.result(t, "push_register", "missing", map[string]any{"kind": "webpush", "url": relay.URL + "/web/missing", "keys": keys})
+	save(t, poster, "again", map[string]any{"body": map[string]any{"text": "again", "mentions": []any{"guest_1"}}})
+	c.notification(t, "message")
+	if got := paths(relay.pushes(t, app, poster)); !reflect.DeepEqual(got, []string{"/relay", "/web", "/web/missing"}) {
+		t.Fatalf("deliveries: %v", got)
+	}
+	app.mu.RLock()
+	_, kept := app.users[c.userID].pushes[relay.URL+"/web/missing"]
+	app.mu.RUnlock()
+	if kept {
+		t.Fatal("a webpush subscription answering 404 was kept")
+	}
+}
+
+func TestPushPayloadFitsInLimit(t *testing.T) {
+	snapshot := map[string]any{
+		"message_id": "1724803200042", "log_id": "1724803200043", "room_id": "general",
+		"from":     map[string]any{"user_id": "alice", "name": "Alice"},
+		"reply_to": map[string]any{"message_id": "1724803200001"},
+		"body":     map[string]any{"text": "short", "format": "markdown", "embeds": []any{map[string]any{"kind": "upload"}}},
+		"ext":      map[string]any{"x": 1},
+	}
+	decode := func(payload []byte) map[string]any {
+		t.Helper()
+		if len(payload) > maxPushPayloadBytes {
+			t.Fatalf("payload of %d bytes", len(payload))
+		}
+		var value map[string]any
+		if err := json.Unmarshal(payload, &value); err != nil {
+			t.Fatal(err)
+		}
+		return value
+	}
+	got := decode(pushPayload("p", 3, snapshot))
+	want := map[string]any{"push_id": "p", "unread": float64(3), "message": map[string]any{
+		"message_id": "1724803200042", "room_id": "general", "from": map[string]any{"user_id": "alice", "name": "Alice"},
+		"reply_to": map[string]any{"message_id": "1724803200001"}, "body": map[string]any{"text": "short"},
+	}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("payload: %#v", got)
+	}
+	// Text is truncated to maxPushTextRunes.
+	snapshot["body"] = map[string]any{"text": strings.Repeat("é", maxPushTextRunes+500)}
+	text := decode(pushPayload("", 0, snapshot))["message"].(map[string]any)["body"].(map[string]any)["text"].(string)
+	if runes := []rune(text); len(runes) != maxPushTextRunes || runes[len(runes)-1] != '…' {
+		t.Fatalf("truncated text: %d runes", len(runes))
+	}
+	// Mentions go first.
+	many := make([]any, 200)
+	for i := range many {
+		many[i] = "a_rather_long_user_id_" + formatID(int64(i))
+	}
+	snapshot["body"] = map[string]any{"text": "hi", "mentions": many}
+	if body := decode(pushPayload("", 0, snapshot))["message"].(map[string]any)["body"]; !reflect.DeepEqual(body, map[string]any{"text": "hi"}) {
+		t.Fatalf("body without mentions: %#v", body)
+	}
+	// Then text is shortened to fit.
+	snapshot["body"] = map[string]any{"text": strings.Repeat(" ", maxPushTextRunes)}
+	payload := pushPayload("", 0, snapshot)
+	text = decode(payload)["message"].(map[string]any)["body"].(map[string]any)["text"].(string)
+	if !strings.HasSuffix(text, "…") || len(payload) < maxPushPayloadBytes-16 {
+		t.Fatalf("shortened text: %d bytes of payload", len(payload))
+	}
+	// Then body goes, from keeps only user_id, and reply_to goes.
+	snapshot["body"] = map[string]any{"text": "hi"}
+	snapshot["from"] = map[string]any{"user_id": "alice", "name": strings.Repeat("\\", 3000)}
+	message := decode(pushPayload("", 0, snapshot))["message"].(map[string]any)
+	if _, has := message["body"]; has || !reflect.DeepEqual(message["from"], map[string]any{"user_id": "alice"}) || message["reply_to"] == nil {
+		t.Fatalf("message without body and name: %#v", message)
+	}
+}
+
+func TestPushRegistrationsExpire(t *testing.T) {
+	relay := newTestRelay(t)
+	app, httpServer := pushTestServer(t)
+	a := dialTestClient(t, httpServer)
+	dora := addAccount(t, app, "dora", a)
+	stale := addPush(app, dora, pushRegistration{url: relay.URL + "/stale", wake: defaultWake, renewed: time.Now().Add(-pushExpiry - time.Minute)})
+	addPush(app, dora, pushRegistration{url: relay.URL + "/fresh", wake: defaultWake, renewed: time.Now().Add(-pushExpiry + time.Hour)})
+	save(t, a, "mention", map[string]any{"body": map[string]any{"text": "@dora", "mentions": []any{"dora"}}})
+	if got := paths(relay.pushes(t, app, a)); !reflect.DeepEqual(got, []string{"/fresh"}) {
+		t.Fatalf("deliveries: %v", got)
+	}
+	app.mu.RLock()
+	_, kept := dora.pushes[stale.url]
+	_, indexed := app.pushes[pushKey("dora", stale.url)]
+	app.mu.RUnlock()
+	if kept || indexed {
+		t.Fatal("an expired registration was kept")
+	}
+	// A user whose only registration expired is offline, not idle.
+	app.mu.Lock()
+	idle := dora.statusAt(time.Now())
+	for _, p := range dora.pushes {
+		p.renewed = time.Now().Add(-pushExpiry)
+	}
+	expired := dora.statusAt(time.Now())
+	app.mu.Unlock()
+	if idle != statusIdle || expired != statusOffline {
+		t.Fatalf("status with a live registration %s, with expired ones %s", idle, expired)
+	}
+}
+
+// unread counts the messages a registration's scopes select after the
+// user's read position, and badge pushes send its changes (§4.7).
+func TestPushUnreadAndBadge(t *testing.T) {
+	relay := newTestRelay(t)
+	app, httpServer := pushTestServer(t)
+	clients := dialGroup(t, httpServer, 2)
+	a, b := clients[0], clients[1]
+	b.result(t, "push_register", "phone", map[string]any{"kind": "relay", "url": relay.URL + "/phone", "push_id": "phone", "wake": []any{"joined", "badge"}})
+	b.result(t, "push_register", "web", map[string]any{"kind": "relay", "url": relay.URL + "/mentions", "wake": []any{"mentions", "badge"}})
+	_, keys := testSubscription(t)
+	b.result(t, "push_register", "browser", map[string]any{"kind": "webpush", "url": relay.URL + "/browser", "keys": keys, "wake": []any{"joined", "badge"}})
+	goIdle(t, b)
+	unread := func(requests []relayRequest, path string) any {
+		t.Helper()
+		for _, request := range requests {
+			if request.path == path && request.payload != nil {
+				return request.payload["unread"]
+			}
+		}
+		return nil
+	}
+	post := func(params map[string]any) string {
+		t.Helper()
+		id, _ := save(t, a, a.nextID("post"), params)
+		b.notification(t, "message")
+		return id
+	}
+	read := func(roomID, messageID string, others ...*testClient) {
+		t.Helper()
+		b.write(t, map[string]any{"method": "activity", "params": map[string]any{"room_id": roomID, "read_message_id": messageID}})
+		for _, c := range append(others, b) {
+			c.notification(t, "activity")
+		}
+	}
+	first := post(map[string]any{"body": map[string]any{"text": "one"}})
+	if got := relay.pushes(t, app, a); !reflect.DeepEqual(paths(got), []string{"/browser", "/phone"}) || unread(got, "/phone") != float64(1) {
+		t.Fatalf("first message: %v %#v", paths(got), got)
+	}
+	second := post(map[string]any{"body": map[string]any{"text": "@guest_2", "mentions": []any{"guest_2"}}})
+	got := relay.pushes(t, app, a)
+	if unread(got, "/phone") != float64(2) || unread(got, "/mentions") != float64(1) {
+		t.Fatalf("second message: %#v", got)
+	}
+	// Reading on another connection sends badge pushes, without a message,
+	// to relay registrations whose count changed; webpush gets none.
+	read("general", first, a)
+	got = relay.pushes(t, app, a)
+	if !reflect.DeepEqual(paths(got), []string{"/phone"}) || !reflect.DeepEqual(got[0].payload, map[string]any{"push_id": "phone", "unread": float64(1)}) {
+		t.Fatalf("badge after reading the first: %#v", got)
+	}
+	read("general", second, a)
+	got = relay.pushes(t, app, a)
+	if !reflect.DeepEqual(paths(got), []string{"/mentions", "/phone"}) || got[0].payload["unread"] != float64(0) || got[1].payload["unread"] != float64(0) {
+		t.Fatalf("badge after reading everything: %#v", got)
+	}
+	// Deleting a counted message lowers the count.
+	third := post(map[string]any{"body": map[string]any{"text": "three"}})
+	relay.pushes(t, app, a)
+	a.request(t, "message", "delete", map[string]any{"room_id": "general", "message_id": third, "deleted": true})
+	b.notification(t, "message")
+	if got := relay.pushes(t, app, a); !reflect.DeepEqual(paths(got), []string{"/phone"}) || got[0].payload["unread"] != float64(0) {
+		t.Fatalf("badge after a deletion: %#v", got)
+	}
+	// The user's own message moves their read position.
+	post(map[string]any{"body": map[string]any{"text": "four"}})
+	relay.pushes(t, app, a)
+	before, _ := b.request(t, "message", "own", map[string]any{"body": map[string]any{"text": "mine"}})
+	if !reflect.DeepEqual(methods(before), []string{"user", "message"}) {
+		t.Fatalf("frames before the own message: %#v", before)
+	}
+	a.notification(t, "message")
+	if got := relay.pushes(t, app, a); !reflect.DeepEqual(paths(got), []string{"/phone"}) || got[0].payload["unread"] != float64(0) {
+		t.Fatalf("badge after posting: %#v", got)
+	}
+	// A mention in a room the user has not joined counts until read there.
+	goIdle(t, b)
+	ops, _ := saveRoom(t, a, "ops", map[string]any{"title": "Ops"})
+	elsewhere, _ := save(t, a, "elsewhere", map[string]any{"room_id": ops, "body": map[string]any{"text": "@guest_2", "mentions": []any{"guest_2"}}})
+	if got := relay.pushes(t, app, a); unread(got, "/mentions") != float64(1) {
+		t.Fatalf("mention in an unjoined room: %#v", got)
+	}
+	read(ops, elsewhere)
+	if got := relay.pushes(t, app, a); !reflect.DeepEqual(paths(got), []string{"/mentions"}) || got[0].payload["unread"] != float64(0) {
+		t.Fatalf("badge after reading the unjoined room: %#v", got)
+	}
+	// A muted user gets no pushes, badges included.
+	b.write(t, map[string]any{"method": "status", "params": map[string]any{"mute": true}})
+	b.notification(t, "user")
+	post(map[string]any{"body": map[string]any{"text": "five"}})
+	if got := relay.pushes(t, app, a); len(got) != 0 {
+		t.Fatalf("muted user pushed: %#v", got)
+	}
+}
+
+// Registrations, with their keys, push_id, and scopes, survive a restart,
+// and so do the VAPID key and the user's status. A registration stored by
+// url alone, before registrations belonged to their user, is kept.
+func TestPushAndStatusSurviveRestart(t *testing.T) {
+	memory := store.NewMemory()
+	_, keys := testSubscription(t)
+	if err := memory.Apply([]store.Entry{
+		{Kind: entryUser, ID: "erin", Value: encodeJSON(storedUser{Name: "Erin", Passkey: &storedPasskey{Handle: []byte("h")}})},
+		{Kind: entryPush, ID: "https://relay.example/legacy", Value: []byte(`{"user":"erin","kind":"relay","token":"tok"}`)},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	app, httpServer, stop := startWithStore(t, memory, t.TempDir())
+	_, frame := dialRaw(t, httpServer)
+	key := frame["params"].(map[string]any)["push"].(map[string]any)["webpush"].(map[string]any)["key"]
+	app.mu.Lock()
+	erin := app.users["erin"]
+	migrated := erin.pushes["https://relay.example/legacy"]
+	if migrated == nil || migrated.token != "tok" || migrated.wake != defaultWake || !migrated.live(time.Now()) {
+		app.mu.Unlock()
+		t.Fatalf("legacy registration: %#v", migrated)
+	}
+	subscription, _ := parsePushKeys(keys["p256dh"].(string), keys["auth"].(string))
+	app.addPushLocked(erin, &pushRegistration{
+		userID: "erin", kind: "webpush", url: "https://push.example/s", pushID: "p1", keys: &subscription,
+		wake: wakeJoined | wakeBadge, renewed: time.Now(), lastUnread: -1,
+	})
+	erin.invisible = true
+	erin.mute = muteState{until: time.Now().Add(time.Hour)}
+	erin.roomMutes["general"] = muteState{forever: true}
+	app.touchUser("erin")
+	app.unlock()
+	stop()
+
+	app, httpServer, _ = startWithStore(t, memory, t.TempDir())
+	_, frame = dialRaw(t, httpServer)
+	if again := frame["params"].(map[string]any)["push"].(map[string]any)["webpush"].(map[string]any)["key"]; again != key {
+		t.Fatalf("VAPID key changed across a restart: %v then %v", key, again)
+	}
+	app.mu.RLock()
+	erin = app.users["erin"]
+	web := erin.pushes["https://push.example/s"]
+	if web == nil || web.kind != "webpush" || web.pushID != "p1" || web.wake != wakeJoined|wakeBadge || web.keys == nil || encodeBase64URL(web.keys.auth) != keys["auth"] {
+		t.Fatalf("webpush registration after restart: %#v", web)
+	}
+	if erin.pushes["https://relay.example/legacy"] == nil || len(app.pushes) != 2 {
+		t.Fatalf("registrations after restart: %v", app.pushes)
+	}
+	if !erin.invisible || !erin.mute.active(time.Now()) || !erin.roomMutes["general"].forever {
+		t.Fatalf("status after restart: %v %v %v", erin.invisible, erin.mute, erin.roomMutes)
+	}
+	app.mu.RUnlock()
+	var stored []string
+	_ = memory.Load(func(e store.Entry) error {
+		if e.Kind == entryPush {
+			stored = append(stored, e.ID)
+		}
+		return nil
+	})
+	slices.Sort(stored)
+	if !reflect.DeepEqual(stored, []string{"erin https://push.example/s", "erin https://relay.example/legacy"}) {
+		t.Fatalf("stored registrations: %v", stored)
+	}
+	// A configured VAPID key replaces the stored one, and a malformed one
+	// stops the server from starting.
+	configured, _ := newVAPIDKey()
+	config := DefaultConfig()
+	config.VAPIDPrivateKey = configured.encoded()
+	if app := New(config); app.vapid.public != configured.public {
+		t.Fatal("the configured VAPID key is not used")
+	}
+	config.VAPIDPrivateKey = "nope"
+	if _, err := Open(config); err == nil {
+		t.Fatal("a malformed VAPID key was accepted")
 	}
 }
 
@@ -165,7 +801,7 @@ func TestPushRefusesInternalAddresses(t *testing.T) {
 	defer relay.Close()
 	deliverer := newPushDeliverer(false)
 	called := false
-	deliverer.deliver(pushRegistration{url: relay.URL}, []byte("{}"), func(bool) { called = true })
+	deliverer.deliver(pushRegistration{url: relay.URL}, []byte("{}"), "normal", func(bool) { called = true })
 	deliverer.wait()
 	if hits.Load() != 0 || called {
 		t.Fatalf("delivered to a loopback address: hits=%d called=%v", hits.Load(), called)
@@ -201,7 +837,7 @@ func TestPushLanesIsolateStalledRelays(t *testing.T) {
 
 	// One user queues at most maxPushQueuedPerUser deliveries.
 	for range maxPushQueuedPerUser + 5 {
-		deliverer.deliver(pushRegistration{userID: "spammer", url: slow.URL + "/slow"}, []byte("{}"), func(bool) {})
+		deliverer.deliver(pushRegistration{userID: "spammer", url: slow.URL + "/slow"}, []byte("{}"), "normal", func(bool) {})
 	}
 	deliverer.mu.Lock()
 	queued := deliverer.users["spammer"]
@@ -210,7 +846,7 @@ func TestPushLanesIsolateStalledRelays(t *testing.T) {
 		t.Fatalf("queued deliveries for one user: %d", queued)
 	}
 	for i := range maxConcurrentPushPOST {
-		deliverer.deliver(pushRegistration{userID: "user" + formatID(int64(i)), url: slow.URL + "/slow"}, []byte("{}"), func(bool) {})
+		deliverer.deliver(pushRegistration{userID: "user" + formatID(int64(i)), url: slow.URL + "/slow"}, []byte("{}"), "normal", func(bool) {})
 	}
 	deadline := time.Now().Add(time.Second)
 	for stalled.Load() < maxPushPerHost && time.Now().Before(deadline) {
@@ -219,12 +855,12 @@ func TestPushLanesIsolateStalledRelays(t *testing.T) {
 	if got := stalled.Load(); got != maxPushPerHost {
 		t.Fatalf("concurrent deliveries to one host: %d", got)
 	}
-	// Another relay host has its own lane.
-	deliverer.deliver(pushRegistration{userID: "victim", url: fast.URL + "/fast"}, []byte("{}"), func(bool) {})
+	// Another push host has its own lane.
+	deliverer.deliver(pushRegistration{userID: "victim", url: fast.URL + "/fast"}, []byte("{}"), "normal", func(bool) {})
 	select {
 	case <-delivered:
 	case <-time.After(2 * time.Second):
-		t.Fatal("a stalled relay host blocked delivery to another host")
+		t.Fatal("a stalled push host blocked delivery to another host")
 	}
 }
 
