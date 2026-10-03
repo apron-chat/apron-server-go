@@ -72,6 +72,8 @@ type userState struct {
 	ownStatus   string
 	statusLimit *rate.Limiter
 	statusTimer *time.Timer
+	// statusChanges limits the user's changes to mute and invisible.
+	statusChanges *rate.Limiter
 	// pushes are the user's push registrations by url (§4.7), and pings the
 	// rooms they have not joined where a message mentioned or replied to
 	// them, from the first such message, for unread counts. unread holds
@@ -81,6 +83,10 @@ type userState struct {
 	pings      map[string]int64
 	unread     map[string]int
 	badgeTimer *time.Timer
+	// pushDay is the UTC day pushesToday counts the pushes delivered to the
+	// user on, against maxPushesPerUserDay.
+	pushDay     string
+	pushesToday int
 }
 
 func newUserState(id, name string) *userState {

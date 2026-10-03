@@ -35,6 +35,10 @@ const (
 	// flapping connection costs its rooms little.
 	statusBurst    = 10
 	statusCoalesce = 2 * time.Second
+	// A user changes mute or invisible at most userStatusBurst times, then
+	// once per userStatusEvery; further changes are dropped, unanswered.
+	userStatusBurst = 6
+	userStatusEvery = 10 * time.Second
 )
 
 // muteState is a mute (§4.11): until a time, forever, or, when zero, none.
@@ -129,6 +133,12 @@ func (s *Server) status(c *client, req request) {
 	s.mu.Lock()
 	defer s.unlock()
 	c.statusAware.Store(true)
+	if update.idle != nil {
+		// Saying whether it is idle takes the connection out of the silence
+		// rule (§4.11).
+		c.reportsIdle.Store(true)
+		c.silent.Store(false)
+	}
 	if c.user == nil {
 		if update.idle != nil {
 			c.idle = *update.idle
@@ -152,6 +162,16 @@ func (s *Server) applyStatusLocked(c *client, u *userState, update statusUpdate,
 	now := time.Now()
 	if update.idle != nil {
 		c.idle = *update.idle
+	}
+	if update.hasMute || update.invisible != nil {
+		// Each change to mute or invisible is stored and echoed, so a user
+		// may make only so many; the rest are dropped.
+		if u.statusChanges == nil {
+			u.statusChanges = rate.NewLimiter(rate.Every(userStatusEvery), userStatusBurst)
+		}
+		if !u.statusChanges.Allow() {
+			update.hasMute, update.invisible = false, nil
+		}
 	}
 	youChanged := false
 	switch {
@@ -402,11 +422,11 @@ func (s *Server) announceJoinStatusLocked(u *userState, r *roomState) {
 	s.sendStatusLocked(u, status, users)
 }
 
-// silenceIdle marks idle a connection that never sent status and has sent
-// no frame but liveness pings for Config.SilentIdleAfter (§4.11), and
+// silenceIdle marks idle a connection that never sent idle and has sent no
+// frame but liveness pings for Config.SilentIdleAfter (§4.11), and
 // announces the change; its next other frame ends it (endSilence).
 func (s *Server) silenceIdle(c *client) {
-	if c.statusAware.Load() || !c.silent.CompareAndSwap(false, true) {
+	if c.reportsIdle.Load() || !c.silent.CompareAndSwap(false, true) {
 		return
 	}
 	s.mu.Lock()

@@ -442,11 +442,15 @@ func TestSilentConnectionsAreIdle(t *testing.T) {
 	quiet.write(t, map[string]any{"method": "frobnicate"})
 	expectStatus(t, observer, quiet.userID, "online")
 	quiet.expectQuiet(t)
-	// A connection that sent status is never idle by silence.
+	// A connection that sent idle is never idle by silence; one that sent
+	// status without idle still is.
 	app.silenceIdle(serverClient(t, app, observer))
 	if serverClient(t, app, observer).silent.Load() {
-		t.Fatal("a status-aware connection went idle by silence")
+		t.Fatal("a connection that sent idle went idle by silence")
 	}
+	quiet.status(t, map[string]any{"invisible": false})
+	app.silenceIdle(serverClient(t, app, quiet))
+	expectStatus(t, observer, quiet.userID, "idle")
 
 	// pingLoop measures the silence.
 	config := DefaultConfig()
@@ -468,4 +472,40 @@ func TestSilentConnectionsAreIdle(t *testing.T) {
 	if !connection.silent.Load() || status != statusIdle || ctx.Err() != nil {
 		t.Fatalf("a silent connection: silent=%v status=%s closed=%v", connection.silent.Load(), status, ctx.Err())
 	}
+}
+
+// A user changes mute or invisible userStatusBurst times at once; further
+// changes are dropped until the budget refills.
+func TestMuteChangesAreLimited(t *testing.T) {
+	app, httpServer := newTestServer(t, DefaultConfig())
+	c := dialTestClient(t, httpServer)
+	for i := range userStatusBurst {
+		frames := c.status(t, map[string]any{"mute": i + 1})
+		if len(frames) != 1 {
+			t.Fatalf("change %d: %#v", i, frames)
+		}
+	}
+	if frames := c.status(t, map[string]any{"mute": 0, "invisible": true}); len(frames) != 0 {
+		t.Fatalf("a change past the limit: %#v", frames)
+	}
+	if you := c.result(t, "me", "me", map[string]any{})["you"].(map[string]any); you["mute"] != float64(userStatusBurst) || you["invisible"] != nil {
+		t.Fatalf("you after the limit: %#v", you)
+	}
+	// idle is not limited (the muted user stays dnd, so nothing is echoed).
+	c.status(t, map[string]any{"idle": true})
+	app.mu.RLock()
+	idle := serverClientLocked(app, c).idle
+	app.mu.RUnlock()
+	if !idle {
+		t.Fatal("idle past the limit was dropped")
+	}
+}
+
+// serverClientLocked is the server's side of c's only connection; the
+// caller holds app.mu.
+func serverClientLocked(app *Server, c *testClient) *client {
+	for connection := range app.users[c.userID].clients {
+		return connection
+	}
+	return nil
 }

@@ -354,12 +354,13 @@ type client struct {
 	// Guarded by server.mu.
 	idle          bool
 	pendingStatus []statusUpdate
-	// statusAware is set once the connection sends status. silent is set
-	// while a connection that never did has sent no frame but pings for
-	// Config.SilentIdleAfter; it then counts as idle (§4.11). lastActive
-	// is when its latest frame other than a ping arrived, in Unix
-	// nanoseconds.
+	// statusAware is set once the connection sends status, and reportsIdle
+	// once it sends idle. silent is set while a connection that never sent
+	// idle has sent no frame but pings for Config.SilentIdleAfter; it then
+	// counts as idle (§4.11). lastActive is when its latest frame other
+	// than a ping arrived, in Unix nanoseconds.
 	statusAware atomic.Bool
+	reportsIdle atomic.Bool
 	silent      atomic.Bool
 	lastActive  atomic.Int64
 	// closing is set once the final batch is queued; later frames are dropped.

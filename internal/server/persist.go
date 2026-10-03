@@ -642,6 +642,15 @@ func (s *Server) restoreLocked() (map[string]bool, error) {
 			stored.URL, stored.Renewed = key, now
 			s.touchPush(key)
 		}
+		if normalized, problem := normalizePushURL(stored.URL); problem != "" {
+			s.touchPush(key)
+			continue
+		} else if normalized != stored.URL {
+			// One stored before endpoints were normalized moves to the key
+			// of its normal form.
+			stored.URL = normalized
+			s.touchPush(key)
+		}
 		p := &pushRegistration{
 			userID: stored.User, kind: stored.Kind, url: stored.URL, token: stored.Token, pushID: stored.PushID,
 			wake: defaultWake, renewed: stored.Renewed, lastUnread: -1,

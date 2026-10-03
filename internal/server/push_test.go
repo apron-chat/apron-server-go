@@ -300,8 +300,17 @@ func TestPushRegistration(t *testing.T) {
 	if again := registration(a.userID); again == first || again.kind != "relay" || again.keys == nil || again.pushID != "" || again.wake != 0 || again.renewed.Before(first.renewed) {
 		t.Fatalf("re-registration: %#v", again)
 	}
+	// Another spelling of the same endpoint is the same registration.
+	a.result(t, "push_register", "spelling", map[string]any{"kind": "relay", "url": "HTTPS://Push.Example.NET:443/s/abc", "keys": keys, "wake": []any{}})
+	app.mu.RLock()
+	spellings := len(app.users[a.userID].pushes)
+	app.mu.RUnlock()
+	if spellings != 1 {
+		t.Fatalf("registrations of one endpoint under two spellings: %d", spellings)
+	}
+	a.expectError(t, "push_register", "long", map[string]any{"kind": "relay", "url": "https://push.example.net/" + strings.Repeat("a", maxPushURLBytes-len("https://push.example.net/")+1)}, codeInvalidParams)
 	// Unregistering removes only the caller's; an unknown url succeeds.
-	a.result(t, "push_unregister", "unregister", map[string]any{"url": endpoint})
+	a.result(t, "push_unregister", "unregister", map[string]any{"url": "https://PUSH.example.net/s/abc"})
 	a.result(t, "push_unregister", "unknown", map[string]any{"url": "https://push.example.net/never"})
 	if registration(a.userID) != nil || registration(b.userID) == nil {
 		t.Fatal("unregister removed the wrong registration")
@@ -449,7 +458,11 @@ func TestPushRespectsMutes(t *testing.T) {
 	}
 
 	// A room's mute covers its threads, and applies to a room the user has
-	// not joined, whose mentions still wake.
+	// not joined, whose mentions still wake. (The user has used up the
+	// changes to mute allowed at once: start again.)
+	app.mu.Lock()
+	app.users[b.userID].statusChanges = nil
+	app.unlock()
 	thread, _ := saveRoom(t, a, "thread", map[string]any{"parent_room_id": "general", "title": "Thread"})
 	b.notification(t, "room_update")
 	joinRoom(t, b, thread)
@@ -877,12 +890,58 @@ func TestPushAndStatusSurviveRestart(t *testing.T) {
 	configured, _ := newVAPIDKey()
 	config := DefaultConfig()
 	config.VAPIDPrivateKey = configured.encoded()
-	if app := New(config); app.vapid.public != configured.public {
+	if app, _ := newTestServer(t, config); app.vapid.public != configured.public {
 		t.Fatal("the configured VAPID key is not used")
 	}
 	config.VAPIDPrivateKey = "nope"
 	if _, err := Open(config); err == nil {
 		t.Fatal("a malformed VAPID key was accepted")
+	}
+}
+
+// A user gets at most maxPushesPerUserDay pushes a day, counting only
+// those their endpoints accepted.
+func TestPushesPerUserDay(t *testing.T) {
+	relay := newTestRelay(t)
+	app, httpServer := pushTestServer(t)
+	a := dialTestClient(t, httpServer)
+	dora := addAccount(t, app, "dora", a)
+	addPush(app, dora, pushRegistration{url: relay.URL + "/broken/missing", wake: defaultWake})
+	mention := func() int {
+		t.Helper()
+		save(t, a, a.nextID("mention"), map[string]any{"body": map[string]any{"text": "@dora", "mentions": []any{"dora"}}})
+		return len(relay.pushes(t, app, a))
+	}
+	// Refused deliveries count nothing (and 404 forgets the registration).
+	if got := mention(); got != 1 {
+		t.Fatalf("deliveries: %d", got)
+	}
+	app.mu.Lock()
+	count := dora.pushesTodayLocked(time.Now())
+	app.unlock()
+	if count != 0 {
+		t.Fatalf("a refused push counted: %d", count)
+	}
+	addPush(app, dora, pushRegistration{url: relay.URL + "/dora", wake: defaultWake})
+	if got := mention(); got != 1 {
+		t.Fatalf("deliveries: %d", got)
+	}
+	app.mu.Lock()
+	count = dora.pushesTodayLocked(time.Now())
+	dora.pushesToday = maxPushesPerUserDay
+	app.unlock()
+	if count != 1 {
+		t.Fatalf("an accepted push counted %d", count)
+	}
+	if got := mention(); got != 0 {
+		t.Fatalf("deliveries past the daily cap: %d", got)
+	}
+	// A new day starts over.
+	app.mu.Lock()
+	dora.pushDay = "2000-01-01"
+	app.unlock()
+	if got := mention(); got != 1 {
+		t.Fatalf("deliveries on a new day: %d", got)
 	}
 }
 
@@ -892,24 +951,33 @@ func TestPushRefusesInternalAddresses(t *testing.T) {
 	defer relay.Close()
 	deliverer := newPushDeliverer(false)
 	called := false
-	deliverer.deliver(pushRegistration{url: relay.URL}, []byte("{}"), "normal", "", func(bool) { called = true })
+	deliverer.deliver(pushRegistration{url: relay.URL}, []byte("{}"), "normal", "", func(int) { called = true })
 	deliverer.wait()
 	if hits.Load() != 0 || called {
 		t.Fatalf("delivered to a loopback address: hits=%d called=%v", hits.Load(), called)
 	}
-	app := New(DefaultConfig())
-	if problem := app.checkPushURL("http://relay.example/p"); problem == "" {
+	app, _ := newTestServer(t, DefaultConfig())
+	if _, problem := app.checkPushURL("http://relay.example/p"); problem == "" {
 		t.Fatal("http push URL accepted without AllowInsecurePush")
 	}
-	// Internal address literals and localhost are refused at registration.
-	for _, endpoint := range []string{"https://10.0.0.1/p", "https://[::1]/p", "https://[fd00::1]:8443/p", "https://169.254.169.254/p", "https://localhost/p", "https://push.localhost./p", "https://192.0.2.1/p"} {
-		if problem := app.checkPushURL(endpoint); problem == "" {
+	// Internal address literals, localhost, and hosts ending in a dot are
+	// refused at registration.
+	for _, endpoint := range []string{"https://10.0.0.1/p", "https://[::1]/p", "https://[fd00::1]:8443/p", "https://169.254.169.254/p", "https://localhost/p", "https://push.localhost/p", "https://192.0.2.1/p", "https://push.example.net./p", "mailto:a@b.example"} {
+		if _, problem := app.checkPushURL(endpoint); problem == "" {
 			t.Errorf("%s accepted", endpoint)
 		}
 	}
-	for _, endpoint := range []string{"https://93.184.215.14/p", "https://fcm.googleapis.com/fcm/send/x"} {
-		if problem := app.checkPushURL(endpoint); problem != "" {
-			t.Errorf("%s refused: %s", endpoint, problem)
+	// Endpoints are kept in one form: scheme and host lowercased, no
+	// default port.
+	for endpoint, want := range map[string]string{
+		"https://93.184.215.14/p":                   "https://93.184.215.14/p",
+		"https://fcm.googleapis.com/fcm/send/x":     "https://fcm.googleapis.com/fcm/send/x",
+		"HTTPS://FCM.GoogleAPIs.com:443/fcm/send/x": "https://fcm.googleapis.com/fcm/send/x",
+		"https://push.example.net:8443/A?b=C":       "https://push.example.net:8443/A?b=C",
+		"https://[2606:4700::1111]:443/p":           "https://[2606:4700::1111]/p",
+	} {
+		if got, problem := app.checkPushURL(endpoint); got != want {
+			t.Errorf("%s normalized to %q (%s), want %q", endpoint, got, problem, want)
 		}
 	}
 }
@@ -932,7 +1000,7 @@ func TestPushDeliveriesCoalesceBadges(t *testing.T) {
 	// Fill the host's lane so later deliveries wait.
 	local := strings.Replace(relay.URL, "127.0.0.1", "localhost", 1)
 	for range maxPushPerHost {
-		deliverer.deliver(pushRegistration{userID: "filler", url: local + "/busy"}, []byte("{}"), "normal", "", func(bool) {})
+		deliverer.deliver(pushRegistration{userID: "filler", url: local + "/busy"}, []byte("{}"), "normal", "", func(int) {})
 	}
 	for deadline := time.Now().Add(2 * time.Second); time.Now().Before(deadline); time.Sleep(5 * time.Millisecond) {
 		mu.Lock()
@@ -944,7 +1012,7 @@ func TestPushDeliveriesCoalesceBadges(t *testing.T) {
 	}
 	upper := strings.Replace(relay.URL, "127.0.0.1", "LocalHost", 1)
 	for i := range 3 {
-		deliverer.deliver(pushRegistration{userID: "u", url: upper + "/badge"}, []byte(formatID(int64(i))), "low", "u "+upper+"/badge", func(bool) {})
+		deliverer.deliver(pushRegistration{userID: "u", url: upper + "/badge"}, []byte(formatID(int64(i))), "low", "u "+upper+"/badge", func(int) {})
 	}
 	deliverer.mu.Lock()
 	lanes, queued := len(deliverer.hosts), deliverer.users["u"]
@@ -986,7 +1054,7 @@ func TestPushLanesIsolateStalledRelays(t *testing.T) {
 
 	// One user queues at most maxPushQueuedPerUser deliveries.
 	for range maxPushQueuedPerUser + 5 {
-		deliverer.deliver(pushRegistration{userID: "spammer", url: slow.URL + "/slow"}, []byte("{}"), "normal", "", func(bool) {})
+		deliverer.deliver(pushRegistration{userID: "spammer", url: slow.URL + "/slow"}, []byte("{}"), "normal", "", func(int) {})
 	}
 	deliverer.mu.Lock()
 	queued := deliverer.users["spammer"]
@@ -995,7 +1063,7 @@ func TestPushLanesIsolateStalledRelays(t *testing.T) {
 		t.Fatalf("queued deliveries for one user: %d", queued)
 	}
 	for i := range maxConcurrentPushPOST {
-		deliverer.deliver(pushRegistration{userID: "user" + formatID(int64(i)), url: slow.URL + "/slow"}, []byte("{}"), "normal", "", func(bool) {})
+		deliverer.deliver(pushRegistration{userID: "user" + formatID(int64(i)), url: slow.URL + "/slow"}, []byte("{}"), "normal", "", func(int) {})
 	}
 	deadline := time.Now().Add(time.Second)
 	for stalled.Load() < maxPushPerHost && time.Now().Before(deadline) {
@@ -1005,7 +1073,7 @@ func TestPushLanesIsolateStalledRelays(t *testing.T) {
 		t.Fatalf("concurrent deliveries to one host: %d", got)
 	}
 	// Another push host has its own lane.
-	deliverer.deliver(pushRegistration{userID: "victim", url: fast.URL + "/fast"}, []byte("{}"), "normal", "", func(bool) {})
+	deliverer.deliver(pushRegistration{userID: "victim", url: fast.URL + "/fast"}, []byte("{}"), "normal", "", func(int) {})
 	select {
 	case <-delivered:
 	case <-time.After(2 * time.Second):

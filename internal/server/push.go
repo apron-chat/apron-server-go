@@ -25,7 +25,7 @@ import (
 const (
 	maxPushTextRunes = 1000
 	maxPushesPerUser = 10
-	maxPushURLBytes  = 2048
+	maxPushURLBytes  = 512
 	maxPushTokenLen  = 4096
 	// maxPushPayloadBytes bounds the JSON payload every kind delivers (§4.7).
 	maxPushPayloadBytes = 2048
@@ -48,6 +48,9 @@ const (
 	maxPushQueuedPerUser  = 20
 	maxPushQueuedPerHost  = 256
 	maxPushQueued         = 1024
+	// maxPushesPerUserDay bounds the pushes delivered to one user in a UTC
+	// day, counting only those the endpoint accepted (2xx).
+	maxPushesPerUserDay = 1000
 	// maxPushResponseDrain is how much of a push service's answer is read so
 	// that its connection can be reused.
 	maxPushResponseDrain = 64 << 10
@@ -202,11 +205,12 @@ func (s *Server) registerPush(c *client, req request) (any, bool, *rpcError) {
 	if err != nil {
 		return nil, false, err
 	}
+	endpoint, problem := s.checkPushURL(endpoint)
+	if problem != "" {
+		return nil, false, invalidParams("%s", problem)
+	}
 	if len(endpoint) > maxPushURLBytes || len(token) > maxPushTokenLen {
 		return nil, false, invalidParams("url is at most %d bytes and token at most %d", maxPushURLBytes, maxPushTokenLen)
-	}
-	if problem := s.checkPushURL(endpoint); problem != "" {
-		return nil, false, invalidParams("%s", problem)
 	}
 	pushID, err := parseString(req.params, "push_id", false)
 	if err != nil {
@@ -287,6 +291,9 @@ func (s *Server) unregisterPush(c *client, req request) (any, bool, *rpcError) {
 	if err != nil {
 		return nil, false, err
 	}
+	if normalized, problem := normalizePushURL(endpoint); problem == "" {
+		endpoint = normalized
+	}
 	s.mu.Lock()
 	defer s.unlock()
 	if registration := c.user.pushes[endpoint]; registration != nil {
@@ -332,26 +339,51 @@ func (s *Server) sweepPushes() {
 	}
 }
 
-// checkPushURL requires an absolute https URL (http too with
-// AllowInsecurePush) without credentials or whitespace, naming a host that
-// is not an internal address literal or localhost. Names that resolve to
-// internal addresses are refused when dialing.
-func (s *Server) checkPushURL(endpoint string) string {
+// normalizePushURL is an endpoint in the one form a registration is kept
+// under: an absolute URL without credentials, whitespace, or a host ending
+// in a dot, with its scheme and host lowercased and no default port. A
+// problem says why it is not one.
+func normalizePushURL(endpoint string) (string, string) {
 	parsed, err := url.Parse(endpoint)
-	if err != nil || parsed.Host == "" || parsed.User != nil || strings.ContainsFunc(endpoint, func(r rune) bool { return r <= ' ' }) {
-		return "url must be an absolute URL"
+	if err != nil || parsed.Host == "" || parsed.User != nil || parsed.Opaque != "" || strings.ContainsFunc(endpoint, func(r rune) bool { return r <= ' ' }) {
+		return "", "url must be an absolute URL"
 	}
+	parsed.Scheme = strings.ToLower(parsed.Scheme)
+	host := strings.ToLower(parsed.Hostname())
+	if host == "" || strings.HasSuffix(host, ".") {
+		return "", "url must name a host without a trailing dot"
+	}
+	if strings.Contains(host, ":") {
+		host = "[" + host + "]"
+	}
+	if port := parsed.Port(); port != "" && !(parsed.Scheme == "https" && port == "443") && !(parsed.Scheme == "http" && port == "80") {
+		host += ":" + port
+	}
+	parsed.Host = host
+	return parsed.String(), ""
+}
+
+// checkPushURL normalizes an endpoint (normalizePushURL) and requires https
+// (http too with AllowInsecurePush) and a host that is not an internal
+// address literal or localhost. Names that resolve to internal addresses
+// are refused when dialing.
+func (s *Server) checkPushURL(endpoint string) (string, string) {
+	endpoint, problem := normalizePushURL(endpoint)
+	if problem != "" {
+		return "", problem
+	}
+	parsed, _ := url.Parse(endpoint)
 	if parsed.Scheme != "https" && !(s.config.AllowInsecurePush && parsed.Scheme == "http") {
-		return "url must use https"
+		return "", "url must use https"
 	}
 	if s.config.AllowInsecurePush {
-		return ""
+		return endpoint, ""
 	}
-	host := strings.ToLower(strings.TrimSuffix(parsed.Hostname(), "."))
+	host := parsed.Hostname()
 	if _, err := netip.ParseAddr(host); err == nil && !publicAddress(host) || host == "localhost" || strings.HasSuffix(host, ".localhost") {
-		return "url must name a public host"
+		return "", "url must name a public host"
 	}
-	return ""
+	return endpoint, ""
 }
 
 // wakeLocked pushes a message to the users it concerns (§4.7). previous is
@@ -440,18 +472,31 @@ func sortedPushes(u *userState) []*pushRegistration {
 	})
 }
 
-// deliverPushLocked hands a payload to the deliverer, forgetting the
-// registration if its endpoint answers that it is gone. A badge push
-// replaces one still waiting for the same registration.
+// deliverPushLocked hands a payload to the deliverer, unless the user has
+// had maxPushesPerUserDay pushes today. A push the endpoint accepts counts
+// toward them, and one answered 404 or 410 forgets the registration. A
+// badge push replaces one still waiting for the same registration.
 func (s *Server) deliverPushLocked(p *pushRegistration, payload []byte, urgency string, badge bool) {
-	done := func(gone bool) {
-		if gone {
-			s.mu.Lock()
+	if u := s.users[p.userID]; u == nil || u.pushesTodayLocked(time.Now()) >= maxPushesPerUserDay {
+		return
+	}
+	done := func(status int) {
+		accepted := status >= 200 && status < 300
+		gone := status == http.StatusNotFound || status == http.StatusGone
+		if !accepted && !gone {
+			return
+		}
+		s.mu.Lock()
+		defer s.unlock()
+		u := s.users[p.userID]
+		switch {
+		case u == nil:
+		case accepted:
+			u.pushesTodayLocked(time.Now())
+			u.pushesToday++
+		default:
 			s.removePushLocked(p)
-			if u := s.users[p.userID]; u != nil {
-				s.statusChangedLocked(u, nil, false)
-			}
-			s.unlock()
+			s.statusChangedLocked(u, nil, false)
 		}
 	}
 	latest := ""
@@ -459,6 +504,15 @@ func (s *Server) deliverPushLocked(p *pushRegistration, payload []byte, urgency 
 		latest = pushKey(p.userID, p.url)
 	}
 	s.push.deliver(*p, payload, urgency, latest, done)
+}
+
+// pushesTodayLocked is how many pushes the user's endpoints accepted on
+// now's UTC day.
+func (u *userState) pushesTodayLocked(now time.Time) int {
+	if day := now.UTC().Format(time.DateOnly); day != u.pushDay {
+		u.pushDay, u.pushesToday = day, 0
+	}
+	return u.pushesToday
 }
 
 // pushPayload is the payload every kind delivers (§4.7): push_id, unread,
@@ -668,10 +722,10 @@ func newPushDeliverer(allowInternal bool) *pushDeliverer {
 
 // deliver POSTs payload to a registration's url. With latest, the key of a
 // badge delivery, a delivery for the same key that has not started takes
-// payload in place of its own. done reports whether the endpoint said it is
-// gone (404 or 410). A delivery beyond the user's, the host's, or the
-// server's queue bound is dropped.
-func (p *pushDeliverer) deliver(registration pushRegistration, payload []byte, urgency, latest string, done func(gone bool)) {
+// payload in place of its own. done receives the endpoint's status code. A
+// delivery beyond the user's, the host's, or the server's queue bound is
+// dropped, as is one that gets no answer.
+func (p *pushDeliverer) deliver(registration pushRegistration, payload []byte, urgency, latest string, done func(status int)) {
 	parsed, err := url.Parse(registration.url)
 	if err != nil {
 		return
@@ -729,7 +783,7 @@ func (p *pushDeliverer) deliver(registration pushRegistration, payload []byte, u
 		// Reading the answer lets the connection be reused.
 		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, maxPushResponseDrain))
 		response.Body.Close()
-		done(response.StatusCode == http.StatusNotFound || response.StatusCode == http.StatusGone)
+		done(response.StatusCode)
 	}()
 }
 
