@@ -13,9 +13,12 @@ import (
 	"reflect"
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/coder/websocket"
 
 	"github.com/apron-chat/apron-server-go/internal/store"
 )
@@ -58,10 +61,12 @@ func newTestRelay(t *testing.T) *testRelay {
 }
 
 // pushes returns the deliveries made so far, sorted by path, after the
-// requests c sent before have finished waking users.
+// requests c sent before have finished waking users and their badge
+// pushes have gone out.
 func (relay *testRelay) pushes(t *testing.T, app *Server, c *testClient) []relayRequest {
 	t.Helper()
 	c.drain(t)
+	app.badges.Wait()
 	app.push.wait()
 	var requests []relayRequest
 	for len(relay.received) > 0 {
@@ -80,11 +85,15 @@ func paths(requests []relayRequest) []string {
 	return list
 }
 
+// pushTestServer accepts internal push endpoints and sends badge pushes
+// without waiting to coalesce them.
 func pushTestServer(t *testing.T) (*Server, *httptest.Server) {
 	t.Helper()
 	config := DefaultConfig()
 	config.AllowInsecurePush = true
-	return newTestServer(t, config)
+	app, httpServer := newTestServer(t, config)
+	app.badgeDelay = 0
+	return app, httpServer
 }
 
 // addAccount adds an account that has joined general and has no connection,
@@ -120,13 +129,10 @@ func addPush(app *Server, u *userState, p pushRegistration) *pushRegistration {
 	return registration
 }
 
-// goIdle tells the server nobody attends c, and reads the status echo.
+// goIdle tells the server nobody attends c, and checks the status echo.
 func goIdle(t *testing.T, c *testClient) {
 	t.Helper()
-	c.write(t, map[string]any{"method": "status", "params": map[string]any{"idle": true}})
-	if you := c.notification(t, "user")["you"].(map[string]any); you["status"] != "idle" {
-		t.Fatalf("status echo: %#v", you)
-	}
+	echoed(t, c, c.status(t, map[string]any{"idle": true}), "idle")
 }
 
 func TestPushWakesMentionsAndRepliesOfIdleUsers(t *testing.T) {
@@ -193,19 +199,17 @@ func TestPushWakesMentionsAndRepliesOfIdleUsers(t *testing.T) {
 	if got := relay.pushes(t, app, a); !reflect.DeepEqual(paths(got), []string{"/b"}) || got[0].header.Get("Authorization") != "" {
 		t.Fatalf("idle user: %#v", got)
 	}
-	// Typing does not end idle; a message from the connection does.
+	// Neither typing nor a message from the connection ends idle; only
+	// idle: false does (§4.11).
 	b.write(t, map[string]any{"method": "activity", "params": map[string]any{"room_id": "general", "typing": 3}})
 	a.notification(t, "activity")
+	own, _ := save(t, b, "own", map[string]any{"body": map[string]any{"text": "mine"}})
+	a.notification(t, "message")
 	post("still-idle", maps.Clone(mentionB))
 	if got := relay.pushes(t, app, a); len(got) != 1 {
-		t.Fatalf("typing ended idle: %d", len(got))
+		t.Fatalf("typing or a message ended idle: %d", len(got))
 	}
-	before, _ := b.request(t, "message", "own", map[string]any{"body": map[string]any{"text": "mine"}})
-	if got := methods(before); !reflect.DeepEqual(got, []string{"user", "message"}) || before[0]["params"].(map[string]any)["you"].(map[string]any)["status"] != "online" {
-		t.Fatalf("frames before a message from an idle connection: %#v", before)
-	}
-	own := before[1]["params"].(map[string]any)["message_id"].(string)
-	a.notification(t, "message")
+	echoed(t, b, b.status(t, map[string]any{"idle": false}), "online")
 	post("back", maps.Clone(mentionB))
 	if got := relay.pushes(t, app, a); len(got) != 0 {
 		t.Fatalf("user back from idle woken: %d", len(got))
@@ -233,7 +237,7 @@ func TestPushWakesMentionsAndRepliesOfIdleUsers(t *testing.T) {
 	if got := relay.pushes(t, app, a); len(got) != 0 {
 		t.Fatalf("mention in a private room woke a non-member: %#v", got)
 	}
-	before, _ = a.request(t, "command", "help", map[string]any{"body": map[string]any{"text": "/help", "mentions": []any{"guest_2"}}})
+	before, _ := a.request(t, "command", "help", map[string]any{"body": map[string]any{"text": "/help", "mentions": []any{"guest_2"}}})
 	if len(before) != 1 {
 		t.Fatalf("help frames: %#v", before)
 	}
@@ -443,6 +447,84 @@ func TestPushRespectsMutes(t *testing.T) {
 	if got := relay.pushes(t, app, a); len(got) != 1 {
 		t.Fatalf("unmuted user woken %d", len(got))
 	}
+
+	// A room's mute covers its threads, and applies to a room the user has
+	// not joined, whose mentions still wake.
+	thread, _ := saveRoom(t, a, "thread", map[string]any{"parent_room_id": "general", "title": "Thread"})
+	b.notification(t, "room_update")
+	joinRoom(t, b, thread)
+	expectMembership(t, a, thread, b.userID, true)
+	b.status(t, map[string]any{"room_id": "general", "mute": true})
+	save(t, a, "in-thread", map[string]any{"room_id": thread, "body": map[string]any{"text": "chatter"}})
+	b.notification(t, "message")
+	if got := relay.pushes(t, app, a); len(got) != 0 {
+		t.Fatalf("thread of a muted room woke %d", len(got))
+	}
+	b.status(t, map[string]any{"room_id": "general", "mute": 0})
+	ops, _ := saveRoom(t, a, "ops", map[string]any{"title": "Ops"})
+	if frames := b.status(t, map[string]any{"room_id": ops, "mute": true}); len(frames) != 0 {
+		t.Fatalf("echo of an unjoined room's mute: %#v", frames)
+	}
+	theirs := formatID(serverMessage(t, app, b.userID))
+	a.notification(t, "message")
+	b.notification(t, "message")
+	save(t, a, "ops-reply", map[string]any{"room_id": ops, "body": map[string]any{"text": "re"}, "reply_to": map[string]any{"message_id": theirs}})
+	if got := relay.pushes(t, app, a); len(got) != 0 {
+		t.Fatalf("reply in a muted unjoined room woke %d", len(got))
+	}
+	save(t, a, "ops-mention", map[string]any{"room_id": ops, "body": map[string]any{"text": "@guest_2", "mentions": []any{"guest_2"}}})
+	if got := relay.pushes(t, app, a); len(got) != 1 || got[0].header.Get("Urgency") != "high" {
+		t.Fatalf("mention in a muted unjoined room: %#v", got)
+	}
+}
+
+// serverMessage is the message_id of a message by userID, made in general.
+func serverMessage(t *testing.T, app *Server, userID string) int64 {
+	t.Helper()
+	app.mu.Lock()
+	defer app.unlock()
+	u := app.users[userID]
+	logID := app.nextIDLocked()
+	id := formatID(logID)
+	m := &messageState{id: id, from: u.from(), owner: u.id, reactions: make(map[string]reactionSet)}
+	app.messages[id] = m
+	app.commitSnapshotLocked(m, map[string]any{"message_id": id, "log_id": id, "room_id": "general", "from": u.from(), "body": map[string]any{"text": "theirs"}}, logID)
+	return logID
+}
+
+// Badge pushes wait badgeDelay, so one push carries the count after a burst
+// of changes; a guest's retirement sends none.
+func TestBadgePushesCoalesce(t *testing.T) {
+	relay := newTestRelay(t)
+	app, httpServer := pushTestServer(t)
+	app.badgeDelay = 300 * time.Millisecond
+	clients := dialGroup(t, httpServer, 2)
+	a, b := clients[0], clients[1]
+	b.result(t, "push_register", "phone", map[string]any{"kind": "relay", "url": relay.URL + "/phone", "wake": []any{"badge"}})
+	var ids []string
+	for i := range 3 {
+		id, _ := save(t, a, a.nextID("post"), map[string]any{"body": map[string]any{"text": formatID(int64(i))}})
+		b.notification(t, "message")
+		ids = append(ids, id)
+	}
+	for _, id := range ids[:2] {
+		b.write(t, map[string]any{"method": "activity", "params": map[string]any{"room_id": "general", "read_message_id": id}})
+		a.notification(t, "activity")
+		b.notification(t, "activity")
+	}
+	got := relay.pushes(t, app, a)
+	if len(got) != 1 || got[0].payload["unread"] != float64(1) {
+		t.Fatalf("coalesced badge pushes: %#v", got)
+	}
+	// A guest that leaves takes its registrations with it: its leaves send
+	// nothing.
+	save(t, a, "more", map[string]any{"body": map[string]any{"text": "more"}})
+	b.notification(t, "message")
+	_ = b.ws.Close(websocket.StatusNormalClosure, "bye")
+	expectMembership(t, a, "general", b.userID, false)
+	if got := relay.pushes(t, app, a); len(got) != 0 {
+		t.Fatalf("pushes after a guest left: %#v", got)
+	}
 }
 
 // webpush deliveries are RFC 8291 ciphertext signed with VAPID (RFC 8292),
@@ -490,7 +572,8 @@ func TestWebPushDelivery(t *testing.T) {
 			t.Fatalf("%s payload: %#v", request.path, payload)
 		}
 	}
-	if relayHeader := got[0].header; relayHeader.Get("Authorization") != "Bearer tok" || relayHeader.Get("TTL") != "" {
+	// Relays get TTL and Urgency too (§4.7).
+	if relayHeader := got[0].header; relayHeader.Get("Authorization") != "Bearer tok" || relayHeader.Get("TTL") != "86400" || relayHeader.Get("Urgency") != "high" {
 		t.Fatalf("relay headers: %v", relayHeader)
 	}
 	header := got[1].header
@@ -563,7 +646,7 @@ func TestPushPayloadFitsInLimit(t *testing.T) {
 		t.Fatalf("payload: %#v", got)
 	}
 	// Text is truncated to maxPushTextRunes.
-	snapshot["body"] = map[string]any{"text": strings.Repeat("é", maxPushTextRunes+500)}
+	snapshot["body"] = map[string]any{"text": strings.Repeat("e", maxPushTextRunes+500)}
 	text := decode(pushPayload("", 0, snapshot))["message"].(map[string]any)["body"].(map[string]any)["text"].(string)
 	if runes := []rune(text); len(runes) != maxPushTextRunes || runes[len(runes)-1] != '…' {
 		t.Fatalf("truncated text: %d runes", len(runes))
@@ -624,8 +707,10 @@ func TestPushRegistrationsExpire(t *testing.T) {
 	}
 }
 
-// unread counts the messages a registration's scopes select after the
-// user's read position, and badge pushes send its changes (§4.7).
+// unread is the user's one count of messages after their read positions,
+// the same in every registration's pushes, and badge pushes, without a
+// message and with Urgency low, send each change of it to the relay
+// registrations with scope badge (§4.7).
 func TestPushUnreadAndBadge(t *testing.T) {
 	relay := newTestRelay(t)
 	app, httpServer := pushTestServer(t)
@@ -636,15 +721,33 @@ func TestPushUnreadAndBadge(t *testing.T) {
 	_, keys := testSubscription(t)
 	b.result(t, "push_register", "browser", map[string]any{"kind": "webpush", "url": relay.URL + "/browser", "keys": keys, "wake": []any{"joined", "badge"}})
 	goIdle(t, b)
-	unread := func(requests []relayRequest, path string) any {
-		t.Helper()
-		for _, request := range requests {
-			if request.path == path && request.payload != nil {
-				return request.payload["unread"]
-			}
-		}
-		return nil
+	// expect checks each delivery: its path, unread, Urgency, and whether
+	// it carries a message.
+	type delivery struct {
+		path    string
+		unread  any
+		urgency string
+		message bool
 	}
+	expect := func(want ...delivery) {
+		t.Helper()
+		got := relay.pushes(t, app, a)
+		var deliveries []delivery
+		for _, request := range got {
+			d := delivery{path: request.path, urgency: request.header.Get("Urgency")}
+			if request.payload != nil {
+				d.unread = request.payload["unread"]
+				_, d.message = request.payload["message"]
+			} else {
+				d.unread, d.message = "encrypted", true
+			}
+			deliveries = append(deliveries, d)
+		}
+		if !reflect.DeepEqual(deliveries, want) {
+			t.Fatalf("deliveries %+v, want %+v", deliveries, want)
+		}
+	}
+	browser := delivery{"/browser", "encrypted", "normal", true}
 	post := func(params map[string]any) string {
 		t.Helper()
 		id, _ := save(t, a, a.nextID("post"), params)
@@ -658,64 +761,52 @@ func TestPushUnreadAndBadge(t *testing.T) {
 			c.notification(t, "activity")
 		}
 	}
+	// A message no scope of /mentions selects still changes the count it
+	// shows: it gets a badge push.
 	first := post(map[string]any{"body": map[string]any{"text": "one"}})
-	if got := relay.pushes(t, app, a); !reflect.DeepEqual(paths(got), []string{"/browser", "/phone"}) || unread(got, "/phone") != float64(1) {
-		t.Fatalf("first message: %v %#v", paths(got), got)
-	}
+	expect(browser, delivery{"/mentions", float64(1), "low", false}, delivery{"/phone", float64(1), "normal", true})
 	second := post(map[string]any{"body": map[string]any{"text": "@guest_2", "mentions": []any{"guest_2"}}})
-	got := relay.pushes(t, app, a)
-	if unread(got, "/phone") != float64(2) || unread(got, "/mentions") != float64(1) {
-		t.Fatalf("second message: %#v", got)
-	}
-	// Reading on another connection sends badge pushes, without a message,
-	// to relay registrations whose count changed; webpush gets none.
+	expect(delivery{"/browser", "encrypted", "normal", true}, delivery{"/mentions", float64(2), "high", true}, delivery{"/phone", float64(2), "normal", true})
+	// Reading on another connection sends badge pushes to relay
+	// registrations whose count changed; webpush ignores badge.
 	read("general", first, a)
-	got = relay.pushes(t, app, a)
-	if !reflect.DeepEqual(paths(got), []string{"/phone"}) || !reflect.DeepEqual(got[0].payload, map[string]any{"push_id": "phone", "unread": float64(1)}) {
-		t.Fatalf("badge after reading the first: %#v", got)
-	}
+	expect(delivery{"/mentions", float64(1), "low", false}, delivery{"/phone", float64(1), "low", false})
 	read("general", second, a)
-	got = relay.pushes(t, app, a)
-	if !reflect.DeepEqual(paths(got), []string{"/mentions", "/phone"}) || got[0].payload["unread"] != float64(0) || got[1].payload["unread"] != float64(0) {
-		t.Fatalf("badge after reading everything: %#v", got)
-	}
+	expect(delivery{"/mentions", float64(0), "low", false}, delivery{"/phone", float64(0), "low", false})
 	// Deleting a counted message lowers the count.
 	third := post(map[string]any{"body": map[string]any{"text": "three"}})
-	relay.pushes(t, app, a)
+	expect(browser, delivery{"/mentions", float64(1), "low", false}, delivery{"/phone", float64(1), "normal", true})
 	a.request(t, "message", "delete", map[string]any{"room_id": "general", "message_id": third, "deleted": true})
 	b.notification(t, "message")
-	if got := relay.pushes(t, app, a); !reflect.DeepEqual(paths(got), []string{"/phone"}) || got[0].payload["unread"] != float64(0) {
-		t.Fatalf("badge after a deletion: %#v", got)
-	}
+	expect(delivery{"/mentions", float64(0), "low", false}, delivery{"/phone", float64(0), "low", false})
 	// The user's own message moves their read position.
 	post(map[string]any{"body": map[string]any{"text": "four"}})
-	relay.pushes(t, app, a)
-	before, _ := b.request(t, "message", "own", map[string]any{"body": map[string]any{"text": "mine"}})
-	if !reflect.DeepEqual(methods(before), []string{"user", "message"}) {
-		t.Fatalf("frames before the own message: %#v", before)
-	}
+	expect(browser, delivery{"/mentions", float64(1), "low", false}, delivery{"/phone", float64(1), "normal", true})
+	save(t, b, "own", map[string]any{"body": map[string]any{"text": "mine"}})
 	a.notification(t, "message")
-	if got := relay.pushes(t, app, a); !reflect.DeepEqual(paths(got), []string{"/phone"}) || got[0].payload["unread"] != float64(0) {
-		t.Fatalf("badge after posting: %#v", got)
-	}
+	expect(delivery{"/mentions", float64(0), "low", false}, delivery{"/phone", float64(0), "low", false})
 	// A mention in a room the user has not joined counts until read there.
-	goIdle(t, b)
 	ops, _ := saveRoom(t, a, "ops", map[string]any{"title": "Ops"})
 	elsewhere, _ := save(t, a, "elsewhere", map[string]any{"room_id": ops, "body": map[string]any{"text": "@guest_2", "mentions": []any{"guest_2"}}})
-	if got := relay.pushes(t, app, a); unread(got, "/mentions") != float64(1) {
-		t.Fatalf("mention in an unjoined room: %#v", got)
-	}
+	expect(delivery{"/mentions", float64(1), "high", true}, delivery{"/phone", float64(1), "low", false})
 	read(ops, elsewhere)
-	if got := relay.pushes(t, app, a); !reflect.DeepEqual(paths(got), []string{"/mentions"}) || got[0].payload["unread"] != float64(0) {
-		t.Fatalf("badge after reading the unjoined room: %#v", got)
+	expect(delivery{"/mentions", float64(0), "low", false}, delivery{"/phone", float64(0), "low", false})
+	// A message moved into a joined room counts there from its move.
+	moved, _ := save(t, a, "to-move", map[string]any{"room_id": ops, "body": map[string]any{"text": "moving"}})
+	expect()
+	before, _ := a.request(t, "message", "move", map[string]any{"message_id": moved, "room_id": "general", "body": map[string]any{"text": "moving"}})
+	if len(before) != 1 {
+		t.Fatalf("frames before the move result: %#v", before)
 	}
-	// A muted user gets no pushes, badges included.
-	b.write(t, map[string]any{"method": "status", "params": map[string]any{"mute": true}})
-	b.notification(t, "user")
-	post(map[string]any{"body": map[string]any{"text": "five"}})
-	if got := relay.pushes(t, app, a); len(got) != 0 {
-		t.Fatalf("muted user pushed: %#v", got)
-	}
+	b.notification(t, "message")
+	expect(delivery{"/mentions", float64(1), "low", false}, delivery{"/phone", float64(1), "low", false})
+	read("general", moved, a)
+	expect(delivery{"/mentions", float64(0), "low", false}, delivery{"/phone", float64(0), "low", false})
+	// What a mute silences reaches only registrations with scope badge,
+	// without a message.
+	b.status(t, map[string]any{"mute": true})
+	post(map[string]any{"body": map[string]any{"text": "@guest_2", "mentions": []any{"guest_2"}}})
+	expect(delivery{"/mentions", float64(1), "low", false}, delivery{"/phone", float64(1), "low", false})
 }
 
 // Registrations, with their keys, push_id, and scopes, survive a restart,
@@ -801,7 +892,7 @@ func TestPushRefusesInternalAddresses(t *testing.T) {
 	defer relay.Close()
 	deliverer := newPushDeliverer(false)
 	called := false
-	deliverer.deliver(pushRegistration{url: relay.URL}, []byte("{}"), "normal", func(bool) { called = true })
+	deliverer.deliver(pushRegistration{url: relay.URL}, []byte("{}"), "normal", "", func(bool) { called = true })
 	deliverer.wait()
 	if hits.Load() != 0 || called {
 		t.Fatalf("delivered to a loopback address: hits=%d called=%v", hits.Load(), called)
@@ -809,6 +900,64 @@ func TestPushRefusesInternalAddresses(t *testing.T) {
 	app := New(DefaultConfig())
 	if problem := app.checkPushURL("http://relay.example/p"); problem == "" {
 		t.Fatal("http push URL accepted without AllowInsecurePush")
+	}
+	// Internal address literals and localhost are refused at registration.
+	for _, endpoint := range []string{"https://10.0.0.1/p", "https://[::1]/p", "https://[fd00::1]:8443/p", "https://169.254.169.254/p", "https://localhost/p", "https://push.localhost./p", "https://192.0.2.1/p"} {
+		if problem := app.checkPushURL(endpoint); problem == "" {
+			t.Errorf("%s accepted", endpoint)
+		}
+	}
+	for _, endpoint := range []string{"https://93.184.215.14/p", "https://fcm.googleapis.com/fcm/send/x"} {
+		if problem := app.checkPushURL(endpoint); problem != "" {
+			t.Errorf("%s refused: %s", endpoint, problem)
+		}
+	}
+}
+
+// Badge deliveries for one registration that have not started give way to
+// the latest; lanes are per host, ignoring case.
+func TestPushDeliveriesCoalesceBadges(t *testing.T) {
+	release := make(chan struct{})
+	var bodies []string
+	var mu sync.Mutex
+	relay := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		bodies = append(bodies, string(body))
+		mu.Unlock()
+		<-release
+	}))
+	defer relay.Close()
+	deliverer := newPushDeliverer(true)
+	// Fill the host's lane so later deliveries wait.
+	local := strings.Replace(relay.URL, "127.0.0.1", "localhost", 1)
+	for range maxPushPerHost {
+		deliverer.deliver(pushRegistration{userID: "filler", url: local + "/busy"}, []byte("{}"), "normal", "", func(bool) {})
+	}
+	for deadline := time.Now().Add(2 * time.Second); time.Now().Before(deadline); time.Sleep(5 * time.Millisecond) {
+		mu.Lock()
+		busy := len(bodies) == maxPushPerHost
+		mu.Unlock()
+		if busy {
+			break
+		}
+	}
+	upper := strings.Replace(relay.URL, "127.0.0.1", "LocalHost", 1)
+	for i := range 3 {
+		deliverer.deliver(pushRegistration{userID: "u", url: upper + "/badge"}, []byte(formatID(int64(i))), "low", "u "+upper+"/badge", func(bool) {})
+	}
+	deliverer.mu.Lock()
+	lanes, queued := len(deliverer.hosts), deliverer.users["u"]
+	deliverer.mu.Unlock()
+	close(release)
+	deliverer.wait()
+	if lanes != 1 || queued != 1 {
+		t.Fatalf("lanes %d, queued badge deliveries %d", lanes, queued)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if !slices.Contains(bodies, "2") || slices.Contains(bodies, "0") || slices.Contains(bodies, "1") {
+		t.Fatalf("delivered bodies: %v", bodies)
 	}
 }
 
@@ -837,7 +986,7 @@ func TestPushLanesIsolateStalledRelays(t *testing.T) {
 
 	// One user queues at most maxPushQueuedPerUser deliveries.
 	for range maxPushQueuedPerUser + 5 {
-		deliverer.deliver(pushRegistration{userID: "spammer", url: slow.URL + "/slow"}, []byte("{}"), "normal", func(bool) {})
+		deliverer.deliver(pushRegistration{userID: "spammer", url: slow.URL + "/slow"}, []byte("{}"), "normal", "", func(bool) {})
 	}
 	deliverer.mu.Lock()
 	queued := deliverer.users["spammer"]
@@ -846,7 +995,7 @@ func TestPushLanesIsolateStalledRelays(t *testing.T) {
 		t.Fatalf("queued deliveries for one user: %d", queued)
 	}
 	for i := range maxConcurrentPushPOST {
-		deliverer.deliver(pushRegistration{userID: "user" + formatID(int64(i)), url: slow.URL + "/slow"}, []byte("{}"), "normal", func(bool) {})
+		deliverer.deliver(pushRegistration{userID: "user" + formatID(int64(i)), url: slow.URL + "/slow"}, []byte("{}"), "normal", "", func(bool) {})
 	}
 	deadline := time.Now().Add(time.Second)
 	for stalled.Load() < maxPushPerHost && time.Now().Before(deadline) {
@@ -856,7 +1005,7 @@ func TestPushLanesIsolateStalledRelays(t *testing.T) {
 		t.Fatalf("concurrent deliveries to one host: %d", got)
 	}
 	// Another push host has its own lane.
-	deliverer.deliver(pushRegistration{userID: "victim", url: fast.URL + "/fast"}, []byte("{}"), "normal", func(bool) {})
+	deliverer.deliver(pushRegistration{userID: "victim", url: fast.URL + "/fast"}, []byte("{}"), "normal", "", func(bool) {})
 	select {
 	case <-delivered:
 	case <-time.After(2 * time.Second):
@@ -880,6 +1029,14 @@ func TestPushRefusesNonPublicRanges(t *testing.T) {
 		"64:ff9b::a00:1":    false,
 		"2002:a00:1::1":     false,
 		"fd00::1":           false,
+		"192.0.2.1":         false,
+		"198.51.100.1":      false,
+		"203.0.113.1":       false,
+		"::a00:1":           false,
+		"100::1":            false,
+		"2001:db8::1":       false,
+		"fec0::1":           false,
+		"3fff::1":           false,
 		"::1":               false,
 	} {
 		if got := publicAddress(host); got != want {

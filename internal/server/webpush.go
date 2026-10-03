@@ -194,7 +194,7 @@ func (k *vapidKey) authorization(endpoint, subject string, now time.Time) (strin
 		return "", errors.New("push endpoint is not an absolute URL")
 	}
 	claims := map[string]any{
-		"aud": parsed.Scheme + "://" + parsed.Host,
+		"aud": origin(parsed),
 		"exp": now.Add(vapidTokenLifetime).Unix(),
 	}
 	if subject != "" {
@@ -211,6 +211,19 @@ func (k *vapidKey) authorization(endpoint, subject string, now time.Time) (strin
 	r.FillBytes(signature[:32])
 	s.FillBytes(signature[32:])
 	return "vapid t=" + unsigned + "." + encodeBase64URL(signature) + ", k=" + k.public, nil
+}
+
+// origin is a URL's origin as push services compare a VAPID audience
+// (RFC 6454): the scheme and host lowercased, without a default port.
+func origin(u *url.URL) string {
+	scheme, host := strings.ToLower(u.Scheme), strings.ToLower(u.Hostname())
+	if strings.Contains(host, ":") {
+		host = "[" + host + "]"
+	}
+	if port := u.Port(); port != "" && !(scheme == "https" && port == "443") && !(scheme == "http" && port == "80") {
+		host += ":" + port
+	}
+	return scheme + "://" + host
 }
 
 // pushTTL is how long a push service keeps an undelivered webpush message,

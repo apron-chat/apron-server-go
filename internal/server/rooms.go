@@ -247,6 +247,7 @@ func (s *Server) addMemberLocked(u *userState, r *roomState) jsontext.Value {
 	r.active[u.id] = r.latestID
 	s.deliverMembershipLocked(membership, r, u)
 	s.announceJoinStatusLocked(u, r)
+	s.unreadChangedLocked(u, r.id)
 	return membership
 }
 
@@ -332,7 +333,7 @@ func (s *Server) leaveLocked(u *userState, r *roomState) bool {
 		s.hideThreadsLocked(u, r)
 	}
 	// The room no longer counts toward the user's unread (§4.7).
-	s.badgeLocked(u, time.Now())
+	s.unreadChangedLocked(u, r.id)
 	return true
 }
 
@@ -416,8 +417,8 @@ func (s *Server) announceRoomLocked(r *roomState, editor *userState) {
 	frame := roomUpdate("updated", s.roomParamsLocked(r))
 	now := time.Now()
 	for _, member := range audience {
-		if record := member.withRoomMute(s.roomParamsLocked(r), r, now); record["mute"] != nil {
-			member.send(roomUpdate("updated", record))
+		if mute, ok := member.roomMutes[r.id]; ok && mute.active(now) && member.joined[r.id] != nil {
+			member.send(roomUpdate("updated", member.withRoomMute(s.roomParamsLocked(r), r, now)))
 		} else {
 			member.send(frame)
 		}
@@ -984,9 +985,8 @@ func parseLimit(params map[string]jsontext.Value, defaultLimit int) (int, *rpcEr
 // activity applies a connection's activity (§4.4). typing and a read cursor
 // in a room are relayed to the room's members; a read cursor must name a
 // message and only advances, and the server keeps the latest per user and
-// sends it after the room is listed. Typing is held back from connections
-// that do not attend the room (§4.11): idle ones, and those attending
-// another room. A frame whose fields change nothing relays nothing.
+// sends it after the room is listed. Typing is held back from idle
+// connections (§4.11). A frame whose fields change nothing relays nothing.
 func (s *Server) activity(c *client, req request) (any, bool, *rpcError) {
 	roomID, err := parseString(req.params, "room_id", false)
 	if err != nil {
@@ -1055,15 +1055,15 @@ func (s *Server) activity(c *client, req request) (any, bool, *rpcError) {
 			s.deliverLocked(map[string]any{"method": "activity", "params": params}, r)
 		}
 	} else {
-		// Typing goes only to connections attending the room; a read cursor
-		// in the same frame goes to every connection.
+		// Typing goes only to attended connections; a read cursor in the
+		// same frame goes to every connection.
 		withTyping := maps.Clone(params)
 		withTyping["typing"] = typing
 		typingFrame, readFrame := render(map[string]any{"method": "activity", "params": withTyping}), render(map[string]any{"method": "activity", "params": params})
 		for _, member := range r.members {
 			for other := range member.clients {
 				switch {
-				case other.attends(r):
+				case other.attended():
 					other.enqueue(typingFrame)
 				case read:
 					other.enqueue(readFrame)
@@ -1073,7 +1073,7 @@ func (s *Server) activity(c *client, req request) (any, bool, *rpcError) {
 	}
 	if read {
 		// Reading lowers the unread count the user's other devices show.
-		s.badgeLocked(u, time.Now())
+		s.unreadChangedLocked(u, r.id)
 	}
 	return result, true, nil
 }

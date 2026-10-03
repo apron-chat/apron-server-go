@@ -218,6 +218,18 @@ func TestVAPIDAuthorization(t *testing.T) {
 	if len(signature) != 64 || !ecdsa.Verify(public, digest[:], new(big.Int).SetBytes(signature[:32]), new(big.Int).SetBytes(signature[32:])) {
 		t.Fatal("the VAPID signature does not verify")
 	}
+	// The audience is the origin, lowercased, without a default port.
+	for endpoint, want := range map[string]string{
+		"HTTPS://Push.Example.NET:443/x": "https://push.example.net",
+		"https://push.example.net:8443/": "https://push.example.net:8443",
+		"http://[::1]:80/x":              "http://[::1]",
+	} {
+		header, _ := key.authorization(endpoint, "", now)
+		token, _, _ := strings.Cut(strings.TrimPrefix(header, "vapid t="), ", k=")
+		if got := decode(strings.Split(token, ".")[1])["aud"]; got != want {
+			t.Errorf("aud for %s = %v, want %s", endpoint, got, want)
+		}
+	}
 	// Without a subject the token has no sub.
 	header, _ = key.authorization("https://push.example.net/x", "", now)
 	token, _, _ = strings.Cut(strings.TrimPrefix(header, "vapid t="), ", k=")

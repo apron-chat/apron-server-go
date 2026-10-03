@@ -283,6 +283,9 @@ func run(logger *slog.Logger, options Options) error {
 		serve("debug server", newServer(debugHandler()), listener)
 	}
 	logger.Info("serving", "store", options.Store, "static_dir", options.StaticDir, "upload_dir", options.Upload.Dir)
+	if !options.Push.Disable && config.VAPIDSubject == "" && !strings.HasPrefix(config.PublicURL, "https://") {
+		logger.Warn("webpush has no VAPID subject, which some push services refuse; set --push.vapid-subject or an https --public-url")
+	}
 	if options.Email.Enable && options.Email.Sender == "log" {
 		logger.Warn("email sign-in codes are written to this log, not sent; use --email.sender smtp in a deployment")
 	}

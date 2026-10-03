@@ -121,11 +121,6 @@ func (s *Server) saveMessage(c *client, req request) (any, bool, *rpcError) {
 	s.mu.Lock()
 	defer s.unlock()
 	u := c.user
-	// A message from a connection ends its idle (§4.11).
-	if c.idle {
-		c.idle = false
-		s.statusChangedLocked(u, nil, false)
-	}
 	destination := s.visibleRoomLocked(u, roomID)
 	if destination == nil {
 		return nil, false, invalidParams("Unknown room %q", roomID)
@@ -220,6 +215,7 @@ func (s *Server) saveMessage(c *client, req request) (any, bool, *rpcError) {
 		current = &messageState{id: messageID, from: from, owner: u.id, reactions: make(map[string]reactionSet)}
 		s.messages[messageID] = current
 	}
+	source := current.roomID
 	moved := s.commitSnapshotLocked(current, snapshot, logID)
 	if deleted {
 		s.redactLocked(current)
@@ -227,15 +223,16 @@ func (s *Server) saveMessage(c *client, req request) (any, bool, *rpcError) {
 	if moved && len(current.reactions) > 0 {
 		s.commitReactionsLocked(current, current.reactionElements())
 	}
-	s.wakeLocked(current, snapshot, previous)
-	switch {
-	case !replacing:
-		// The author's own message moves their read position (§4.7).
-		s.badgeLocked(u, time.Now())
-	case deleted:
-		// The message no longer counts toward anyone's unread.
-		s.badgeRoomLocked(destination, previous)
+	var movedFrom *roomState
+	if moved {
+		movedFrom = s.rooms[source]
 	}
+	s.messageUnreadLocked(current, previous, movedFrom)
+	if !replacing {
+		// The author's own message moves their read position (§4.7).
+		s.unreadChangedLocked(u, destination.id)
+	}
+	s.wakeLocked(current, snapshot, previous)
 	result := map[string]any{"message_id": messageID}
 	if len(written) > 0 {
 		result["embeds"] = written
@@ -275,6 +272,7 @@ func (s *Server) commitSnapshotLocked(m *messageState, snapshot map[string]any, 
 		destination.active[m.owner] = logID
 	}
 	record := newLogRecord(logID, kindMessage, snapshot)
+	record.message = m.id
 	m.records = append(m.records, record)
 	s.touchMessage(m)
 	s.appendLocked(record, rooms...)

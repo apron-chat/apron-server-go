@@ -2,24 +2,30 @@ package server
 
 import (
 	"context"
-	"reflect"
 	"testing"
 	"time"
 
 	"github.com/coder/websocket"
 )
 
-// status sends a status notification.
-func (c *testClient) status(t *testing.T, params map[string]any) {
+// status sends a status notification and returns the frames it caused on
+// c, after the server has processed it.
+func (c *testClient) status(t *testing.T, params map[string]any) []map[string]any {
 	t.Helper()
 	c.write(t, map[string]any{"method": "status", "params": params})
+	return c.drain(t)
 }
 
 // expectStatus reads a user notification announcing userID's status, as
-// `new`, or as `you` when userID is c's own.
+// `new`, or as `you` when userID is c's own, and returns the object.
 func expectStatus(t *testing.T, c *testClient, userID, status string) map[string]any {
 	t.Helper()
-	params := c.notification(t, "user")
+	return checkStatus(t, c.read(t), c, userID, status)
+}
+
+func checkStatus(t *testing.T, frame map[string]any, c *testClient, userID, status string) map[string]any {
+	t.Helper()
+	params := notificationParams(t, frame, "user")
 	field := "new"
 	if userID == c.userID {
 		field = "you"
@@ -29,6 +35,16 @@ func expectStatus(t *testing.T, c *testClient, userID, status string) map[string
 		t.Fatalf("user notification = %#v, want %s %s %s", params, field, userID, status)
 	}
 	return object
+}
+
+// echoed checks that a status update caused exactly one `you` echo on its
+// connection, and returns it.
+func echoed(t *testing.T, c *testClient, frames []map[string]any, status string) map[string]any {
+	t.Helper()
+	if len(frames) != 1 {
+		t.Fatalf("frames after status: %#v", frames)
+	}
+	return checkStatus(t, frames[0], c, c.userID, status)
 }
 
 // listedStatus is userID's status in the users of a room_list of general.
@@ -54,11 +70,12 @@ func serverClient(t *testing.T, app *Server, c *testClient) *client {
 	return nil
 }
 
-// A user's status (§4.11) is online while a connection is attended, idle
-// while an idle connection or a push registration can notify them, dnd
-// when muted, and offline otherwise or when invisible. Changes go to the
-// status-aware connections of those who share a room, as `new`, and to
-// the user's own, as `you`; every current user object carries it.
+// A user's status (§4.11) is, in order: offline when invisible, dnd while
+// the unscoped mute is set, online while a connection is attended, idle
+// while an idle connection or a push registration can notify them, and
+// offline otherwise. Changes go to the status-aware connections of those
+// who share a room, as `new`, and to the user's own, as `you`; every
+// current user object carries it.
 func TestStatusDerivationAndBroadcast(t *testing.T) {
 	config := DefaultConfig()
 	config.WebAuthn = testWebAuthn(t)
@@ -66,74 +83,77 @@ func TestStatusDerivationAndBroadcast(t *testing.T) {
 	app, httpServer := newTestServer(t, config)
 	clients := dialGroup(t, httpServer, 2)
 	a, b := clients[0], clients[1]
-	// a reports its status, so it is told of changes; b's own changes
-	// echo to b once b has sent status too.
-	a.result(t, "status", "aware", map[string]any{"idle": false})
+	// a reports its status, so it is told of changes, but nothing changed.
+	if frames := a.status(t, map[string]any{"idle": false}); len(frames) != 0 {
+		t.Fatalf("frames after an unchanged status: %#v", frames)
+	}
 	if got := listedStatus(t, a, b.userID); got != "online" {
 		t.Fatalf("listed status: %v", got)
 	}
-	b.status(t, map[string]any{"idle": true})
+	echoed(t, b, b.status(t, map[string]any{"idle": true}), "idle")
 	expectStatus(t, a, b.userID, "idle")
-	expectStatus(t, b, b.userID, "idle")
 	if got := listedStatus(t, a, b.userID); got != "idle" {
 		t.Fatalf("listed status after idle: %v", got)
 	}
-	b.status(t, map[string]any{"idle": false})
+	echoed(t, b, b.status(t, map[string]any{"idle": false}), "online")
 	expectStatus(t, a, b.userID, "online")
-	expectStatus(t, b, b.userID, "online")
-	// Scoped idle: false attends a room, and the connection with it.
-	b.status(t, map[string]any{"idle": true})
-	expectStatus(t, a, b.userID, "idle")
-	expectStatus(t, b, b.userID, "idle")
-	b.status(t, map[string]any{"room_id": "general", "idle": false})
-	expectStatus(t, a, b.userID, "online")
-	expectStatus(t, b, b.userID, "online")
+	// idle is unscoped: a scoped idle, or invisible, is ignored.
+	if frames := b.status(t, map[string]any{"room_id": "general", "idle": true, "invisible": true}); len(frames) != 0 {
+		t.Fatalf("frames after a scoped idle: %#v", frames)
+	}
+	a.expectQuiet(t)
 
-	// Invisible shows offline to others, until changed; the user still
-	// sees what others see in `you`.
-	b.status(t, map[string]any{"invisible": true})
+	// Invisible shows offline to others; the user's own status ignores it,
+	// and `you` echoes invisible.
+	you := echoed(t, b, b.status(t, map[string]any{"invisible": true}), "online")
+	if you["invisible"] != true || you["mute"] != float64(0) {
+		t.Fatalf("invisible echo: %#v", you)
+	}
 	expectStatus(t, a, b.userID, "offline")
-	expectStatus(t, b, b.userID, "offline")
 	if got := listedStatus(t, a, b.userID); got != "offline" {
 		t.Fatalf("listed status while invisible: %v", got)
 	}
-	b.status(t, map[string]any{"room_id": "general", "invisible": false})
-	b.expectQuiet(t) // A room has no invisibility.
-	b.status(t, map[string]any{"invisible": false})
+	if got := b.result(t, "me", "me-invisible", map[string]any{})["you"].(map[string]any); got["status"] != "online" || got["invisible"] != true {
+		t.Fatalf("you while invisible: %#v", got)
+	}
+	if you := echoed(t, b, b.status(t, map[string]any{"invisible": false}), "online"); you["invisible"] != false {
+		t.Fatalf("visible echo: %#v", you)
+	}
 	expectStatus(t, a, b.userID, "online")
-	expectStatus(t, b, b.userID, "online")
 
-	// A muted user who is here is online; muted and idle is dnd. The mute
-	// is echoed to the user only.
-	b.status(t, map[string]any{"mute": true})
-	if you := expectStatus(t, b, b.userID, "online"); you["mute"] != true {
+	// The unscoped mute is dnd, attended or not, and is echoed to the user
+	// only.
+	if you := echoed(t, b, b.status(t, map[string]any{"mute": true}), "dnd"); you["mute"] != true {
 		t.Fatalf("mute echo: %#v", you)
 	}
+	expectStatus(t, a, b.userID, "dnd")
 	if kept := b.result(t, "me", "me", map[string]any{})["you"].(map[string]any); kept["mute"] != true {
 		t.Fatalf("you without the mute: %#v", kept)
 	}
-	b.status(t, map[string]any{"idle": true})
-	expectStatus(t, a, b.userID, "dnd")
-	expectStatus(t, b, b.userID, "dnd")
-	listed := listRooms(t, a, map[string]any{"room_id": "general", "members": true})["users"].([]any)
-	for _, user := range listed {
+	for _, user := range listRooms(t, a, map[string]any{"room_id": "general", "members": true})["users"].([]any) {
 		if _, has := user.(map[string]any)["mute"]; has {
 			t.Fatalf("mute shown to others: %#v", user)
 		}
 	}
-	b.status(t, map[string]any{"mute": 0})
-	if you := expectStatus(t, b, b.userID, "idle"); you["mute"] != float64(0) {
-		t.Fatalf("unmute echo: %#v", you)
-	}
-	expectStatus(t, a, b.userID, "idle")
-
-	// A message from an idle connection ends its idle.
-	before, _ := b.request(t, "message", "back", map[string]any{"body": map[string]any{"text": "back"}})
-	if !reflect.DeepEqual(methods(before), []string{"user", "message"}) || before[0]["params"].(map[string]any)["you"].(map[string]any)["status"] != "online" {
-		t.Fatalf("frames before a message from an idle connection: %#v", before)
+	// A room's mute is not dnd.
+	frames := b.status(t, map[string]any{"mute": 0})
+	if len(frames) != 1 || checkStatus(t, frames[0], b, b.userID, "online")["mute"] != float64(0) {
+		t.Fatalf("unmute echo: %#v", frames)
 	}
 	expectStatus(t, a, b.userID, "online")
+	if frames := b.status(t, map[string]any{"room_id": "general", "mute": true}); len(frames) != 1 || frames[0]["method"] != "room_update" {
+		t.Fatalf("frames after a room mute: %#v", frames)
+	}
+	a.expectQuiet(t)
+
+	// Only idle: false ends idle; a message from the connection does not.
+	echoed(t, b, b.status(t, map[string]any{"idle": true}), "idle")
+	expectStatus(t, a, b.userID, "idle")
+	save(t, b, "still-idle", map[string]any{"body": map[string]any{"text": "still idle"}})
 	a.notification(t, "message")
+	a.expectQuiet(t)
+	echoed(t, b, b.status(t, map[string]any{"idle": false}), "online")
+	expectStatus(t, a, b.userID, "online")
 
 	// An account without a connection is idle while a live push
 	// registration can notify it, and offline otherwise.
@@ -146,22 +166,30 @@ func TestStatusDerivationAndBroadcast(t *testing.T) {
 	}
 	expectMembership(t, b, "general", ownerID, true)
 	expectStatus(t, b, ownerID, "online")
-	a.expectQuiet(t)
+	// A registration that wakes only for badge cannot notify; one that
+	// wakes for messages can.
+	owner.result(t, "push_register", "badge", map[string]any{"kind": "relay", "url": "http://relay.example/badge", "wake": []any{"badge"}})
+	app.mu.RLock()
+	badgeOnly := app.users[ownerID].notifiable(time.Now())
+	app.mu.RUnlock()
+	if badgeOnly {
+		t.Fatal("a badge-only registration makes the user notifiable")
+	}
+	owner.result(t, "push_unregister", "unregister-badge", map[string]any{"url": "http://relay.example/badge"})
 	owner.result(t, "push_register", "push", map[string]any{"kind": "relay", "url": "http://relay.example/p"})
 	_ = owner.ws.Close(websocket.StatusNormalClosure, "bye")
 	expectStatus(t, a, ownerID, "idle")
 	expectStatus(t, b, ownerID, "idle")
+	// An expired registration no longer counts, and the sweep says so.
 	app.mu.Lock()
-	app.removePushLocked(app.users[ownerID].pushes["http://relay.example/p"])
-	app.statusChangedLocked(app.users[ownerID], nil, false)
+	app.users[ownerID].pushes["http://relay.example/p"].renewed = time.Now().Add(-pushExpiry)
+	app.expirePushesLocked(app.users[ownerID], time.Now())
 	app.unlock()
 	expectStatus(t, a, ownerID, "offline")
 	expectStatus(t, b, ownerID, "offline")
 	if got := listedStatus(t, a, ownerID); got != "offline" {
 		t.Fatalf("listed status of an account away: %v", got)
 	}
-	a.expectQuiet(t)
-	b.expectQuiet(t)
 
 	// A connection that never sent status is told of no changes, though
 	// current objects still carry the status.
@@ -170,34 +198,53 @@ func TestStatusDerivationAndBroadcast(t *testing.T) {
 	expectStatus(t, a, c.userID, "online")
 	expectMembership(t, b, "general", c.userID, true)
 	expectStatus(t, b, c.userID, "online")
-	b.status(t, map[string]any{"idle": true})
+	echoed(t, b, b.status(t, map[string]any{"idle": true}), "idle")
 	expectStatus(t, a, b.userID, "idle")
-	expectStatus(t, b, b.userID, "idle")
 	c.expectQuiet(t)
 	if got := listedStatus(t, c, b.userID); got != "idle" {
 		t.Fatalf("listed status for a client that never sent status: %v", got)
 	}
 }
 
+// A flapping user's changes reach others at once for a few, then coalesced
+// to the latest at most every statusCoalesce.
+func TestStatusChangesCoalesce(t *testing.T) {
+	_, httpServer := newTestServer(t, DefaultConfig())
+	clients := dialGroup(t, httpServer, 2)
+	a, b := clients[0], clients[1]
+	a.status(t, map[string]any{"idle": false})
+	// b's first status, online when it signed in, took one of the burst.
+	for i := range statusBurst - 1 {
+		idle := i%2 == 0
+		b.status(t, map[string]any{"idle": idle})
+		expectStatus(t, a, b.userID, map[bool]string{true: "idle", false: "online"}[idle])
+	}
+	// Past the burst, changes wait, and only the latest is sent.
+	for _, idle := range []bool{false, true, false} {
+		b.status(t, map[string]any{"idle": idle})
+	}
+	a.expectQuiet(t)
+	time.Sleep(statusCoalesce + 200*time.Millisecond)
+	expectStatus(t, a, b.userID, "online")
+	a.expectQuiet(t)
+}
+
 // status is accepted before authentication: the connection's idle applies
-// at once, and the user's fields once it signs in (§4.11).
+// at once, and the user's fields once it signs in (§4.11). It is never
+// answered, even with an id (§1).
 func TestStatusBeforeAuth(t *testing.T) {
 	_, httpServer := newTestServer(t, DefaultConfig())
 	a := dialTestClient(t, httpServer)
-	a.result(t, "status", "aware", map[string]any{"idle": false})
+	a.status(t, map[string]any{"idle": false})
 	c, _ := dialRaw(t, httpServer)
-	c.status(t, map[string]any{"invisible": true})
-	c.status(t, map[string]any{"mute": 60})
-	c.status(t, map[string]any{"room_id": "general", "mute": true})
-	c.status(t, map[string]any{"room_id": "missing", "mute": true})
-	c.status(t, map[string]any{"idle": true})
-	// With an id, status is answered, before authentication too.
-	if result := c.result(t, "status", "early", map[string]any{"idle": true}); len(result) != 0 {
-		t.Fatalf("status result: %#v", result)
-	}
-	c.expectError(t, "status", "bad", map[string]any{"mute": -1}, codeInvalidParams)
+	c.write(t, map[string]any{"method": "status", "params": map[string]any{"invisible": true}})
+	c.write(t, map[string]any{"method": "status", "params": map[string]any{"mute": 60}})
+	c.write(t, map[string]any{"method": "status", "params": map[string]any{"room_id": "general", "mute": true}})
+	c.write(t, map[string]any{"method": "status", "params": map[string]any{"room_id": "missing", "mute": true}})
+	c.write(t, map[string]any{"method": "status", "id": "early", "params": map[string]any{"idle": true}})
+	c.write(t, map[string]any{"method": "status", "id": "bad", "params": map[string]any{"mute": -1}})
 	you := guestAuth(t, c)["you"].(map[string]any)
-	if you["status"] != "offline" || you["mute"] != float64(60) {
+	if you["status"] != "dnd" || you["mute"] != float64(60) || you["invisible"] != true {
 		t.Fatalf("you after auth: %#v", you)
 	}
 	// Invisible, the new member's join shows nothing to others.
@@ -211,25 +258,35 @@ func TestStatusBeforeAuth(t *testing.T) {
 	if got := listedStatus(t, a, c.userID); got != "offline" {
 		t.Fatalf("status of an invisible user: %v", got)
 	}
-	// After auth, a room the user cannot see is invalid_params, and so is
-	// a malformed field; neither changes anything.
-	for i, params := range []map[string]any{
+	// After auth, a room the user cannot see, or a room_id that is not a
+	// string, ignores the update; a malformed field is ignored on its own.
+	for _, params := range []map[string]any{
 		{"room_id": "missing", "mute": true},
-		{"idle": "yes"},
-		{"invisible": 1},
+		{"room_id": 5, "mute": 5},
 		{"mute": false},
 		{"mute": 1.5},
-		{"mute": "60"},
-		{"room_id": 5, "idle": true},
+		{"mute": "60", "idle": "yes", "invisible": 1},
 	} {
-		c.expectError(t, "status", "bad-"+formatID(int64(i)), params, codeInvalidParams)
+		if frames := c.status(t, params); len(frames) != 0 {
+			t.Fatalf("frames after %#v: %#v", params, frames)
+		}
 	}
-	c.expectQuiet(t)
+	if you := echoed(t, c, c.status(t, map[string]any{"idle": "yes", "invisible": false, "mute": 1.5}), "dnd"); you["invisible"] != false {
+		t.Fatalf("echo of the valid field: %#v", you)
+	}
+	expectStatus(t, a, c.userID, "dnd")
 	a.expectQuiet(t)
+
+	// Unset, invisible and mute are absent from the auth result's you.
+	d, _ := dialRaw(t, httpServer)
+	you = guestAuth(t, d)["you"].(map[string]any)
+	if _, has := you["mute"]; has || you["invisible"] != nil || you["status"] != "online" {
+		t.Fatalf("you of a user who set nothing: %#v", you)
+	}
 }
 
-// A user's room mute is echoed in the room records they receive (§3.4,
-// §4.11), and is theirs alone.
+// A user's room mute is a delivery field of the room records they receive
+// (§3.4, §4.11), and is theirs alone.
 func TestRoomMuteEcho(t *testing.T) {
 	_, httpServer := newTestServer(t, DefaultConfig())
 	clients := dialGroup(t, httpServer, 2)
@@ -237,13 +294,15 @@ func TestRoomMuteEcho(t *testing.T) {
 	ops, _ := saveRoom(t, a, "ops", map[string]any{"title": "Ops"})
 	joinRoom(t, b, ops)
 	expectMembership(t, a, ops, b.userID, true)
-	b.status(t, map[string]any{"room_id": ops, "mute": 120})
-	if record := roomUpdated(t, b, "updated"); record["room_id"] != ops || record["mute"] != float64(120) || record["title"] != "Ops" {
+	frames := b.status(t, map[string]any{"room_id": ops, "mute": 120})
+	if len(frames) != 1 {
+		t.Fatalf("frames after a room mute: %#v", frames)
+	}
+	if record := updateRecord(t, frames[0], "updated"); record["room_id"] != ops || record["mute"] != float64(120) || record["title"] != "Ops" {
 		t.Fatalf("room mute echo: %#v", record)
 	}
 	a.expectQuiet(t)
-	listed := listRooms(t, b, map[string]any{"filter": "joined"})["joined"].([]any)
-	for _, entry := range listed {
+	for _, entry := range listRooms(t, b, map[string]any{"filter": "joined"})["joined"].([]any) {
 		entry := entry.(map[string]any)
 		if mute, has := entry["mute"]; (entry["room_id"] == ops) != has || (has && mute != float64(120)) {
 			t.Fatalf("listing: %#v", entry)
@@ -258,53 +317,90 @@ func TestRoomMuteEcho(t *testing.T) {
 	if before, _ := b.request(t, "room_join", "again", map[string]any{"room_id": ops}); joinedRecord(t, before[0], b.userID)["mute"] != float64(120) {
 		t.Fatalf("joined record: %#v", before)
 	}
-	b.status(t, map[string]any{"room_id": ops, "mute": 0})
-	if record := roomUpdated(t, b, "updated"); record["mute"] != float64(0) {
-		t.Fatalf("room unmute echo: %#v", record)
+	// Scoped mute 0 removes the room's own mute, echoed as 0.
+	frames = b.status(t, map[string]any{"room_id": ops, "mute": 0})
+	if len(frames) != 1 || updateRecord(t, frames[0], "updated")["mute"] != float64(0) {
+		t.Fatalf("room unmute echo: %#v", frames)
 	}
-	listed = listRooms(t, b, map[string]any{"room_id": ops})["joined"].([]any)
-	if _, has := listed[0].(map[string]any)["mute"]; has {
+	if listed := listRooms(t, b, map[string]any{"room_id": ops})["joined"].([]any); listed[0].(map[string]any)["mute"] != nil {
 		t.Fatalf("listing after unmute: %#v", listed)
 	}
 	a.expectQuiet(t)
+
+	// A visible room the user has not joined may be muted: nothing is
+	// echoed until they join it, and its records carry the mute after.
+	news, _ := saveRoom(t, a, "news", map[string]any{"title": "News"})
+	if frames := b.status(t, map[string]any{"room_id": news, "mute": true}); len(frames) != 0 {
+		t.Fatalf("frames after muting an unjoined room: %#v", frames)
+	}
+	if listed := listRooms(t, b, map[string]any{"room_id": news})["not_joined"].([]any); listed[0].(map[string]any)["mute"] != nil {
+		t.Fatalf("unjoined listing: %#v", listed)
+	}
+	if record := joinRoom(t, b, news); record["mute"] != true {
+		t.Fatalf("joined record of a muted room: %#v", record)
+	}
+	expectMembership(t, a, news, b.userID, true)
+	// Others never see it: a's records of the room do not carry it.
+	saveRoom(t, a, "rename-news", map[string]any{"room_id": news, "title": "News!"})
+	if record := roomUpdated(t, b, "updated"); record["mute"] != true {
+		t.Fatalf("edit to the muting user: %#v", record)
+	}
+	if listed := listRooms(t, a, map[string]any{"room_id": news})["joined"].([]any); listed[0].(map[string]any)["mute"] != nil {
+		t.Fatalf("another member's listing: %#v", listed)
+	}
+	page := historyPage(t, b, news, map[string]any{})
+	for _, record := range records(t, page, "rooms") {
+		if _, has := record.(map[string]any)["mute"]; has {
+			t.Fatalf("history room record with a mute: %#v", record)
+		}
+	}
 }
 
-// A timed mute ends by itself, announced as if the user had ended it.
+// A change to mute or invisible is echoed to every connection of the user,
+// status-aware or not (§4.11).
+func TestMuteEchoReachesEveryConnection(t *testing.T) {
+	config := DefaultConfig()
+	config.WebAuthn = testWebAuthn(t)
+	_, httpServer := newTestServer(t, config)
+	first, _ := dialOrigin(t, httpServer, testPasskeyOrigin)
+	registered := registerTestPasskey(t, first, newTestAuthenticator(t))
+	second, _ := dialOrigin(t, httpServer, testPasskeyOrigin)
+	second.result(t, "auth", "resume", map[string]any{"scheme": "token", "token": registered["token"]})
+	second.userID = first.userID
+	first.drain(t)
+	first.status(t, map[string]any{"mute": 60})
+	if you := expectStatus(t, second, second.userID, "dnd"); you["mute"] != float64(60) || you["invisible"] != false {
+		t.Fatalf("echo to a connection that never sent status: %#v", you)
+	}
+}
+
+// A timed mute ends by itself. Clients count it down, so the mute is not
+// echoed, but the status that changes with it is announced.
 func TestMuteExpires(t *testing.T) {
 	_, httpServer := newTestServer(t, DefaultConfig())
 	clients := dialGroup(t, httpServer, 2)
 	a, b := clients[0], clients[1]
-	a.result(t, "status", "aware", map[string]any{"idle": false})
-	b.status(t, map[string]any{"idle": true})
-	expectStatus(t, a, b.userID, "idle")
-	expectStatus(t, b, b.userID, "idle")
-	b.status(t, map[string]any{"mute": 1})
-	expectStatus(t, a, b.userID, "dnd")
-	if you := expectStatus(t, b, b.userID, "dnd"); you["mute"] != float64(1) {
+	a.status(t, map[string]any{"idle": false})
+	if you := echoed(t, b, b.status(t, map[string]any{"mute": 1}), "dnd"); you["mute"] != float64(1) {
 		t.Fatalf("mute echo: %#v", you)
 	}
+	expectStatus(t, a, b.userID, "dnd")
 	time.Sleep(1100 * time.Millisecond)
-	expectStatus(t, a, b.userID, "idle")
-	if you := expectStatus(t, b, b.userID, "idle"); you["mute"] != float64(0) {
+	expectStatus(t, a, b.userID, "online")
+	if you := expectStatus(t, b, b.userID, "online"); len(you) != 2 {
 		t.Fatalf("expiry echo: %#v", you)
 	}
 }
 
-// Typing goes only to connections attending the room (§4.11); read
-// cursors go to every connection.
-func TestTypingGoesToAttendingConnections(t *testing.T) {
+// Typing is held back from idle connections (§4.11); read cursors go to
+// every connection.
+func TestTypingSkipsIdleConnections(t *testing.T) {
 	_, httpServer := newTestServer(t, DefaultConfig())
-	clients := dialGroup(t, httpServer, 4)
-	typist, elsewhere, idle, plain := clients[0], clients[1], clients[2], clients[3]
-	ops, _ := saveRoom(t, typist, "ops", map[string]any{"title": "Ops"})
-	elsewhere.result(t, "status", "ops", map[string]any{"room_id": ops, "idle": false})
-	if before, _ := idle.request(t, "status", "idle", map[string]any{"idle": true}); len(before) != 1 || before[0]["params"].(map[string]any)["you"].(map[string]any)["status"] != "idle" {
-		t.Fatalf("frames before the status result: %#v", before)
-	}
-	// Only connections that sent status are told.
-	expectStatus(t, elsewhere, idle.userID, "idle")
+	clients := dialGroup(t, httpServer, 3)
+	typist, idle, plain := clients[0], clients[1], clients[2]
+	echoed(t, idle, idle.status(t, map[string]any{"idle": true}), "idle")
 	id, _ := save(t, typist, "post", map[string]any{"body": map[string]any{"text": "hi"}})
-	for _, c := range []*testClient{elsewhere, idle, plain} {
+	for _, c := range []*testClient{idle, plain} {
 		c.notification(t, "message")
 	}
 	typist.write(t, map[string]any{"method": "activity", "params": map[string]any{"room_id": "general", "typing": 5}})
@@ -313,7 +409,6 @@ func TestTypingGoesToAttendingConnections(t *testing.T) {
 			t.Fatalf("typing: %#v", params)
 		}
 	}
-	elsewhere.expectQuiet(t)
 	idle.expectQuiet(t)
 	// A read cursor in the same frame still reaches every connection,
 	// without the typing.
@@ -321,44 +416,43 @@ func TestTypingGoesToAttendingConnections(t *testing.T) {
 	for _, c := range clients {
 		params := c.notification(t, "activity")
 		_, typing := params["typing"]
-		if params["read_message_id"] != id || typing != (c == typist || c == plain) {
+		if params["read_message_id"] != id || typing != (c != idle) {
 			t.Fatalf("activity to %s: %#v", c.userID, params)
 		}
 	}
-	// Attending general again, the connection gets typing there.
-	elsewhere.result(t, "status", "general", map[string]any{"room_id": "general", "idle": false})
-	typist.write(t, map[string]any{"method": "activity", "params": map[string]any{"room_id": "general", "typing": 5}})
-	for _, c := range []*testClient{typist, elsewhere, plain} {
-		c.notification(t, "activity")
-	}
-	// Scoped idle: true leaves a room without attending another.
-	elsewhere.result(t, "status", "leave-general", map[string]any{"room_id": "general", "idle": true})
-	typist.write(t, map[string]any{"method": "activity", "params": map[string]any{"room_id": "general", "typing": 5}})
-	for _, c := range []*testClient{typist, plain} {
-		c.notification(t, "activity")
-	}
-	elsewhere.expectQuiet(t)
-	idle.expectQuiet(t)
 }
 
-// A connection that has sent no frame for the silence that closes a
-// pinging client counts as idle until its next frame (§4.11).
+// A connection that never sent status counts as idle after sending nothing
+// but liveness pings for Config.SilentIdleAfter, until its next other frame
+// (§4.11).
 func TestSilentConnectionsAreIdle(t *testing.T) {
 	app, httpServer := newTestServer(t, DefaultConfig())
 	clients := dialGroup(t, httpServer, 2)
 	observer, quiet := clients[0], clients[1]
-	observer.result(t, "status", "aware", map[string]any{"idle": false})
+	observer.status(t, map[string]any{"idle": false})
 	app.silenceIdle(serverClient(t, app, quiet))
 	expectStatus(t, observer, quiet.userID, "idle")
-	// Any frame ends the silence, such as a notification nobody answers.
+	// A liveness ping does not end it; any other frame does, such as a
+	// notification nobody answers.
+	quiet.write(t, map[string]any{"method": "ping"})
+	if pong := quiet.read(t); pong["method"] != "pong" {
+		t.Fatalf("ping answered with %#v", pong)
+	}
+	observer.expectQuiet(t)
 	quiet.write(t, map[string]any{"method": "frobnicate"})
 	expectStatus(t, observer, quiet.userID, "online")
 	quiet.expectQuiet(t)
+	// A connection that sent status is never idle by silence.
+	app.silenceIdle(serverClient(t, app, observer))
+	if serverClient(t, app, observer).silent.Load() {
+		t.Fatal("a status-aware connection went idle by silence")
+	}
 
 	// pingLoop measures the silence.
 	config := DefaultConfig()
 	config.PingInterval = 20 * time.Millisecond
 	config.PingTimeout = 200 * time.Millisecond
+	config.SilentIdleAfter = 100 * time.Millisecond
 	app, httpServer = newTestServer(t, config)
 	silent := dialTestClient(t, httpServer)
 	connection := serverClient(t, app, silent)
@@ -371,10 +465,7 @@ func TestSilentConnectionsAreIdle(t *testing.T) {
 	app.mu.RLock()
 	status := app.users[silent.userID].statusAt(time.Now())
 	app.mu.RUnlock()
-	if !connection.silent.Load() || status != statusIdle {
-		t.Fatalf("a silent connection is not idle: silent=%v status=%s", connection.silent.Load(), status)
-	}
-	if !reflect.DeepEqual(ctx.Err(), nil) {
-		t.Fatalf("a silent connection that never pinged was closed: %v", ctx.Err())
+	if !connection.silent.Load() || status != statusIdle || ctx.Err() != nil {
+		t.Fatalf("a silent connection: silent=%v status=%s closed=%v", connection.silent.Load(), status, ctx.Err())
 	}
 }

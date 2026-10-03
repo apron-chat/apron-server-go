@@ -376,7 +376,11 @@ func TestReadCursors(t *testing.T) {
 	a.write(t, map[string]any{"method": "activity", "params": map[string]any{"room_id": "general", "read_message_id": first}})
 	b.expectQuiet(t)
 	a.expectQuiet(t)
-	a.expectError(t, "activity", "unknown", map[string]any{"room_id": "general", "read_message_id": "999"}, codeInvalidParams)
+	// activity is a notification: one sent with an id is processed as one,
+	// unanswered, and an unknown cursor changes nothing (§1).
+	a.write(t, map[string]any{"method": "activity", "id": "unknown", "params": map[string]any{"room_id": "general", "read_message_id": "999"}})
+	a.expectQuiet(t)
+	b.expectQuiet(t)
 
 	// Kept cursors follow a room_list result that lists the room: every
 	// member's for a joined room, only the user's own for another.

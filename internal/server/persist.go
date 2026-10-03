@@ -538,6 +538,7 @@ func (s *Server) restoreLocked() (map[string]bool, error) {
 		}
 		for _, logID := range stored.Records {
 			if record := records[logID]; record != nil {
+				record.message = id
 				m.records = append(m.records, record)
 			}
 		}
@@ -687,7 +688,7 @@ func (s *Server) restoreLocked() (map[string]bool, error) {
 		} else {
 			s.grantRolesLocked(u)
 			s.scheduleMuteLocked(u)
-			u.status = u.statusAt(now)
+			u.status, u.ownStatus = u.statusAt(now), u.ownStatusAt(now)
 		}
 	}
 	for _, id := range slices.Sorted(maps.Keys(s.embeds)) {

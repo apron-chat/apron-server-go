@@ -230,6 +230,8 @@ func TestLivenessPing(t *testing.T) {
 	}
 	ping(`{"method":"ping"}`)
 	ping(`{ "method": "ping", "params": {} }`)
+	// A ping with an id is a ping, answered with pong and nothing else (§1).
+	ping(`{"method":"ping","id":"p1"}`)
 	c.request(t, "auth", "auth", map[string]any{"scheme": "guest"})
 	ping(`{"method":"ping"}`)
 
@@ -1050,12 +1052,13 @@ func TestActivityRelaysTypingWithInlineIdentity(t *testing.T) {
 	if stop := c.notification(t, "activity"); stop["typing"] != float64(0) {
 		t.Fatalf("stop: %#v", stop)
 	}
-	c.expectError(t, "activity", "missing", map[string]any{"room_id": "missing", "typing": 8}, codeInvalidParams)
-	c.expectError(t, "activity", "negative", map[string]any{"room_id": thread, "typing": -1}, codeInvalidParams)
-
-	// away is gone from activity (§4.11 status replaces it): like any
-	// unknown field, it is ignored.
-	c.write(t, map[string]any{"method": "activity", "params": map[string]any{"away": true}})
-	c.result(t, "activity", "away", map[string]any{"away": "yes"})
+	// Invalid activity changes nothing, and, as a notification, is not
+	// answered even when sent with an id (§1).
+	c.write(t, map[string]any{"method": "activity", "id": "missing", "params": map[string]any{"room_id": "missing", "typing": 8}})
+	c.write(t, map[string]any{"method": "activity", "params": map[string]any{"room_id": thread, "typing": -1}})
+	c.write(t, map[string]any{"method": "activity", "id": "typing", "params": map[string]any{"room_id": thread, "typing": 1}})
+	if typing := c.notification(t, "activity"); typing["typing"] != float64(1) {
+		t.Fatalf("typing sent with an id: %#v", typing)
+	}
 	c.expectQuiet(t)
 }

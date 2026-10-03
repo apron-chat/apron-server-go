@@ -7,6 +7,7 @@ import (
 	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"errors"
+	"io"
 	"maps"
 	"net"
 	"net/http"
@@ -14,7 +15,6 @@ import (
 	"net/url"
 	"regexp"
 	"slices"
-	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -28,28 +28,29 @@ const (
 	maxPushURLBytes  = 2048
 	maxPushTokenLen  = 4096
 	// maxPushPayloadBytes bounds the JSON payload every kind delivers (§4.7).
-	maxPushPayloadBytes = 3072
+	maxPushPayloadBytes = 2048
 	// maxWakeScopes and maxWakeScopeBytes bound a registration's wake list.
 	maxWakeScopes     = 16
 	maxWakeScopeBytes = 64
 	// pushExpiry is how long a registration lasts unless registered again
-	// (§4.7); clients register on each connection.
-	pushExpiry  = 30 * 24 * time.Hour
-	pushTimeout = 10 * time.Second
+	// (§4.7); clients register on each connection. pushSweepInterval is how
+	// often expired registrations are looked for.
+	pushExpiry        = 30 * 24 * time.Hour
+	pushSweepInterval = time.Hour
+	pushTimeout       = 10 * time.Second
 	// Deliveries run in lanes per push host, at most maxPushPerHost at once
 	// to one host, and at most maxConcurrentPushPOST in all. A user has at
-	// most maxPushQueuedPerUser deliveries waiting or running, and the server
-	// at most maxPushQueued; beyond them a delivery is dropped, as pushes are
-	// best effort.
+	// most maxPushQueuedPerUser deliveries waiting or running, a host
+	// maxPushQueuedPerHost, and the server maxPushQueued; beyond them a
+	// delivery is dropped, as pushes are best effort.
 	maxConcurrentPushPOST = 32
 	maxPushPerHost        = 8
 	maxPushQueuedPerUser  = 20
+	maxPushQueuedPerHost  = 256
 	maxPushQueued         = 1024
-	// maxUnread caps the unread count a push carries, and maxUnreadScan the
-	// records one room's count looks through, newest first, so counting
-	// stays cheap for a user who never reads a busy room.
-	maxUnread     = 999
-	maxUnreadScan = 5000
+	// maxPushResponseDrain is how much of a push service's answer is read so
+	// that its connection can be reused.
+	maxPushResponseDrain = 64 << 10
 )
 
 // wakeScope is a set of wake scopes (§4.7).
@@ -63,8 +64,8 @@ const (
 	wakeBadge
 	// defaultWake is the scopes of a registration without wake.
 	defaultWake = wakeMentions | wakeReplies
-	// messageScopes are the scopes that select new messages.
-	messageScopes = wakeMentions | wakeReplies | wakePrivate | wakeJoined
+	// urgentScopes push with Urgency high; joined is normal, badge low.
+	urgentScopes = wakeMentions | wakeReplies | wakePrivate
 )
 
 // wakeScopeNames lists the scopes this server implements, in the order
@@ -128,6 +129,12 @@ func (p *pushRegistration) live(now time.Time) bool {
 	return now.Before(p.renewed.Add(pushExpiry))
 }
 
+// takesBadges reports whether the registration gets badge pushes: it has
+// scope badge, which webpush ignores (§4.7).
+func (p *pushRegistration) takesBadges() bool {
+	return p.wake&wakeBadge != 0 && p.kind != "webpush"
+}
+
 // pushKey identifies a registration in Server.pushes and the store: its
 // user and url, which holds no space.
 func pushKey(userID, url string) string {
@@ -144,6 +151,7 @@ func (s *Server) addPushLocked(u *userState, p *pushRegistration) {
 }
 
 // removePushLocked forgets a registration, if it is still the one recorded.
+// A user left without registrations has no unread counts kept.
 func (s *Server) removePushLocked(p *pushRegistration) {
 	key := pushKey(p.userID, p.url)
 	if s.pushes[key] != p {
@@ -153,14 +161,19 @@ func (s *Server) removePushLocked(p *pushRegistration) {
 	s.touchPush(key)
 	if u := s.users[p.userID]; u != nil && u.pushes[p.url] == p {
 		delete(u.pushes, p.url)
+		if len(u.pushes) == 0 {
+			u.unread = nil
+			s.stopBadgeLocked(u)
+		}
 	}
 }
 
-// livePush reports whether the user has a registration that has not
-// expired, which can notify them (§4.11).
-func (u *userState) livePush(now time.Time) bool {
+// notifiable reports whether the user has a registration that has not
+// expired and wakes for messages, a scope other than badge, which can
+// notify them (§4.11).
+func (u *userState) notifiable(now time.Time) bool {
 	for _, p := range u.pushes {
-		if p.live(now) {
+		if p.live(now) && p.wake&^wakeBadge != 0 {
 			return true
 		}
 	}
@@ -284,18 +297,45 @@ func (s *Server) unregisterPush(c *client, req request) (any, bool, *rpcError) {
 }
 
 // expirePushesLocked forgets the user's registrations that were not
-// registered again within pushExpiry.
+// registered again within pushExpiry, announcing the status that may change
+// with them (§4.11).
 func (s *Server) expirePushesLocked(u *userState, now time.Time) {
+	expired := false
 	for _, p := range u.pushes {
 		if !p.live(now) {
 			s.removePushLocked(p)
+			expired = true
+		}
+	}
+	if expired {
+		s.statusChangedLocked(u, nil, false)
+	}
+}
+
+// sweepPushes forgets expired registrations every pushSweepInterval until
+// the server shuts down, so a user's status stops showing them idle.
+func (s *Server) sweepPushes() {
+	ticker := time.NewTicker(pushSweepInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-s.stopped:
+			return
+		case <-ticker.C:
+			s.mu.Lock()
+			now := time.Now()
+			for _, id := range slices.Sorted(maps.Keys(s.users)) {
+				s.expirePushesLocked(s.users[id], now)
+			}
+			s.unlock()
 		}
 	}
 }
 
 // checkPushURL requires an absolute https URL (http too with
-// AllowInsecurePush) without credentials or whitespace. Internal addresses
-// are refused when dialing.
+// AllowInsecurePush) without credentials or whitespace, naming a host that
+// is not an internal address literal or localhost. Names that resolve to
+// internal addresses are refused when dialing.
 func (s *Server) checkPushURL(endpoint string) string {
 	parsed, err := url.Parse(endpoint)
 	if err != nil || parsed.Host == "" || parsed.User != nil || strings.ContainsFunc(endpoint, func(r rune) bool { return r <= ' ' }) {
@@ -303,6 +343,13 @@ func (s *Server) checkPushURL(endpoint string) string {
 	}
 	if parsed.Scheme != "https" && !(s.config.AllowInsecurePush && parsed.Scheme == "http") {
 		return "url must use https"
+	}
+	if s.config.AllowInsecurePush {
+		return ""
+	}
+	host := strings.ToLower(strings.TrimSuffix(parsed.Hostname(), "."))
+	if _, err := netip.ParseAddr(host); err == nil && !publicAddress(host) || host == "localhost" || strings.HasSuffix(host, ".localhost") {
+		return "url must name a public host"
 	}
 	return ""
 }
@@ -314,12 +361,15 @@ func (s *Server) checkPushURL(endpoint string) string {
 // mentions) and the author of the message it replies to (replies), in any
 // room they can see, and the room's members (joined, and private in a room
 // only some can see). An edit concerns only the users it adds to
-// body.mentions. The author is never woken by their own message.
+// body.mentions. Nobody is woken by their own message.
 //
 // Each concerned user is woken only when no connection of theirs is
-// attended (§4.11) and they are not muted; a room they muted wakes them only
-// for mentions. Each live registration whose wake scopes include a reason
-// of theirs gets the payload with its push_id and unread count.
+// attended (§4.11). Their unscoped mute silences every scope, and their
+// mute of the room, or of a room it is a thread of, every scope but
+// mentions; what is silenced reaches them only as a badge push
+// (badgeLocked). Each live registration whose wake scopes select the
+// message gets the payload with its push_id and the user's unread count,
+// with the most urgent Urgency of the scopes that select it.
 func (s *Server) wakeLocked(m *messageState, snapshot, previous map[string]any) {
 	if s.config.DisablePush || len(s.pushes) == 0 || snapshot["deleted"] == true {
 		return
@@ -353,41 +403,31 @@ func (s *Server) wakeLocked(m *messageState, snapshot, previous map[string]any) 
 	}
 	delete(reasons, m.owner)
 	now := time.Now()
-	messageID, _ := strconv.ParseInt(m.id, 10, 64)
-	const urgent = wakeMentions | wakeReplies | wakePrivate
 	for _, id := range slices.Sorted(maps.Keys(reasons)) {
 		u := s.users[id]
-		if u == nil || len(u.pushes) == 0 || !r.visibleTo(u) {
+		if u == nil || len(u.pushes) == 0 || !r.visibleTo(u) || u.attended() || u.mute.active(now) {
 			continue
 		}
-		if u.joined[r.id] == nil && reasons[id]&(wakeMentions|wakeReplies) != 0 {
-			// A room the user has not joined counts toward unread from the
-			// first message there that mentioned or replied to them.
-			if since, ok := u.pings[r.id]; !ok || since > messageID {
-				u.pings[r.id] = messageID
-				s.touchUser(u.id)
-			}
+		why := reasons[id]
+		if u.roomMuted(r, now) {
+			why &= wakeMentions
 		}
-		if u.attended() || u.mute.active(now) {
-			continue
-		}
-		roomMuted := u.roomMuted(r.id, now)
 		s.expirePushesLocked(u, now)
+		unread := -1
 		for _, p := range sortedPushes(u) {
-			scopes := reasons[id] & p.wake
-			if roomMuted {
-				scopes &= wakeMentions
-			}
+			scopes := why & p.wake
 			if scopes == 0 {
 				continue
 			}
-			unread := s.unreadLocked(u, p.wake, now)
+			if unread < 0 {
+				unread = s.unreadLocked(u, now)
+			}
 			p.lastUnread = unread
 			urgency := "normal"
-			if scopes&urgent != 0 {
+			if scopes&urgentScopes != 0 {
 				urgency = "high"
 			}
-			s.deliverPushLocked(p, pushPayload(p.pushID, unread, snapshot), urgency)
+			s.deliverPushLocked(p, pushPayload(p.pushID, unread, snapshot), urgency, false)
 		}
 	}
 }
@@ -401,9 +441,10 @@ func sortedPushes(u *userState) []*pushRegistration {
 }
 
 // deliverPushLocked hands a payload to the deliverer, forgetting the
-// registration if its endpoint answers that it is gone.
-func (s *Server) deliverPushLocked(p *pushRegistration, payload []byte, urgency string) {
-	s.push.deliver(*p, payload, urgency, func(gone bool) {
+// registration if its endpoint answers that it is gone. A badge push
+// replaces one still waiting for the same registration.
+func (s *Server) deliverPushLocked(p *pushRegistration, payload []byte, urgency string, badge bool) {
+	done := func(gone bool) {
 		if gone {
 			s.mu.Lock()
 			s.removePushLocked(p)
@@ -412,133 +453,12 @@ func (s *Server) deliverPushLocked(p *pushRegistration, payload []byte, urgency 
 			}
 			s.unlock()
 		}
-	})
-}
-
-// badgeLocked sends a badge push (§4.7), {push_id, unread} without a
-// message, to each of the user's registrations with scope badge whose
-// unread count changed since it last received one: after the user reads,
-// posts, leaves a room, or changes a mute, or after a message they counted
-// is deleted. It goes to attended users too, whose other devices show the
-// count, but not to muted ones. webpush registrations get none: a browser
-// shows a notification for every push.
-func (s *Server) badgeLocked(u *userState, now time.Time) {
-	if s.config.DisablePush || len(u.pushes) == 0 || u.mute.active(now) {
-		return
 	}
-	for _, p := range sortedPushes(u) {
-		if p.wake&wakeBadge == 0 || p.kind == "webpush" || !p.live(now) {
-			continue
-		}
-		unread := s.unreadLocked(u, p.wake, now)
-		if unread == p.lastUnread {
-			continue
-		}
-		p.lastUnread = unread
-		payload := map[string]any{"unread": unread}
-		if p.pushID != "" {
-			payload["push_id"] = p.pushID
-		}
-		s.deliverPushLocked(p, encodeJSON(payload), "low")
+	latest := ""
+	if badge {
+		latest = pushKey(p.userID, p.url)
 	}
-}
-
-// badgeRoomLocked sends badge pushes after a message in r is deleted, to
-// the users it may have counted for: the room's members and those its last
-// snapshot, previous, mentioned or replied to.
-func (s *Server) badgeRoomLocked(r *roomState, previous map[string]any) {
-	users := maps.Clone(r.members)
-	body, _ := previous["body"].(map[string]any)
-	for _, id := range mentions(body) {
-		if u := s.users[id]; u != nil {
-			users[id] = u
-		}
-	}
-	if ref, ok := previous["reply_to"].(map[string]any); ok {
-		if target := s.messages[ref["message_id"].(string)]; target != nil && s.users[target.owner] != nil {
-			users[target.owner] = s.users[target.owner]
-		}
-	}
-	now := time.Now()
-	for _, id := range slices.Sorted(maps.Keys(users)) {
-		s.badgeLocked(users[id], now)
-	}
-}
-
-// unreadLocked counts the user's unread messages for a registration's
-// scopes (§4.7): messages by others, not deleted, in rooms the user can
-// see, after the user's read position in each room, that the scopes
-// select, counting only mentions in rooms the user muted. A registration
-// with only badge counts by the default scopes. The read position in a
-// joined room is the latest of the user's read cursor (§4.4), their join,
-// and their latest message there; in a room they have not joined, it is
-// their read cursor, and only rooms where they were mentioned or replied to
-// count, from the first such message. The count stops at maxUnread, and
-// each room's at the newest maxUnreadScan records.
-func (s *Server) unreadLocked(u *userState, wake wakeScope, now time.Time) int {
-	scopes := wake & messageScopes
-	if scopes == 0 {
-		scopes = defaultWake
-	}
-	rooms := maps.Clone(u.joined)
-	for id := range u.pings {
-		if r := s.rooms[id]; r != nil && rooms[id] == nil {
-			rooms[id] = r
-		}
-	}
-	count := 0
-	for _, id := range slices.Sorted(maps.Keys(rooms)) {
-		r := rooms[id]
-		if !r.visibleTo(u) {
-			continue
-		}
-		joined := u.joined[r.id] != nil
-		since := r.reads[u.id].id
-		var member wakeScope
-		if joined {
-			since = max(since, r.active[u.id])
-			member = wakeJoined
-			if everyone, _ := r.audience(); !everyone {
-				member |= wakePrivate
-			}
-		} else {
-			since = max(since, u.pings[r.id]-1)
-		}
-		muted := u.roomMuted(r.id, now)
-		start, _ := slices.BinarySearchFunc(r.log, since+1, compareLogID)
-		start = max(start, len(r.log)-maxUnreadScan)
-		for _, record := range r.log[start:] {
-			if record.kind != kindMessage {
-				continue
-			}
-			// A message's first snapshot is logged at its message_id; an
-			// edit's log_id names no message.
-			m := s.messages[formatID(record.id)]
-			if m == nil || m.roomID != r.id || m.owner == u.id {
-				continue
-			}
-			info := m.info()
-			if info.deleted {
-				continue
-			}
-			why := member
-			if slices.Contains(info.mentions, u.id) {
-				why |= wakeMentions
-			}
-			if target := s.messages[info.replyTo]; target != nil && target.owner == u.id {
-				why |= wakeReplies
-			}
-			if muted {
-				why &= wakeMentions
-			}
-			if why&scopes != 0 {
-				if count++; count >= maxUnread {
-					return count
-				}
-			}
-		}
-	}
-	return count
+	s.push.deliver(*p, payload, urgency, latest, done)
 }
 
 // pushPayload is the payload every kind delivers (§4.7): push_id, unread,
@@ -630,11 +550,11 @@ func pushPayload(pushID string, unread int, snapshot map[string]any) []byte {
 }
 
 // pushDeliverer POSTs push payloads in the background, off the paths that
-// deliver messages. Each push host has its own lane of bounded concurrency,
-// so a slow or stalling host delays only pushes to itself. Unless insecure
-// pushes are allowed, it refuses to connect to loopback, private,
-// link-local, and other non-public addresses, checked on the dialed address
-// so DNS cannot redirect it.
+// deliver messages. Each push host has its own lane of bounded concurrency
+// and queue, so a slow or stalling host delays only pushes to itself.
+// Unless insecure pushes are allowed, it refuses to connect to loopback,
+// private, link-local, and other non-public addresses, checked on the
+// dialed address so DNS cannot redirect it.
 type pushDeliverer struct {
 	client  *http.Client
 	slots   chan struct{}
@@ -647,6 +567,9 @@ type pushDeliverer struct {
 	queued int
 	users  map[string]int
 	hosts  map[string]*pushLane
+	// latest holds the payload of each badge delivery that has not started,
+	// by registration, so a newer count replaces it.
+	latest map[string]*[]byte
 }
 
 // pushLane bounds concurrent deliveries to one push host; queued counts the
@@ -657,19 +580,35 @@ type pushLane struct {
 }
 
 // nonPublicPrefixes are special-purpose ranges that netip's classification
-// does not already exclude: shared address space (CGNAT), IETF protocol
-// assignments, benchmarking, the reserved class E range, and IPv6
-// translation and tunneling prefixes that embed IPv4 addresses.
+// does not already exclude: this network, shared address space (CGNAT),
+// IETF protocol assignments, documentation, the 6to4 relay anycast,
+// benchmarking, and the reserved class E range; and in IPv6, IPv4-compatible
+// addresses, discard-only, translation and tunneling prefixes that embed
+// IPv4 addresses, benchmarking, ORCHID, documentation, deprecated
+// site-local, and segment routing.
 var nonPublicPrefixes = []netip.Prefix{
 	netip.MustParsePrefix("0.0.0.0/8"),
 	netip.MustParsePrefix("100.64.0.0/10"),
 	netip.MustParsePrefix("192.0.0.0/24"),
+	netip.MustParsePrefix("192.0.2.0/24"),
+	netip.MustParsePrefix("192.88.99.0/24"),
 	netip.MustParsePrefix("198.18.0.0/15"),
+	netip.MustParsePrefix("198.51.100.0/24"),
+	netip.MustParsePrefix("203.0.113.0/24"),
 	netip.MustParsePrefix("240.0.0.0/4"),
+	netip.MustParsePrefix("::/96"),
 	netip.MustParsePrefix("64:ff9b::/96"),
 	netip.MustParsePrefix("64:ff9b:1::/48"),
+	netip.MustParsePrefix("100::/64"),
 	netip.MustParsePrefix("2001::/32"),
+	netip.MustParsePrefix("2001:2::/48"),
+	netip.MustParsePrefix("2001:10::/28"),
+	netip.MustParsePrefix("2001:20::/28"),
+	netip.MustParsePrefix("2001:db8::/32"),
 	netip.MustParsePrefix("2002::/16"),
+	netip.MustParsePrefix("3fff::/20"),
+	netip.MustParsePrefix("5f00::/16"),
+	netip.MustParsePrefix("fec0::/10"),
 }
 
 // publicAddress reports whether a dialed address is on the public internet.
@@ -704,7 +643,14 @@ func newPushDeliverer(allowInternal bool) *pushDeliverer {
 			return nil
 		}
 	}
-	transport := &http.Transport{DialContext: dialer.DialContext, TLSHandshakeTimeout: pushTimeout}
+	transport := &http.Transport{
+		DialContext:         dialer.DialContext,
+		TLSHandshakeTimeout: pushTimeout,
+		// A custom dialer turns HTTP/2 off unless asked; push services
+		// serve many pushes over one HTTP/2 connection.
+		ForceAttemptHTTP2:   true,
+		MaxIdleConnsPerHost: maxPushPerHost,
+	}
 	return &pushDeliverer{
 		client: &http.Client{
 			Timeout:   pushTimeout,
@@ -713,34 +659,46 @@ func newPushDeliverer(allowInternal bool) *pushDeliverer {
 				return http.ErrUseLastResponse
 			},
 		},
-		slots: make(chan struct{}, maxConcurrentPushPOST),
-		users: make(map[string]int),
-		hosts: make(map[string]*pushLane),
+		slots:  make(chan struct{}, maxConcurrentPushPOST),
+		users:  make(map[string]int),
+		hosts:  make(map[string]*pushLane),
+		latest: make(map[string]*[]byte),
 	}
 }
 
-// deliver POSTs payload to a registration's url. done reports whether the
-// endpoint said it is gone (404 or 410). A delivery beyond the user's or
-// the server's queue bound is dropped.
-func (p *pushDeliverer) deliver(registration pushRegistration, payload []byte, urgency string, done func(gone bool)) {
+// deliver POSTs payload to a registration's url. With latest, the key of a
+// badge delivery, a delivery for the same key that has not started takes
+// payload in place of its own. done reports whether the endpoint said it is
+// gone (404 or 410). A delivery beyond the user's, the host's, or the
+// server's queue bound is dropped.
+func (p *pushDeliverer) deliver(registration pushRegistration, payload []byte, urgency, latest string, done func(gone bool)) {
 	parsed, err := url.Parse(registration.url)
 	if err != nil {
 		return
 	}
-	host := parsed.Host
+	host := strings.ToLower(parsed.Host)
 	p.mu.Lock()
-	if p.queued >= maxPushQueued || p.users[registration.userID] >= maxPushQueuedPerUser {
+	if waiting := p.latest[latest]; latest != "" && waiting != nil {
+		*waiting = payload
+		p.mu.Unlock()
+		return
+	}
+	lane := p.hosts[host]
+	if p.queued >= maxPushQueued || p.users[registration.userID] >= maxPushQueuedPerUser || lane != nil && lane.queued >= maxPushQueuedPerHost {
 		p.mu.Unlock()
 		return
 	}
 	p.queued++
 	p.users[registration.userID]++
-	lane := p.hosts[host]
 	if lane == nil {
 		lane = &pushLane{slots: make(chan struct{}, maxPushPerHost)}
 		p.hosts[host] = lane
 	}
 	lane.queued++
+	waiting := &payload
+	if latest != "" {
+		p.latest[latest] = waiting
+	}
 	p.mu.Unlock()
 	p.pending.Add(1)
 	go func() {
@@ -752,6 +710,12 @@ func (p *pushDeliverer) deliver(registration pushRegistration, payload []byte, u
 		defer func() { <-lane.slots }()
 		p.slots <- struct{}{}
 		defer func() { <-p.slots }()
+		p.mu.Lock()
+		payload := *waiting
+		if latest != "" {
+			delete(p.latest, latest)
+		}
+		p.mu.Unlock()
 		ctx, cancel := context.WithTimeout(context.Background(), pushTimeout)
 		defer cancel()
 		request, err := p.request(ctx, registration, payload, urgency)
@@ -762,15 +726,17 @@ func (p *pushDeliverer) deliver(registration pushRegistration, payload []byte, u
 		if err != nil {
 			return
 		}
+		// Reading the answer lets the connection be reused.
+		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, maxPushResponseDrain))
 		response.Body.Close()
 		done(response.StatusCode == http.StatusNotFound || response.StatusCode == http.StatusGone)
 	}()
 }
 
-// request builds a delivery (§4.7). relay: the payload as JSON, or, with
-// keys, encrypted as for webpush, with the token as bearer. webpush
-// (RFC 8030): the payload encrypted for the subscription (RFC 8291), with
-// a VAPID Authorization (RFC 8292), TTL, and Urgency.
+// request builds a delivery (§4.7), with TTL and Urgency for every kind.
+// relay: the payload as JSON, or, with keys, encrypted as for webpush, with
+// the token, if any, as bearer. webpush (RFC 8030): the payload encrypted
+// for the subscription (RFC 8291), with a VAPID Authorization (RFC 8292).
 func (p *pushDeliverer) request(ctx context.Context, registration pushRegistration, payload []byte, urgency string) (*http.Request, error) {
 	body, contentType := payload, "application/json"
 	if registration.keys != nil {
@@ -788,6 +754,8 @@ func (p *pushDeliverer) request(ctx context.Context, registration pushRegistrati
 	if registration.keys != nil {
 		request.Header.Set("Content-Encoding", "aes128gcm")
 	}
+	request.Header.Set("TTL", pushTTL)
+	request.Header.Set("Urgency", urgency)
 	switch registration.kind {
 	case "webpush":
 		if p.vapid == nil || registration.keys == nil {
@@ -798,8 +766,6 @@ func (p *pushDeliverer) request(ctx context.Context, registration pushRegistrati
 			return nil, err
 		}
 		request.Header.Set("Authorization", authorization)
-		request.Header.Set("TTL", pushTTL)
-		request.Header.Set("Urgency", urgency)
 	default:
 		if registration.token != "" {
 			request.Header.Set("Authorization", "Bearer "+registration.token)

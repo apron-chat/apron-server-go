@@ -61,17 +61,26 @@ type userState struct {
 	posts *rate.Limiter
 
 	// invisible, mute, and roomMutes are the user's status fields (§4.11);
-	// muteTimer ends a timed mute. status is the status last announced.
-	invisible bool
-	mute      muteState
-	roomMutes map[string]muteState
-	muteTimer *time.Timer
-	status    string
+	// muteTimer ends a timed mute. status is the status last sent to
+	// others, and ownStatus to the user; statusLimit and statusTimer
+	// coalesce a flapping user's changes.
+	invisible   bool
+	mute        muteState
+	roomMutes   map[string]muteState
+	muteTimer   *time.Timer
+	status      string
+	ownStatus   string
+	statusLimit *rate.Limiter
+	statusTimer *time.Timer
 	// pushes are the user's push registrations by url (§4.7), and pings the
 	// rooms they have not joined where a message mentioned or replied to
-	// them, from the first such message, for unread counts.
-	pushes map[string]*pushRegistration
-	pings  map[string]int64
+	// them, from the first such message, for unread counts. unread holds
+	// the counts known per room while the user has registrations, and
+	// badgeTimer a pending badge push (unread.go).
+	pushes     map[string]*pushRegistration
+	pings      map[string]int64
+	unread     map[string]int
+	badgeTimer *time.Timer
 }
 
 func newUserState(id, name string) *userState {
@@ -83,6 +92,7 @@ func newUserState(id, name string) *userState {
 		leftAt:    make(map[string]int64),
 		roomMutes: make(map[string]muteState),
 		status:    statusOffline,
+		ownStatus: statusOffline,
 		pushes:    make(map[string]*pushRegistration),
 		pings:     make(map[string]int64),
 	}
@@ -401,16 +411,20 @@ func (s *Server) retireLocked(u *userState) {
 	rooms := slices.SortedFunc(maps.Values(u.joined), func(a, b *roomState) int {
 		return cmp.Compare(a.createdID, b.createdID)
 	})
+	// Its registrations go first, so its leaves send it no badge pushes.
+	for _, registration := range u.pushes {
+		s.removePushLocked(registration)
+	}
 	for _, r := range rooms {
 		s.leaveLocked(u, r)
 		delete(r.reads, u.id)
 	}
-	for _, registration := range u.pushes {
-		s.removePushLocked(registration)
+	for _, timer := range []*time.Timer{u.muteTimer, u.statusTimer} {
+		if timer != nil {
+			timer.Stop()
+		}
 	}
-	if u.muteTimer != nil {
-		u.muteTimer.Stop()
-	}
+	s.stopBadgeLocked(u)
 	s.setAvatarEmbedLocked(u, nil)
 	delete(s.users, u.id)
 	s.touchUser(u.id)
