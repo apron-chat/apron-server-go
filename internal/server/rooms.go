@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // maxListedRooms caps `not_joined` in a room_list result; `joined` is never
@@ -245,6 +246,8 @@ func (s *Server) addMemberLocked(u *userState, r *roomState) jsontext.Value {
 	membership := s.logMembershipLocked(u, r, true)
 	r.active[u.id] = r.latestID
 	s.deliverMembershipLocked(membership, r, u)
+	s.announceJoinStatusLocked(u, r)
+	s.unreadChangedLocked(u, r.id)
 	return membership
 }
 
@@ -266,15 +269,16 @@ func (s *Server) joinLocked(u *userState, r *roomState) bool {
 	if membership == nil {
 		return false
 	}
-	u.send(s.joinedUpdateLocked(r, membership))
+	u.send(s.joinedUpdateLocked(u, r, membership))
 	return true
 }
 
-// joinedUpdateLocked renders room_update joined for r: its record with its
-// members, as bare user objects, their current objects in `users`, and the
-// membership that joined the user, if any (§4.3.3).
-func (s *Server) joinedUpdateLocked(r *roomState, membership jsontext.Value) jsontext.Value {
-	record := s.roomParamsLocked(r)
+// joinedUpdateLocked renders room_update joined for r, to u: its record with
+// u's mute of it and its members, as bare user objects, their current
+// objects in `users`, and the membership that joined the user, if any
+// (§4.3.3).
+func (s *Server) joinedUpdateLocked(u *userState, r *roomState, membership jsontext.Value) jsontext.Value {
+	record := u.withRoomMute(s.roomParamsLocked(r), r, time.Now())
 	listed := s.addMembersLocked(record, r)
 	params := map[string]any{"joined": []any{record}, "users": profiles(listed)}
 	if membership != nil {
@@ -328,6 +332,8 @@ func (s *Server) leaveLocked(u *userState, r *roomState) bool {
 	if r.private {
 		s.hideThreadsLocked(u, r)
 	}
+	// The room no longer counts toward the user's unread (§4.7).
+	s.unreadChangedLocked(u, r.id)
 	return true
 }
 
@@ -398,7 +404,8 @@ func (s *Server) commitRoomLocked(roomID string, parent *roomState, private bool
 
 // announceRoomLocked sends a room's current record as room_update updated to
 // its members, the parent's members for a thread that is not private, and
-// editor, if any.
+// editor, if any. A user who muted the room receives it with their mute
+// (§3.4).
 func (s *Server) announceRoomLocked(r *roomState, editor *userState) {
 	audience := maps.Clone(r.members)
 	if r.parent != nil && !r.private {
@@ -408,8 +415,13 @@ func (s *Server) announceRoomLocked(r *roomState, editor *userState) {
 		audience[editor.id] = editor
 	}
 	frame := roomUpdate("updated", s.roomParamsLocked(r))
+	now := time.Now()
 	for _, member := range audience {
-		member.send(frame)
+		if mute, ok := member.roomMutes[r.id]; ok && mute.active(now) && member.joined[r.id] != nil {
+			member.send(roomUpdate("updated", member.withRoomMute(s.roomParamsLocked(r), r, now)))
+		} else {
+			member.send(frame)
+		}
 	}
 }
 
@@ -515,7 +527,7 @@ func (s *Server) setRoom(c *client, req request) (any, bool, *rpcError) {
 		s.touchUser(u.id)
 		membership := s.logMembershipLocked(u, r, true)
 		r.active[u.id] = r.latestID
-		u.send(s.joinedUpdateLocked(r, membership))
+		u.send(s.joinedUpdateLocked(u, r, membership))
 		// A private thread's record goes only to its own members.
 		if parent != nil && !r.private {
 			frame := roomUpdate("updated", s.roomParamsLocked(r))
@@ -655,10 +667,12 @@ func (s *Server) listRooms(c *client, req request) (any, bool, *rpcError) {
 	}
 
 	users := make(map[string]*userState)
+	now := time.Now()
 	renderRooms := func(rooms []*roomState) []any {
 		entries := make([]any, len(rooms))
 		for i, r := range rooms {
-			entry := s.roomParamsLocked(r)
+			// The caller's own mute of the room is echoed (§4.11).
+			entry := u.withRoomMute(s.roomParamsLocked(r), r, now)
 			if withMembers {
 				maps.Copy(users, s.addMembersLocked(entry, r))
 			}
@@ -740,7 +754,7 @@ func (s *Server) joinRoom(c *client, req request) (any, bool, *rpcError) {
 		}
 	}
 	if !s.joinLocked(target, r) && target == u {
-		c.enqueue(s.joinedUpdateLocked(r, nil))
+		c.enqueue(s.joinedUpdateLocked(u, r, nil))
 	}
 	result := map[string]any{}
 	if req.hasID {
@@ -971,9 +985,8 @@ func parseLimit(params map[string]jsontext.Value, defaultLimit int) (int, *rpcEr
 // activity applies a connection's activity (§4.4). typing and a read cursor
 // in a room are relayed to the room's members; a read cursor must name a
 // message and only advances, and the server keeps the latest per user and
-// sends it after the room is listed. A frame whose fields change nothing
-// relays nothing. away is kept per connection for push decisions and never
-// delivered; typing and a read cursor end it.
+// sends it after the room is listed. Typing is held back from idle
+// connections (§4.11). A frame whose fields change nothing relays nothing.
 func (s *Server) activity(c *client, req request) (any, bool, *rpcError) {
 	roomID, err := parseString(req.params, "room_id", false)
 	if err != nil {
@@ -995,11 +1008,6 @@ func (s *Server) activity(c *client, req request) (any, bool, *rpcError) {
 		return nil, false, err
 	}
 	_, hasRead := req.params["read_message_id"]
-	away, err := parseBool(req.params, "away", false)
-	if err != nil {
-		return nil, false, err
-	}
-	_, hasAway := req.params["away"]
 	s.mu.Lock()
 	defer s.unlock()
 	inRoom := typing != nil || hasRead
@@ -1017,20 +1025,12 @@ func (s *Server) activity(c *client, req request) (any, bool, *rpcError) {
 			c.sendResult(req, result)
 		}
 	}()
-	if inRoom {
-		c.away = false
-	}
-	if hasAway {
-		c.away = away
-	}
 	if !inRoom {
 		return result, true, nil
 	}
 	u := c.user
 	params := map[string]any{"room_id": roomID, "from": u.from()}
-	if typing != nil {
-		params["typing"] = typing
-	}
+	read := false
 	if hasRead {
 		id, _ := strconv.ParseInt(readID, 10, 64)
 		if cursor, ok := r.reads[u.id]; !ok || id > cursor.id {
@@ -1040,12 +1040,40 @@ func (s *Server) activity(c *client, req request) (any, bool, *rpcError) {
 				// A cursor for a room the user has not joined still syncs
 				// across their own connections.
 				u.send(map[string]any{"method": "activity", "params": map[string]any{"room_id": roomID, "from": u.from(), "read_message_id": readID}})
+				if id >= r.latestID {
+					// Read to the end: no earlier mention there counts.
+					delete(u.pings, r.id)
+					s.touchUser(u.id)
+				}
 			}
 			params["read_message_id"] = readID
+			read = true
 		}
 	}
-	if len(params) > 2 {
-		s.deliverLocked(map[string]any{"method": "activity", "params": params}, r)
+	if typing == nil {
+		if read {
+			s.deliverLocked(map[string]any{"method": "activity", "params": params}, r)
+		}
+	} else {
+		// Typing goes only to attended connections; a read cursor in the
+		// same frame goes to every connection.
+		withTyping := maps.Clone(params)
+		withTyping["typing"] = typing
+		typingFrame, readFrame := render(map[string]any{"method": "activity", "params": withTyping}), render(map[string]any{"method": "activity", "params": params})
+		for _, member := range r.members {
+			for other := range member.clients {
+				switch {
+				case other.attended():
+					other.enqueue(typingFrame)
+				case read:
+					other.enqueue(readFrame)
+				}
+			}
+		}
+	}
+	if read {
+		// Reading lowers the unread count the user's other devices show.
+		s.unreadChangedLocked(u, r.id)
 	}
 	return result, true, nil
 }

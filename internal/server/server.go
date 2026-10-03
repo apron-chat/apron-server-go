@@ -51,6 +51,7 @@ const (
 	defaultStreamMaxBytes     int64 = 16 << 20
 	defaultStreamMaxDuration        = time.Hour
 	defaultMaxListedMembers         = 1000
+	defaultSilentIdleAfter          = 5 * time.Minute
 	// retryAfterSeconds is the delay suggested by connection-level
 	// retry_after errors (capacity and shutdown).
 	retryAfterSeconds = 30
@@ -107,6 +108,16 @@ type Config struct {
 	// AllowInsecurePush accepts http push endpoints and internal addresses.
 	// Use only for development and tests.
 	AllowInsecurePush bool
+	// VAPIDPrivateKey is the server's VAPID key for webpush (§4.7), the
+	// P-256 scalar in base64url. Empty uses the key kept in Store,
+	// generated at the first start.
+	VAPIDPrivateKey string
+	// VAPIDSubject is the contact push services may use, a mailto: or
+	// https: URL, sent in VAPID tokens. Empty uses PublicURL, if any.
+	VAPIDSubject string
+	// SilentIdleAfter is how long a connection that never sent status may
+	// send nothing but liveness pings before it counts as idle (§4.11).
+	SilentIdleAfter time.Duration
 	// MaxConnections bounds concurrent WebSockets; 0 is unlimited.
 	MaxConnections int
 	// MessagesPerMinute bounds each user's new messages; 0 is unlimited.
@@ -155,6 +166,7 @@ func DefaultConfig() Config {
 		StreamMaxBytes:        defaultStreamMaxBytes,
 		StreamMaxDuration:     defaultStreamMaxDuration,
 		MaxListedMembers:      defaultMaxListedMembers,
+		SilentIdleAfter:       defaultSilentIdleAfter,
 	}
 }
 
@@ -202,6 +214,9 @@ func (c Config) withDefaults() Config {
 	if c.StreamMaxBytes <= 0 {
 		c.StreamMaxBytes = defaults.StreamMaxBytes
 	}
+	if c.SilentIdleAfter <= 0 {
+		c.SilentIdleAfter = defaults.SilentIdleAfter
+	}
 	if c.StreamMaxDuration <= 0 {
 		c.StreamMaxDuration = defaults.StreamMaxDuration
 	}
@@ -232,6 +247,8 @@ type logRecord struct {
 	raw  jsontext.Value
 	// rooms are the rooms whose logs hold the record.
 	rooms []string
+	// message is the message_id of a message snapshot.
+	message string
 }
 
 // newLogRecord encodes value. Values hold only JSON-decoded data and
@@ -332,9 +349,20 @@ type client struct {
 	emailSends *rate.Limiter
 	proposal   *emailProposal
 	clientKey  string
-	// away reports that nobody is attending the connection (§4.4). Guarded
-	// by server.mu.
-	away bool
+	// idle reports that nobody is attending the connection (§4.11), and
+	// pendingStatus holds the user's fields it sent before signing in.
+	// Guarded by server.mu.
+	idle          bool
+	pendingStatus []statusUpdate
+	// statusAware is set once the connection sends status, and reportsIdle
+	// once it sends idle. silent is set while a connection that never sent
+	// idle has sent no frame but pings for Config.SilentIdleAfter; it then
+	// counts as idle (§4.11). lastActive is when its latest frame other
+	// than a ping arrived, in Unix nanoseconds.
+	statusAware atomic.Bool
+	reportsIdle atomic.Bool
+	silent      atomic.Bool
+	lastActive  atomic.Int64
 	// closing is set once the final batch is queued; later frames are dropped.
 	closing atomic.Bool
 	// pinged is set by the first liveness ping (§1); lastFrame is when the
@@ -407,8 +435,18 @@ type Server struct {
 	// mailing tracks email deliveries in progress, which Shutdown awaits.
 	mailing sync.WaitGroup
 
-	ops         map[string]operation
-	push        *pushDeliverer
+	ops  map[string]operation
+	push *pushDeliverer
+	// vapid is the webpush key (§4.7); vapidStored reports that it is the
+	// one kept in the store.
+	vapid       *vapidKey
+	vapidStored bool
+	// badgeDelay is how long badge pushes wait to coalesce the changes to
+	// one user's unread count; badges counts the waits in progress.
+	badgeDelay time.Duration
+	badges     sync.WaitGroup
+	// stopped ends the background sweep of expired push registrations.
+	stopped     chan struct{}
 	connections sync.WaitGroup
 }
 
@@ -449,6 +487,8 @@ func Open(config Config) (*Server, error) {
 		dirty:       newDirtySet(),
 		storeWrites: make(chan []store.Entry, storeQueue),
 		storeDone:   make(chan struct{}),
+		badgeDelay:  badgeDelay,
+		stopped:     make(chan struct{}),
 	}
 	for _, holders := range config.Roles {
 		for _, holder := range holders {
@@ -457,6 +497,17 @@ func Open(config Config) (*Server, error) {
 	}
 	s.ops = s.operations()
 	s.push = newPushDeliverer(config.AllowInsecurePush)
+	if config.VAPIDPrivateKey != "" {
+		key, err := parseVAPIDKey(config.VAPIDPrivateKey)
+		if err != nil {
+			return nil, err
+		}
+		s.vapid = key
+	}
+	s.push.subject = config.VAPIDSubject
+	if s.push.subject == "" && strings.HasPrefix(config.PublicURL, "https://") {
+		s.push.subject = config.PublicURL
+	}
 	s.openUploadDir()
 	go s.writeStore()
 	s.mu.Lock()
@@ -467,6 +518,7 @@ func Open(config Config) (*Server, error) {
 		s.mu.Unlock()
 		return nil, err
 	}
+	s.push.vapid = s.vapid
 	if s.rooms[defaultRoomID] == nil {
 		// The seeded default room has a logged creation record like any
 		// other room, so its history_log_id is never null.
@@ -474,6 +526,7 @@ func Open(config Config) (*Server, error) {
 	}
 	s.removeStaleUploads(files)
 	s.unlock()
+	go s.sweepPushes()
 	return s, nil
 }
 
@@ -547,6 +600,7 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	s.mu.Lock()
 	if !s.closed {
 		s.closed = true
+		close(s.stopped)
 		for c := range s.clients {
 			c.closeWithError(&rpcError{Code: codeRetryAfter, Message: "Server is shutting down; reconnect shortly", Data: map[string]any{"retry_after": 5}})
 		}
@@ -562,6 +616,7 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	done := make(chan struct{})
 	go func() {
 		s.connections.Wait()
+		s.badges.Wait()
 		s.push.wait()
 		s.mailing.Wait()
 		s.mu.Lock()
@@ -609,6 +664,8 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		clientKey: clientKey(s.clientIP(r)),
 		baseURL:   s.baseURL(r),
 	}
+	c.lastFrame.Store(time.Now().UnixNano())
+	c.lastActive.Store(time.Now().UnixNano())
 	go c.writeLoop()
 	go c.pingLoop()
 	s.mu.Lock()
@@ -654,6 +711,8 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 			c.pong()
 			continue
 		}
+		c.lastActive.Store(time.Now().UnixNano())
+		s.endSilence(c)
 		// Frames are processed in order, each to completion before the next
 		// is read, which makes auth a barrier (§3.2).
 		s.processFrame(c, payload)
@@ -719,7 +778,7 @@ func (s *Server) serverParams() map[string]any {
 	params := map[string]any{
 		"apron":        7,
 		"agent":        "apron-go/7",
-		"capabilities": []string{"history", "edit", "rooms", "reactions", "activity", "embed:upload", "embed:stream", "command"},
+		"capabilities": []string{"history", "edit", "rooms", "reactions", "activity", "embed:upload", "embed:stream", "command", "status"},
 		"auth":         authSchemes,
 		"ping":         max(1, int(s.config.PingInterval/time.Second)),
 		"ext": map[string]any{"apron-go": map[string]any{
@@ -737,7 +796,11 @@ func (s *Server) serverParams() map[string]any {
 		}},
 	}
 	if !s.config.DisablePush {
-		params["push"] = map[string]any{"relay": map[string]any{}}
+		push := map[string]any{"relay": map[string]any{}, "wake": (urgentScopes | wakeJoined | wakeBadge).names()}
+		if s.vapid != nil {
+			push["webpush"] = map[string]any{"key": s.vapid.public}
+		}
+		params["push"] = push
 	}
 	if s.config.Welcome != "" {
 		params["welcome"] = s.config.Welcome
@@ -781,7 +844,9 @@ func (c *client) writeLoop() {
 // pingLoop pings at the WebSocket level, which finds dead transports, and
 // closes a connection whose client sent liveness pings (§1) and then fell
 // silent for three intervals: its page is frozen or gone even if the socket
-// is not. Three intervals leave room for background timer throttling.
+// is not. Three intervals leave room for background timer throttling. A
+// connection that never sent status and has sent nothing but pings for
+// Config.SilentIdleAfter counts as idle until its next other frame (§4.11).
 func (c *client) pingLoop() {
 	config := c.server.config
 	ticker := time.NewTicker(config.PingInterval)
@@ -795,6 +860,9 @@ func (c *client) pingLoop() {
 			if c.pinged.Load() && time.Since(time.Unix(0, c.lastFrame.Load())) > silence {
 				c.stopConnection()
 				return
+			}
+			if time.Since(time.Unix(0, c.lastActive.Load())) > config.SilentIdleAfter {
+				c.server.silenceIdle(c)
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), config.PingTimeout)
 			err := c.ws.Ping(ctx)
@@ -906,6 +974,9 @@ func (s *Server) operations() map[string]operation {
 	return ops
 }
 
+// notificationOnly are the methods clients send only as notifications.
+var notificationOnly = map[string]bool{"ping": true, "activity": true, "status": true}
+
 // readOnlyOps change nothing, so their results are not kept for
 // deduplication (§1.2): a duplicate after the original finished runs again.
 var readOnlyOps = map[string]bool{"history": true, "room_list": true}
@@ -924,7 +995,12 @@ func (s *Server) processFrame(c *client, payload []byte) {
 		return
 	}
 
-	if req.method == "ping" && !req.hasID {
+	// Notification-only methods sent with an id are processed as the
+	// notification, and not answered (§1).
+	if notificationOnly[req.method] {
+		req.hasID = false
+	}
+	if req.method == "ping" {
 		// A ping with other spacing or keys is still a ping.
 		c.pong()
 		return
@@ -937,6 +1013,12 @@ func (s *Server) processFrame(c *client, payload []byte) {
 		if _, err := s.authenticate(c, req); err != nil && req.hasID {
 			c.sendError(req, err)
 		}
+		return
+	}
+	// status is accepted before authentication too, and applies once the
+	// connection signs in (§4.11).
+	if req.method == "status" {
+		s.status(c, req)
 		return
 	}
 
@@ -1014,7 +1096,7 @@ func (s *Server) processFrame(c *client, payload []byte) {
 func (s *Server) currentResultLocked(u *userState, method string, result any) any {
 	switch method {
 	case "me":
-		return map[string]any{"you": u.profile()}
+		return map[string]any{"you": u.you()}
 	case "message", "command":
 		original, ok := result.(map[string]any)
 		if !ok || original["embeds"] == nil {

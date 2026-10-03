@@ -74,8 +74,10 @@ type Options struct {
 	} `group:"Email sign-in" namespace:"email"`
 
 	Push struct {
-		Disable       bool `long:"disable" description:"Do not offer push registration"`
-		AllowInsecure bool `long:"allow-insecure" description:"Accept http and internal push endpoints (development only)"`
+		Disable         bool   `long:"disable" description:"Do not offer push registration"`
+		AllowInsecure   bool   `long:"allow-insecure" description:"Accept http push endpoints and ones on internal addresses, so any client can make the server POST into its network (tests only; refused with --public-url or --tls.domain)"`
+		VAPIDPrivateKey string `long:"vapid-private-key" description:"Web Push VAPID private key, the P-256 scalar in base64url as web-push tools print it (default: one generated at the first start and kept in the store)"`
+		VAPIDSubject    string `long:"vapid-subject" description:"Contact push services may use, a mailto: or https: URL, sent with Web Push (default: --public-url)"`
 	} `group:"Push" namespace:"push"`
 
 	TLS struct {
@@ -147,7 +149,15 @@ func serverConfig(options Options) (server.Config, error) {
 		config.Roles[role] = append(config.Roles[role], holder)
 	}
 	config.DisablePush = options.Push.Disable
+	if options.Push.AllowInsecure && (options.PublicURL != "" || len(options.TLS.Domains) > 0) {
+		return config, errors.New("--push.allow-insecure lets any client make the server POST to http and internal addresses; it is for tests and refused with --public-url or --tls.domain")
+	}
 	config.AllowInsecurePush = options.Push.AllowInsecure
+	config.VAPIDPrivateKey = options.Push.VAPIDPrivateKey
+	config.VAPIDSubject = options.Push.VAPIDSubject
+	if subject := config.VAPIDSubject; subject != "" && !strings.HasPrefix(subject, "mailto:") && !strings.HasPrefix(subject, "https://") {
+		return config, fmt.Errorf("invalid --push.vapid-subject %q: use a mailto: or https: URL", subject)
+	}
 	config.UploadDir = options.Upload.Dir
 	config.MaxUploadBytes = options.Upload.MaxMB << 20
 	config.MaxMessageUploadBytes = options.Upload.MaxMessageMB << 20
@@ -276,6 +286,12 @@ func run(logger *slog.Logger, options Options) error {
 		serve("debug server", newServer(debugHandler()), listener)
 	}
 	logger.Info("serving", "store", options.Store, "static_dir", options.StaticDir, "upload_dir", options.Upload.Dir)
+	if !options.Push.Disable && config.VAPIDSubject == "" && !strings.HasPrefix(config.PublicURL, "https://") {
+		logger.Warn("webpush has no VAPID subject, which some push services refuse; set --push.vapid-subject or an https --public-url")
+	}
+	if options.Push.AllowInsecure {
+		logger.Warn("push accepts http and internal endpoints (--push.allow-insecure); never set it on a reachable server")
+	}
 	if options.Email.Enable && options.Email.Sender == "log" {
 		logger.Warn("email sign-in codes are written to this log, not sent; use --email.sender smtp in a deployment")
 	}

@@ -34,14 +34,46 @@ npm test
 
 The config starts both services itself with `reuseExistingServer: false`:
 
-* Go server: `127.0.0.1:8080`, started from the repository root with `--addr`
+* Go server: `127.0.0.1:8080`, started from the repository root with
+  `--store memory --addr 127.0.0.1:8080 --push.allow-insecure
+  --push.vapid-private-key <test key> --push.vapid-subject
+  mailto:interop@example.com`. The push flags are for `push.spec.ts` and
+  change nothing for the other tests, which register no push endpoint. The
+  key is the public test fixture in `push-test-vapid.ts`, never one for a real
+  server; `--push.allow-insecure` lets the test's capture endpoint on
+  `http://127.0.0.1` receive pushes, and aprond refuses it with `--public-url`
+  or `--tls.domain`.
 * Vite dev server: `127.0.0.1:5173`, started from `.apron-web`, a checkout of
   [apron-chat/apron-web](https://github.com/apron-chat/apron-web) that `make install`
-  clones (or a symlink to your own)
+  clones (or a symlink to your own), or from `APRON_WEB_DIR` when it is set
 
 Set `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH` when the browser is supplied by the
 environment (for example, the NixOS VM). If it is unset, Playwright uses its
 normal Chromium resolution.
+
+## Web push and status
+
+The `push` project runs `push.spec.ts`: a passkey user turns on push in
+Preferences, goes idle, and is mentioned and replied to by a second client;
+the test receives the pushes on a local capture endpoint, checks the VAPID
+token against the test key and decrypts the `aes128gcm` payload with its own
+subscription keys, and checks the service worker's notification. A second test
+checks `status` (online, idle, dnd, offline, and private mute and invisible) as
+another client sees it. Both wait out the 30-second idle timeout, so the
+project allows three minutes a test. Run it alone with:
+
+```sh
+npx playwright test --project=push
+```
+
+Notifications need full Chromium in its new headless mode (`channel:
+'chromium'`): the headless shell reports `Notification.permission` as denied
+whatever is granted. `npx playwright install chromium` installs both builds;
+with `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH`, point it at full Chromium.
+
+Against an apron-web without web push and status (before apron-web#48), the
+tests skip themselves. Skipped tests and their reasons are listed at the end
+of every run, and on GitHub Actions also as notices and in the job summary.
 
 The UI contract used by the tests is an accessible textbox named `Message`, a
 `Send message` button, and message containers rendered as

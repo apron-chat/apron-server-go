@@ -101,6 +101,40 @@ func TestTLSDomainIsThePublicURL(t *testing.T) {
 	}
 }
 
+func TestVAPIDSettings(t *testing.T) {
+	options, _ := parse(t, "--push.vapid-private-key", "key", "--push.vapid-subject", "mailto:ops@chat.example")
+	config, err := serverConfig(*options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.VAPIDPrivateKey != "key" || config.VAPIDSubject != "mailto:ops@chat.example" {
+		t.Fatalf("VAPID settings: %q %q", config.VAPIDPrivateKey, config.VAPIDSubject)
+	}
+	for _, subject := range []string{"ops@chat.example", "http://chat.example"} {
+		options, _ := parse(t, "--push.vapid-subject", subject)
+		if _, err := serverConfig(*options); err == nil {
+			t.Errorf("VAPID subject %q accepted", subject)
+		}
+	}
+}
+
+func TestInsecurePushIsForTestsOnly(t *testing.T) {
+	options, _ := parse(t, "--push.allow-insecure")
+	if config, err := serverConfig(*options); err != nil || !config.AllowInsecurePush {
+		t.Fatalf("allow insecure %v, error %v", config.AllowInsecurePush, err)
+	}
+	// A public server refuses it, as it lets clients reach internal addresses.
+	for _, args := range [][]string{
+		{"--push.allow-insecure", "--public-url", "https://chat.example"},
+		{"--push.allow-insecure", "--tls.domain", "chat.example"},
+	} {
+		options, _ := parse(t, args...)
+		if _, err := serverConfig(*options); err == nil {
+			t.Errorf("accepted %v", args)
+		}
+	}
+}
+
 func TestWelcomeAndRoles(t *testing.T) {
 	options, _ := parse(t, "--welcome", "Sign in with **email**.", "--role", "admin=ada", "--role", "Moderator = bob", "--role", "admin=carol")
 	config, err := serverConfig(*options)

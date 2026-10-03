@@ -60,14 +60,22 @@ func TestServerFrame(t *testing.T) {
 			t.Fatalf("pre-0bf4a27 field %q: %#v", old, params)
 		}
 	}
-	if !reflect.DeepEqual(params["capabilities"], []any{"history", "edit", "rooms", "reactions", "activity", "embed:upload", "embed:stream", "command"}) {
+	if !reflect.DeepEqual(params["capabilities"], []any{"history", "edit", "rooms", "reactions", "activity", "embed:upload", "embed:stream", "command", "status"}) {
 		t.Fatalf("capabilities: %#v", params["capabilities"])
 	}
 	if _, has := params["signup"]; !reflect.DeepEqual(params["auth"], []any{"guest"}) || has {
 		t.Fatalf("auth: %#v, signup: %#v", params["auth"], params["signup"])
 	}
-	if !reflect.DeepEqual(params["push"], map[string]any{"relay": map[string]any{}}) {
-		t.Fatalf("push: %#v", params["push"])
+	// push offers relay and webpush, with the server's VAPID key, and the
+	// wake scopes it implements (§4.7).
+	push, _ := params["push"].(map[string]any)
+	webpush, _ := push["webpush"].(map[string]any)
+	key, _ := webpush["key"].(string)
+	if point, err := decodeBase64URL(key); err != nil || len(point) != p256PointBytes || len(webpush) != 1 {
+		t.Fatalf("push.webpush: %#v", push["webpush"])
+	}
+	if !reflect.DeepEqual(push["relay"], map[string]any{}) || !reflect.DeepEqual(push["wake"], []any{"mentions", "replies", "private", "joined", "badge"}) || len(push) != 3 {
+		t.Fatalf("push: %#v", push)
 	}
 	limits := params["ext"].(map[string]any)["apron-go"].(map[string]any)
 	if limits["max_upload_bytes"] != float64(defaultMaxUploadBytes) || limits["stream_keep_bytes"] != float64(defaultStreamKeepBytes) {
@@ -222,6 +230,8 @@ func TestLivenessPing(t *testing.T) {
 	}
 	ping(`{"method":"ping"}`)
 	ping(`{ "method": "ping", "params": {} }`)
+	// A ping with an id is a ping, answered with pong and nothing else (§1).
+	ping(`{"method":"ping","id":"p1"}`)
 	c.request(t, "auth", "auth", map[string]any{"scheme": "guest"})
 	ping(`{"method":"ping"}`)
 
@@ -311,7 +321,7 @@ func TestMessageSnapshotsReplaceEditableState(t *testing.T) {
 	observer := dialTestClient(t, httpServer)
 	expectMembership(t, owner, "general", observer.userID, true)
 	owner.result(t, "me", "name", map[string]any{"name": "Alice"})
-	if renamed := observer.notification(t, "user"); !reflect.DeepEqual(renamed, map[string]any{"new": map[string]any{"user_id": "guest_1", "name": "Alice"}}) {
+	if renamed := observer.notification(t, "user"); !reflect.DeepEqual(renamed, map[string]any{"new": map[string]any{"user_id": "guest_1", "name": "Alice", "status": "online"}}) {
 		t.Fatalf("rename notification: %#v", renamed)
 	}
 	ext := map[string]any{"irc": map[string]any{"nick": "ada_"}}
@@ -1042,12 +1052,13 @@ func TestActivityRelaysTypingWithInlineIdentity(t *testing.T) {
 	if stop := c.notification(t, "activity"); stop["typing"] != float64(0) {
 		t.Fatalf("stop: %#v", stop)
 	}
-	c.expectError(t, "activity", "missing", map[string]any{"room_id": "missing", "typing": 8}, codeInvalidParams)
-	c.expectError(t, "activity", "negative", map[string]any{"room_id": thread, "typing": -1}, codeInvalidParams)
-
-	// away applies to the connection and is never delivered.
-	c.write(t, map[string]any{"method": "activity", "params": map[string]any{"away": true}})
-	c.write(t, map[string]any{"method": "activity", "params": map[string]any{"room_id": thread, "away": false}})
+	// Invalid activity changes nothing, and, as a notification, is not
+	// answered even when sent with an id (§1).
+	c.write(t, map[string]any{"method": "activity", "id": "missing", "params": map[string]any{"room_id": "missing", "typing": 8}})
+	c.write(t, map[string]any{"method": "activity", "params": map[string]any{"room_id": thread, "typing": -1}})
+	c.write(t, map[string]any{"method": "activity", "id": "typing", "params": map[string]any{"room_id": thread, "typing": 1}})
+	if typing := c.notification(t, "activity"); typing["typing"] != float64(1) {
+		t.Fatalf("typing sent with an id: %#v", typing)
+	}
 	c.expectQuiet(t)
-	c.expectError(t, "activity", "bad-away", map[string]any{"away": "yes"}, codeInvalidParams)
 }

@@ -69,7 +69,10 @@ test.describe('reference features against the Go server', () => {
 			await Promise.all([openChat(pageA), openChat(pageB)]);
 			const token = `upload-${Date.now().toString(36)}`;
 			await composer(pageA).fill(`${token} chart`);
+			// Picked files are staged on the draft, and Send posts them with its text.
 			await pageA.getByTestId('attach-input').setInputFiles({ name: 'chart.png', mimeType: 'image/png', buffer: png(48, 24) });
+			await expect(pageA.getByTestId('staged-files')).toBeVisible();
+			await pageA.getByTestId('send-button').click();
 
 			// The server hosts the file and describes it with og.image; both sides show the picture.
 			for (const page of [pageA, pageB]) {
@@ -82,6 +85,8 @@ test.describe('reference features against the Go server', () => {
 
 			// A file without a preview is a file card linking to the download.
 			await pageA.getByTestId('attach-input').setInputFiles({ name: `${token}.txt`, mimeType: 'text/plain', buffer: Buffer.from('notes') });
+			await expect(pageA.getByTestId('staged-files')).toContainText(`${token}.txt`);
+			await pageA.getByTestId('send-button').click();
 			const card = pageB.locator('a.ap-embed-file').filter({ hasText: `${token}.txt` });
 			await expect(card).toBeVisible();
 			const href = await card.getAttribute('href');

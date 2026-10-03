@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"fmt"
 	"io"
@@ -62,7 +63,7 @@ func TestRoomListFiltersAndOrder(t *testing.T) {
 	if randomEntry := withMembers["not_joined"].([]any)[0].(map[string]any); !reflect.DeepEqual(memberIDs(randomEntry), []string{"guest_2"}) {
 		t.Fatalf("unjoined room members: %#v", randomEntry)
 	}
-	wantUsers := []any{map[string]any{"user_id": "guest_1", "name": "Ada"}, map[string]any{"user_id": "guest_2"}}
+	wantUsers := []any{map[string]any{"user_id": "guest_1", "name": "Ada", "status": "online"}, map[string]any{"user_id": "guest_2", "status": "online"}}
 	if !reflect.DeepEqual(withMembers["users"], wantUsers) {
 		t.Fatalf("users: %#v", withMembers["users"])
 	}
@@ -376,7 +377,11 @@ func TestReadCursors(t *testing.T) {
 	a.write(t, map[string]any{"method": "activity", "params": map[string]any{"room_id": "general", "read_message_id": first}})
 	b.expectQuiet(t)
 	a.expectQuiet(t)
-	a.expectError(t, "activity", "unknown", map[string]any{"room_id": "general", "read_message_id": "999"}, codeInvalidParams)
+	// activity is a notification: one sent with an id is processed as one,
+	// unanswered, and an unknown cursor changes nothing (§1).
+	a.write(t, map[string]any{"method": "activity", "id": "unknown", "params": map[string]any{"room_id": "general", "read_message_id": "999"}})
+	a.expectQuiet(t)
+	b.expectQuiet(t)
 
 	// Kept cursors follow a room_list result that lists the room: every
 	// member's for a joined room, only the user's own for another.
@@ -409,7 +414,7 @@ func TestProfilesAndUserNotifications(t *testing.T) {
 	a, b := clients[0], clients[1]
 	ext := map[string]any{"example.org": map[string]any{"pronouns": "she/her"}}
 	you := a.result(t, "me", "profile", map[string]any{"name": "  Ada  ", "avatar": "data:image/png;base64,iVBORw0KGgo=", "ext": ext})["you"]
-	want := map[string]any{"user_id": "guest_1", "name": "Ada", "avatar": "data:image/png;base64,iVBORw0KGgo=", "ext": ext}
+	want := map[string]any{"user_id": "guest_1", "name": "Ada", "avatar": "data:image/png;base64,iVBORw0KGgo=", "ext": ext, "status": "online"}
 	if !reflect.DeepEqual(you, any(want)) {
 		t.Fatalf("you = %#v", you)
 	}
@@ -442,17 +447,17 @@ func TestProfilesAndUserNotifications(t *testing.T) {
 	b.expectQuiet(t)
 	// An empty value removes a field, announced as that empty value.
 	you = a.result(t, "me", "clear", map[string]any{"ext": map[string]any{}, "avatar": ""})["you"]
-	cleared := map[string]any{"user_id": "guest_1", "name": "Ada", "avatar": "", "ext": map[string]any{}}
+	cleared := map[string]any{"user_id": "guest_1", "name": "Ada", "avatar": "", "ext": map[string]any{}, "status": "online"}
 	if !reflect.DeepEqual(you, any(cleared)) {
 		t.Fatalf("removal result: %#v", you)
 	}
 	if notice := b.notification(t, "user"); !reflect.DeepEqual(notice, map[string]any{"new": cleared}) {
 		t.Fatalf("removal notification: %#v", notice)
 	}
-	if users := listRooms(t, b, map[string]any{"room_id": "general", "members": true})["users"].([]any); !reflect.DeepEqual(users[0], map[string]any{"user_id": "guest_1", "name": "Ada"}) {
+	if users := listRooms(t, b, map[string]any{"room_id": "general", "members": true})["users"].([]any); !reflect.DeepEqual(users[0], map[string]any{"user_id": "guest_1", "name": "Ada", "status": "online"}) {
 		t.Fatalf("profile after removal: %#v", users[0])
 	}
-	if you := a.result(t, "me", "clear-name", map[string]any{"name": ""})["you"]; !reflect.DeepEqual(you, map[string]any{"user_id": "guest_1", "name": ""}) {
+	if you := a.result(t, "me", "clear-name", map[string]any{"name": ""})["you"]; !reflect.DeepEqual(you, map[string]any{"user_id": "guest_1", "name": "", "status": "online"}) {
 		t.Fatalf("clearing the name: %#v", you)
 	}
 	b.notification(t, "user")
@@ -722,7 +727,7 @@ func TestStreamWriteConnectionCanReadAStream(t *testing.T) {
 }
 
 func TestSavingWithoutAStreamEndsIt(t *testing.T) {
-	_, httpServer := newTestServer(t, DefaultConfig())
+	app, httpServer := newTestServer(t, DefaultConfig())
 	a := dialTestClient(t, httpServer)
 	result := postEmbeds(t, a, "stream", map[string]any{"room_id": "general", "body": map[string]any{"embeds": []any{map[string]any{"kind": "stream"}}}})
 	writeURL := result["embeds"].([]any)[0].(map[string]any)["write_url"].(string)
@@ -739,12 +744,50 @@ func TestSavingWithoutAStreamEndsIt(t *testing.T) {
 		writerDone <- response.StatusCode
 	}()
 	_, _ = pipe.Write([]byte("partial"))
+	// The save must find the write started; one that arrives after it is
+	// refused instead (TestRefusedWriteDoesNotWaitForItsBody).
+	token := writeURL[strings.LastIndex(writeURL, "/")+1:]
+	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(5 * time.Millisecond) {
+		app.mu.RLock()
+		_, waiting := app.writes[token]
+		app.mu.RUnlock()
+		if !waiting {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the stream write never started")
+		}
+	}
 	save(t, a, "stop", map[string]any{"message_id": result["message_id"], "body": map[string]any{"text": "never mind"}})
 	if status := <-writerDone; status != http.StatusGone {
 		t.Fatalf("writer status %d", status)
 	}
 	_ = pipe.Close()
 	a.expectQuiet(t)
+}
+
+// A write to a URL that is no longer usable is refused at once, even while
+// its body is still open: the server does not wait to read the body first.
+func TestRefusedWriteDoesNotWaitForItsBody(t *testing.T) {
+	_, httpServer := newTestServer(t, DefaultConfig())
+	a := dialTestClient(t, httpServer)
+	result := postEmbeds(t, a, "stream", map[string]any{"room_id": "general", "body": map[string]any{"embeds": []any{map[string]any{"kind": "stream"}}}})
+	writeURL := result["embeds"].([]any)[0].(map[string]any)["write_url"].(string)
+	save(t, a, "stop", map[string]any{"message_id": result["message_id"], "body": map[string]any{"text": "never mind"}})
+	body, pipe := io.Pipe()
+	defer pipe.Close()
+	go func() { _, _ = pipe.Write([]byte("late")) }()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	request, _ := http.NewRequestWithContext(ctx, http.MethodPost, writeURL, body)
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatalf("a refused write with an open body: %v", err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusNotFound {
+		t.Fatalf("status %d", response.StatusCode)
+	}
 }
 
 func TestAvatarCommand(t *testing.T) {

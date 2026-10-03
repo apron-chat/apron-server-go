@@ -90,7 +90,6 @@ func (s *Server) command(c *client, req request) (any, bool, *rpcError) {
 
 	s.mu.Lock()
 	defer s.unlock()
-	c.away = false
 	r := s.visibleRoomLocked(c.user, roomID)
 	if r == nil {
 		return nil, false, invalidParams("Unknown room %q", roomID)

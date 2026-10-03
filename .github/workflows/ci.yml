@@ -18,7 +18,8 @@ concurrency:
 jobs:
   check:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # The push interop tests wait out the 30-second idle timeout (§4.11).
+    timeout-minutes: 20
     steps:
       # The submodule holds the shared protocol fixtures from shazow/apron.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -26,6 +27,8 @@ jobs:
           persist-credentials: false
           submodules: true
       # The web client the browser tests run; make install skips its clone.
+      # It is apron-web main: push.spec.ts skips, with its reason listed as a
+      # notice and in the job summary, until main has web push (apron-web#48).
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           repository: apron-chat/apron-web
@@ -44,6 +47,9 @@ jobs:
           cache-dependency-path: go.sum
       - run: make install
       - run: make check test build
+      # Both Chromium builds: the headless shell for most tests, and full
+      # Chromium (channel: 'chromium') for push.spec.ts, as the shell denies
+      # notifications.
       - run: npx playwright install --with-deps chromium
         working-directory: tests/interop
       - run: make test-interop

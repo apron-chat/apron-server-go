@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"time"
 	"unicode"
 	"unicode/utf8"
 
@@ -58,15 +59,48 @@ type userState struct {
 	// posts limits the user's new messages, room_set requests, and /avatar
 	// commands to MessagesPerMinute; nil when unlimited.
 	posts *rate.Limiter
+
+	// invisible, mute, and roomMutes are the user's status fields (§4.11);
+	// muteTimer ends a timed mute. status is the status last sent to
+	// others, and ownStatus to the user; statusLimit and statusTimer
+	// coalesce a flapping user's changes.
+	invisible   bool
+	mute        muteState
+	roomMutes   map[string]muteState
+	muteTimer   *time.Timer
+	status      string
+	ownStatus   string
+	statusLimit *rate.Limiter
+	statusTimer *time.Timer
+	// statusChanges limits the user's changes to mute and invisible.
+	statusChanges *rate.Limiter
+	// pushes are the user's push registrations by url (§4.7), and pings the
+	// rooms they have not joined where a message mentioned or replied to
+	// them, from the first such message, for unread counts. unread holds
+	// the counts known per room while the user has registrations, and
+	// badgeTimer a pending badge push (unread.go).
+	pushes     map[string]*pushRegistration
+	pings      map[string]int64
+	unread     map[string]int
+	badgeTimer *time.Timer
+	// pushDay is the UTC day pushesToday counts the pushes delivered to the
+	// user on, against maxPushesPerUserDay.
+	pushDay     string
+	pushesToday int
 }
 
 func newUserState(id, name string) *userState {
 	return &userState{
-		id:      id,
-		name:    name,
-		clients: make(map[*client]struct{}),
-		joined:  make(map[string]*roomState),
-		leftAt:  make(map[string]int64),
+		id:        id,
+		name:      name,
+		clients:   make(map[*client]struct{}),
+		joined:    make(map[string]*roomState),
+		leftAt:    make(map[string]int64),
+		roomMutes: make(map[string]muteState),
+		status:    statusOffline,
+		ownStatus: statusOffline,
+		pushes:    make(map[string]*pushRegistration),
+		pings:     make(map[string]int64),
 	}
 }
 
@@ -97,10 +131,11 @@ func (u *userState) hasRole(role string) bool {
 	return slices.Contains(u.roles, role)
 }
 
-// profile is the complete current user object for you, user, and users
-// (§3.3).
+// profile is the complete current user object for user and users (§3.3),
+// with the user's status (§4.11); you adds what only the user sees.
 func (u *userState) profile() map[string]any {
 	value := maps.Clone(u.from())
+	value["status"] = u.statusAt(time.Now())
 	if u.avatar != "" {
 		value["avatar"] = u.avatar
 	}
@@ -288,7 +323,7 @@ func (s *Server) authenticate(c *client, req request) (any, *rpcError) {
 		return nil, err
 	}
 	if c.user != nil {
-		result := map[string]any{"you": c.user.profile()}
+		result := map[string]any{"you": c.user.you()}
 		if req.hasID {
 			c.sendResult(req, result)
 		}
@@ -301,7 +336,7 @@ func (s *Server) authenticate(c *client, req request) (any, *rpcError) {
 	// A new guest joins the default room, so their room list is not empty,
 	// and the membership reaches this connection before the result (§1).
 	s.joinDefaultRoomLocked(user)
-	result := map[string]any{"you": user.profile()}
+	result := map[string]any{"you": user.you()}
 	if req.hasID {
 		c.sendResult(req, result)
 	}
@@ -313,7 +348,7 @@ func (s *Server) authenticate(c *client, req request) (any, *rpcError) {
 // identity's rooms: the client lists them with room_list.
 func (s *Server) switchUserLocked(c *client, req request, user *userState, extra map[string]any) map[string]any {
 	s.attachLocked(c, user)
-	result := map[string]any{"you": user.profile()}
+	result := map[string]any{"you": user.you()}
 	maps.Copy(result, extra)
 	if req.hasID {
 		c.sendResult(req, result)
@@ -321,10 +356,11 @@ func (s *Server) switchUserLocked(c *client, req request, user *userState, extra
 	return result
 }
 
-// attachLocked makes user the connection's identity. A guest identity left
-// without connections is retired, logging its leaves, and then others who
-// shared a room with it learn of the user_id change through a `user`
-// notification with `new` and `old` (§3.3).
+// attachLocked makes user the connection's identity, applying the status
+// the connection sent before signing in (§4.11) and announcing the user's
+// new status. A guest identity left without connections is retired, logging
+// its leaves, and then others who shared a room with it learn of the
+// user_id change through a `user` notification with `new` and `old` (§3.3).
 func (s *Server) attachLocked(c *client, user *userState) {
 	previous := c.user
 	if previous == user {
@@ -340,7 +376,12 @@ func (s *Server) attachLocked(c *client, user *userState) {
 	}
 	c.user = user
 	user.clients[c] = struct{}{}
+	s.applyPendingStatusLocked(c, user)
+	s.statusChangedLocked(user, c, false)
 	if previous == nil || len(previous.clients) > 0 || previous.account() {
+		if previous != nil {
+			s.statusChangedLocked(previous, nil, false)
+		}
 		return
 	}
 	sharers := s.sharersLocked(previous)
@@ -363,7 +404,9 @@ func (s *Server) detachLocked(c *client) {
 	c.user = nil
 	if len(user.clients) == 0 && !user.account() {
 		s.retireLocked(user)
+		return
 	}
+	s.statusChangedLocked(user, nil, false)
 }
 
 // retireLocked removes a guest identity for good. It leaves every room it
@@ -374,30 +417,23 @@ func (s *Server) retireLocked(u *userState) {
 	rooms := slices.SortedFunc(maps.Values(u.joined), func(a, b *roomState) int {
 		return cmp.Compare(a.createdID, b.createdID)
 	})
+	// Its registrations go first, so its leaves send it no badge pushes.
+	for _, registration := range u.pushes {
+		s.removePushLocked(registration)
+	}
 	for _, r := range rooms {
 		s.leaveLocked(u, r)
 		delete(r.reads, u.id)
 	}
-	for key, registration := range s.pushes {
-		if registration.userID == u.id {
-			delete(s.pushes, key)
-			s.touchPush(key)
+	for _, timer := range []*time.Timer{u.muteTimer, u.statusTimer} {
+		if timer != nil {
+			timer.Stop()
 		}
 	}
+	s.stopBadgeLocked(u)
 	s.setAvatarEmbedLocked(u, nil)
 	delete(s.users, u.id)
 	s.touchUser(u.id)
-}
-
-// attending reports whether any connection of the user is not away (§4.4).
-// Callers hold s.mu.
-func (u *userState) attending() bool {
-	for c := range u.clients {
-		if !c.away {
-			return true
-		}
-	}
-	return false
 }
 
 // send queues a frame to every connection of the user.
@@ -431,7 +467,7 @@ func (s *Server) sharersLocked(u *userState) []*userState {
 // removed, announced as empty values.
 func (s *Server) notifyProfileLocked(u *userState, except *client, removed ...string) {
 	profile := withRemoved(u.profile(), removed)
-	you := notification("user", map[string]any{"you": profile})
+	you := notification("user", map[string]any{"you": withRemoved(u.you(), removed)})
 	for c := range u.clients {
 		if c != except {
 			c.enqueue(you)
@@ -510,7 +546,7 @@ func (s *Server) updateProfile(c *client, req request) (any, bool, *rpcError) {
 			removed = append(removed, "ext")
 		}
 	}
-	result := map[string]any{"you": withRemoved(u.profile(), removed)}
+	result := map[string]any{"you": withRemoved(u.you(), removed)}
 	if !jsonEqual(before, u.profile()) {
 		s.notifyProfileLocked(u, c, removed...)
 	}

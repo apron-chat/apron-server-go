@@ -29,6 +29,7 @@ import (
 // Entry kinds and IDs:
 //
 //	meta     "counters"   log_id, guest, embed, and upload sequences
+//	meta     "vapid"      the webpush VAPID private key (§4.7)
 //	used_id  lowercased user_id ever assigned
 //	record   log_id       a logged record and the rooms whose logs hold it
 //	room     room_id
@@ -36,7 +37,8 @@ import (
 //	user     user_id      guests too, retired at the next start
 //	session  hex SHA-256 of the bearer token
 //	embed    embed_id
-//	push     url
+//	push     user_id, a space, and url (url alone before registrations
+//	         belonged to their user)
 const (
 	entryMeta    = "meta"
 	entryUsedID  = "used_id"
@@ -65,6 +67,7 @@ type dirtySet struct {
 	embeds   map[string]bool
 	pushes   map[string]bool
 	usedIDs  []string
+	vapid    bool
 }
 
 func newDirtySet() dirtySet {
@@ -85,7 +88,7 @@ func (s *Server) touchMessage(m *messageState) { s.dirty.messages[m.id] = true }
 func (s *Server) touchUser(id string)          { s.dirty.users[id] = true }
 func (s *Server) touchSession(key [32]byte)    { s.dirty.sessions[key] = true }
 func (s *Server) touchEmbed(id string)         { s.dirty.embeds[id] = true }
-func (s *Server) touchPush(url string)         { s.dirty.pushes[url] = true }
+func (s *Server) touchPush(key string)         { s.dirty.pushes[key] = true }
 func (s *Server) touchUsedID(lowercased string) {
 	s.dirty.usedIDs = append(s.dirty.usedIDs, lowercased)
 }
@@ -160,6 +163,17 @@ type storedUser struct {
 	LeftAt      map[string]int64 `json:"left_at,omitzero"`
 	Passkey     *storedPasskey   `json:"passkey,omitzero"`
 	Email       string           `json:"email,omitzero"`
+	// Invisible, Mute, and RoomMutes are the status the user set (§4.11);
+	// Pings are the rooms they have not joined that count toward unread.
+	Invisible bool                  `json:"invisible,omitzero"`
+	Mute      *storedMute           `json:"mute,omitzero"`
+	RoomMutes map[string]storedMute `json:"room_mutes,omitzero"`
+	Pings     map[string]int64      `json:"pings,omitzero"`
+}
+
+type storedMute struct {
+	Forever bool      `json:"forever,omitzero"`
+	Until   time.Time `json:"until,omitzero"`
 }
 
 type storedSession struct {
@@ -186,9 +200,18 @@ type storedEmbed struct {
 }
 
 type storedPush struct {
-	User  string `json:"user"`
-	Kind  string `json:"kind"`
-	Token string `json:"token,omitzero"`
+	User   string `json:"user"`
+	Kind   string `json:"kind"`
+	URL    string `json:"url,omitzero"`
+	Token  string `json:"token,omitzero"`
+	PushID string `json:"push_id,omitzero"`
+	// P256DH and Auth are the subscription's keys, in base64url.
+	P256DH string `json:"p256dh,omitzero"`
+	Auth   string `json:"auth,omitzero"`
+	// Wake lists the registration's scopes; nil, in a registration stored
+	// before scopes, is the default.
+	Wake    []string  `json:"wake"`
+	Renewed time.Time `json:"renewed,omitzero"`
 }
 
 // metaLocked is the counters entry of the current state.
@@ -241,9 +264,10 @@ func (s *Server) dumpLocked() []store.Entry {
 	for id := range s.embeds {
 		all.embeds[id] = true
 	}
-	for url := range s.pushes {
-		all.pushes[url] = true
+	for key := range s.pushes {
+		all.pushes[key] = true
 	}
+	all.vapid = s.vapidStored
 	meta := s.metaLocked()
 	return append(s.entriesLocked(all), store.Entry{Kind: entryMeta, ID: "counters", Value: encodeJSON(meta)})
 }
@@ -299,12 +323,22 @@ func (s *Server) entriesLocked(d dirtySet) []store.Entry {
 			del(entryEmbed, id)
 		}
 	}
-	for url := range d.pushes {
-		if p := s.pushes[url]; p != nil {
-			put(entryPush, url, storedPush{User: p.userID, Kind: p.kind, Token: p.token})
+	for key := range d.pushes {
+		if p := s.pushes[key]; p != nil {
+			stored := storedPush{
+				User: p.userID, Kind: p.kind, URL: p.url, Token: p.token, PushID: p.pushID,
+				Wake: p.wake.names(), Renewed: p.renewed,
+			}
+			if p.keys != nil {
+				stored.P256DH, stored.Auth = encodeBase64URL(p.keys.p256dh), encodeBase64URL(p.keys.auth)
+			}
+			put(entryPush, key, stored)
 		} else {
-			del(entryPush, url)
+			del(entryPush, key)
 		}
+	}
+	if d.vapid && s.vapidStored {
+		put(entryMeta, "vapid", s.vapid.encoded())
 	}
 	return batch
 }
@@ -347,7 +381,19 @@ func storedMessageOf(m *messageState) storedMessage {
 }
 
 func storedUserOf(u *userState) storedUser {
-	stored := storedUser{Name: u.name, Avatar: u.avatar, Ext: u.ext, LeftAt: u.leftAt, Email: u.email}
+	stored := storedUser{Name: u.name, Avatar: u.avatar, Ext: u.ext, LeftAt: u.leftAt, Email: u.email, Invisible: u.invisible, Pings: u.pings}
+	now := time.Now()
+	if u.mute.active(now) {
+		stored.Mute = &storedMute{Forever: u.mute.forever, Until: u.mute.until}
+	}
+	for id, mute := range u.roomMutes {
+		if mute.active(now) {
+			if stored.RoomMutes == nil {
+				stored.RoomMutes = make(map[string]storedMute)
+			}
+			stored.RoomMutes[id] = storedMute{Forever: mute.forever, Until: mute.until}
+		}
+	}
 	if u.avatarEmbed != nil {
 		stored.AvatarEmbed = u.avatarEmbed.id
 	}
@@ -424,6 +470,9 @@ func (s *Server) restoreLocked() (map[string]bool, error) {
 		s.lastID, s.guestNumber, s.accountNumber = s.storedMeta.LastID, s.storedMeta.GuestNumber, s.storedMeta.AccountNumber
 		s.embedNumber, s.uploadSeq = s.storedMeta.EmbedNumber, s.storedMeta.UploadSeq
 	}
+	if err := s.restoreVAPIDLocked(entries[entryMeta]["vapid"]); err != nil {
+		return nil, err
+	}
 	for id := range entries[entryUsedID] {
 		s.usedIDs[id] = true
 	}
@@ -489,6 +538,7 @@ func (s *Server) restoreLocked() (map[string]bool, error) {
 		}
 		for _, logID := range stored.Records {
 			if record := records[logID]; record != nil {
+				record.message = id
 				m.records = append(m.records, record)
 			}
 		}
@@ -513,6 +563,16 @@ func (s *Server) restoreLocked() (map[string]bool, error) {
 		}
 		if stored.LeftAt != nil {
 			u.leftAt = stored.LeftAt
+		}
+		u.invisible = stored.Invisible
+		if stored.Mute != nil {
+			u.mute = muteState{forever: stored.Mute.Forever, until: stored.Mute.Until}
+		}
+		for id, mute := range stored.RoomMutes {
+			u.roomMutes[id] = muteState{forever: mute.Forever, until: mute.Until}
+		}
+		if stored.Pings != nil {
+			u.pings = stored.Pings
 		}
 		if stored.Passkey != nil {
 			u.passkey = &passkeyUser{user: u, handle: stored.Passkey.Handle, credentials: stored.Passkey.Credentials}
@@ -570,16 +630,47 @@ func (s *Server) restoreLocked() (map[string]bool, error) {
 		}
 	}
 
-	for url, raw := range entries[entryPush] {
+	now := time.Now()
+	for key, raw := range entries[entryPush] {
 		var stored storedPush
-		if err := decode(entryPush, url, raw, &stored); err != nil {
+		if err := decode(entryPush, key, raw, &stored); err != nil {
 			return nil, err
 		}
-		if s.users[stored.User] != nil {
-			s.pushes[url] = &pushRegistration{userID: stored.User, kind: stored.Kind, url: url, token: stored.Token}
+		if stored.URL == "" {
+			// A registration stored by url alone, before registrations
+			// belonged to their user, is renewed under its new key.
+			stored.URL, stored.Renewed = key, now
+			s.touchPush(key)
+		}
+		if normalized, problem := normalizePushURL(stored.URL); problem != "" {
+			s.touchPush(key)
+			continue
+		} else if normalized != stored.URL {
+			// One stored before endpoints were normalized moves to the key
+			// of its normal form.
+			stored.URL = normalized
+			s.touchPush(key)
+		}
+		p := &pushRegistration{
+			userID: stored.User, kind: stored.Kind, url: stored.URL, token: stored.Token, pushID: stored.PushID,
+			wake: defaultWake, renewed: stored.Renewed, lastUnread: -1,
+		}
+		if stored.Wake != nil {
+			p.wake = parseWakeNames(stored.Wake)
+		}
+		if stored.P256DH != "" {
+			keys, err := parsePushKeys(stored.P256DH, stored.Auth)
+			if err != nil {
+				return nil, fmt.Errorf("stored push %q: %w", key, err)
+			}
+			p.keys = &keys
+		}
+		if u := s.users[stored.User]; u != nil && p.live(now) {
+			s.addPushLocked(u, p)
+		} else {
+			s.touchPush(key)
 		}
 	}
-	now := time.Now()
 	for id, raw := range entries[entrySession] {
 		var stored storedSession
 		key, err := hex.DecodeString(id)
@@ -605,6 +696,8 @@ func (s *Server) restoreLocked() (map[string]bool, error) {
 			s.retireLocked(u)
 		} else {
 			s.grantRolesLocked(u)
+			s.scheduleMuteLocked(u)
+			u.status, u.ownStatus = u.statusAt(now), u.ownStatusAt(now)
 		}
 	}
 	for _, id := range slices.Sorted(maps.Keys(s.embeds)) {
@@ -613,6 +706,33 @@ func (s *Server) restoreLocked() (map[string]bool, error) {
 		}
 	}
 	return files, nil
+}
+
+// restoreVAPIDLocked sets the webpush VAPID key (§4.7): Config's, else the
+// one in the store, else a new one, which is stored.
+func (s *Server) restoreVAPIDLocked(raw jsontext.Value) error {
+	if s.vapid != nil {
+		return nil
+	}
+	if raw != nil {
+		var encoded string
+		if err := json.Unmarshal(raw, &encoded); err != nil {
+			return fmt.Errorf("stored VAPID key: %w", err)
+		}
+		key, err := parseVAPIDKey(encoded)
+		if err != nil {
+			return fmt.Errorf("stored VAPID key: %w", err)
+		}
+		s.vapid, s.vapidStored = key, true
+		return nil
+	}
+	key, err := newVAPIDKey()
+	if err != nil {
+		return err
+	}
+	s.vapid, s.vapidStored = key, true
+	s.dirty.vapid = true
+	return nil
 }
 
 // removeStaleUploads deletes upload files in the upload directory that no
