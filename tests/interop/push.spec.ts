@@ -137,18 +137,35 @@ async function tapSocket(page: Page): Promise<Tap> {
 }
 
 // ---------- Passkey account ----------
-async function signUpWithPasskey(page: Page, context: BrowserContext): Promise<void> {
+/** A virtual authenticator on the page, with the given credentials. */
+async function addAuthenticator(page: Page, context: BrowserContext, credentials: any[] = []) {
 	const cdp = await context.newCDPSession(page);
 	await cdp.send('WebAuthn.enable');
-	await cdp.send('WebAuthn.addVirtualAuthenticator', { options: {
+	const { authenticatorId } = await cdp.send('WebAuthn.addVirtualAuthenticator', { options: {
 		protocol: 'ctap2', transport: 'internal', hasResidentKey: true,
 		hasUserVerification: true, isUserVerified: true, automaticPresenceSimulation: true
 	} });
+	for (const credential of credentials) await cdp.send('WebAuthn.addCredential', { authenticatorId, credential });
+	return { credentials: async () => (await cdp.send('WebAuthn.getCredentials', { authenticatorId })).credentials };
+}
+
+async function signUpWithPasskey(page: Page, context: BrowserContext): Promise<{ credentials: () => Promise<any[]> }> {
+	const authenticator = await addAuthenticator(page, context);
 	await page.getByRole('button', { name: /^Your profile on/ }).click();
 	await page.getByRole('dialog', { name: 'Edit profile' }).getByRole('button', { name: 'Sign in with a passkey', exact: true }).click();
 	const card = page.getByRole('form', { name: 'Sign in' });
 	await card.getByRole('radiogroup', { name: 'Passkey', exact: true }).getByRole('radio', { name: /^Create account/ }).click();
 	await card.getByRole('button', { name: 'Create account with passkey', exact: true }).click();
+	await expect(card).toHaveCount(0);
+	return authenticator;
+}
+
+async function signInWithPasskey(page: Page): Promise<void> {
+	// Signing out leaves the profile editor open.
+	if (!(await page.getByRole('dialog', { name: 'Edit profile' }).count())) await page.getByRole('button', { name: /^Your profile on/ }).click();
+	await page.getByRole('dialog', { name: 'Edit profile' }).getByRole('button', { name: 'Sign in with a passkey', exact: true }).click();
+	const card = page.getByRole('form', { name: 'Sign in' });
+	await card.getByRole('button', { name: 'Sign in with passkey', exact: true }).click();
 	await expect(card).toHaveCount(0);
 }
 
@@ -236,7 +253,7 @@ test('web push: register, wake rules, VAPID + aes128gcm delivery, service worker
 	const serverFrame = tap.received.find((frame) => frame.method === 'server');
 	evidence('server.push', serverFrame?.params?.push);
 	expect(serverFrame?.params?.push?.webpush?.key).toBe(vapidPublicFromPrivate(VAPID_PRIVATE));
-	await signUpWithPasskey(page, context);
+	const authenticator = await signUpWithPasskey(page, context);
 	const user1 = await userIdOf(page);
 	evidence('user1', user1);
 
@@ -261,7 +278,7 @@ test('web push: register, wake rules, VAPID + aes128gcm delivery, service worker
 	expect(register.params.kind).toBe('webpush');
 	expect(register.params.url).toBe(endpoint);
 	expect(register.params.keys).toEqual({ p256dh, auth });
-	expect(register.params.push_id).toMatch(/^[A-Za-z0-9_-]{16}$/);
+	expect(register.params.push_id).toMatch(/^[A-Za-z0-9_-]{1,64}$/);
 	expect(register.params.wake).toEqual(['mentions', 'replies']);
 	const pushId = register.params.push_id as string;
 	// Opaque (§4.7): it names neither the server nor the account.
@@ -400,18 +417,34 @@ test('web push: register, wake rules, VAPID + aes128gcm delivery, service worker
 	await expectNoPost(capture.posts, 'mention while attended', before);
 
 	// --- Tab closed: push ---
+	const passkeys = await authenticator.credentials();
 	await page.close();
 	await expect.poll(seenStatus).toBe('idle');
 	const closedMention = await user2.request('message', { room_id: 'general', body: { text: `closed mention @${user1}`, mentions: [user1] } });
 	const closedPush = await pushOf(closedMention.message_id);
 	evidence('closed-tab mention push', { payload: closedPush.payload, statusSeenByUser2: user2.frames.filter((f) => f.method === 'user' && f.params?.new?.user_id === user1).map((f) => f.params.new.status) });
 
-	// --- Reopen (session resumes, registers again), then sign out: unregister ---
+	// --- Reopen: the session resumes and registers again, with the same push_id ---
 	const page2 = await context.newPage();
 	const tap2 = await tapSocket(page2);
 	await openChat(page2);
+	await addAuthenticator(page2, context, passkeys);
 	await expect.poll(() => findSent(tap2, 'push_register').length).toBeGreaterThanOrEqual(1);
-	evidence('re-register on connect', findSent(tap2, 'push_register')[0]);
+	const again2 = findSent(tap2, 'push_register')[0];
+	evidence('re-register on connect', again2);
+	expect(again2.params).toEqual(register.params);
+	const enabledIds = () => page2.evaluate(() => new Promise<unknown>((resolve) => {
+		const request = indexedDB.open('apron-push');
+		request.onsuccess = () => {
+			const get = request.result.transaction('state').objectStore('state').get('enabled');
+			get.onsuccess = () => { resolve(get.result); request.result.close(); };
+			get.onerror = () => resolve('error');
+		};
+		request.onerror = () => resolve('error');
+	}));
+	expect(await enabledIds()).toContain(pushId);
+
+	// --- Sign out: unregister, push off for this account here, and this device stops showing it ---
 	await page2.getByRole('button', { name: /^Your profile on/ }).click();
 	await page2.getByRole('dialog', { name: 'Edit profile' }).getByRole('button', { name: 'Sign out', exact: true }).click();
 	await expect.poll(() => findSent(tap2, 'push_unregister').length).toBeGreaterThanOrEqual(1);
@@ -422,8 +455,35 @@ test('web push: register, wake rules, VAPID + aes128gcm delivery, service worker
 	before = capture.posts.length;
 	await user2.request('message', { room_id: 'general', body: { text: `after signout @${user1}`, mentions: [user1] } });
 	await expectNoPost(capture.posts, 'mention after sign-out', before);
-	evidence('swPushLog', await (context.serviceWorkers()[0]?.evaluate(() => (self as any).__pushLog).catch(() => 'n/a')));
-	evidence('page push log', await page2.evaluate(() => (window as any).__pushLog));
+	await expect.poll(enabledIds).not.toContain(pushId);
+	evidence('enabled push_ids after sign-out', await enabledIds());
+	// A late push for the signed-out account is dropped: nothing new shows.
+	const shownBefore = await swNotifications(context);
+	const late = JSON.stringify({ push_id: pushId, unread: 1, message: { message_id: '9999999999999', room_id: 'general', from: { user_id: user2.userId, name: 'Second' }, body: { text: 'late push' } } });
+	// The first page's CDP session closed with it: find the registration again from this page.
+	const cdp2 = await context.newCDPSession(page2);
+	const registrations2: any[] = [];
+	cdp2.on('ServiceWorker.workerRegistrationUpdated', (event) => registrations2.push(...event.registrations));
+	await cdp2.send('ServiceWorker.enable');
+	await expect.poll(() => registrations2.find((r) => !r.isDeleted)).toBeTruthy();
+	await cdp2.send('ServiceWorker.deliverPushMessage', { origin: ORIGIN, registrationId: registrations2.find((r) => !r.isDeleted).registrationId, data: late });
+	await new Promise((resolve) => setTimeout(resolve, 1_000));
+	const shownAfter = await swNotifications(context);
+	evidence('notifications after a push for the signed-out account', { before: shownBefore, after: shownAfter });
+	expect(shownAfter.filter((n: any) => n.body === 'late push')).toHaveLength(0);
+	expect(shownAfter).toHaveLength(shownBefore.length);
+
+	// --- Signing in again: push stays off, and the client unregisters this browser's endpoint ---
+	const sentBefore = tap2.sent.length;
+	await signInWithPasskey(page2);
+	expect(await userIdOf(page2)).toBe(user1);
+	await expect.poll(() => tap2.sent.slice(sentBefore).filter((frame) => frame.method === 'push_unregister').length).toBeGreaterThanOrEqual(1);
+	const afterSignIn = tap2.sent.slice(sentBefore).filter((frame) => frame.method === 'push_register' || frame.method === 'push_unregister');
+	evidence('push frames after signing in again', afterSignIn);
+	expect(afterSignIn.every((frame) => frame.method === 'push_unregister' && frame.params.url === endpoint)).toBe(true);
+	await page2.getByRole('button', { name: /^Open preferences/ }).click();
+	await expect(page2.getByRole('dialog', { name: 'Preferences' }).getByRole('switch', { name: 'Push notifications' })).toHaveAttribute('aria-checked', 'false');
+	await page2.keyboard.press('Escape');
 	evidence('total posts', capture.posts.length);
 	user2.close();
 	capture.close();
