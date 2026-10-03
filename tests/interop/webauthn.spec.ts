@@ -24,12 +24,19 @@ async function openPasskeySignIn(page: Page): Promise<void> {
 	await expect(connectCard(page).getByRole('radio', { name: 'Passkey', exact: true })).toHaveAttribute('aria-checked', 'true');
 }
 
-/** The sign-in panel's two explicit passkey actions: an account with a new passkey, or an existing passkey's account. */
-const createAccount = (page: Page) => connectCard(page).getByRole('button', { name: 'New here? Create an account with a passkey', exact: true });
+/**
+ * The sign-in panel's two explicit passkey actions: on Passkey, the viewer picks Sign in (an
+ * existing passkey's account, the default) or Create account (an account with a new passkey),
+ * and the primary button does it.
+ */
+const chooseCreateAccount = (page: Page) => connectCard(page).getByRole('radiogroup', { name: 'Passkey', exact: true })
+	.getByRole('radio', { name: /^Create account/ }).click();
+const createAccount = (page: Page) => connectCard(page).getByRole('button', { name: 'Create account with passkey', exact: true });
 const signInWithPasskey = (page: Page) => connectCard(page).getByRole('button', { name: 'Sign in with passkey', exact: true });
 
 async function registerPasskey(page: Page): Promise<void> {
 	await openPasskeySignIn(page);
+	await chooseCreateAccount(page);
 	await createAccount(page).click();
 	await expect(connectCard(page)).toHaveCount(0);
 }
@@ -142,6 +149,8 @@ test('a handle typed in the profile names the new account and its passkey', asyn
 	await profileButton(page).click();
 	await profileDialog(page).getByTestId('display-name-input').fill(handle);
 	await profileDialog(page).getByRole('button', { name: 'Sign in with a passkey', exact: true }).click();
+	// A new account takes a name; signing in restores one, so only Create account asks.
+	await chooseCreateAccount(page);
 	await expect(connectCard(page).getByTestId('connect-name-input')).toHaveValue(handle);
 	await createAccount(page).click();
 	await expect(connectCard(page)).toHaveCount(0);
@@ -162,6 +171,7 @@ test('cancelling an active passkey prompt leaves sign-in and server changes usab
 	await openChat(page);
 	await openPasskeySignIn(page);
 	const card = connectCard(page);
+	await chooseCreateAccount(page);
 	await createAccount(page).click();
 	await expect(card.getByRole('button', { name: 'Signing in…', exact: true })).toBeVisible();
 	await card.getByRole('button', { name: 'Cancel', exact: true }).click();
