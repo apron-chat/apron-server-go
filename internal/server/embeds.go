@@ -306,7 +306,7 @@ func (s *Server) handleWrite(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.Method != http.MethodPut && r.Method != http.MethodPost {
 		w.Header().Set("Allow", "PUT, POST, OPTIONS")
-		http.Error(w, "Write with PUT or POST", http.StatusMethodNotAllowed)
+		refuseWrite(w, "Write with PUT or POST", http.StatusMethodNotAllowed)
 		return
 	}
 	token := strings.TrimPrefix(r.URL.Path, writePath)
@@ -314,7 +314,7 @@ func (s *Server) handleWrite(w http.ResponseWriter, r *http.Request) {
 	e := s.writes[token]
 	if e == nil || e.started || e.removed {
 		s.unlock()
-		http.Error(w, "This write URL is unknown, used, or expired", http.StatusNotFound)
+		refuseWrite(w, "This write URL is unknown, used, or expired", http.StatusNotFound)
 		return
 	}
 	e.started = true
@@ -329,6 +329,16 @@ func (s *Server) handleWrite(w http.ResponseWriter, r *http.Request) {
 	} else {
 		s.writeUpload(w, r, e)
 	}
+}
+
+// refuseWrite answers a write without reading its body, and closes the
+// connection. net/http would otherwise read what is left of the body before
+// answering, to reuse the connection, and wait for as long as the writer
+// holds the body open, such as a stream writer waiting for the answer.
+func refuseWrite(w http.ResponseWriter, message string, status int) {
+	w.Header().Set("Connection", "close")
+	_ = http.NewResponseController(w).SetReadDeadline(time.Now())
+	http.Error(w, message, status)
 }
 
 func (s *Server) writeUpload(w http.ResponseWriter, r *http.Request, e *embedState) {

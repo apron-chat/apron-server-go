@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"fmt"
 	"io"
@@ -726,7 +727,7 @@ func TestStreamWriteConnectionCanReadAStream(t *testing.T) {
 }
 
 func TestSavingWithoutAStreamEndsIt(t *testing.T) {
-	_, httpServer := newTestServer(t, DefaultConfig())
+	app, httpServer := newTestServer(t, DefaultConfig())
 	a := dialTestClient(t, httpServer)
 	result := postEmbeds(t, a, "stream", map[string]any{"room_id": "general", "body": map[string]any{"embeds": []any{map[string]any{"kind": "stream"}}}})
 	writeURL := result["embeds"].([]any)[0].(map[string]any)["write_url"].(string)
@@ -743,12 +744,50 @@ func TestSavingWithoutAStreamEndsIt(t *testing.T) {
 		writerDone <- response.StatusCode
 	}()
 	_, _ = pipe.Write([]byte("partial"))
+	// The save must find the write started; one that arrives after it is
+	// refused instead (TestRefusedWriteDoesNotWaitForItsBody).
+	token := writeURL[strings.LastIndex(writeURL, "/")+1:]
+	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(5 * time.Millisecond) {
+		app.mu.RLock()
+		_, waiting := app.writes[token]
+		app.mu.RUnlock()
+		if !waiting {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the stream write never started")
+		}
+	}
 	save(t, a, "stop", map[string]any{"message_id": result["message_id"], "body": map[string]any{"text": "never mind"}})
 	if status := <-writerDone; status != http.StatusGone {
 		t.Fatalf("writer status %d", status)
 	}
 	_ = pipe.Close()
 	a.expectQuiet(t)
+}
+
+// A write to a URL that is no longer usable is refused at once, even while
+// its body is still open: the server does not wait to read the body first.
+func TestRefusedWriteDoesNotWaitForItsBody(t *testing.T) {
+	_, httpServer := newTestServer(t, DefaultConfig())
+	a := dialTestClient(t, httpServer)
+	result := postEmbeds(t, a, "stream", map[string]any{"room_id": "general", "body": map[string]any{"embeds": []any{map[string]any{"kind": "stream"}}}})
+	writeURL := result["embeds"].([]any)[0].(map[string]any)["write_url"].(string)
+	save(t, a, "stop", map[string]any{"message_id": result["message_id"], "body": map[string]any{"text": "never mind"}})
+	body, pipe := io.Pipe()
+	defer pipe.Close()
+	go func() { _, _ = pipe.Write([]byte("late")) }()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	request, _ := http.NewRequestWithContext(ctx, http.MethodPost, writeURL, body)
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatalf("a refused write with an open body: %v", err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusNotFound {
+		t.Fatalf("status %d", response.StatusCode)
+	}
 }
 
 func TestAvatarCommand(t *testing.T) {
