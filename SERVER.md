@@ -197,7 +197,7 @@ without parsing, and a `ping` notification with other spacing, or with an
 WebSocket level every 30 seconds and closes a connection that does not
 answer within ten. A connection that sent liveness pings and then sent
 nothing for three ping intervals plus the timeout (100 seconds) is closed:
-its page is frozen or gone. A connection that never sent `status` and has
+its page is frozen or gone. A connection that never sent `idle` and has
 sent nothing but liveness pings for five minutes counts as idle
 ([Status](#status)) until its next other frame: a client that does not
 report `status` thus shows idle while unused, and gets pushes.
@@ -478,7 +478,9 @@ New `upload` and `stream` embeds get a one-time write URL, listed in the
 pending snapshot's broadcast. The sender PUTs the content there (§4.6.3);
 `POST`, which earlier versions allowed, is still accepted. A write URL expires after five minutes unused,
 and a write that never starts or fails is finished by publishing the message
-without the embed.
+without the embed. A write to a URL that is unknown, used, or expired, or
+whose embed was removed, is answered `404` at once and its connection
+closed, without waiting for its body to end.
 
 - **Uploads** (at most 20 MiB each, and 20 MiB for one message's uploads
   together; a message has at most 32 embeds). While pending the embed has no `url`. When
@@ -566,6 +568,8 @@ or names a room the user cannot see, ignores the whole frame.
   end it. A scoped `idle` is ignored.
 - `invisible` is the user's and lasts until changed, across connections
   and restarts. A scoped `invisible` is ignored.
+- A user changes `mute` and `invisible` six times at once, then once every
+  ten seconds; further changes are dropped. `idle` is not limited.
 - `mute` is the user's: seconds (at most a year), `true` until changed, or
   `0` for not muted, across connections and restarts. The unscoped mute
   silences everything. With `room_id` it mutes that room and its threads,
@@ -614,10 +618,12 @@ VAPID public key as `webpush.key`, and `wake`: `mentions`, `replies`,
 `private`, `joined`, and `badge`. `push_register` takes `{kind, url,
 push_id?, keys?, wake?}`, and `token` for `relay`:
 
-- `url` (at most 2,048 bytes) must be an absolute `https` URL (`http` too
-  with `--push.allow-insecure`) without credentials or whitespace, naming
-  neither `localhost` nor an internal address literal; for `webpush` it is
-  the subscription's endpoint. Any other `kind`, `wake` included, is
+- `url` must be an absolute `https` URL (`http` too with
+  `--push.allow-insecure`) without credentials or whitespace, naming
+  neither `localhost` nor an internal address literal, nor a host ending in
+  a dot; for `webpush` it is the subscription's endpoint. It is kept, and
+  matched by `push_unregister`, in one form: scheme and host lowercased,
+  without a default port. That form is at most 512 bytes. Any other `kind`, `wake` included, is
   `invalid_params`.
 - `keys` is `{p256dh, auth}` in base64url, as `PushSubscription.toJSON()`
   gives them: `p256dh` an uncompressed P-256 point on the curve, `auth` 16
@@ -717,7 +723,9 @@ per push host (ignoring case): at most 8 at once to one host and 32 in all,
 so a slow host delays only pushes to itself, over HTTP/2 where the host
 offers it, reading up to 64 KiB of each answer so its connection is reused.
 A user has at most 20 deliveries waiting or running, a host 256, and the
-server 1,024; beyond them a push is dropped. Redirects are not followed.
+server 1,024; beyond them a push is dropped. A user gets at most 1,000
+pushes a UTC day, counting only those an endpoint accepted (2xx); there is
+no allowance per sender. Redirects are not followed.
 Deliveries connect only to public addresses: never loopback, private,
 link-local, shared (CGNAT, `100.64.0.0/10`), documentation, benchmarking,
 reserved, discard-only, site-local, or IPv6 translation addresses. An
