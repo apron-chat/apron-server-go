@@ -119,8 +119,12 @@ Flags (`aprond --help` lists them all):
   oldest message uploads are removed: their files are deleted and each
   affected message is republished without them. Avatars count toward the
   bound but are never removed.
-- `--push.disable` removes push; `--push.allow-insecure` accepts `http` and
-  internal push endpoints (development only). `--push.vapid-private-key`
+- `--push.disable` removes push. `--push.allow-insecure` is for tests only:
+  it accepts `http` push endpoints and ones on internal addresses, so any
+  client could make the server POST into its network; it is refused with
+  `--public-url` or `--tls.domain`, and the server warns at start when it is
+  set. The browser interop tests set it for their local capture endpoint.
+  `--push.vapid-private-key`
   sets the Web Push VAPID key, the P-256 private scalar in base64url as
   `web-push generate-vapid-keys` prints it; without it the server generates
   one at its first start and keeps it in the store, so it lasts as long as

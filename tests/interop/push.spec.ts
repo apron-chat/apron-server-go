@@ -1,18 +1,17 @@
 /**
  * Web push (§4.7) and status (§4.11) end to end between the web client and this server.
- * Runs with its own config, which starts aprond with a fixed VAPID key and --push.allow-insecure:
- *   npx playwright test --config=push.config.ts
- * See push.config.ts.
+ * The push project of playwright.config.ts runs it, with aprond started with a fixed test VAPID
+ * key (push-test-vapid.ts) and --push.allow-insecure:
+ *   npx playwright test --project=push
  */
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { expect, test, type BrowserContext, type Page, type WebSocketRoute } from '@playwright/test';
-import { VAPID_PRIVATE_KEY, VAPID_SUBJECT } from './push.config';
+import { TEST_VAPID_PRIVATE_KEY as VAPID_PRIVATE, TEST_VAPID_SUBJECT as VAPID_SUBJECT } from './push-test-vapid';
 import { openChat, userIdOf } from './test-helpers';
 
-const VAPID_PRIVATE = VAPID_PRIVATE_KEY;
 const PROXIED_WS = 'ws://127.0.0.1:5173/ws';
 const ORIGIN = 'http://localhost:5173';
 /** Set APRON_PUSH_EVIDENCE to a file to record the frames, headers, and payloads checked, as JSON lines. */

@@ -251,6 +251,20 @@ distributions). For a custom browser installation, set:
 PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/path/to/chromium make test-interop
 ```
 
+The `push` project (`push.spec.ts`) needs full Chromium, not the headless
+shell, which `npx playwright install chromium` also installs; with a custom
+browser, point the variable at full Chromium. It skips itself, listing the
+reason at the end of the run, against an apron-web without web push. To run
+against another apron-web checkout, such as a pull request's worktree, set
+`APRON_WEB_DIR`:
+
+```sh
+APRON_WEB_DIR=../apron-web-pr make test-interop
+```
+
+See [`tests/interop/README.md`](tests/interop/README.md) for what each suite
+covers and the flags the server is started with.
+
 No root JavaScript workspace or Go workspace is required.
 
 ## Environment updates

@@ -118,6 +118,23 @@ func TestVAPIDSettings(t *testing.T) {
 	}
 }
 
+func TestInsecurePushIsForTestsOnly(t *testing.T) {
+	options, _ := parse(t, "--push.allow-insecure")
+	if config, err := serverConfig(*options); err != nil || !config.AllowInsecurePush {
+		t.Fatalf("allow insecure %v, error %v", config.AllowInsecurePush, err)
+	}
+	// A public server refuses it, as it lets clients reach internal addresses.
+	for _, args := range [][]string{
+		{"--push.allow-insecure", "--public-url", "https://chat.example"},
+		{"--push.allow-insecure", "--tls.domain", "chat.example"},
+	} {
+		options, _ := parse(t, args...)
+		if _, err := serverConfig(*options); err == nil {
+			t.Errorf("accepted %v", args)
+		}
+	}
+}
+
 func TestWelcomeAndRoles(t *testing.T) {
 	options, _ := parse(t, "--welcome", "Sign in with **email**.", "--role", "admin=ada", "--role", "Moderator = bob", "--role", "admin=carol")
 	config, err := serverConfig(*options)
