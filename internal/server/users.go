@@ -395,7 +395,11 @@ func (s *Server) attachLocked(c *client, user *userState) {
 		return
 	}
 	sharers := s.sharersLocked(previous)
-	frame := notification("user", map[string]any{"new": user.profile(), "old": previous.profile()})
+	// The old object names the identity that was; it is no current user
+	// object, so it carries no status (§3.3, §4.11).
+	old := previous.profile()
+	delete(old, "status")
+	frame := notification("user", map[string]any{"new": user.profile(), "old": old})
 	s.retireLocked(previous)
 	for _, other := range sharers {
 		if other != user {

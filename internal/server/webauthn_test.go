@@ -550,9 +550,9 @@ func TestSignInReplacesGuestAndDeduplicatesPerUser(t *testing.T) {
 		}
 	}
 	notice := observer.notification(t, "user")
-	// The retired guest is offline.
+	// The old object, no current user object, carries no status.
 	retired := maps.Clone(guest)
-	retired["status"] = "offline"
+	delete(retired, "status")
 	if !reflect.DeepEqual(notice, map[string]any{"new": registered["you"], "old": retired}) {
 		t.Fatalf("user notification = %#v", notice)
 	}
