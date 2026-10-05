@@ -541,3 +541,64 @@ func TestStatusSurvivesRestart(t *testing.T) {
 		t.Fatalf("room mute after restart: %#v", params)
 	}
 }
+
+// Only a sign-in is sent the mutes and statuses after its auth result
+// (§4.11): an auth that adds a passkey or an address to a signed-in
+// connection is sent nothing after it, while a sign-in to the same account
+// elsewhere is.
+func TestAdditionsAreNotSignIns(t *testing.T) {
+	_, mailbox, httpServer := emailTestServer(t, func(config *Config) {
+		config.WebAuthn = testWebAuthn(t)
+	})
+	other := dialTestClient(t, httpServer)
+	c, _ := dialOrigin(t, httpServer, testPasskeyOrigin)
+	guestAuth(t, c)
+	expectMembership(t, other, "general", c.userID, true)
+	watching(c)
+	c.drain(t)
+	frames := c.status(t, map[string]any{"mute": true})
+	if len(frames) != 1 {
+		t.Fatalf("mute echo: %#v", frames)
+	}
+	checkMute(t, frames[0], "", true)
+
+	// A passkey registration adds the passkey: its result, and nothing
+	// after it.
+	authenticator := newTestAuthenticator(t)
+	options := passkeyResult(t, passkeyCall(t, c, "register-begin", "register", "begin", nil))
+	registered := passkeyResult(t, passkeyCall(t, c, "register-finish", "register", "finish", map[string]any{"credential": authenticator.registration(t, options, testPasskeyOrigin)}))
+	if registered["you"].(map[string]any)["user_id"] != c.userID || registered["token"] == nil {
+		t.Fatalf("passkey registration: %#v", registered)
+	}
+	if frames := c.drain(t); len(frames) != 0 {
+		t.Fatalf("frames after a passkey registration: %#v", frames)
+	}
+
+	// Nor is an address added to the account.
+	propose(t, c, "added@example.com")
+	message := mailbox.receive(t)
+	if !message.Add {
+		t.Fatalf("addition email: %#v", message)
+	}
+	if _, result := approve(t, c, message.Code, nil); len(result) != 0 {
+		t.Fatalf("approving an addition: %#v", result)
+	}
+	if frames := c.drain(t); len(frames) != 0 {
+		t.Fatalf("frames after an address addition: %#v", frames)
+	}
+
+	// A sign-in to the account on another connection is sent the mute and
+	// the statuses after its result.
+	signedIn, _ := dialOrigin(t, httpServer, testPasskeyOrigin)
+	watching(signedIn)
+	before, _ := signedIn.request(t, "auth", "resume", map[string]any{"scheme": "token", "token": registered["token"]})
+	if len(before) != 0 {
+		t.Fatalf("frames before the sign-in result: %#v", before)
+	}
+	frames = signedIn.drain(t)
+	if len(frames) != 2 {
+		t.Fatalf("frames after a sign-in: %#v", frames)
+	}
+	checkMute(t, frames[0], "", true)
+	checkStatus(t, frames[1], other.userID, "online")
+}

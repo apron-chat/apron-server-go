@@ -346,17 +346,20 @@ func (s *Server) authenticate(c *client, req request) (any, *rpcError) {
 }
 
 // switchUserLocked makes user the connection's identity and replies with
-// extra fields beside `you` (§3.2, §3.3), then sends what follows auth
-// (§4.11). No room_update is sent for the new identity's rooms: the client
-// lists them with room_list.
-func (s *Server) switchUserLocked(c *client, req request, user *userState, extra map[string]any) map[string]any {
+// extra fields beside `you` (§3.2, §3.3), then, for a sign-in, sends what
+// follows it (§4.11). An auth that adds a passkey to a signed-in connection
+// is not a sign-in, and is sent nothing after its result. No room_update is
+// sent for the new identity's rooms: the client lists them with room_list.
+func (s *Server) switchUserLocked(c *client, req request, user *userState, extra map[string]any, signIn bool) map[string]any {
 	s.attachLocked(c, user)
 	result := map[string]any{"you": user.you()}
 	maps.Copy(result, extra)
 	if req.hasID {
 		c.sendResult(req, result)
 	}
-	s.sendAfterAuthLocked(c)
+	if signIn {
+		s.sendAfterAuthLocked(c)
+	}
 	return result
 }
 

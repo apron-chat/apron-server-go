@@ -583,13 +583,15 @@ winning, so a flapping connection costs its rooms little. A new member is
 announced to a room's other members the same way, since a membership
 carries only a recorded user, unless their status is `offline` or `""`.
 
-After every `auth` result, the connection is sent `status` for each of the
-user's mutes in effect (below), then `user` `{new: {user_id, status}}`
-with the status others see of each user who shares a room with it, since
-its client may have dropped the statuses it kept. It leaves out users who
-show `offline` or `""`, so the snapshot tells neither who is invisible nor
-who opted out; a `dnd` user without a connection shows `offline` and is
-left out.
+After the result of every sign-in, an `auth` that signs the connection
+in, the connection is sent `status` for each of the user's mutes in effect
+(below), then `user` `{new: {user_id, status}}` with the status others see
+of each user who shares a room with it, since its client may have dropped
+the statuses it kept. It leaves out users who show `offline` or `""`, so
+the snapshot tells neither who is invisible nor who opted out; a `dnd` user
+without a connection shows `offline` and is left out. An `auth` that adds
+a passkey or an address to a signed-in connection is not a sign-in: its
+result is followed by neither.
 
 The `status` notification is never answered. It is accepted before
 authentication too: `idle` applies to the connection at once, and `mute`

@@ -297,13 +297,18 @@ func (s *Server) finishPasskeyCeremony(c *client, req request, action string, w 
 			}
 		}
 	}
-	return s.signInLocked(c, req, user.user, now)
+	// A registration adds the passkey to the signed-in connection's
+	// account: it is not a sign-in (§4.11).
+	return s.signInLocked(c, req, user.user, now, ceremony.action != "register")
 }
 
 // signInLocked makes an account the connection's identity after a passkey
-// or email sign-in, with a new bearer token for later connections in the
-// result (§3.2). The connection's previous token is forgotten.
-func (s *Server) signInLocked(c *client, req request, user *userState, now time.Time) (any, *rpcError) {
+// or email sign-in, or a passkey registration, with a new bearer token for
+// later connections in the result (§3.2). The connection's previous token
+// is forgotten. signIn is whether the auth signed the connection in, rather
+// than adding a passkey to it, which alone sends what follows a sign-in
+// (§4.11).
+func (s *Server) signInLocked(c *client, req request, user *userState, now time.Time, signIn bool) (any, *rpcError) {
 	delete(s.sessions, c.token)
 	s.touchSession(c.token)
 	secret := make([]byte, 32)
@@ -314,7 +319,7 @@ func (s *Server) signInLocked(c *client, req request, user *userState, now time.
 	c.token = sha256.Sum256([]byte(token))
 	s.sessions[c.token] = session{user: user, origin: c.origin, expires: now.Add(sessionLifetime)}
 	s.touchSession(c.token)
-	return s.switchUserLocked(c, req, user, map[string]any{"token": token}), nil
+	return s.switchUserLocked(c, req, user, map[string]any{"token": token}, signIn), nil
 }
 
 // pruneSessionsLocked forgets expired sessions.
@@ -358,7 +363,7 @@ func (s *Server) authenticateToken(c *client, req request) (any, *rpcError) {
 	s.sessions[key] = session
 	s.touchSession(key)
 	c.token = key
-	return s.switchUserLocked(c, req, session.user, map[string]any{"token": token}), nil
+	return s.switchUserLocked(c, req, session.user, map[string]any{"token": token}, true), nil
 }
 
 // parsePasskeyCredential performs only wire-shape validation. A syntactically

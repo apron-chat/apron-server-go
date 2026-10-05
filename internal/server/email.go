@@ -580,7 +580,7 @@ func (s *Server) approveEmailLocked(c *client, req request, token, name, request
 		s.attachLocked(c, user)
 		s.joinDefaultRoomLocked(user)
 	}
-	return s.signInLocked(c, req, user, now)
+	return s.signInLocked(c, req, user, now, true)
 }
 
 // assignAccountIDLocked honors a requested user_id as assignUserIDLocked
