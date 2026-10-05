@@ -978,12 +978,20 @@ func TestRequestDeduplication(t *testing.T) {
 	if len(logIDs(t, second, "messages")) != len(logIDs(t, first, "messages"))+1 {
 		t.Fatalf("a finished read was answered from the cache: %#v", second)
 	}
-	app.mu.RLock()
-	defer app.mu.RUnlock()
-	if entry := app.users[c.userID].dedup.get("read"); entry != nil {
+	// The server forgets a read just after sending its result, so the
+	// result can arrive first.
+	kept := func(id string) bool {
+		app.mu.RLock()
+		defer app.mu.RUnlock()
+		return app.users[c.userID].dedup.get(id) != nil
+	}
+	for deadline := time.Now().Add(time.Second); kept("read") && time.Now().Before(deadline); {
+		time.Sleep(time.Millisecond)
+	}
+	if kept("read") {
 		t.Fatal("history result kept for deduplication")
 	}
-	if entry := app.users[c.userID].dedup.get("post"); entry == nil {
+	if !kept("post") {
 		t.Fatal("message result not kept for deduplication")
 	}
 }
