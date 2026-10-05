@@ -263,14 +263,24 @@ func TestStatusBeforeAuth(t *testing.T) {
 	for _, params := range []map[string]any{
 		{"room_id": "missing", "mute": true},
 		{"room_id": 5, "mute": 5},
-		{"mute": false},
-		{"mute": 1.5},
-		{"mute": "60", "idle": "yes", "invisible": 1},
+		{"idle": "yes"},
 	} {
 		if frames := c.status(t, params); len(frames) != 0 {
 			t.Fatalf("frames after %#v: %#v", params, frames)
 		}
 	}
+	// An unscoped mute or invisible, even malformed, echoes the values that
+	// result to the sender alone (§4.11).
+	for _, params := range []map[string]any{
+		{"mute": false},
+		{"mute": 1.5},
+		{"mute": "60", "idle": "yes", "invisible": 1},
+	} {
+		if you := echoed(t, c, c.status(t, params), "dnd"); you["mute"] != float64(60) || you["invisible"] != true {
+			t.Fatalf("echo after %#v: %#v", params, you)
+		}
+	}
+	a.expectQuiet(t)
 	if you := echoed(t, c, c.status(t, map[string]any{"idle": "yes", "invisible": false, "mute": 1.5}), "dnd"); you["invisible"] != false {
 		t.Fatalf("echo of the valid field: %#v", you)
 	}
@@ -371,6 +381,19 @@ func TestMuteEchoReachesEveryConnection(t *testing.T) {
 	first.status(t, map[string]any{"mute": 60})
 	if you := expectStatus(t, second, second.userID, "dnd"); you["mute"] != float64(60) || you["invisible"] != false {
 		t.Fatalf("echo to a connection that never sent status: %#v", you)
+	}
+	// A status that changes nothing still echoes the values to its sender,
+	// and to no other connection (§4.11).
+	if you := echoed(t, second, second.status(t, map[string]any{"invisible": false}), "dnd"); you["mute"] != float64(60) || you["invisible"] != false {
+		t.Fatalf("echo of an unchanged mute: %#v", you)
+	}
+	first.expectQuiet(t)
+	// A mute past a year is shortened to one, and the echo says so.
+	first.write(t, map[string]any{"method": "status", "params": map[string]any{"mute": 10 * maxMuteSeconds}})
+	for _, c := range []*testClient{first, second} {
+		if you := expectStatus(t, c, c.userID, "dnd"); you["mute"] != float64(maxMuteSeconds) {
+			t.Fatalf("echo of a mute past a year: %#v", you)
+		}
 	}
 }
 
@@ -559,8 +582,10 @@ func TestMuteChangesAreLimited(t *testing.T) {
 			t.Fatalf("change %d: %#v", i, frames)
 		}
 	}
-	if frames := c.status(t, map[string]any{"mute": 0, "invisible": true}); len(frames) != 0 {
-		t.Fatalf("a change past the limit: %#v", frames)
+	// A change past the limit is dropped, and the sender told the values
+	// that stand (§4.11).
+	if you := echoed(t, c, c.status(t, map[string]any{"mute": 0, "invisible": true}), "dnd"); you["mute"] != float64(userStatusBurst) || you["invisible"] != false {
+		t.Fatalf("echo of a change past the limit: %#v", you)
 	}
 	if you := c.result(t, "me", "me", map[string]any{})["you"].(map[string]any); you["mute"] != float64(userStatusBurst) || you["invisible"] != nil {
 		t.Fatalf("you after the limit: %#v", you)

@@ -76,6 +76,10 @@ type statusUpdate struct {
 	hasMute     bool
 	muteForever bool
 	muteSeconds int64
+	// echo is set when the update carries an unscoped mute or invisible,
+	// valid or not: the sending connection is then told the resulting
+	// values, changed or not (§4.11).
+	echo bool
 }
 
 // parseStatus reads a status notification's params (§4.11), ignoring each
@@ -91,6 +95,11 @@ func parseStatus(params map[string]jsontext.Value) (statusUpdate, bool) {
 			return update, false
 		}
 		update.roomID, update.scoped = roomID, true
+	}
+	if !update.scoped {
+		_, hasMute := params["mute"]
+		_, hasInvisible := params["invisible"]
+		update.echo = hasMute || hasInvisible
 	}
 	for name, field := range map[string]**bool{"idle": &update.idle, "invisible": &update.invisible} {
 		if _, has := params[name]; has && !update.scoped {
@@ -217,6 +226,12 @@ func (s *Server) applyStatusLocked(c *client, u *userState, update statusUpdate,
 		youChanged = true
 	}
 	s.statusChangedLocked(u, echoExcept, youChanged)
+	// A change went to every connection of the user above. Otherwise the
+	// sender still learns the values that resulted, such as after a change
+	// dropped by the limit (§4.11).
+	if update.echo && !youChanged && c != echoExcept {
+		c.enqueue(notification("user", map[string]any{"you": u.youEcho(now)}))
+	}
 }
 
 // applyPendingStatusLocked applies the status updates c received before it
@@ -335,6 +350,12 @@ func (u *userState) you() map[string]any {
 	return profile
 }
 
+// youEcho is the `you` that echoes the user's mute and invisible, with the
+// status the user sees (§4.11).
+func (u *userState) youEcho(now time.Time) map[string]any {
+	return map[string]any{"user_id": u.id, "status": u.ownStatusAt(now), "mute": u.mute.wire(now), "invisible": u.invisible}
+}
+
 // statusChangedLocked announces u's status after something it depends on
 // changed: to others (announceStatusLocked), and to u's own connections,
 // except echoExcept, as `you` with the user's own status when it changed.
@@ -353,7 +374,7 @@ func (s *Server) statusChangedLocked(u *userState, echoExcept *client, youChange
 	u.ownStatus = own
 	you := map[string]any{"user_id": u.id, "status": own}
 	if youChanged {
-		you["mute"], you["invisible"] = u.mute.wire(now), u.invisible
+		you = u.youEcho(now)
 	}
 	frame := notification("user", map[string]any{"you": you})
 	for c := range u.clients {
