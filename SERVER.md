@@ -119,7 +119,9 @@ Flags (`aprond --help` lists them all):
   oldest message uploads are removed: their files are deleted and each
   affected message is republished without them. Avatars count toward the
   bound but are never removed.
-- `--push.disable` removes push. `--push.allow-insecure` is for tests only:
+- `--push.disable` removes push. Stored registrations are kept but not
+  loaded, so they neither wake nor make their users `idle`, and apply
+  again once push is enabled. `--push.allow-insecure` is for tests only:
   it accepts `http` push endpoints and ones on internal addresses, so any
   client could make the server POST into its network; it is refused with
   `--public-url` or `--tls.domain`, and the server warns at start when it is
@@ -176,7 +178,7 @@ sessions, finished uploads and their files, the VAPID key, and the
 is reused. What does not: connections and their `idle`, request
 deduplication, email proposals, live streams, the unread counts kept per
 room, which are counted again when needed, and the count each push
-endpoint last received, so the first badge push after a restart is sent
+endpoint last accepted, so the first badge push after a restart is sent
 even when the count is unchanged. Guests exist only while connected, so at start every guest
 left in the store is retired as if its last connection had just closed,
 logging its leaves; a write that had not finished fails, and its message is
@@ -197,14 +199,14 @@ message itself.
 The server answers the liveness ping `{"method":"ping"}` with
 `{"method":"pong"}`, before authentication too; the exact bytes are answered
 without parsing, and a `ping` notification with other spacing, or with an
-`id`, is answered as well, with `pong` alone. It also pings at the
+`id`, or with invalid params, is answered as well, with `pong` alone. It also pings at the
 WebSocket level every 30 seconds and closes a connection that does not
 answer within ten. A connection that sent liveness pings and then sent
 nothing for three ping intervals plus the timeout (100 seconds) is closed:
 its page is frozen or gone. A connection that never sent `idle` and has
 sent nothing but liveness pings for five minutes counts as idle
 ([Status](#status)) until its next other frame: a client that does not
-report `status` thus shows idle while unused, and gets pushes.
+report `idle` thus shows idle while unused, and gets pushes.
 
 ## Log and history
 
@@ -288,8 +290,9 @@ Current user objects (`you`, `new` in `user`, and `users` in `room_list` and
 `room_update`) carry `avatar`, `ext`, and `roles`, an account's `roles` always,
 `[]` when it holds none, so a role taken away clears it (§3.3), and
 `status` ([Status](#status)); `you` also carries the user's remaining
-`mute`. Recorded objects (`from` in messages
-and reactions, `user` in memberships) carry only `user_id` and `name` as they
+`mute` and `invisible` while set. The `old` object of a `user_id` change
+is not a current object and carries no `status`. Recorded objects (`from`
+in messages and reactions, `user` in memberships) carry only `user_id` and `name` as they
 were when logged. Room `members` are bare `{user_id}` objects whose complete
 objects are in the accompanying `users`.
 
@@ -299,9 +302,10 @@ are memberships. A profile change sends
 who shares a room with them. When a sign-in replaces a guest identity on a
 connection, the guest is retired: a leave is logged in every room it had
 joined, and then those who shared a room with it receive `user` with `new` and
-`old`. A guest whose last connection closes is retired the same way, with a
-logged leave for each room; its `user_id` is never reissued, so its records
-stay consistent. Accounts are never retired.
+`old`; `old` names the retired identity and carries no `status`. A guest
+whose last connection closes is retired the same way, with a logged leave
+for each room; its `user_id` is never reissued, so its records stay
+consistent. Accounts are never retired.
 
 ## Rooms, threads, and membership
 
@@ -574,13 +578,15 @@ or names a room the user cannot see, ignores the whole frame.
   and restarts. A scoped `invisible` is ignored.
 - A user changes `mute` and `invisible` six times at once, then once every
   ten seconds; further changes are dropped. `idle` is not limited.
-- `mute` is the user's: seconds (at most a year), `true` until changed, or
-  `0` for not muted, across connections and restarts. The unscoped mute
-  silences everything. With `room_id` it mutes that room and its threads,
-  except mentions, whether or not the user has joined it; `0` removes the
-  room's own mute. Both apply at once. A timed mute ends by itself: the
-  status that changes with it is announced, but no `mute: 0`, since clients
-  count the seconds down.
+- `mute` is the user's: seconds (longer ones are shortened to a year),
+  `true` until changed, or `0` for not muted, across connections and
+  restarts. The unscoped mute silences everything. With `room_id` it mutes
+  that room and its threads, except mentions, whether or not the user has
+  joined it; `0` removes the room's own mute. Both apply at once. A timed
+  mute ends by itself, with no `mute: 0`, since clients count the seconds
+  down: for the unscoped mute the status that changes with it is
+  announced, and for a room mute the unread count is taken again and a
+  badge push sent ([Push](#push)).
 
 The server derives each user's `status`, the first of these that applies:
 
@@ -599,23 +605,31 @@ change goes as `user` `{new: {user_id, status}}` to the connections of
 those who share a room with the user, and as `you` `{user_id, status}` to
 the user's own; a new member who is not offline is announced to the room's
 other members the same way, since a membership carries only a recorded
-user. These changes go only to connections that have sent `status`, which
+user. These changes go only to connections that have sent `idle`, which
 is how a client shows it implements §4.11; others learn statuses from
-current objects alone. A user's changes go to others at once ten times,
-then at most once every two seconds, the latest status winning, so a
+current objects alone. When a connection first sends `idle`, or signs in
+after sending it, it is sent `user` `{new: {user_id, status}}` for each
+user with a connection who shares a room with it, since its client may
+have dropped the statuses it kept; users without a connection have no
+known status and are left out. A user's changes go to others at once ten
+times, then at most once every two seconds, the latest status winning, so a
 flapping connection costs its rooms little. Registrations that expire are
 looked for every hour, and the status that changes with them announced.
 
 A change to `mute` or `invisible` is echoed to every connection of the
 user as `you` with `status`, `mute` (`0` when not muted), and `invisible`.
-The `auth` and `me` results carry `mute` and `invisible` while set, and
-never show them to others. A room's mute is a delivery field of the room
-records only that user receives (§3.4): `room_list` and `room_update`
-`joined` carry it while set (absent means `0`), and so does `updated` when
-the room is edited; a change to it sends the user's connections the room
-in `room_update` `updated`, with `mute: 0` when removed, while they have
-joined the room. A room they have not joined keeps its mute, shown once
-they join. History `rooms` records never carry it.
+A `status` that carries an unscoped `mute` or `invisible`, valid or not,
+is echoed the same way to the sending connection even when nothing
+changed: a change the limit dropped, or a mute shortened to a year, shows
+the values that stand. The `auth` and `me` results carry `mute` and
+`invisible` while set, and never show them to others. A room's mute is a
+delivery field of the room records only that user receives (§3.4):
+`room_list`, both `joined` and `not_joined`, and `room_update` `joined`
+carry it while set (absent means `0`), and so does `updated` when the room
+is edited; a change to it sends the user's connections the room in
+`room_update` `updated`, with `mute: 0` when removed, while they have
+joined the room, and otherwise shows in the next `room_list`. History
+`rooms` records never carry it.
 
 ## Push
 
@@ -637,10 +651,11 @@ push_id?, keys?, wake?}`, and `token` for `relay`:
   encrypted as for `webpush`. A `webpush` registration ignores `token`.
 - `push_id` is 1 to 64 letters, digits, `_` or `-`, kept and repeated in
   every payload to the registration.
-- `wake` is an array of at most 16 names of at most 64 bytes. Names this
-  server does not implement, `ext:` ones included, are ignored, so `[]` or
-  only unknown names wake for nothing; without `wake`, `mentions` and
-  `replies`. `badge` is ignored for `webpush`.
+- `wake` is an array of names; one that is not an array of strings is
+  `invalid_params`. Names past the first 16, names over 64 bytes, and
+  names this server does not implement, `ext:` ones included, are ignored,
+  so `[]` or only unknown names wake for nothing; without `wake`,
+  `mentions` and `replies`. `badge` is ignored for `webpush`.
 
 A registration belongs to the user and its `url`: registering a `url`
 again replaces the caller's registration of it, with its `push_id`, keys,
@@ -698,16 +713,19 @@ mentioned or replied to them, from that message, until their read cursor
 reaches the room's end. The count stops at 999. The server keeps each
 count per user and room while the user has registrations: a new message
 adds to it, and anything else that may change it (reading, posting,
-joining, leaving, a deletion or move, a room mute) forgets the counts it
-touches, which are counted again from the room's newest 5,000 records when
+joining, leaving, a deletion or move, a room mute set, removed, or run
+out) forgets the counts it touches, which are counted again from the room's newest 5,000 records when
 next needed.
 
 Badge pushes, `{push_id?, unread}` without `message` and with `Urgency:
 low`, go to `relay` registrations that wake for `badge` whenever the count
-differs from the one the registration last received, attended and muted
-users included. They wait two seconds, so one push carries the count after
-a burst of changes, and one still waiting to be sent is replaced by a
-newer count.
+differs from the one the registration last accepted (2xx), attended and
+muted users included; one is not sent for the count of a push to the
+registration still in flight. A count is the registration's only once its
+endpoint accepts the push, so after a failure the next change sends the
+count again, even when it is unchanged. Badge pushes wait two seconds, so
+one push carries the count after a burst of changes, and one still waiting
+to be sent is replaced by a newer count.
 
 Deliveries, all with `TTL: 86400` and the `Urgency` above:
 
@@ -744,8 +762,10 @@ Frames must be I-JSON ([RFC 7493](https://www.rfc-editor.org/rfc/rfc7493)):
 a frame repeating an object key or holding invalid UTF-8 is a parse error.
 The server encodes JSON with `encoding/json/v2` and needs Go 1.27.
 
-`activity`, `status`, and `ping` are notifications only: sent with an `id`,
-they are processed as the notification and not answered (§1).
+`activity`, `status`, and `ping` are notifications only: their `id`, of
+any type, is ignored, and they are processed as the notification and
+never answered, not even with an error for invalid or malformed params
+(§1).
 
 Request `id`s must be strings (§1). They deduplicate per user, across all
 of that user's connections: a retry is not executed or broadcast again, and
