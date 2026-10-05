@@ -142,11 +142,11 @@ func (s *Server) status(c *client, req request) {
 	}
 	s.mu.Lock()
 	defer s.unlock()
-	c.statusAware.Store(true)
+	first := false
 	if update.idle != nil {
 		// Saying whether it is idle takes the connection out of the silence
-		// rule (§4.11).
-		c.reportsIdle.Store(true)
+		// rule, and has it sent status changes (§4.11).
+		first = c.reportsIdle.CompareAndSwap(false, true)
 		c.silent.Store(false)
 	}
 	if c.user == nil {
@@ -163,6 +163,9 @@ func (s *Server) status(c *client, req request) {
 		return
 	}
 	s.applyStatusLocked(c, c.user, update, nil)
+	if first {
+		s.sendSharerStatusLocked(c)
+	}
 }
 
 // applyStatusLocked applies an update for user u from connection c, then
@@ -359,7 +362,7 @@ func (u *userState) youEcho(now time.Time) map[string]any {
 // statusChangedLocked announces u's status after something it depends on
 // changed: to others (announceStatusLocked), and to u's own connections,
 // except echoExcept, as `you` with the user's own status when it changed.
-// Only connections that have sent `status` are told of status changes,
+// Only connections that have sent `idle` are told of status changes,
 // which is how a client shows it implements §4.11; every current user
 // object carries the status regardless. youChanged, the user having changed
 // mute or invisible, echoes both, with the status, to every connection of
@@ -378,7 +381,7 @@ func (s *Server) statusChangedLocked(u *userState, echoExcept *client, youChange
 	}
 	frame := notification("user", map[string]any{"you": you})
 	for c := range u.clients {
-		if c != echoExcept && (youChanged || c.statusAware.Load()) {
+		if c != echoExcept && (youChanged || c.reportsIdle.Load()) {
 			c.enqueue(frame)
 		}
 	}
@@ -415,15 +418,36 @@ func (s *Server) announceStatusLocked(u *userState) {
 	s.sendStatusLocked(u, status, s.sharersLocked(u))
 }
 
-// sendStatusLocked tells the status-aware connections of users that u's
-// status is status.
+// sendStatusLocked tells the status-aware connections of users, those that
+// have sent idle, that u's status is status.
 func (s *Server) sendStatusLocked(u *userState, status string, users []*userState) {
-	frame := notification("user", map[string]any{"new": map[string]any{"user_id": u.id, "status": status}})
+	frame := statusFrame(u, status)
 	for _, other := range users {
 		for c := range other.clients {
-			if c.statusAware.Load() {
+			if c.reportsIdle.Load() {
 				c.enqueue(frame)
 			}
+		}
+	}
+}
+
+func statusFrame(u *userState, status string) jsontext.Value {
+	return notification("user", map[string]any{"new": map[string]any{"user_id": u.id, "status": status}})
+}
+
+// sendSharerStatusLocked sends a connection that has just sent its first
+// idle, or signed in after it, the status of each user with a connection
+// who shares a room with it (§4.11): it is told only of changes from then
+// on, and its client may have dropped what it kept. Users without a
+// connection have no status to know.
+func (s *Server) sendSharerStatusLocked(c *client) {
+	if c.user == nil {
+		return
+	}
+	now := time.Now()
+	for _, other := range s.sharersLocked(c.user) {
+		if len(other.clients) > 0 {
+			c.enqueue(statusFrame(other, other.statusAt(now)))
 		}
 	}
 }

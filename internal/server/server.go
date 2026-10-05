@@ -115,7 +115,7 @@ type Config struct {
 	// VAPIDSubject is the contact push services may use, a mailto: or
 	// https: URL, sent in VAPID tokens. Empty uses PublicURL, if any.
 	VAPIDSubject string
-	// SilentIdleAfter is how long a connection that never sent status may
+	// SilentIdleAfter is how long a connection that never sent idle may
 	// send nothing but liveness pings before it counts as idle (§4.11).
 	SilentIdleAfter time.Duration
 	// MaxConnections bounds concurrent WebSockets; 0 is unlimited.
@@ -354,12 +354,12 @@ type client struct {
 	// Guarded by server.mu.
 	idle          bool
 	pendingStatus []statusUpdate
-	// statusAware is set once the connection sends status, and reportsIdle
-	// once it sends idle. silent is set while a connection that never sent
-	// idle has sent no frame but pings for Config.SilentIdleAfter; it then
-	// counts as idle (§4.11). lastActive is when its latest frame other
-	// than a ping arrived, in Unix nanoseconds.
-	statusAware atomic.Bool
+	// reportsIdle is set once the connection sends idle, which is how a
+	// client shows it implements §4.11: only then is it sent status
+	// changes. silent is set while a connection that never sent idle has
+	// sent no frame but pings for Config.SilentIdleAfter; it then counts as
+	// idle (§4.11). lastActive is when its latest frame other than a ping
+	// arrived, in Unix nanoseconds.
 	reportsIdle atomic.Bool
 	silent      atomic.Bool
 	lastActive  atomic.Int64
@@ -849,7 +849,7 @@ func (c *client) writeLoop() {
 // closes a connection whose client sent liveness pings (§1) and then fell
 // silent for three intervals: its page is frozen or gone even if the socket
 // is not. Three intervals leave room for background timer throttling. A
-// connection that never sent status and has sent nothing but pings for
+// connection that never sent idle and has sent nothing but pings for
 // Config.SilentIdleAfter counts as idle until its next other frame (§4.11).
 func (c *client) pingLoop() {
 	config := c.server.config

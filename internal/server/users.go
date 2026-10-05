@@ -336,6 +336,11 @@ func (s *Server) authenticate(c *client, req request) (any, *rpcError) {
 	// A new guest joins the default room, so their room list is not empty,
 	// and the membership reaches this connection before the result (§1).
 	s.joinDefaultRoomLocked(user)
+	// Its status snapshot, if it sent idle, waited for the room it now
+	// shares (§4.11).
+	if c.reportsIdle.Load() {
+		s.sendSharerStatusLocked(c)
+	}
 	result := map[string]any{"you": user.you()}
 	if req.hasID {
 		c.sendResult(req, result)
@@ -378,6 +383,11 @@ func (s *Server) attachLocked(c *client, user *userState) {
 	user.clients[c] = struct{}{}
 	s.applyPendingStatusLocked(c, user)
 	s.statusChangedLocked(user, c, false)
+	// A connection that sent idle before signing in learns the status of
+	// those it now shares rooms with.
+	if c.reportsIdle.Load() {
+		s.sendSharerStatusLocked(c)
+	}
 	if previous == nil || len(previous.clients) > 0 || previous.account() {
 		if previous != nil {
 			s.statusChangedLocked(previous, nil, false)

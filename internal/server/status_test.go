@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"reflect"
 	"testing"
 	"time"
 
@@ -47,6 +48,34 @@ func echoed(t *testing.T, c *testClient, frames []map[string]any, status string)
 	return checkStatus(t, frames[0], c, c.userID, status)
 }
 
+// snapshot splits the frames after a connection's first idle into the
+// statuses of the connected users it shares a room with, as `new`, by
+// user_id, which the server sends it then (§4.11), and the rest.
+func snapshot(t *testing.T, c *testClient, frames []map[string]any) (map[string]string, []map[string]any) {
+	t.Helper()
+	statuses := map[string]string{}
+	var rest []map[string]any
+	for _, frame := range frames {
+		params, _ := frame["params"].(map[string]any)
+		if object, ok := params["new"].(map[string]any); ok && frame["method"] == "user" && len(params) == 1 && len(object) == 2 && object["user_id"] != c.userID {
+			if _, dup := statuses[object["user_id"].(string)]; dup {
+				t.Fatalf("status of %v sent twice: %#v", object["user_id"], frames)
+			}
+			statuses[object["user_id"].(string)] = object["status"].(string)
+			continue
+		}
+		rest = append(rest, frame)
+	}
+	return statuses, rest
+}
+
+// firstIdle sends a connection's first idle and returns the statuses it is
+// sent of others and the other frames.
+func firstIdle(t *testing.T, c *testClient, idle bool) (map[string]string, []map[string]any) {
+	t.Helper()
+	return snapshot(t, c, c.status(t, map[string]any{"idle": idle}))
+}
+
 // listedStatus is userID's status in the users of a room_list of general.
 func listedStatus(t *testing.T, c *testClient, userID string) any {
 	t.Helper()
@@ -83,14 +112,23 @@ func TestStatusDerivationAndBroadcast(t *testing.T) {
 	app, httpServer := newTestServer(t, config)
 	clients := dialGroup(t, httpServer, 2)
 	a, b := clients[0], clients[1]
-	// a reports its status, so it is told of changes, but nothing changed.
+	// a reports idle, so it is told of changes, and is sent b's status,
+	// but its own did not change.
+	if statuses, frames := firstIdle(t, a, false); len(frames) != 0 || !reflect.DeepEqual(statuses, map[string]string{b.userID: "online"}) {
+		t.Fatalf("frames after a first, unchanged idle: %#v %#v", statuses, frames)
+	}
+	// Only the first idle sends the statuses of others.
 	if frames := a.status(t, map[string]any{"idle": false}); len(frames) != 0 {
-		t.Fatalf("frames after an unchanged status: %#v", frames)
+		t.Fatalf("frames after an unchanged idle: %#v", frames)
 	}
 	if got := listedStatus(t, a, b.userID); got != "online" {
 		t.Fatalf("listed status: %v", got)
 	}
-	echoed(t, b, b.status(t, map[string]any{"idle": true}), "idle")
+	statuses, frames := firstIdle(t, b, true)
+	echoed(t, b, frames, "idle")
+	if !reflect.DeepEqual(statuses, map[string]string{a.userID: "online"}) {
+		t.Fatalf("statuses after b's first idle: %#v", statuses)
+	}
 	expectStatus(t, a, b.userID, "idle")
 	if got := listedStatus(t, a, b.userID); got != "idle" {
 		t.Fatalf("listed status after idle: %v", got)
@@ -136,7 +174,7 @@ func TestStatusDerivationAndBroadcast(t *testing.T) {
 		}
 	}
 	// A room's mute is not dnd.
-	frames := b.status(t, map[string]any{"mute": 0})
+	frames = b.status(t, map[string]any{"mute": 0})
 	if len(frames) != 1 || checkStatus(t, frames[0], b, b.userID, "online")["mute"] != float64(0) {
 		t.Fatalf("unmute echo: %#v", frames)
 	}
@@ -243,7 +281,16 @@ func TestStatusBeforeAuth(t *testing.T) {
 	c.write(t, map[string]any{"method": "status", "params": map[string]any{"room_id": "missing", "mute": true}})
 	c.write(t, map[string]any{"method": "status", "id": "early", "params": map[string]any{"idle": true}})
 	c.write(t, map[string]any{"method": "status", "id": "bad", "params": map[string]any{"mute": -1}})
-	you := guestAuth(t, c)["you"].(map[string]any)
+	// Having sent idle, it is sent the status of the connected users of the
+	// room it joins, after the membership (§4.11).
+	before, result := c.request(t, "auth", "auth", map[string]any{"scheme": "guest"})
+	c.userID = result["you"].(map[string]any)["user_id"].(string)
+	statuses, before := snapshot(t, c, before)
+	if len(before) != 1 || !reflect.DeepEqual(statuses, map[string]string{a.userID: "online"}) {
+		t.Fatalf("frames before the guest auth result: %#v %#v", statuses, before)
+	}
+	checkMembership(t, membershipOnly(t, before[0]), "general", c.userID, true)
+	you := result["you"].(map[string]any)
 	if you["status"] != "dnd" || you["mute"] != float64(60) || you["invisible"] != true {
 		t.Fatalf("you after auth: %#v", you)
 	}
@@ -478,6 +525,7 @@ func TestMuteExpires(t *testing.T) {
 	clients := dialGroup(t, httpServer, 2)
 	a, b := clients[0], clients[1]
 	a.status(t, map[string]any{"idle": false})
+	b.status(t, map[string]any{"idle": false})
 	if you := echoed(t, b, b.status(t, map[string]any{"mute": 1}), "dnd"); you["mute"] != float64(1) {
 		t.Fatalf("mute echo: %#v", you)
 	}
@@ -495,7 +543,8 @@ func TestTypingSkipsIdleConnections(t *testing.T) {
 	_, httpServer := newTestServer(t, DefaultConfig())
 	clients := dialGroup(t, httpServer, 3)
 	typist, idle, plain := clients[0], clients[1], clients[2]
-	echoed(t, idle, idle.status(t, map[string]any{"idle": true}), "idle")
+	_, frames := firstIdle(t, idle, true)
+	echoed(t, idle, frames, "idle")
 	id, _ := save(t, typist, "post", map[string]any{"body": map[string]any{"text": "hi"}})
 	for _, c := range []*testClient{idle, plain} {
 		c.notification(t, "message")
@@ -607,4 +656,34 @@ func serverClientLocked(app *Server, c *testClient) *client {
 		return connection
 	}
 	return nil
+}
+
+// Only connections that have sent idle are told of status changes, and a
+// connection's first idle sends it the status of each user with a
+// connection who shares a room with it, once (§4.11).
+func TestStatusSnapshotOnFirstIdle(t *testing.T) {
+	app, httpServer := newTestServer(t, DefaultConfig())
+	clients := dialGroup(t, httpServer, 3)
+	a, b, c := clients[0], clients[1], clients[2]
+	addAccount(t, app, "alice", a, b, c)
+	echoed(t, c, c.status(t, map[string]any{"invisible": true}), "online")
+	// A status without a valid idle does not make a connection
+	// status-aware.
+	if frames := a.status(t, map[string]any{"idle": "no", "room_id": "general", "mute": 0}); len(frames) != 1 || frames[0]["method"] != "room_update" {
+		t.Fatalf("frames after a status without idle: %#v", frames)
+	}
+	statuses, frames := firstIdle(t, b, true)
+	echoed(t, b, frames, "idle")
+	if !reflect.DeepEqual(statuses, map[string]string{a.userID: "online", c.userID: "offline"}) {
+		t.Fatalf("statuses after b's first idle: %#v", statuses)
+	}
+	a.expectQuiet(t)
+	// a's first idle: alice has no connection, so no status to send.
+	statuses, frames = firstIdle(t, a, false)
+	if len(frames) != 0 || !reflect.DeepEqual(statuses, map[string]string{b.userID: "idle", c.userID: "offline"}) {
+		t.Fatalf("statuses after a's first idle: %#v %#v", statuses, frames)
+	}
+	echoed(t, b, b.status(t, map[string]any{"idle": false}), "online")
+	expectStatus(t, a, b.userID, "online")
+	a.expectQuiet(t)
 }

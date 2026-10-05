@@ -133,7 +133,8 @@ func addPush(app *Server, u *userState, p pushRegistration) *pushRegistration {
 // goIdle tells the server nobody attends c, and checks the status echo.
 func goIdle(t *testing.T, c *testClient) {
 	t.Helper()
-	echoed(t, c, c.status(t, map[string]any{"idle": true}), "idle")
+	_, frames := snapshot(t, c, c.status(t, map[string]any{"idle": true}))
+	echoed(t, c, frames, "idle")
 }
 
 func TestPushWakesMentionsAndRepliesOfIdleUsers(t *testing.T) {
