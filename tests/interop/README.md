@@ -58,8 +58,10 @@ Preferences, goes idle, and is mentioned and replied to by a second client;
 the test receives the pushes on a local capture endpoint, checks the VAPID
 token against the test key and decrypts the `aes128gcm` payload with its own
 subscription keys, and checks the service worker's notification. A second test
-checks `status` (online, idle, dnd, offline, and private mute and invisible) as
-another client sees it. Both wait out the 30-second idle timeout, so the
+checks `status` as other clients see it: the derived online, idle, and
+offline, and dnd and invisible set through the web client with `me`; and that
+mutes stay private, come back to the user's connections as `status`
+notifications, also after a reload, and are applied by the web client. Both wait out the 30-second idle timeout, so the
 project allows three minutes a test. Run it alone with:
 
 ```sh
@@ -72,7 +74,9 @@ whatever is granted. `npx playwright install chromium` installs both builds;
 with `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH`, point it at full Chromium.
 
 Against an apron-web without web push and status (before apron-web#48), the
-tests skip themselves. Skipped tests and their reasons are listed at the end
+tests skip themselves, and the status test also skips against one that cannot
+set a status with `me` (a control named for do not disturb in the profile
+editor or Preferences, directly or behind one named Status). Skipped tests and their reasons are listed at the end
 of every run, and on GitHub Actions also as notices and in the job summary.
 
 The UI contract used by the tests is an accessible textbox named `Message`, a

@@ -346,8 +346,7 @@ test('web push: register, wake rules, VAPID + aes128gcm delivery, service worker
 		await expect.poll(() => decryptAll().some((entry) => entry.payload.message?.message_id === messageId), { timeout: 10_000 }).toBe(true);
 		return decryptAll().find((entry) => entry.payload.message?.message_id === messageId)!;
 	};
-	// user2 says `status`, so it sees user1's status change once the server has applied it.
-	user2.notify('status', { idle: false });
+	// user2 sees user1's status changes once the server has applied them (§4.11).
 	const seenStatus = () => user2.frames.filter((f) => f.method === 'user' && f.params?.new?.user_id === user1).map((f) => f.params.new.status).at(-1);
 
 	// --- User 1's own message: no push. Sent through the UI while idle. ---
@@ -381,9 +380,10 @@ test('web push: register, wake rules, VAPID + aes128gcm delivery, service worker
 	await prefs.getByRole('button', { name: /^Pause/ }).click();
 	await page.getByRole('menuitem', { name: /Until I resume/ }).or(page.getByRole('option', { name: /Until I resume/ })).first().click();
 	await expect.poll(() => findSent(tap, 'status').find((frame) => frame.params?.mute === true)).toBeTruthy();
-	await expect.poll(() => tap.received.find((frame) => frame.method === 'user' && frame.params?.you?.mute === true)).toBeTruthy();
+	// The server sends each mute change to all of the user's connections, the sender's too (§4.11).
+	await expect.poll(() => tap.received.find((frame) => frame.method === 'status' && frame.params?.mute === true && !('room_id' in frame.params))).toBeTruthy();
 	evidence('mute frame sent', findSent(tap, 'status').find((frame) => frame.params?.mute === true));
-	evidence('mute echo', tap.received.filter((frame) => frame.method === 'user' && frame.params?.you?.mute !== undefined));
+	evidence('mute echo', tap.received.filter((frame) => frame.method === 'status'));
 	await page.keyboard.press('Escape');
 	before = capture.posts.length;
 	await user2.request('message', { room_id: 'general', body: { text: `muted mention @${user1}`, mentions: [user1] } });
@@ -391,22 +391,20 @@ test('web push: register, wake rules, VAPID + aes128gcm delivery, service worker
 	await expectNoPost(capture.posts, 'mention+reply while unscoped mute (webpush gets no badge either)', before, 4_000);
 	await page.getByRole('button', { name: /^Open preferences/ }).click();
 	await prefs.getByRole('button', { name: 'Resume', exact: true }).click();
-	await expect.poll(() => findSent(tap, 'status').find((frame) => frame.params?.mute === 0)).toBeTruthy();
-	await expect.poll(() => tap.received.find((frame) => frame.method === 'user' && frame.params?.you?.mute === 0)).toBeTruthy();
+	await expect.poll(() => findSent(tap, 'status').find((frame) => frame.params?.mute === 0 || frame.params?.mute === false)).toBeTruthy();
+	await expect.poll(() => tap.received.find((frame) => frame.method === 'status' && frame.params?.mute === false && !('room_id' in frame.params))).toBeTruthy();
 	await page.keyboard.press('Escape');
 
-	// --- Room mute via raw status: mention pushes, a reply doesn't ---
+	// --- Room mute via raw status: it silences mentions and replies alike (§4.11) ---
 	tap.inject({ method: 'status', params: { room_id: 'general', mute: true } });
-	await expect.poll(() => tap.received.find((frame) => frame.method === 'room_update' && JSON.stringify(frame.params).includes('"mute":true'))).toBeTruthy();
-	evidence('room mute echo', tap.received.filter((frame) => frame.method === 'room_update' && JSON.stringify(frame.params).includes('"mute"')).map((f) => f.params));
+	await expect.poll(() => tap.received.find((frame) => frame.method === 'status' && frame.params?.room_id === 'general' && frame.params?.mute === true)).toBeTruthy();
+	evidence('room mute echo', tap.received.filter((frame) => frame.method === 'status' && 'room_id' in frame.params).map((f) => f.params));
 	before = capture.posts.length;
 	await user2.request('message', { room_id: 'general', body: { text: 'reply in muted room' }, reply_to: { message_id: ownId } });
-	await expectNoPost(capture.posts, 'reply in muted room', before);
-	const mutedMention = await user2.request('message', { room_id: 'general', body: { text: `mention in muted room @${user1}`, mentions: [user1] } });
-	const mutedPush = await pushOf(mutedMention.message_id);
-	evidence('room-muted mention push', { urgency: mutedPush.post.headers.urgency, payload: mutedPush.payload });
-	tap.inject({ method: 'status', params: { room_id: 'general', mute: 0 } });
-	await expect.poll(() => tap.received.find((frame) => frame.method === 'room_update' && JSON.stringify(frame.params).includes('"mute":0'))).toBeTruthy();
+	await user2.request('message', { room_id: 'general', body: { text: `mention in muted room @${user1}`, mentions: [user1] } });
+	await expectNoPost(capture.posts, 'reply and mention in muted room', before);
+	tap.inject({ method: 'status', params: { room_id: 'general', mute: false } });
+	await expect.poll(() => tap.received.find((frame) => frame.method === 'status' && frame.params?.room_id === 'general' && frame.params?.mute === false)).toBeTruthy();
 
 	// --- Attended: no push ---
 	await goAttended(page, tap);
@@ -415,10 +413,10 @@ test('web push: register, wake rules, VAPID + aes128gcm delivery, service worker
 	await user2.request('message', { room_id: 'general', body: { text: `attended mention @${user1}`, mentions: [user1] } });
 	await expectNoPost(capture.posts, 'mention while attended', before);
 
-	// --- Tab closed: push ---
+	// --- Tab closed: push. With no connection, user1 is offline, push registration or not. ---
 	const passkeys = await authenticator.credentials();
 	await page.close();
-	await expect.poll(seenStatus).toBe('idle');
+	await expect.poll(seenStatus).toBe('offline');
 	const closedMention = await user2.request('message', { room_id: 'general', body: { text: `closed mention @${user1}`, mentions: [user1] } });
 	const closedPush = await pushOf(closedMention.message_id);
 	evidence('closed-tab mention push', { payload: closedPush.payload, statusSeenByUser2: user2.frames.filter((f) => f.method === 'user' && f.params?.new?.user_id === user1).map((f) => f.params.new.status) });
@@ -488,17 +486,59 @@ test('web push: register, wake rules, VAPID + aes128gcm delivery, service worker
 	capture.close();
 });
 
-test('status: online, idle, dnd, offline as another client sees them; mute and invisible stay private', async ({ page, context, browser }) => {
+/**
+ * The web client's way to set a status with `me` (§4.11), if it has one: a control named for
+ * do not disturb in the profile editor or Preferences, shown directly (a radio, menu item, or
+ * option) or behind a control named Status (a menu button or a select). Choosing picks the
+ * status whose label matches and closes the dialog again.
+ */
+async function statusChooser(page: Page): Promise<((label: RegExp) => Promise<void>) | undefined> {
+	const DND = /do not disturb/i;
+	const surfaces = [
+		{ open: () => page.getByRole('button', { name: /^Your profile on/ }).click(), dialog: page.getByRole('dialog', { name: 'Edit profile' }) },
+		{ open: () => page.getByRole('button', { name: /^Open preferences/ }).click(), dialog: page.getByRole('dialog', { name: 'Preferences' }) }
+	];
+	const choices = (scope: ReturnType<Page['locator']>, name: RegExp) =>
+		scope.getByRole('radio', { name }).or(scope.getByRole('menuitemradio', { name })).or(scope.getByRole('menuitem', { name })).or(scope.getByRole('option', { name }));
+	for (const surface of surfaces) {
+		await surface.open();
+		await expect(surface.dialog).toBeVisible();
+		const direct = await choices(surface.dialog, DND).count();
+		const opener = surface.dialog.getByRole('button', { name: /status/i }).or(surface.dialog.getByRole('combobox', { name: /status/i }));
+		const behind = await opener.count();
+		await page.keyboard.press('Escape');
+		if (!direct && !behind) continue;
+		return async (label: RegExp) => {
+			if (!(await surface.dialog.isVisible())) await surface.open();
+			if (!(await choices(surface.dialog, label).count())) {
+				const control = opener.first();
+				if ((await control.getAttribute('role')) === 'combobox' || (await control.evaluate((element) => element.tagName)) === 'SELECT') {
+					const options = await control.locator('option').allTextContents();
+					await control.selectOption({ label: options.find((text) => label.test(text))! });
+				} else {
+					await control.click();
+				}
+			}
+			const choice = choices(page.locator('body'), label).first();
+			if (await choice.count()) await choice.click();
+			if (await surface.dialog.isVisible()) await page.keyboard.press('Escape');
+		};
+	}
+	return undefined;
+}
+
+test('status: set with me, derived online, idle, offline as other clients see it; mutes stay private and reach every connection', async ({ page, context, browser }) => {
 	const tap = await tapSocket(page);
 	await openChat(page);
 	// A client implementing §4.11 reports its initial idle at once.
 	test.skip(!findSent(tap, 'status').length, 'This apron-web does not send status yet (apron-web#48)');
 	await signUpWithPasskey(page, context);
 	const user1 = await userIdOf(page);
+	const choose = await statusChooser(page);
+	test.skip(!choose, 'This apron-web does not set status with `me` yet (§4.11 as of shazow/apron 9825e38)');
 
-	// Observer 1: a raw status-aware client. Observer 2: the web client as a guest in another context.
+	// Observer 1: a raw client. Observer 2: the web client as a guest in another context.
 	let observer = await Raw.connect('Observer');
-	observer.notify('status', { idle: false });
 	const otherContext = await browser.newContext({ baseURL: ORIGIN });
 	const otherPage = await otherContext.newPage();
 	const otherTap = await tapSocket(otherPage);
@@ -518,69 +558,82 @@ test('status: online, idle, dnd, offline as another client sees them; mute and i
 		await expect.poll(() => lastSeen(otherTap.received), { timeout: 15_000 }).toBe(status);
 		if (drawsDots) await expect(dot).toHaveAttribute('data-status', status, { timeout: 15_000 });
 	};
-	evidence('other web client sent status', findSent(otherTap, 'status'));
+	/** Sets user1's status through the web client, which sends it with `me`; `you` shows the value set. */
+	const setStatus = async (label: RegExp, status: string) => {
+		const before = findSent(tap, 'me').length;
+		await choose!(label);
+		await expect.poll(() => findSent(tap, 'me').slice(before).find((frame) => frame.params?.status === status), { timeout: 5_000 }).toBeTruthy();
+		const request = findSent(tap, 'me').slice(before).find((frame) => frame.params?.status === status)!;
+		await expect.poll(() => resultOf(tap, request.id)?.result?.you?.status).toBe(status);
+	};
 
+	// online derives online and idle from user1's connections.
 	await goIdle(page, tap);
 	await expectBoth('idle');
 	await goAttended(page, tap);
 	await expectBoth('online');
 
-	// An observer that reconnects has no status for user1 until its first idle, which
-	// the server answers with the status of each connected user it shares a room with (§4.11).
+	// An observer that reconnects is sent, after auth, the status of each connected user it shares
+	// a room with (§4.11), without sending anything first.
 	const earlierObserverFrames = observer.frames;
 	observer.close();
 	observer = await Raw.connect('Observer again');
-	await new Promise((resolve) => setTimeout(resolve, 500));
-	expect(lastSeen(observer.frames)).toBeUndefined();
-	observer.notify('status', { idle: false });
 	await expect.poll(() => lastSeen(observer.frames), { timeout: 5_000 }).toBe('online');
 	evidence('reconnected observer statuses for user1', statusesSeen(observer.frames));
 
+	// dnd shows dnd whether attended or not; invisible shows offline to others.
+	await setStatus(/do not disturb/i, 'dnd');
+	await expectBoth('dnd');
+	await setStatus(/invisible|appear offline/i, 'invisible');
+	await expectBoth('offline');
+	await setStatus(/^(online|available|automatic)/i, 'online');
+	await expectBoth('online');
+	evidence('user1 me frames', findSent(tap, 'me'));
+
+	// A mute changes nothing others see. The server sends it back to user1's connections as
+	// `status`, and again after the next auth, which the client applies as its own setting.
 	await page.getByRole('button', { name: /^Open preferences/ }).click();
 	const prefs = page.getByRole('dialog', { name: 'Preferences' });
 	await prefs.getByRole('button', { name: /^Pause/ }).click();
 	await page.getByRole('menuitem', { name: /For 1 hour/ }).or(page.getByRole('option', { name: /For 1 hour/ })).first().click();
-	await expectBoth('dnd');
-	const youMute = tap.received.filter((frame) => frame.method === 'user' && frame.params?.you).map((frame) => frame.params.you);
-	evidence('user1 own you frames after mute', youMute);
-	await prefs.getByRole('button', { name: 'Resume', exact: true }).click();
-	await expectBoth('online');
+	await expect.poll(() => tap.received.find((frame) => frame.method === 'status' && typeof frame.params?.mute === 'number')).toBeTruthy();
 	await page.keyboard.press('Escape');
-
-	tap.inject({ method: 'status', params: { invisible: true } });
-	await expectBoth('offline');
-	await expect.poll(() => tap.received.find((frame) => frame.method === 'user' && frame.params?.you?.invisible === true)).toBeTruthy();
-	evidence('user1 you while invisible', tap.received.filter((frame) => frame.method === 'user' && frame.params?.you?.invisible === true).map((frame) => frame.params.you));
-	// Idle while invisible: others still see offline (no new transition).
-	tap.inject({ method: 'status', params: { invisible: false } });
-	await expectBoth('online');
 	tap.inject({ method: 'status', params: { room_id: 'general', mute: true } });
+	await expect.poll(() => tap.received.find((frame) => frame.method === 'status' && frame.params?.room_id === 'general' && frame.params?.mute === true)).toBeTruthy();
 	await new Promise((resolve) => setTimeout(resolve, 1_500));
-	tap.inject({ method: 'status', params: { room_id: 'general', mute: 0 } });
-
-	// Paused again, then the page closes: with no connection, a muted user is offline, not dnd.
-	// The six mute and invisible changes above used the server's burst; wait for the next.
-	await new Promise((resolve) => setTimeout(resolve, 10_500));
+	expect(lastSeen(observer.frames)).toBe('online');
+	const authsBefore = tap.received.filter((frame) => frame.result?.you).length;
+	const receivedBefore = tap.received.length;
+	await page.reload();
+	await expect.poll(() => tap.received.filter((frame) => frame.result?.you).length, { timeout: 15_000 }).toBeGreaterThan(authsBefore);
+	await expect.poll(() => tap.received.slice(receivedBefore).filter((frame) => frame.method === 'status').map((frame) => frame.params), { timeout: 5_000 })
+		.toEqual([{ mute: expect.any(Number) }, { room_id: 'general', mute: true }]);
+	evidence('mutes after auth', tap.received.slice(receivedBefore).filter((frame) => frame.method === 'status'));
+	await expect(page.getByRole('button', { name: /^Open preferences\. Notifications paused/ })).toBeVisible({ timeout: 10_000 });
 	await page.getByRole('button', { name: /^Open preferences/ }).click();
-	await prefs.getByRole('button', { name: /^Pause/ }).click();
-	await page.getByRole('menuitem', { name: /For 1 hour/ }).or(page.getByRole('option', { name: /For 1 hour/ })).first().click();
-	await expectBoth('dnd');
+	await prefs.getByRole('button', { name: 'Resume', exact: true }).click();
+	await expect.poll(() => tap.received.slice(receivedBefore).find((frame) => frame.method === 'status' && frame.params?.mute === false && !('room_id' in frame.params))).toBeTruthy();
+	await page.keyboard.press('Escape');
+	tap.inject({ method: 'status', params: { room_id: 'general', mute: false } });
+	await expect.poll(() => tap.received.slice(receivedBefore).find((frame) => frame.method === 'status' && frame.params?.room_id === 'general' && frame.params?.mute === false)).toBeTruthy();
+
+	// The page closes: with no connection, user1 is offline.
 	await page.close();
 	await expectBoth('offline');
 
 	evidence('observer statuses for user1', statusesSeen(observer.frames));
 	evidence('web observer statuses for user1', statusesSeen(otherTap.received));
-	// No frame to others ever names user1's mute or invisible, or a room mute of theirs.
+	// No frame to others names user1's mutes: no `status` notification, and no user object with
+	// mute or invisible.
 	const leaks = (frames: Frame[]) => {
-		const found: unknown[] = [];
+		const found: unknown[] = frames.filter((frame) => frame.method === 'status');
 		const walk = (value: any, frame: Frame) => {
 			if (!value || typeof value !== 'object') return;
 			if (value.user_id === user1 && ('mute' in value || 'invisible' in value)) found.push(frame);
 			for (const child of Object.values(value)) walk(child, frame);
 		};
 		for (const frame of frames) walk(frame, frame);
-		const roomMutes = frames.filter((frame) => frame.method === 'room_update' && JSON.stringify(frame.params).includes('"mute"'));
-		return [...found, ...roomMutes];
+		return found;
 	};
 	expect(leaks(earlierObserverFrames)).toEqual([]);
 	expect(leaks(observer.frames)).toEqual([]);
