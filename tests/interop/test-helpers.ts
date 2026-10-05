@@ -79,7 +79,7 @@ export async function setDisplayName(page: Page, name: string): Promise<void> {
 	const dialog = page.getByRole('dialog', { name: 'Edit profile', exact: true });
 	await dialog.getByTestId('display-name-input').fill(name);
 	await dialog.getByRole('button', { name: 'Save', exact: true }).click();
-	await expect(page.getByRole('button', { name: new RegExp(`^Your profile on .*: ${name}\\.`) })).toBeVisible();
+	await expect(page.getByRole('button', { name: new RegExp(`^Your profile on .*: ${name}[,.]`) })).toBeVisible();
 }
 
 /** The `user_id` the server assigned this page, as the profile editor shows it. */

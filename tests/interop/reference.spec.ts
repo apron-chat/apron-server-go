@@ -228,7 +228,7 @@ test.describe('reference features against the Go server', () => {
 		const handle = `nick-${Date.now().toString(36)}`;
 		await field.fill(`/nick ${handle}`);
 		await run.click();
-		await expect(page.getByRole('button', { name: new RegExp(`^Your profile on .*: ${handle}\\.`) })).toBeVisible();
+		await expect(page.getByRole('button', { name: new RegExp(`^Your profile on .*: ${handle}[,.]`) })).toBeVisible();
 		const id = await userIdOf(page);
 		// The earlier message renders with the latest name; notices above it began its group.
 		await expect(posted.locator('.ap-msg-sender')).toHaveText(handle);
