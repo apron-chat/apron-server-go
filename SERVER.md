@@ -604,6 +604,7 @@ number of seconds of at least 0. A `room_id` that is not a string ignores
 the whole frame; one that names a room the user cannot see ignores its
 `mute`.
 
+- `room_id` scopes only `mute`.
 - `idle` is the connection's, with or without `room_id`: a connection is
   attended until it sends `idle: true`, and idle until it sends `idle:
   false`. A message does not end it.

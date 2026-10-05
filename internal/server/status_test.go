@@ -602,3 +602,34 @@ func TestAdditionsAreNotSignIns(t *testing.T) {
 	checkMute(t, frames[0], "", true)
 	checkStatus(t, frames[1], other.userID, "online")
 }
+
+// room_id scopes only mute (§4.11): idle is the sending connection's with
+// any room_id, one that names a room the user cannot see included, and the
+// unscoped mute is untouched by a scoped one.
+func TestRoomIDScopesOnlyMute(t *testing.T) {
+	app, httpServer := newTestServer(t, DefaultConfig())
+	clients := dialGroup(t, httpServer, 2)
+	a, b := clients[0], clients[1]
+	watching(a)
+	a.drain(t)
+
+	// A room the user cannot see: idle applies, the mute is ignored.
+	if frames := b.status(t, map[string]any{"room_id": "missing", "idle": true, "mute": true}); len(frames) != 0 {
+		t.Fatalf("frames after a mute of a missing room: %#v", frames)
+	}
+	expectStatus(t, a, b.userID, "idle")
+	// A visible room: idle applies to the connection, the mute to the room.
+	frames := b.status(t, map[string]any{"room_id": "general", "idle": false, "mute": true})
+	if len(frames) != 1 {
+		t.Fatalf("frames after a mute of general: %#v", frames)
+	}
+	checkMute(t, frames[0], "general", true)
+	expectStatus(t, a, b.userID, "online")
+	a.expectQuiet(t)
+	app.mu.RLock()
+	defer app.mu.RUnlock()
+	u := app.users[b.userID]
+	if now := time.Now(); u.mute.active(now) || !u.roomMuted(app.rooms["general"], now) {
+		t.Fatalf("mutes: unscoped %#v, rooms %#v", u.mute, u.roomMutes)
+	}
+}
