@@ -497,7 +497,7 @@ test('status: online, idle, dnd, offline as another client sees them; mute and i
 	const user1 = await userIdOf(page);
 
 	// Observer 1: a raw status-aware client. Observer 2: the web client as a guest in another context.
-	const observer = await Raw.connect('Observer');
+	let observer = await Raw.connect('Observer');
 	observer.notify('status', { idle: false });
 	const otherContext = await browser.newContext({ baseURL: ORIGIN });
 	const otherPage = await otherContext.newPage();
@@ -505,11 +505,18 @@ test('status: online, idle, dnd, offline as another client sees them; mute and i
 	await openChat(otherPage);
 	await new Promise((resolve) => setTimeout(resolve, 1_000));
 
+	// A web client that draws status dots shows them in its member list (apron-web 0ef07ea on).
+	const memberToggle = otherPage.getByRole('button', { name: 'Show member list' });
+	if (await memberToggle.count()) await memberToggle.first().click();
+	const dot = otherPage.locator(`li.member[data-user="${user1}"]`);
+	const drawsDots = await dot.and(otherPage.locator('[data-status]')).waitFor({ timeout: 5_000 }).then(() => true, () => false);
+	evidence('other web client draws status dots', drawsDots);
 	const statusesSeen = (frames: Frame[]) => frames.filter((frame) => frame.method === 'user' && frame.params?.new?.user_id === user1).map((frame) => frame.params.new.status);
 	const lastSeen = (frames: Frame[]) => statusesSeen(frames).at(-1);
 	const expectBoth = async (status: string) => {
 		await expect.poll(() => lastSeen(observer.frames), { timeout: 15_000 }).toBe(status);
 		await expect.poll(() => lastSeen(otherTap.received), { timeout: 15_000 }).toBe(status);
+		if (drawsDots) await expect(dot).toHaveAttribute('data-status', status, { timeout: 15_000 });
 	};
 	evidence('other web client sent status', findSent(otherTap, 'status'));
 
@@ -517,6 +524,17 @@ test('status: online, idle, dnd, offline as another client sees them; mute and i
 	await expectBoth('idle');
 	await goAttended(page, tap);
 	await expectBoth('online');
+
+	// An observer that reconnects has no status for user1 until its first idle, which
+	// the server answers with the status of each connected user it shares a room with (§4.11).
+	const earlierObserverFrames = observer.frames;
+	observer.close();
+	observer = await Raw.connect('Observer again');
+	await new Promise((resolve) => setTimeout(resolve, 500));
+	expect(lastSeen(observer.frames)).toBeUndefined();
+	observer.notify('status', { idle: false });
+	await expect.poll(() => lastSeen(observer.frames), { timeout: 5_000 }).toBe('online');
+	evidence('reconnected observer statuses for user1', statusesSeen(observer.frames));
 
 	await page.getByRole('button', { name: /^Open preferences/ }).click();
 	const prefs = page.getByRole('dialog', { name: 'Preferences' });
@@ -564,6 +582,7 @@ test('status: online, idle, dnd, offline as another client sees them; mute and i
 		const roomMutes = frames.filter((frame) => frame.method === 'room_update' && JSON.stringify(frame.params).includes('"mute"'));
 		return [...found, ...roomMutes];
 	};
+	expect(leaks(earlierObserverFrames)).toEqual([]);
 	expect(leaks(observer.frames)).toEqual([]);
 	expect(leaks(otherTap.received)).toEqual([]);
 	observer.close();
