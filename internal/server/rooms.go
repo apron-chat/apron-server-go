@@ -417,7 +417,7 @@ func (s *Server) announceRoomLocked(r *roomState, editor *userState) {
 	frame := roomUpdate("updated", s.roomParamsLocked(r))
 	now := time.Now()
 	for _, member := range audience {
-		if mute, ok := member.roomMutes[r.id]; ok && mute.active(now) && member.joined[r.id] != nil {
+		if mute, ok := member.roomMutes[r.id]; ok && mute.active(now) {
 			member.send(roomUpdate("updated", member.withRoomMute(s.roomParamsLocked(r), r, now)))
 		} else {
 			member.send(frame)
@@ -671,7 +671,8 @@ func (s *Server) listRooms(c *client, req request) (any, bool, *rpcError) {
 	renderRooms := func(rooms []*roomState) []any {
 		entries := make([]any, len(rooms))
 		for i, r := range rooms {
-			// The caller's own mute of the room is echoed (§4.11).
+			// The caller's own mute of the room is echoed, joined or not
+			// (§4.11).
 			entry := u.withRoomMute(s.roomParamsLocked(r), r, now)
 			if withMembers {
 				maps.Copy(users, s.addMembersLocked(entry, r))

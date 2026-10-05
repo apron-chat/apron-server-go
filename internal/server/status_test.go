@@ -385,13 +385,17 @@ func TestRoomMuteEcho(t *testing.T) {
 	a.expectQuiet(t)
 
 	// A visible room the user has not joined may be muted: nothing is
-	// echoed until they join it, and its records carry the mute after.
+	// echoed, and its records carry the mute, in room_list not_joined too
+	// (§4.11).
 	news, _ := saveRoom(t, a, "news", map[string]any{"title": "News"})
 	if frames := b.status(t, map[string]any{"room_id": news, "mute": true}); len(frames) != 0 {
 		t.Fatalf("frames after muting an unjoined room: %#v", frames)
 	}
-	if listed := listRooms(t, b, map[string]any{"room_id": news})["not_joined"].([]any); listed[0].(map[string]any)["mute"] != nil {
+	if listed := listRooms(t, b, map[string]any{"room_id": news})["not_joined"].([]any); listed[0].(map[string]any)["mute"] != true {
 		t.Fatalf("unjoined listing: %#v", listed)
+	}
+	if listed := listRooms(t, a, map[string]any{"room_id": news})["joined"].([]any); listed[0].(map[string]any)["mute"] != nil {
+		t.Fatalf("another member's listing of a room b muted: %#v", listed)
 	}
 	if record := joinRoom(t, b, news); record["mute"] != true {
 		t.Fatalf("joined record of a muted room: %#v", record)

@@ -204,8 +204,8 @@ func (s *Server) applyStatusLocked(c *client, u *userState, update statusUpdate,
 		s.touchUser(u.id)
 		// The user's own room mute is a delivery field of the room records
 		// they receive (§3.4), so a change re-sends a joined room to every
-		// connection of theirs. A room they have not joined keeps the mute
-		// for when they join.
+		// connection of theirs. For a room they have not joined, it arrives
+		// in the next room_list (§4.11).
 		if u.joined[r.id] != nil {
 			record := s.roomParamsLocked(r)
 			record["mute"] = mute.wire(now)
@@ -329,10 +329,10 @@ func (u *userState) roomMuted(r *roomState, now time.Time) bool {
 	return false
 }
 
-// withRoomMute adds u's own mute of room r to a record of a room u has
-// joined, sent to u (§3.4), when there is one; absent, it is 0.
+// withRoomMute adds u's own mute of room r, when there is one, to a record
+// of r sent to u (§3.4), joined or not; absent, it is 0.
 func (u *userState) withRoomMute(record map[string]any, r *roomState, now time.Time) map[string]any {
-	if mute, ok := u.roomMutes[r.id]; ok && mute.active(now) && u.joined[r.id] != nil {
+	if mute, ok := u.roomMutes[r.id]; ok && mute.active(now) {
 		record["mute"] = mute.wire(now)
 	}
 	return record
