@@ -63,6 +63,11 @@ func TestServerFrame(t *testing.T) {
 	if !reflect.DeepEqual(params["capabilities"], []any{"history", "edit", "rooms", "reactions", "activity", "embed:upload", "embed:stream", "command", "status"}) {
 		t.Fatalf("capabilities: %#v", params["capabilities"])
 	}
+	// With capability status, server.status lists the optional statuses
+	// accepted (§4.11).
+	if !reflect.DeepEqual(params["status"], []any{"dnd", "invisible"}) {
+		t.Fatalf("status: %#v", params["status"])
+	}
 	if _, has := params["signup"]; !reflect.DeepEqual(params["auth"], []any{"guest"}) || has {
 		t.Fatalf("auth: %#v, signup: %#v", params["auth"], params["signup"])
 	}

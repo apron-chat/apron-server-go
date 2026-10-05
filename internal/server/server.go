@@ -765,6 +765,9 @@ func (s *Server) serverParams() map[string]any {
 		"capabilities": []string{"history", "edit", "rooms", "reactions", "activity", "embed:upload", "embed:stream", "command", "status"},
 		"auth":         authSchemes,
 		"ping":         max(1, int(s.config.PingInterval/time.Second)),
+		// The optional statuses accepted with `me` (§4.11); online and ""
+		// always are, and are not listed.
+		"status": optionalStatuses,
 		"ext": map[string]any{"apron-go": map[string]any{
 			"max_frame_bytes":           s.config.ReadLimit,
 			"max_history_limit":         maxHistoryPageSize,

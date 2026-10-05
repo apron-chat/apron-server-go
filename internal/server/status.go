@@ -47,14 +47,18 @@ const (
 	statusCoalesce = 2 * time.Second
 )
 
+// optionalStatuses are the optional statuses the server accepts, which the
+// server frame lists as server.status (§3.1, §4.11).
+var optionalStatuses = []string{statusDND, statusInvisible}
+
 // settableStatus reports whether the server supports value as a status a
 // user sets (§4.11); it stores "" for any other.
 func settableStatus(value string) bool {
 	switch value {
-	case statusOnline, statusNone, statusDND, statusInvisible:
+	case statusOnline, statusNone:
 		return true
 	}
-	return false
+	return slices.Contains(optionalStatuses, value)
 }
 
 // muteState is a mute (§4.11): until a time, forever, or, when zero, none.

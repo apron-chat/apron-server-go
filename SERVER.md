@@ -32,8 +32,8 @@ Defaults:
   `capabilities`: `history`, `edit`, `rooms`, `reactions`, `activity`,
   `embed:upload`, `embed:stream`, `command`, `status`; `server.push`: kinds
   `relay` and `webpush` (with the server's VAPID `key`) and `wake`:
-  `mentions`, `replies`, `private`, `joined`, `badge`; `server.ping`: 30
-  seconds
+  `mentions`, `replies`, `private`, `joined`, `badge`; `server.status`:
+  `dnd`, `invisible`; `server.ping`: 30 seconds
 - `server.ext["apron-go"]`: frame, history, upload, avatar, stream, and
   member-listing limits
 - seeded default room: `general` (title `General`)
@@ -558,6 +558,7 @@ read cursors go to every connection of the room's members.
 
 The `status` capability (§4.11) implements every status value: a user sets
 `status` with `me` to `online` (the default), `""` (none), `dnd`, or
+`invisible`. `server.status` lists the optional ones, `dnd` and
 `invisible`. Any other string, the derived `idle` and `offline` included,
 is stored as `""`; a `status` that is not a string is `invalid_params`.
 The status lasts until changed, across connections and restarts. Others
