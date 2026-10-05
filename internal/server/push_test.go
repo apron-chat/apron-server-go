@@ -36,6 +36,8 @@ type relayRequest struct {
 type testRelay struct {
 	*httptest.Server
 	received chan relayRequest
+	// failing makes paths ending in /flaky answer 500 while set.
+	failing atomic.Bool
 }
 
 func newTestRelay(t *testing.T) *testRelay {
@@ -53,6 +55,8 @@ func newTestRelay(t *testing.T) *testRelay {
 			w.WriteHeader(http.StatusGone)
 		case strings.HasSuffix(r.URL.Path, "/missing"):
 			w.WriteHeader(http.StatusNotFound)
+		case strings.HasSuffix(r.URL.Path, "/flaky") && relay.failing.Load():
+			w.WriteHeader(http.StatusInternalServerError)
 		default:
 			w.WriteHeader(http.StatusCreated)
 		}
@@ -975,7 +979,7 @@ func TestPushRefusesInternalAddresses(t *testing.T) {
 	defer relay.Close()
 	deliverer := newPushDeliverer(false)
 	called := false
-	deliverer.deliver(pushRegistration{url: relay.URL}, []byte("{}"), "normal", "", func(int) { called = true })
+	deliverer.deliver(pushRegistration{url: relay.URL}, []byte("{}"), "normal", "", func(status int) { called = status != 0 })
 	deliverer.wait()
 	if hits.Load() != 0 || called {
 		t.Fatalf("delivered to a loopback address: hits=%d called=%v", hits.Load(), called)
@@ -1162,4 +1166,60 @@ func TestDisabledPushIgnoresStoredRegistrations(t *testing.T) {
 	if status, pushes := statusOf(app); status != statusIdle || pushes != 1 {
 		t.Fatalf("with push enabled again: status %s, %d registrations", status, pushes)
 	}
+}
+
+// A count is recorded as an endpoint's only once it accepts the push with a
+// 2xx: a badge push that failed is sent again at the next change, even one
+// that leaves the count where it was (§4.7).
+func TestBadgeCountRecordedOnlyWhenAccepted(t *testing.T) {
+	relay := newTestRelay(t)
+	app, httpServer := pushTestServer(t)
+	a := dialTestClient(t, httpServer)
+	alice := addAccount(t, app, "alice", a)
+	addPush(app, alice, pushRegistration{url: relay.URL + "/flaky", wake: wakeBadge})
+	relay.failing.Store(true)
+	save(t, a, "post", map[string]any{"body": map[string]any{"text": "hi"}})
+	if got := relay.pushes(t, app, a); len(got) != 1 || got[0].payload["unread"] != float64(1) {
+		t.Fatalf("first badge: %#v", got)
+	}
+	relay.failing.Store(false)
+	recount := func() {
+		app.mu.Lock()
+		app.unreadChangedLocked(alice, "")
+		app.unlock()
+	}
+	recount()
+	if got := relay.pushes(t, app, a); len(got) != 1 || got[0].payload["unread"] != float64(1) {
+		t.Fatalf("badge after a failed one: %#v", got)
+	}
+	// Accepted, the same count is not sent again.
+	recount()
+	if got := relay.pushes(t, app, a); len(got) != 0 {
+		t.Fatalf("badge of an accepted count: %#v", got)
+	}
+}
+
+// A timed room mute that runs out changes what counts, so the count is
+// taken again and a badge push sent (§4.7, §4.11).
+func TestRoomMuteExpiryUpdatesBadge(t *testing.T) {
+	relay := newTestRelay(t)
+	app, httpServer := pushTestServer(t)
+	clients := dialGroup(t, httpServer, 2)
+	a, b := clients[0], clients[1]
+	b.result(t, "push_register", "badge", map[string]any{"kind": "relay", "url": relay.URL + "/b", "wake": []any{"badge"}})
+	if frames := b.status(t, map[string]any{"room_id": "general", "mute": 1}); len(frames) != 1 {
+		t.Fatalf("room mute echo: %#v", frames)
+	}
+	save(t, a, "post", map[string]any{"body": map[string]any{"text": "hi"}})
+	b.notification(t, "message")
+	for _, got := range relay.pushes(t, app, a) {
+		if got.payload["unread"] != float64(0) {
+			t.Fatalf("badge while the room is muted: %#v", got)
+		}
+	}
+	time.Sleep(1200 * time.Millisecond)
+	if got := relay.pushes(t, app, a); len(got) != 1 || got[0].payload["unread"] != float64(1) {
+		t.Fatalf("badge after the room mute ran out: %#v", got)
+	}
+	b.expectQuiet(t)
 }

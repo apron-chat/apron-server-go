@@ -201,6 +201,7 @@ func (s *Server) applyStatusLocked(c *client, u *userState, update statusUpdate,
 		} else {
 			delete(u.roomMutes, r.id)
 		}
+		s.scheduleRoomMuteLocked(u, r.id)
 		s.touchUser(u.id)
 		// The user's own room mute is a delivery field of the room records
 		// they receive (§3.4), so a change re-sends a joined room to every
@@ -274,6 +275,39 @@ func (s *Server) scheduleMuteLocked(u *userState) {
 		u.muteTimer = nil
 		s.touchUser(u.id)
 		s.statusChangedLocked(u, nil, false)
+	})
+}
+
+// scheduleRoomMuteLocked ends u's timed mute of room id when its time
+// passes. Like the unscoped mute it is not echoed (§4.11), but what counts
+// toward u's unread changes with it in the room and its threads, so the
+// counts are taken again and a badge push sent (§4.7).
+func (s *Server) scheduleRoomMuteLocked(u *userState, id string) {
+	if timer := u.roomMuteTimers[id]; timer != nil {
+		timer.Stop()
+		delete(u.roomMuteTimers, id)
+	}
+	mute, ok := u.roomMutes[id]
+	if !ok || mute.forever || mute.until.IsZero() {
+		return
+	}
+	if u.roomMuteTimers == nil {
+		u.roomMuteTimers = make(map[string]*time.Timer)
+	}
+	until := mute.until
+	u.roomMuteTimers[id] = time.AfterFunc(time.Until(until), func() {
+		s.mu.Lock()
+		defer s.unlock()
+		if s.closed || s.users[u.id] != u {
+			return
+		}
+		if mute, ok := u.roomMutes[id]; !ok || mute.forever || !mute.until.Equal(until) {
+			return
+		}
+		delete(u.roomMuteTimers, id)
+		delete(u.roomMutes, id)
+		s.touchUser(u.id)
+		s.unreadChangedLocked(u, "")
 	})
 }
 

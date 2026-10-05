@@ -270,7 +270,7 @@ func (s *Server) stopBadgeLocked(u *userState) {
 
 // badgeLocked sends a badge push (§4.7), {push_id, unread} without a
 // message, to each of the user's registrations that takes them and last
-// received another count. It goes to attended and muted users too: what a
+// accepted another count. It goes to attended and muted users too: what a
 // mute silences still changes the count.
 func (s *Server) badgeLocked(u *userState, now time.Time) {
 	unread := -1
@@ -281,14 +281,13 @@ func (s *Server) badgeLocked(u *userState, now time.Time) {
 		if unread < 0 {
 			unread = s.unreadLocked(u, now)
 		}
-		if unread == p.lastUnread {
+		if unread == p.lastUnread || p.inFlight && unread == p.pendingUnread {
 			continue
 		}
-		p.lastUnread = unread
 		payload := map[string]any{"unread": unread}
 		if p.pushID != "" {
 			payload["push_id"] = p.pushID
 		}
-		s.deliverPushLocked(p, encodeJSON(payload), "low", true)
+		s.deliverPushLocked(p, unread, encodeJSON(payload), "low", true)
 	}
 }

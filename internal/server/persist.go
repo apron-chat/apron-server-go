@@ -704,6 +704,9 @@ func (s *Server) restoreLocked() (map[string]bool, error) {
 		} else {
 			s.grantRolesLocked(u)
 			s.scheduleMuteLocked(u)
+			for id := range u.roomMutes {
+				s.scheduleRoomMuteLocked(u, id)
+			}
 			u.status, u.ownStatus = u.statusAt(now), u.ownStatusAt(now)
 		}
 	}

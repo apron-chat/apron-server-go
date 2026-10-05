@@ -61,17 +61,19 @@ type userState struct {
 	posts *rate.Limiter
 
 	// invisible, mute, and roomMutes are the user's status fields (§4.11);
-	// muteTimer ends a timed mute. status is the status last sent to
+	// muteTimer ends a timed mute, and roomMuteTimers each timed room mute.
+	// status is the status last sent to
 	// others, and ownStatus to the user; statusLimit and statusTimer
 	// coalesce a flapping user's changes.
-	invisible   bool
-	mute        muteState
-	roomMutes   map[string]muteState
-	muteTimer   *time.Timer
-	status      string
-	ownStatus   string
-	statusLimit *rate.Limiter
-	statusTimer *time.Timer
+	invisible      bool
+	mute           muteState
+	roomMutes      map[string]muteState
+	muteTimer      *time.Timer
+	roomMuteTimers map[string]*time.Timer
+	status         string
+	ownStatus      string
+	statusLimit    *rate.Limiter
+	statusTimer    *time.Timer
 	// statusChanges limits the user's changes to mute and invisible.
 	statusChanges *rate.Limiter
 	// pushes are the user's push registrations by url (§4.7), and pings the
@@ -443,6 +445,9 @@ func (s *Server) retireLocked(u *userState) {
 		if timer != nil {
 			timer.Stop()
 		}
+	}
+	for _, timer := range u.roomMuteTimers {
+		timer.Stop()
 	}
 	s.stopBadgeLocked(u)
 	s.setAvatarEmbedLocked(u, nil)

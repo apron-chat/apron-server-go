@@ -121,10 +121,18 @@ type pushRegistration struct {
 	// renewed is when the client last registered it; it expires pushExpiry
 	// later.
 	renewed time.Time
-	// lastUnread is the unread count the endpoint last received, -1 when
-	// none was sent since the server started; a badge push is sent only when
-	// the count differs (§4.7).
+	// lastUnread is the unread count the endpoint last accepted, -1 when
+	// none was since the server started; a badge push is sent only when the
+	// count differs (§4.7). sent numbers the pushes handed to the deliverer
+	// and accepted the latest of them the endpoint accepted, so a push
+	// accepted late does not record an older count.
 	lastUnread int
+	sent       uint64
+	accepted   uint64
+	// pendingUnread is the count of the latest push sent, while inFlight:
+	// a badge push for the same count waits on its outcome.
+	pendingUnread int
+	inFlight      bool
 }
 
 // live reports whether the registration has not expired at now.
@@ -454,12 +462,11 @@ func (s *Server) wakeLocked(m *messageState, snapshot, previous map[string]any) 
 			if unread < 0 {
 				unread = s.unreadLocked(u, now)
 			}
-			p.lastUnread = unread
 			urgency := "normal"
 			if scopes&urgentScopes != 0 {
 				urgency = "high"
 			}
-			s.deliverPushLocked(p, pushPayload(p.pushID, unread, snapshot), urgency, false)
+			s.deliverPushLocked(p, unread, pushPayload(p.pushID, unread, snapshot), urgency, false)
 		}
 	}
 }
@@ -472,28 +479,39 @@ func sortedPushes(u *userState) []*pushRegistration {
 	})
 }
 
-// deliverPushLocked hands a payload to the deliverer, unless the user has
-// had maxPushesPerUserDay pushes today. A push the endpoint accepts counts
-// toward them, and one answered 404 or 410 forgets the registration. A
-// badge push replaces one still waiting for the same registration.
-func (s *Server) deliverPushLocked(p *pushRegistration, payload []byte, urgency string, badge bool) {
+// deliverPushLocked hands a payload carrying the count unread to the
+// deliverer, unless the user has had maxPushesPerUserDay pushes today. A
+// push the endpoint accepts, with a 2xx, counts toward them and records
+// unread as the count the endpoint has; one answered 404 or 410 forgets the
+// registration. A badge push replaces one still waiting for the same
+// registration.
+func (s *Server) deliverPushLocked(p *pushRegistration, unread int, payload []byte, urgency string, badge bool) {
 	if u := s.users[p.userID]; u == nil || u.pushesTodayLocked(time.Now()) >= maxPushesPerUserDay {
 		return
 	}
+	p.sent++
+	seq := p.sent
+	p.pendingUnread, p.inFlight = unread, true
 	done := func(status int) {
 		accepted := status >= 200 && status < 300
 		gone := status == http.StatusNotFound || status == http.StatusGone
+		s.mu.Lock()
+		defer s.unlock()
+		if seq == p.sent {
+			p.inFlight = false
+		}
 		if !accepted && !gone {
 			return
 		}
-		s.mu.Lock()
-		defer s.unlock()
 		u := s.users[p.userID]
 		switch {
 		case u == nil:
 		case accepted:
 			u.pushesTodayLocked(time.Now())
 			u.pushesToday++
+			if seq > p.accepted {
+				p.accepted, p.lastUnread = seq, unread
+			}
 		default:
 			s.removePushLocked(p)
 			s.statusChangedLocked(u, nil, false)
@@ -621,9 +639,15 @@ type pushDeliverer struct {
 	queued int
 	users  map[string]int
 	hosts  map[string]*pushLane
-	// latest holds the payload of each badge delivery that has not started,
-	// by registration, so a newer count replaces it.
-	latest map[string]*[]byte
+	// latest holds each badge delivery that has not started, by
+	// registration, so a newer count replaces its payload and its done.
+	latest map[string]*queuedPush
+}
+
+// queuedPush is a delivery's payload and what it reports to.
+type queuedPush struct {
+	payload []byte
+	done    func(status int)
 }
 
 // pushLane bounds concurrent deliveries to one push host; queued counts the
@@ -716,30 +740,33 @@ func newPushDeliverer(allowInternal bool) *pushDeliverer {
 		slots:  make(chan struct{}, maxConcurrentPushPOST),
 		users:  make(map[string]int),
 		hosts:  make(map[string]*pushLane),
-		latest: make(map[string]*[]byte),
+		latest: make(map[string]*queuedPush),
 	}
 }
 
 // deliver POSTs payload to a registration's url. With latest, the key of a
 // badge delivery, a delivery for the same key that has not started takes
-// payload in place of its own. done receives the endpoint's status code. A
-// delivery beyond the user's, the host's, or the server's queue bound is
-// dropped, as is one that gets no answer.
+// payload and done in place of its own, and the replaced done is never
+// called. done receives the endpoint's status code, or 0 for a delivery
+// dropped beyond the user's, the host's, or the server's queue bound, or
+// one that gets no answer.
 func (p *pushDeliverer) deliver(registration pushRegistration, payload []byte, urgency, latest string, done func(status int)) {
 	parsed, err := url.Parse(registration.url)
 	if err != nil {
+		p.dropped(done)
 		return
 	}
 	host := strings.ToLower(parsed.Host)
 	p.mu.Lock()
 	if waiting := p.latest[latest]; latest != "" && waiting != nil {
-		*waiting = payload
+		waiting.payload, waiting.done = payload, done
 		p.mu.Unlock()
 		return
 	}
 	lane := p.hosts[host]
 	if p.queued >= maxPushQueued || p.users[registration.userID] >= maxPushQueuedPerUser || lane != nil && lane.queued >= maxPushQueuedPerHost {
 		p.mu.Unlock()
+		p.dropped(done)
 		return
 	}
 	p.queued++
@@ -749,7 +776,7 @@ func (p *pushDeliverer) deliver(registration pushRegistration, payload []byte, u
 		p.hosts[host] = lane
 	}
 	lane.queued++
-	waiting := &payload
+	waiting := &queuedPush{payload: payload, done: done}
 	if latest != "" {
 		p.latest[latest] = waiting
 	}
@@ -765,7 +792,7 @@ func (p *pushDeliverer) deliver(registration pushRegistration, payload []byte, u
 		p.slots <- struct{}{}
 		defer func() { <-p.slots }()
 		p.mu.Lock()
-		payload := *waiting
+		payload, done := waiting.payload, waiting.done
 		if latest != "" {
 			delete(p.latest, latest)
 		}
@@ -774,16 +801,28 @@ func (p *pushDeliverer) deliver(registration pushRegistration, payload []byte, u
 		defer cancel()
 		request, err := p.request(ctx, registration, payload, urgency)
 		if err != nil {
+			done(0)
 			return
 		}
 		response, err := p.client.Do(request)
 		if err != nil {
+			done(0)
 			return
 		}
 		// Reading the answer lets the connection be reused.
 		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, maxPushResponseDrain))
 		response.Body.Close()
 		done(response.StatusCode)
+	}()
+}
+
+// dropped tells done of a delivery dropped before it started, apart, since
+// the caller may hold the lock done takes.
+func (p *pushDeliverer) dropped(done func(status int)) {
+	p.pending.Add(1)
+	go func() {
+		defer p.pending.Done()
+		done(0)
 	}()
 }
 
