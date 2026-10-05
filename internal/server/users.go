@@ -60,22 +60,19 @@ type userState struct {
 	// commands to MessagesPerMinute; nil when unlimited.
 	posts *rate.Limiter
 
-	// invisible, mute, and roomMutes are the user's status fields (§4.11);
-	// muteTimer ends a timed mute, and roomMuteTimers each timed room mute.
-	// status is the status last sent to
-	// others, and ownStatus to the user; statusLimit and statusTimer
-	// coalesce a flapping user's changes.
-	invisible      bool
+	// chosen is the status the user set with `me` (§4.11), and mute and
+	// roomMutes their mutes; muteTimer ends a timed mute, and
+	// roomMuteTimers each timed room mute. status is the status last sent
+	// to others; statusLimit and statusTimer coalesce a flapping user's
+	// changes.
+	chosen         string
 	mute           muteState
 	roomMutes      map[string]muteState
 	muteTimer      *time.Timer
 	roomMuteTimers map[string]*time.Timer
 	status         string
-	ownStatus      string
 	statusLimit    *rate.Limiter
 	statusTimer    *time.Timer
-	// statusChanges limits the user's changes to mute and invisible.
-	statusChanges *rate.Limiter
 	// pushes are the user's push registrations by url (§4.7), and pings the
 	// rooms they have not joined where a message mentioned or replied to
 	// them, from the first such message, for unread counts. unread holds
@@ -99,8 +96,8 @@ func newUserState(id, name string) *userState {
 		joined:    make(map[string]*roomState),
 		leftAt:    make(map[string]int64),
 		roomMutes: make(map[string]muteState),
+		chosen:    statusOnline,
 		status:    statusOffline,
-		ownStatus: statusOffline,
 		pushes:    make(map[string]*pushRegistration),
 		pings:     make(map[string]int64),
 	}
@@ -134,7 +131,8 @@ func (u *userState) hasRole(role string) bool {
 }
 
 // profile is the complete current user object for user and users (§3.3),
-// with the user's status (§4.11); you adds what only the user sees.
+// with the user's status as others see it (§4.11); you has the status the
+// user set instead.
 func (u *userState) profile() map[string]any {
 	value := maps.Clone(u.from())
 	value["status"] = u.statusAt(time.Now())
@@ -329,6 +327,7 @@ func (s *Server) authenticate(c *client, req request) (any, *rpcError) {
 		if req.hasID {
 			c.sendResult(req, result)
 		}
+		s.sendAfterAuthLocked(c)
 		return result, nil
 	}
 	user := newUserState(s.assignUserIDLocked(requested), normalizeName(name))
@@ -338,21 +337,18 @@ func (s *Server) authenticate(c *client, req request) (any, *rpcError) {
 	// A new guest joins the default room, so their room list is not empty,
 	// and the membership reaches this connection before the result (§1).
 	s.joinDefaultRoomLocked(user)
-	// Its status snapshot, if it sent idle, waited for the room it now
-	// shares (§4.11).
-	if c.reportsIdle.Load() {
-		s.sendSharerStatusLocked(c)
-	}
 	result := map[string]any{"you": user.you()}
 	if req.hasID {
 		c.sendResult(req, result)
 	}
+	s.sendAfterAuthLocked(c)
 	return result, nil
 }
 
 // switchUserLocked makes user the connection's identity and replies with
-// extra fields beside `you` (§3.2, §3.3). No room_update is sent for the new
-// identity's rooms: the client lists them with room_list.
+// extra fields beside `you` (§3.2, §3.3), then sends what follows auth
+// (§4.11). No room_update is sent for the new identity's rooms: the client
+// lists them with room_list.
 func (s *Server) switchUserLocked(c *client, req request, user *userState, extra map[string]any) map[string]any {
 	s.attachLocked(c, user)
 	result := map[string]any{"you": user.you()}
@@ -360,10 +356,11 @@ func (s *Server) switchUserLocked(c *client, req request, user *userState, extra
 	if req.hasID {
 		c.sendResult(req, result)
 	}
+	s.sendAfterAuthLocked(c)
 	return result
 }
 
-// attachLocked makes user the connection's identity, applying the status
+// attachLocked makes user the connection's identity, applying the mutes
 // the connection sent before signing in (§4.11) and announcing the user's
 // new status. A guest identity left without connections is retired, logging
 // its leaves, and then others who shared a room with it learn of the
@@ -384,15 +381,10 @@ func (s *Server) attachLocked(c *client, user *userState) {
 	c.user = user
 	user.clients[c] = struct{}{}
 	s.applyPendingStatusLocked(c, user)
-	s.statusChangedLocked(user, c, false)
-	// A connection that sent idle before signing in learns the status of
-	// those it now shares rooms with.
-	if c.reportsIdle.Load() {
-		s.sendSharerStatusLocked(c)
-	}
+	s.announceStatusLocked(user)
 	if previous == nil || len(previous.clients) > 0 || previous.account() {
 		if previous != nil {
-			s.statusChangedLocked(previous, nil, false)
+			s.announceStatusLocked(previous)
 		}
 		return
 	}
@@ -422,7 +414,7 @@ func (s *Server) detachLocked(c *client) {
 		s.retireLocked(user)
 		return
 	}
-	s.statusChangedLocked(user, nil, false)
+	s.announceStatusLocked(user)
 }
 
 // retireLocked removes a guest identity for good. It leaves every room it
@@ -492,6 +484,8 @@ func (s *Server) notifyProfileLocked(u *userState, except *client, removed ...st
 			c.enqueue(you)
 		}
 	}
+	// The profile carries the status others see, so it is the last sent.
+	u.status = profile["status"].(string)
 	others := notification("user", map[string]any{"new": profile})
 	for _, other := range s.sharersLocked(u) {
 		other.send(others)
@@ -514,8 +508,10 @@ func withRemoved(profile map[string]any, removed []string) map[string]any {
 // current value, an omitted one stays, and an empty value ("" or {}) removes
 // the field, which the result and notifications carry as that empty value.
 // Names are trimmed and capped; avatars must be https: URLs or small image
-// data: URLs, or the current avatar unchanged. roles are not settable, and
-// like other unknown fields are ignored.
+// data: URLs, or the current avatar unchanged. status is the status the user
+// sets (§4.11), "" for a value the server does not support, and is kept
+// across connections and restarts. roles are not settable, and like other
+// unknown fields are ignored.
 func (s *Server) updateProfile(c *client, req request) (any, bool, *rpcError) {
 	name, err := parseString(req.params, "name", false)
 	if err != nil {
@@ -532,8 +528,13 @@ func (s *Server) updateProfile(c *client, req request) (any, bool, *rpcError) {
 	if ext != nil && len(req.params["ext"]) > maxProfileExtBytes {
 		return nil, false, invalidParams("ext is at most %d bytes", maxProfileExtBytes)
 	}
+	status, err := parseString(req.params, "status", false)
+	if err != nil {
+		return nil, false, err
+	}
 	_, hasName := req.params["name"]
 	_, hasAvatar := req.params["avatar"]
+	_, hasStatus := req.params["status"]
 
 	s.mu.Lock()
 	defer s.unlock()
@@ -541,7 +542,7 @@ func (s *Server) updateProfile(c *client, req request) (any, bool, *rpcError) {
 	if hasAvatar && avatar != "" && avatar != u.avatar && !validAvatar(avatar) {
 		return nil, false, invalidParams("avatar must be an https: URL or a data:image URL of at most %d bytes; upload larger images with /avatar", maxAvatarDataURLBytes)
 	}
-	before := u.profile()
+	before, beforeYou := u.profile(), u.you()
 	s.touchUser(u.id)
 	var removed []string
 	if hasName {
@@ -565,8 +566,14 @@ func (s *Server) updateProfile(c *client, req request) (any, bool, *rpcError) {
 			removed = append(removed, "ext")
 		}
 	}
+	if hasStatus {
+		if !settableStatus(status) {
+			status = statusNone
+		}
+		u.chosen = status
+	}
 	result := map[string]any{"you": withRemoved(u.you(), removed)}
-	if !jsonEqual(before, u.profile()) {
+	if !jsonEqual(before, u.profile()) || !jsonEqual(beforeYou, u.you()) {
 		s.notifyProfileLocked(u, c, removed...)
 	}
 	if req.hasID {

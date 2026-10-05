@@ -26,6 +26,11 @@ type testClient struct {
 	requests int
 	// userID is the identity the guest was assigned at auth.
 	userID string
+	// statuses keeps the bare status announcements of others (§4.11),
+	// `user` `{new: {user_id, status}}`, which read otherwise skips: they
+	// follow every connection, idle change, and join, and only the status
+	// tests look at them.
+	statuses bool
 }
 
 // nextID returns a request ID not used before on this client.
@@ -261,7 +266,20 @@ func (c *testClient) read(t *testing.T) map[string]any {
 	if err := json.Unmarshal(payload, &frame); err != nil {
 		t.Fatalf("decode frame %q: %v", payload, err)
 	}
+	if !c.statuses && isStatusAnnouncement(frame) {
+		return c.read(t)
+	}
 	return frame
+}
+
+// isStatusAnnouncement reports whether frame is a bare announcement of
+// another user's status: `user` with only `new`, which has only user_id and
+// status.
+func isStatusAnnouncement(frame map[string]any) bool {
+	params, _ := frame["params"].(map[string]any)
+	object, _ := params["new"].(map[string]any)
+	_, hasStatus := object["status"]
+	return frame["method"] == "user" && len(params) == 1 && len(object) == 2 && hasStatus
 }
 
 // call sends a request and returns its reply frame, which must come next.

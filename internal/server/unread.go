@@ -9,19 +9,20 @@ import (
 // Unread counts (§4.7): one count per user, the same in every push to any of
 // their registrations. A message counts toward a user's unread when it
 // arrived in a room after the user's read position there, is by someone
-// else, is not deleted, and
+// else, is not deleted, is not in a room the user muted (their own mute of
+// it or of a room it is a thread of, which silences mentions too, §4.11),
+// and
 //
 //   - mentions the user, or
-//   - is in a joined room the user has not muted (their own mute of it or of
-//     a room it is a thread of), or
-//   - in a room they have not joined, replies to them, unmuted likewise.
+//   - is in a joined room, or
+//   - in a room they have not joined, replies to them.
 //
 // The read position in a joined room is the latest of the user's read
 // cursor (§4.4), where the message it names arrived in the room, their
 // join, and their latest message there. A room the
 // user has not joined counts only once a message there mentioned or replied
-// to them (userState.pings), from that message. The unscoped mute silences
-// pushes but not the count.
+// to them (userState.pings), from that message. The unscoped mute and a dnd
+// status silence pushes but not the count (§4.7).
 //
 // Counts are kept per user and room for users with push registrations
 // (userState.unread): a new message adds to the rooms whose count is
@@ -77,12 +78,10 @@ func (s *Server) countsLocked(u *userState, r *roomState, m *messageState, now t
 	}
 	info := m.info()
 	switch {
-	case info.deleted:
+	case info.deleted, u.roomMuted(r, now):
 		return false
 	case slices.Contains(info.mentions, u.id):
 		return true
-	case u.roomMuted(r, now):
-		return false
 	case u.joined[r.id] != nil:
 		return true
 	}
@@ -119,12 +118,11 @@ func (s *Server) recountLocked(u *userState, r *roomState, now time.Time) int {
 // unreadLocked returns u's unread count, counting again the rooms whose
 // count is not known.
 func (s *Server) unreadLocked(u *userState, now time.Time) int {
-	// A room mute that ran out changes what counts in the room and its
-	// threads: it is forgotten, and so are the counts.
-	for id, mute := range u.roomMutes {
-		if !mute.active(now) {
-			delete(u.roomMutes, id)
-			s.touchUser(u.id)
+	// A room mute that ran out, its timer not yet run, changes what counts
+	// in the room and its threads: it ends, and the counts are forgotten.
+	for _, id := range slices.Sorted(maps.Keys(u.roomMutes)) {
+		if !u.roomMutes[id].active(now) {
+			s.endRoomMuteLocked(u, id)
 			u.unread = nil
 		}
 	}

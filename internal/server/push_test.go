@@ -134,11 +134,12 @@ func addPush(app *Server, u *userState, p pushRegistration) *pushRegistration {
 	return registration
 }
 
-// goIdle tells the server nobody attends c, and checks the status echo.
+// goIdle tells the server nobody attends c, which tells c nothing.
 func goIdle(t *testing.T, c *testClient) {
 	t.Helper()
-	_, frames := snapshot(t, c, c.status(t, map[string]any{"idle": true}))
-	echoed(t, c, frames, "idle")
+	if frames := c.status(t, map[string]any{"idle": true}); len(frames) != 0 {
+		t.Fatalf("frames after idle: %#v", frames)
+	}
 }
 
 func TestPushWakesMentionsAndRepliesOfIdleUsers(t *testing.T) {
@@ -209,13 +210,16 @@ func TestPushWakesMentionsAndRepliesOfIdleUsers(t *testing.T) {
 	// idle: false does (§4.11).
 	b.write(t, map[string]any{"method": "activity", "params": map[string]any{"room_id": "general", "typing": 3}})
 	a.notification(t, "activity")
+	b.notification(t, "activity")
 	own, _ := save(t, b, "own", map[string]any{"body": map[string]any{"text": "mine"}})
 	a.notification(t, "message")
 	post("still-idle", maps.Clone(mentionB))
 	if got := relay.pushes(t, app, a); len(got) != 1 {
 		t.Fatalf("typing or a message ended idle: %d", len(got))
 	}
-	echoed(t, b, b.status(t, map[string]any{"idle": false}), "online")
+	if frames := b.status(t, map[string]any{"idle": false}); len(frames) != 0 {
+		t.Fatalf("frames after idle: false: %#v", frames)
+	}
 	post("back", maps.Clone(mentionB))
 	if got := relay.pushes(t, app, a); len(got) != 0 {
 		t.Fatalf("user back from idle woken: %d", len(got))
@@ -405,8 +409,26 @@ func TestPushWakeScopes(t *testing.T) {
 	}
 }
 
-// Muted users get no pushes; a muted room wakes only for mentions (§4.7,
-// §4.11).
+// expectMute reads the `status` notification that tells c of a mute
+// (§4.11): everywhere, or of roomID.
+func expectMute(t *testing.T, c *testClient, roomID string, mute any) {
+	t.Helper()
+	checkMute(t, c.read(t), roomID, mute)
+}
+
+func checkMute(t *testing.T, frame map[string]any, roomID string, mute any) {
+	t.Helper()
+	want := map[string]any{"mute": mute}
+	if roomID != "" {
+		want["room_id"] = roomID
+	}
+	if params := notificationParams(t, frame, "status"); !reflect.DeepEqual(params, want) {
+		t.Fatalf("status = %#v, want %#v", params, want)
+	}
+}
+
+// Muted users, and those whose status is dnd, get no pushes; nor does a
+// muted room, mentions included (§4.7, §4.11).
 func TestPushRespectsMutes(t *testing.T) {
 	relay := newTestRelay(t)
 	app, httpServer := pushTestServer(t)
@@ -422,76 +444,78 @@ func TestPushRespectsMutes(t *testing.T) {
 	mention := map[string]any{"body": map[string]any{"text": "@guest_2", "mentions": []any{"guest_2"}}}
 	chatter := map[string]any{"body": map[string]any{"text": "chatter"}}
 
-	// A muted room wakes only for mentions.
+	// A muted room wakes for nothing, mentions included.
 	b.write(t, map[string]any{"method": "status", "params": map[string]any{"room_id": "general", "mute": true}})
-	if record := roomUpdated(t, b, "updated"); record["room_id"] != "general" || record["mute"] != true {
-		t.Fatalf("room mute echo: %#v", record)
-	}
+	expectMute(t, b, "general", true)
 	post(maps.Clone(chatter))
+	post(maps.Clone(mention))
 	if got := relay.pushes(t, app, a); len(got) != 0 {
 		t.Fatalf("muted room woke %d", len(got))
 	}
-	post(maps.Clone(mention))
-	if got := relay.pushes(t, app, a); len(got) != 1 {
-		t.Fatalf("mention in a muted room woke %d", len(got))
-	}
-	b.write(t, map[string]any{"method": "status", "params": map[string]any{"room_id": "general", "mute": 0}})
-	if record := roomUpdated(t, b, "updated"); record["mute"] != float64(0) {
-		t.Fatalf("room unmute echo: %#v", record)
-	}
+	b.write(t, map[string]any{"method": "status", "params": map[string]any{"room_id": "general", "mute": false}})
+	expectMute(t, b, "general", false)
 	post(maps.Clone(chatter))
 	if got := relay.pushes(t, app, a); len(got) != 1 {
 		t.Fatalf("unmuted room woke %d", len(got))
 	}
 	// A muted user gets no pushes at all, mentions included.
 	b.write(t, map[string]any{"method": "status", "params": map[string]any{"mute": 3600}})
-	if you := b.notification(t, "user")["you"].(map[string]any); you["mute"] != float64(3600) || you["status"] != "dnd" {
-		t.Fatalf("mute echo: %#v", you)
-	}
+	expectMute(t, b, "", float64(3600))
 	post(maps.Clone(mention))
 	if got := relay.pushes(t, app, a); len(got) != 0 {
 		t.Fatalf("muted user woken %d", len(got))
 	}
 	b.write(t, map[string]any{"method": "status", "params": map[string]any{"mute": 0}})
-	if you := b.notification(t, "user")["you"].(map[string]any); you["mute"] != float64(0) || you["status"] != "idle" {
-		t.Fatalf("unmute echo: %#v", you)
-	}
+	expectMute(t, b, "", false)
 	post(maps.Clone(mention))
 	if got := relay.pushes(t, app, a); len(got) != 1 {
 		t.Fatalf("unmuted user woken %d", len(got))
 	}
+	// A dnd status silences like the mute.
+	if you := b.result(t, "me", "dnd", map[string]any{"status": "dnd"})["you"].(map[string]any); you["status"] != "dnd" {
+		t.Fatalf("you after dnd: %#v", you)
+	}
+	post(maps.Clone(mention))
+	if got := relay.pushes(t, app, a); len(got) != 0 {
+		t.Fatalf("dnd user woken %d", len(got))
+	}
+	b.result(t, "me", "online", map[string]any{"status": "online"})
+	post(maps.Clone(mention))
+	if got := relay.pushes(t, app, a); len(got) != 1 {
+		t.Fatalf("online user woken %d", len(got))
+	}
 
 	// A room's mute covers its threads, and applies to a room the user has
-	// not joined, whose mentions still wake. (The user has used up the
-	// changes to mute allowed at once: start again.)
-	app.mu.Lock()
-	app.users[b.userID].statusChanges = nil
-	app.unlock()
+	// not joined, mentions and replies alike.
 	thread, _ := saveRoom(t, a, "thread", map[string]any{"parent_room_id": "general", "title": "Thread"})
 	b.notification(t, "room_update")
 	joinRoom(t, b, thread)
 	expectMembership(t, a, thread, b.userID, true)
 	b.status(t, map[string]any{"room_id": "general", "mute": true})
-	save(t, a, "in-thread", map[string]any{"room_id": thread, "body": map[string]any{"text": "chatter"}})
+	save(t, a, "in-thread", map[string]any{"room_id": thread, "body": map[string]any{"text": "@guest_2", "mentions": []any{"guest_2"}}})
 	b.notification(t, "message")
 	if got := relay.pushes(t, app, a); len(got) != 0 {
 		t.Fatalf("thread of a muted room woke %d", len(got))
 	}
 	b.status(t, map[string]any{"room_id": "general", "mute": 0})
 	ops, _ := saveRoom(t, a, "ops", map[string]any{"title": "Ops"})
-	if frames := b.status(t, map[string]any{"room_id": ops, "mute": true}); len(frames) != 0 {
-		t.Fatalf("echo of an unjoined room's mute: %#v", frames)
+	frames := b.status(t, map[string]any{"room_id": ops, "mute": true})
+	if len(frames) != 1 {
+		t.Fatalf("frames after muting an unjoined room: %#v", frames)
 	}
+	checkMute(t, frames[0], ops, true)
 	theirs := formatID(serverMessage(t, app, b.userID))
 	a.notification(t, "message")
 	b.notification(t, "message")
 	save(t, a, "ops-reply", map[string]any{"room_id": ops, "body": map[string]any{"text": "re"}, "reply_to": map[string]any{"message_id": theirs}})
-	if got := relay.pushes(t, app, a); len(got) != 0 {
-		t.Fatalf("reply in a muted unjoined room woke %d", len(got))
-	}
 	save(t, a, "ops-mention", map[string]any{"room_id": ops, "body": map[string]any{"text": "@guest_2", "mentions": []any{"guest_2"}}})
+	if got := relay.pushes(t, app, a); len(got) != 0 {
+		t.Fatalf("muted unjoined room woke %d", len(got))
+	}
+	b.status(t, map[string]any{"room_id": ops, "mute": false})
+	save(t, a, "ops-mention-again", map[string]any{"room_id": ops, "body": map[string]any{"text": "@guest_2", "mentions": []any{"guest_2"}}})
 	if got := relay.pushes(t, app, a); len(got) != 1 || got[0].header.Get("Urgency") != "high" {
-		t.Fatalf("mention in a muted unjoined room: %#v", got)
+		t.Fatalf("mention in an unmuted unjoined room: %#v", got)
 	}
 }
 
@@ -584,10 +608,6 @@ func TestWebPushDelivery(t *testing.T) {
 	goIdle(t, c)
 	poster := dialTestClient(t, httpServer)
 	expectMembership(t, c, "general", poster.userID, true)
-	// c sent status, so it learns that the new member is online (§4.11).
-	if joined := c.notification(t, "user"); !reflect.DeepEqual(joined, map[string]any{"new": map[string]any{"user_id": poster.userID, "status": "online"}}) {
-		t.Fatalf("status of a new member: %#v", joined)
-	}
 	save(t, poster, "mention", map[string]any{"body": map[string]any{"text": "hi @guest_1", "format": "markdown", "mentions": []any{"guest_1"}}})
 	c.notification(t, "message")
 	got := relay.pushes(t, app, poster)
@@ -733,17 +753,6 @@ func TestPushRegistrationsExpire(t *testing.T) {
 	if kept || indexed {
 		t.Fatal("an expired registration was kept")
 	}
-	// A user whose only registration expired is offline, not idle.
-	app.mu.Lock()
-	idle := dora.statusAt(time.Now())
-	for _, p := range dora.pushes {
-		p.renewed = time.Now().Add(-pushExpiry)
-	}
-	expired := dora.statusAt(time.Now())
-	app.mu.Unlock()
-	if idle != statusIdle || expired != statusOffline {
-		t.Fatalf("status with a live registration %s, with expired ones %s", idle, expired)
-	}
 }
 
 // unread is the user's one count of messages after their read positions,
@@ -846,16 +855,31 @@ func TestPushUnreadAndBadge(t *testing.T) {
 	b.status(t, map[string]any{"mute": true})
 	post(map[string]any{"body": map[string]any{"text": "@guest_2", "mentions": []any{"guest_2"}}})
 	expect(delivery{"/mentions", float64(1), "low", false}, delivery{"/phone", float64(1), "low", false})
+	// So does what a dnd status silences.
+	b.status(t, map[string]any{"mute": false})
+	b.result(t, "me", "dnd", map[string]any{"status": "dnd"})
+	post(map[string]any{"body": map[string]any{"text": "@guest_2", "mentions": []any{"guest_2"}}})
+	expect(delivery{"/mentions", float64(2), "low", false}, delivery{"/phone", float64(2), "low", false})
+	// A room's mute leaves what it silences out of unread, mentions too.
+	b.result(t, "me", "online", map[string]any{"status": "online"})
+	b.status(t, map[string]any{"room_id": "general", "mute": true})
+	expect(delivery{"/mentions", float64(0), "low", false}, delivery{"/phone", float64(0), "low", false})
+	post(map[string]any{"body": map[string]any{"text": "@guest_2", "mentions": []any{"guest_2"}}})
+	expect()
 }
 
 // Registrations, with their keys, push_id, and scopes, survive a restart,
-// and so do the VAPID key and the user's status. A registration stored by
-// url alone, before registrations belonged to their user, is kept.
+// and so do the VAPID key and the status and mutes the user set (§4.11). A
+// registration stored by url alone, before registrations belonged to their
+// user, is kept, and so is an invisible flag stored before status was set
+// with `me`, as the invisible status.
 func TestPushAndStatusSurviveRestart(t *testing.T) {
 	memory := store.NewMemory()
 	_, keys := testSubscription(t)
 	if err := memory.Apply([]store.Entry{
 		{Kind: entryUser, ID: "erin", Value: encodeJSON(storedUser{Name: "Erin", Passkey: &storedPasskey{Handle: []byte("h")}})},
+		{Kind: entryUser, ID: "finn", Value: []byte(`{"name":"Finn","passkey":{"handle":"aA=="},"invisible":true}`)},
+		{Kind: entryUser, ID: "gail", Value: []byte(`{"name":"Gail","passkey":{"handle":"aQ=="},"status":"away"}`)},
 		{Kind: entryPush, ID: "https://relay.example/legacy", Value: []byte(`{"user":"erin","kind":"relay","token":"tok"}`)},
 	}); err != nil {
 		t.Fatal(err)
@@ -875,10 +899,16 @@ func TestPushAndStatusSurviveRestart(t *testing.T) {
 		userID: "erin", kind: "webpush", url: "https://push.example/s", pushID: "p1", keys: &subscription,
 		wake: wakeJoined | wakeBadge, renewed: time.Now(), lastUnread: -1,
 	})
-	erin.invisible = true
+	if finn, gail := app.users["finn"], app.users["gail"]; finn.chosen != statusInvisible || gail.chosen != statusNone || erin.chosen != statusOnline {
+		app.mu.Unlock()
+		t.Fatalf("loaded statuses: erin %q finn %q gail %q", erin.chosen, finn.chosen, gail.chosen)
+	}
+	erin.chosen = statusDND
+	app.users["finn"].chosen = statusNone
 	erin.mute = muteState{until: time.Now().Add(time.Hour)}
 	erin.roomMutes["general"] = muteState{forever: true}
 	app.touchUser("erin")
+	app.touchUser("finn")
 	app.unlock()
 	stop()
 
@@ -896,8 +926,8 @@ func TestPushAndStatusSurviveRestart(t *testing.T) {
 	if erin.pushes["https://relay.example/legacy"] == nil || len(app.pushes) != 2 {
 		t.Fatalf("registrations after restart: %v", app.pushes)
 	}
-	if !erin.invisible || !erin.mute.active(time.Now()) || !erin.roomMutes["general"].forever {
-		t.Fatalf("status after restart: %v %v %v", erin.invisible, erin.mute, erin.roomMutes)
+	if erin.chosen != statusDND || app.users["finn"].chosen != statusNone || !erin.mute.active(time.Now()) || !erin.roomMutes["general"].forever {
+		t.Fatalf("status after restart: %q %q %v %v", erin.chosen, app.users["finn"].chosen, erin.mute, erin.roomMutes)
 	}
 	app.mu.RUnlock()
 	var stored []string
@@ -1139,8 +1169,8 @@ func TestPushRefusesNonPublicRanges(t *testing.T) {
 	}
 }
 
-// With push disabled, stored registrations are kept but not loaded, so they
-// do not make their users idle (§4.11); enabled again, they apply.
+// With push disabled, stored registrations are kept but not loaded;
+// enabled again, they apply.
 func TestDisabledPushIgnoresStoredRegistrations(t *testing.T) {
 	memory := store.NewMemory()
 	url := "https://relay.example/erin"
@@ -1150,19 +1180,19 @@ func TestDisabledPushIgnoresStoredRegistrations(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	statusOf := func(app *Server) (string, int) {
+	pushesOf := func(app *Server) int {
 		app.mu.RLock()
 		defer app.mu.RUnlock()
-		return app.users["erin"].statusAt(time.Now()), len(app.pushes)
+		return len(app.pushes) + len(app.users["erin"].pushes)
 	}
 	app, _, stop := startWith(t, memory, t.TempDir(), func(c *Config) { c.DisablePush = true })
-	if status, pushes := statusOf(app); status != statusOffline || pushes != 0 {
-		t.Fatalf("with push disabled: status %s, %d registrations", status, pushes)
+	if pushes := pushesOf(app); pushes != 0 {
+		t.Fatalf("with push disabled: %d registrations", pushes)
 	}
 	stop()
 	app, _, _ = startWithStore(t, memory, t.TempDir())
-	if status, pushes := statusOf(app); status != statusIdle || pushes != 1 {
-		t.Fatalf("with push enabled again: status %s, %d registrations", status, pushes)
+	if pushes := pushesOf(app); pushes != 2 {
+		t.Fatalf("with push enabled again: %d registrations", pushes)
 	}
 }
 
@@ -1219,6 +1249,8 @@ func TestRoomMuteExpiryUpdatesBadge(t *testing.T) {
 	if got := relay.pushes(t, app, a); len(got) != 1 || got[0].payload["unread"] != float64(1) {
 		t.Fatalf("badge after the room mute ran out: %#v", got)
 	}
+	// Its end is sent to the user's connections (§4.11).
+	expectMute(t, b, "general", false)
 	b.expectQuiet(t)
 }
 

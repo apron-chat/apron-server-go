@@ -163,8 +163,12 @@ type storedUser struct {
 	LeftAt      map[string]int64 `json:"left_at,omitzero"`
 	Passkey     *storedPasskey   `json:"passkey,omitzero"`
 	Email       string           `json:"email,omitzero"`
-	// Invisible, Mute, and RoomMutes are the status the user set (§4.11);
-	// Pings are the rooms they have not joined that count toward unread.
+	// Status is the status the user set (§4.11), absent for online, and
+	// Mute and RoomMutes their mutes; Pings are the rooms they have not
+	// joined that count toward unread. Invisible is the invisible flag
+	// stored before status was set with `me`: it loads as the invisible
+	// status.
+	Status    *string               `json:"status,omitzero"`
 	Invisible bool                  `json:"invisible,omitzero"`
 	Mute      *storedMute           `json:"mute,omitzero"`
 	RoomMutes map[string]storedMute `json:"room_mutes,omitzero"`
@@ -381,7 +385,10 @@ func storedMessageOf(m *messageState) storedMessage {
 }
 
 func storedUserOf(u *userState) storedUser {
-	stored := storedUser{Name: u.name, Avatar: u.avatar, Ext: u.ext, LeftAt: u.leftAt, Email: u.email, Invisible: u.invisible, Pings: u.pings}
+	stored := storedUser{Name: u.name, Avatar: u.avatar, Ext: u.ext, LeftAt: u.leftAt, Email: u.email, Pings: u.pings}
+	if status := u.chosen; status != statusOnline {
+		stored.Status = &status
+	}
 	now := time.Now()
 	if u.mute.active(now) {
 		stored.Mute = &storedMute{Forever: u.mute.forever, Until: u.mute.until}
@@ -564,7 +571,15 @@ func (s *Server) restoreLocked() (map[string]bool, error) {
 		if stored.LeftAt != nil {
 			u.leftAt = stored.LeftAt
 		}
-		u.invisible = stored.Invisible
+		switch {
+		case stored.Status != nil && settableStatus(*stored.Status):
+			u.chosen = *stored.Status
+		case stored.Status != nil:
+			u.chosen = statusNone
+		case stored.Invisible:
+			u.chosen = statusInvisible
+			s.touchUser(id)
+		}
 		if stored.Mute != nil {
 			u.mute = muteState{forever: stored.Mute.Forever, until: stored.Mute.Until}
 		}
@@ -631,9 +646,8 @@ func (s *Server) restoreLocked() (map[string]bool, error) {
 	}
 
 	now := time.Now()
-	// With push disabled, stored registrations stay in the store, unused:
-	// loaded, they would make their users idle (§4.11) with nothing to wake
-	// them.
+	// With push disabled, stored registrations stay in the store, unused,
+	// for when push is enabled again.
 	storedPushes := entries[entryPush]
 	if s.config.DisablePush {
 		storedPushes = nil
@@ -707,7 +721,7 @@ func (s *Server) restoreLocked() (map[string]bool, error) {
 			for id := range u.roomMutes {
 				s.scheduleRoomMuteLocked(u, id)
 			}
-			u.status, u.ownStatus = u.statusAt(now), u.ownStatusAt(now)
+			u.status = u.statusAt(now)
 		}
 	}
 	for _, id := range slices.Sorted(maps.Keys(s.embeds)) {

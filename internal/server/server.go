@@ -51,7 +51,6 @@ const (
 	defaultStreamMaxBytes     int64 = 16 << 20
 	defaultStreamMaxDuration        = time.Hour
 	defaultMaxListedMembers         = 1000
-	defaultSilentIdleAfter          = 5 * time.Minute
 	// retryAfterSeconds is the delay suggested by connection-level
 	// retry_after errors (capacity and shutdown).
 	retryAfterSeconds = 30
@@ -115,9 +114,6 @@ type Config struct {
 	// VAPIDSubject is the contact push services may use, a mailto: or
 	// https: URL, sent in VAPID tokens. Empty uses PublicURL, if any.
 	VAPIDSubject string
-	// SilentIdleAfter is how long a connection that never sent idle may
-	// send nothing but liveness pings before it counts as idle (§4.11).
-	SilentIdleAfter time.Duration
 	// MaxConnections bounds concurrent WebSockets; 0 is unlimited.
 	MaxConnections int
 	// MessagesPerMinute bounds each user's new messages; 0 is unlimited.
@@ -166,7 +162,6 @@ func DefaultConfig() Config {
 		StreamMaxBytes:        defaultStreamMaxBytes,
 		StreamMaxDuration:     defaultStreamMaxDuration,
 		MaxListedMembers:      defaultMaxListedMembers,
-		SilentIdleAfter:       defaultSilentIdleAfter,
 	}
 }
 
@@ -213,9 +208,6 @@ func (c Config) withDefaults() Config {
 	}
 	if c.StreamMaxBytes <= 0 {
 		c.StreamMaxBytes = defaults.StreamMaxBytes
-	}
-	if c.SilentIdleAfter <= 0 {
-		c.SilentIdleAfter = defaults.SilentIdleAfter
 	}
 	if c.StreamMaxDuration <= 0 {
 		c.StreamMaxDuration = defaults.StreamMaxDuration
@@ -350,19 +342,10 @@ type client struct {
 	proposal   *emailProposal
 	clientKey  string
 	// idle reports that nobody is attending the connection (§4.11), and
-	// pendingStatus holds the user's fields it sent before signing in.
-	// Guarded by server.mu.
+	// pendingStatus holds the mutes it sent before signing in. Guarded by
+	// server.mu.
 	idle          bool
 	pendingStatus []statusUpdate
-	// reportsIdle is set once the connection sends idle, which is how a
-	// client shows it implements §4.11: only then is it sent status
-	// changes. silent is set while a connection that never sent idle has
-	// sent no frame but pings for Config.SilentIdleAfter; it then counts as
-	// idle (§4.11). lastActive is when its latest frame other than a ping
-	// arrived, in Unix nanoseconds.
-	reportsIdle atomic.Bool
-	silent      atomic.Bool
-	lastActive  atomic.Int64
 	// closing is set once the final batch is queued; later frames are dropped.
 	closing atomic.Bool
 	// pinged is set by the first liveness ping (§1); lastFrame is when the
@@ -669,7 +652,6 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		baseURL:   s.baseURL(r),
 	}
 	c.lastFrame.Store(time.Now().UnixNano())
-	c.lastActive.Store(time.Now().UnixNano())
 	go c.writeLoop()
 	go c.pingLoop()
 	s.mu.Lock()
@@ -715,8 +697,6 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 			c.pong()
 			continue
 		}
-		c.lastActive.Store(time.Now().UnixNano())
-		s.endSilence(c)
 		// Frames are processed in order, each to completion before the next
 		// is read, which makes auth a barrier (§3.2).
 		s.processFrame(c, payload)
@@ -848,9 +828,7 @@ func (c *client) writeLoop() {
 // pingLoop pings at the WebSocket level, which finds dead transports, and
 // closes a connection whose client sent liveness pings (§1) and then fell
 // silent for three intervals: its page is frozen or gone even if the socket
-// is not. Three intervals leave room for background timer throttling. A
-// connection that never sent idle and has sent nothing but pings for
-// Config.SilentIdleAfter counts as idle until its next other frame (§4.11).
+// is not. Three intervals leave room for background timer throttling.
 func (c *client) pingLoop() {
 	config := c.server.config
 	ticker := time.NewTicker(config.PingInterval)
@@ -864,9 +842,6 @@ func (c *client) pingLoop() {
 			if c.pinged.Load() && time.Since(time.Unix(0, c.lastFrame.Load())) > silence {
 				c.stopConnection()
 				return
-			}
-			if time.Since(time.Unix(0, c.lastActive.Load())) > config.SilentIdleAfter {
-				c.server.silenceIdle(c)
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), config.PingTimeout)
 			err := c.ws.Ping(ctx)

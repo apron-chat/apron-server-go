@@ -181,18 +181,6 @@ func (s *Server) removePushLocked(p *pushRegistration) {
 	}
 }
 
-// notifiable reports whether the user has a registration that has not
-// expired and wakes for messages, a scope other than badge, which can
-// notify them (§4.11).
-func (u *userState) notifiable(now time.Time) bool {
-	for _, p := range u.pushes {
-		if p.live(now) && p.wake&^wakeBadge != 0 {
-			return true
-		}
-	}
-	return false
-}
-
 // registerPush records a push endpoint for the caller (§4.7): kind relay,
 // with an optional bearer token, or webpush, with the subscription's keys;
 // a relay with keys gets the payload encrypted as for webpush. Registering
@@ -267,8 +255,6 @@ func (s *Server) registerPush(c *client, req request) (any, bool, *rpcError) {
 		userID: u.id, kind: kind, url: endpoint, token: token, pushID: pushID,
 		keys: keys, wake: wake, renewed: now, lastUnread: -1,
 	})
-	// A user without an attended connection can now be notified (§4.11).
-	s.statusChangedLocked(u, nil, false)
 	return map[string]any{}, false, nil
 }
 
@@ -310,29 +296,23 @@ func (s *Server) unregisterPush(c *client, req request) (any, bool, *rpcError) {
 	defer s.unlock()
 	if registration := c.user.pushes[endpoint]; registration != nil {
 		s.removePushLocked(registration)
-		s.statusChangedLocked(c.user, nil, false)
 	}
 	return map[string]any{}, false, nil
 }
 
 // expirePushesLocked forgets the user's registrations that were not
-// registered again within pushExpiry, announcing the status that may change
-// with them (§4.11).
+// registered again within pushExpiry.
 func (s *Server) expirePushesLocked(u *userState, now time.Time) {
-	expired := false
 	for _, p := range u.pushes {
 		if !p.live(now) {
 			s.removePushLocked(p)
-			expired = true
 		}
-	}
-	if expired {
-		s.statusChangedLocked(u, nil, false)
 	}
 }
 
 // sweepPushes forgets expired registrations every pushSweepInterval until
-// the server shuts down, so a user's status stops showing them idle.
+// the server shuts down, so the store drops them though their users stay
+// away.
 func (s *Server) sweepPushes() {
 	ticker := time.NewTicker(pushSweepInterval)
 	defer ticker.Stop()
@@ -408,10 +388,9 @@ func (s *Server) checkPushURL(endpoint string) (string, string) {
 // body.mentions. Nobody is woken by their own message.
 //
 // Each concerned user is woken only when no connection of theirs is
-// attended (§4.11). Their unscoped mute silences every scope, and their
-// mute of the room, or of a room it is a thread of, every scope but
-// mentions; what is silenced reaches them only as a badge push
-// (badgeLocked). Each live registration whose wake scopes select the
+// attended (§4.11). Their unscoped mute or a dnd status silences every
+// scope, and so does their mute of the room, or of a room it is a thread
+// of; what is silenced reaches them only as a badge push (badgeLocked). Each live registration whose wake scopes select the
 // message gets the payload with its push_id and the user's unread count,
 // with the most urgent Urgency of the scopes that select it.
 func (s *Server) wakeLocked(m *messageState, snapshot, previous map[string]any) {
@@ -449,13 +428,10 @@ func (s *Server) wakeLocked(m *messageState, snapshot, previous map[string]any) 
 	now := time.Now()
 	for _, id := range slices.Sorted(maps.Keys(reasons)) {
 		u := s.users[id]
-		if u == nil || len(u.pushes) == 0 || !r.visibleTo(u) || u.attended() || u.mute.active(now) {
+		if u == nil || len(u.pushes) == 0 || !r.visibleTo(u) || u.attended() || u.silenced(now) || u.roomMuted(r, now) {
 			continue
 		}
 		why := reasons[id]
-		if u.roomMuted(r, now) {
-			why &= wakeMentions
-		}
 		s.expirePushesLocked(u, now)
 		unread := -1
 		for _, p := range sortedPushes(u) {
@@ -518,7 +494,6 @@ func (s *Server) deliverPushLocked(p *pushRegistration, unread int, payload []by
 			}
 		default:
 			s.removePushLocked(p)
-			s.statusChangedLocked(u, nil, false)
 		}
 	}
 	latest := ""
