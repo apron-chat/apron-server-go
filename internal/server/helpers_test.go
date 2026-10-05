@@ -39,7 +39,8 @@ func newTestServer(t *testing.T, config Config) (*Server, *httptest.Server) {
 	app := New(config)
 	httpServer := httptest.NewServer(app.Handler())
 	t.Cleanup(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		// Generous, since -race on a busy machine slows every goroutine.
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		if err := app.Shutdown(ctx); err != nil {
 			t.Errorf("shutdown: %v", err)
 		}

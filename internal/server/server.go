@@ -607,6 +607,10 @@ func (s *Server) Shutdown(ctx context.Context) error {
 		for _, e := range s.embeds {
 			e.endStream()
 		}
+		// Pending badge pushes would only be dropped once they fire.
+		for _, u := range s.users {
+			s.stopBadgeLocked(u)
+		}
 		if s.tempUploadDir {
 			_ = os.RemoveAll(s.uploadDir)
 		}

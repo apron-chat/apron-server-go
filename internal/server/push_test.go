@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/sha256"
@@ -537,6 +538,28 @@ func TestBadgePushesCoalesce(t *testing.T) {
 	expectMembership(t, a, "general", b.userID, false)
 	if got := relay.pushes(t, app, a); len(got) != 0 {
 		t.Fatalf("pushes after a guest left: %#v", got)
+	}
+}
+
+// Shutdown cancels pending badge pushes rather than waiting out badgeDelay.
+func TestShutdownCancelsPendingBadges(t *testing.T) {
+	relay := newTestRelay(t)
+	app, httpServer := pushTestServer(t)
+	app.badgeDelay = time.Hour
+	a := dialTestClient(t, httpServer)
+	dora := addAccount(t, app, "dora", a)
+	addPush(app, dora, pushRegistration{url: relay.URL + "/dora", wake: wakeBadge})
+	save(t, a, "post", map[string]any{"body": map[string]any{"text": "hi"}})
+	app.mu.Lock()
+	pending := dora.badgeTimer != nil
+	app.mu.Unlock()
+	if !pending {
+		t.Fatal("no badge push pending")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := app.Shutdown(ctx); err != nil {
+		t.Fatalf("shutdown with a pending badge: %v", err)
 	}
 }
 
