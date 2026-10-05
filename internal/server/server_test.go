@@ -1062,3 +1062,57 @@ func TestActivityRelaysTypingWithInlineIdentity(t *testing.T) {
 	}
 	c.expectQuiet(t)
 }
+
+// A notification-only method is never answered, whatever its id and even
+// with invalid or malformed params (§1). A ping is still answered with pong.
+func TestNotificationOnlyWithIDNeverAnswered(t *testing.T) {
+	_, httpServer := newTestServer(t, DefaultConfig())
+	c, _ := dialRaw(t, httpServer)
+	raw := func(frame string) {
+		t.Helper()
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		if err := c.ws.Write(ctx, websocket.MessageText, []byte(frame)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	frames := []string{
+		`{"method":"status","id":"s1","params":[]}`,
+		`{"method":"status","id":"s2","params":"idle"}`,
+		`{"method":"status","id":"s3","params":null}`,
+		`{"method":"status","id":5,"params":{"idle":true}}`,
+		`{"method":"status","id":null}`,
+		`{"id":{},"method":"status","params":{"mute":-1}}`,
+		`{"method":"activity","id":"a1","params":[]}`,
+		`{"method":"activity","id":7,"params":{"typing":-1}}`,
+		`{"method":"activity","id":"a2","params":{"room_id":"missing","typing":3}}`,
+		`{"method":"activity","id":"a3","params":{"read_message_id":5}}`,
+	}
+	check := func() {
+		t.Helper()
+		for _, frame := range frames {
+			raw(frame)
+		}
+		c.expectQuiet(t)
+		for _, frame := range []string{`{"method":"ping","id":5}`, `{"method":"ping","id":"p","params":[]}`} {
+			raw(frame)
+			if pong := c.read(t); !reflect.DeepEqual(pong, map[string]any{"method": "pong"}) {
+				t.Fatalf("%s answered with %#v", frame, pong)
+			}
+		}
+		c.expectQuiet(t)
+	}
+	check()
+	guestAuth(t, c)
+	c.drain(t)
+	check()
+	// Other methods still reply to a bad id or bad params.
+	raw(`{"method":"room_list","id":5}`)
+	if reply := c.read(t); reply["error"].(map[string]any)["code"] != float64(codeInvalidRequest) {
+		t.Fatalf("bad id on a request: %#v", reply)
+	}
+	raw(`{"method":"room_list","id":"r1","params":[]}`)
+	if reply := c.read(t); reply["id"] != "r1" || reply["error"].(map[string]any)["code"] != float64(codeInvalidParams) {
+		t.Fatalf("bad params on a request: %#v", reply)
+	}
+}

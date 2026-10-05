@@ -47,17 +47,22 @@ func parseRequest(payload []byte) (request, *rpcError) {
 		return request{}, &rpcError{Code: codeInvalidRequest, Message: "Invalid request"}
 	}
 
+	// method comes first: an id on a notification-only method is ignored,
+	// whatever it is, and so are its params' errors (§1).
 	var req request
-	if rawID, ok := object["id"]; ok {
+	rawMethod, hasMethod := object["method"]
+	methodOK := hasMethod && json.Unmarshal(rawMethod, &req.method) == nil && req.method != ""
+	if !methodOK {
+		req.method = ""
+	}
+	if rawID, ok := object["id"]; ok && !notificationOnly[req.method] {
 		req.hasID = true
 		if bytes.Equal(bytes.TrimSpace(rawID), []byte("null")) || json.Unmarshal(rawID, &req.id) != nil {
 			req.hasID = false
 			return req, &rpcError{Code: codeInvalidRequest, Message: "Request id must be a string"}
 		}
 	}
-
-	rawMethod, ok := object["method"]
-	if !ok || json.Unmarshal(rawMethod, &req.method) != nil || req.method == "" {
+	if !methodOK {
 		return req, &rpcError{Code: codeInvalidRequest, Message: "Invalid request"}
 	}
 
@@ -69,6 +74,10 @@ func parseRequest(payload []byte) (request, *rpcError) {
 	}
 	return req, nil
 }
+
+// notificationOnly are the methods clients send only as notifications. An
+// id on one is ignored, and nothing about it is answered (§1).
+var notificationOnly = map[string]bool{"ping": true, "activity": true, "status": true}
 
 func canonicalParams(params map[string]jsontext.Value) string {
 	if params == nil {

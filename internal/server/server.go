@@ -978,9 +978,6 @@ func (s *Server) operations() map[string]operation {
 	return ops
 }
 
-// notificationOnly are the methods clients send only as notifications.
-var notificationOnly = map[string]bool{"ping": true, "activity": true, "status": true}
-
 // readOnlyOps change nothing, so their results are not kept for
 // deduplication (§1.2): a duplicate after the original finished runs again.
 var readOnlyOps = map[string]bool{"history": true, "room_list": true}
@@ -988,6 +985,14 @@ var readOnlyOps = map[string]bool{"history": true, "room_list": true}
 func (s *Server) processFrame(c *client, payload []byte) {
 	req, parseErr := parseRequest(payload)
 	if parseErr != nil {
+		if notificationOnly[req.method] {
+			// Never answered, even with invalid params (§1); a ping is
+			// still a ping.
+			if req.method == "ping" {
+				c.pong()
+			}
+			return
+		}
 		if parseErr.Code == codeInvalidParams && !req.hasID {
 			return
 		}
@@ -999,11 +1004,7 @@ func (s *Server) processFrame(c *client, payload []byte) {
 		return
 	}
 
-	// Notification-only methods sent with an id are processed as the
-	// notification, and not answered (§1).
-	if notificationOnly[req.method] {
-		req.hasID = false
-	}
+	// parseRequest drops an id on a notification-only method (§1).
 	if req.method == "ping" {
 		// A ping with other spacing or keys is still a ping.
 		c.pong()
