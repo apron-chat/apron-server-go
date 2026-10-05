@@ -586,10 +586,12 @@ The server derives each user's `status`, the first of these that applies:
 
 - `offline`: the user is `invisible` (to others only; the user's own
   `status` in `you` ignores it).
-- `dnd`: the unscoped mute is set, attended or not.
+- `dnd`: the unscoped mute is set and the user has a connection, attended
+  or not.
 - `online`: a connection is attended.
-- `idle`: a connection is idle, or the user has a live push registration
-  that wakes for messages (a scope other than only `badge`).
+- `idle`: a connection is idle, or the unscoped mute is not set and the user
+  has a live push registration that wakes for messages (a scope other than
+  only `badge`).
 - `offline`: otherwise.
 
 Every current user object carries `status`, so a listing shows it. A

@@ -71,9 +71,9 @@ func serverClient(t *testing.T, app *Server, c *testClient) *client {
 }
 
 // A user's status (§4.11) is, in order: offline when invisible, dnd while
-// the unscoped mute is set, online while a connection is attended, idle
-// while an idle connection or a push registration can notify them, and
-// offline otherwise. Changes go to the status-aware connections of those
+// the unscoped mute is set and the user is connected, online while a
+// connection is attended, idle while an idle connection or, unmuted, a push
+// registration can notify them, and offline otherwise. Changes go to the status-aware connections of those
 // who share a room, as `new`, and to the user's own, as `you`; every
 // current user object carries it.
 func TestStatusDerivationAndBroadcast(t *testing.T) {
@@ -121,8 +121,8 @@ func TestStatusDerivationAndBroadcast(t *testing.T) {
 	}
 	expectStatus(t, a, b.userID, "online")
 
-	// The unscoped mute is dnd, attended or not, and is echoed to the user
-	// only.
+	// The unscoped mute is dnd while connected, attended or not, and is
+	// echoed to the user only.
 	if you := echoed(t, b, b.status(t, map[string]any{"mute": true}), "dnd"); you["mute"] != true {
 		t.Fatalf("mute echo: %#v", you)
 	}
@@ -371,6 +371,80 @@ func TestMuteEchoReachesEveryConnection(t *testing.T) {
 	first.status(t, map[string]any{"mute": 60})
 	if you := expectStatus(t, second, second.userID, "dnd"); you["mute"] != float64(60) || you["invisible"] != false {
 		t.Fatalf("echo to a connection that never sent status: %#v", you)
+	}
+}
+
+// dnd needs a connection (§4.11): a muted user is offline once their last
+// connection closes, push registration or not, and dnd again when they
+// reconnect. Unmuted, a push registration makes them idle instead.
+func TestMutedUserWithoutConnectionIsOffline(t *testing.T) {
+	config := DefaultConfig()
+	config.WebAuthn = testWebAuthn(t)
+	config.AllowInsecurePush = true
+	app, httpServer := newTestServer(t, config)
+	a := dialTestClient(t, httpServer)
+	a.status(t, map[string]any{"idle": false})
+	owner, _ := dialOrigin(t, httpServer, testPasskeyOrigin)
+	registered := registerTestPasskey(t, owner, newTestAuthenticator(t))
+	ownerID := registered["you"].(map[string]any)["user_id"].(string)
+	expectMembership(t, a, "general", ownerID, true)
+	expectStatus(t, a, ownerID, "online")
+	resume := func(want string) *testClient {
+		t.Helper()
+		c, _ := dialOrigin(t, httpServer, testPasskeyOrigin)
+		you := c.result(t, "auth", "resume", map[string]any{"scheme": "token", "token": registered["token"]})["you"].(map[string]any)
+		if you["status"] != want {
+			t.Fatalf("you on resume: %#v, want %s", you, want)
+		}
+		c.userID = ownerID
+		c.drain(t)
+		expectStatus(t, a, ownerID, want)
+		return c
+	}
+	closeLast := func(c *testClient, want string) {
+		t.Helper()
+		_ = c.ws.Close(websocket.StatusNormalClosure, "bye")
+		expectStatus(t, a, ownerID, want)
+		if got := listedStatus(t, a, ownerID); got != want {
+			t.Fatalf("listed status after the last connection closed: %v, want %s", got, want)
+		}
+		app.mu.RLock()
+		own := app.users[ownerID].ownStatus
+		app.mu.RUnlock()
+		if own != want {
+			t.Fatalf("own status after the last connection closed: %s, want %s", own, want)
+		}
+	}
+
+	// Muted and connected is dnd; muted and disconnected is offline.
+	echoed(t, owner, owner.status(t, map[string]any{"mute": true}), "dnd")
+	expectStatus(t, a, ownerID, "dnd")
+	closeLast(owner, "offline")
+	owner = resume("dnd")
+
+	// A push registration does not make a muted user idle.
+	owner.result(t, "push_register", "push", map[string]any{"kind": "relay", "url": "http://relay.example/p"})
+	closeLast(owner, "offline")
+	owner = resume("dnd")
+
+	// Unmuted, the registration makes a disconnected user idle.
+	echoed(t, owner, owner.status(t, map[string]any{"mute": 0}), "online")
+	expectStatus(t, a, ownerID, "online")
+	closeLast(owner, "idle")
+	a.expectQuiet(t)
+}
+
+// Invisible shows offline to others even while muted and connected; the
+// user's own status ignores it (§4.11).
+func TestInvisibleOutranksDND(t *testing.T) {
+	_, httpServer := newTestServer(t, DefaultConfig())
+	clients := dialGroup(t, httpServer, 2)
+	a, b := clients[0], clients[1]
+	a.status(t, map[string]any{"idle": false})
+	echoed(t, b, b.status(t, map[string]any{"mute": true, "invisible": true}), "dnd")
+	expectStatus(t, a, b.userID, "offline")
+	if got := listedStatus(t, a, b.userID); got != "offline" {
+		t.Fatalf("listed status while invisible and muted: %v", got)
 	}
 }
 

@@ -540,6 +540,13 @@ test('status: online, idle, dnd, offline as another client sees them; mute and i
 	await new Promise((resolve) => setTimeout(resolve, 1_500));
 	tap.inject({ method: 'status', params: { room_id: 'general', mute: 0 } });
 
+	// Paused again, then the page closes: with no connection, a muted user is offline, not dnd.
+	// The six mute and invisible changes above used the server's burst; wait for the next.
+	await new Promise((resolve) => setTimeout(resolve, 10_500));
+	await page.getByRole('button', { name: /^Open preferences/ }).click();
+	await prefs.getByRole('button', { name: /^Pause/ }).click();
+	await page.getByRole('menuitem', { name: /For 1 hour/ }).or(page.getByRole('option', { name: /For 1 hour/ })).first().click();
+	await expectBoth('dnd');
 	await page.close();
 	await expectBoth('offline');
 

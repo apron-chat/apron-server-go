@@ -15,10 +15,11 @@ import (
 // this order:
 //
 //	offline  the user is invisible (to others only)
-//	dnd      the user's unscoped mute is set, attended or not
+//	dnd      the user's unscoped mute is set and the user is connected,
+//	         attended or not
 //	online   a connection is attended
-//	idle     none is, but an idle connection or a live push registration
-//	         can notify the user
+//	idle     none is, but a connection is idle, or the user is not muted
+//	         and a live push registration can notify them
 //	offline  none of these
 const (
 	statusOnline  = "online"
@@ -278,12 +279,13 @@ func (u *userState) attended() bool {
 // ownStatusAt derives the user's status as the user sees it, which
 // invisible does not change (§4.11).
 func (u *userState) ownStatusAt(now time.Time) string {
+	muted := u.mute.active(now)
 	switch {
-	case u.mute.active(now):
+	case muted && len(u.clients) > 0:
 		return statusDND
 	case u.attended():
 		return statusOnline
-	case len(u.clients) > 0 || u.notifiable(now):
+	case len(u.clients) > 0 || !muted && u.notifiable(now):
 		return statusIdle
 	}
 	return statusOffline
