@@ -568,7 +568,8 @@ see:
   `idle` while the user is connected but no connection is, and `offline`
   without connections;
 - for `""`: `""`;
-- for `dnd`: `dnd`, connected or not;
+- for `dnd`: `dnd` while the user has a connection, and `offline`
+  without one, announced on the last disconnect and on a reconnect;
 - for `invisible`: `offline`.
 
 `you` shows the value the user set, so the user's own connections learn
@@ -584,11 +585,11 @@ carries only a recorded user, unless their status is `offline` or `""`.
 
 After every `auth` result, the connection is sent `status` for each of the
 user's mutes in effect (below), then `user` `{new: {user_id, status}}`
-for each user who shares a room with it and is connected, since its
-client may have dropped the statuses it kept. It leaves out users who show
-`offline` or `""`, and sends `dnd` whether or not the user is connected,
-so the snapshot tells neither who is invisible nor whether a `dnd` user is
-connected.
+with the status others see of each user who shares a room with it, since
+its client may have dropped the statuses it kept. It leaves out users who
+show `offline` or `""`, so the snapshot tells neither who is invisible nor
+who opted out; a `dnd` user without a connection shows `offline` and is
+left out.
 
 The `status` notification is never answered. It is accepted before
 authentication too: `idle` applies to the connection at once, and `mute`

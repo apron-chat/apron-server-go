@@ -78,7 +78,8 @@ func expectProfileStatus(t *testing.T, c *testClient, userID, status string) {
 
 // Each status a user sets (§4.11), as others see it and as the user's own
 // `you` shows it: online derives online, idle, or offline from the user's
-// connections; "" is none; dnd is dnd; invisible is offline to others. An
+// connections; "" is none; dnd is dnd while connected and offline
+// otherwise; invisible is offline to others. An
 // unsupported value is stored as "". Every current object carries the
 // status, and a change reaches those who share a room as `user` `new`.
 func TestStatusValuesAndDerivation(t *testing.T) {
@@ -198,6 +199,60 @@ func TestStatusValuesAndDerivation(t *testing.T) {
 		t.Fatalf("you on another connection: %#v", you)
 	}
 	expectProfileStatus(t, a, b.userID, "dnd")
+}
+
+// Others see dnd only while the user has a connection, and offline
+// otherwise (§4.11): the last disconnect announces offline, a reconnect dnd
+// again, and listings and the snapshot after a sign-in agree.
+func TestDNDOnlyWhileConnected(t *testing.T) {
+	config := DefaultConfig()
+	config.WebAuthn = testWebAuthn(t)
+	_, httpServer := newTestServer(t, config)
+	a := dialTestClient(t, httpServer)
+	b, _ := dialOrigin(t, httpServer, testPasskeyOrigin)
+	registered := registerTestPasskey(t, b, newTestAuthenticator(t))
+	token := registered["token"]
+	expectMembership(t, a, "general", b.userID, true)
+	watching(a)
+	b.drain(t)
+	a.drain(t)
+	setStatus(t, b, "dnd")
+	expectProfileStatus(t, a, b.userID, "dnd")
+	second, _ := dialOrigin(t, httpServer, testPasskeyOrigin)
+	second.result(t, "auth", "second", map[string]any{"scheme": "token", "token": token})
+	second.drain(t)
+	a.expectQuiet(t)
+
+	// Closing one of two connections changes nothing; the last shows
+	// offline.
+	_ = second.ws.Close(websocket.StatusNormalClosure, "bye")
+	a.expectQuiet(t)
+	_ = b.ws.Close(websocket.StatusNormalClosure, "bye")
+	expectStatus(t, a, b.userID, "offline")
+	if got := listedStatus(t, a, b.userID); got != "offline" {
+		t.Fatalf("listed status while dnd without connections: %v", got)
+	}
+	// A sign-in elsewhere leaves the disconnected dnd user out.
+	g, _ := dialRaw(t, httpServer)
+	watching(g)
+	guestAuth(t, g)
+	frames := g.drain(t)
+	if len(frames) != 1 {
+		t.Fatalf("snapshot after a sign-in: %#v", frames)
+	}
+	checkStatus(t, frames[0], a.userID, "online")
+	a.drain(t)
+
+	// A reconnect shows dnd again; `you` still shows the status set.
+	b, _ = dialOrigin(t, httpServer, testPasskeyOrigin)
+	if you := b.result(t, "auth", "resume", map[string]any{"scheme": "token", "token": token})["you"].(map[string]any); you["status"] != "dnd" {
+		t.Fatalf("you after a reconnect while dnd: %#v", you)
+	}
+	expectStatus(t, a, registered["you"].(map[string]any)["user_id"].(string), "dnd")
+	if got := listedStatus(t, a, registered["you"].(map[string]any)["user_id"].(string)); got != "dnd" {
+		t.Fatalf("listed status while dnd and connected: %v", got)
+	}
+	a.expectQuiet(t)
 }
 
 // An invisible user is offline to others in every frame that could tell:
@@ -361,9 +416,10 @@ func TestMuteEchoToAllConnections(t *testing.T) {
 	}
 }
 
-// After auth, a connection is sent one `status` for each of its user's
-// mutes in effect, then the status of each connected user who shares a
-// room with it (§4.11). Mutes sent before auth apply once it signs in, and
+// After a sign-in, a connection is sent, after the auth result, one
+// `status` for each of its user's mutes in effect, then the status others
+// see of each user who shares a room with it, other than offline and ""
+// (§4.11). Mutes sent before auth apply once it signs in, and
 // reach the user's other connections.
 func TestAfterAuthMutesAndStatuses(t *testing.T) {
 	config := DefaultConfig()
@@ -379,7 +435,7 @@ func TestAfterAuthMutesAndStatuses(t *testing.T) {
 		c.drain(t)
 	}
 	// An account without connections, which shows offline, and one with
-	// dnd, which shows dnd without them.
+	// dnd, which without them shows offline too: both are left out.
 	addAccount(t, app, "away", clients...)
 	addAccount(t, app, "busy", clients...)
 	app.mu.Lock()
@@ -414,7 +470,7 @@ func TestAfterAuthMutesAndStatuses(t *testing.T) {
 	expectMute(t, owner, "", true)
 	expectMute(t, owner, "general", false)
 	frames := c.drain(t)
-	if len(frames) != 6 {
+	if len(frames) != 5 {
 		t.Fatalf("frames after auth: %#v", frames)
 	}
 	checkMute(t, frames[0], "", true)
@@ -424,7 +480,7 @@ func TestAfterAuthMutesAndStatuses(t *testing.T) {
 		object := notificationParams(t, frame, "user")["new"].(map[string]any)
 		statuses[object["user_id"].(string)] = object["status"].(string)
 	}
-	if want := map[string]string{attended.userID: "online", idle.userID: "idle", dnd.userID: "dnd", "busy": "dnd"}; !reflect.DeepEqual(statuses, want) {
+	if want := map[string]string{attended.userID: "online", idle.userID: "idle", dnd.userID: "dnd"}; !reflect.DeepEqual(statuses, want) {
 		t.Fatalf("statuses after auth: %#v, want %#v", statuses, want)
 	}
 	// The connection's idle, sent before auth, applies: the owner, attended
@@ -445,7 +501,7 @@ func TestAfterAuthMutesAndStatuses(t *testing.T) {
 	g, _ := dialRaw(t, httpServer)
 	watching(g)
 	guestAuth(t, g)
-	if frames := g.drain(t); len(frames) != 5 {
+	if frames := g.drain(t); len(frames) != 4 {
 		t.Fatalf("guest snapshot: %#v", frames)
 	}
 }

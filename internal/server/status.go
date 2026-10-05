@@ -18,7 +18,7 @@ import (
 //	online     online while a connection is attended, idle while connected
 //	           with none attended, offline without a connection
 //	""         ""
-//	dnd        dnd
+//	dnd        dnd while connected, offline without a connection
 //	invisible  offline
 //
 // and the user sees, in `you`, the value they set. Separately, each
@@ -236,11 +236,9 @@ func (s *Server) applyPendingStatusLocked(c *client, u *userState) {
 
 // sendAfterAuthLocked sends a connection that has just authenticated, after
 // its auth result (§4.11), one `status` for each of its user's mutes in
-// effect, and the status of each connected user who shares a room with it.
-// dnd, which does not depend on connections, is sent whether or not the
-// user is connected, so the snapshot does not tell who is; offline (an
-// invisible user) and "" are left out, so it tells neither who is invisible
-// nor who opted out.
+// effect, and the status others see of each user who shares a room with
+// it. offline (a user without connections, or an invisible one) and "" are
+// left out, so it tells neither who is invisible nor who opted out.
 func (s *Server) sendAfterAuthLocked(c *client) {
 	u := c.user
 	if u == nil {
@@ -372,6 +370,13 @@ func (u *userState) statusAt(time.Time) string {
 			return statusOnline
 		case len(u.clients) > 0:
 			return statusIdle
+		}
+		return statusOffline
+	case statusDND:
+		// dnd shows only while connected, so it does not tell others
+		// that the user is reachable when they are not (§4.11).
+		if len(u.clients) > 0 {
+			return statusDND
 		}
 		return statusOffline
 	case statusInvisible:
