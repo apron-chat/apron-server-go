@@ -29,7 +29,9 @@ const (
 	maxPushTokenLen  = 4096
 	// maxPushPayloadBytes bounds the JSON payload every kind delivers (§4.7).
 	maxPushPayloadBytes = 2048
-	// maxWakeScopes and maxWakeScopeBytes bound a registration's wake list.
+	// maxWakeScopes and maxWakeScopeBytes bound the wake names a server
+	// reads: those beyond the first maxWakeScopes, and longer ones, are
+	// ignored.
 	maxWakeScopes     = 16
 	maxWakeScopeBytes = 64
 	// pushExpiry is how long a registration lasts unless registered again
@@ -241,10 +243,12 @@ func (s *Server) registerPush(c *client, req request) (any, bool, *rpcError) {
 	wake := defaultWake
 	if raw, has := req.params["wake"]; has {
 		var names []string
-		if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) || json.Unmarshal(raw, &names) != nil || names == nil ||
-			len(names) > maxWakeScopes || slices.ContainsFunc(names, func(name string) bool { return len(name) > maxWakeScopeBytes }) {
-			return nil, false, invalidParams("wake is an array of at most %d scope names of at most %d bytes", maxWakeScopes, maxWakeScopeBytes)
+		if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) || json.Unmarshal(raw, &names) != nil || names == nil {
+			return nil, false, invalidParams("wake must be an array of scope names")
 		}
+		// Past the bounds, names are ignored like unknown scopes.
+		names = names[:min(len(names), maxWakeScopes)]
+		names = slices.DeleteFunc(names, func(name string) bool { return len(name) > maxWakeScopeBytes })
 		wake = parseWakeNames(names)
 	}
 

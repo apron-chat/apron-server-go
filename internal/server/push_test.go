@@ -280,8 +280,6 @@ func TestPushRegistration(t *testing.T) {
 		{"kind": "relay", "url": endpoint, "wake": "mentions"},
 		{"kind": "relay", "url": endpoint, "wake": []any{"mentions", 5}},
 		{"kind": "relay", "url": endpoint, "wake": nil},
-		{"kind": "relay", "url": endpoint, "wake": []any{strings.Repeat("x", 65)}},
-		{"kind": "relay", "url": endpoint, "wake": make([]any, maxWakeScopes+1)},
 	} {
 		a.expectError(t, "push_register", "bad-"+formatID(int64(i)), params, codeInvalidParams)
 	}
@@ -1222,4 +1220,30 @@ func TestRoomMuteExpiryUpdatesBadge(t *testing.T) {
 		t.Fatalf("badge after the room mute ran out: %#v", got)
 	}
 	b.expectQuiet(t)
+}
+
+// A wake list's names past the first maxWakeScopes, and names longer than
+// maxWakeScopeBytes, are ignored rather than refused (§4.7).
+func TestWakeNamesPastTheBoundsAreIgnored(t *testing.T) {
+	app, httpServer := pushTestServer(t)
+	a := dialTestClient(t, httpServer)
+	endpoint := "http://127.0.0.1:1/p"
+	wakeOf := func(id string, wake []any) wakeScope {
+		t.Helper()
+		a.result(t, "push_register", id, map[string]any{"kind": "relay", "url": endpoint, "wake": wake})
+		app.mu.RLock()
+		defer app.mu.RUnlock()
+		return app.users[a.userID].pushes[endpoint].wake
+	}
+	many := make([]any, maxWakeScopes+4)
+	for i := range many {
+		many[i] = "ext:filler"
+	}
+	many[0], many[maxWakeScopes] = "replies", "mentions"
+	if got := wakeOf("many", many); got != wakeReplies {
+		t.Fatalf("wake of %d names: %v", len(many), got)
+	}
+	if got := wakeOf("long", []any{"mentions" + strings.Repeat(" ", maxWakeScopeBytes), "private"}); got != wakePrivate {
+		t.Fatalf("wake with a long name: %v", got)
+	}
 }
