@@ -631,7 +631,14 @@ func (s *Server) restoreLocked() (map[string]bool, error) {
 	}
 
 	now := time.Now()
-	for key, raw := range entries[entryPush] {
+	// With push disabled, stored registrations stay in the store, unused:
+	// loaded, they would make their users idle (§4.11) with nothing to wake
+	// them.
+	storedPushes := entries[entryPush]
+	if s.config.DisablePush {
+		storedPushes = nil
+	}
+	for key, raw := range storedPushes {
 		var stored storedPush
 		if err := decode(entryPush, key, raw, &stored); err != nil {
 			return nil, err

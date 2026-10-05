@@ -1136,3 +1136,30 @@ func TestPushRefusesNonPublicRanges(t *testing.T) {
 		}
 	}
 }
+
+// With push disabled, stored registrations are kept but not loaded, so they
+// do not make their users idle (§4.11); enabled again, they apply.
+func TestDisabledPushIgnoresStoredRegistrations(t *testing.T) {
+	memory := store.NewMemory()
+	url := "https://relay.example/erin"
+	if err := memory.Apply([]store.Entry{
+		{Kind: entryUser, ID: "erin", Value: encodeJSON(storedUser{Name: "Erin", Passkey: &storedPasskey{Handle: []byte("h")}})},
+		{Kind: entryPush, ID: pushKey("erin", url), Value: encodeJSON(storedPush{User: "erin", Kind: "relay", URL: url, Renewed: time.Now()})},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	statusOf := func(app *Server) (string, int) {
+		app.mu.RLock()
+		defer app.mu.RUnlock()
+		return app.users["erin"].statusAt(time.Now()), len(app.pushes)
+	}
+	app, _, stop := startWith(t, memory, t.TempDir(), func(c *Config) { c.DisablePush = true })
+	if status, pushes := statusOf(app); status != statusOffline || pushes != 0 {
+		t.Fatalf("with push disabled: status %s, %d registrations", status, pushes)
+	}
+	stop()
+	app, _, _ = startWithStore(t, memory, t.TempDir())
+	if status, pushes := statusOf(app); status != statusIdle || pushes != 1 {
+		t.Fatalf("with push enabled again: status %s, %d registrations", status, pushes)
+	}
+}
