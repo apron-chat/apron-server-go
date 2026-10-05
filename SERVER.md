@@ -120,8 +120,7 @@ Flags (`aprond --help` lists them all):
   affected message is republished without them. Avatars count toward the
   bound but are never removed.
 - `--push.disable` removes push. Stored registrations are kept but not
-  loaded, so they neither wake nor make their users `idle`, and apply
-  again once push is enabled. `--push.allow-insecure` is for tests only:
+  loaded, and apply again once push is enabled. `--push.allow-insecure` is for tests only:
   it accepts `http` push endpoints and ones on internal addresses, so any
   client could make the server POST into its network; it is refused with
   `--public-url` or `--tls.domain`, and the server warns at start when it is
@@ -172,7 +171,7 @@ What survives a restart: rooms and threads with their complete logs, message
 state and reactions, read cursors, accounts (passkey and email users) with
 their credentials, addresses, profiles, memberships, push registrations
 (with their keys, `push_id`, scopes, and when they were last registered),
-and the status they set (`invisible`, mutes, and room mutes), unexpired
+the status they set with `me`, and their mutes and room mutes, unexpired
 sessions, finished uploads and their files, the VAPID key, and the
 `log_id`, guest, account, and embed counters, so no `log_id` or `user_id`
 is reused. What does not: connections and their `idle`, request
@@ -203,10 +202,7 @@ without parsing, and a `ping` notification with other spacing, or with an
 WebSocket level every 30 seconds and closes a connection that does not
 answer within ten. A connection that sent liveness pings and then sent
 nothing for three ping intervals plus the timeout (100 seconds) is closed:
-its page is frozen or gone. A connection that never sent `idle` and has
-sent nothing but liveness pings for five minutes counts as idle
-([Status](#status)) until its next other frame: a client that does not
-report `idle` thus shows idle while unused, and gets pushes.
+its page is frozen or gone.
 
 ## Log and history
 
@@ -284,13 +280,14 @@ mapped, runs of spaces folded, and the ends trimmed), after invisible
 characters such as controls and bidirectional overrides are dropped, and is
 capped at 64 characters; `avatar` must be an `https:` URL or a
 `data:image/{png,jpeg,gif,webp};base64,` URL of at most 64 KiB; `ext`
-(at most 16 KiB of JSON) replaces the profile extension object. The result's `you` and the `user`
+(at most 16 KiB of JSON) replaces the profile extension object; `status`
+sets the user's status ([Status](#status)). The result's `you` and the `user`
 notifications carry removed fields as their empty values (`""`, `{}`).
 Current user objects (`you`, `new` in `user`, and `users` in `room_list` and
 `room_update`) carry `avatar`, `ext`, and `roles`, an account's `roles` always,
 `[]` when it holds none, so a role taken away clears it (§3.3), and
-`status` ([Status](#status)); `you` also carries the user's remaining
-`mute` and `invisible` while set. The `old` object of a `user_id` change
+`status` ([Status](#status)): in `you`, the status the user set, and
+elsewhere the status others see. The `old` object of a `user_id` change
 is not a current object and carries no `status`. Recorded objects (`from`
 in messages and reactions, `user` in memberships) carry only `user_id` and `name` as they
 were when logged. Room `members` are bare `{user_id}` objects whose complete
@@ -554,82 +551,72 @@ replies arrive before its result. Commands:
 room (`general` without `room_id`) to the room's members. A read cursor must
 name an existing message and only moves forward; the server keeps each
 user's latest cursor per room and sends it after `room_list` lists the room.
-A frame that changes nothing, or is invalid, relays nothing. Typing is
-held back from idle connections ([Status](#status)); a read cursor goes to
-every connection of the room's members, without the typing when the same
-frame carries both.
+A frame that changes nothing, or is invalid, relays nothing. Typing and
+read cursors go to every connection of the room's members.
 
 ## Status
 
-The `status` capability (§4.11) takes the `status` notification, which is
-never answered. It is accepted before authentication too: `idle` applies to
-the connection at once, and the user's fields wait on the connection until
-it signs in (at most 16 frames, the oldest dropped), then apply without
-being echoed to that connection, whose `auth` result carries them in `you`.
+The `status` capability (§4.11) implements every status value: a user sets
+`status` with `me` to `online` (the default), `""` (none), `dnd`, or
+`invisible`. Any other string, the derived `idle` and `offline` included,
+is stored as `""`; a `status` that is not a string is `invalid_params`.
+The status lasts until changed, across connections and restarts. Others
+see:
+
+- for `online`: `online` while a connection of the user is attended,
+  `idle` while the user is connected but no connection is, and `offline`
+  without connections;
+- for `""`: `""`;
+- for `dnd`: `dnd`, connected or not;
+- for `invisible`: `offline`.
+
+`you` shows the value the user set, so the user's own connections learn
+of a change to it, as with any profile change, but not of the derived
+changes. Every other current user object carries the status others see,
+so a listing shows it. A `me` that changes the status sends `user` `new`
+with the profile to those who share a room with the user. A derived
+change goes to their connections as `user` `{new: {user_id, status}}`: at
+once ten times, then at most once every two seconds, the latest status
+winning, so a flapping connection costs its rooms little. A new member is
+announced to a room's other members the same way, since a membership
+carries only a recorded user, unless their status is `offline` or `""`.
+
+After every `auth` result, the connection is sent `status` for each of the
+user's mutes in effect (below), then `user` `{new: {user_id, status}}`
+for each user who shares a room with it and is connected, since its
+client may have dropped the statuses it kept. It leaves out users who show
+`offline` or `""`, and sends `dnd` whether or not the user is connected,
+so the snapshot tells neither who is invisible nor whether a `dnd` user is
+connected.
+
+The `status` notification is never answered. It is accepted before
+authentication too: `idle` applies to the connection at once, and `mute`
+waits on the connection until it signs in (at most 16 frames, the oldest
+dropped), then applies, sent to the user's other connections; the
+signing-in connection gets it in the mutes after its `auth` result.
 Absent fields leave their state unchanged, and an invalid one is ignored
-on its own: `idle` or `invisible` not a boolean, or `mute` not `true` or
-a whole number of seconds of at least 0. A `room_id` that is not a string,
-or names a room the user cannot see, ignores the whole frame.
+on its own: `idle` not a boolean, or `mute` not `true`, `false`, or a whole
+number of seconds of at least 0. A `room_id` that is not a string ignores
+the whole frame; one that names a room the user cannot see ignores its
+`mute`.
 
-- `idle` is the connection's: a connection is attended until it sends
-  `idle: true`, and idle until it sends `idle: false`. A message does not
-  end it. A scoped `idle` is ignored.
-- `invisible` is the user's and lasts until changed, across connections
-  and restarts. A scoped `invisible` is ignored.
-- A user changes `mute` and `invisible` six times at once, then once every
-  ten seconds; further changes are dropped. `idle` is not limited.
+- `idle` is the connection's, with or without `room_id`: a connection is
+  attended until it sends `idle: true`, and idle until it sends `idle:
+  false`. A message does not end it.
 - `mute` is the user's: seconds (longer ones are shortened to a year),
-  `true` until changed, or `0` for not muted, across connections and
-  restarts. The unscoped mute silences everything. With `room_id` it mutes
-  that room and its threads, except mentions, whether or not the user has
-  joined it; `0` removes the room's own mute. Both apply at once. A timed
-  mute ends by itself, with no `mute: 0`, since clients count the seconds
-  down: for the unscoped mute the status that changes with it is
-  announced, and for a room mute the unread count is taken again and a
-  badge push sent ([Push](#push)).
-
-The server derives each user's `status`, the first of these that applies:
-
-- `offline`: the user is `invisible` (to others only; the user's own
-  `status` in `you` ignores it).
-- `dnd`: the unscoped mute is set and the user has a connection, attended
-  or not.
-- `online`: a connection is attended.
-- `idle`: a connection is idle, or the unscoped mute is not set and the user
-  has a live push registration that wakes for messages (a scope other than
-  only `badge`).
-- `offline`: otherwise.
-
-Every current user object carries `status`, so a listing shows it. A
-change goes as `user` `{new: {user_id, status}}` to the connections of
-those who share a room with the user, and as `you` `{user_id, status}` to
-the user's own; a new member who is not offline is announced to the room's
-other members the same way, since a membership carries only a recorded
-user. These changes go only to connections that have sent `idle`, which
-is how a client shows it implements §4.11; others learn statuses from
-current objects alone. When a connection first sends `idle`, or signs in
-after sending it, it is sent `user` `{new: {user_id, status}}` for each
-user with a connection who shares a room with it, since its client may
-have dropped the statuses it kept; users without a connection have no
-known status and are left out. A user's changes go to others at once ten
-times, then at most once every two seconds, the latest status winning, so a
-flapping connection costs its rooms little. Registrations that expire are
-looked for every hour, and the status that changes with them announced.
-
-A change to `mute` or `invisible` is echoed to every connection of the
-user as `you` with `status`, `mute` (`0` when not muted), and `invisible`.
-A `status` that carries an unscoped `mute` or `invisible`, valid or not,
-is echoed the same way to the sending connection even when nothing
-changed: a change the limit dropped, or a mute shortened to a year, shows
-the values that stand. The `auth` and `me` results carry `mute` and
-`invisible` while set, and never show them to others. A room's mute is a
-delivery field of the room records only that user receives (§3.4):
-`room_list`, both `joined` and `not_joined`, and `room_update` `joined`
-carry it while set (absent means `0`), and so does `updated` when the room
-is edited; a change to it sends the user's connections the room in
-`room_update` `updated`, with `mute: 0` when removed, while they have
-joined the room, and otherwise shows in the next `room_list`. History
-`rooms` records never carry it.
+  `true` until changed, or `false` or `0` for not muted, across
+  connections and restarts. Without `room_id` it silences every push;
+  with `room_id` it silences that room and its threads, mentions too,
+  whether or not the user has joined it, and `false` removes the room's
+  mute. Both apply at once. A `dnd` status silences like the mute without
+  `room_id`.
+- Each mute that is set, changed, or cleared is sent to every connection
+  of the user, the sender's included, as `status` `{mute}` or `{room_id,
+  mute}`, with the seconds left or `true`, or `false`. A timed mute ends
+  by itself and is sent as `false` then too; a room mute that runs out
+  also has the unread count taken again and a badge push sent
+  ([Push](#push)). Mutes are never shown to others, and no room record
+  carries one.
 
 ## Push
 
@@ -682,12 +669,12 @@ A new message selects, by scope:
 An edit selects only the users it adds to `body.mentions` (scope
 `mentions`). Deletions, moves, reactions, and commands select no one, and
 nobody is selected by their own message. A selected user is woken only
-when no connection of theirs is attended ([Status](#status)). Their
-unscoped mute silences every scope, and their mute of the room, or of a
-room it is a thread of, every scope but `mentions`. Each live registration
+when no connection of theirs is attended ([Status](#status)). Their mute
+without `room_id`, a `dnd` status, and their mute of the room, or of a
+room it is a thread of, each silence every scope. Each live registration
 whose scopes select the message gets the message payload, once, with
 `Urgency: normal` when only `joined` selected it and `high` otherwise.
-What a mute silences, and what no scope of a registration selects, reaches
+What a mute or `dnd` silences, and what no scope of a registration selects, reaches
 it only as a badge push, when the registration wakes for `badge` and the
 user's unread count changed.
 
@@ -701,10 +688,11 @@ to the longest prefix that fits, then `body` goes, `from` keeps only
 
 `unread` is the user's one unread count, the same in every registration's
 pushes: messages by others, not deleted, that arrived in a room after the
-user's read position there and either mention the user, or are in a
-joined room the user has not muted (their own mute of it or of a room it
-is a thread of), or, in a room they have not joined, reply to them. The
-unscoped mute silences pushes but not the count. In a joined room the
+user's read position there, in a room the user has not muted (their own
+mute of it or of a room it is a thread of, which leaves mentions out too),
+and either mention the user, or are in a joined room, or, in a room they
+have not joined, reply to them. The mute without `room_id` and a `dnd`
+status silence pushes but not the count. In a joined room the
 read position is the latest of the user's read cursor
 ([Activity](#activity)), where the message it names arrived in the room
 (a moved message arrives with its move), their join, and their latest
