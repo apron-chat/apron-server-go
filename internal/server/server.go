@@ -760,8 +760,8 @@ func (s *Server) serverParams() map[string]any {
 	// guest makes the guest an account, and email and guest start one.
 	signup := slices.DeleteFunc(slices.Clone(authSchemes), func(scheme string) bool { return scheme == "token" })
 	params := map[string]any{
-		"apron":        7,
-		"agent":        "apron-go/7",
+		"apron":        8,
+		"agent":        "apron-go/8",
 		"capabilities": []string{"history", "edit", "rooms", "reactions", "activity", "embed:upload", "embed:stream", "command", "status"},
 		"auth":         authSchemes,
 		"ping":         max(1, int(s.config.PingInterval/time.Second)),

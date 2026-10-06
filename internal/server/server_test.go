@@ -52,7 +52,7 @@ func TestServerFrame(t *testing.T) {
 	_, httpServer := newTestServer(t, DefaultConfig())
 	_, frame := dialRaw(t, httpServer)
 	params := frame["params"].(map[string]any)
-	if params["apron"] != float64(7) || params["agent"] != "apron-go/7" || params["ping"] != float64(30) {
+	if params["apron"] != float64(8) || params["agent"] != "apron-go/8" || params["ping"] != float64(30) {
 		t.Fatalf("version, agent, and ping: %#v", params)
 	}
 	for _, old := range []string{"protocol", "name", "caps"} {

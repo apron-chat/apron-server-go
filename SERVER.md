@@ -1,6 +1,6 @@
 # aprond
 
-`cmd/aprond` serves the reference Apron backend: it implements protocol v7
+`cmd/aprond` serves the reference Apron backend: it implements protocol v8
 ([PROTOCOL.md](https://github.com/shazow/apron/blob/main/PROTOCOL.md)), every capability, private rooms,
 roles, passkey and email sign-in, and liveness ping, but not the designs
 under consideration in
@@ -28,7 +28,7 @@ Defaults:
 - embed endpoints: `/write/<token>`, `/files/<embed_id>/<secret>`,
   `/streams/<embed_id>/<secret>`
 - WebSocket origins: `localhost`, `127.0.0.1`, and `::1` during development
-- `server` frame: `apron: 7`, `agent: "apron-go/7"`, and
+- `server` frame: `apron: 8`, `agent: "apron-go/8"`, and
   `capabilities`: `history`, `edit`, `rooms`, `reactions`, `activity`,
   `embed:upload`, `embed:stream`, `command`, `status`; `server.push`: kinds
   `relay` and `webpush` (with the server's VAPID `key`) and `wake`:
