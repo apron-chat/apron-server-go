@@ -445,28 +445,24 @@ func TestPushRespectsMutes(t *testing.T) {
 	chatter := map[string]any{"body": map[string]any{"text": "chatter"}}
 
 	// A muted room wakes for nothing, mentions included.
-	b.write(t, map[string]any{"method": "status", "params": map[string]any{"room_id": "general", "mute": true}})
-	expectMute(t, b, "general", true)
+	expectEcho(t, b, map[string]any{"room_id": "general", "mute": true}, "general", true)
 	post(maps.Clone(chatter))
 	post(maps.Clone(mention))
 	if got := relay.pushes(t, app, a); len(got) != 0 {
 		t.Fatalf("muted room woke %d", len(got))
 	}
-	b.write(t, map[string]any{"method": "status", "params": map[string]any{"room_id": "general", "mute": false}})
-	expectMute(t, b, "general", false)
+	expectEcho(t, b, map[string]any{"room_id": "general", "mute": false}, "general", false)
 	post(maps.Clone(chatter))
 	if got := relay.pushes(t, app, a); len(got) != 1 {
 		t.Fatalf("unmuted room woke %d", len(got))
 	}
 	// A muted user gets no pushes at all, mentions included.
-	b.write(t, map[string]any{"method": "status", "params": map[string]any{"mute": 3600}})
-	expectMute(t, b, "", float64(3600))
+	expectEcho(t, b, map[string]any{"mute": 3600}, "", float64(3600))
 	post(maps.Clone(mention))
 	if got := relay.pushes(t, app, a); len(got) != 0 {
 		t.Fatalf("muted user woken %d", len(got))
 	}
-	b.write(t, map[string]any{"method": "status", "params": map[string]any{"mute": 0}})
-	expectMute(t, b, "", false)
+	expectEcho(t, b, map[string]any{"mute": 0}, "", false)
 	post(maps.Clone(mention))
 	if got := relay.pushes(t, app, a); len(got) != 1 {
 		t.Fatalf("unmuted user woken %d", len(got))

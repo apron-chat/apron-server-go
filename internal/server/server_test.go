@@ -1090,12 +1090,6 @@ func TestNotificationOnlyWithIDNeverAnswered(t *testing.T) {
 		}
 	}
 	frames := []string{
-		`{"method":"status","id":"s1","params":[]}`,
-		`{"method":"status","id":"s2","params":"idle"}`,
-		`{"method":"status","id":"s3","params":null}`,
-		`{"method":"status","id":5,"params":{"idle":true}}`,
-		`{"method":"status","id":null}`,
-		`{"id":{},"method":"status","params":{"idle":"no"}}`,
 		`{"method":"activity","id":"a1","params":[]}`,
 		`{"method":"activity","id":7,"params":{"typing":-1}}`,
 		`{"method":"activity","id":"a2","params":{"room_id":"missing","typing":3}}`,

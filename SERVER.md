@@ -593,21 +593,31 @@ without a connection shows `offline` and is left out. An `auth` that adds
 a passkey or an address to a signed-in connection is not a sign-in: its
 result is followed by neither.
 
-The `status` notification is never answered. It is accepted before
-authentication too: `idle` applies to the connection at once, and `mute`
-waits on the connection until it signs in (at most 16 frames, the oldest
-dropped), then applies, sent to the user's other connections; the
-signing-in connection gets it in the mutes after its `auth` result.
-Absent fields leave their state unchanged, and an invalid one is ignored
-on its own: `idle` not a boolean, or `mute` not `true`, `false`, or a whole
-number of seconds of at least 0. A `room_id` that is not a string ignores
-the whole frame; one that names a room the user cannot see ignores its
-`mute`.
+Clients set `idle` and mutes with the `status` request, answered `{}`
+once the change is applied; a mute's echo (below) reaches the sending
+connection before the result. Before sign-in it is `denied`, like any
+request, and nothing is kept for later. A `status` without an `id` is a
+notification with no meaning: it is ignored like one with an unknown method
+(§1), before sign-in and after, whatever its params, and changes nothing.
+Absent fields leave their state unchanged. On an error nothing changes,
+the valid fields beside an invalid one included:
 
-- `room_id` scopes only `mute`.
-- `idle` is the connection's, with or without `room_id`: a connection is
-  attended until it sends `idle: true`, and idle until it sends `idle:
-  false`. A message does not end it.
+- `invalid_params` for a `room_id` that is not a string, `idle` that is not
+  a boolean, `mute` that is not `true`, `false`, or a whole number of
+  seconds of at least 0, or a `mute` with a `room_id` that names a room the
+  user cannot see;
+- `retry_after` beyond the user's limit: a burst of 20 `status` requests,
+  `idle` and mutes alike, across all of the user's connections, refilled one
+  a second. `data.retry_after` is the whole seconds until the next is
+  accepted. A refused or invalid request does not count.
+
+- `room_id` scopes only `mute`; without `mute` it is not looked at.
+- `idle` is the connection's, with or without `room_id`: a connection
+  starts attended, with nothing kept from the user's earlier or other
+  connections, is attended until it sends `idle: true`, and idle until it
+  sends `idle: false`. A message does not end it. The server does not take
+  a connection that never sends `idle` as idle after a quiet period, which
+  §4.11 allows: such a client shows `online` while connected.
 - `mute` is the user's: seconds (longer ones are shortened to a year),
   `true` until changed, or `false` or `0` for not muted, across
   connections and restarts. Without `room_id` it silences every push;
@@ -755,7 +765,7 @@ Frames must be I-JSON ([RFC 7493](https://www.rfc-editor.org/rfc/rfc7493)):
 a frame repeating an object key or holding invalid UTF-8 is a parse error.
 The server encodes JSON with `encoding/json/v2` and needs Go 1.27.
 
-`activity`, `status`, and `ping` are notifications only: their `id`, of
+`activity` and `ping` are notifications only: their `id`, of
 any type, is ignored, and they are processed as the notification and
 never answered, not even with an error for invalid or malformed params
 (§1).

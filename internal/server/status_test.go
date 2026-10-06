@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"fmt"
 	"path/filepath"
 	"reflect"
@@ -9,16 +10,52 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+	"golang.org/x/time/rate"
 
 	"github.com/apron-chat/apron-server-go/internal/store"
 )
 
-// status sends a status notification and returns the frames it caused on
-// c, after the server has processed it.
+// status sends a status request, whose result must be {}, and returns the
+// notifications that precede the result on c. Its request IDs are unique
+// across connections, which share a user's deduplication (§1.2).
 func (c *testClient) status(t *testing.T, params map[string]any) []map[string]any {
 	t.Helper()
-	c.write(t, map[string]any{"method": "status", "params": params})
-	return c.drain(t)
+	before, result := c.request(t, "status", statusID(), params)
+	if len(result) != 0 {
+		t.Fatalf("status result = %#v, want {}", result)
+	}
+	return before
+}
+
+// statusError sends a status request that must fail with code, and
+// returns the error.
+func (c *testClient) statusError(t *testing.T, params map[string]any, code int) map[string]any {
+	t.Helper()
+	id := statusID()
+	frame := c.call(t, "status", id, params)
+	failure, ok := frame["error"].(map[string]any)
+	if !ok || failure["code"] != float64(code) {
+		t.Fatalf("status %#v: %#v, want error %d", params, frame, code)
+	}
+	return failure
+}
+
+// expectEcho sends a status request from c that changes a mute, and checks
+// that the change reaches c, before the result, and each of others.
+func expectEcho(t *testing.T, c *testClient, params map[string]any, roomID string, mute any, others ...*testClient) {
+	t.Helper()
+	frames := c.status(t, params)
+	if len(frames) != 1 {
+		t.Fatalf("frames before the result of %#v: %#v", params, frames)
+	}
+	checkMute(t, frames[0], roomID, mute)
+	for _, other := range others {
+		expectMute(t, other, roomID, mute)
+	}
+}
+
+func statusID() string {
+	return fmt.Sprintf("status-%d", statusRequests.Add(1))
 }
 
 // watching has each client keep the status announcements of others, which
@@ -60,8 +97,7 @@ func listedStatus(t *testing.T, c *testClient, userID string) any {
 // deduplication (§1.2).
 func setStatus(t *testing.T, c *testClient, status any) any {
 	t.Helper()
-	id := fmt.Sprintf("status-%d", statusRequests.Add(1))
-	return c.result(t, "me", id, map[string]any{"status": status})["you"].(map[string]any)["status"]
+	return c.result(t, "me", statusID(), map[string]any{"status": status})["you"].(map[string]any)["status"]
 }
 
 var statusRequests atomic.Int64
@@ -351,12 +387,6 @@ func TestMuteEchoToAllConnections(t *testing.T) {
 	first.drain(t)
 	second.drain(t)
 	observer.drain(t)
-	both := func(roomID string, mute any) {
-		t.Helper()
-		for _, c := range []*testClient{first, second} {
-			expectMute(t, c, roomID, mute)
-		}
-	}
 	for _, step := range []struct {
 		params map[string]any
 		roomID string
@@ -370,26 +400,23 @@ func TestMuteEchoToAllConnections(t *testing.T) {
 		{map[string]any{"room_id": "general", "mute": true}, "general", true},
 		{map[string]any{"room_id": "general", "mute": 0}, "general", false},
 	} {
-		first.write(t, map[string]any{"method": "status", "params": step.params})
-		both(step.roomID, step.mute)
+		expectEcho(t, first, step.params, step.roomID, step.mute, second)
 	}
-	// Invalid values, and a room the user cannot see, change nothing and
-	// are not answered.
+	// Invalid values, and a room the user cannot see, are invalid_params
+	// and change nothing, the valid fields beside them included.
 	for _, params := range []map[string]any{
 		{"mute": -1}, {"mute": 1.5}, {"mute": "60"}, {"mute": nil},
 		{"room_id": "missing", "mute": true}, {"room_id": 5, "mute": true},
+		{"mute": true, "idle": "yes"}, {"mute": true, "room_id": nil},
 	} {
-		if frames := second.status(t, params); len(frames) != 0 {
-			t.Fatalf("frames after %#v: %#v", params, frames)
-		}
+		second.statusError(t, params, codeInvalidParams)
 	}
 	first.expectQuiet(t)
+	second.expectQuiet(t)
 
 	// Timed mutes end by themselves, sent as false to every connection.
-	second.write(t, map[string]any{"method": "status", "params": map[string]any{"mute": 1}})
-	second.write(t, map[string]any{"method": "status", "params": map[string]any{"room_id": "general", "mute": 1}})
-	both("", float64(1))
-	both("general", float64(1))
+	expectEcho(t, second, map[string]any{"mute": 1}, "", float64(1), first)
+	expectEcho(t, second, map[string]any{"room_id": "general", "mute": 1}, "general", float64(1), first)
 	time.Sleep(1200 * time.Millisecond)
 	for _, c := range []*testClient{first, second} {
 		frames := c.drain(t)
@@ -419,8 +446,9 @@ func TestMuteEchoToAllConnections(t *testing.T) {
 // After a sign-in, a connection is sent, after the auth result, one
 // `status` for each of its user's mutes in effect, then the status others
 // see of each user who shares a room with it, other than offline and ""
-// (§4.11). Mutes sent before auth apply once it signs in, and
-// reach the user's other connections.
+// (§4.11). A `status` before sign-in is denied like any request, and one
+// without an id is ignored, so neither changes anything: the connection
+// starts attended.
 func TestAfterAuthMutesAndStatuses(t *testing.T) {
 	config := DefaultConfig()
 	config.WebAuthn = testWebAuthn(t)
@@ -449,26 +477,27 @@ func TestAfterAuthMutesAndStatuses(t *testing.T) {
 		c.drain(t)
 	}
 	ops, _ := saveRoom(t, owner, "ops", map[string]any{"title": "Ops"})
-	owner.write(t, map[string]any{"method": "status", "params": map[string]any{"mute": 600}})
-	owner.write(t, map[string]any{"method": "status", "params": map[string]any{"room_id": ops, "mute": true}})
-	owner.write(t, map[string]any{"method": "status", "params": map[string]any{"room_id": "general", "mute": 60}})
+	owner.status(t, map[string]any{"mute": true})
+	owner.status(t, map[string]any{"room_id": ops, "mute": true})
+	owner.status(t, map[string]any{"room_id": "general", "mute": 60})
+	owner.status(t, map[string]any{"room_id": "general", "mute": false})
 	owner.drain(t)
 
-	// A connection that sends mutes before it signs in: the first replaces
-	// the unscoped mute, and the room's mute ends; its other connections
-	// are told, it is not, but gets the snapshot.
+	// A connection that sends status before it signs in: as a request it
+	// is denied, and without an id ignored. Nothing changes, and the
+	// owner's connection is told nothing.
 	c, _ := dialOrigin(t, httpServer, testPasskeyOrigin)
 	watching(c)
-	c.write(t, map[string]any{"method": "status", "params": map[string]any{"mute": true}})
-	c.write(t, map[string]any{"method": "status", "params": map[string]any{"room_id": "general", "mute": false}})
+	c.write(t, map[string]any{"method": "status", "params": map[string]any{"mute": false}})
 	c.write(t, map[string]any{"method": "status", "params": map[string]any{"idle": true}})
-	c.write(t, map[string]any{"method": "status", "id": "early", "params": map[string]any{"room_id": "missing", "mute": true}})
+	c.statusError(t, map[string]any{"mute": false}, codeDenied)
+	c.statusError(t, map[string]any{"idle": true}, codeDenied)
+	c.statusError(t, map[string]any{"room_id": "missing", "mute": true}, codeDenied)
 	before, _ := c.request(t, "auth", "resume", map[string]any{"scheme": "token", "token": registered["token"]})
 	if len(before) != 0 {
 		t.Fatalf("frames before the auth result: %#v", before)
 	}
-	expectMute(t, owner, "", true)
-	expectMute(t, owner, "general", false)
+	owner.expectQuiet(t)
 	frames := c.drain(t)
 	if len(frames) != 5 {
 		t.Fatalf("frames after auth: %#v", frames)
@@ -483,17 +512,20 @@ func TestAfterAuthMutesAndStatuses(t *testing.T) {
 	if want := map[string]string{attended.userID: "online", idle.userID: "idle", dnd.userID: "dnd"}; !reflect.DeepEqual(statuses, want) {
 		t.Fatalf("statuses after auth: %#v, want %#v", statuses, want)
 	}
-	// The connection's idle, sent before auth, applies: the owner, attended
-	// on its first connection, stays online.
+	// The idle sent before sign-in did not apply: the new connection
+	// starts attended, so the owner stays online when the first one goes,
+	// and is idle only once the new one says so.
+	attended.drain(t)
+	watching(attended)
+	_ = owner.ws.Close(websocket.StatusNormalClosure, "bye")
+	attended.expectQuiet(t)
 	app.mu.RLock()
 	status := app.users[owner.userID].statusAt(time.Now())
 	app.mu.RUnlock()
 	if status != statusOnline {
 		t.Fatalf("owner status: %s", status)
 	}
-	attended.drain(t)
-	watching(attended)
-	_ = owner.ws.Close(websocket.StatusNormalClosure, "bye")
+	c.status(t, map[string]any{"idle": true})
 	expectStatus(t, attended, owner.userID, "idle")
 	c.expectQuiet(t)
 
@@ -605,7 +637,9 @@ func TestAdditionsAreNotSignIns(t *testing.T) {
 
 // room_id scopes only mute (§4.11): idle is the sending connection's with
 // any room_id, one that names a room the user cannot see included, and the
-// unscoped mute is untouched by a scoped one.
+// unscoped mute is untouched by a scoped one. A mute of a room the user
+// cannot see is invalid_params, and then the idle beside it does not apply
+// either.
 func TestRoomIDScopesOnlyMute(t *testing.T) {
 	app, httpServer := newTestServer(t, DefaultConfig())
 	clients := dialGroup(t, httpServer, 2)
@@ -613,9 +647,12 @@ func TestRoomIDScopesOnlyMute(t *testing.T) {
 	watching(a)
 	a.drain(t)
 
-	// A room the user cannot see: idle applies, the mute is ignored.
-	if frames := b.status(t, map[string]any{"room_id": "missing", "idle": true, "mute": true}); len(frames) != 0 {
-		t.Fatalf("frames after a mute of a missing room: %#v", frames)
+	// A mute of a room the user cannot see changes nothing.
+	b.statusError(t, map[string]any{"room_id": "missing", "idle": true, "mute": true}, codeInvalidParams)
+	a.expectQuiet(t)
+	// Without a mute, room_id is not looked at: idle applies.
+	if frames := b.status(t, map[string]any{"room_id": "missing", "idle": true}); len(frames) != 0 {
+		t.Fatalf("frames after an idle with a missing room: %#v", frames)
 	}
 	expectStatus(t, a, b.userID, "idle")
 	// A visible room: idle applies to the connection, the mute to the room.
@@ -631,5 +668,138 @@ func TestRoomIDScopesOnlyMute(t *testing.T) {
 	u := app.users[b.userID]
 	if now := time.Now(); u.mute.active(now) || !u.roomMuted(app.rooms["general"], now) {
 		t.Fatalf("mutes: unscoped %#v, rooms %#v", u.mute, u.roomMutes)
+	}
+}
+
+// A client's `status` is a request (§4.11): answered {} once applied,
+// denied before sign-in, and with a bad id or params answered like any
+// request. A `status` without an id is a notification with no meaning,
+// ignored as one with an unknown method is (§1), before sign-in and after,
+// whatever its params.
+func TestStatusIsARequest(t *testing.T) {
+	app, httpServer := newTestServer(t, DefaultConfig())
+	a := dialTestClient(t, httpServer)
+	watching(a)
+	a.drain(t)
+	b, _ := dialRaw(t, httpServer)
+	raw := func(frame string) {
+		t.Helper()
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		if err := b.ws.Write(ctx, websocket.MessageText, []byte(frame)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	notifications := []string{
+		`{"method":"status","params":{"idle":true}}`,
+		`{"method":"status","params":{"mute":true}}`,
+		`{"method":"status","params":{"mute":-1}}`,
+		`{"method":"status","params":[]}`,
+		`{"method":"status","params":null}`,
+		`{"method":"status"}`,
+	}
+	for _, frame := range notifications {
+		raw(frame)
+	}
+	b.expectQuiet(t)
+	b.statusError(t, map[string]any{"idle": true}, codeDenied)
+	b.statusError(t, map[string]any{"mute": true}, codeDenied)
+
+	guestAuth(t, b)
+	expectMembership(t, a, "general", b.userID, true)
+	expectStatus(t, a, b.userID, "online")
+	b.drain(t)
+	a.expectQuiet(t)
+	for _, frame := range notifications {
+		raw(frame)
+	}
+	b.expectQuiet(t)
+	a.expectQuiet(t)
+	app.mu.RLock()
+	u := app.users[b.userID]
+	if now := time.Now(); u.mute.active(now) || u.statusAt(now) != statusOnline {
+		app.mu.RUnlock()
+		t.Fatalf("after status notifications: mute %#v, status %s", u.mute, u.statusAt(now))
+	}
+	app.mu.RUnlock()
+
+	// As a request it applies, and answers {}.
+	if frames := b.status(t, map[string]any{"idle": true}); len(frames) != 0 {
+		t.Fatalf("frames before the idle result: %#v", frames)
+	}
+	expectStatus(t, a, b.userID, "idle")
+	// A notification does not end it.
+	raw(`{"method":"status","params":{"idle":false}}`)
+	b.expectQuiet(t)
+	a.expectQuiet(t)
+	if got := listedStatus(t, a, b.userID); got != "idle" {
+		t.Fatalf("listed status after an idle notification: %v", got)
+	}
+	// A bad id or params are answered like those of any request.
+	raw(`{"method":"status","id":5,"params":{"idle":false}}`)
+	if reply := b.read(t); reply["id"] != nil || reply["error"].(map[string]any)["code"] != float64(codeInvalidRequest) {
+		t.Fatalf("bad id on status: %#v", reply)
+	}
+	raw(`{"method":"status","id":"bad-params","params":[]}`)
+	if reply := b.read(t); reply["id"] != "bad-params" || reply["error"].(map[string]any)["code"] != float64(codeInvalidParams) {
+		t.Fatalf("bad params on status: %#v", reply)
+	}
+	b.statusError(t, map[string]any{"idle": "no"}, codeInvalidParams)
+	a.expectQuiet(t)
+	b.status(t, map[string]any{"idle": false})
+	expectStatus(t, a, b.userID, "online")
+}
+
+// The server limits each user's `status` requests (§4.11): beyond the
+// limit a request is retry_after, with the seconds to wait, and changes
+// nothing, neither idle nor mute.
+func TestStatusRateLimit(t *testing.T) {
+	app, httpServer := newTestServer(t, DefaultConfig())
+	clients := dialGroup(t, httpServer, 2)
+	a, b := clients[0], clients[1]
+	watching(a)
+	a.drain(t)
+
+	// The default: a burst of statusRequestBurst, refilled one a second, so
+	// a quick run of more is refused.
+	for i := range statusRequestBurst + 2 {
+		b.write(t, map[string]any{"method": "status", "id": statusID(), "params": map[string]any{"room_id": fmt.Sprint(i)}})
+	}
+	limited := 0
+	for range statusRequestBurst + 2 {
+		frame := b.read(t)
+		if failure, ok := frame["error"].(map[string]any); ok {
+			if failure["code"] != float64(codeRetryAfter) {
+				t.Fatalf("status beyond the burst: %#v", frame)
+			}
+			limited++
+		}
+	}
+	if limited == 0 {
+		t.Fatalf("no status of %d was limited", statusRequestBurst+2)
+	}
+
+	// A limit of two, refilled hourly.
+	app.mu.Lock()
+	app.users[b.userID].statusRequests = rate.NewLimiter(rate.Every(time.Hour), 2)
+	app.unlock()
+	b.status(t, map[string]any{"idle": true})
+	expectStatus(t, a, b.userID, "idle")
+	expectEcho(t, b, map[string]any{"mute": true}, "", true)
+	for _, params := range []map[string]any{
+		{"idle": false}, {"mute": false}, {"room_id": "general", "mute": true},
+	} {
+		failure := b.statusError(t, params, codeRetryAfter)
+		if wait, _ := failure["data"].(map[string]any)["retry_after"].(float64); wait < 1 {
+			t.Fatalf("retry_after of %#v: %#v", params, failure)
+		}
+	}
+	b.expectQuiet(t)
+	a.expectQuiet(t)
+	app.mu.RLock()
+	defer app.mu.RUnlock()
+	u := app.users[b.userID]
+	if now := time.Now(); !u.mute.forever || u.roomMuted(app.rooms["general"], now) || u.statusAt(now) != statusIdle {
+		t.Fatalf("after limited requests: mute %#v, room mutes %#v, status %s", u.mute, u.roomMutes, u.statusAt(now))
 	}
 }

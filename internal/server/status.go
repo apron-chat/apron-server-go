@@ -24,9 +24,13 @@ import (
 // and the user sees, in `you`, the value they set. Separately, each
 // connection reports whether it is idle, and the user mutes their
 // notifications everywhere or in one room and its threads; mutes and a dnd
-// status silence pushes (§4.7). Mutes are private: each change goes to every
-// connection of the user as a `status` notification, and the mutes in
-// effect to a connection after its auth.
+// status silence pushes (§4.7). Both are set with the `status` request.
+// Mutes are private: each change goes to every connection of the user as a
+// `status` notification, and the mutes in effect to a connection after a
+// sign-in. A connection starts attended, and only its own `idle: true`
+// makes it idle: the server does not take a connection that never sends
+// idle as idle after a quiet period, which §4.11 allows but does not ask
+// for.
 const (
 	statusOnline    = "online"
 	statusIdle      = "idle"
@@ -36,9 +40,11 @@ const (
 	statusNone      = ""
 	// maxMuteSeconds caps a timed mute at a year; `true` mutes until changed.
 	maxMuteSeconds = 365 * 24 * 60 * 60
-	// maxPendingStatus bounds the mutes a connection keeps until it signs
-	// in; beyond it the oldest are dropped.
-	maxPendingStatus = 16
+	// Each user may send statusRequestBurst `status` requests at once,
+	// refilled one every statusRequestRefill; beyond them a request is
+	// retry_after (§4.11).
+	statusRequestBurst  = 20
+	statusRequestRefill = time.Second
 	// A user's derived status changes go to others at once up to
 	// statusBurst times, then at most once per statusCoalesce, the latest
 	// status winning, so a flapping connection costs its rooms little
@@ -84,7 +90,7 @@ func (m muteState) wire(now time.Time) any {
 	return int64((m.until.Sub(now) + time.Second - 1) / time.Second)
 }
 
-// statusUpdate is one parsed `status` notification. A nil field was absent.
+// statusUpdate is one parsed `status` request. A nil field was absent.
 type statusUpdate struct {
 	// roomID, when scoped, is the room the mute is of.
 	roomID string
@@ -96,23 +102,26 @@ type statusUpdate struct {
 	muteSeconds int64
 }
 
-// parseStatus reads a status notification's params (§4.11), ignoring each
-// malformed field on its own. A room_id that is not a string ignores the
-// whole update, whose mute was not meant for everywhere. room_id scopes
-// only the mute: idle is about the connection either way.
-func parseStatus(params map[string]jsontext.Value) (statusUpdate, bool) {
+// parseStatus reads a status request's params (§4.11). Any field of the
+// wrong type is invalid_params, and then nothing changes: room_id a string,
+// idle a boolean, and mute true, false, or a whole number of seconds of at
+// least 0, a longer one shortened to maxMuteSeconds. room_id scopes only
+// the mute: idle is about the connection either way.
+func parseStatus(params map[string]jsontext.Value) (statusUpdate, *rpcError) {
 	var update statusUpdate
 	if _, has := params["room_id"]; has {
 		roomID, err := parseString(params, "room_id", true)
 		if err != nil {
-			return update, false
+			return update, err
 		}
 		update.roomID, update.scoped = roomID, true
 	}
 	if _, has := params["idle"]; has {
-		if value, err := parseBool(params, "idle", true); err == nil {
-			update.idle = &value
+		value, err := parseBool(params, "idle", true)
+		if err != nil {
+			return update, err
 		}
+		update.idle = &value
 	}
 	if raw, has := params["mute"]; has {
 		var seconds int64
@@ -121,12 +130,13 @@ func parseStatus(params map[string]jsontext.Value) (statusUpdate, bool) {
 			update.hasMute, update.muteForever = true, true
 		case bytes.Equal(raw, []byte("false")):
 			update.hasMute = true
-		case bytes.Equal(raw, []byte("null")):
-		case json.Unmarshal(raw, &seconds) == nil && seconds >= 0:
+		case !bytes.Equal(raw, []byte("null")) && json.Unmarshal(raw, &seconds) == nil && seconds >= 0:
 			update.hasMute, update.muteSeconds = true, min(seconds, maxMuteSeconds)
+		default:
+			return update, invalidParams("mute must be true, false, or a whole number of seconds")
 		}
 	}
-	return update, true
+	return update, nil
 }
 
 // mute returns the mute an update sets, starting at now.
@@ -140,37 +150,53 @@ func (update statusUpdate) mute(now time.Time) muteState {
 	return muteState{until: now.Add(time.Duration(update.muteSeconds) * time.Second)}
 }
 
-// status applies a `status` notification (§4.11), which is never answered.
-// It is accepted before authentication: idle applies to the connection at
-// once, and a mute waits on the connection until it signs in.
-func (s *Server) status(c *client, req request) {
-	update, ok := parseStatus(req.params)
-	if !ok {
-		return
+// status applies a `status` request (§4.11) and answers {} once it has: the
+// mute's echo to the user's connections, the sender's included, precedes
+// the result. Like other requests it needs a signed-in connection, and a
+// `status` without an id is a notification no client sends, which
+// processFrame ignores. On an error nothing changes: invalid params, a mute
+// of a room the user cannot see, or more requests than the user's limit
+// (admitStatusLocked).
+func (s *Server) status(c *client, req request) (any, bool, *rpcError) {
+	update, err := parseStatus(req.params)
+	if err != nil {
+		return nil, false, err
 	}
 	s.mu.Lock()
 	defer s.unlock()
-	if c.user == nil {
-		if update.idle != nil {
-			c.idle = *update.idle
-		}
-		if update.hasMute {
-			update.idle = nil
-			c.pendingStatus = append(c.pendingStatus, update)
-			if len(c.pendingStatus) > maxPendingStatus {
-				c.pendingStatus = c.pendingStatus[1:]
-			}
-		}
-		return
+	u := c.user
+	if update.hasMute && update.scoped && s.visibleRoomLocked(u, update.roomID) == nil {
+		return nil, false, invalidParams("Unknown room %q", update.roomID)
 	}
-	s.applyStatusLocked(c, c.user, update, nil)
+	if err := admitStatusLocked(u); err != nil {
+		return nil, false, err
+	}
+	s.applyStatusLocked(c, u, update)
+	return map[string]any{}, false, nil
+}
+
+// admitStatusLocked applies the user's limit on `status` requests, idle and
+// mute alike (§4.11 lets servers limit them): a burst of statusRequestBurst,
+// refilled one every statusRequestRefill, across all of the user's
+// connections. Beyond it the request is retry_after and changes nothing, so
+// a client flipping idle or its mutes in a loop cannot make the server
+// announce, store, and recount for it without end.
+func admitStatusLocked(u *userState) *rpcError {
+	if u.statusRequests == nil {
+		u.statusRequests = rate.NewLimiter(rate.Every(statusRequestRefill), statusRequestBurst)
+	}
+	now := time.Now()
+	reservation := u.statusRequests.ReserveN(now, 1)
+	if delay := reservation.DelayFrom(now); delay > 0 {
+		reservation.CancelAt(now)
+		return retryAfter("Too many status changes; slow down", delay)
+	}
+	return nil
 }
 
 // applyStatusLocked applies an update for user u from connection c, then
-// announces what changed. echoExcept, if any, is a connection not sent the
-// mute: one signing in, which is sent the mutes in effect after its auth
-// result (sendAfterAuthLocked).
-func (s *Server) applyStatusLocked(c *client, u *userState, update statusUpdate, echoExcept *client) {
+// announces what changed. A scoped mute's room is visible to u.
+func (s *Server) applyStatusLocked(c *client, u *userState, update statusUpdate) {
 	if update.idle != nil && c.idle != *update.idle {
 		c.idle = *update.idle
 		s.announceStatusLocked(u)
@@ -184,14 +210,10 @@ func (s *Server) applyStatusLocked(c *client, u *userState, update statusUpdate,
 		u.mute = mute
 		s.touchUser(u.id)
 		s.scheduleMuteLocked(u)
-		u.sendExcept(echoExcept, muteFrame("", mute, now))
+		u.send(muteFrame("", mute, now))
 		return
 	}
-	// A mute of a room the user cannot see changes nothing.
 	r := s.visibleRoomLocked(u, update.roomID)
-	if r == nil {
-		return
-	}
 	if mute.active(now) {
 		u.roomMutes[r.id] = mute
 	} else {
@@ -199,7 +221,7 @@ func (s *Server) applyStatusLocked(c *client, u *userState, update statusUpdate,
 	}
 	s.touchUser(u.id)
 	s.scheduleRoomMuteLocked(u, r.id)
-	u.sendExcept(echoExcept, muteFrame(r.id, mute, now))
+	u.send(muteFrame(r.id, mute, now))
 	// What counts toward unread changes with a room's mute (unread.go).
 	s.unreadChangedLocked(u, r.id)
 }
@@ -212,26 +234,6 @@ func muteFrame(roomID string, mute muteState, now time.Time) jsontext.Value {
 		params["room_id"] = roomID
 	}
 	return notification("status", params)
-}
-
-// sendExcept queues a frame to every connection of the user but except.
-func (u *userState) sendExcept(except *client, frame jsontext.Value) {
-	for c := range u.clients {
-		if c != except {
-			c.enqueue(frame)
-		}
-	}
-}
-
-// applyPendingStatusLocked applies the mutes c received before it signed in
-// as u. Its other connections are told; c is sent the mutes in effect after
-// its auth result.
-func (s *Server) applyPendingStatusLocked(c *client, u *userState) {
-	pending := c.pendingStatus
-	c.pendingStatus = nil
-	for _, update := range pending {
-		s.applyStatusLocked(c, u, update, c)
-	}
 }
 
 // sendAfterAuthLocked sends a connection that has just authenticated, after

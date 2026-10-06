@@ -77,7 +77,7 @@ func parseRequest(payload []byte) (request, *rpcError) {
 
 // notificationOnly are the methods clients send only as notifications. An
 // id on one is ignored, and nothing about it is answered (§1).
-var notificationOnly = map[string]bool{"ping": true, "activity": true, "status": true}
+var notificationOnly = map[string]bool{"ping": true, "activity": true}
 
 func canonicalParams(params map[string]jsontext.Value) string {
 	if params == nil {

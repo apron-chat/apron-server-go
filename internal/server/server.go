@@ -341,11 +341,9 @@ type client struct {
 	emailSends *rate.Limiter
 	proposal   *emailProposal
 	clientKey  string
-	// idle reports that nobody is attending the connection (§4.11), and
-	// pendingStatus holds the mutes it sent before signing in. Guarded by
-	// server.mu.
-	idle          bool
-	pendingStatus []statusUpdate
+	// idle reports that nobody is attending the connection (§4.11): false
+	// until the connection says otherwise. Guarded by server.mu.
+	idle bool
 	// closing is set once the final batch is queued; later frames are dropped.
 	closing atomic.Bool
 	// pinged is set by the first liveness ping (§1); lastFrame is when the
@@ -948,6 +946,7 @@ func (s *Server) operations() map[string]operation {
 		"room_leave": (*Server).leaveRoom,
 		"reactions":  (*Server).react,
 		"activity":   (*Server).activity,
+		"status":     (*Server).status,
 	}
 	if !s.config.DisablePush {
 		ops["push_register"] = (*Server).registerPush
@@ -998,10 +997,10 @@ func (s *Server) processFrame(c *client, payload []byte) {
 		}
 		return
 	}
-	// status is accepted before authentication too, and applies once the
-	// connection signs in (§4.11).
-	if req.method == "status" {
-		s.status(c, req)
+	// status is only a request (§4.11). Without an id it is a notification
+	// with no meaning, ignored like one with an unknown method (§1), before
+	// sign-in or after.
+	if req.method == "status" && !req.hasID {
 		return
 	}
 

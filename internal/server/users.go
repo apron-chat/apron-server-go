@@ -64,7 +64,7 @@ type userState struct {
 	// roomMutes their mutes; muteTimer ends a timed mute, and
 	// roomMuteTimers each timed room mute. status is the status last sent
 	// to others; statusLimit and statusTimer coalesce a flapping user's
-	// changes.
+	// changes. statusRequests limits the user's `status` requests.
 	chosen         string
 	mute           muteState
 	roomMutes      map[string]muteState
@@ -73,6 +73,7 @@ type userState struct {
 	status         string
 	statusLimit    *rate.Limiter
 	statusTimer    *time.Timer
+	statusRequests *rate.Limiter
 	// pushes are the user's push registrations by url (§4.7), and pings the
 	// rooms they have not joined where a message mentioned or replied to
 	// them, from the first such message, for unread counts. unread holds
@@ -383,7 +384,6 @@ func (s *Server) attachLocked(c *client, user *userState) {
 	}
 	c.user = user
 	user.clients[c] = struct{}{}
-	s.applyPendingStatusLocked(c, user)
 	s.announceStatusLocked(user)
 	if previous == nil || len(previous.clients) > 0 || previous.account() {
 		if previous != nil {
