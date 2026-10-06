@@ -12,9 +12,11 @@ forgets it on restart); see [SERVER.md](SERVER.md#storage).
   packages. See [SERVER.md](SERVER.md).
 - [apron-chat/apron-web](https://github.com/apron-chat/apron-web): the
   SvelteKit and TypeScript web client, deployed at `https://web.apron.chat`.
-  `make install` clones it into `.apron-web/` (ignored), where the browser
-  tests, `make dev-web`, and `make run` use it; replace that directory with a
-  symlink to work on your own checkout.
+  `.apron-web` is a submodule of it, pinned to the commit the browser tests,
+  `make dev-web`, and `make run` use; `make install` checks it out. To test
+  another version, check out that commit in `.apron-web` (and commit the new
+  pin to keep it), or point `APRON_WEB_DIR` at another checkout for the
+  interop tests.
 - `tests/interop`: Playwright tests against real clients and the Go backend.
 - `testdata/apron`: a submodule of [shazow/apron](https://github.com/shazow/apron),
   pinned to the protocol version this server implements. Its

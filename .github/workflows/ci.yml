@@ -21,19 +21,13 @@ jobs:
     # The push interop tests wait out the 30-second idle timeout (§4.5).
     timeout-minutes: 20
     steps:
-      # The submodule holds the shared protocol fixtures from shazow/apron.
+      # The submodules hold the shared protocol fixtures from shazow/apron
+      # (testdata/apron) and the web client the browser tests run
+      # (.apron-web), each at its pinned commit.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
           submodules: true
-      # The web client the browser tests run; make install skips its clone.
-      # It is apron-web main: push.spec.ts skips, with its reason listed as a
-      # notice and in the job summary, until main has web push (apron-web#48).
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          repository: apron-chat/apron-web
-          path: .apron-web
-          persist-credentials: false
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version-file: .node-version

@@ -1,19 +1,20 @@
 .PHONY: install dev-web dev-server check test test-go test-wire test-interop test-perf build build-web serve run
 
-# The web client lives in apron-chat/apron-web. The browser tests, dev-web, and
-# run use a checkout of it here; replace it with a symlink to use your own.
+# The web client lives in apron-chat/apron-web, pinned as a submodule. The
+# browser tests, dev-web, and run use it; check out another commit in it to
+# test against that version.
 WEB := .apron-web
 
 # The shared protocol fixtures come from shazow/apron, pinned as a submodule.
 FIXTURES := testdata/apron/tests/fixtures
 
-$(WEB):
-	git clone --depth 1 https://github.com/apron-chat/apron-web.git $@
+$(WEB)/package.json:
+	git submodule update --init --depth 1 $(WEB)
 
 $(FIXTURES):
 	git submodule update --init --depth 1 testdata/apron
 
-install: $(WEB) $(FIXTURES)
+install: $(WEB)/package.json $(FIXTURES)
 	npm --prefix $(WEB) ci
 	npm --prefix tests/interop ci
 	go mod download

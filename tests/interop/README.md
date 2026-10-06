@@ -43,9 +43,9 @@ The config starts both services itself with `reuseExistingServer: false`:
   server; `--push.allow-insecure` lets the test's capture endpoint on
   `http://127.0.0.1` receive pushes, and aprond refuses it with `--public-url`
   or `--tls.domain`.
-* Vite dev server: `127.0.0.1:5173`, started from `.apron-web`, a checkout of
-  [apron-chat/apron-web](https://github.com/apron-chat/apron-web) that `make install`
-  clones (or a symlink to your own), or from `APRON_WEB_DIR` when it is set
+* Vite dev server: `127.0.0.1:5173`, started from `.apron-web`, a submodule of
+  [apron-chat/apron-web](https://github.com/apron-chat/apron-web) pinned to the
+  version under test, or from `APRON_WEB_DIR` when it is set
 
 Set `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH` when the browser is supplied by the
 environment (for example, the NixOS VM). If it is unset, Playwright uses its
