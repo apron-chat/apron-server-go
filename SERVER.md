@@ -517,7 +517,7 @@ sent by clients is dropped: the server describes only media it hosts.
 New `upload` and `stream` embeds get a one-time write URL, listed in the
 `message` result as `embeds: [{embed_id, kind, write_url}]`, which follows the
 pending snapshot's broadcast. The sender PUTs the content there (§4.8.3);
-`POST`, which earlier versions allowed, is still accepted. A write URL expires after five minutes unused,
+other methods are `405`. A write URL expires after five minutes unused,
 and a write that never starts or fails is finished by publishing the message
 without the embed. A write to a URL that is unknown, used, or expired, or
 whose embed was removed, is answered `404` at once and its connection

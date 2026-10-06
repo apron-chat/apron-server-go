@@ -299,14 +299,14 @@ func setEmbedCORS(w http.ResponseWriter, methods string) {
 
 // handleWrite accepts an upload or stream body at its write URL, once.
 func (s *Server) handleWrite(w http.ResponseWriter, r *http.Request) {
-	setEmbedCORS(w, "PUT, POST, OPTIONS")
+	setEmbedCORS(w, "PUT, OPTIONS")
 	if r.Method == http.MethodOptions {
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
-	if r.Method != http.MethodPut && r.Method != http.MethodPost {
-		w.Header().Set("Allow", "PUT, POST, OPTIONS")
-		refuseWrite(w, "Write with PUT or POST", http.StatusMethodNotAllowed)
+	if r.Method != http.MethodPut {
+		w.Header().Set("Allow", "PUT, OPTIONS")
+		refuseWrite(w, "Write with PUT", http.StatusMethodNotAllowed)
 		return
 	}
 	token := strings.TrimPrefix(r.URL.Path, writePath)

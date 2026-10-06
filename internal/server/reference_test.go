@@ -728,7 +728,8 @@ func TestStreamWriteConnectionCanReadAStream(t *testing.T) {
 	live := embedsOf(t, result["snapshot"].(map[string]any))
 	// One connection carries the finished write and then the read.
 	client := &http.Client{Transport: &http.Transport{MaxConnsPerHost: 1}}
-	response, err := client.Post(written[0].(map[string]any)["write_url"].(string), "text/plain", strings.NewReader("done"))
+	request, _ := http.NewRequest(http.MethodPut, written[0].(map[string]any)["write_url"].(string), strings.NewReader("done"))
+	response, err := client.Do(request)
 	if err != nil || response.StatusCode != http.StatusNoContent {
 		t.Fatalf("first stream write: %v %v", response, err)
 	}
@@ -754,7 +755,7 @@ func TestSavingWithoutAStreamEndsIt(t *testing.T) {
 	body, pipe := io.Pipe()
 	writerDone := make(chan int, 1)
 	go func() {
-		request, _ := http.NewRequest(http.MethodPost, writeURL, body)
+		request, _ := http.NewRequest(http.MethodPut, writeURL, body)
 		response, err := http.DefaultClient.Do(request)
 		if err != nil {
 			writerDone <- 0
@@ -786,6 +787,20 @@ func TestSavingWithoutAStreamEndsIt(t *testing.T) {
 	a.expectQuiet(t)
 }
 
+// Writes use PUT (§4.8.3); another method leaves the write URL unused.
+func TestWritesArePUT(t *testing.T) {
+	_, httpServer := newTestServer(t, DefaultConfig())
+	a := dialTestClient(t, httpServer)
+	result := postEmbeds(t, a, "upload", map[string]any{"room_id": "general", "body": map[string]any{"embeds": []any{map[string]any{"kind": "upload"}}}})
+	writeURL := result["embeds"].([]any)[0].(map[string]any)["write_url"].(string)
+	if status, header, _ := httpDo(t, http.MethodPost, writeURL, strings.NewReader("data"), "text/plain"); status != http.StatusMethodNotAllowed || header.Get("Allow") != "PUT, OPTIONS" {
+		t.Fatalf("POST: %d, Allow %q", status, header.Get("Allow"))
+	}
+	if status, _, _ := httpDo(t, http.MethodPut, writeURL, strings.NewReader("data"), "text/plain"); status != http.StatusCreated {
+		t.Fatalf("PUT after POST: %d", status)
+	}
+}
+
 // A write to a URL that is no longer usable is refused at once, even while
 // its body is still open: the server does not wait to read the body first.
 func TestRefusedWriteDoesNotWaitForItsBody(t *testing.T) {
@@ -799,7 +814,7 @@ func TestRefusedWriteDoesNotWaitForItsBody(t *testing.T) {
 	go func() { _, _ = pipe.Write([]byte("late")) }()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	request, _ := http.NewRequestWithContext(ctx, http.MethodPost, writeURL, body)
+	request, _ := http.NewRequestWithContext(ctx, http.MethodPut, writeURL, body)
 	response, err := http.DefaultClient.Do(request)
 	if err != nil {
 		t.Fatalf("a refused write with an open body: %v", err)
