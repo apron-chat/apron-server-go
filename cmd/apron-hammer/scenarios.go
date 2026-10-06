@@ -3,10 +3,12 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"math/rand/v2"
 	"net/http"
 	"slices"
@@ -30,9 +32,15 @@ func run(n int, f func(i int)) {
 	wg.Wait()
 }
 
-// connect signs in n guests, at most 32 at a time. notify, when set, makes
-// each peer's notification handler.
+// connect signs in n guests, at most 32 at a time, and returns those that
+// signed in. options, when set, makes each one's dial options.
 func connect(h *hammer, n int, label string, options func(i int) dialOptions) []*peer {
+	return compact(connectIndexed(h, n, label, options))
+}
+
+// connectIndexed is connect, with nil in place of each guest that failed to
+// sign in, so that peers[i] was dialed with options(i).
+func connectIndexed(h *hammer, n int, label string, options func(i int) dialOptions) []*peer {
 	peers := make([]*peer, n)
 	slots := make(chan struct{}, 32)
 	run(n, func(i int) {
@@ -51,7 +59,7 @@ func connect(h *hammer, n int, label string, options func(i int) dialOptions) []
 		}
 		peers[i] = p
 	})
-	return compact(peers)
+	return peers
 }
 
 func compact(peers []*peer) []*peer {
@@ -116,8 +124,10 @@ func createRoom(ctx context.Context, p *peer, params map[string]any) (string, er
 	return result.RoomID, err
 }
 
-// orderCheck verifies that a connection sees each room's log_ids increase
-// across every logged kind it checks: messages, reactions, and memberships.
+// orderCheck verifies that a connection receives each room's message
+// snapshots in ascending log_id, the one order a live connection is promised
+// (§3.5), and counts the message creations it receives. A transient notice,
+// which has no log_id, is neither checked nor counted.
 type orderCheck struct {
 	h        *hammer
 	last     map[string]int64
@@ -128,44 +138,35 @@ func newOrderCheck(h *hammer) *orderCheck {
 	return &orderCheck{h: h, last: make(map[string]int64)}
 }
 
-// notify runs on the peer's read goroutine. Memberships arrive in
-// room_update memberships.
+// notify runs on the peer's read goroutine.
 func (o *orderCheck) notify(method string, frame []byte) {
-	type record struct {
-		RoomID string `json:"room_id"`
-		LogID  string `json:"log_id"`
+	if method != "message" {
+		return
 	}
 	var f struct {
 		Params struct {
-			record
-			Memberships []record `json:"memberships"`
+			RoomID    string `json:"room_id"`
+			MessageID string `json:"message_id"`
+			LogID     string `json:"log_id"`
 		} `json:"params"`
 	}
-	switch method {
-	case "message", "reactions", "room_update":
-	default:
-		return
-	}
 	if err := json.Unmarshal(frame, &f); err != nil {
-		o.h.protocolViolation("%s notification: %v", method, err)
+		o.h.protocolViolation("message notification: %v", err)
 		return
 	}
-	records := f.Params.Memberships
-	if method != "room_update" {
-		records = []record{f.Params.record}
+	if f.Params.LogID == "" {
+		return
 	}
-	for _, r := range records {
-		id, err := strconv.ParseInt(r.LogID, 10, 64)
-		if err != nil {
-			o.h.protocolViolation("%s notification log_id %q", method, r.LogID)
-			return
-		}
-		if id <= o.last[r.RoomID] {
-			o.h.protocolViolation("room %s log_id %d after %d", r.RoomID, id, o.last[r.RoomID])
-		}
-		o.last[r.RoomID] = id
+	id, err := strconv.ParseInt(f.Params.LogID, 10, 64)
+	if err != nil {
+		o.h.protocolViolation("message notification log_id %q", f.Params.LogID)
+		return
 	}
-	if method == "message" {
+	if id <= o.last[f.Params.RoomID] {
+		o.h.protocolViolation("room %s snapshot log_id %d after %d", f.Params.RoomID, id, o.last[f.Params.RoomID])
+	}
+	o.last[f.Params.RoomID] = id
+	if f.Params.MessageID == f.Params.LogID {
 		o.messages.Add(1)
 	}
 }
@@ -234,20 +235,115 @@ func runFlood(h *hammer, st *stats) {
 		acked.Load(), alive, 100*float64(received)/float64(max(1, acked.Load()*int64(len(peers)))))
 }
 
+// activityPace is how often each client sends activity.
+const activityPace = 250 * time.Millisecond
+
+// activityProbe measures one client's activity: the time from each
+// notification it sends to the broadcast of it reaching its own connection,
+// keyed by the typing value, and the broadcasts it receives from others.
+type activityProbe struct {
+	st     *stats
+	ctx    context.Context
+	self   atomic.Pointer[string]
+	mu     sync.Mutex
+	sent   map[int]time.Time
+	echoes atomic.Int64
+	others atomic.Int64
+}
+
+func (a *activityProbe) notify(method string, frame []byte) {
+	if method != "activity" {
+		return
+	}
+	var f struct {
+		Params struct {
+			From struct {
+				UserID string `json:"user_id"`
+			} `json:"from"`
+			Typing *int `json:"typing"`
+		} `json:"params"`
+	}
+	self := a.self.Load()
+	if json.Unmarshal(frame, &f) != nil || self == nil || f.Params.Typing == nil {
+		return
+	}
+	if f.Params.From.UserID != *self {
+		a.others.Add(1)
+		return
+	}
+	a.echoes.Add(1)
+	a.mu.Lock()
+	start, ok := a.sent[*f.Params.Typing]
+	delete(a.sent, *f.Params.Typing)
+	ctx := a.ctx
+	a.mu.Unlock()
+	if ok && ctx != nil && ctx.Err() == nil {
+		a.st.observe("activity echo", time.Since(start), nil)
+	}
+}
+
+// runActivity has every client send typing activity to general as a
+// notification, without an id, every activityPace (§4.6), and measures its
+// delivery through the activity broadcasts the clients receive. No reply
+// is expected; one would be a violation.
 func runActivity(h *hammer, st *stats) {
-	peers := connect(h, h.clients, "typist", nil)
-	defer closeAll(peers)
+	all := make([]*activityProbe, h.clients)
+	indexed := connectIndexed(h, h.clients, "typist", func(i int) dialOptions {
+		all[i] = &activityProbe{st: st, sent: make(map[int]time.Time)}
+		return dialOptions{notify: all[i].notify}
+	})
+	var connected []*peer
+	var probes []*activityProbe
+	for i, p := range indexed {
+		if p != nil {
+			connected = append(connected, p)
+			probes = append(probes, all[i])
+		}
+	}
+	defer closeAll(connected)
 	ctx, cancel := st.window()
-	defer cancel()
-	defer st.finish()
-	run(len(peers), func(i int) {
-		for ctx.Err() == nil && peers[i].alive() {
-			_ = measure(ctx, st, "activity", func() error {
-				_, err := peers[i].call(ctx, "activity", map[string]any{"room_id": generalRoom, "typing": 1})
-				return err
-			})
+	for _, probe := range probes {
+		probe.mu.Lock()
+		probe.ctx = ctx
+		probe.mu.Unlock()
+	}
+	var sent atomic.Int64
+	run(len(connected), func(i int) {
+		p, probe := connected[i], probes[i]
+		self := p.userID
+		probe.self.Store(&self)
+		ticker := time.NewTicker(activityPace)
+		defer ticker.Stop()
+		for seq := 0; ctx.Err() == nil && p.alive(); seq++ {
+			typing := seq%30 + 1
+			probe.mu.Lock()
+			probe.sent[typing] = time.Now()
+			probe.mu.Unlock()
+			// Not the window's context: the WebSocket library closes the
+			// connection when a write's context ends during the write.
+			write, cancelWrite := context.WithTimeout(context.Background(), 5*time.Second)
+			if p.send(write, "", "activity", map[string]any{"room_id": generalRoom, "typing": typing}) == nil {
+				sent.Add(1)
+			}
+			cancelWrite()
+			select {
+			case <-ticker.C:
+			case <-ctx.Done():
+			}
 		}
 	})
+	cancel()
+	st.finish()
+	// Let the last broadcasts arrive before counting.
+	time.Sleep(500 * time.Millisecond)
+	var echoes, others int64
+	for _, probe := range probes {
+		echoes += probe.echoes.Load()
+		others += probe.others.Load()
+	}
+	clients := int64(len(connected))
+	st.note("%d activity notifications sent; %.1f%% echoed to their senders, and others received %.1f%% of the broadcasts to them",
+		sent.Load(), 100*float64(echoes)/float64(max(1, sent.Load())), 100*float64(others)/float64(max(1, sent.Load()*(clients-1))))
 }
 
 // runSlow checks that clients which stop reading are dropped once their
@@ -655,4 +751,225 @@ func awaitStreamURL(ctx context.Context, messages chan []byte, messageID string)
 			return "", ctx.Err()
 		}
 	}
+}
+
+// bigExtNumber is above 2^53: a server that decodes ext into float64 loses
+// it, and one that merges raw JSON keeps it byte for byte.
+const bigExtNumber = "12345678901234567891"
+
+// snapshotLog keeps the raw frame of the latest snapshot of each message a
+// connection receives.
+type snapshotLog struct {
+	mu     sync.Mutex
+	latest map[string][]byte
+	logIDs map[string]int64
+}
+
+func (l *snapshotLog) notify(method string, frame []byte) {
+	if method != "message" {
+		return
+	}
+	var f struct {
+		Params struct {
+			MessageID string `json:"message_id"`
+			LogID     string `json:"log_id"`
+		} `json:"params"`
+	}
+	if json.Unmarshal(frame, &f) != nil || f.Params.LogID == "" {
+		return
+	}
+	id, _ := strconv.ParseInt(f.Params.LogID, 10, 64)
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if id > l.logIDs[f.Params.MessageID] {
+		l.logIDs[f.Params.MessageID] = id
+		l.latest[f.Params.MessageID] = frame
+	}
+}
+
+// ext returns the ext of the latest snapshot of a message, with each value
+// as the JSON it arrived as, and whether the snapshot carries ext.
+func (l *snapshotLog) ext(messageID string) (map[string]string, bool) {
+	l.mu.Lock()
+	frame := l.latest[messageID]
+	l.mu.Unlock()
+	var f struct {
+		Params struct {
+			Ext map[string]jsontext.Value `json:"ext"`
+		} `json:"params"`
+	}
+	if frame == nil || json.Unmarshal(frame, &f) != nil || f.Params.Ext == nil {
+		return nil, false
+	}
+	ext := make(map[string]string, len(f.Params.Ext))
+	for key, value := range f.Params.Ext {
+		value = slices.Clone(value)
+		_ = value.Compact()
+		ext[key] = string(value)
+	}
+	return ext, true
+}
+
+// runExt saves messages through the ext merge's edge cases (§3.5, §4.4) and
+// checks each resulting snapshot: a creation drops empty values and keeps
+// integers beyond 2^53 exactly; two saves of different keys pipelined
+// without waiting both survive, as concurrent saves must; "ext": {} and a
+// save without ext change nothing; null is an ordinary value; empty values
+// remove keys; and a tombstone carries no ext.
+func runExt(h *hammer, st *stats) {
+	logs := make([]*snapshotLog, h.clients)
+	indexed := connectIndexed(h, h.clients, "extender", func(i int) dialOptions {
+		logs[i] = &snapshotLog{latest: make(map[string][]byte), logIDs: make(map[string]int64)}
+		return dialOptions{notify: logs[i].notify}
+	})
+	defer closeAll(compact(slices.Clone(indexed)))
+	ctx, cancel := st.window()
+	defer cancel()
+	defer st.finish()
+	run(len(indexed), func(i int) {
+		p, log := indexed[i], logs[i]
+		if p == nil {
+			return
+		}
+		check := func(step, messageID string, want map[string]string) {
+			got, has := log.ext(messageID)
+			if want == nil && has || want != nil && !maps.Equal(got, want) {
+				h.protocolViolation("ext %s: message %s has ext %v, want %v", step, messageID, got, want)
+			}
+		}
+		save := func(op string, params map[string]any) error {
+			return measure(ctx, st, op, func() error {
+				_, err := p.call(ctx, "message", params)
+				return err
+			})
+		}
+		body := map[string]any{"text": "ext"}
+		for n := 0; ctx.Err() == nil && p.alive(); n++ {
+			var id string
+			if measure(ctx, st, "ext create", func() error {
+				raw, err := p.call(ctx, "message", map[string]any{"room_id": generalRoom, "body": body,
+					"ext": map[string]any{"keep": 1, "big": jsontext.Value(bigExtNumber), "gone": ""}})
+				if err != nil {
+					return err
+				}
+				var result struct {
+					MessageID string `json:"message_id"`
+				}
+				err = json.Unmarshal(raw, &result)
+				id = result.MessageID
+				return err
+			}) != nil {
+				continue
+			}
+			check("create", id, map[string]string{"keep": "1", "big": bigExtNumber})
+
+			// Two saves of different keys, the second sent before the first
+			// is answered.
+			edit := func(ext map[string]any) map[string]any {
+				params := map[string]any{"room_id": generalRoom, "message_id": id, "body": body}
+				if ext != nil {
+					params["ext"] = ext
+				}
+				return params
+			}
+			if measure(ctx, st, "ext pipelined saves", func() error {
+				left, right := fmt.Sprintf("ext-left-%d", n), fmt.Sprintf("ext-right-%d", n)
+				leftCh, err := p.expect(left)
+				if err != nil {
+					return err
+				}
+				rightCh, err := p.expect(right)
+				if err != nil {
+					return err
+				}
+				if err := p.send(ctx, left, "message", edit(map[string]any{"left": n})); err != nil {
+					return err
+				}
+				if err := p.send(ctx, right, "message", edit(map[string]any{"right": n})); err != nil {
+					return err
+				}
+				if _, err := p.wait(ctx, left, leftCh); err != nil {
+					return err
+				}
+				_, err = p.wait(ctx, right, rightCh)
+				return err
+			}) != nil {
+				continue
+			}
+			both := map[string]string{"keep": "1", "big": bigExtNumber, "left": strconv.Itoa(n), "right": strconv.Itoa(n)}
+			check("pipelined saves", id, both)
+			if save("ext save", edit(nil)) != nil {
+				continue
+			}
+			check("save without ext", id, both)
+			if save("ext save", edit(map[string]any{})) != nil {
+				continue
+			}
+			check("ext {}", id, both)
+			if save("ext save", edit(map[string]any{"keep": nil})) != nil {
+				continue
+			}
+			check("null", id, map[string]string{"keep": "null", "big": bigExtNumber, "left": strconv.Itoa(n), "right": strconv.Itoa(n)})
+			if save("ext save", edit(map[string]any{"keep": map[string]any{}, "left": "", "right": []any{}, "never": ""})) != nil {
+				continue
+			}
+			check("empty values", id, map[string]string{"big": bigExtNumber})
+			if save("ext delete", map[string]any{"room_id": generalRoom, "message_id": id, "deleted": true, "ext": map[string]any{"late": 1}}) != nil {
+				continue
+			}
+			check("tombstone", id, nil)
+		}
+	})
+}
+
+// runSignIn signs guests in over and over and checks that nothing a
+// sign-in causes reaches its connection before the auth result (§3.2):
+// before it, only the server frame and transient notices may arrive.
+func runSignIn(h *hammer, st *stats) {
+	ctx, cancel := st.window()
+	defer cancel()
+	defer st.finish()
+	run(h.clients, func(int) {
+		for ctx.Err() == nil {
+			var mu sync.Mutex
+			answered := false
+			var early []string
+			options := dialOptions{
+				notify: func(method string, frame []byte) {
+					mu.Lock()
+					defer mu.Unlock()
+					if answered || method == "server" {
+						return
+					}
+					var f struct {
+						Params struct {
+							MessageID *string `json:"message_id"`
+						} `json:"params"`
+					}
+					if method == "message" && json.Unmarshal(frame, &f) == nil && f.Params.MessageID == nil {
+						return
+					}
+					early = append(early, method)
+				},
+				onReply: func(id string) {
+					mu.Lock()
+					defer mu.Unlock()
+					answered = true
+				},
+			}
+			var p *peer
+			_ = measure(ctx, st, "sign-in", func() (err error) {
+				p, err = h.dialGuest(ctx, "signer", options)
+				return err
+			})
+			if p != nil {
+				mu.Lock()
+				if len(early) > 0 {
+					h.protocolViolation("%s arrived before the auth result of %s", strings.Join(early, ", "), p.userID)
+				}
+				mu.Unlock()
+				p.close()
+			}
+		}
+	})
 }

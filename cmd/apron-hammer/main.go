@@ -54,12 +54,14 @@ type scenario struct {
 var scenarios = []scenario{
 	{"churn", "connect, sign in as a guest (joining general), and disconnect (leaving it) as fast as possible", runChurn},
 	{"flood", "every client posts to general with one request in flight", runFlood},
-	{"activity", "every client sends typing activity to general", runActivity},
+	{"activity", "every client sends typing activity to general as notifications at a set pace", runActivity},
 	{"slow", "slow consumers that stop reading while others keep posting", runSlow},
 	{"history", "seed a room, then page its history concurrently", runHistory},
 	{"threads", "create many threads, then list them, sign in with a pipelined room_list, and join and leave concurrently", runThreads},
 	{"edits", "post, edit, react, and delete in a loop", runEdits},
 	{"embeds", "upload files and run live streams with readers", runEmbeds},
+	{"ext", "save messages through the ext merge's edge cases, pipelined saves of different keys included", runExt},
+	{"signin", "sign guests in and check that nothing about the new identity precedes the auth result", runSignIn},
 }
 
 func main() {
