@@ -117,9 +117,19 @@ class Raw {
 }
 
 // ---------- Page WebSocket tap ----------
-interface Tap { sent: Frame[]; received: Frame[]; server?: WebSocketRoute; inject(frame: Frame): void }
+interface Tap { sent: Frame[]; received: Frame[]; server?: WebSocketRoute; injected: Set<string>; inject(frame: Frame): void }
+/**
+ * Taps the page's WebSocket. inject sends a frame of the test's own on it; the reply to an
+ * injected request is recorded in received but not passed to the page, which did not send it.
+ */
 async function tapSocket(page: Page): Promise<Tap> {
-	const tap: Tap = { sent: [], received: [], inject(frame) { tap.server!.send(JSON.stringify(frame)); } };
+	const tap: Tap = {
+		sent: [], received: [], injected: new Set(),
+		inject(frame) {
+			if (typeof frame.id === 'string') tap.injected.add(frame.id);
+			tap.server!.send(JSON.stringify(frame));
+		},
+	};
 	await page.routeWebSocket('**/ws', (ws) => {
 		const server = ws.connectToServer();
 		tap.server = server;
@@ -128,7 +138,9 @@ async function tapSocket(page: Page): Promise<Tap> {
 			server.send(message);
 		});
 		server.onMessage((message) => {
-			try { tap.received.push(JSON.parse(String(message))); } catch { /* binary */ }
+			let frame: Frame | undefined;
+			try { frame = JSON.parse(String(message)); tap.received.push(frame!); } catch { /* binary */ }
+			if (typeof frame?.id === 'string' && tap.injected.has(frame.id)) return;
 			ws.send(message);
 		});
 	});
@@ -205,6 +217,14 @@ function pushStub(endpoint: string, p256dh: string, auth: string) {
 
 const findSent = (tap: Tap, method: string) => tap.sent.filter((frame) => frame.method === method);
 const resultOf = (tap: Tap, id: string) => tap.received.find((frame) => frame.id === id);
+let injectedStatus = 0;
+/** Sets a mute on the page's connection with a `status` request of the test's own (§4.11), and waits for its `{}`. */
+async function injectStatus(tap: Tap, params: Record<string, unknown>) {
+	const id = `tap-status-${injectedStatus++}`;
+	tap.inject({ method: 'status', id, params });
+	await expect.poll(() => resultOf(tap, id), { timeout: 5_000 }).toBeTruthy();
+	expect(resultOf(tap, id), `status ${JSON.stringify(params)}`).toMatchObject({ result: {} });
+}
 
 async function waitPosts(posts: Captured[], count: number, timeout = 10_000) {
 	await expect.poll(() => posts.length, { timeout }).toBeGreaterThanOrEqual(count);
@@ -396,14 +416,14 @@ test('web push: register, wake rules, VAPID + aes128gcm delivery, service worker
 	await page.keyboard.press('Escape');
 
 	// --- Room mute via raw status: it silences mentions and replies alike (§4.11) ---
-	tap.inject({ method: 'status', params: { room_id: 'general', mute: true } });
+	await injectStatus(tap, { room_id: 'general', mute: true });
 	await expect.poll(() => tap.received.find((frame) => frame.method === 'status' && frame.params?.room_id === 'general' && frame.params?.mute === true)).toBeTruthy();
 	evidence('room mute echo', tap.received.filter((frame) => frame.method === 'status' && 'room_id' in frame.params).map((f) => f.params));
 	before = capture.posts.length;
 	await user2.request('message', { room_id: 'general', body: { text: 'reply in muted room' }, reply_to: { message_id: ownId } });
 	await user2.request('message', { room_id: 'general', body: { text: `mention in muted room @${user1}`, mentions: [user1] } });
 	await expectNoPost(capture.posts, 'reply and mention in muted room', before);
-	tap.inject({ method: 'status', params: { room_id: 'general', mute: false } });
+	await injectStatus(tap, { room_id: 'general', mute: false });
 	await expect.poll(() => tap.received.find((frame) => frame.method === 'status' && frame.params?.room_id === 'general' && frame.params?.mute === false)).toBeTruthy();
 
 	// --- Attended: no push ---
@@ -530,8 +550,6 @@ async function statusChooser(page: Page): Promise<((label: RegExp) => Promise<vo
 test('status: set with me, derived online, idle, offline as other clients see it; mutes stay private and reach every connection', async ({ page, context, browser }) => {
 	const tap = await tapSocket(page);
 	await openChat(page);
-	// A client implementing §4.11 reports its initial idle at once.
-	test.skip(!findSent(tap, 'status').length, 'This apron-web does not send status yet (apron-web#48)');
 	await signUpWithPasskey(page, context);
 	const user1 = await userIdOf(page);
 	const choose = await statusChooser(page);
@@ -567,8 +585,10 @@ test('status: set with me, derived online, idle, offline as other clients see it
 		await expect.poll(() => resultOf(tap, request.id)?.result?.you?.status).toBe(status);
 	};
 
-	// online derives online and idle from user1's connections.
-	await goIdle(page, tap);
+	// online derives online and idle from user1's connections. A connection starts attended, so
+	// a client implementing §4.11 sends its first `status` when it goes idle.
+	const sendsStatus = await goIdle(page, tap).then(() => true, () => false);
+	test.skip(!sendsStatus, 'This apron-web does not send status yet (apron-web#48)');
 	await expectBoth('idle');
 	await goAttended(page, tap);
 	await expectBoth('online');
@@ -598,7 +618,7 @@ test('status: set with me, derived online, idle, offline as other clients see it
 	await page.getByRole('menuitem', { name: /For 1 hour/ }).or(page.getByRole('option', { name: /For 1 hour/ })).first().click();
 	await expect.poll(() => tap.received.find((frame) => frame.method === 'status' && typeof frame.params?.mute === 'number')).toBeTruthy();
 	await page.keyboard.press('Escape');
-	tap.inject({ method: 'status', params: { room_id: 'general', mute: true } });
+	await injectStatus(tap, { room_id: 'general', mute: true });
 	await expect.poll(() => tap.received.find((frame) => frame.method === 'status' && frame.params?.room_id === 'general' && frame.params?.mute === true)).toBeTruthy();
 	await new Promise((resolve) => setTimeout(resolve, 1_500));
 	expect(lastSeen(observer.frames)).toBe('online');
@@ -614,8 +634,16 @@ test('status: set with me, derived online, idle, offline as other clients see it
 	await prefs.getByRole('button', { name: 'Resume', exact: true }).click();
 	await expect.poll(() => tap.received.slice(receivedBefore).find((frame) => frame.method === 'status' && frame.params?.mute === false && !('room_id' in frame.params))).toBeTruthy();
 	await page.keyboard.press('Escape');
-	tap.inject({ method: 'status', params: { room_id: 'general', mute: false } });
+	await injectStatus(tap, { room_id: 'general', mute: false });
 	await expect.poll(() => tap.received.slice(receivedBefore).find((frame) => frame.method === 'status' && frame.params?.room_id === 'general' && frame.params?.mute === false)).toBeTruthy();
+
+	// The web client sends each `status` as a request, after sign-in, and the server answers {} (§4.11).
+	const sentStatus = findSent(tap, 'status');
+	evidence('status requests and replies', sentStatus.map((frame) => ({ sent: frame, reply: resultOf(tap, frame.id) })));
+	for (const frame of sentStatus) {
+		expect(typeof frame.id, `status without an id: ${JSON.stringify(frame)}`).toBe('string');
+		await expect.poll(() => resultOf(tap, frame.id), { timeout: 5_000 }).toMatchObject({ result: {} });
+	}
 
 	// The page closes: with no connection, user1 is offline.
 	await page.close();
