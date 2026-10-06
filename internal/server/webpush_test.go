@@ -237,3 +237,26 @@ func TestVAPIDAuthorization(t *testing.T) {
 		t.Fatal("sub without a subject")
 	}
 }
+
+// A VAPID header is signed once per audience and subject and reused for
+// vapidTokenReuse, then signed again.
+func TestVAPIDTokensAreReused(t *testing.T) {
+	key, err := newVAPIDKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
+	first, _ := key.authorization("https://push.example.net/a", "mailto:ops@example.com", now)
+	if again, _ := key.authorization("https://PUSH.example.net:443/b", "mailto:ops@example.com", now.Add(vapidTokenReuse-time.Second)); again != first {
+		t.Fatal("a token was signed again for the same audience within the reuse period")
+	}
+	if other, _ := key.authorization("https://push.example.net/a", "", now); other == first {
+		t.Fatal("a token was reused for another subject")
+	}
+	if other, _ := key.authorization("https://other.example.net/a", "mailto:ops@example.com", now); other == first {
+		t.Fatal("a token was reused for another audience")
+	}
+	if later, _ := key.authorization("https://push.example.net/a", "mailto:ops@example.com", now.Add(vapidTokenReuse)); later == first {
+		t.Fatal("a token was reused past the reuse period")
+	}
+}

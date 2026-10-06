@@ -15,6 +15,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -41,6 +42,11 @@ const (
 	// vapidTokenLifetime is how long a VAPID token is valid; RFC 8292
 	// allows at most 24 hours.
 	vapidTokenLifetime = 12 * time.Hour
+	// vapidTokenReuse is how long a VAPID token is reused for its audience
+	// and subject before another is signed, well within its lifetime;
+	// maxVAPIDTokens bounds the tokens kept, one per push service origin.
+	vapidTokenReuse = time.Hour
+	maxVAPIDTokens  = 1024
 )
 
 // pushKeys are a subscription's keys (§4.7 keys): the client's P-256 public
@@ -145,6 +151,17 @@ type vapidKey struct {
 	private *ecdsa.PrivateKey
 	// public is the uncompressed public key in unpadded base64url.
 	public string
+
+	// tokens holds the Authorization header last signed for each audience
+	// and subject, reused for vapidTokenReuse.
+	mu     sync.Mutex
+	tokens map[string]vapidToken
+}
+
+// vapidToken is a signed Authorization header and when it was signed.
+type vapidToken struct {
+	header string
+	signed time.Time
 }
 
 // newVAPIDKey generates a VAPID key pair.
@@ -187,14 +204,44 @@ func (k *vapidKey) encoded() string {
 // authorization is the Authorization header that identifies this server to
 // the push service of endpoint (RFC 8292 section 3): vapid t=<ES256 JWT for
 // the endpoint's origin>, k=<public key>. subject, a mailto: or https: URL,
-// is the contact the push service may use; empty leaves sub out.
+// is the contact the push service may use; empty leaves sub out. A header
+// signed for the same audience and subject within vapidTokenReuse before
+// now is reused, so a burst of pushes to one push service signs once.
 func (k *vapidKey) authorization(endpoint, subject string, now time.Time) (string, error) {
 	parsed, err := url.Parse(endpoint)
 	if err != nil || parsed.Host == "" {
 		return "", errors.New("push endpoint is not an absolute URL")
 	}
+	audience := origin(parsed)
+	key := audience + " " + subject
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if token, ok := k.tokens[key]; ok && !now.Before(token.signed) && now.Sub(token.signed) < vapidTokenReuse {
+		return token.header, nil
+	}
+	header, err := k.sign(audience, subject, now)
+	if err != nil {
+		return "", err
+	}
+	if k.tokens == nil || len(k.tokens) >= maxVAPIDTokens {
+		for stale, token := range k.tokens {
+			if now.Sub(token.signed) >= vapidTokenReuse || now.Before(token.signed) {
+				delete(k.tokens, stale)
+			}
+		}
+		if k.tokens == nil || len(k.tokens) >= maxVAPIDTokens {
+			k.tokens = make(map[string]vapidToken)
+		}
+	}
+	k.tokens[key] = vapidToken{header: header, signed: now}
+	return header, nil
+}
+
+// sign signs a VAPID Authorization header for an audience, valid for
+// vapidTokenLifetime from now.
+func (k *vapidKey) sign(audience, subject string, now time.Time) (string, error) {
 	claims := map[string]any{
-		"aud": origin(parsed),
+		"aud": audience,
 		"exp": now.Add(vapidTokenLifetime).Unix(),
 	}
 	if subject != "" {
