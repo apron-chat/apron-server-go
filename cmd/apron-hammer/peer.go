@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/coder/websocket"
 )
@@ -291,20 +292,6 @@ func (p *peer) call(ctx context.Context, method string, params any) (jsontext.Va
 	return p.wait(ctx, id, ch)
 }
 
-// callRaw sends a hand-written request frame carrying id and waits for its
-// reply.
-func (p *peer) callRaw(ctx context.Context, id string, payload []byte) (jsontext.Value, error) {
-	ch, err := p.expect(id)
-	if err != nil {
-		return nil, err
-	}
-	if err := p.sendRaw(ctx, payload); err != nil {
-		p.forget(id)
-		return nil, err
-	}
-	return p.wait(ctx, id, ch)
-}
-
 func (p *peer) expect(id string) (chan reply, error) {
 	ch := make(chan reply, 1)
 	p.mu.Lock()
@@ -358,4 +345,30 @@ func (p *peer) close() {
 func (p *peer) closeGracefully() {
 	p.closedByUs.Store(true)
 	_ = p.ws.Close(websocket.StatusNormalClosure, "done")
+}
+
+// capabilities connects once and returns server.capabilities from the
+// server frame the server sends first (§3.1).
+func (h *hammer) capabilities() ([]string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	p, err := h.dial(ctx, dialOptions{noRead: true})
+	if err != nil {
+		return nil, err
+	}
+	defer p.close()
+	_, data, err := p.ws.Read(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var frame struct {
+		Method string `json:"method"`
+		Params struct {
+			Capabilities []string `json:"capabilities"`
+		} `json:"params"`
+	}
+	if err := json.Unmarshal(data, &frame); err != nil || frame.Method != "server" {
+		return nil, fmt.Errorf("the first frame is not a server frame: %s", data)
+	}
+	return frame.Params.Capabilities, nil
 }

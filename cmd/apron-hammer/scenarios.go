@@ -810,7 +810,7 @@ func (l *snapshotLog) ext(messageID string) (map[string]string, bool) {
 	return ext, true
 }
 
-// runExt saves messages through the ext merge's edge cases (§3.5, §4.4) and
+// runExt saves messages through the ext merge's edge cases (§4.12, §4.4) and
 // checks each resulting snapshot: a creation drops empty values and keeps
 // integers beyond 2^53 exactly; two saves of different keys pipelined
 // without waiting both survive, as concurrent saves must; "ext": {} and a

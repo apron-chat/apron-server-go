@@ -16,7 +16,11 @@ go run ./cmd/apron-hammer -profile-dir /tmp/apron-profiles
 
 Scenarios run in order against the same server, so the state earlier ones
 leave behind (messages, threads, uploads) is part of the load for later ones.
-Restart the server between runs you want to compare.
+Restart the server between runs you want to compare. A scenario that needs a
+capability the server's `server` frame does not list is skipped: `activity`
+needs `activity`, `history` needs `history` and `rooms`, `threads` needs
+`rooms`, `edits` needs `edit` and `reactions`, `embeds` needs
+`embed:upload` and `embed:stream`, and `ext` needs `edit` and `ext`.
 
 | Scenario   | Load |
 |------------|------|
