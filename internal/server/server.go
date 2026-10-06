@@ -268,11 +268,10 @@ func encodeJSON(value any) []byte {
 	return payload
 }
 
-// value decodes the record.
+// value decodes the record. Its ext keeps its values as raw JSON, so
+// re-encoding the record keeps them exactly.
 func (r *logRecord) value() map[string]any {
-	var value map[string]any
-	_ = json.Unmarshal(r.raw, &value)
-	return value
+	return decodeObject(r.raw)
 }
 
 // rewrite replaces the record with edit applied to its decoded value.

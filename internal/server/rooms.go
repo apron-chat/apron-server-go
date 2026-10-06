@@ -462,9 +462,9 @@ func (s *Server) setRoom(c *client, req request) (any, bool, *rpcError) {
 		return nil, false, err
 	}
 	if len(description) > maxDescriptionBytes {
-		return nil, false, invalidParams("description is at most %d bytes", maxDescriptionBytes)
+		return nil, false, &rpcError{Code: codeTooLarge, Message: fmt.Sprintf("description is at most %d bytes", maxDescriptionBytes)}
 	}
-	ext, err := parseObject(req.params, "ext", false)
+	extWrite, _, err := parseExt(req.params, "ext")
 	if err != nil {
 		return nil, false, err
 	}
@@ -477,16 +477,24 @@ func (s *Server) setRoom(c *client, req request) (any, bool, *rpcError) {
 	defer s.unlock()
 	u := c.user
 	var parent *roomState
+	var keptExt extObject
 	if updating {
 		existing := s.visibleRoomLocked(u, roomID)
 		if existing == nil {
 			return nil, false, invalidParams("Unknown room %q", roomID)
 		}
 		parent = existing.parent
+		keptExt = extOf(existing.record["ext"])
 	} else if parentID != "" {
 		if parent = s.visibleRoomLocked(u, parentID); parent == nil {
 			return nil, false, invalidParams("Unknown parent room %q", parentID)
 		}
+	}
+	// ext merges into the room's (§3.5), and the limit applies to the
+	// result; other client fields are replaced (§4.3.4).
+	ext := mergeExt(keptExt, extWrite)
+	if encodedSize(ext) > maxRoomExtBytes {
+		return nil, false, &rpcError{Code: codeTooLarge, Message: fmt.Sprintf("The room's ext would be over %d bytes", maxRoomExtBytes)}
 	}
 	if err := s.admitPostLocked(u); err != nil {
 		return nil, false, err
@@ -502,7 +510,7 @@ func (s *Server) setRoom(c *client, req request) (any, bool, *rpcError) {
 	if description != "" {
 		fields["description"] = description
 	}
-	if ext != nil {
+	if len(ext) > 0 {
 		fields["ext"] = ext
 	}
 	if _, given := req.params["private"]; !given && !updating && parent != nil {
@@ -546,9 +554,10 @@ func (s *Server) setRoom(c *client, req request) (any, bool, *rpcError) {
 const (
 	maxThreadTitleRunes = 60
 	defaultThreadTitle  = "Thread"
-	// maxDescriptionBytes bounds a room's description, which every room
-	// record carries.
+	// maxDescriptionBytes bounds a room's description, and maxRoomExtBytes
+	// its merged ext, which every room record carries.
 	maxDescriptionBytes = 16 << 10
+	maxRoomExtBytes     = 16 << 10
 )
 
 // threadTitle derives a default thread title from the first line of its

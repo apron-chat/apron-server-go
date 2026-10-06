@@ -127,7 +127,7 @@ type storedRoom struct {
 	Parent      string                  `json:"parent,omitzero"`
 	Private     bool                    `json:"private,omitzero"`
 	Active      map[string]int64        `json:"active,omitzero"`
-	Record      map[string]any          `json:"record"`
+	Record      jsontext.Value          `json:"record"`
 	RecordLogID int64                   `json:"record_log_id"`
 	CreatedID   int64                   `json:"created_id"`
 	LatestID    int64                   `json:"latest_id"`
@@ -158,7 +158,7 @@ type storedPasskey struct {
 type storedUser struct {
 	Name        string           `json:"name,omitzero"`
 	Avatar      string           `json:"avatar,omitzero"`
-	Ext         map[string]any   `json:"ext,omitzero"`
+	Ext         extObject        `json:"ext,omitzero"`
 	AvatarEmbed string           `json:"avatar_embed,omitzero"`
 	LeftAt      map[string]int64 `json:"left_at,omitzero"`
 	Passkey     *storedPasskey   `json:"passkey,omitzero"`
@@ -346,7 +346,7 @@ func (s *Server) entriesLocked(d dirtySet) []store.Entry {
 
 func (s *Server) storedRoomLocked(r *roomState) storedRoom {
 	stored := storedRoom{
-		Record:      r.record,
+		Record:      encodeJSON(r.record),
 		RecordLogID: r.recordLogID,
 		CreatedID:   r.createdID,
 		LatestID:    r.latestID,
@@ -504,7 +504,7 @@ func (s *Server) restoreLocked() (map[string]bool, error) {
 			stored.Active = make(map[string]int64)
 		}
 		s.rooms[id] = &roomState{
-			id: id, record: stored.Record, recordLogID: stored.RecordLogID, createdID: stored.CreatedID,
+			id: id, record: decodeObject(stored.Record), recordLogID: stored.RecordLogID, createdID: stored.CreatedID,
 			latestID: stored.LatestID, creator: stored.Creator, private: stored.Private, active: stored.Active,
 			members: make(map[string]*userState), reads: make(map[string]readCursor),
 		}

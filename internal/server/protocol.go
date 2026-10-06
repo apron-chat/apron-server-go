@@ -5,6 +5,8 @@ import (
 	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"fmt"
+	"maps"
+	"slices"
 )
 
 const (
@@ -155,6 +157,125 @@ func parseObject(params map[string]jsontext.Value, name string, required bool) (
 		return nil, invalidParams("%s must be an object", name)
 	}
 	return value, nil
+}
+
+// extObject is an ext object (§3.5) keyed by extension name, each value
+// kept as the JSON it arrived as, so a merge or a store keeps it byte for
+// byte, numbers beyond 2^53 included.
+type extObject = map[string]jsontext.Value
+
+// parseExt reads an optional ext object of a write (§3.5). present reports
+// whether the request carried it.
+func parseExt(params map[string]jsontext.Value, name string) (ext extObject, present bool, err *rpcError) {
+	raw, ok := params[name]
+	if !ok {
+		return nil, false, nil
+	}
+	if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) || json.Unmarshal(raw, &ext) != nil || ext == nil {
+		return nil, true, invalidParams("%s must be an object", name)
+	}
+	for key, value := range ext {
+		value = slices.Clone(value)
+		if value.Compact() != nil {
+			return nil, true, invalidParams("%s.%s is not valid JSON", name, key)
+		}
+		ext[key] = value
+	}
+	return ext, true, nil
+}
+
+// emptyJSON reports whether a compact JSON value is an empty value ("", [],
+// or {}), which clears what it is merged into (§3.3).
+func emptyJSON(value jsontext.Value) bool {
+	switch string(value) {
+	case `""`, `[]`, `{}`:
+		return true
+	}
+	return false
+}
+
+// mergeExt merges a write's ext into the kept one, one level deep (§3.5):
+// each key the write carries replaces the kept value, a key whose value is
+// empty is removed, and keys the write leaves out stay. null is an ordinary
+// value, and an empty write changes nothing. The result is a new object, or
+// nil when no key is left; kept is not modified.
+func mergeExt(kept, write extObject) extObject {
+	merged := make(extObject, len(kept)+len(write))
+	maps.Copy(merged, kept)
+	for key, value := range write {
+		if emptyJSON(value) {
+			delete(merged, key)
+		} else {
+			merged[key] = value
+		}
+	}
+	if len(merged) == 0 {
+		return nil
+	}
+	return merged
+}
+
+// clearedExt lists, as their empty values, the keys of a write's ext that
+// cleared a key that was kept, for a notification that carries the change
+// (§3.3).
+func clearedExt(kept, write extObject) extObject {
+	var cleared extObject
+	for key, value := range write {
+		if _, had := kept[key]; had && emptyJSON(value) {
+			if cleared == nil {
+				cleared = make(extObject)
+			}
+			cleared[key] = value
+		}
+	}
+	return cleared
+}
+
+// extOf returns a decoded object's ext as an extObject: kept as is when it
+// already is one, re-encoded when it was decoded into plain values.
+func extOf(value any) extObject {
+	switch value := value.(type) {
+	case extObject:
+		return value
+	case map[string]any:
+		ext := make(extObject, len(value))
+		for key, child := range value {
+			if raw := encodeJSON(child); raw != nil {
+				ext[key] = raw
+			}
+		}
+		return ext
+	}
+	return nil
+}
+
+// decodeObject decodes a JSON object, keeping the values of a top-level
+// ext as raw JSON so that re-encoding the object keeps them exactly.
+func decodeObject(raw []byte) map[string]any {
+	var fields map[string]jsontext.Value
+	if json.Unmarshal(raw, &fields) != nil || fields == nil {
+		return nil
+	}
+	value := make(map[string]any, len(fields))
+	for key, field := range fields {
+		if key == "ext" {
+			var ext extObject
+			if json.Unmarshal(field, &ext) == nil && ext != nil {
+				value[key] = ext
+				continue
+			}
+		}
+		var decoded any
+		if json.Unmarshal(field, &decoded) == nil {
+			value[key] = decoded
+		}
+	}
+	return value
+}
+
+// encodedSize is the size of a value encoded as JSON.
+func encodedSize(value any) int {
+	return len(encodeJSON(value))
 }
 
 func cloneValue(value any) any {

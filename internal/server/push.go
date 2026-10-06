@@ -7,6 +7,7 @@ import (
 	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"errors"
+	"fmt"
 	"io"
 	"maps"
 	"net"
@@ -208,7 +209,7 @@ func (s *Server) registerPush(c *client, req request) (any, bool, *rpcError) {
 		return nil, false, invalidParams("%s", problem)
 	}
 	if len(endpoint) > maxPushURLBytes || len(token) > maxPushTokenLen {
-		return nil, false, invalidParams("url is at most %d bytes and token at most %d", maxPushURLBytes, maxPushTokenLen)
+		return nil, false, &rpcError{Code: codeTooLarge, Message: fmt.Sprintf("url is at most %d bytes and token at most %d", maxPushURLBytes, maxPushTokenLen)}
 	}
 	pushID, err := parseString(req.params, "push_id", false)
 	if err != nil {

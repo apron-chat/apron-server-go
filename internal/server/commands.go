@@ -77,7 +77,7 @@ func (s *Server) command(c *client, req request) (any, bool, *rpcError) {
 	if err := validateBody(body); err != nil {
 		return nil, false, err
 	}
-	if _, err := parseObject(req.params, "ext", false); err != nil {
+	if _, _, err := parseExt(req.params, "ext"); err != nil {
 		return nil, false, err
 	}
 	text, _ := body["text"].(string)

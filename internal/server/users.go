@@ -35,7 +35,7 @@ type userState struct {
 	id     string
 	name   string
 	avatar string
-	ext    map[string]any
+	ext    extObject
 	// email is the account's sign-in address (§4.11), lowercased; empty for
 	// guests and passkey users without one.
 	email string
@@ -146,7 +146,7 @@ func (u *userState) profile() map[string]any {
 		value["roles"] = append([]string{}, u.roles...)
 	}
 	if len(u.ext) > 0 {
-		value["ext"] = cloneObject(u.ext)
+		value["ext"] = maps.Clone(u.ext)
 	}
 	return value
 }
@@ -487,11 +487,13 @@ func (s *Server) sharersLocked(u *userState) []*userState {
 
 // notifyProfileLocked sends a `user` notification after a profile change:
 // `you` to the user's connections other than except, and `new` to everyone
-// who shares a room with them (§3.3). removed lists fields the change
-// removed, announced as empty values.
-func (s *Server) notifyProfileLocked(u *userState, except *client, removed ...string) {
-	profile := withRemoved(u.profile(), removed)
-	you := notification("user", map[string]any{"you": withRemoved(u.you(), removed)})
+// who shares a room with them (§3.3). Each carries the complete profile, so
+// at least the fields that changed. removed lists fields the change
+// removed, and cleared the ext keys it removed, both announced as empty
+// values, since clients merge a notification into the object they keep.
+func (s *Server) notifyProfileLocked(u *userState, except *client, cleared extObject, removed ...string) {
+	profile := withCleared(withRemoved(u.profile(), removed), cleared)
+	you := notification("user", map[string]any{"you": withCleared(withRemoved(u.you(), removed), cleared)})
 	for c := range u.clients {
 		if c != except {
 			c.enqueue(you)
@@ -508,12 +510,23 @@ func (s *Server) notifyProfileLocked(u *userState, except *client, removed ...st
 // withRemoved adds each removed field to a profile as its empty value.
 func withRemoved(profile map[string]any, removed []string) map[string]any {
 	for _, field := range removed {
-		if field == "ext" {
-			profile[field] = map[string]any{}
-		} else {
-			profile[field] = ""
-		}
+		profile[field] = ""
 	}
+	return profile
+}
+
+// withCleared adds each cleared ext key to a profile's ext as its empty
+// value (§3.5).
+func withCleared(profile map[string]any, cleared extObject) map[string]any {
+	if len(cleared) == 0 {
+		return profile
+	}
+	ext := maps.Clone(extOf(profile["ext"]))
+	if ext == nil {
+		ext = make(extObject, len(cleared))
+	}
+	maps.Copy(ext, cleared)
+	profile["ext"] = ext
 	return profile
 }
 
@@ -536,12 +549,9 @@ func (s *Server) updateProfile(c *client, req request) (any, bool, *rpcError) {
 	if err != nil {
 		return nil, false, err
 	}
-	ext, err := parseObject(req.params, "ext", false)
+	extWrite, hasExt, err := parseExt(req.params, "ext")
 	if err != nil {
 		return nil, false, err
-	}
-	if ext != nil && len(req.params["ext"]) > maxProfileExtBytes {
-		return nil, false, invalidParams("ext is at most %d bytes", maxProfileExtBytes)
 	}
 	status, err := parseString(req.params, "status", false)
 	if err != nil {
@@ -555,10 +565,22 @@ func (s *Server) updateProfile(c *client, req request) (any, bool, *rpcError) {
 	defer s.unlock()
 	u := c.user
 	if hasAvatar && avatar != "" && avatar != u.avatar && !validAvatar(avatar) {
+		if strings.HasPrefix(avatar, "data:") && len(avatar) > maxAvatarDataURLBytes {
+			return nil, false, &rpcError{Code: codeTooLarge, Message: fmt.Sprintf("An avatar data: URL is at most %d bytes; upload larger images with /avatar", maxAvatarDataURLBytes)}
+		}
 		return nil, false, invalidParams("avatar must be an https: URL or a data:image URL of at most %d bytes; upload larger images with /avatar", maxAvatarDataURLBytes)
 	}
 	if hasStatus && !settableStatus(status) {
 		status = statusNone
+	}
+	// ext merges into the kept one (§3.5), and the limit applies to the
+	// result.
+	ext := u.ext
+	if hasExt {
+		ext = mergeExt(u.ext, extWrite)
+		if encodedSize(ext) > maxProfileExtBytes {
+			return nil, false, &rpcError{Code: codeTooLarge, Message: fmt.Sprintf("Your profile's ext would be over %d bytes", maxProfileExtBytes)}
+		}
 	}
 	// A status change counts against the user's limit on status changes,
 	// as a `status` request does (§4.5), so `me` flipping it in a loop
@@ -585,19 +607,14 @@ func (s *Server) updateProfile(c *client, req request) (any, bool, *rpcError) {
 	if hasAvatar && avatar == "" {
 		removed = append(removed, "avatar")
 	}
-	if ext != nil {
-		u.ext = ext
-		if len(ext) == 0 {
-			u.ext = nil
-			removed = append(removed, "ext")
-		}
-	}
+	cleared := clearedExt(u.ext, extWrite)
+	u.ext = ext
 	if hasStatus {
 		u.chosen = status
 	}
 	result := map[string]any{"you": withRemoved(u.you(), removed)}
 	if !jsonEqual(before, u.profile()) || !jsonEqual(beforeYou, u.you()) {
-		s.notifyProfileLocked(u, c, removed...)
+		s.notifyProfileLocked(u, c, cleared, removed...)
 	}
 	if req.hasID {
 		c.sendResult(req, result)

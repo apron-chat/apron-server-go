@@ -543,7 +543,7 @@ func (s *Server) approveEmailLocked(c *client, req request, token, name, request
 		s.touchUser(account.id)
 		if s.grantRolesLocked(account) {
 			// The account's roles changed with its address.
-			s.notifyProfileLocked(account, nil)
+			s.notifyProfileLocked(account, nil, nil)
 		}
 		result := map[string]any{}
 		c.sendResult(req, result)

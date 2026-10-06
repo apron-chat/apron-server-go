@@ -417,7 +417,7 @@ func (s *Server) writeUpload(w http.ResponseWriter, r *http.Request, e *embedSta
 			s.setAvatarEmbedLocked(u, e)
 			u.avatar = e.fileURL()
 			s.touchUser(u.id)
-			s.notifyProfileLocked(u, nil)
+			s.notifyProfileLocked(u, nil, nil)
 		} else {
 			s.removeEmbedLocked(e.id)
 		}

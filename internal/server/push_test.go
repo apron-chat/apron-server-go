@@ -271,7 +271,6 @@ func TestPushRegistration(t *testing.T) {
 		{"kind": "relay", "url": "/relative"},
 		{"kind": "relay", "url": "https://user:pass@relay.example/a"},
 		{"kind": "relay", "url": "https://relay.example/a b"},
-		{"kind": "relay", "url": "https://relay.example/" + strings.Repeat("a", maxPushURLBytes)},
 		{"kind": "relay", "url": endpoint, "token": 5},
 		{"kind": "relay", "url": endpoint, "push_id": ""},
 		{"kind": "relay", "url": endpoint, "push_id": "has space"},
@@ -289,6 +288,8 @@ func TestPushRegistration(t *testing.T) {
 	} {
 		a.expectError(t, "push_register", "bad-"+formatID(int64(i)), params, codeInvalidParams)
 	}
+	// A url rejected for its size is too_large (§1.1).
+	a.expectError(t, "push_register", "long-url", map[string]any{"kind": "relay", "url": "https://relay.example/" + strings.Repeat("a", maxPushURLBytes)}, codeTooLarge)
 	registration := func(u string) *pushRegistration {
 		app.mu.RLock()
 		defer app.mu.RUnlock()
@@ -318,7 +319,7 @@ func TestPushRegistration(t *testing.T) {
 	if spellings != 1 {
 		t.Fatalf("registrations of one endpoint under two spellings: %d", spellings)
 	}
-	a.expectError(t, "push_register", "long", map[string]any{"kind": "relay", "url": "https://push.example.net/" + strings.Repeat("a", maxPushURLBytes-len("https://push.example.net/")+1)}, codeInvalidParams)
+	a.expectError(t, "push_register", "long", map[string]any{"kind": "relay", "url": "https://push.example.net/" + strings.Repeat("a", maxPushURLBytes-len("https://push.example.net/")+1)}, codeTooLarge)
 	// Unregistering removes only the caller's; an unknown url succeeds.
 	a.result(t, "push_unregister", "unregister", map[string]any{"url": "https://PUSH.example.net/s/abc"})
 	a.result(t, "push_unregister", "unknown", map[string]any{"url": "https://push.example.net/never"})

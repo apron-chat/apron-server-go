@@ -155,8 +155,9 @@ func TestProfileAndPushSizeLimits(t *testing.T) {
 	config.AllowInsecurePush = true
 	_, httpServer := newTestServer(t, config)
 	a := dialTestClient(t, httpServer)
-	a.expectError(t, "me", "ext", map[string]any{"ext": map[string]any{"x": strings.Repeat("y", maxProfileExtBytes)}}, codeInvalidParams)
-	a.expectError(t, "push_register", "url", map[string]any{"kind": "relay", "url": "http://relay.example/" + strings.Repeat("p", maxPushURLBytes)}, codeInvalidParams)
+	// A value rejected for its size is too_large (§1.1).
+	a.expectError(t, "me", "ext", map[string]any{"ext": map[string]any{"x": strings.Repeat("y", maxProfileExtBytes)}}, codeTooLarge)
+	a.expectError(t, "push_register", "url", map[string]any{"kind": "relay", "url": "http://relay.example/" + strings.Repeat("p", maxPushURLBytes)}, codeTooLarge)
 }
 
 func TestConnectionAndRateLimits(t *testing.T) {

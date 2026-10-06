@@ -445,13 +445,33 @@ func TestProfilesAndUserNotifications(t *testing.T) {
 		t.Fatalf("empty me changed the profile: %#v", kept)
 	}
 	b.expectQuiet(t)
-	// An empty value removes a field, announced as that empty value.
-	you = a.result(t, "me", "clear", map[string]any{"ext": map[string]any{}, "avatar": ""})["you"]
-	cleared := map[string]any{"user_id": "guest_1", "name": "Ada", "avatar": "", "ext": map[string]any{}, "status": "online"}
+	// "ext": {} changes nothing (§3.5).
+	if kept := a.result(t, "me", "empty-ext", map[string]any{"ext": map[string]any{}})["you"]; !reflect.DeepEqual(kept, any(want)) {
+		t.Fatalf("ext {} changed the profile: %#v", kept)
+	}
+	b.expectQuiet(t)
+	// ext merges one level deep: a key the write carries replaces the kept
+	// value whole, null included, and keys it leaves out stay.
+	you = a.result(t, "me", "merge", map[string]any{"ext": map[string]any{"example.net": nil}})["you"]
+	merged := maps.Clone(want)
+	merged["ext"] = map[string]any{"example.org": map[string]any{"pronouns": "she/her"}, "example.net": nil}
+	if !reflect.DeepEqual(you, any(merged)) {
+		t.Fatalf("merge result: %#v", you)
+	}
+	if notice := b.notification(t, "user"); !reflect.DeepEqual(notice, map[string]any{"new": merged}) {
+		t.Fatalf("merge notification: %#v", notice)
+	}
+	// An empty value removes a field or an ext key. The result is complete,
+	// and the notification, which clients merge, carries what it removed as
+	// those empty values.
+	you = a.result(t, "me", "clear", map[string]any{"ext": map[string]any{"example.org": "", "example.net": []any{}, "absent.example": map[string]any{}}, "avatar": ""})["you"]
+	cleared := map[string]any{"user_id": "guest_1", "name": "Ada", "avatar": "", "status": "online"}
 	if !reflect.DeepEqual(you, any(cleared)) {
 		t.Fatalf("removal result: %#v", you)
 	}
-	if notice := b.notification(t, "user"); !reflect.DeepEqual(notice, map[string]any{"new": cleared}) {
+	announced := maps.Clone(cleared)
+	announced["ext"] = map[string]any{"example.org": "", "example.net": []any{}}
+	if notice := b.notification(t, "user"); !reflect.DeepEqual(notice, map[string]any{"new": announced}) {
 		t.Fatalf("removal notification: %#v", notice)
 	}
 	if users := listRooms(t, b, map[string]any{"room_id": "general", "members": true})["users"].([]any); !reflect.DeepEqual(users[0], map[string]any{"user_id": "guest_1", "name": "Ada", "status": "online"}) {

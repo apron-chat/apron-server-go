@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json/jsontext"
 	"encoding/json/v2"
+	"fmt"
 	"slices"
 	"sort"
 	"time"
@@ -113,7 +114,7 @@ func (s *Server) saveMessage(c *client, req request) (any, bool, *rpcError) {
 			return nil, false, err
 		}
 	}
-	ext, err := parseObject(req.params, "ext", false)
+	extWrite, _, err := parseExt(req.params, "ext")
 	if err != nil {
 		return nil, false, err
 	}
@@ -155,6 +156,19 @@ func (s *Server) saveMessage(c *client, req request) (any, bool, *rpcError) {
 			return nil, false, &rpcError{Code: codeDenied, Message: "A reply cannot quote a message that fewer people can see"}
 		}
 	}
+	var previous map[string]any
+	if current != nil {
+		previous = current.snapshot()
+	}
+	// ext merges into the current snapshot's (§3.5), and the limit applies
+	// to the result. A tombstone carries none (§4.4).
+	var ext extObject
+	if !deleted {
+		ext = mergeExt(extOf(previous["ext"]), extWrite)
+		if encodedSize(ext) > maxMessageExtBytes {
+			return nil, false, &rpcError{Code: codeTooLarge, Message: fmt.Sprintf("The message's ext would be over %d bytes", maxMessageExtBytes)}
+		}
+	}
 	if !replacing {
 		if text, _ := body["text"].(string); text == "" && len(asList(body["embeds"])) == 0 {
 			result := map[string]any{}
@@ -171,10 +185,6 @@ func (s *Server) saveMessage(c *client, req request) (any, bool, *rpcError) {
 	logID := s.nextIDLocked()
 	if !replacing {
 		messageID = formatID(logID)
-	}
-	var previous map[string]any
-	if current != nil {
-		previous = current.snapshot()
 	}
 	// Embeds are resolved last: a new upload or stream embed reserves a write.
 	var written []any
@@ -207,7 +217,7 @@ func (s *Server) saveMessage(c *client, req request) (any, bool, *rpcError) {
 	if hasReply {
 		snapshot["reply_to"] = map[string]any{"message_id": replyID}
 	}
-	if ext != nil {
+	if len(ext) > 0 {
 		snapshot["ext"] = ext
 	}
 
@@ -308,6 +318,7 @@ func tombstone(snapshot map[string]any) {
 		return
 	}
 	delete(snapshot, "body")
+	delete(snapshot, "ext")
 	snapshot["deleted"] = true
 }
 
@@ -377,8 +388,13 @@ func parseMessageRef(params map[string]jsontext.Value, name string) (string, boo
 	return id, true, nil
 }
 
-// maxMentions bounds body.mentions.
-const maxMentions = 256
+const (
+	// maxMentions bounds body.mentions.
+	maxMentions = 256
+	// maxMessageExtBytes bounds a message's ext, merged (§3.5), which
+	// every snapshot of the message carries.
+	maxMessageExtBytes = 64 << 10
+)
 
 // mentions returns a message body's body.mentions (§3.5).
 func mentions(body map[string]any) []string {

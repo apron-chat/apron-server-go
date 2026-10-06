@@ -333,7 +333,7 @@ func TestMessageSnapshotsReplaceEditableState(t *testing.T) {
 	id, creation := save(t, owner, "create", map[string]any{
 		"from":    map[string]any{"user_id": "forged"},
 		"log_id":  "123",
-		"body":    map[string]any{"text": "hello", "format": "plain", "embeds": []any{map[string]any{"kind": "file"}}},
+		"body":    map[string]any{"text": "hello", "format": "plain", "embeds": []any{map[string]any{"kind": "ext:file"}}},
 		"ext":     ext,
 		"custom":  true,
 		"deleted": false,
@@ -357,13 +357,18 @@ func TestMessageSnapshotsReplaceEditableState(t *testing.T) {
 	if stable != id || parseID(t, edit["log_id"]) <= parseID(t, id) {
 		t.Fatalf("edit snapshot: %#v", edit)
 	}
-	if _, kept := edit["ext"]; kept || len(edit["body"].(map[string]any)) != 1 || edit["from"].(map[string]any)["name"] != "Alice" {
-		t.Fatalf("replacement merged editable fields or changed author: %#v", edit)
+	// A save replaces every client field but ext, which merges (§4.4): the
+	// edit that leaves ext out keeps it.
+	if !reflect.DeepEqual(edit["ext"], ext) || len(edit["body"].(map[string]any)) != 1 || edit["from"].(map[string]any)["name"] != "Alice" {
+		t.Fatalf("replacement merged editable fields, lost ext, or changed author: %#v", edit)
 	}
 
-	_, deleted := save(t, owner, "delete", map[string]any{"message_id": id, "deleted": true, "body": "discard even invalid body"})
+	// A tombstone carries neither body nor ext (§4.4).
+	_, deleted := save(t, owner, "delete", map[string]any{"message_id": id, "deleted": true, "body": "discard even invalid body", "ext": map[string]any{"irc": map[string]any{"nick": "x"}}})
 	observer.notification(t, "message")
-	if _, exists := deleted["body"]; exists || deleted["deleted"] != true {
+	_, hasBody := deleted["body"]
+	_, hasExt := deleted["ext"]
+	if hasBody || hasExt || deleted["deleted"] != true {
 		t.Fatalf("tombstone: %#v", deleted)
 	}
 
@@ -376,6 +381,7 @@ func TestMessageSnapshotsReplaceEditableState(t *testing.T) {
 	redacted := func(snapshot map[string]any) map[string]any {
 		value := maps.Clone(snapshot)
 		delete(value, "body")
+		delete(value, "ext")
 		value["deleted"] = true
 		return value
 	}
@@ -539,12 +545,13 @@ func TestRoomSetCreatesAndEditsRoomsAndThreads(t *testing.T) {
 		{"title": nil},
 		{"description": 12},
 		{"description": nil},
-		{"description": strings.Repeat("x", maxDescriptionBytes+1)},
 		{"ext": []any{}},
 		{"ext": nil},
 	} {
 		c.expectError(t, "room_set", fmt.Sprint("bad-room-", i), params, codeInvalidParams)
 	}
+	// A value rejected for its size is too_large (§1.1).
+	c.expectError(t, "room_set", "long-description", map[string]any{"description": strings.Repeat("x", maxDescriptionBytes+1)}, codeTooLarge)
 	c.expectQuiet(t)
 	observer.expectQuiet(t)
 
