@@ -99,7 +99,8 @@ type statusUpdate struct {
 	roomID string
 	scoped bool
 	idle   *bool
-	// mute is present when hasMute: forever, or seconds, 0 ending it.
+	// mute is present when hasMute: forever, a positive number of seconds,
+	// or, when neither, false, which ends it.
 	hasMute     bool
 	muteForever bool
 	muteSeconds int64
@@ -107,9 +108,10 @@ type statusUpdate struct {
 
 // parseStatus reads a status request's params (§4.5). Any field of the
 // wrong type is invalid_params, and then nothing changes: room_id a string,
-// idle a boolean, and mute true, false, or a whole number of seconds of at
-// least 0, a longer one shortened to maxMuteSeconds. room_id scopes only
-// the mute: idle is about the connection either way.
+// idle a boolean, and mute true, false, or a positive whole number of
+// seconds, a longer one shortened to maxMuteSeconds. room_id scopes only
+// the mute, so room_id without mute is invalid_params: idle is about the
+// connection either way.
 func parseStatus(params map[string]jsontext.Value) (statusUpdate, *rpcError) {
 	var update statusUpdate
 	if _, has := params["room_id"]; has {
@@ -133,11 +135,14 @@ func parseStatus(params map[string]jsontext.Value) (statusUpdate, *rpcError) {
 			update.hasMute, update.muteForever = true, true
 		case bytes.Equal(raw, []byte("false")):
 			update.hasMute = true
-		case !bytes.Equal(raw, []byte("null")) && json.Unmarshal(raw, &seconds) == nil && seconds >= 0:
+		case !bytes.Equal(raw, []byte("null")) && json.Unmarshal(raw, &seconds) == nil && seconds > 0:
 			update.hasMute, update.muteSeconds = true, min(seconds, maxMuteSeconds)
 		default:
-			return update, invalidParams("mute must be true, false, or a whole number of seconds")
+			return update, invalidParams("mute must be true, false, or a positive whole number of seconds")
 		}
+	}
+	if update.scoped && !update.hasMute {
+		return update, invalidParams("room_id scopes a mute; send it with mute")
 	}
 	return update, nil
 }
@@ -148,6 +153,7 @@ func (update statusUpdate) mute(now time.Time) muteState {
 		return muteState{forever: true}
 	}
 	if update.muteSeconds == 0 {
+		// mute: false
 		return muteState{}
 	}
 	return muteState{until: now.Add(time.Duration(update.muteSeconds) * time.Second)}

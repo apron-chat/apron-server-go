@@ -159,8 +159,11 @@ func TestStatusValuesAndDerivation(t *testing.T) {
 	if you := b.result(t, "me", "me", map[string]any{})["you"].(map[string]any); you["status"] != "online" {
 		t.Fatalf("you while online: %#v", you)
 	}
-	// A scoped idle is still the connection's: room_id scopes only mute.
-	b.status(t, map[string]any{"room_id": "general", "idle": true})
+	// room_id scopes only mute, so room_id without mute is invalid_params
+	// and changes nothing (§4.5).
+	b.statusError(t, map[string]any{"room_id": "general", "idle": true}, codeInvalidParams)
+	a.expectQuiet(t)
+	b.status(t, map[string]any{"idle": true})
 	expectStatus(t, a, b.userID, "idle")
 	_ = second.ws.Close(websocket.StatusNormalClosure, "bye")
 	_ = b.ws.Close(websocket.StatusNormalClosure, "bye")
@@ -397,16 +400,17 @@ func TestMuteEchoToAllConnections(t *testing.T) {
 		{map[string]any{"mute": true}, "", true},
 		{map[string]any{"mute": false}, "", false},
 		{map[string]any{"mute": 10 * maxMuteSeconds}, "", float64(maxMuteSeconds)},
-		{map[string]any{"mute": 0}, "", false},
 		{map[string]any{"room_id": "general", "mute": true}, "general", true},
-		{map[string]any{"room_id": "general", "mute": 0}, "general", false},
+		{map[string]any{"room_id": "general", "mute": false}, "general", false},
 	} {
 		expectEcho(t, first, step.params, step.roomID, step.mute, second)
 	}
 	// Invalid values, and a room the user cannot see, are invalid_params
 	// and change nothing, the valid fields beside them included.
 	for _, params := range []map[string]any{
-		{"mute": -1}, {"mute": 1.5}, {"mute": "60"}, {"mute": nil},
+		// mute seconds are a positive integer: 0 is not false (§4.5).
+		{"mute": -1}, {"mute": 0}, {"room_id": "general", "mute": 0}, {"mute": 1.5}, {"mute": "60"}, {"mute": nil},
+		{"room_id": "general"}, {"room_id": "general", "idle": false},
 		{"room_id": "missing", "mute": true}, {"room_id": 5, "mute": true},
 		{"mute": true, "idle": "yes"}, {"mute": true, "room_id": nil},
 	} {
@@ -651,9 +655,12 @@ func TestRoomIDScopesOnlyMute(t *testing.T) {
 	// A mute of a room the user cannot see changes nothing.
 	b.statusError(t, map[string]any{"room_id": "missing", "idle": true, "mute": true}, codeInvalidParams)
 	a.expectQuiet(t)
-	// Without a mute, room_id is not looked at: idle applies.
-	if frames := b.status(t, map[string]any{"room_id": "missing", "idle": true}); len(frames) != 0 {
-		t.Fatalf("frames after an idle with a missing room: %#v", frames)
+	// Without a mute, room_id is invalid_params (§4.5), and the idle beside
+	// it does not apply either.
+	b.statusError(t, map[string]any{"room_id": "missing", "idle": true}, codeInvalidParams)
+	a.expectQuiet(t)
+	if frames := b.status(t, map[string]any{"idle": true}); len(frames) != 0 {
+		t.Fatalf("frames after an idle: %#v", frames)
 	}
 	expectStatus(t, a, b.userID, "idle")
 	// A visible room: idle applies to the connection, the mute to the room.
@@ -764,7 +771,7 @@ func TestStatusRateLimit(t *testing.T) {
 	// The default: a burst of statusRequestBurst, refilled one a second, so
 	// a quick run of more is refused.
 	for i := range statusRequestBurst + 2 {
-		b.write(t, map[string]any{"method": "status", "id": statusID(), "params": map[string]any{"room_id": fmt.Sprint(i)}})
+		b.write(t, map[string]any{"method": "status", "id": statusID(), "params": map[string]any{"idle": false, "seq": i}})
 	}
 	limited := 0
 	for range statusRequestBurst + 2 {

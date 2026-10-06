@@ -465,7 +465,7 @@ func TestPushRespectsMutes(t *testing.T) {
 	if got := relay.pushes(t, app, a); len(got) != 0 {
 		t.Fatalf("muted user woken %d", len(got))
 	}
-	expectEcho(t, b, map[string]any{"mute": 0}, "", false)
+	expectEcho(t, b, map[string]any{"mute": false}, "", false)
 	post(maps.Clone(mention))
 	if got := relay.pushes(t, app, a); len(got) != 1 {
 		t.Fatalf("unmuted user woken %d", len(got))
@@ -496,7 +496,7 @@ func TestPushRespectsMutes(t *testing.T) {
 	if got := relay.pushes(t, app, a); len(got) != 0 {
 		t.Fatalf("thread of a muted room woke %d", len(got))
 	}
-	b.status(t, map[string]any{"room_id": "general", "mute": 0})
+	b.status(t, map[string]any{"room_id": "general", "mute": false})
 	ops, _ := saveRoom(t, a, "ops", map[string]any{"title": "Ops"})
 	frames := b.status(t, map[string]any{"room_id": ops, "mute": true})
 	if len(frames) != 1 {
