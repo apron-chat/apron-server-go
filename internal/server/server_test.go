@@ -1135,3 +1135,46 @@ func TestNotificationOnlyWithIDNeverAnswered(t *testing.T) {
 		t.Fatalf("bad params on a request: %#v", reply)
 	}
 }
+
+// Clients send every request with an id, and a server may ignore a request
+// method sent without one (§1.1): this one does, before sign-in and after,
+// whatever it is.
+func TestRequestsWithoutAnIDAreIgnored(t *testing.T) {
+	_, httpServer := newTestServer(t, DefaultConfig())
+	clients := dialGroup(t, httpServer, 2)
+	a, b := clients[0], clients[1]
+	for _, frame := range []map[string]any{
+		{"method": "me", "params": map[string]any{"name": "Nobody"}},
+		{"method": "message", "params": map[string]any{"room_id": "general", "body": map[string]any{"text": "hi"}}},
+		{"method": "room_set", "params": map[string]any{"title": "Nothing"}},
+		{"method": "room_join", "params": map[string]any{"room_id": "general"}},
+		{"method": "status", "params": map[string]any{"mute": true}},
+		{"method": "auth", "params": map[string]any{"scheme": "guest"}},
+	} {
+		a.write(t, frame)
+	}
+	a.expectQuiet(t)
+	b.expectQuiet(t)
+	if rooms := roomIDs(t, listRooms(t, a, map[string]any{})["joined"]); len(rooms) != 1 {
+		t.Fatalf("rooms after ignored requests: %v", rooms)
+	}
+}
+
+// Every notification a sign-in causes on its connection comes after the
+// auth result (§3.2): the new guest's join, then the statuses of those who
+// share a room (§4.5).
+func TestSignInNotificationsFollowTheResult(t *testing.T) {
+	_, httpServer := newTestServer(t, DefaultConfig())
+	a := dialTestClient(t, httpServer)
+	b, _ := dialRaw(t, httpServer)
+	watching(b)
+	b.write(t, map[string]any{"method": "auth", "id": "auth", "params": map[string]any{"scheme": "guest"}})
+	frames := []map[string]any{b.read(t), b.read(t), b.read(t)}
+	if got := methods(frames); !reflect.DeepEqual(got, []string{"reply", "room_update", "user"}) {
+		t.Fatalf("sign-in frames: %v", got)
+	}
+	b.userID = frames[0]["result"].(map[string]any)["you"].(map[string]any)["user_id"].(string)
+	checkMembership(t, membershipOnly(t, frames[1]), "general", b.userID, true)
+	checkStatus(t, frames[2], a.userID, "online")
+	b.expectQuiet(t)
+}
