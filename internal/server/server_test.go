@@ -55,12 +55,7 @@ func TestServerFrame(t *testing.T) {
 	if params["apron"] != float64(8) || params["agent"] != "apron-go/8" || params["ping"] != float64(30) {
 		t.Fatalf("version, agent, and ping: %#v", params)
 	}
-	for _, old := range []string{"protocol", "name", "caps"} {
-		if _, has := params[old]; has {
-			t.Fatalf("pre-0bf4a27 field %q: %#v", old, params)
-		}
-	}
-	if !reflect.DeepEqual(params["capabilities"], []any{"history", "edit", "rooms", "reactions", "activity", "embed:upload", "embed:stream", "command", "status"}) {
+	if !reflect.DeepEqual(params["capabilities"], []any{"history", "edit", "rooms", "reactions", "activity", "embed:upload", "embed:stream", "command", "status", "ext"}) {
 		t.Fatalf("capabilities: %#v", params["capabilities"])
 	}
 	// With capability status, server.status lists the optional statuses
@@ -82,9 +77,10 @@ func TestServerFrame(t *testing.T) {
 	if !reflect.DeepEqual(push["relay"], map[string]any{}) || !reflect.DeepEqual(push["wake"], []any{"mentions", "replies", "private", "joined", "badge"}) || len(push) != 3 {
 		t.Fatalf("push: %#v", push)
 	}
-	limits := params["ext"].(map[string]any)["apron-go"].(map[string]any)
-	if limits["max_upload_bytes"] != float64(defaultMaxUploadBytes) || limits["stream_keep_bytes"] != float64(defaultStreamKeepBytes) {
-		t.Fatalf("ext limits: %#v", limits)
+	// ext is a capability (§4.12); the server frame carries no ext of its
+	// own.
+	if _, has := params["ext"]; has {
+		t.Fatalf("server.ext: %#v", params["ext"])
 	}
 
 	// A token only signs in, so signup lists the other schemes.

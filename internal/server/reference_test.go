@@ -445,7 +445,7 @@ func TestProfilesAndUserNotifications(t *testing.T) {
 		t.Fatalf("empty me changed the profile: %#v", kept)
 	}
 	b.expectQuiet(t)
-	// "ext": {} changes nothing (§3.5).
+	// "ext": {} changes nothing (§4.12).
 	if kept := a.result(t, "me", "empty-ext", map[string]any{"ext": map[string]any{}})["you"]; !reflect.DeepEqual(kept, any(want)) {
 		t.Fatalf("ext {} changed the profile: %#v", kept)
 	}

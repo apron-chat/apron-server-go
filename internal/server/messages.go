@@ -160,9 +160,9 @@ func (s *Server) saveMessage(c *client, req request) (any, bool, *rpcError) {
 	if current != nil {
 		previous = current.snapshot()
 	}
-	// ext merges into the current snapshot's (§3.5), and the limit applies
+	// ext merges into the current snapshot's (§4.12), and the limit applies
 	// to the result. A creation, and a save of a tombstone, merges into an
-	// empty ext (§3.5), and a tombstone carries none (§4.4).
+	// empty ext (§4.12), and a tombstone carries none (§4.4).
 	var ext extObject
 	if !deleted {
 		ext = mergeExt(extOf(previous["ext"]), extWrite)
@@ -392,7 +392,7 @@ func parseMessageRef(params map[string]jsontext.Value, name string) (string, boo
 const (
 	// maxMentions bounds body.mentions.
 	maxMentions = 256
-	// maxMessageExtBytes bounds a message's ext, merged (§3.5), which
+	// maxMessageExtBytes bounds a message's ext, merged (§4.12), which
 	// every snapshot of the message carries.
 	maxMessageExtBytes = 64 << 10
 )

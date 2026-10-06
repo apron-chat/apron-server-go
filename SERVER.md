@@ -1,7 +1,7 @@
 # aprond
 
 `cmd/aprond` serves the reference Apron backend: it implements protocol v8
-as of apron [3fd2244](https://github.com/shazow/apron/blob/3fd22449b1dede31b6a8030e1359563ead9e487d/PROTOCOL.md),
+as of apron [c9c6856](https://github.com/shazow/apron/blob/c9c68566e266b30a2ee52dd10ecf59530add2779/PROTOCOL.md),
 the commit `testdata/apron` pins
 ([PROTOCOL.md](https://github.com/shazow/apron/blob/main/PROTOCOL.md)), every capability, private rooms,
 roles, passkey and email sign-in, and liveness ping, but not the designs
@@ -32,12 +32,10 @@ Defaults:
 - WebSocket origins: `localhost`, `127.0.0.1`, and `::1` during development
 - `server` frame: `apron: 8`, `agent: "apron-go/8"`, and
   `capabilities`: `history`, `edit`, `rooms`, `reactions`, `activity`,
-  `embed:upload`, `embed:stream`, `command`, `status`; `server.push`: kinds
+  `embed:upload`, `embed:stream`, `command`, `status`, `ext`; `server.push`: kinds
   `relay` and `webpush` (with the server's VAPID `key`) and `wake`:
   `mentions`, `replies`, `private`, `joined`, `badge`; `server.status`:
   `dnd`, `invisible`; `server.ping`: 30 seconds
-- `server.ext["apron-go"]`: frame, history, upload, avatar, stream, and
-  member-listing limits
 - seeded default room: `general` (title `General`)
 - authentication (`server.auth`, in this order): WebAuthn passkeys, email
   codes with `--email.enable` (off by default), bearer-token resume,
@@ -285,7 +283,7 @@ mapped, runs of spaces folded, and the ends trimmed), after invisible
 characters such as controls and bidirectional overrides are dropped, and is
 capped at 64 characters; `avatar` must be an `https:` URL or a
 `data:image/{png,jpeg,gif,webp};base64,` URL of at most 64 KiB (a larger
-one is `too_large`); `ext` merges into the profile's one level deep (§3.5):
+one is `too_large`); `ext` merges into the profile's one level deep (§4.12):
 each key it carries replaces that key's value whole, a key whose value is
 empty (`""`, `[]`, `{}`) is removed, keys it leaves out stay, `null` is kept
 as an ordinary value, and `"ext": {}` changes nothing. Values are kept byte
@@ -445,7 +443,7 @@ account's join to `general`, and a guest's leaves when it is retired.
   as `room_update` `updated`, without joining them. With `room_id` it
   replaces every client field except `parent_room_id` and `private`, which
   are fixed at creation and kept, and `ext`, which merges as `me`'s does
-  (§3.5); other omitted fields are cleared. The merged `ext` is at most
+  (§4.12); other omitted fields are cleared. The merged `ext` is at most
   16 KiB of JSON, or the request is `too_large`. The edit goes as
   `room_update` `updated` to the room's members, to the parent's members for
   a thread that is not private, and to the editor. Both return
@@ -470,7 +468,7 @@ Message notifications and history `messages` are flat snapshots:
 `message` creates a message when `message_id` is absent and, when it is
 present, replaces every client field (`room_id`, `body`, `reply_to`,
 `deleted`) with the submitted state, and merges `ext` into the current
-snapshot's as `me` does (§3.5), so a save that leaves `ext` out keeps it.
+snapshot's as `me` does (§4.12), so a save that leaves `ext` out keeps it.
 A creation, and a save of a tombstone, merges into an empty `ext`.
 Saves apply in server order, each merging into the snapshot current then,
 so concurrent saves of different `ext` keys both survive. The merged `ext`
@@ -557,6 +555,17 @@ clears, and a request that leaves the set unchanged logs nothing. Unknown
 messages and non-string or empty entries are `invalid_params`, an entry
 over 64 bytes is `too_large`, and more than 20 distinct emoji per user is
 `denied`.
+
+## Extension data
+
+With capability `ext` (§4.12), the server keeps the `ext` that clients
+write with `me`, `message`, and `room_set`, and merges it one level deep,
+as each section above describes. Its keys are kept as written, and its
+values byte for byte. The merged `ext` is at most 16 KiB of JSON on a
+profile or a room, and 64 KiB on a message; past that the write is
+`too_large` and changes nothing. A tombstone carries none. A `command`'s
+`ext` must be an object, and is otherwise ignored. The server keeps no
+extension data of its own, so the `server` frame carries no `ext`.
 
 ## Commands
 

@@ -518,7 +518,7 @@ func withRemoved(profile map[string]any, removed []string) map[string]any {
 }
 
 // withCleared adds each cleared ext key to a profile's ext as its empty
-// value (§3.5).
+// value (§4.12).
 func withCleared(profile map[string]any, cleared extObject) map[string]any {
 	if len(cleared) == 0 {
 		return profile
@@ -575,7 +575,7 @@ func (s *Server) updateProfile(c *client, req request) (any, bool, *rpcError) {
 	if hasStatus && !settableStatus(status) {
 		status = statusNone
 	}
-	// ext merges into the kept one (§3.5), and the limit applies to the
+	// ext merges into the kept one (§4.12), and the limit applies to the
 	// result.
 	ext := u.ext
 	if hasExt {

@@ -161,12 +161,12 @@ func parseObject(params map[string]jsontext.Value, name string, required bool) (
 	return value, nil
 }
 
-// extObject is an ext object (§3.5) keyed by extension name, each value
+// extObject is an ext object (§4.12) keyed by extension name, each value
 // kept as the JSON it arrived as, so a merge or a store keeps it byte for
 // byte, numbers beyond 2^53 included.
 type extObject = map[string]jsontext.Value
 
-// parseExt reads an optional ext object of a write (§3.5). present reports
+// parseExt reads an optional ext object of a write (§4.12). present reports
 // whether the request carried it.
 func parseExt(params map[string]jsontext.Value, name string) (ext extObject, present bool, err *rpcError) {
 	raw, ok := params[name]
@@ -196,7 +196,7 @@ func emptyJSON(value jsontext.Value) bool {
 	return false
 }
 
-// mergeExt merges a write's ext into the kept one, one level deep (§3.5):
+// mergeExt merges a write's ext into the kept one, one level deep (§4.12):
 // each key the write carries replaces the kept value, a key whose value is
 // empty is removed, and keys the write leaves out stay. null is an ordinary
 // value, and an empty write changes nothing. The result is a new object, or
@@ -219,7 +219,7 @@ func mergeExt(kept, write extObject) extObject {
 
 // clearedExt lists, as their empty values, the keys of a write's ext that
 // cleared a key that was kept, for a notification that carries the change
-// (§3.3).
+// (§4.12).
 func clearedExt(kept, write extObject) extObject {
 	var cleared extObject
 	for key, value := range write {
@@ -233,22 +233,10 @@ func clearedExt(kept, write extObject) extObject {
 	return cleared
 }
 
-// extOf returns a decoded object's ext as an extObject: kept as is when it
-// already is one, re-encoded when it was decoded into plain values.
+// extOf returns the ext of an object decoded with decodeObject, or nil.
 func extOf(value any) extObject {
-	switch value := value.(type) {
-	case extObject:
-		return value
-	case map[string]any:
-		ext := make(extObject, len(value))
-		for key, child := range value {
-			if raw := encodeJSON(child); raw != nil {
-				ext[key] = raw
-			}
-		}
-		return ext
-	}
-	return nil
+	ext, _ := value.(extObject)
+	return ext
 }
 
 // decodeObject decodes a JSON object, keeping the values of a top-level

@@ -490,7 +490,7 @@ func (s *Server) setRoom(c *client, req request) (any, bool, *rpcError) {
 			return nil, false, invalidParams("Unknown parent room %q", parentID)
 		}
 	}
-	// ext merges into the room's (§3.5), and the limit applies to the
+	// ext merges into the room's (§4.12), and the limit applies to the
 	// result; other client fields are replaced (§4.3.4).
 	ext := mergeExt(keptExt, extWrite)
 	if encodedSize(ext) > maxRoomExtBytes {

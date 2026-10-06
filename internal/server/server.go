@@ -761,25 +761,12 @@ func (s *Server) serverParams() map[string]any {
 	params := map[string]any{
 		"apron":        8,
 		"agent":        "apron-go/8",
-		"capabilities": []string{"history", "edit", "rooms", "reactions", "activity", "embed:upload", "embed:stream", "command", "status"},
+		"capabilities": []string{"history", "edit", "rooms", "reactions", "activity", "embed:upload", "embed:stream", "command", "status", "ext"},
 		"auth":         authSchemes,
 		"ping":         max(1, int(s.config.PingInterval/time.Second)),
 		// The optional statuses accepted with `me` (§4.5); online and ""
 		// always are, and are not listed.
 		"status": optionalStatuses,
-		"ext": map[string]any{"apron-go": map[string]any{
-			"max_frame_bytes":           s.config.ReadLimit,
-			"max_history_limit":         maxHistoryPageSize,
-			"max_upload_bytes":          s.config.MaxUploadBytes,
-			"max_message_upload_bytes":  s.config.MaxMessageUploadBytes,
-			"max_avatar_bytes":          s.config.MaxAvatarBytes,
-			"stream_keep_bytes":         s.config.StreamKeepBytes,
-			"max_stream_bytes":          s.config.StreamMaxBytes,
-			"max_stream_seconds":        int(s.config.StreamMaxDuration / time.Second),
-			"messages_per_minute":       s.config.MessagesPerMinute,
-			"write_url_timeout_seconds": int(s.config.UploadStartTimeout / time.Second),
-			"max_listed_members":        s.config.MaxListedMembers,
-		}},
 	}
 	if !s.config.DisablePush {
 		push := map[string]any{"relay": map[string]any{}, "wake": (urgentScopes | wakeJoined | wakeBadge).names()}

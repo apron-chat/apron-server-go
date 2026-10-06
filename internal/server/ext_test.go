@@ -11,7 +11,7 @@ import (
 // bigNumber is above 2^53, so a float64 cannot hold it exactly.
 const bigNumber = "12345678901234567891"
 
-// Writes merge ext one level deep (§3.5): each key a write carries replaces
+// Writes merge ext one level deep (§4.12): each key a write carries replaces
 // the kept value whole, an empty value ("", [], {}) removes the key, keys it
 // leaves out stay, null is an ordinary value, and "ext": {} changes nothing.
 // A message save leaves ext out to keep it.
@@ -75,7 +75,7 @@ func TestMessageSavesMergeExt(t *testing.T) {
 	a.expectQuiet(t)
 
 	// A tombstone carries no ext, and a save of a tombstone merges into an
-	// empty ext (§3.5).
+	// empty ext (§4.12).
 	_, tombstone := save(t, a, "delete", map[string]any{"message_id": id, "deleted": true, "ext": map[string]any{"irc": "x"}})
 	if _, has := tombstone["ext"]; has {
 		t.Fatalf("tombstone: %#v", tombstone)
@@ -135,7 +135,7 @@ func TestConcurrentSavesOfDifferentExtKeysBothSurvive(t *testing.T) {
 }
 
 // room_set replaces the client fields of a room, but merges ext (§4.3.4,
-// §3.5); the limit applies to the merged ext.
+// §4.12); the limit applies to the merged ext.
 func TestRoomSetMergesExt(t *testing.T) {
 	_, httpServer := newTestServer(t, DefaultConfig())
 	a := dialTestClient(t, httpServer)
