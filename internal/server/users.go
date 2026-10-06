@@ -440,18 +440,28 @@ func (s *Server) retireLocked(u *userState) {
 		s.leaveLocked(u, r)
 		delete(r.reads, u.id)
 	}
-	for _, timer := range []*time.Timer{u.muteTimer, u.statusTimer} {
-		if timer != nil {
-			timer.Stop()
-		}
-	}
-	for _, timer := range u.roomMuteTimers {
-		timer.Stop()
-	}
-	s.stopBadgeLocked(u)
+	s.stopTimersLocked(u)
 	s.setAvatarEmbedLocked(u, nil)
 	delete(s.users, u.id)
 	s.touchUser(u.id)
+}
+
+// stopTimersLocked stops u's timers: the ends of its timed mutes, its
+// coalesced status, and its pending badge pushes.
+func (s *Server) stopTimersLocked(u *userState) {
+	if u.muteTimer != nil {
+		u.muteTimer.Stop()
+		u.muteTimer = nil
+	}
+	if u.statusTimer != nil {
+		u.statusTimer.Stop()
+		u.statusTimer = nil
+	}
+	for id, timer := range u.roomMuteTimers {
+		timer.Stop()
+		delete(u.roomMuteTimers, id)
+	}
+	s.stopBadgeLocked(u)
 }
 
 // send queues a frame to every connection of the user.
@@ -517,8 +527,10 @@ func withRemoved(profile map[string]any, removed []string) map[string]any {
 // Names are trimmed and capped; avatars must be https: URLs or small image
 // data: URLs, or the current avatar unchanged. status is the status the user
 // sets (§4.11), "" for a value the server does not support, and is kept
-// across connections and restarts. roles are not settable, and like other
-// unknown fields are ignored.
+// across connections and restarts; a change to it counts against the
+// user's limit on status changes (admitStatusLocked), beyond which the
+// request is retry_after and changes nothing. roles are not settable, and
+// like other unknown fields are ignored.
 func (s *Server) updateProfile(c *client, req request) (any, bool, *rpcError) {
 	name, err := parseString(req.params, "name", false)
 	if err != nil {
@@ -549,6 +561,17 @@ func (s *Server) updateProfile(c *client, req request) (any, bool, *rpcError) {
 	if hasAvatar && avatar != "" && avatar != u.avatar && !validAvatar(avatar) {
 		return nil, false, invalidParams("avatar must be an https: URL or a data:image URL of at most %d bytes; upload larger images with /avatar", maxAvatarDataURLBytes)
 	}
+	if hasStatus && !settableStatus(status) {
+		status = statusNone
+	}
+	// A status change counts against the user's limit on status changes,
+	// as a `status` request does (§4.11), so `me` flipping it in a loop
+	// cannot make the server announce it to every sharer without end.
+	if hasStatus && status != u.chosen {
+		if err := admitStatusLocked(u); err != nil {
+			return nil, false, err
+		}
+	}
 	before, beforeYou := u.profile(), u.you()
 	s.touchUser(u.id)
 	var removed []string
@@ -574,9 +597,6 @@ func (s *Server) updateProfile(c *client, req request) (any, bool, *rpcError) {
 		}
 	}
 	if hasStatus {
-		if !settableStatus(status) {
-			status = statusNone
-		}
 		u.chosen = status
 	}
 	result := map[string]any{"you": withRemoved(u.you(), removed)}

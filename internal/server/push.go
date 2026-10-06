@@ -383,16 +383,18 @@ func (s *Server) checkPushURL(endpoint string) (string, string) {
 //
 // A new message concerns the users its body.mentions lists (scope
 // mentions) and the author of the message it replies to (replies), in any
-// room they can see, and the room's members (joined, and private in a room
-// only some can see). An edit concerns only the users it adds to
-// body.mentions. Nobody is woken by their own message.
+// room they can see, the room's members (joined), and, in a private room
+// or a thread of one, the users who joined every private room on the way
+// up, members of the thread or not (private). An edit concerns only the
+// users it adds to body.mentions. Nobody is woken by their own message.
 //
 // Each concerned user is woken only when no connection of theirs is
 // attended (§4.11). Their unscoped mute or a dnd status silences every
 // scope, and so does their mute of the room, or of a room it is a thread
-// of; what is silenced reaches them only as a badge push (badgeLocked). Each live registration whose wake scopes select the
-// message gets the payload with its push_id and the user's unread count,
-// with the most urgent Urgency of the scopes that select it.
+// of; what is silenced reaches them only as a badge push (badgeLocked).
+// Each live registration whose wake scopes select the message gets the
+// payload with its push_id and the user's unread count, with the most
+// urgent Urgency of the scopes that select it.
 func (s *Server) wakeLocked(m *messageState, snapshot, previous map[string]any) {
 	if s.config.DisablePush || len(s.pushes) == 0 || snapshot["deleted"] == true {
 		return
@@ -409,13 +411,19 @@ func (s *Server) wakeLocked(m *messageState, snapshot, previous map[string]any) 
 				reasons[target.owner] |= wakeReplies
 			}
 		}
-		member := wakeJoined
-		if everyone, _ := r.audience(); !everyone {
-			member |= wakePrivate
-		}
 		for id, u := range r.members {
 			if len(u.pushes) > 0 {
-				reasons[id] |= member
+				reasons[id] |= wakeJoined
+			}
+		}
+		// private selects messages in the private rooms the user joined and
+		// in their threads (§4.7): those who can see a private room's
+		// thread joined every private room above it.
+		if everyone, audience := r.audience(); !everyone {
+			for id, u := range audience {
+				if len(u.pushes) > 0 {
+					reasons[id] |= wakePrivate
+				}
 			}
 		}
 	} else {
@@ -623,10 +631,12 @@ type pushDeliverer struct {
 	latest map[string]*queuedPush
 }
 
-// queuedPush is a delivery's payload and what it reports to.
+// queuedPush is a delivery's registration, as it was when the delivery
+// was handed over, its payload, and what it reports to.
 type queuedPush struct {
-	payload []byte
-	done    func(status int)
+	registration pushRegistration
+	payload      []byte
+	done         func(status int)
 }
 
 // pushLane bounds concurrent deliveries to one push host; queued counts the
@@ -725,8 +735,8 @@ func newPushDeliverer(allowInternal bool) *pushDeliverer {
 
 // deliver POSTs payload to a registration's url. With latest, the key of a
 // badge delivery, a delivery for the same key that has not started takes
-// payload and done in place of its own, and the replaced done is never
-// called. done receives the endpoint's status code, or 0 for a delivery
+// the registration, as registered now, payload, and done in place of its
+// own, and the replaced done is never called. done receives the endpoint's status code, or 0 for a delivery
 // dropped beyond the user's, the host's, or the server's queue bound, or
 // one that gets no answer.
 func (p *pushDeliverer) deliver(registration pushRegistration, payload []byte, urgency, latest string, done func(status int)) {
@@ -738,7 +748,7 @@ func (p *pushDeliverer) deliver(registration pushRegistration, payload []byte, u
 	host := strings.ToLower(parsed.Host)
 	p.mu.Lock()
 	if waiting := p.latest[latest]; latest != "" && waiting != nil {
-		waiting.payload, waiting.done = payload, done
+		waiting.registration, waiting.payload, waiting.done = registration, payload, done
 		p.mu.Unlock()
 		return
 	}
@@ -755,7 +765,7 @@ func (p *pushDeliverer) deliver(registration pushRegistration, payload []byte, u
 		p.hosts[host] = lane
 	}
 	lane.queued++
-	waiting := &queuedPush{payload: payload, done: done}
+	waiting := &queuedPush{registration: registration, payload: payload, done: done}
 	if latest != "" {
 		p.latest[latest] = waiting
 	}
@@ -771,7 +781,7 @@ func (p *pushDeliverer) deliver(registration pushRegistration, payload []byte, u
 		p.slots <- struct{}{}
 		defer func() { <-p.slots }()
 		p.mu.Lock()
-		payload, done := waiting.payload, waiting.done
+		registration, payload, done := waiting.registration, waiting.payload, waiting.done
 		if latest != "" {
 			delete(p.latest, latest)
 		}

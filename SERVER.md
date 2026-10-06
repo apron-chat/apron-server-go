@@ -580,7 +580,8 @@ changes. Every other current user object carries the status others see,
 so a listing shows it: each room's `members` and `users` in `room_list` and
 `room_update` carry it, `offline` and `""` included. A `me` that changes
 the status sends `user` `new` with the profile to those who share a room
-with the user. A derived
+with the user, and counts against the user's limit on `status` requests
+(below): beyond it the `me` is `retry_after` and changes nothing. A derived
 change goes to their connections as `user` `{new: {user_id, status}}`: at
 once ten times, then at most once every two seconds, the latest status
 winning, so a flapping connection costs its rooms little. A new member is
@@ -589,16 +590,19 @@ carries only a recorded user, unless their status is `offline` or `""`.
 
 A sign-in is an `auth` that signs the connection in as a user it is not
 already signed in as. After the result of every sign-in, the connection is
-sent `status` for each of the user's mutes in effect (below), then `user`
-`{new: {user_id, status}}` with the status others see of each user who
-shares a room with it, since its client drops the statuses it kept at each
-sign-in. It leaves out users who show `offline` or `""`, so the snapshot
-tells neither who is invisible nor who opted out; a `dnd` user without a
-connection shows `offline` and is left out. An `auth` that adds a passkey
-or an address, and one that signs the connection in again as the user it
-is signed in as (a guest `auth` on a signed-in connection, or a `token` or
-passkey sign-in as the same user), is not a sign-in: its result is
-followed by neither.
+sent `status` for each of the user's mutes in effect (below), the room
+mutes only of rooms the user can see, then `user` `{new: {user_id,
+status}}` with the status others see of each user who shares a room with
+it, since its client drops the statuses it kept at each sign-in. It leaves
+out users who show `offline` or `""`, so the snapshot tells neither who is
+invisible nor who opted out; a `dnd` user without a connection shows
+`offline` and is left out. Like a room's listed members, it holds at most
+`--max-listed-members` (1000) users, those most recently active (joined or
+posted) in the rooms they share with the user. An `auth` that adds a
+passkey or an address, and one that signs the connection in again as the
+user it is signed in as (a guest `auth` on a signed-in connection, or a
+`token` or passkey sign-in as the same user), is not a sign-in: its result
+is followed by neither.
 
 Clients set `idle` and mutes with the `status` request, answered `{}`
 once the change is applied; a mute's echo (below) reaches the sending
@@ -613,6 +617,7 @@ the valid fields beside an invalid one included:
   a boolean, `mute` that is not `true`, `false`, or a whole number of
   seconds of at least 0, or a `mute` with a `room_id` that names a room the
   user cannot see;
+- `denied` for a mute of another room once the user has 1,000 room mutes;
 - `retry_after` beyond the user's limit: a burst of 20 `status` requests,
   `idle` and mutes alike, across all of the user's connections, refilled one
   a second. `data.retry_after` is the whole seconds until the next is
@@ -635,10 +640,10 @@ the valid fields beside an invalid one included:
 - Each mute that is set, changed, or cleared is sent to every connection
   of the user, the sender's included, as `status` `{mute}` or `{room_id,
   mute}`, with the seconds left or `true`, or `false`. A timed mute ends
-  by itself and is sent as `false` then too; a room mute that runs out
-  also has the unread count taken again and a badge push sent
-  ([Push](#push)). Mutes are never shown to others, and no room record
-  carries one.
+  by itself and is sent as `false` then too. A room mute set, removed, or
+  run out has the unread counts of every room taken again, the room's
+  threads at any depth included, and a badge push sent ([Push](#push)).
+  Mutes are never shown to others, and no room record carries one.
 
 ## Push
 
@@ -685,8 +690,10 @@ A new message selects, by scope:
 - `replies`: the author of the message its `reply_to` refers to, in any
   room they can see.
 - `joined`: the room's members.
-- `private`: the room's members, when the room is private or a thread of
-  one (visible to its members only).
+- `private`: in a private room or a thread of one, at any depth, the users
+  who joined every private room among the room and the rooms it is a
+  thread of, so the members of a private room are woken for its threads
+  whether or not they joined the thread.
 
 An edit selects only the users it adds to `body.mentions` (scope
 `mentions`). Deletions, moves, reactions, and commands select no one, and
@@ -723,9 +730,11 @@ mentioned or replied to them, from that message, until their read cursor
 reaches the room's end. The count stops at 999. The server keeps each
 count per user and room while the user has registrations: a new message
 adds to it, and anything else that may change it (reading, posting,
-joining, leaving, a deletion or move, a room mute set, removed, or run
-out) forgets the counts it touches, which are counted again from the room's newest 5,000 records when
-next needed.
+joining, leaving, a deletion or move) forgets the counts it touches, which
+are counted again from the room's newest 5,000 records when next needed. A
+room mute set, removed, or run out, which changes what counts in the room
+and its threads, and leaving a private room, which hides its threads,
+forget every count of the user.
 
 Badge pushes, `{push_id?, unread}` without `message` and with `Urgency:
 low`, go to `relay` registrations that wake for `badge` whenever the count

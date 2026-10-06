@@ -2,8 +2,10 @@ package server
 
 import (
 	"bytes"
+	"cmp"
 	"encoding/json/jsontext"
 	"encoding/json/v2"
+	"fmt"
 	"maps"
 	"slices"
 	"time"
@@ -38,6 +40,9 @@ const (
 	statusNone      = ""
 	// maxMuteSeconds caps a timed mute at a year; `true` mutes until changed.
 	maxMuteSeconds = 365 * 24 * 60 * 60
+	// maxRoomMutes bounds the rooms a user mutes at once; muting another
+	// is denied until one is unmuted.
+	maxRoomMutes = 1000
 	// Each user may send statusRequestBurst `status` requests at once,
 	// refilled one every statusRequestRefill; beyond them a request is
 	// retry_after (§4.11).
@@ -153,8 +158,8 @@ func (update statusUpdate) mute(now time.Time) muteState {
 // the result. Like other requests it needs a signed-in connection, and a
 // `status` without an id is a notification no client sends, which
 // processFrame ignores. On an error nothing changes: invalid params, a mute
-// of a room the user cannot see, or more requests than the user's limit
-// (admitStatusLocked).
+// of a room the user cannot see, a mute of another room beyond
+// maxRoomMutes, or more requests than the user's limit (admitStatusLocked).
 func (s *Server) status(c *client, req request) (any, bool, *rpcError) {
 	update, err := parseStatus(req.params)
 	if err != nil {
@@ -166,6 +171,11 @@ func (s *Server) status(c *client, req request) (any, bool, *rpcError) {
 	if update.hasMute && update.scoped && s.visibleRoomLocked(u, update.roomID) == nil {
 		return nil, false, invalidParams("Unknown room %q", update.roomID)
 	}
+	if now := time.Now(); update.hasMute && update.scoped && update.mute(now).active(now) {
+		if _, muted := u.roomMutes[update.roomID]; !muted && len(u.roomMutes) >= maxRoomMutes {
+			return nil, false, &rpcError{Code: codeDenied, Message: fmt.Sprintf("At most %d rooms can be muted; unmute one first", maxRoomMutes)}
+		}
+	}
 	if err := admitStatusLocked(u); err != nil {
 		return nil, false, err
 	}
@@ -174,7 +184,8 @@ func (s *Server) status(c *client, req request) (any, bool, *rpcError) {
 }
 
 // admitStatusLocked applies the user's limit on `status` requests, idle and
-// mute alike (§4.11 lets servers limit them): a burst of statusRequestBurst,
+// mute alike, and on `me` requests that change the status (§4.11 lets
+// servers limit them): a burst of statusRequestBurst,
 // refilled one every statusRequestRefill, across all of the user's
 // connections. Beyond it the request is retry_after and changes nothing, so
 // a client flipping idle or its mutes in a loop cannot make the server
@@ -220,8 +231,10 @@ func (s *Server) applyStatusLocked(c *client, u *userState, update statusUpdate)
 	s.touchUser(u.id)
 	s.scheduleRoomMuteLocked(u, r.id)
 	u.send(muteFrame(r.id, mute, now))
-	// What counts toward unread changes with a room's mute (unread.go).
-	s.unreadChangedLocked(u, r.id)
+	// What counts toward unread changes with a room's mute, in the room and
+	// its threads, at any depth (unread.go), so every count is taken again,
+	// as when the mute runs out.
+	s.unreadChangedLocked(u, "")
 }
 
 // muteFrame is the `status` notification that tells the user's connections
@@ -234,11 +247,14 @@ func muteFrame(roomID string, mute muteState, now time.Time) jsontext.Value {
 	return notification("status", params)
 }
 
-// sendAfterAuthLocked sends a connection that has just authenticated, after
+// sendAfterAuthLocked sends a connection that has just signed in, after
 // its auth result (§4.11), one `status` for each of its user's mutes in
-// effect, and the status others see of each user who shares a room with
-// it. offline (a user without connections, or an invisible one) and "" are
-// left out, so it tells neither who is invisible nor who opted out.
+// effect, of rooms the user can see, and the status others see of the users
+// who share a room with it. offline (a user without connections, or an
+// invisible one) and "" are left out, so it tells neither who is invisible
+// nor who opted out. Like a room's listed members (§4.3.1), the statuses
+// are at most Config.MaxListedMembers, of the users most recently active in
+// the rooms they share.
 func (s *Server) sendAfterAuthLocked(c *client) {
 	u := c.user
 	if u == nil {
@@ -250,14 +266,32 @@ func (s *Server) sendAfterAuthLocked(c *client) {
 		frames = append(frames, muteFrame("", u.mute, now))
 	}
 	for _, id := range slices.Sorted(maps.Keys(u.roomMutes)) {
-		if mute := u.roomMutes[id]; mute.active(now) && s.rooms[id] != nil {
+		if mute := u.roomMutes[id]; mute.active(now) && s.visibleRoomLocked(u, id) != nil {
 			frames = append(frames, muteFrame(id, mute, now))
 		}
 	}
+	var shown []*userState
 	for _, other := range s.sharersLocked(u) {
 		if status := other.shownStatus(); status != statusOffline && status != statusNone {
-			frames = append(frames, statusFrame(other, status))
+			shown = append(shown, other)
 		}
+	}
+	if limit := s.config.MaxListedMembers; limit > 0 && len(shown) > limit {
+		// Each user's latest join or message in a room shared with u.
+		active := make(map[string]int64, len(shown))
+		for _, r := range u.joined {
+			for id := range r.members {
+				active[id] = max(active[id], r.active[id])
+			}
+		}
+		slices.SortStableFunc(shown, func(a, b *userState) int {
+			return cmp.Compare(active[b.id], active[a.id])
+		})
+		shown = shown[:limit]
+		slices.SortFunc(shown, func(a, b *userState) int { return cmp.Compare(a.id, b.id) })
+	}
+	for _, other := range shown {
+		frames = append(frames, statusFrame(other, other.shownStatus()))
 	}
 	if len(frames) > 0 {
 		c.enqueueBatch(frames...)
@@ -271,7 +305,7 @@ func (s *Server) scheduleMuteLocked(u *userState) {
 		u.muteTimer.Stop()
 		u.muteTimer = nil
 	}
-	if u.mute.forever || u.mute.until.IsZero() {
+	if s.closed || u.mute.forever || u.mute.until.IsZero() {
 		return
 	}
 	until := u.mute.until
@@ -298,7 +332,7 @@ func (s *Server) scheduleRoomMuteLocked(u *userState, id string) {
 		delete(u.roomMuteTimers, id)
 	}
 	mute, ok := u.roomMutes[id]
-	if !ok || mute.forever || mute.until.IsZero() {
+	if s.closed || !ok || mute.forever || mute.until.IsZero() {
 		return
 	}
 	if u.roomMuteTimers == nil {
@@ -400,7 +434,7 @@ func (u *userState) you() map[string]any {
 // their `you` carries the status the user set, which this does not change.
 func (s *Server) announceStatusLocked(u *userState) {
 	status := u.shownStatus()
-	if status == u.status || u.statusTimer != nil {
+	if s.closed || status == u.status || u.statusTimer != nil {
 		return
 	}
 	if u.statusLimit == nil {

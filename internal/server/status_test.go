@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -902,4 +903,84 @@ func TestListingsCarryStatus(t *testing.T) {
 	before, _ := online.request(t, "room_join", "join", map[string]any{"room_id": room})
 	update := notificationParams(t, before[0], "room_update")
 	check("room_update joined", update["joined"].([]any)[0].(map[string]any)["members"].([]any), update["users"].([]any))
+}
+
+// The statuses sent after a sign-in are at most MaxListedMembers, of the
+// users most recently active in the rooms they share with the user
+// (§4.11).
+func TestAfterAuthStatusesAreBounded(t *testing.T) {
+	config := DefaultConfig()
+	config.MaxListedMembers = 2
+	_, httpServer := newTestServer(t, config)
+	clients := dialGroup(t, httpServer, 4)
+	save(t, clients[0], "post", map[string]any{"body": map[string]any{"text": "hi"}})
+	for _, c := range clients {
+		c.drain(t)
+	}
+	g, _ := dialRaw(t, httpServer)
+	watching(g)
+	guestAuth(t, g)
+	var got []string
+	for _, frame := range g.drain(t) {
+		object := notificationParams(t, frame, "user")["new"].(map[string]any)
+		got = append(got, object["user_id"].(string))
+	}
+	want := []string{clients[0].userID, clients[3].userID}
+	slices.Sort(want)
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("statuses after sign-in for %v, want the most recently active %v", got, want)
+	}
+}
+
+// A `me` that changes the status counts against the user's limit on status
+// changes, as a status request does (§4.11): beyond it the `me` is
+// retry_after and changes nothing, while one that leaves the status as it
+// is passes.
+func TestMeStatusChangesAreLimited(t *testing.T) {
+	app, httpServer := newTestServer(t, DefaultConfig())
+	clients := dialGroup(t, httpServer, 2)
+	a, b := clients[0], clients[1]
+	watching(a)
+	a.drain(t)
+	app.mu.Lock()
+	app.users[b.userID].statusRequests = rate.NewLimiter(rate.Every(time.Hour), 1)
+	app.unlock()
+	if got := setStatus(t, b, "dnd"); got != "dnd" {
+		t.Fatalf("status = %v", got)
+	}
+	expectProfileStatus(t, a, b.userID, "dnd")
+	frame := b.call(t, "me", statusID(), map[string]any{"status": "online", "name": "Bea"})
+	if failure, ok := frame["error"].(map[string]any); !ok || failure["code"] != float64(codeRetryAfter) {
+		t.Fatalf("me beyond the limit: %#v", frame)
+	}
+	if got := setStatus(t, b, "dnd"); got != "dnd" {
+		t.Fatalf("unchanged status = %v", got)
+	}
+	b.expectQuiet(t)
+	a.expectQuiet(t)
+	app.mu.RLock()
+	defer app.mu.RUnlock()
+	if u := app.users[b.userID]; u.chosen != statusDND || u.name == "Bea" {
+		t.Fatalf("after a limited me: status %q name %q", u.chosen, u.name)
+	}
+}
+
+// A user mutes at most maxRoomMutes rooms at once: muting another is
+// denied, while changing or removing a room's mute is not.
+func TestRoomMutesAreBounded(t *testing.T) {
+	app, httpServer := newTestServer(t, DefaultConfig())
+	c := dialTestClient(t, httpServer)
+	room, _ := saveRoom(t, c, "room", map[string]any{"title": "Room"})
+	expectEcho(t, c, map[string]any{"room_id": room, "mute": true}, room, true)
+	app.mu.Lock()
+	u := app.users[c.userID]
+	for i := range maxRoomMutes - 1 {
+		u.roomMutes[fmt.Sprintf("gone-%d", i)] = muteState{forever: true}
+	}
+	app.unlock()
+	c.statusError(t, map[string]any{"room_id": "general", "mute": 60}, codeDenied)
+	expectEcho(t, c, map[string]any{"room_id": room, "mute": 60}, room, float64(60))
+	expectEcho(t, c, map[string]any{"room_id": "general", "mute": false}, "general", false)
+	expectEcho(t, c, map[string]any{"room_id": room, "mute": false}, room, false)
+	expectEcho(t, c, map[string]any{"room_id": "general", "mute": true}, "general", true)
 }

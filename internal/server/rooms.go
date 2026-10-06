@@ -329,11 +329,15 @@ func (s *Server) leaveLocked(u *userState, r *roomState) bool {
 	delete(r.members, u.id)
 	delete(r.active, u.id)
 	u.send(notification("room_update", map[string]any{"left": []any{map[string]any{"room_id": r.id}}, "memberships": []any{membership}}))
+	// The room no longer counts toward the user's unread (§4.7), and
+	// neither do the threads of a private room, joined or not, which the
+	// user can no longer see: their counts are all taken again.
 	if r.private {
 		s.hideThreadsLocked(u, r)
+		s.unreadChangedLocked(u, "")
+	} else {
+		s.unreadChangedLocked(u, r.id)
 	}
-	// The room no longer counts toward the user's unread (§4.7).
-	s.unreadChangedLocked(u, r.id)
 	return true
 }
 

@@ -241,9 +241,9 @@ func (s *Server) messageUnreadLocked(m *messageState, previous map[string]any, f
 
 // scheduleBadgeLocked sends u's badge pushes after badgeDelay, when u has a
 // registration with scope badge (§4.7). Later changes within the delay ride
-// along.
+// along. Nothing is scheduled once the server is shutting down.
 func (s *Server) scheduleBadgeLocked(u *userState) {
-	if u.badgeTimer != nil || !slices.ContainsFunc(slices.Collect(maps.Values(u.pushes)), (*pushRegistration).takesBadges) {
+	if s.closed || u.badgeTimer != nil || !slices.ContainsFunc(slices.Collect(maps.Values(u.pushes)), (*pushRegistration).takesBadges) {
 		return
 	}
 	s.badges.Add(1)

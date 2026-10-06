@@ -6,6 +6,7 @@ import (
 	"crypto/elliptic"
 	"crypto/sha256"
 	"encoding/json/v2"
+	"fmt"
 	"io"
 	"maps"
 	"math/big"
@@ -20,6 +21,7 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+	"golang.org/x/time/rate"
 
 	"github.com/apron-chat/apron-server-go/internal/store"
 )
@@ -1272,5 +1274,181 @@ func TestWakeNamesPastTheBoundsAreIgnored(t *testing.T) {
 	}
 	if got := wakeOf("long", []any{"mentions" + strings.Repeat(" ", maxWakeScopeBytes), "private"}); got != wakePrivate {
 		t.Fatalf("wake with a long name: %v", got)
+	}
+}
+
+// private wakes the members of a private room for messages in its threads,
+// joined or not (§4.7).
+func TestPrivateWakesForThreadsOfJoinedRooms(t *testing.T) {
+	relay := newTestRelay(t)
+	app, httpServer := pushTestServer(t)
+	a := dialTestClient(t, httpServer)
+	carol := addAccount(t, app, "carol", a)
+	addPush(app, carol, pushRegistration{url: relay.URL + "/private", wake: wakePrivate})
+	addAccount(t, app, "dave", a)
+	addPush(app, app.users["dave"], pushRegistration{url: relay.URL + "/dave", wake: wakePrivate | wakeJoined})
+	secret, _ := saveRoom(t, a, "secret", map[string]any{"title": "Secret", "private": true})
+	a.request(t, "room_join", "add-carol", map[string]any{"room_id": secret, "user_id": "carol"})
+	thread, _ := saveRoom(t, a, "thread", map[string]any{"parent_room_id": secret, "private": false})
+	nested, _ := saveRoom(t, a, "nested", map[string]any{"parent_room_id": thread})
+	relay.pushes(t, app, a)
+	for i, room := range []string{thread, nested} {
+		save(t, a, fmt.Sprint("post-", i), map[string]any{"room_id": room, "body": map[string]any{"text": "in a thread"}})
+		got := relay.pushes(t, app, a)
+		if !reflect.DeepEqual(paths(got), []string{"/private"}) || got[0].header.Get("Urgency") != "high" {
+			t.Fatalf("a message in a thread of a private room carol joined woke %v", paths(got))
+		}
+	}
+	// A public room's thread wakes no one for private.
+	public, _ := saveRoom(t, a, "public-thread", map[string]any{"parent_room_id": "general"})
+	save(t, a, "post-public", map[string]any{"room_id": public, "body": map[string]any{"text": "public"}})
+	if got := relay.pushes(t, app, a); len(got) != 0 {
+		t.Fatalf("a public thread woke %v", paths(got))
+	}
+}
+
+// unreadState is u's unread count as kept, and as counted again from the
+// log.
+func unreadState(app *Server, u *userState) (kept, fresh int) {
+	app.mu.Lock()
+	defer app.unlock()
+	now := time.Now()
+	kept = app.unreadLocked(u, now)
+	u.unread = nil
+	return kept, app.unreadLocked(u, now)
+}
+
+// Muting or unmuting a room takes the unread counts of its threads again,
+// which the mute silences too (§4.7, §4.11).
+func TestRoomMuteRecountsThreads(t *testing.T) {
+	relay := newTestRelay(t)
+	app, httpServer := pushTestServer(t)
+	a := dialTestClient(t, httpServer)
+	carol := addAccount(t, app, "carol", a)
+	addPush(app, carol, pushRegistration{url: relay.URL + "/badge", wake: wakeBadge})
+	thread, _ := saveRoom(t, a, "thread", map[string]any{"parent_room_id": "general", "title": "T"})
+	a.request(t, "room_join", "add-carol", map[string]any{"room_id": thread, "user_id": "carol"})
+	save(t, a, "p1", map[string]any{"room_id": thread, "body": map[string]any{"text": "one"}})
+	save(t, a, "p2", map[string]any{"room_id": thread, "body": map[string]any{"text": "two"}})
+	relay.pushes(t, app, a)
+	if kept, fresh := unreadState(app, carol); kept != 2 || fresh != 2 {
+		t.Fatalf("before the mute: kept %d, counted %d", kept, fresh)
+	}
+	for _, mute := range []bool{true, false} {
+		app.mu.Lock()
+		app.applyStatusLocked(nil, carol, statusUpdate{roomID: "general", scoped: true, hasMute: true, muteForever: mute})
+		app.unlock()
+		want := 2
+		if mute {
+			want = 0
+		}
+		if got := relay.pushes(t, app, a); len(got) != 1 || got[0].payload["unread"] != float64(want) {
+			t.Fatalf("badge after mute %v: %#v", mute, got)
+		}
+		if kept, fresh := unreadState(app, carol); kept != want || fresh != want {
+			t.Fatalf("after mute %v: kept %d, counted %d, want %d", mute, kept, fresh, want)
+		}
+	}
+}
+
+// Leaving a private room takes the unread counts of its threads again: a
+// thread the user could see there, and was mentioned in without joining,
+// no longer counts (§4.7).
+func TestLeavingPrivateRoomRecountsThreads(t *testing.T) {
+	relay := newTestRelay(t)
+	app, httpServer := pushTestServer(t)
+	a := dialTestClient(t, httpServer)
+	carol := addAccount(t, app, "carol", a)
+	addPush(app, carol, pushRegistration{url: relay.URL + "/badge", wake: wakeBadge})
+	secret, _ := saveRoom(t, a, "secret", map[string]any{"title": "Secret", "private": true})
+	a.request(t, "room_join", "add-carol", map[string]any{"room_id": secret, "user_id": "carol"})
+	thread, _ := saveRoom(t, a, "thread", map[string]any{"parent_room_id": secret, "private": false})
+	save(t, a, "ping", map[string]any{"room_id": thread, "body": map[string]any{"text": "@carol", "mentions": []any{"carol"}}})
+	relay.pushes(t, app, a)
+	if kept, fresh := unreadState(app, carol); kept != 1 || fresh != 1 {
+		t.Fatalf("before leaving: kept %d, counted %d", kept, fresh)
+	}
+	a.request(t, "room_leave", "remove-carol", map[string]any{"room_id": secret, "user_id": "carol"})
+	if got := relay.pushes(t, app, a); len(got) != 1 || got[0].payload["unread"] != float64(0) {
+		t.Fatalf("badge after leaving: %#v", got)
+	}
+	if kept, fresh := unreadState(app, carol); kept != 0 || fresh != 0 {
+		t.Fatalf("after leaving: kept %d, counted %d", kept, fresh)
+	}
+}
+
+// A badge delivery that replaces one still queued goes with the
+// registration as it is now, its token included, not as it was when the
+// first was queued.
+func TestCoalescedBadgeUsesLatestRegistration(t *testing.T) {
+	release := make(chan struct{})
+	var mu sync.Mutex
+	tokens := map[string]string{}
+	relay := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		tokens[string(body)] = r.Header.Get("Authorization")
+		mu.Unlock()
+		<-release
+	}))
+	defer relay.Close()
+	deliverer := newPushDeliverer(true)
+	for range maxPushPerHost {
+		deliverer.deliver(pushRegistration{userID: "filler", url: relay.URL + "/busy"}, []byte("{}"), "normal", "", func(int) {})
+	}
+	for deadline := time.Now().Add(2 * time.Second); time.Now().Before(deadline); time.Sleep(5 * time.Millisecond) {
+		mu.Lock()
+		busy := len(tokens) > 0
+		mu.Unlock()
+		if busy {
+			break
+		}
+	}
+	key := "u " + relay.URL + "/badge"
+	deliverer.deliver(pushRegistration{userID: "u", url: relay.URL + "/badge", token: "old"}, []byte("1"), "low", key, func(int) {})
+	deliverer.deliver(pushRegistration{userID: "u", url: relay.URL + "/badge", token: "new"}, []byte("2"), "low", key, func(int) {})
+	close(release)
+	deliverer.wait()
+	mu.Lock()
+	defer mu.Unlock()
+	if _, sent := tokens["1"]; sent || tokens["2"] != "Bearer new" {
+		t.Fatalf("badge deliveries: %#v", tokens)
+	}
+}
+
+// Shutdown stops the timers that end timed mutes and send coalesced
+// statuses, and no badge push is scheduled after it.
+func TestShutdownStopsTimers(t *testing.T) {
+	relay := newTestRelay(t)
+	app, httpServer := pushTestServer(t)
+	app.badgeDelay = time.Hour
+	a := dialTestClient(t, httpServer)
+	dora := addAccount(t, app, "dora", a)
+	addPush(app, dora, pushRegistration{url: relay.URL + "/dora", wake: wakeBadge})
+	app.mu.Lock()
+	now := time.Now()
+	dora.mute = muteState{until: now.Add(time.Hour)}
+	app.scheduleMuteLocked(dora)
+	dora.roomMutes["general"] = muteState{until: now.Add(time.Hour)}
+	app.scheduleRoomMuteLocked(dora, "general")
+	dora.statusLimit = rate.NewLimiter(rate.Every(time.Hour), 0)
+	dora.chosen = statusNone
+	app.announceStatusLocked(dora)
+	pending := dora.muteTimer != nil && dora.roomMuteTimers["general"] != nil && dora.statusTimer != nil
+	app.unlock()
+	if !pending {
+		t.Fatal("timers not pending")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := app.Shutdown(ctx); err != nil {
+		t.Fatalf("shutdown with pending timers: %v", err)
+	}
+	app.mu.Lock()
+	defer app.mu.Unlock()
+	app.scheduleBadgeLocked(dora)
+	app.scheduleMuteLocked(dora)
+	if dora.muteTimer != nil || len(dora.roomMuteTimers) != 0 || dora.statusTimer != nil || dora.badgeTimer != nil {
+		t.Fatalf("timers after shutdown: mute %v, room mutes %v, status %v, badge %v", dora.muteTimer, dora.roomMuteTimers, dora.statusTimer, dora.badgeTimer)
 	}
 }
