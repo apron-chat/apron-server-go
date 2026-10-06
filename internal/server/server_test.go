@@ -138,7 +138,7 @@ func TestGuestAuth(t *testing.T) {
 	parseID(t, logID)
 	want := map[string]any{
 		"room_id": "general", "title": "General", "log_id": logID, "latest_log_id": membership["log_id"], "history_log_id": logID,
-		"members": []any{map[string]any{"user_id": "guest_1"}},
+		"members": []any{map[string]any{"user_id": "guest_1", "status": "online"}},
 	}
 	if !reflect.DeepEqual(general, want) || !reflect.DeepEqual(listed["users"], []any{you}) {
 		t.Fatalf("general = %#v with users %#v, want %#v", general, listed["users"], want)

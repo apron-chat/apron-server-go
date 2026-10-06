@@ -803,3 +803,103 @@ func TestStatusRateLimit(t *testing.T) {
 		t.Fatalf("after limited requests: mute %#v, room mutes %#v, status %s", u.mute, u.roomMutes, u.shownStatus())
 	}
 }
+
+// A repeat auth as the user the connection is signed in as is no sign-in
+// (§4.11): a guest auth on a signed-in connection, and a token or passkey
+// sign-in as the same account, are answered with their result and nothing
+// after it, mutes and statuses alike. Another connection signing in as the
+// account is sent both.
+func TestRepeatAuthIsNoSignIn(t *testing.T) {
+	_, httpServer := passkeyTestServer(t)
+	other := dialTestClient(t, httpServer)
+
+	g := dialTestClient(t, httpServer)
+	watching(g)
+	g.drain(t)
+	expectEcho(t, g, map[string]any{"mute": true}, "", true)
+	if before, result := g.request(t, "auth", "again", map[string]any{"scheme": "guest"}); len(before) != 0 || result["you"].(map[string]any)["user_id"] != g.userID {
+		t.Fatalf("guest auth again: %#v then %#v", before, result)
+	}
+	g.expectQuiet(t)
+
+	owner, _ := dialOrigin(t, httpServer, testPasskeyOrigin)
+	authenticator := newTestAuthenticator(t)
+	registered := registerTestPasskey(t, owner, authenticator)
+	watching(owner)
+	owner.drain(t)
+	expectEcho(t, owner, map[string]any{"room_id": "general", "mute": true}, "general", true)
+	before, result := owner.request(t, "auth", "resume-again", map[string]any{"scheme": "token", "token": registered["token"]})
+	if len(before) != 0 || result["you"].(map[string]any)["user_id"] != owner.userID {
+		t.Fatalf("token auth as the same user: %#v then %#v", before, result)
+	}
+	owner.expectQuiet(t)
+	options := passkeyResult(t, passkeyCall(t, owner, "login-begin", "login", "begin", nil))
+	loggedIn := passkeyResult(t, passkeyCall(t, owner, "login-finish", "login", "finish", map[string]any{"credential": authenticator.assertion(t, options, testPasskeyOrigin, "localhost", 0x05)}))
+	if loggedIn["you"].(map[string]any)["user_id"] != owner.userID {
+		t.Fatalf("passkey login as the same user: %#v", loggedIn)
+	}
+	owner.expectQuiet(t)
+
+	// A sign-in as the account elsewhere is sent the mute and the statuses.
+	signedIn, _ := dialOrigin(t, httpServer, testPasskeyOrigin)
+	watching(signedIn)
+	signedIn.result(t, "auth", "resume", map[string]any{"scheme": "token", "token": loggedIn["token"]})
+	frames := signedIn.drain(t)
+	if len(frames) != 3 {
+		t.Fatalf("frames after a sign-in: %#v", frames)
+	}
+	checkMute(t, frames[0], "general", true)
+	statuses := map[string]string{}
+	for _, frame := range frames[1:] {
+		object := notificationParams(t, frame, "user")["new"].(map[string]any)
+		statuses[object["user_id"].(string)] = object["status"].(string)
+	}
+	if want := map[string]string{other.userID: "online", g.userID: "online"}; !reflect.DeepEqual(statuses, want) {
+		t.Fatalf("statuses after a sign-in: %#v, want %#v", statuses, want)
+	}
+}
+
+// Every current user object in room_list and room_update carries the status
+// others see (§4.11), offline and "" included: a room's members and users
+// in a room_list with members, and in a room_update joined.
+func TestListingsCarryStatus(t *testing.T) {
+	app, httpServer := newTestServer(t, DefaultConfig())
+	clients := dialGroup(t, httpServer, 3)
+	online, none, invisible := clients[0], clients[1], clients[2]
+	setStatus(t, none, "")
+	setStatus(t, invisible, "invisible")
+	for _, c := range clients {
+		c.drain(t)
+	}
+	addAccount(t, app, "away", clients...)
+	want := map[string]any{online.userID: "online", none.userID: "", invisible.userID: "offline", "away": "offline"}
+	check := func(what string, members, users []any) {
+		t.Helper()
+		for _, list := range [][]any{members, users} {
+			got := map[string]any{}
+			for _, object := range list {
+				object := object.(map[string]any)
+				status, has := object["status"]
+				if !has {
+					t.Fatalf("%s: %#v without status", what, object)
+				}
+				got[object["user_id"].(string)] = status
+			}
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("%s statuses = %#v, want %#v", what, got, want)
+			}
+		}
+	}
+	listed := listRooms(t, online, map[string]any{"filter": "joined", "members": true})
+	check("room_list", listed["joined"].([]any)[0].(map[string]any)["members"].([]any), listed["users"].([]any))
+
+	room, _ := saveRoom(t, none, "room", map[string]any{"title": "Room"})
+	joinRoom(t, invisible, room)
+	app.mu.Lock()
+	app.addMemberLocked(app.users["away"], app.rooms[room])
+	app.unlock()
+	online.drain(t)
+	before, _ := online.request(t, "room_join", "join", map[string]any{"room_id": room})
+	update := notificationParams(t, before[0], "room_update")
+	check("room_update joined", update["joined"].([]any)[0].(map[string]any)["members"].([]any), update["users"].([]any))
+}

@@ -298,16 +298,18 @@ func (s *Server) finishPasskeyCeremony(c *client, req request, action string, w 
 		}
 	}
 	// A registration adds the passkey to the signed-in connection's
-	// account: it is not a sign-in (§4.11).
-	return s.signInLocked(c, req, user.user, now, ceremony.action != "register")
+	// account, and a login as the user the connection is signed in as
+	// changes no user: neither is a sign-in (§4.11).
+	return s.signInLocked(c, req, user.user, now, ceremony.action != "register" && c.user != user.user)
 }
 
 // signInLocked makes an account the connection's identity after a passkey
 // or email sign-in, or a passkey registration, with a new bearer token for
 // later connections in the result (§3.2). The connection's previous token
-// is forgotten. signIn is whether the auth signed the connection in, rather
-// than adding a passkey to it, which alone sends what follows a sign-in
-// (§4.11).
+// is forgotten. signIn is whether the auth signed the connection in as a
+// user it was not signed in as, rather than adding a passkey to it or
+// authenticating it again as the same user, which alone sends what follows
+// a sign-in (§4.11).
 func (s *Server) signInLocked(c *client, req request, user *userState, now time.Time, signIn bool) (any, *rpcError) {
 	delete(s.sessions, c.token)
 	s.touchSession(c.token)
@@ -363,7 +365,9 @@ func (s *Server) authenticateToken(c *client, req request) (any, *rpcError) {
 	s.sessions[key] = session
 	s.touchSession(key)
 	c.token = key
-	return s.switchUserLocked(c, req, session.user, map[string]any{"token": token}, true), nil
+	// Resuming the user the connection is signed in as is no sign-in
+	// (§4.11), and sends nothing after its result.
+	return s.switchUserLocked(c, req, session.user, map[string]any{"token": token}, c.user != session.user), nil
 }
 
 // parsePasskeyCredential performs only wire-shape validation. A syntactically

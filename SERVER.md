@@ -290,7 +290,9 @@ Current user objects (`you`, `new` in `user`, and `users` in `room_list` and
 elsewhere the status others see. The `old` object of a `user_id` change
 is not a current object and carries no `status`. Recorded objects (`from`
 in messages and reactions, `user` in memberships) carry only `user_id` and `name` as they
-were when logged. Room `members` are bare `{user_id}` objects whose complete
+were when logged. Room `members` are bare `{user_id, status}` objects,
+carrying the status others see like every current object in `room_list`
+and `room_update`, `offline` and `""` included (§4.11), whose complete
 objects are in the accompanying `users`.
 
 `user` notifications carry profile and identity changes; joins and leaves
@@ -575,23 +577,28 @@ see:
 `you` shows the value the user set, so the user's own connections learn
 of a change to it, as with any profile change, but not of the derived
 changes. Every other current user object carries the status others see,
-so a listing shows it. A `me` that changes the status sends `user` `new`
-with the profile to those who share a room with the user. A derived
+so a listing shows it: each room's `members` and `users` in `room_list` and
+`room_update` carry it, `offline` and `""` included. A `me` that changes
+the status sends `user` `new` with the profile to those who share a room
+with the user. A derived
 change goes to their connections as `user` `{new: {user_id, status}}`: at
 once ten times, then at most once every two seconds, the latest status
 winning, so a flapping connection costs its rooms little. A new member is
 announced to a room's other members the same way, since a membership
 carries only a recorded user, unless their status is `offline` or `""`.
 
-After the result of every sign-in, an `auth` that signs the connection
-in, the connection is sent `status` for each of the user's mutes in effect
-(below), then `user` `{new: {user_id, status}}` with the status others see
-of each user who shares a room with it, since its client may have dropped
-the statuses it kept. It leaves out users who show `offline` or `""`, so
-the snapshot tells neither who is invisible nor who opted out; a `dnd` user
-without a connection shows `offline` and is left out. An `auth` that adds
-a passkey or an address to a signed-in connection is not a sign-in: its
-result is followed by neither.
+A sign-in is an `auth` that signs the connection in as a user it is not
+already signed in as. After the result of every sign-in, the connection is
+sent `status` for each of the user's mutes in effect (below), then `user`
+`{new: {user_id, status}}` with the status others see of each user who
+shares a room with it, since its client drops the statuses it kept at each
+sign-in. It leaves out users who show `offline` or `""`, so the snapshot
+tells neither who is invisible nor who opted out; a `dnd` user without a
+connection shows `offline` and is left out. An `auth` that adds a passkey
+or an address, and one that signs the connection in again as the user it
+is signed in as (a guest `auth` on a signed-in connection, or a `token` or
+passkey sign-in as the same user), is not a sign-in: its result is
+followed by neither.
 
 Clients set `idle` and mutes with the `status` request, answered `{}`
 once the change is applied; a mute's echo (below) reaches the sending
@@ -615,9 +622,9 @@ the valid fields beside an invalid one included:
 - `idle` is the connection's, with or without `room_id`: a connection
   starts attended, with nothing kept from the user's earlier or other
   connections, is attended until it sends `idle: true`, and idle until it
-  sends `idle: false`. A message does not end it. The server does not take
-  a connection that never sends `idle` as idle after a quiet period, which
-  §4.11 allows: such a client shows `online` while connected.
+  sends `idle: false`. A message does not end it, and a connection that
+  never sends `idle` is never taken as idle: such a client shows `online`
+  while connected.
 - `mute` is the user's: seconds (longer ones are shortened to a year),
   `true` until changed, or `false` or `0` for not muted, across
   connections and restarts. Without `room_id` it silences every push;

@@ -268,15 +268,14 @@ func (s *Server) joinLocked(u *userState, r *roomState) bool {
 	if membership == nil {
 		return false
 	}
-	u.send(s.joinedUpdateLocked(u, r, membership))
+	u.send(s.joinedUpdateLocked(r, membership))
 	return true
 }
 
-// joinedUpdateLocked renders room_update joined for r, to u: its record with
-// its members, as bare user objects, their current
-// objects in `users`, and the membership that joined the user, if any
-// (§4.3.3).
-func (s *Server) joinedUpdateLocked(u *userState, r *roomState, membership jsontext.Value) jsontext.Value {
+// joinedUpdateLocked renders room_update joined for r: its record with its
+// members, as bare user objects with their status, their complete objects
+// in `users`, and the membership that joined the user, if any (§4.3.3).
+func (s *Server) joinedUpdateLocked(r *roomState, membership jsontext.Value) jsontext.Value {
 	record := s.roomParamsLocked(r)
 	listed := s.addMembersLocked(record, r)
 	params := map[string]any{"joined": []any{record}, "users": profiles(listed)}
@@ -287,9 +286,11 @@ func (s *Server) joinedUpdateLocked(u *userState, r *roomState, membership jsont
 }
 
 // addMembersLocked adds a room's members to its record as bare user
-// objects, ordered by user_id, and returns them. A room with more than
-// Config.MaxListedMembers lists only its most recently active members and
-// adds member_count, the total (§4.3.1).
+// objects, ordered by user_id, and returns them. Each carries the status
+// others see, offline and "" included, as every current user object a
+// listing carries does (§4.11); their complete objects go in `users`. A
+// room with more than Config.MaxListedMembers lists only its most recently
+// active members and adds member_count, the total (§4.3.1).
 func (s *Server) addMembersLocked(record map[string]any, r *roomState) map[string]*userState {
 	ids := slices.Collect(maps.Keys(r.members))
 	listed := r.members
@@ -307,7 +308,7 @@ func (s *Server) addMembersLocked(record map[string]any, r *roomState) map[strin
 	slices.Sort(ids)
 	refs := make([]any, len(ids))
 	for i, id := range ids {
-		refs[i] = map[string]any{"user_id": id}
+		refs[i] = map[string]any{"user_id": id, "status": r.members[id].shownStatus()}
 	}
 	record["members"] = refs
 	return listed
@@ -520,7 +521,7 @@ func (s *Server) setRoom(c *client, req request) (any, bool, *rpcError) {
 		s.touchUser(u.id)
 		membership := s.logMembershipLocked(u, r, true)
 		r.active[u.id] = r.latestID
-		u.send(s.joinedUpdateLocked(u, r, membership))
+		u.send(s.joinedUpdateLocked(r, membership))
 		// A private thread's record goes only to its own members.
 		if parent != nil && !r.private {
 			frame := roomUpdate("updated", s.roomParamsLocked(r))
@@ -745,7 +746,7 @@ func (s *Server) joinRoom(c *client, req request) (any, bool, *rpcError) {
 		}
 	}
 	if !s.joinLocked(target, r) && target == u {
-		c.enqueue(s.joinedUpdateLocked(u, r, nil))
+		c.enqueue(s.joinedUpdateLocked(r, nil))
 	}
 	result := map[string]any{}
 	if req.hasID {

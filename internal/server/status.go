@@ -28,9 +28,7 @@ import (
 // Mutes are private: each change goes to every connection of the user as a
 // `status` notification, and the mutes in effect to a connection after a
 // sign-in. A connection starts attended, and only its own `idle: true`
-// makes it idle: the server does not take a connection that never sends
-// idle as idle after a quiet period, which §4.11 allows but does not ask
-// for.
+// makes it idle: a connection that never sends idle is never taken as idle.
 const (
 	statusOnline    = "online"
 	statusIdle      = "idle"

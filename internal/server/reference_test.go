@@ -57,7 +57,7 @@ func TestRoomListFiltersAndOrder(t *testing.T) {
 	b.notification(t, "user")
 	withMembers := listRooms(t, a, map[string]any{"members": true})
 	general := withMembers["joined"].([]any)[2].(map[string]any)
-	if !reflect.DeepEqual(memberIDs(general), []string{"guest_1", "guest_2"}) || !reflect.DeepEqual(general["members"].([]any)[0], map[string]any{"user_id": "guest_1"}) {
+	if !reflect.DeepEqual(memberIDs(general), []string{"guest_1", "guest_2"}) || !reflect.DeepEqual(general["members"].([]any)[0], map[string]any{"user_id": "guest_1", "status": "online"}) {
 		t.Fatalf("general members: %#v", general)
 	}
 	if randomEntry := withMembers["not_joined"].([]any)[0].(map[string]any); !reflect.DeepEqual(memberIDs(randomEntry), []string{"guest_2"}) {
@@ -427,13 +427,13 @@ func TestProfilesAndUserNotifications(t *testing.T) {
 	if !reflect.DeepEqual(snapshot["from"], map[string]any{"user_id": "guest_1", "name": "Ada"}) {
 		t.Fatalf("from: %#v", snapshot["from"])
 	}
-	// room_list with members: true sends members bare, with complete
-	// objects in users.
+	// room_list with members: true sends members bare but for their status
+	// (§4.11), with complete objects in users.
 	if listed := listRooms(t, b, map[string]any{"filter": "joined"}); listed["users"] != nil {
 		t.Fatalf("users without members: true: %#v", listed)
 	}
 	listed := listRooms(t, b, map[string]any{"filter": "joined", "members": true})
-	if members := listed["joined"].([]any)[0].(map[string]any)["members"].([]any); !reflect.DeepEqual(members[0], map[string]any{"user_id": "guest_1"}) {
+	if members := listed["joined"].([]any)[0].(map[string]any)["members"].([]any); !reflect.DeepEqual(members[0], map[string]any{"user_id": "guest_1", "status": "online"}) {
 		t.Fatalf("members: %#v", members)
 	}
 	if users := listed["users"].([]any); !reflect.DeepEqual(users[0], any(want)) {

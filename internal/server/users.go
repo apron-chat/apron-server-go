@@ -324,11 +324,13 @@ func (s *Server) authenticate(c *client, req request) (any, *rpcError) {
 		return nil, err
 	}
 	if c.user != nil {
+		// Guest auth on a signed-in connection answers with the identity it
+		// has. It signs the connection in as no other user, so it is no
+		// sign-in and sends nothing after its result (§4.11).
 		result := map[string]any{"you": c.user.you()}
 		if req.hasID {
 			c.sendResult(req, result)
 		}
-		s.sendAfterAuthLocked(c)
 		return result, nil
 	}
 	user := newUserState(s.assignUserIDLocked(requested), normalizeName(name))
@@ -348,9 +350,11 @@ func (s *Server) authenticate(c *client, req request) (any, *rpcError) {
 
 // switchUserLocked makes user the connection's identity and replies with
 // extra fields beside `you` (§3.2, §3.3), then, for a sign-in, sends what
-// follows it (§4.11). An auth that adds a passkey to a signed-in connection
-// is not a sign-in, and is sent nothing after its result. No room_update is
-// sent for the new identity's rooms: the client lists them with room_list.
+// follows it (§4.11). A sign-in signs the connection in as a user it was not
+// signed in as: an auth that adds a passkey or address, or that signs in
+// again as the same user, is not one, and is sent nothing after its result.
+// No room_update is sent for the new identity's rooms: the client lists them
+// with room_list.
 func (s *Server) switchUserLocked(c *client, req request, user *userState, extra map[string]any, signIn bool) map[string]any {
 	s.attachLocked(c, user)
 	result := map[string]any{"you": user.you()}
