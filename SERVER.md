@@ -1,7 +1,7 @@
 # aprond
 
 `cmd/aprond` serves the reference Apron backend: it implements protocol v8
-as of apron [25c4f46](https://github.com/shazow/apron/blob/25c4f46d34e9342ac336d67ee620d7d31f6c475d/PROTOCOL.md),
+as of apron [df331ea](https://github.com/shazow/apron/blob/df331eaadda656b31b89f747177ea1876b646d57/PROTOCOL.md),
 the commit `testdata/apron` pins
 ([PROTOCOL.md](https://github.com/shazow/apron/blob/main/PROTOCOL.md)), every capability, private rooms,
 roles, passkey and email sign-in, and liveness ping, but not the designs
@@ -199,7 +199,7 @@ one form described in [Push](#push), and written back.
 ## Connections and liveness
 
 The server answers the liveness ping `{"method":"ping"}` with
-`{"method":"pong"}`, before authentication too; the exact bytes are answered
+`{"method":"pong"}`, before authentication too (§3.2); the exact bytes are answered
 without parsing, and a `ping` notification with other spacing, or with an
 `id`, or with invalid params, is answered as well, with `pong` alone. It also pings at the
 WebSocket level every 30 seconds and closes a connection that does not
@@ -471,7 +471,8 @@ Message notifications and history `messages` are flat snapshots:
 present, replaces every client field (`room_id`, `body`, `reply_to`,
 `deleted`) with the submitted state, and merges `ext` into the current
 snapshot's as `me` does (§4.12), so a save that leaves `ext` out keeps it.
-A creation, and a save of a tombstone, merges into an empty `ext`.
+A creation, and a save onto a message whose current snapshot is a
+tombstone, merges into an empty `ext`.
 Saves apply in server order, each merging into the snapshot current then,
 so concurrent saves of different `ext` keys both survive. The merged `ext`
 is at most 64 KiB of JSON, or the save is `too_large` and changes nothing. Without `room_id` the message goes to
@@ -489,7 +490,7 @@ Edits, deletion, and moves require the creating identity. A missing
 `body.format` means `plain`. Posting to a room does not join it.
 
 Deletion is a save with `deleted: true` and yields a tombstone without `body`
-or `ext`.
+or `ext`: such a save drops `ext` (§4.12).
 The server then redacts the message: its earlier snapshots become tombstones
 at their original `log_id`s, and the content of its hosted embeds is deleted.
 
@@ -565,8 +566,10 @@ write with `me`, `message`, and `room_set`, and merges it one level deep,
 as each section above describes. Its keys are kept as written, and its
 values byte for byte. The merged `ext` is at most 16 KiB of JSON on a
 profile or a room, and 64 KiB on a message; past that the write is
-`too_large` and changes nothing. A tombstone carries none. A `command`'s
-`ext` must be an object, and is otherwise ignored. The server keeps no
+`too_large` and changes nothing. A save with `deleted: true` drops a
+message's `ext`, so a tombstone carries none, and a save onto a tombstone
+merges into an empty one. A `command`'s `ext` is an argument, like the rest
+of its params: it must be an object, and is not kept. The server keeps no
 extension data of its own, so the `server` frame carries no `ext`.
 
 ## Commands
@@ -762,7 +765,7 @@ The payload is the JSON object `{push_id?, unread, message?}`, at most
 2,048 bytes as UTF-8. `message` is the message without `log_id`:
 `message_id`, `room_id`, `from` as recorded, `reply_to`, and `body` with
 `text` cut to 1,000 characters and `mentions`; never `format`, `embeds`, or
-`ext`. When it would be longer, `mentions` goes first, then `text` is cut
+`ext` (§4.9). When it would be longer, `mentions` goes first, then `text` is cut
 to the longest prefix that fits, then `body` goes, `from` keeps only
 `user_id`, and `reply_to` goes, in turn.
 
@@ -834,11 +837,11 @@ The server encodes JSON with `encoding/json/v2` and needs Go 1.27.
 
 Clients send `activity` and `ping` as notifications, and every other method
 as a request, with an `id` (§1.1). A server may ignore a request method
-sent without an `id`, and a notification method sent with one (§1.1), and
-this server does both:
+sent without an `id`, and may ignore the `id` of a notification method and
+handle the frame as a notification (§1.1). This server does both:
 
-- An `id` on `activity` or `ping`, of any type, is ignored: they are
-  processed as the notification and never answered, not even with an error
+- An `id` on `activity` or `ping`, of any type, is ignored: the frame is
+  handled as the notification and never answered, not even with an error
   for invalid or malformed params.
 - A request method sent without an `id` is ignored, whatever its params,
   before sign-in or after: it is neither executed nor answered. This

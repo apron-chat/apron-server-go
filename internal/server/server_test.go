@@ -236,7 +236,8 @@ func TestLivenessPing(t *testing.T) {
 	ping(`{"method":"ping"}`)
 	ping(`{ "method": "ping", "params": {} }`)
 	// A ping with an id is a ping, answered with pong and nothing else: a
-	// server may ignore an id on a notification method (§1.1).
+	// server may ignore the id of a notification method, and handle the
+	// frame as a notification (§1.1).
 	ping(`{"method":"ping","id":"p1"}`)
 	guestAuth(t, c)
 	ping(`{"method":"ping"}`)

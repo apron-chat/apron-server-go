@@ -155,12 +155,17 @@ func (s *Server) saveMessage(c *client, req request) (any, bool, *rpcError) {
 	if current != nil {
 		previous = current.snapshot()
 	}
-	// ext merges into the current snapshot's (§4.12), and the limit applies
-	// to the result. A creation, and a save of a tombstone, merges into an
-	// empty ext (§4.12), and a tombstone carries none (§4.4).
+	// ext merges into the current snapshot's, and the limit applies to the
+	// result: one over it is too_large and changes nothing (§4.12). A
+	// creation, and a save onto a tombstone, merges into an empty ext, and a
+	// save with deleted: true drops it (§4.12).
 	var ext extObject
 	if !deleted {
-		ext = mergeExt(extOf(previous["ext"]), extWrite)
+		var kept extObject
+		if previous["deleted"] != true {
+			kept = extOf(previous["ext"])
+		}
+		ext = mergeExt(kept, extWrite)
 		if encodedSize(ext) > maxMessageExtBytes {
 			return nil, false, &rpcError{Code: codeTooLarge, Message: fmt.Sprintf("The message's ext would be over %d bytes", maxMessageExtBytes)}
 		}
