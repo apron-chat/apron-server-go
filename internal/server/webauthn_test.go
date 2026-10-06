@@ -8,7 +8,6 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json/v2"
-	"maps"
 	"net/http/httptest"
 	"reflect"
 	"testing"
@@ -533,11 +532,11 @@ func TestSignInReplacesGuestAndDeduplicatesPerUser(t *testing.T) {
 	expectMembership(t, owner, "general", guestID, true)
 	expectMembership(t, observer, "general", guestID, true)
 
-	// Signing in replaces the guest identity, which is retired: its leave
-	// is logged in general and reaches general's members, the switching
-	// connection included, which now acts as the passkey user, before its
-	// result. Others who shared a room with the guest then learn of the
-	// user_id change.
+	// Signing in to an existing account replaces the guest identity, which
+	// is retired as when it disconnects: its leave is logged in general and
+	// reaches general's members, the switching connection included, which
+	// now acts as the passkey user, before its result. It is a departure,
+	// not a user_id change: no `user` with `old` follows (§3.3).
 	before, result := switcher.request(t, "auth", "resume", map[string]any{"scheme": "token", "token": registered["token"]})
 	if !reflect.DeepEqual(result["you"], registered["you"]) || len(before) != 1 {
 		t.Fatalf("sign-in %#v after %#v", result, before)
@@ -549,13 +548,7 @@ func TestSignInReplacesGuestAndDeduplicatesPerUser(t *testing.T) {
 			t.Fatalf("member's copy %#v differs from %#v", observed, leave)
 		}
 	}
-	notice := observer.notification(t, "user")
-	// The old object, no current user object, carries no status.
-	retired := maps.Clone(guest)
-	delete(retired, "status")
-	if !reflect.DeepEqual(notice, map[string]any{"new": registered["you"], "old": retired}) {
-		t.Fatalf("user notification = %#v", notice)
-	}
+	observer.expectQuiet(t)
 	owner.expectQuiet(t)
 	switcher.expectQuiet(t)
 

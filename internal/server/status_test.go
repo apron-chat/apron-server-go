@@ -984,3 +984,54 @@ func TestRoomMutesAreBounded(t *testing.T) {
 	expectEcho(t, c, map[string]any{"room_id": room, "mute": false}, room, false)
 	expectEcho(t, c, map[string]any{"room_id": "general", "mute": true}, "general", true)
 }
+
+// A guest connection that signs in to an existing account is announced as
+// the guest's departure, never as a `user` change with `old` (§3.3): its
+// leaves reach the room's members as when it disconnects, and the account
+// then shows through its own status, so an invisible account, or one
+// without a status, shows nothing new, and others never learn it
+// connected. A guest that becomes a new account keeps its user_id, so
+// others are told of no change at all.
+func TestSignInToExistingAccountIsADeparture(t *testing.T) {
+	_, httpServer := passkeyTestServer(t)
+	observer := dialTestClient(t, httpServer)
+	watching(observer)
+	observer.drain(t)
+
+	// A guest that registers a passkey becomes an account in place.
+	newcomer, _ := dialOrigin(t, httpServer, testPasskeyOrigin)
+	registerTestPasskey(t, newcomer, newTestAuthenticator(t))
+	// The guest's join, with its status, and then nothing.
+	expectMembership(t, observer, "general", newcomer.userID, true)
+	expectStatus(t, observer, newcomer.userID, "online")
+	observer.expectQuiet(t)
+
+	for _, status := range []string{"online", "invisible", ""} {
+		owner, _ := dialOrigin(t, httpServer, testPasskeyOrigin)
+		registered := registerTestPasskey(t, owner, newTestAuthenticator(t))
+		setStatus(t, owner, status)
+		_ = owner.ws.Close(websocket.StatusNormalClosure, "away")
+		observer.drain(t)
+
+		guest, _ := dialOrigin(t, httpServer, testPasskeyOrigin)
+		guestAuth(t, guest)
+		expectMembership(t, observer, "general", guest.userID, true)
+		observer.drain(t)
+		guest.request(t, "auth", "resume", map[string]any{"scheme": "token", "token": registered["token"]})
+		expectMembership(t, observer, "general", guest.userID, false)
+		frames := observer.drain(t)
+		switch status {
+		case "online":
+			if len(frames) != 1 {
+				t.Fatalf("after a sign-in to an online account: %#v", frames)
+			}
+			checkStatus(t, frames[0], owner.userID, "online")
+		default:
+			if len(frames) != 0 {
+				t.Fatalf("after a sign-in to an account with status %q: %#v", status, frames)
+			}
+		}
+		_ = guest.ws.Close(websocket.StatusNormalClosure, "done")
+		observer.drain(t)
+	}
+}

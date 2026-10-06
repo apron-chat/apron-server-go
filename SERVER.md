@@ -287,8 +287,7 @@ Current user objects (`you`, `new` in `user`, and `users` in `room_list` and
 `room_update`) carry `avatar`, `ext`, and `roles`, an account's `roles` always,
 `[]` when it holds none, so a role taken away clears it (§3.3), and
 `status` ([Status](#status)): in `you`, the status the user set, and
-elsewhere the status others see. The `old` object of a `user_id` change
-is not a current object and carries no `status`. Recorded objects (`from`
+elsewhere the status others see. Recorded objects (`from`
 in messages and reactions, `user` in memberships) carry only `user_id` and `name` as they
 were when logged. Room `members` are bare `{user_id, status}` objects,
 carrying the status others see like every current object in `room_list`
@@ -298,13 +297,18 @@ objects are in the accompanying `users`.
 `user` notifications carry profile and identity changes; joins and leaves
 are memberships. A profile change sends
 `user` with `you` to the user's other connections and with `new` to everyone
-who shares a room with them. When a sign-in replaces a guest identity on a
-connection, the guest is retired: a leave is logged in every room it had
-joined, and then those who shared a room with it receive `user` with `new` and
-`old`; `old` names the retired identity and carries no `status`. A guest
-whose last connection closes is retired the same way, with a logged leave
-for each room; its `user_id` is never reissued, so its records stay
-consistent. Accounts are never retired.
+who shares a room with them. A guest whose last connection closes is
+retired, with a logged leave for each room it had joined; its `user_id` is
+never reissued, so its records stay consistent. Accounts are never retired.
+
+A sign-in to an existing account on a guest's connection is the guest's
+departure, not a `user_id` change (§3.3): when that was its last
+connection, the guest is retired as above, its leaves reaching the rooms'
+members first, and the account then shows through its own status as on any
+connection ([Status](#status)), so an invisible account, or one without a status,
+shows others nothing new. A guest becomes a new account in place, keeping
+its `user_id`, with a passkey registration or an email addition, so this
+server never sends `user` with `old`.
 
 ## Rooms, threads, and membership
 

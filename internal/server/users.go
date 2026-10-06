@@ -371,8 +371,13 @@ func (s *Server) switchUserLocked(c *client, req request, user *userState, extra
 // attachLocked makes user the connection's identity and announces the
 // status others see of it and of the identity the connection leaves
 // (§4.11). A guest identity left without connections is retired, logging
-// its leaves, and then others who shared a room with it learn of the
-// user_id change through a `user` notification with `new` and `old` (§3.3).
+// its leaves, as when its last connection closes: a sign-in to an existing
+// account is announced as the guest's departure, never as a `user` change
+// with `old` (§3.3), and the account appears to others through its own
+// status, so an invisible one, or one without a status, shows nothing new.
+// A guest that becomes a new account does so in place, keeping its user_id
+// (a passkey registration or an email addition), so this server has no
+// user_id change to announce with `old`.
 func (s *Server) attachLocked(c *client, user *userState) {
 	previous := c.user
 	if previous == user {
@@ -388,25 +393,16 @@ func (s *Server) attachLocked(c *client, user *userState) {
 	}
 	c.user = user
 	user.clients[c] = struct{}{}
+	// The previous identity's departure goes first, then the user's own
+	// status.
+	switch {
+	case previous == nil:
+	case len(previous.clients) == 0 && !previous.account():
+		s.retireLocked(previous)
+	default:
+		s.announceStatusLocked(previous)
+	}
 	s.announceStatusLocked(user)
-	if previous == nil || len(previous.clients) > 0 || previous.account() {
-		if previous != nil {
-			s.announceStatusLocked(previous)
-		}
-		return
-	}
-	sharers := s.sharersLocked(previous)
-	// The old object names the identity that was; it is no current user
-	// object, so it carries no status (§3.3, §4.11).
-	old := previous.profile()
-	delete(old, "status")
-	frame := notification("user", map[string]any{"new": user.profile(), "old": old})
-	s.retireLocked(previous)
-	for _, other := range sharers {
-		if other != user {
-			other.send(frame)
-		}
-	}
 }
 
 // detachLocked forgets a closed connection, retiring its guest identity.
