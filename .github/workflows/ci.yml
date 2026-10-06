@@ -18,7 +18,7 @@ concurrency:
 jobs:
   check:
     runs-on: ubuntu-latest
-    # The push interop tests wait out the 30-second idle timeout (§4.11).
+    # The push interop tests wait out the 30-second idle timeout (§4.5).
     timeout-minutes: 20
     steps:
       # The submodule holds the shared protocol fixtures from shazow/apron.

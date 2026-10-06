@@ -33,7 +33,7 @@ type messageState struct {
 	cached *messageInfo
 }
 
-// messageInfo is what unread counts (§4.7) read of a message's current
+// messageInfo is what unread counts (§4.9) read of a message's current
 // snapshot.
 type messageInfo struct {
 	deleted  bool
@@ -66,14 +66,14 @@ func (m *messageState) snapshot() map[string]any {
 }
 
 // saveMessage creates a message (no message_id) or saves an existing one
-// (§4.2): every client field is replaced by the submitted state. Without
+// (§4.4): every client field is replaced by the submitted state. Without
 // room_id the message goes to the default room (§3.5). A save naming a
 // different room_id moves the message; the snapshot is logged in and
 // broadcast to both rooms, followed by a reactions record in the destination
 // when the message has reactions. The broadcasts precede the result (§1),
 // so a sender who has joined receives a new upload's pending snapshot before
 // the result carrying its write URL. Posting does not join the room
-// (§4.3.5): a poster who has not joined gets only the result. A new message
+// (§4.3.2): a poster who has not joined gets only the result. A new message
 // with no text and no embeds is neither logged nor broadcast, and its
 // result is {}.
 func (s *Server) saveMessage(c *client, req request) (any, bool, *rpcError) {
@@ -229,7 +229,7 @@ func (s *Server) saveMessage(c *client, req request) (any, bool, *rpcError) {
 	}
 	s.messageUnreadLocked(current, previous, movedFrom)
 	if !replacing {
-		// The author's own message moves their read position (§4.7).
+		// The author's own message moves their read position (§4.9).
 		s.unreadChangedLocked(u, destination.id)
 	}
 	s.wakeLocked(current, snapshot, previous)
@@ -281,7 +281,7 @@ func (s *Server) commitSnapshotLocked(m *messageState, snapshot map[string]any, 
 }
 
 // republishLocked publishes a server-made snapshot of a message, such as a
-// finished upload or stream (§4.6.3): edit rewrites a copy of the
+// finished upload or stream (§4.8.3): edit rewrites a copy of the
 // current body, and nothing is published when it reports no change.
 func (s *Server) republishLocked(m *messageState, edit func(body map[string]any) bool) {
 	snapshot := m.snapshot()
@@ -295,7 +295,7 @@ func (s *Server) republishLocked(m *messageState, edit func(body map[string]any)
 }
 
 // redactLocked rewrites a deleted message's earlier snapshots into
-// tombstones at their original log_ids (§4.2).
+// tombstones at their original log_ids (§4.4).
 func (s *Server) redactLocked(m *messageState) {
 	for _, record := range m.records {
 		record.rewrite(tombstone)
@@ -444,7 +444,7 @@ const (
 )
 
 // react replaces the caller's complete reaction set on one message
-// (§4.5). Duplicates collapse; an unchanged set logs nothing. The broadcast
+// (§4.7). Duplicates collapse; an unchanged set logs nothing. The broadcast
 // precedes the result (§1).
 func (s *Server) react(c *client, req request) (any, bool, *rpcError) {
 	messageID, err := parseString(req.params, "message_id", true)

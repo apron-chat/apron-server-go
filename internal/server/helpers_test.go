@@ -26,7 +26,7 @@ type testClient struct {
 	requests int
 	// userID is the identity the guest was assigned at auth.
 	userID string
-	// statuses keeps the bare status announcements of others (§4.11),
+	// statuses keeps the bare status announcements of others (§4.5),
 	// `user` `{new: {user_id, status}}`, which read otherwise skips: they
 	// follow every connection, idle change, and join, and only the status
 	// tests look at them.

@@ -51,7 +51,7 @@ const (
 	accountIDPrefix = "user_"
 )
 
-// EmailSender delivers the codes of email sign-in (PROTOCOL.md §4.10). The
+// EmailSender delivers the codes of email sign-in (PROTOCOL.md §4.11). The
 // server calls it on its own goroutine, outside any lock; an error is logged,
 // and the person asks for another code.
 type EmailSender interface {
@@ -106,7 +106,7 @@ func (l LogEmailSender) SendSignInCode(_ context.Context, m SignInEmail) error {
 	return nil
 }
 
-// emailProposal is a connection's pending proposal (§4.10): to sign in
+// emailProposal is a connection's pending proposal (§4.11): to sign in
 // with an address, or to add it to the proposing account. Its short code
 // works only on that connection; a sign-in's link token, unguessable, works
 // on any connection not signed in. Guarded by s.mu.
@@ -316,7 +316,7 @@ func normalizeEmail(value string) string {
 
 // signInLink builds a sign-in link from the configured page, never from
 // request fields, with the token in the fragment so it stays out of server
-// logs (§4.10): #token=<token>, and &server=<URL> with this server's public
+// logs (§4.11): #token=<token>, and &server=<URL> with this server's public
 // WebSocket URL when it is known, so a client that speaks to several
 // servers presents it to the right one. Values are form-encoded.
 func signInLink(page, token, server string) string {
@@ -351,7 +351,7 @@ func (s *Server) publicWebSocketURL() string {
 	return parsed.String()
 }
 
-// authenticateEmail runs the email scheme under s.mu (§4.10). A request
+// authenticateEmail runs the email scheme under s.mu (§4.11). A request
 // with email proposes: on a connection signed in, guests included, adding
 // the address to that account, else signing in with it. It returns {},
 // whether or not the address has an account, and changes no
@@ -496,7 +496,7 @@ func (s *Server) proposeEmailLocked(c *client, req request, email, name, request
 	return result, nil
 }
 
-// approveEmailLocked approves a proposal with a token (§4.10): the code of
+// approveEmailLocked approves a proposal with a token (§4.11): the code of
 // the connection's own proposal, or the link token of a sign-in proposal
 // made anywhere. Approving a sign-in authenticates this connection, which
 // must not be signed in, to the address's account or a new one, taking a

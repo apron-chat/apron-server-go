@@ -19,7 +19,7 @@ import (
 	"time"
 )
 
-// Web Push (§4.7, push kind webpush, and relay with keys): message
+// Web Push (§4.9, push kind webpush, and relay with keys): message
 // encryption for the client (RFC 8291, the aes128gcm content coding of
 // RFC 8188) and the server's VAPID identification to push services
 // (RFC 8292), with the standard library only.
@@ -49,14 +49,14 @@ const (
 	maxVAPIDTokens  = 1024
 )
 
-// pushKeys are a subscription's keys (§4.7 keys): the client's P-256 public
+// pushKeys are a subscription's keys (§4.9 keys): the client's P-256 public
 // key and its auth secret.
 type pushKeys struct {
 	p256dh []byte
 	auth   []byte
 }
 
-// decodeBase64URL decodes base64url, unpadded as §4.7 sends it, or padded.
+// decodeBase64URL decodes base64url, unpadded as §4.9 sends it, or padded.
 func decodeBase64URL(text string) ([]byte, error) {
 	return base64.RawURLEncoding.DecodeString(strings.TrimRight(text, "="))
 }

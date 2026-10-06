@@ -12,7 +12,7 @@ const (
 	privateNoticeID = "~private"
 )
 
-// serverCommand is one command this server provides (§4.8).
+// serverCommand is one command this server provides (§4.1).
 type serverCommand struct {
 	name  string
 	usage string
@@ -46,7 +46,7 @@ func init() {
 	}
 }
 
-// command runs a `command` request (§4.8). It takes the params of a new
+// command runs a `command` request (§4.1). It takes the params of a new
 // message and is never logged, broadcast, or saved: body.text is the command
 // line, and mentions, reply_to, and embeds are arguments that notify no one.
 // Without room_id it runs in the default room. The result is {} or, for new
@@ -153,7 +153,7 @@ func (s *Server) helpCommand(c *client, r *roomState, _ map[string]any, _ string
 }
 
 // avatarCommand takes exactly one upload embed, whose file becomes the
-// sender's avatar when its write finishes (§4.6.6). The result carries the
+// sender's avatar when its write finishes (§4.8.6). The result carries the
 // write URL.
 func (s *Server) avatarCommand(c *client, _ *roomState, body map[string]any, _ string) (map[string]any, *rpcError) {
 	embeds := asList(body["embeds"])

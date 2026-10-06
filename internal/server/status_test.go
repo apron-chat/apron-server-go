@@ -113,7 +113,7 @@ func expectProfileStatus(t *testing.T, c *testClient, userID, status string) {
 	}
 }
 
-// Each status a user sets (§4.11), as others see it and as the user's own
+// Each status a user sets (§4.5), as others see it and as the user's own
 // `you` shows it: online derives online, idle, or offline from the user's
 // connections; "" is none; dnd is dnd while connected and offline
 // otherwise; invisible is offline to others. An
@@ -239,7 +239,7 @@ func TestStatusValuesAndDerivation(t *testing.T) {
 }
 
 // Others see dnd only while the user has a connection, and offline
-// otherwise (§4.11): the last disconnect announces offline, a reconnect dnd
+// otherwise (§4.5): the last disconnect announces offline, a reconnect dnd
 // again, and listings and the snapshot after a sign-in agree.
 func TestDNDOnlyWhileConnected(t *testing.T) {
 	config := DefaultConfig()
@@ -295,7 +295,7 @@ func TestDNDOnlyWhileConnected(t *testing.T) {
 // An invisible user is offline to others in every frame that could tell:
 // no announcement when they connect, go idle, or leave; none when they join
 // a room; and none in the snapshot another connection gets after auth
-// (§4.11). The same holds for a user who set "".
+// (§4.5). The same holds for a user who set "".
 func TestInvisiblePrivacy(t *testing.T) {
 	config := DefaultConfig()
 	config.WebAuthn = testWebAuthn(t)
@@ -372,7 +372,7 @@ func TestStatusChangesCoalesce(t *testing.T) {
 
 // Each change to the user's mutes goes to all of their connections as
 // `status`, the sender's included: true, the seconds left, or false when a
-// mute is cleared or ends (§4.11). Others never see a mute.
+// mute is cleared or ends (§4.5). Others never see a mute.
 func TestMuteEchoToAllConnections(t *testing.T) {
 	config := DefaultConfig()
 	config.WebAuthn = testWebAuthn(t)
@@ -447,7 +447,7 @@ func TestMuteEchoToAllConnections(t *testing.T) {
 // After a sign-in, a connection is sent, after the auth result, one
 // `status` for each of its user's mutes in effect, then the status others
 // see of each user who shares a room with it, other than offline and ""
-// (§4.11). A `status` before sign-in is denied like any request, and one
+// (§4.5). A `status` before sign-in is denied like any request, and one
 // without an id is ignored, so neither changes anything: the connection
 // starts attended.
 func TestAfterAuthMutesAndStatuses(t *testing.T) {
@@ -539,7 +539,7 @@ func TestAfterAuthMutesAndStatuses(t *testing.T) {
 	}
 }
 
-// The status a user sets and their mutes survive a restart (§4.11): the
+// The status a user sets and their mutes survive a restart (§4.5): the
 // auth result's `you` carries the status, and the mutes follow it.
 func TestStatusSurvivesRestart(t *testing.T) {
 	dir := t.TempDir()
@@ -576,7 +576,7 @@ func TestStatusSurvivesRestart(t *testing.T) {
 }
 
 // Only a sign-in is sent the mutes and statuses after its auth result
-// (§4.11): an auth that adds a passkey or an address to a signed-in
+// (§4.5): an auth that adds a passkey or an address to a signed-in
 // connection is sent nothing after it, while a sign-in to the same account
 // elsewhere is.
 func TestAdditionsAreNotSignIns(t *testing.T) {
@@ -636,7 +636,7 @@ func TestAdditionsAreNotSignIns(t *testing.T) {
 	checkStatus(t, frames[1], other.userID, "online")
 }
 
-// room_id scopes only mute (§4.11): idle is the sending connection's with
+// room_id scopes only mute (§4.5): idle is the sending connection's with
 // any room_id, one that names a room the user cannot see included, and the
 // unscoped mute is untouched by a scoped one. A mute of a room the user
 // cannot see is invalid_params, and then the idle beside it does not apply
@@ -672,7 +672,7 @@ func TestRoomIDScopesOnlyMute(t *testing.T) {
 	}
 }
 
-// A client's `status` is a request (§4.11): answered {} once applied,
+// A client's `status` is a request (§4.5): answered {} once applied,
 // denied before sign-in, and with a bad id or params answered like any
 // request. A `status` without an id is a notification with no meaning,
 // ignored as one with an unknown method is (§1), before sign-in and after,
@@ -751,7 +751,7 @@ func TestStatusIsARequest(t *testing.T) {
 	expectStatus(t, a, b.userID, "online")
 }
 
-// The server limits each user's `status` requests (§4.11): beyond the
+// The server limits each user's `status` requests (§4.5): beyond the
 // limit a request is retry_after, with the seconds to wait, and changes
 // nothing, neither idle nor mute.
 func TestStatusRateLimit(t *testing.T) {
@@ -806,7 +806,7 @@ func TestStatusRateLimit(t *testing.T) {
 }
 
 // A repeat auth as the user the connection is signed in as is no sign-in
-// (§4.11): a guest auth on a signed-in connection, and a token or passkey
+// (§4.5): a guest auth on a signed-in connection, and a token or passkey
 // sign-in as the same account, are answered with their result and nothing
 // after it, mutes and statuses alike. Another connection signing in as the
 // account is sent both.
@@ -861,7 +861,7 @@ func TestRepeatAuthIsNoSignIn(t *testing.T) {
 }
 
 // Every current user object in room_list and room_update carries the status
-// others see (§4.11), offline and "" included: a room's members and users
+// others see (§4.5), offline and "" included: a room's members and users
 // in a room_list with members, and in a room_update joined.
 func TestListingsCarryStatus(t *testing.T) {
 	app, httpServer := newTestServer(t, DefaultConfig())
@@ -907,7 +907,7 @@ func TestListingsCarryStatus(t *testing.T) {
 
 // The statuses sent after a sign-in are at most MaxListedMembers, of the
 // users most recently active in the rooms they share with the user
-// (§4.11).
+// (§4.5).
 func TestAfterAuthStatusesAreBounded(t *testing.T) {
 	config := DefaultConfig()
 	config.MaxListedMembers = 2
@@ -933,7 +933,7 @@ func TestAfterAuthStatusesAreBounded(t *testing.T) {
 }
 
 // A `me` that changes the status counts against the user's limit on status
-// changes, as a status request does (§4.11): beyond it the `me` is
+// changes, as a status request does (§4.5): beyond it the `me` is
 // retry_after and changes nothing, while one that leaves the status as it
 // is passes.
 func TestMeStatusChangesAreLimited(t *testing.T) {

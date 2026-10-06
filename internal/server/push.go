@@ -27,7 +27,7 @@ const (
 	maxPushesPerUser = 10
 	maxPushURLBytes  = 512
 	maxPushTokenLen  = 4096
-	// maxPushPayloadBytes bounds the JSON payload every kind delivers (§4.7).
+	// maxPushPayloadBytes bounds the JSON payload every kind delivers (§4.9).
 	maxPushPayloadBytes = 2048
 	// maxWakeScopes and maxWakeScopeBytes bound the wake names a server
 	// reads: those beyond the first maxWakeScopes, and longer ones, are
@@ -35,7 +35,7 @@ const (
 	maxWakeScopes     = 16
 	maxWakeScopeBytes = 64
 	// pushExpiry is how long a registration lasts unless registered again
-	// (§4.7); clients register on each connection. pushSweepInterval is how
+	// (§4.9); clients register on each connection. pushSweepInterval is how
 	// often expired registrations are looked for.
 	pushExpiry        = 30 * 24 * time.Hour
 	pushSweepInterval = time.Hour
@@ -58,7 +58,7 @@ const (
 	maxPushResponseDrain = 64 << 10
 )
 
-// wakeScope is a set of wake scopes (§4.7).
+// wakeScope is a set of wake scopes (§4.9).
 type wakeScope uint8
 
 const (
@@ -92,7 +92,7 @@ func (w wakeScope) names() []string {
 }
 
 // parseWakeNames reads a wake list, ignoring scopes this server does not
-// implement (§4.7).
+// implement (§4.9).
 func parseWakeNames(names []string) wakeScope {
 	var wake wakeScope
 	for _, name := range names {
@@ -105,10 +105,10 @@ func parseWakeNames(names []string) wakeScope {
 	return wake
 }
 
-// pushIDPattern is the shape of a client's push_id (§4.7).
+// pushIDPattern is the shape of a client's push_id (§4.9).
 var pushIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
 
-// pushRegistration is one push endpoint of a user (§4.7), identified by the
+// pushRegistration is one push endpoint of a user (§4.9), identified by the
 // user and its url.
 type pushRegistration struct {
 	userID string
@@ -125,7 +125,7 @@ type pushRegistration struct {
 	renewed time.Time
 	// lastUnread is the unread count the endpoint last accepted, -1 when
 	// none was since the server started; a badge push is sent only when the
-	// count differs (§4.7). sent numbers the pushes handed to the deliverer
+	// count differs (§4.9). sent numbers the pushes handed to the deliverer
 	// and accepted the latest of them the endpoint accepted, so a push
 	// accepted late does not record an older count.
 	lastUnread int
@@ -143,7 +143,7 @@ func (p *pushRegistration) live(now time.Time) bool {
 }
 
 // takesBadges reports whether the registration gets badge pushes: it has
-// scope badge, which webpush ignores (§4.7).
+// scope badge, which webpush ignores (§4.9).
 func (p *pushRegistration) takesBadges() bool {
 	return p.wake&wakeBadge != 0 && p.kind != "webpush"
 }
@@ -181,7 +181,7 @@ func (s *Server) removePushLocked(p *pushRegistration) {
 	}
 }
 
-// registerPush records a push endpoint for the caller (§4.7): kind relay,
+// registerPush records a push endpoint for the caller (§4.9): kind relay,
 // with an optional bearer token, or webpush, with the subscription's keys;
 // a relay with keys gets the payload encrypted as for webpush. Registering
 // a url again replaces the caller's registration of it and renews it; other
@@ -258,7 +258,7 @@ func (s *Server) registerPush(c *client, req request) (any, bool, *rpcError) {
 	return map[string]any{}, false, nil
 }
 
-// parseKeysParam reads a registration's optional keys (§4.7).
+// parseKeysParam reads a registration's optional keys (§4.9).
 func parseKeysParam(params map[string]jsontext.Value) (*pushKeys, *rpcError) {
 	if _, has := params["keys"]; !has {
 		return nil, nil
@@ -283,7 +283,7 @@ func parseKeysParam(params map[string]jsontext.Value) (*pushKeys, *rpcError) {
 }
 
 // unregisterPush removes the caller's registration of a url; an unknown url
-// is already unregistered (§4.7).
+// is already unregistered (§4.9).
 func (s *Server) unregisterPush(c *client, req request) (any, bool, *rpcError) {
 	endpoint, err := parseString(req.params, "url", true)
 	if err != nil {
@@ -378,7 +378,7 @@ func (s *Server) checkPushURL(endpoint string) (string, string) {
 	return endpoint, ""
 }
 
-// wakeLocked pushes a message to the users it concerns (§4.7). previous is
+// wakeLocked pushes a message to the users it concerns (§4.9). previous is
 // the snapshot the save replaced, nil for a new message.
 //
 // A new message concerns the users its body.mentions lists (scope
@@ -389,7 +389,7 @@ func (s *Server) checkPushURL(endpoint string) (string, string) {
 // users it adds to body.mentions. Nobody is woken by their own message.
 //
 // Each concerned user is woken only when no connection of theirs is
-// attended (§4.11). Their unscoped mute or a dnd status silences every
+// attended (§4.5). Their unscoped mute or a dnd status silences every
 // scope, and so does their mute of the room, or of a room it is a thread
 // of; what is silenced reaches them only as a badge push (badgeLocked).
 // Each live registration whose wake scopes select the message gets the
@@ -417,7 +417,7 @@ func (s *Server) wakeLocked(m *messageState, snapshot, previous map[string]any) 
 			}
 		}
 		// private selects messages in the private rooms the user joined and
-		// in their threads (§4.7): those who can see a private room's
+		// in their threads (§4.9): those who can see a private room's
 		// thread joined every private room above it.
 		if everyone, audience := r.audience(); !everyone {
 			for id, u := range audience {
@@ -520,7 +520,7 @@ func (u *userState) pushesTodayLocked(now time.Time) int {
 	return u.pushesToday
 }
 
-// pushPayload is the payload every kind delivers (§4.7): push_id, unread,
+// pushPayload is the payload every kind delivers (§4.9): push_id, unread,
 // and the message without log_id, format, embeds, or ext, its text
 // truncated to maxPushTextRunes. When the JSON is longer than
 // maxPushPayloadBytes the message is cut to fit: mentions go first, then
@@ -815,7 +815,7 @@ func (p *pushDeliverer) dropped(done func(status int)) {
 	}()
 }
 
-// request builds a delivery (§4.7), with TTL and Urgency for every kind.
+// request builds a delivery (§4.9), with TTL and Urgency for every kind.
 // relay: the payload as JSON, or, with keys, encrypted as for webpush, with
 // the token, if any, as bearer. webpush (RFC 8030): the payload encrypted
 // for the subscription (RFC 8291), with a VAPID Authorization (RFC 8292).

@@ -171,7 +171,7 @@ func TestPushWakesMentionsAndRepliesOfIdleUsers(t *testing.T) {
 	if !reflect.DeepEqual(paths(got), []string{"/alice", "/alice/gone"}) {
 		t.Fatalf("deliveries: %v", paths(got))
 	}
-	// The payload is the envelope (§4.7): push_id, unread, and the message
+	// The payload is the envelope (§4.9): push_id, unread, and the message
 	// without log_id, format, or embeds; the token is the bearer.
 	message := map[string]any{"message_id": id, "room_id": "general", "from": map[string]any{"user_id": "guest_1"}, "body": map[string]any{"text": text, "mentions": []any{"alice"}}}
 	if want := map[string]any{"push_id": "alice-phone", "unread": float64(1), "message": message}; !reflect.DeepEqual(got[0].payload, want) {
@@ -196,7 +196,7 @@ func TestPushWakesMentionsAndRepliesOfIdleUsers(t *testing.T) {
 	}
 
 	// A connected user is woken only when no connection of theirs is
-	// attended (§4.11).
+	// attended (§4.5).
 	b.result(t, "push_register", "b", map[string]any{"kind": "relay", "url": relay.URL + "/b"})
 	mentionB := map[string]any{"body": map[string]any{"text": "@guest_2 ping", "mentions": []any{"guest_2"}}}
 	post("attended", maps.Clone(mentionB))
@@ -209,7 +209,7 @@ func TestPushWakesMentionsAndRepliesOfIdleUsers(t *testing.T) {
 		t.Fatalf("idle user: %#v", got)
 	}
 	// Neither typing nor a message from the connection ends idle; only
-	// idle: false does (§4.11).
+	// idle: false does (§4.5).
 	b.write(t, map[string]any{"method": "activity", "params": map[string]any{"room_id": "general", "typing": 3}})
 	a.notification(t, "activity")
 	b.notification(t, "activity")
@@ -348,7 +348,7 @@ func TestPushRegistration(t *testing.T) {
 	b.expectQuiet(t)
 }
 
-// Wake scopes (§4.7): mentions, replies, private, joined; [] wakes for
+// Wake scopes (§4.9): mentions, replies, private, joined; [] wakes for
 // nothing, and without wake the default is mentions and replies.
 func TestPushWakeScopes(t *testing.T) {
 	relay := newTestRelay(t)
@@ -412,7 +412,7 @@ func TestPushWakeScopes(t *testing.T) {
 }
 
 // expectMute reads the `status` notification that tells c of a mute
-// (§4.11): everywhere, or of roomID.
+// (§4.5): everywhere, or of roomID.
 func expectMute(t *testing.T, c *testClient, roomID string, mute any) {
 	t.Helper()
 	checkMute(t, c.read(t), roomID, mute)
@@ -430,7 +430,7 @@ func checkMute(t *testing.T, frame map[string]any, roomID string, mute any) {
 }
 
 // Muted users, and those whose status is dnd, get no pushes; nor does a
-// muted room, mentions included (§4.7, §4.11).
+// muted room, mentions included (§4.9, §4.5).
 func TestPushRespectsMutes(t *testing.T) {
 	relay := newTestRelay(t)
 	app, httpServer := pushTestServer(t)
@@ -629,7 +629,7 @@ func TestWebPushDelivery(t *testing.T) {
 			t.Fatalf("%s payload: %#v", request.path, payload)
 		}
 	}
-	// Relays get TTL and Urgency too (§4.7).
+	// Relays get TTL and Urgency too (§4.9).
 	if relayHeader := got[0].header; relayHeader.Get("Authorization") != "Bearer tok" || relayHeader.Get("TTL") != "86400" || relayHeader.Get("Urgency") != "high" {
 		t.Fatalf("relay headers: %v", relayHeader)
 	}
@@ -756,7 +756,7 @@ func TestPushRegistrationsExpire(t *testing.T) {
 // unread is the user's one count of messages after their read positions,
 // the same in every registration's pushes, and badge pushes, without a
 // message and with Urgency low, send each change of it to the relay
-// registrations with scope badge (§4.7).
+// registrations with scope badge (§4.9).
 func TestPushUnreadAndBadge(t *testing.T) {
 	relay := newTestRelay(t)
 	app, httpServer := pushTestServer(t)
@@ -867,7 +867,7 @@ func TestPushUnreadAndBadge(t *testing.T) {
 }
 
 // Registrations, with their keys, push_id, and scopes, survive a restart,
-// and so do the VAPID key and the status and mutes the user set (§4.11). A
+// and so do the VAPID key and the status and mutes the user set (§4.5). A
 // registration stored by url alone, before registrations belonged to their
 // user, is kept, and a stored status the server does not support loads as "".
 func TestPushAndStatusSurviveRestart(t *testing.T) {
@@ -1195,7 +1195,7 @@ func TestDisabledPushIgnoresStoredRegistrations(t *testing.T) {
 
 // A count is recorded as an endpoint's only once it accepts the push with a
 // 2xx: a badge push that failed is sent again at the next change, even one
-// that leaves the count where it was (§4.7).
+// that leaves the count where it was (§4.9).
 func TestBadgeCountRecordedOnlyWhenAccepted(t *testing.T) {
 	relay := newTestRelay(t)
 	app, httpServer := pushTestServer(t)
@@ -1225,7 +1225,7 @@ func TestBadgeCountRecordedOnlyWhenAccepted(t *testing.T) {
 }
 
 // A timed room mute that runs out changes what counts, so the count is
-// taken again and a badge push sent (§4.7, §4.11).
+// taken again and a badge push sent (§4.9, §4.5).
 func TestRoomMuteExpiryUpdatesBadge(t *testing.T) {
 	relay := newTestRelay(t)
 	app, httpServer := pushTestServer(t)
@@ -1246,13 +1246,13 @@ func TestRoomMuteExpiryUpdatesBadge(t *testing.T) {
 	if got := relay.pushes(t, app, a); len(got) != 1 || got[0].payload["unread"] != float64(1) {
 		t.Fatalf("badge after the room mute ran out: %#v", got)
 	}
-	// Its end is sent to the user's connections (§4.11).
+	// Its end is sent to the user's connections (§4.5).
 	expectMute(t, b, "general", false)
 	b.expectQuiet(t)
 }
 
 // A wake list's names past the first maxWakeScopes, and names longer than
-// maxWakeScopeBytes, are ignored rather than refused (§4.7).
+// maxWakeScopeBytes, are ignored rather than refused (§4.9).
 func TestWakeNamesPastTheBoundsAreIgnored(t *testing.T) {
 	app, httpServer := pushTestServer(t)
 	a := dialTestClient(t, httpServer)
@@ -1278,7 +1278,7 @@ func TestWakeNamesPastTheBoundsAreIgnored(t *testing.T) {
 }
 
 // private wakes the members of a private room for messages in its threads,
-// joined or not (§4.7).
+// joined or not (§4.9).
 func TestPrivateWakesForThreadsOfJoinedRooms(t *testing.T) {
 	relay := newTestRelay(t)
 	app, httpServer := pushTestServer(t)
@@ -1319,7 +1319,7 @@ func unreadState(app *Server, u *userState) (kept, fresh int) {
 }
 
 // Muting or unmuting a room takes the unread counts of its threads again,
-// which the mute silences too (§4.7, §4.11).
+// which the mute silences too (§4.9, §4.5).
 func TestRoomMuteRecountsThreads(t *testing.T) {
 	relay := newTestRelay(t)
 	app, httpServer := pushTestServer(t)
@@ -1353,7 +1353,7 @@ func TestRoomMuteRecountsThreads(t *testing.T) {
 
 // Leaving a private room takes the unread counts of its threads again: a
 // thread the user could see there, and was mentioned in without joining,
-// no longer counts (§4.7).
+// no longer counts (§4.9).
 func TestLeavingPrivateRoomRecountsThreads(t *testing.T) {
 	relay := newTestRelay(t)
 	app, httpServer := pushTestServer(t)

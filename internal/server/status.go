@@ -13,7 +13,7 @@ import (
 	"golang.org/x/time/rate"
 )
 
-// Status (§4.11). A user sets a status with `me`: online (the default), ""
+// Status (§4.5). A user sets a status with `me`: online (the default), ""
 // for none, dnd, or invisible; the server stores "" for any other value.
 // Others see it as:
 //
@@ -26,7 +26,7 @@ import (
 // and the user sees, in `you`, the value they set. Separately, each
 // connection reports whether it is idle, and the user mutes their
 // notifications everywhere or in one room and its threads; mutes and a dnd
-// status silence pushes (§4.7). Both are set with the `status` request.
+// status silence pushes (§4.9). Both are set with the `status` request.
 // Mutes are private: each change goes to every connection of the user as a
 // `status` notification, and the mutes in effect to a connection after a
 // sign-in. A connection starts attended, and only its own `idle: true`
@@ -45,23 +45,23 @@ const (
 	maxRoomMutes = 1000
 	// Each user may send statusRequestBurst `status` requests at once,
 	// refilled one every statusRequestRefill; beyond them a request is
-	// retry_after (§4.11).
+	// retry_after (§4.5).
 	statusRequestBurst  = 20
 	statusRequestRefill = time.Second
 	// A user's derived status changes go to others at once up to
 	// statusBurst times, then at most once per statusCoalesce, the latest
 	// status winning, so a flapping connection costs its rooms little
-	// (§4.11 lets servers delay them).
+	// (§4.5 lets servers delay them).
 	statusBurst    = 10
 	statusCoalesce = 2 * time.Second
 )
 
 // optionalStatuses are the optional statuses the server accepts, which the
-// server frame lists as server.status (§3.1, §4.11).
+// server frame lists as server.status (§3.1, §4.5).
 var optionalStatuses = []string{statusDND, statusInvisible}
 
 // settableStatus reports whether the server supports value as a status a
-// user sets (§4.11); it stores "" for any other.
+// user sets (§4.5); it stores "" for any other.
 func settableStatus(value string) bool {
 	switch value {
 	case statusOnline, statusNone:
@@ -70,7 +70,7 @@ func settableStatus(value string) bool {
 	return slices.Contains(optionalStatuses, value)
 }
 
-// muteState is a mute (§4.11): until a time, forever, or, when zero, none.
+// muteState is a mute (§4.5): until a time, forever, or, when zero, none.
 type muteState struct {
 	forever bool
 	until   time.Time
@@ -105,7 +105,7 @@ type statusUpdate struct {
 	muteSeconds int64
 }
 
-// parseStatus reads a status request's params (§4.11). Any field of the
+// parseStatus reads a status request's params (§4.5). Any field of the
 // wrong type is invalid_params, and then nothing changes: room_id a string,
 // idle a boolean, and mute true, false, or a whole number of seconds of at
 // least 0, a longer one shortened to maxMuteSeconds. room_id scopes only
@@ -153,7 +153,7 @@ func (update statusUpdate) mute(now time.Time) muteState {
 	return muteState{until: now.Add(time.Duration(update.muteSeconds) * time.Second)}
 }
 
-// status applies a `status` request (§4.11) and answers {} once it has: the
+// status applies a `status` request (§4.5) and answers {} once it has: the
 // mute's echo to the user's connections, the sender's included, precedes
 // the result. Like other requests it needs a signed-in connection, and a
 // `status` without an id is a notification no client sends, which
@@ -184,7 +184,7 @@ func (s *Server) status(c *client, req request) (any, bool, *rpcError) {
 }
 
 // admitStatusLocked applies the user's limit on `status` requests, idle and
-// mute alike, and on `me` requests that change the status (§4.11 lets
+// mute alike, and on `me` requests that change the status (§4.5 lets
 // servers limit them): a burst of statusRequestBurst,
 // refilled one every statusRequestRefill, across all of the user's
 // connections. Beyond it the request is retry_after and changes nothing, so
@@ -238,7 +238,7 @@ func (s *Server) applyStatusLocked(c *client, u *userState, update statusUpdate)
 }
 
 // muteFrame is the `status` notification that tells the user's connections
-// of a mute, everywhere or, with roomID, of that room (§4.11).
+// of a mute, everywhere or, with roomID, of that room (§4.5).
 func muteFrame(roomID string, mute muteState, now time.Time) jsontext.Value {
 	params := map[string]any{"mute": mute.wire(now)}
 	if roomID != "" {
@@ -248,7 +248,7 @@ func muteFrame(roomID string, mute muteState, now time.Time) jsontext.Value {
 }
 
 // sendAfterAuthLocked sends a connection that has just signed in, after
-// its auth result (§4.11), one `status` for each of its user's mutes in
+// its auth result (§4.5), one `status` for each of its user's mutes in
 // effect, of rooms the user can see, and the status others see of the users
 // who share a room with it. offline (a user without connections, or an
 // invisible one) and "" are left out, so it tells neither who is invisible
@@ -299,7 +299,7 @@ func (s *Server) sendAfterAuthLocked(c *client) {
 }
 
 // scheduleMuteLocked ends u's timed mute when its time passes, telling the
-// user's connections it is now false (§4.11).
+// user's connections it is now false (§4.5).
 func (s *Server) scheduleMuteLocked(u *userState) {
 	if u.muteTimer != nil {
 		u.muteTimer.Stop()
@@ -325,7 +325,7 @@ func (s *Server) scheduleMuteLocked(u *userState) {
 // scheduleRoomMuteLocked ends u's timed mute of room id when its time
 // passes. Its end is sent like the unscoped mute's, and what counts toward
 // u's unread changes with it in the room and its threads, so the counts are
-// taken again and a badge push sent (§4.7).
+// taken again and a badge push sent (§4.9).
 func (s *Server) scheduleRoomMuteLocked(u *userState, id string) {
 	if timer := u.roomMuteTimers[id]; timer != nil {
 		timer.Stop()
@@ -354,7 +354,7 @@ func (s *Server) scheduleRoomMuteLocked(u *userState, id string) {
 }
 
 // endRoomMuteLocked forgets u's mute of room id, which has run out, and
-// tells the user's connections it is now false (§4.11). The caller takes
+// tells the user's connections it is now false (§4.5). The caller takes
 // the unread counts again.
 func (s *Server) endRoomMuteLocked(u *userState, id string) {
 	if timer := u.roomMuteTimers[id]; timer != nil {
@@ -367,13 +367,13 @@ func (s *Server) endRoomMuteLocked(u *userState, id string) {
 }
 
 // silenced reports whether u's notifications are silenced everywhere: by
-// the unscoped mute, or by a dnd status (§4.11).
+// the unscoped mute, or by a dnd status (§4.5).
 func (u *userState) silenced(now time.Time) bool {
 	return u.mute.active(now) || u.chosen == statusDND
 }
 
 // roomMuted reports whether u's own mute of room r, or of a room r is a
-// thread of, is in effect: it silences r, mentions too (§4.11). The
+// thread of, is in effect: it silences r, mentions too (§4.5). The
 // unscoped mute applies besides.
 func (u *userState) roomMuted(r *roomState, now time.Time) bool {
 	for room := r; room != nil; room = room.parent {
@@ -385,7 +385,7 @@ func (u *userState) roomMuted(r *roomState, now time.Time) bool {
 }
 
 // attended reports whether any connection of the user has not said it is
-// idle (§4.11).
+// idle (§4.5).
 func (u *userState) attended() bool {
 	for c := range u.clients {
 		if !c.idle {
@@ -395,7 +395,7 @@ func (u *userState) attended() bool {
 	return false
 }
 
-// shownStatus is the user's status as others see it (§4.11).
+// shownStatus is the user's status as others see it (§4.5).
 func (u *userState) shownStatus() string {
 	switch u.chosen {
 	case statusOnline:
@@ -408,7 +408,7 @@ func (u *userState) shownStatus() string {
 		return statusOffline
 	case statusDND:
 		// dnd shows only while connected, so it does not tell others
-		// that the user is reachable when they are not (§4.11).
+		// that the user is reachable when they are not (§4.5).
 		if len(u.clients) > 0 {
 			return statusDND
 		}

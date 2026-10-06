@@ -52,7 +52,7 @@ func emailTestServer(t *testing.T, configure func(*Config)) (*Server, testMailbo
 }
 
 // propose proposes an email sign-in or addition on c, which must be answered
-// with {} (§4.10).
+// with {} (§4.11).
 func propose(t *testing.T, c *testClient, email string) {
 	t.Helper()
 	if result := c.result(t, "auth", c.nextID("propose"), map[string]any{"scheme": "email", "email": email}); len(result) != 0 {
@@ -317,7 +317,7 @@ func TestEmailAdditions(t *testing.T) {
 	victim.expectError(t, "auth", "second", map[string]any{"scheme": "email", "token": pendingCode(t, app, victim.userID)}, codeDenied)
 
 	// A passkey registration on the signed-in account adds the passkey to
-	// it (§4.9), and signs in to it later.
+	// it (§4.10), and signs in to it later.
 	authenticator := newTestAuthenticator(t)
 	options := passkeyResult(t, passkeyCall(t, victim, "register-begin", "register", "begin", nil))
 	registered := passkeyResult(t, passkeyCall(t, victim, "register-finish", "register", "finish", map[string]any{"credential": authenticator.registration(t, options, testPasskeyOrigin)}))

@@ -64,7 +64,7 @@ func TestServerFrame(t *testing.T) {
 		t.Fatalf("capabilities: %#v", params["capabilities"])
 	}
 	// With capability status, server.status lists the optional statuses
-	// accepted (§4.11).
+	// accepted (§4.5).
 	if !reflect.DeepEqual(params["status"], []any{"dnd", "invisible"}) {
 		t.Fatalf("status: %#v", params["status"])
 	}
@@ -72,7 +72,7 @@ func TestServerFrame(t *testing.T) {
 		t.Fatalf("auth: %#v, signup: %#v", params["auth"], params["signup"])
 	}
 	// push offers relay and webpush, with the server's VAPID key, and the
-	// wake scopes it implements (§4.7).
+	// wake scopes it implements (§4.9).
 	push, _ := params["push"].(map[string]any)
 	webpush, _ := push["webpush"].(map[string]any)
 	key, _ := webpush["key"].(string)

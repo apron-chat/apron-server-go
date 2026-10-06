@@ -107,7 +107,7 @@ type Config struct {
 	// AllowInsecurePush accepts http push endpoints and internal addresses.
 	// Use only for development and tests.
 	AllowInsecurePush bool
-	// VAPIDPrivateKey is the server's VAPID key for webpush (§4.7), the
+	// VAPIDPrivateKey is the server's VAPID key for webpush (§4.9), the
 	// P-256 scalar in base64url. Empty uses the key kept in Store,
 	// generated at the first start.
 	VAPIDPrivateKey string
@@ -130,7 +130,7 @@ type Config struct {
 	// shown beside names; "admin" and "moderator" may also remove others
 	// from rooms (§4.3.2).
 	Roles map[string][]string
-	// EmailSender enables email sign-in (§4.10) and delivers its codes; nil
+	// EmailSender enables email sign-in (§4.11) and delivers its codes; nil
 	// disables it. LogEmailSender logs codes, for development.
 	EmailSender EmailSender
 	// ClientIPHeader names the request header a reverse proxy puts the
@@ -229,10 +229,10 @@ const (
 // logRecord is one committed change: raw is the complete wire object
 // (including log_id) as it was at commit time, kept as JSON, which history
 // and broadcasts send as is and which costs far less memory than decoded
-// maps. Only redaction (§4.2) rewrites a record; raw is replaced, never
+// maps. Only redaction (§4.4) rewrites a record; raw is replaced, never
 // modified, so a reader may hold it after releasing s.mu. A record is
 // referenced from the log of every room it belongs to, so a move snapshot
-// appears in both the source and destination room logs (§4.1).
+// appears in both the source and destination room logs (§4.2).
 type logRecord struct {
 	id   int64
 	kind recordKind
@@ -341,7 +341,7 @@ type client struct {
 	emailSends *rate.Limiter
 	proposal   *emailProposal
 	clientKey  string
-	// idle reports that nobody is attending the connection (§4.11): false
+	// idle reports that nobody is attending the connection (§4.5): false
 	// until the connection says otherwise. Guarded by server.mu.
 	idle bool
 	// closing is set once the final batch is queued; later frames are dropped.
@@ -418,7 +418,7 @@ type Server struct {
 
 	ops  map[string]operation
 	push *pushDeliverer
-	// vapid is the webpush key (§4.7); vapidStored reports that it is the
+	// vapid is the webpush key (§4.9); vapidStored reports that it is the
 	// one kept in the store.
 	vapid       *vapidKey
 	vapidStored bool
@@ -512,7 +512,7 @@ func Open(config Config) (*Server, error) {
 }
 
 // defaultRoomID is the seeded room that requests without room_id address
-// (§3.5, §4.1) and that new guests join.
+// (§3.5, §4.2) and that new guests join.
 const defaultRoomID = "general"
 
 // Handler returns the HTTP handler serving /ws, /healthz, the upload, file,
@@ -765,7 +765,7 @@ func (s *Server) serverParams() map[string]any {
 		"capabilities": []string{"history", "edit", "rooms", "reactions", "activity", "embed:upload", "embed:stream", "command", "status"},
 		"auth":         authSchemes,
 		"ping":         max(1, int(s.config.PingInterval/time.Second)),
-		// The optional statuses accepted with `me` (§4.11); online and ""
+		// The optional statuses accepted with `me` (§4.5); online and ""
 		// always are, and are not listed.
 		"status": optionalStatuses,
 		"ext": map[string]any{"apron-go": map[string]any{
@@ -999,7 +999,7 @@ func (s *Server) processFrame(c *client, payload []byte) {
 		}
 		return
 	}
-	// status is only a request (§4.11). Without an id it is a notification
+	// status is only a request (§4.5). Without an id it is a notification
 	// with no meaning, ignored like one with an unknown method (§1), before
 	// sign-in or after.
 	if req.method == "status" && !req.hasID {

@@ -29,7 +29,7 @@ import (
 // Entry kinds and IDs:
 //
 //	meta     "counters"   log_id, guest, embed, and upload sequences
-//	meta     "vapid"      the webpush VAPID private key (§4.7)
+//	meta     "vapid"      the webpush VAPID private key (§4.9)
 //	used_id  lowercased user_id ever assigned
 //	record   log_id       a logged record and the rooms whose logs hold it
 //	room     room_id
@@ -163,7 +163,7 @@ type storedUser struct {
 	LeftAt      map[string]int64 `json:"left_at,omitzero"`
 	Passkey     *storedPasskey   `json:"passkey,omitzero"`
 	Email       string           `json:"email,omitzero"`
-	// Status is the status the user set (§4.11), absent for online, and
+	// Status is the status the user set (§4.5), absent for online, and
 	// Mute and RoomMutes their mutes; Pings are the rooms they have not
 	// joined that count toward unread.
 	Status    *string               `json:"status,omitzero"`
@@ -726,7 +726,7 @@ func (s *Server) restoreLocked() (map[string]bool, error) {
 	return files, nil
 }
 
-// restoreVAPIDLocked sets the webpush VAPID key (§4.7): Config's, else the
+// restoreVAPIDLocked sets the webpush VAPID key (§4.9): Config's, else the
 // one in the store, else a new one, which is stored.
 func (s *Server) restoreVAPIDLocked(raw jsontext.Value) error {
 	if s.vapid != nil {

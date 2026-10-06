@@ -291,7 +291,7 @@ elsewhere the status others see. Recorded objects (`from`
 in messages and reactions, `user` in memberships) carry only `user_id` and `name` as they
 were when logged. Room `members` are bare `{user_id, status}` objects,
 carrying the status others see like every current object in `room_list`
-and `room_update`, `offline` and `""` included (§4.11), whose complete
+and `room_update`, `offline` and `""` included (§4.5), whose complete
 objects are in the accompanying `users`.
 
 `user` notifications carry profile and identity changes; joins and leaves
@@ -359,7 +359,7 @@ and from a private room or its threads to rooms visible to all their
 members, such as its public threads or any public room. A move out to where
 more people can see the message leaves out `prev_room_id`, so it does not
 name the private room to them. This deviates on purpose from PROTOCOL.md §2
-and §4.2, which say a move snapshot names its source room: readers of the
+and §4.4, which say a move snapshot names its source room: readers of the
 destination cannot walk the message's earlier snapshots, which are in a
 room they cannot see anyway. Its reactions go with it, showing who in
 the private room reacted. For the same reason a reply cannot quote a
@@ -486,7 +486,7 @@ sent by clients is dropped: the server describes only media it hosts.
 
 New `upload` and `stream` embeds get a one-time write URL, listed in the
 `message` result as `embeds: [{embed_id, kind, write_url}]`, which follows the
-pending snapshot's broadcast. The sender PUTs the content there (§4.6.3);
+pending snapshot's broadcast. The sender PUTs the content there (§4.8.3);
 `POST`, which earlier versions allowed, is still accepted. A write URL expires after five minutes unused,
 and a write that never starts or fails is finished by publishing the message
 without the embed. A write to a URL that is unknown, used, or expired, or
@@ -510,7 +510,7 @@ closed, without waiting for its body to end.
   writer gets `413`); the server then publishes the kept text as `text` in
   place of `url`, and both URLs stop working. Saving the message without the
   embed ends the stream (the writer gets `410`).
-- **Avatars** ([PROTOCOL.md §4.6.6](https://github.com/shazow/apron/blob/main/PROTOCOL.md#466-avatars)): the `/avatar` command with one `upload`
+- **Avatars** ([PROTOCOL.md §4.8.6](https://github.com/shazow/apron/blob/main/PROTOCOL.md#486-avatars)): the `/avatar` command with one `upload`
   embed returns a write URL. A PNG, JPEG, GIF, or WebP of at most 2 MiB
   becomes the sender's `avatar`, followed by a `user` notification; replacing
   or removing the avatar deletes the upload.
@@ -527,7 +527,7 @@ distinct emoji per user are `invalid_params`.
 
 ## Commands
 
-`command` ([PROTOCOL.md §4.8](https://github.com/shazow/apron/blob/main/PROTOCOL.md#48-command)) takes the params of a new message, in
+`command` ([PROTOCOL.md §4.1](https://github.com/shazow/apron/blob/main/PROTOCOL.md#41-command)) takes the params of a new message, in
 `general` without `room_id`, and is never logged, broadcast, or saved;
 `message_id` and `deleted` are `invalid_params`, as are text that does not
 start with `/` and unknown commands (`Unknown command /foo; try /help`).
@@ -562,7 +562,7 @@ read cursors go to every connection of the room's members.
 
 ## Status
 
-The `status` capability (§4.11) implements every status value: a user sets
+The `status` capability (§4.5) implements every status value: a user sets
 `status` with `me` to `online` (the default), `""` (none), `dnd`, or
 `invisible`. `server.status` lists the optional ones, `dnd` and
 `invisible`. Any other string, the derived `idle` and `offline` included,
@@ -859,7 +859,7 @@ authenticator. Credential removal and account recovery are future work.
 ### Example WebAuthn exchange
 
 These examples define the Go server's bearer-token policy alongside the canonical
-protocol exchange ([PROTOCOL.md §4.9](https://github.com/shazow/apron/blob/main/PROTOCOL.md#49-webauthn-authentication)). All steps use `auth` requests with fresh IDs
+protocol exchange ([PROTOCOL.md §4.10](https://github.com/shazow/apron/blob/main/PROTOCOL.md#410-webauthn-authentication)). All steps use `auth` requests with fresh IDs
 over the same WebSocket; no HTTP authentication endpoints are needed.
 
 | `params.action` and `params.step` | Other parameters | Result |
@@ -889,7 +889,7 @@ With both nil only guest authentication is enabled.
 
 ## Email sign-in
 
-With email sign-in ([PROTOCOL.md §4.10](https://github.com/shazow/apron/blob/main/PROTOCOL.md#410-email-authentication)),
+With email sign-in ([PROTOCOL.md §4.11](https://github.com/shazow/apron/blob/main/PROTOCOL.md#411-email-authentication)),
 `server.auth` and `server.signup` list `email`. An `auth` with
 `scheme: "email"` and `email` **proposes**, and one with `token`
 **approves**. A proposal returns `{}`, whether or not the address has an
@@ -965,10 +965,10 @@ clients in an hour.
 
 Email accounts are kept like passkey users, and an account may have both: a
 passkey registered on a signed-in connection is added to that account
-(§4.9). The address is never sent to clients.
+(§4.10). The address is never sent to clients.
 
 A sign-in link opens that page with the token in the fragment, and, with
-`--public-url`, this server's WebSocket URL (§4.10's suggested convention),
+`--public-url`, this server's WebSocket URL (§4.11's suggested convention),
 form-encoded:
 `https://chat.example/#token=Hk41x9…&server=wss%3A%2F%2Fchat.example%2Fws`.
 A client reads it to sign in, on a connection not signed in, to the server

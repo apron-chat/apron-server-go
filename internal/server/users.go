@@ -18,7 +18,7 @@ import (
 const (
 	maxNameRunes = 64
 	// maxAvatarDataURLBytes bounds an avatar given inline as a data: URL;
-	// larger images go through a /avatar upload (§4.6.6).
+	// larger images go through a /avatar upload (§4.8.6).
 	maxAvatarDataURLBytes = 64 << 10
 	maxDedupEntries       = 1024
 	// maxProfileExtBytes bounds a profile's ext, which is sent to everyone
@@ -28,7 +28,7 @@ const (
 
 // userState is everything the server keeps for one user_id across its
 // connections: the profile (§3.3), joined rooms (§4.3.2), request
-// deduplication (§1.2), and push registrations (§4.7). Guest users
+// deduplication (§1.2), and push registrations (§4.9). Guest users
 // are retired when their last connection closes; accounts (passkey users)
 // persist.
 type userState struct {
@@ -36,7 +36,7 @@ type userState struct {
 	name   string
 	avatar string
 	ext    map[string]any
-	// email is the account's sign-in address (§4.10), lowercased; empty for
+	// email is the account's sign-in address (§4.11), lowercased; empty for
 	// guests and passkey users without one.
 	email string
 	// roles are the server roles (§3.3) Config.Roles grants the account,
@@ -60,7 +60,7 @@ type userState struct {
 	// commands to MessagesPerMinute; nil when unlimited.
 	posts *rate.Limiter
 
-	// chosen is the status the user set with `me` (§4.11), and mute and
+	// chosen is the status the user set with `me` (§4.5), and mute and
 	// roomMutes their mutes; muteTimer ends a timed mute, and
 	// roomMuteTimers each timed room mute. status is the status last sent
 	// to others; statusLimit and statusTimer coalesce a flapping user's
@@ -74,7 +74,7 @@ type userState struct {
 	statusLimit    *rate.Limiter
 	statusTimer    *time.Timer
 	statusRequests *rate.Limiter
-	// pushes are the user's push registrations by url (§4.7), and pings the
+	// pushes are the user's push registrations by url (§4.9), and pings the
 	// rooms they have not joined where a message mentioned or replied to
 	// them, from the first such message, for unread counts. unread holds
 	// the counts known per room while the user has registrations, and
@@ -106,7 +106,7 @@ func newUserState(id, name string) *userState {
 
 // from is the recorded user object carried in logged records (a message's
 // or reaction's from, a membership's user): user_id and name. Avatars and
-// ext travel only in current objects (§3.3, §4.6.6). Every
+// ext travel only in current objects (§3.3, §4.8.6). Every
 // record by the user shares the returned map until the name changes, so it
 // must not be modified.
 func (u *userState) from() map[string]any {
@@ -132,7 +132,7 @@ func (u *userState) hasRole(role string) bool {
 }
 
 // profile is the complete current user object for user and users (§3.3),
-// with the user's status as others see it (§4.11); you has the status the
+// with the user's status as others see it (§4.5); you has the status the
 // user set instead.
 func (u *userState) profile() map[string]any {
 	value := maps.Clone(u.from())
@@ -225,7 +225,7 @@ func normalizeName(name string) string {
 
 var avatarDataURL = regexp.MustCompile(`^data:image/(png|jpeg|gif|webp);base64,[A-Za-z0-9+/]+={0,2}$`)
 
-// validAvatar accepts https: URLs and small image data: URLs (§4.6.6).
+// validAvatar accepts https: URLs and small image data: URLs (§4.8.6).
 func validAvatar(value string) bool {
 	if strings.HasPrefix(value, "data:") {
 		return len(value) <= maxAvatarDataURLBytes && avatarDataURL.MatchString(value)
@@ -326,7 +326,7 @@ func (s *Server) authenticate(c *client, req request) (any, *rpcError) {
 	if c.user != nil {
 		// Guest auth on a signed-in connection answers with the identity it
 		// has. It signs the connection in as no other user, so it is no
-		// sign-in and sends nothing after its result (§4.11).
+		// sign-in and sends nothing after its result (§4.5).
 		result := map[string]any{"you": c.user.you()}
 		if req.hasID {
 			c.sendResult(req, result)
@@ -350,7 +350,7 @@ func (s *Server) authenticate(c *client, req request) (any, *rpcError) {
 
 // switchUserLocked makes user the connection's identity and replies with
 // extra fields beside `you` (§3.2, §3.3), then, for a sign-in, sends what
-// follows it (§4.11). A sign-in signs the connection in as a user it was not
+// follows it (§4.5). A sign-in signs the connection in as a user it was not
 // signed in as: an auth that adds a passkey or address, or that signs in
 // again as the same user, is not one, and is sent nothing after its result.
 // No room_update is sent for the new identity's rooms: the client lists them
@@ -370,7 +370,7 @@ func (s *Server) switchUserLocked(c *client, req request, user *userState, extra
 
 // attachLocked makes user the connection's identity and announces the
 // status others see of it and of the identity the connection leaves
-// (§4.11). A guest identity left without connections is retired, logging
+// (§4.5). A guest identity left without connections is retired, logging
 // its leaves, as when its last connection closes: a sign-in to an existing
 // account is announced as the guest's departure, never as a `user` change
 // with `old` (§3.3), and the account appears to others through its own
@@ -387,7 +387,7 @@ func (s *Server) attachLocked(c *client, user *userState) {
 		delete(previous.clients, c)
 	}
 	// A pending email proposal was made by the previous identity: an
-	// addition must not be approved as the next one (§4.10).
+	// addition must not be approved as the next one (§4.11).
 	if c.proposal != nil {
 		s.dropProposalLocked(c.proposal)
 	}
@@ -522,7 +522,7 @@ func withRemoved(profile map[string]any, removed []string) map[string]any {
 // the field, which the result and notifications carry as that empty value.
 // Names are trimmed and capped; avatars must be https: URLs or small image
 // data: URLs, or the current avatar unchanged. status is the status the user
-// sets (§4.11), "" for a value the server does not support, and is kept
+// sets (§4.5), "" for a value the server does not support, and is kept
 // across connections and restarts; a change to it counts against the
 // user's limit on status changes (admitStatusLocked), beyond which the
 // request is retry_after and changes nothing. roles are not settable, and
@@ -561,7 +561,7 @@ func (s *Server) updateProfile(c *client, req request) (any, bool, *rpcError) {
 		status = statusNone
 	}
 	// A status change counts against the user's limit on status changes,
-	// as a `status` request does (§4.11), so `me` flipping it in a loop
+	// as a `status` request does (§4.5), so `me` flipping it in a loop
 	// cannot make the server announce it to every sharer without end.
 	if hasStatus && status != u.chosen {
 		if err := admitStatusLocked(u); err != nil {

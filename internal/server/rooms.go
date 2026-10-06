@@ -38,9 +38,9 @@ type roomState struct {
 	// them (§4.3.1).
 	active map[string]int64
 	// creator is the user_id that created the room, empty for the seeded
-	// room; only the creator may /kick (§4.8).
+	// room; only the creator may /kick (§4.1).
 	creator string
-	// reads holds each user's latest read cursor (§4.4).
+	// reads holds each user's latest read cursor (§4.6).
 	reads map[string]readCursor
 }
 
@@ -121,7 +121,7 @@ func (s *Server) visibleMessageLocked(u *userState, id string) *messageState {
 }
 
 // mayRemove reports whether u may remove others from r, with /kick or
-// room_leave's user_id (§4.3.2, §4.8): the room's creator, or a user with
+// room_leave's user_id (§4.3.2, §4.1): the room's creator, or a user with
 // the admin or moderator role.
 func (r *roomState) mayRemove(u *userState) bool {
 	return r.creator == u.id || u.hasRole("admin") || u.hasRole("moderator")
@@ -146,7 +146,7 @@ func (r *roomState) title() string {
 }
 
 // cursorFramesLocked renders the read cursors kept for a room that the
-// server sends after listing it (§4.4): every member's cursor for a room u
+// server sends after listing it (§4.6): every member's cursor for a room u
 // has joined, which delivers read receipts, and otherwise only u's own.
 func (s *Server) cursorFramesLocked(u *userState, r *roomState) []any {
 	var frames []any
@@ -288,7 +288,7 @@ func (s *Server) joinedUpdateLocked(r *roomState, membership jsontext.Value) jso
 // addMembersLocked adds a room's members to its record as bare user
 // objects, ordered by user_id, and returns them. Each carries the status
 // others see, offline and "" included, as every current user object a
-// listing carries does (§4.11); their complete objects go in `users`. A
+// listing carries does (§4.5); their complete objects go in `users`. A
 // room with more than Config.MaxListedMembers lists only its most recently
 // active members and adds member_count, the total (§4.3.1).
 func (s *Server) addMembersLocked(record map[string]any, r *roomState) map[string]*userState {
@@ -329,7 +329,7 @@ func (s *Server) leaveLocked(u *userState, r *roomState) bool {
 	delete(r.members, u.id)
 	delete(r.active, u.id)
 	u.send(notification("room_update", map[string]any{"left": []any{map[string]any{"room_id": r.id}}, "memberships": []any{membership}}))
-	// The room no longer counts toward the user's unread (§4.7), and
+	// The room no longer counts toward the user's unread (§4.9), and
 	// neither do the threads of a private room, joined or not, which the
 	// user can no longer see: their counts are all taken again.
 	if r.private {
@@ -580,7 +580,7 @@ func threadTitle(description string) string {
 // room_id, is in `not_joined` too when the filter asks for it.
 //
 // The result is followed by the read cursors kept for the listed rooms
-// (§4.4).
+// (§4.6).
 func (s *Server) listRooms(c *client, req request) (any, bool, *rpcError) {
 	filter, err := parseString(req.params, "filter", false)
 	if err != nil {
@@ -811,7 +811,7 @@ func parseMembershipParams(params map[string]jsontext.Value) (roomID, userID str
 	return roomID, userID, hasUser, nil
 }
 
-// history returns a window of one room's log (§4.1), the default room's
+// history returns a window of one room's log (§4.2), the default room's
 // without room_id. limit counts records of every kind; the slice is
 // partitioned into rooms, messages, reactions, and membership, each omitted
 // when empty. The server retains all records and does not compact, and it
@@ -885,7 +885,7 @@ func (s *Server) history(c *client, req request) (any, bool, *rpcError) {
 	return result, true, nil
 }
 
-// renderHistory assembles a history result (§4.1) from a window of records.
+// renderHistory assembles a history result (§4.2) from a window of records.
 func renderHistory(r *roomState, matching []*logRecord, more bool, size int) []byte {
 	buf := make([]byte, 0, size+len(matching)+256)
 	buf = append(buf, `{"more":`...)
@@ -978,7 +978,7 @@ func parseLimit(params map[string]jsontext.Value, defaultLimit int) (int, *rpcEr
 	return min(value, maxHistoryPageSize), nil
 }
 
-// activity applies a connection's activity (§4.4). typing and a read cursor
+// activity applies a connection's activity (§4.6). typing and a read cursor
 // in a room are relayed to the room's members; a read cursor must name a
 // message and only advances, and the server keeps the latest per user and
 // sends it after the room is listed. A frame whose fields change nothing

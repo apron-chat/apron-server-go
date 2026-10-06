@@ -138,7 +138,7 @@ move. Escape leaves select mode. Moved messages keep their reply references and
 reactions.
 
 Who a message mentions is its `body.mentions` ([PROTOCOL.md §3.5](https://github.com/shazow/apron/blob/main/PROTOCOL.md#35-messages)); in the text a
-mention follows the `@user_id` convention ([Appendix A.3](https://github.com/shazow/apron/blob/main/PROTOCOL.md#a3-mention-text)): a
+mention follows the `@user_id` convention ([Appendix A.3](https://github.com/shazow/apron/blob/main/PROTOCOL.md#a3-prefixes-in-text)): a
 known user renders as a chip with their current name, a room as a link, and
 unknown IDs as written, never inside code. A message whose `body.mentions` lists
 you tints its row and pulses once when it arrives (or an edit adds you), and
@@ -154,7 +154,7 @@ muted `@user_id` beside it, always when another user known to the client shows
 under the same name ([§3.3](https://github.com/shazow/apron/blob/main/PROTOCOL.md#33-identity)). A sender's name and avatar come from the latest
 profile the server sent for them, else from the message itself.
 
-With cap `command` ([PROTOCOL.md §4.8](https://github.com/shazow/apron/blob/main/PROTOCOL.md#48-command)), composer text starting with one `/` is
+With cap `command` ([PROTOCOL.md §4.1](https://github.com/shazow/apron/blob/main/PROTOCOL.md#41-command)), composer text starting with one `/` is
 a command: the composer tags it, and Run sends it as a `command` request
 (`/nick`, `/join`, `/leave` and `/topic` map to `me`, `room_join`, `room_leave`
 and `room_set` with `description`), while `//` posts a message starting with `/`. Replies arrive as

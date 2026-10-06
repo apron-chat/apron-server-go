@@ -428,7 +428,7 @@ func TestProfilesAndUserNotifications(t *testing.T) {
 		t.Fatalf("from: %#v", snapshot["from"])
 	}
 	// room_list with members: true sends members bare but for their status
-	// (§4.11), with complete objects in users.
+	// (§4.5), with complete objects in users.
 	if listed := listRooms(t, b, map[string]any{"filter": "joined"}); listed["users"] != nil {
 		t.Fatalf("users without members: true: %#v", listed)
 	}
@@ -922,7 +922,7 @@ func TestCommands(t *testing.T) {
 	// The removal is a logged leave: the removed user's connections get
 	// room_update with left and the membership, the room's other members the
 	// membership alone and then a ~room notice, all before the result (§1,
-	// §4.8).
+	// §4.1).
 	before, result := a.request(t, "command", "kick", kick)
 	if len(result) != 0 || !reflect.DeepEqual(methods(before), []string{"room_update", "message"}) {
 		t.Fatalf("kick frames %#v then %#v", before, result)

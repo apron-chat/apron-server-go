@@ -59,11 +59,11 @@ export default defineConfig({
 			}
 		},
 		{
-			// Web push (§4.7) and status (§4.11); it skips itself, saying so, against an apron-web
+			// Web push (§4.9) and status (§4.5); it skips itself, saying so, against an apron-web
 			// without them (before apron-web#48).
 			name: 'push',
 			testMatch: /push\.spec\.ts$/,
-			// A connection turns idle only after 30 seconds unattended (§4.11), and the tests wait for it.
+			// A connection turns idle only after 30 seconds unattended (§4.5), and the tests wait for it.
 			timeout: 180_000,
 			use: {
 				...devices['Desktop Chrome'],

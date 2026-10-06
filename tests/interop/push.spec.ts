@@ -1,5 +1,5 @@
 /**
- * Web push (§4.7) and status (§4.11) end to end between the web client and this server.
+ * Web push (§4.9) and status (§4.5) end to end between the web client and this server.
  * The push project of playwright.config.ts runs it, with aprond started with a fixed test VAPID
  * key (push-test-vapid.ts) and --push.allow-insecure:
  *   npx playwright test --project=push
@@ -218,7 +218,7 @@ function pushStub(endpoint: string, p256dh: string, auth: string) {
 const findSent = (tap: Tap, method: string) => tap.sent.filter((frame) => frame.method === method);
 const resultOf = (tap: Tap, id: string) => tap.received.find((frame) => frame.id === id);
 let injectedStatus = 0;
-/** Sets a mute on the page's connection with a `status` request of the test's own (§4.11), and waits for its `{}`. */
+/** Sets a mute on the page's connection with a `status` request of the test's own (§4.5), and waits for its `{}`. */
 async function injectStatus(tap: Tap, params: Record<string, unknown>) {
 	const id = `tap-status-${injectedStatus++}`;
 	tap.inject({ method: 'status', id, params });
@@ -300,7 +300,7 @@ test('web push: register, wake rules, VAPID + aes128gcm delivery, service worker
 	expect(register.params.push_id).toMatch(/^[A-Za-z0-9_-]{1,64}$/);
 	expect(register.params.wake).toEqual(['mentions', 'replies']);
 	const pushId = register.params.push_id as string;
-	// Opaque (§4.7): it names neither the server nor the account.
+	// Opaque (§4.9): it names neither the server nor the account.
 	expect(pushId).not.toContain(user1);
 	await page.keyboard.press('Escape');
 
@@ -366,7 +366,7 @@ test('web push: register, wake rules, VAPID + aes128gcm delivery, service worker
 		await expect.poll(() => decryptAll().some((entry) => entry.payload.message?.message_id === messageId), { timeout: 10_000 }).toBe(true);
 		return decryptAll().find((entry) => entry.payload.message?.message_id === messageId)!;
 	};
-	// user2 sees user1's status changes once the server has applied them (§4.11).
+	// user2 sees user1's status changes once the server has applied them (§4.5).
 	const seenStatus = () => user2.frames.filter((f) => f.method === 'user' && f.params?.new?.user_id === user1).map((f) => f.params.new.status).at(-1);
 
 	// --- User 1's own message: no push. Sent through the UI while idle. ---
@@ -400,7 +400,7 @@ test('web push: register, wake rules, VAPID + aes128gcm delivery, service worker
 	await prefs.getByRole('button', { name: /^Pause/ }).click();
 	await page.getByRole('menuitem', { name: /Until I resume/ }).or(page.getByRole('option', { name: /Until I resume/ })).first().click();
 	await expect.poll(() => findSent(tap, 'status').find((frame) => frame.params?.mute === true)).toBeTruthy();
-	// The server sends each mute change to all of the user's connections, the sender's too (§4.11).
+	// The server sends each mute change to all of the user's connections, the sender's too (§4.5).
 	await expect.poll(() => tap.received.find((frame) => frame.method === 'status' && frame.params?.mute === true && !('room_id' in frame.params))).toBeTruthy();
 	evidence('mute frame sent', findSent(tap, 'status').find((frame) => frame.params?.mute === true));
 	evidence('mute echo', tap.received.filter((frame) => frame.method === 'status'));
@@ -415,7 +415,7 @@ test('web push: register, wake rules, VAPID + aes128gcm delivery, service worker
 	await expect.poll(() => tap.received.find((frame) => frame.method === 'status' && frame.params?.mute === false && !('room_id' in frame.params))).toBeTruthy();
 	await page.keyboard.press('Escape');
 
-	// --- Room mute via raw status: it silences mentions and replies alike (§4.11) ---
+	// --- Room mute via raw status: it silences mentions and replies alike (§4.5) ---
 	await injectStatus(tap, { room_id: 'general', mute: true });
 	await expect.poll(() => tap.received.find((frame) => frame.method === 'status' && frame.params?.room_id === 'general' && frame.params?.mute === true)).toBeTruthy();
 	evidence('room mute echo', tap.received.filter((frame) => frame.method === 'status' && 'room_id' in frame.params).map((f) => f.params));
@@ -507,7 +507,7 @@ test('web push: register, wake rules, VAPID + aes128gcm delivery, service worker
 });
 
 /**
- * The web client's way to set a status with `me` (§4.11), if it has one: a control named for
+ * The web client's way to set a status with `me` (§4.5), if it has one: a control named for
  * do not disturb in the profile editor or Preferences, shown directly (a radio, menu item, or
  * option) or behind a control named Status (a menu button or a select). Choosing picks the
  * status whose label matches and closes the dialog again.
@@ -553,7 +553,7 @@ test('status: set with me, derived online, idle, offline as other clients see it
 	await signUpWithPasskey(page, context);
 	const user1 = await userIdOf(page);
 	const choose = await statusChooser(page);
-	test.skip(!choose, 'This apron-web does not set status with `me` yet (§4.11 as of shazow/apron 9825e38)');
+	test.skip(!choose, 'This apron-web does not set status with `me` yet (§4.5 as of shazow/apron 9825e38)');
 
 	// Observer 1: a raw client. Observer 2: the web client as a guest in another context.
 	let observer = await Raw.connect('Observer');
@@ -586,7 +586,7 @@ test('status: set with me, derived online, idle, offline as other clients see it
 	};
 
 	// online derives online and idle from user1's connections. A connection starts attended, so
-	// a client implementing §4.11 sends its first `status` when it goes idle.
+	// a client implementing §4.5 sends its first `status` when it goes idle.
 	const sendsStatus = await goIdle(page, tap).then(() => true, () => false);
 	test.skip(!sendsStatus, 'This apron-web does not send status yet (apron-web#48)');
 	await expectBoth('idle');
@@ -594,7 +594,7 @@ test('status: set with me, derived online, idle, offline as other clients see it
 	await expectBoth('online');
 
 	// An observer that reconnects is sent, after auth, the status of each connected user it shares
-	// a room with (§4.11), without sending anything first.
+	// a room with (§4.5), without sending anything first.
 	const earlierObserverFrames = observer.frames;
 	observer.close();
 	observer = await Raw.connect('Observer again');
@@ -637,7 +637,7 @@ test('status: set with me, derived online, idle, offline as other clients see it
 	await injectStatus(tap, { room_id: 'general', mute: false });
 	await expect.poll(() => tap.received.slice(receivedBefore).find((frame) => frame.method === 'status' && frame.params?.room_id === 'general' && frame.params?.mute === false)).toBeTruthy();
 
-	// The web client sends each `status` as a request, after sign-in, and the server answers {} (§4.11).
+	// The web client sends each `status` as a request, after sign-in, and the server answers {} (§4.5).
 	const sentStatus = findSent(tap, 'status');
 	evidence('status requests and replies', sentStatus.map((frame) => ({ sent: frame, reply: resultOf(tap, frame.id) })));
 	for (const frame of sentStatus) {
