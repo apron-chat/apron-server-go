@@ -313,7 +313,9 @@ func (s *Server) authenticate(c *client, req request) (any, *rpcError) {
 		return s.authenticateToken(c, req)
 	case "guest":
 	default:
-		return nil, &rpcError{Code: codeUnsupported, Message: fmt.Sprintf("Unsupported authentication scheme %q", scheme)}
+		// A request that depends on a name the server does not know is
+		// invalid_params (§1).
+		return nil, invalidParams("Unknown authentication scheme %q", scheme)
 	}
 	name, err := parseString(req.params, "name", false)
 	if err != nil {
@@ -336,31 +338,29 @@ func (s *Server) authenticate(c *client, req request) (any, *rpcError) {
 	user := newUserState(s.assignUserIDLocked(requested), normalizeName(name))
 	s.users[user.id] = user
 	s.touchUser(user.id)
-	s.attachLocked(c, user)
-	// A new guest joins the default room, so their room list is not empty,
-	// and the membership reaches this connection before the result (§1).
-	s.joinDefaultRoomLocked(user)
-	result := map[string]any{"you": user.you()}
-	if req.hasID {
-		c.sendResult(req, result)
-	}
-	s.sendAfterAuthLocked(c)
-	return result, nil
+	// A new guest joins the default room, so their room list is not empty.
+	return s.switchUserLocked(c, req, user, nil, true, true), nil
 }
 
-// switchUserLocked makes user the connection's identity and replies with
-// extra fields beside `you` (§3.2, §3.3), then, for a sign-in, sends what
-// follows it (§4.5). A sign-in signs the connection in as a user it was not
-// signed in as: an auth that adds a passkey or address, or that signs in
-// again as the same user, is not one, and is sent nothing after its result.
-// No room_update is sent for the new identity's rooms: the client lists them
-// with room_list.
-func (s *Server) switchUserLocked(c *client, req request, user *userState, extra map[string]any, signIn bool) map[string]any {
-	s.attachLocked(c, user)
+// switchUserLocked replies with user as `you` and extra fields beside it
+// (§3.2, §3.3), then makes user the connection's identity. Every
+// notification a sign-in causes on its connection follows the result
+// (§3.2): the departure of the identity it leaves, the join of a new
+// identity to the default room when joinDefault is set, and then what
+// follows a sign-in (§4.5). A sign-in signs the connection in as a user it
+// was not signed in as: an auth that adds a passkey or address, or that
+// signs in again as the same user, is not one, and is sent nothing after
+// its result. No room_update is sent for the new identity's rooms: the
+// client lists them with room_list.
+func (s *Server) switchUserLocked(c *client, req request, user *userState, extra map[string]any, signIn, joinDefault bool) map[string]any {
 	result := map[string]any{"you": user.you()}
 	maps.Copy(result, extra)
 	if req.hasID {
 		c.sendResult(req, result)
+	}
+	s.attachLocked(c, user)
+	if joinDefault {
+		s.joinDefaultRoomLocked(user)
 	}
 	if signIn {
 		s.sendAfterAuthLocked(c)

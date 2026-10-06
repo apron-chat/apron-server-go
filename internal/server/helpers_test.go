@@ -90,16 +90,17 @@ func dialOrigin(t *testing.T, httpServer *httptest.Server, origin string) (*test
 	return c, serverFrame
 }
 
-// guestAuth signs c in as a guest and returns the auth result, which follows
-// the membership of the guest's join to general.
+// guestAuth signs c in as a guest and returns the auth result. Every
+// notification the sign-in causes follows the result (§3.2): first the
+// membership of the guest's join to general.
 func guestAuth(t *testing.T, c *testClient) map[string]any {
 	t.Helper()
 	before, result := c.request(t, "auth", c.nextID("auth"), map[string]any{"scheme": "guest"})
 	c.userID = result["you"].(map[string]any)["user_id"].(string)
-	if len(before) != 1 {
+	if len(before) != 0 {
 		t.Fatalf("frames before the guest auth result: %#v", before)
 	}
-	checkMembership(t, membershipOnly(t, before[0]), "general", c.userID, true)
+	checkMembership(t, membershipOnly(t, c.read(t)), "general", c.userID, true)
 	return result
 }
 
@@ -126,8 +127,8 @@ func membershipOnly(t *testing.T, frame map[string]any) map[string]any {
 }
 
 // dialTestClient signs in a new guest. The guest's join to general is a
-// logged membership, delivered to its connection before the auth result;
-// nothing follows the result: clients list their rooms with room_list.
+// logged membership, delivered to its connection after the auth result
+// (§3.2); clients list their rooms with room_list.
 func dialTestClient(t *testing.T, httpServer *httptest.Server) *testClient {
 	t.Helper()
 	c, _ := dialRaw(t, httpServer)

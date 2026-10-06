@@ -49,8 +49,9 @@ func parseRequest(payload []byte) (request, *rpcError) {
 		return request{}, &rpcError{Code: codeInvalidRequest, Message: "Invalid request"}
 	}
 
-	// method comes first: an id on a notification-only method is ignored,
-	// whatever it is, and so are its params' errors (§1).
+	// method comes first: by this server's policy, an id on a method that
+	// clients send only as a notification (§1.1) is ignored, whatever it
+	// is, and so are its params' errors.
 	var req request
 	rawMethod, hasMethod := object["method"]
 	methodOK := hasMethod && json.Unmarshal(rawMethod, &req.method) == nil && req.method != ""
@@ -77,8 +78,9 @@ func parseRequest(payload []byte) (request, *rpcError) {
 	return req, nil
 }
 
-// notificationOnly are the methods clients send only as notifications. An
-// id on one is ignored, and nothing about it is answered (§1).
+// notificationOnly are the methods clients send only as notifications
+// (§1.1). By this server's policy an id on one is ignored, and nothing about
+// it is answered.
 var notificationOnly = map[string]bool{"ping": true, "activity": true}
 
 func canonicalParams(params map[string]jsontext.Value) string {

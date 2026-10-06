@@ -964,8 +964,8 @@ func (s *Server) processFrame(c *client, payload []byte) {
 	req, parseErr := parseRequest(payload)
 	if parseErr != nil {
 		if notificationOnly[req.method] {
-			// Never answered, even with invalid params (§1); a ping is
-			// still a ping.
+			// Never answered, even with invalid params, by this server's
+			// policy; a ping is still a ping.
 			if req.method == "ping" {
 				c.pong()
 			}
@@ -982,10 +982,18 @@ func (s *Server) processFrame(c *client, payload []byte) {
 		return
 	}
 
-	// parseRequest drops an id on a notification-only method (§1).
+	// parseRequest drops an id on a notification-only method: this server
+	// never answers activity or ping, with or without one.
 	if req.method == "ping" {
 		// A ping with other spacing or keys is still a ping.
 		c.pong()
+		return
+	}
+	// Clients send every other method they send as a request, with an id
+	// (§1.1). One without an id may be ignored, and this server ignores it,
+	// whatever its method and params, before sign-in or after: guest auth
+	// and status alike.
+	if !req.hasID && !notificationOnly[req.method] {
 		return
 	}
 	// auth is a barrier (§3.2): the read loop processes one frame at a time,
@@ -996,12 +1004,6 @@ func (s *Server) processFrame(c *client, payload []byte) {
 		if _, err := s.authenticate(c, req); err != nil && req.hasID {
 			c.sendError(req, err)
 		}
-		return
-	}
-	// status is only a request (§4.5). Without an id it is a notification
-	// with no meaning, ignored like one with an unknown method (§1), before
-	// sign-in or after.
-	if req.method == "status" && !req.hasID {
 		return
 	}
 

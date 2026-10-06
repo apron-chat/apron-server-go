@@ -397,7 +397,8 @@ func (s *Server) checkPushURL(endpoint string) (string, string) {
 // payload with its push_id and the user's unread count, with the most
 // urgent Urgency of the scopes that select it.
 func (s *Server) wakeLocked(m *messageState, snapshot, previous map[string]any) {
-	if s.config.DisablePush || len(s.pushes) == 0 || snapshot["deleted"] == true {
+	// Transient notices, which have no message_id, are never pushed (§4.9).
+	if s.config.DisablePush || len(s.pushes) == 0 || snapshot["deleted"] == true || snapshot["message_id"] == nil {
 		return
 	}
 	r := s.rooms[m.roomID]

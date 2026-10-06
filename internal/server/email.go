@@ -575,12 +575,11 @@ func (s *Server) approveEmailLocked(c *client, req request, token, name, request
 		s.emails[p.email] = user
 		s.touchUser(user.id)
 		s.grantRolesLocked(user)
-		// A new account joins the default room, as a new guest does, and
-		// the join reaches this connection before the result.
-		s.attachLocked(c, user)
-		s.joinDefaultRoomLocked(user)
+		// A new account joins the default room, as a new guest does, after
+		// the result (§3.2).
+		return s.signInLocked(c, req, user, now, true, true)
 	}
-	return s.signInLocked(c, req, user, now, true)
+	return s.signInLocked(c, req, user, now, true, false)
 }
 
 // assignAccountIDLocked honors a requested user_id as assignUserIDLocked

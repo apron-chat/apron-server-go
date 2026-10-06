@@ -345,6 +345,7 @@ func TestRolesAndWelcome(t *testing.T) {
 	_, authed := guest.request(t, "auth", "auth", map[string]any{"scheme": "guest", "user_id": "newbie"})
 	you := authed["you"].(map[string]any)
 	guest.userID = you["user_id"].(string)
+	expectMembership(t, guest, "general", guest.userID, true)
 	if guest.userID == "newbie" {
 		t.Fatal("a guest took a granted user_id")
 	}

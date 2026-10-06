@@ -111,15 +111,19 @@ func TestGuestAuth(t *testing.T) {
 	_, httpServer := newTestServer(t, DefaultConfig())
 	c, _ := dialRaw(t, httpServer)
 	c.expectError(t, "message", "early", map[string]any{"room_id": "general", "body": map[string]any{}}, codeDenied)
-	c.expectError(t, "auth", "bad-scheme", map[string]any{"scheme": "password"}, codeUnsupported)
+	// An unknown scheme is a name the server does not know (§1).
+	c.expectError(t, "auth", "bad-scheme", map[string]any{"scheme": "password"}, codeInvalidParams)
+	// A request method without an id is ignored, guest auth included.
+	c.write(t, map[string]any{"method": "auth", "params": map[string]any{"scheme": "guest"}})
+	c.expectQuiet(t)
 	// The new guest's join to general is a logged membership, delivered to
-	// its connection before the auth result (§1).
+	// its connection after the auth result (§3.2).
 	before, result := c.request(t, "auth", "auth", map[string]any{"scheme": "guest", "name": "Ada", "agent": "apron-test/1"})
 	you := result["you"].(map[string]any)
-	if you["user_id"] != "guest_1" || you["name"] != "Ada" || len(before) != 1 {
+	if you["user_id"] != "guest_1" || you["name"] != "Ada" || len(before) != 0 {
 		t.Fatalf("guest identity %#v after %#v", you, before)
 	}
-	membership := membershipOnly(t, before[0])
+	membership := membershipOnly(t, c.read(t))
 	wantMembership := map[string]any{
 		"log_id": membership["log_id"], "room_id": "general",
 		"members": []any{map[string]any{"user": map[string]any{"user_id": "guest_1", "name": "Ada"}, "joined": true}},
@@ -235,9 +239,10 @@ func TestLivenessPing(t *testing.T) {
 	}
 	ping(`{"method":"ping"}`)
 	ping(`{ "method": "ping", "params": {} }`)
-	// A ping with an id is a ping, answered with pong and nothing else (§1).
+	// A ping with an id is a ping, answered with pong and nothing else, by
+	// this server's policy.
 	ping(`{"method":"ping","id":"p1"}`)
-	c.request(t, "auth", "auth", map[string]any{"scheme": "guest"})
+	guestAuth(t, c)
 	ping(`{"method":"ping"}`)
 
 	// A connection that pinged and then fell silent is closed.
@@ -271,13 +276,14 @@ func TestAuthIsABarrier(t *testing.T) {
 	for len(frames) < 6 {
 		frames = append(frames, c.read(t))
 	}
-	if got := methods(frames); !reflect.DeepEqual(got, []string{"room_update", "reply", "reply", "reply", "message", "reply"}) {
+	// The sign-in's join follows its result (§3.2).
+	if got := methods(frames); !reflect.DeepEqual(got, []string{"reply", "room_update", "reply", "reply", "message", "reply"}) {
 		t.Fatalf("pipelined frames: %v", got)
 	}
-	membership := membershipOnly(t, frames[0])
-	for i, id := range []string{"auth", "list", "history"} {
-		if frames[i+1]["id"] != id || frames[i+1]["result"] == nil {
-			t.Fatalf("reply %d = %#v, want a result for %s", i, frames[i+1], id)
+	membership := membershipOnly(t, frames[1])
+	for i, id := range []string{"auth", "", "list", "history"} {
+		if id != "" && (frames[i]["id"] != id || frames[i]["result"] == nil) {
+			t.Fatalf("reply %d = %#v, want a result for %s", i, frames[i], id)
 		}
 	}
 	listed := frames[2]["result"].(map[string]any)
