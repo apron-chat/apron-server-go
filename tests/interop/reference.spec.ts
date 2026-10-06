@@ -144,7 +144,7 @@ test.describe('reference features against the Go server', () => {
 			await bot.request('message', { room_id: 'general', body: { text: token, embeds: [
 				{ kind: 'iframe', url: 'https://example.com/term', height: 900, title: 'Terminal' },
 				{ kind: 'html', html: '<table><tr><td><b>green</b></td></tr></table><img src=x onerror="window.pwned=1"><script>window.pwned=1</script>' },
-				{ kind: 'poll', url: 'https://example.com/poll/7' }
+				{ kind: 'ext:poll', url: 'https://example.com/poll/7' }
 			] } });
 			const embeds = embedOf(page, token);
 			// Live views stay paused until asked for, then load sandboxed and clamped.
@@ -157,7 +157,7 @@ test.describe('reference features against the Go server', () => {
 			await expect(embeds.locator('.ap-embed-html script')).toHaveCount(0);
 			expect(await page.evaluate(() => (window as { pwned?: number }).pwned)).toBeUndefined();
 			// An unknown kind is a fallback card with its link.
-			await expect(embeds.locator('.ap-embed-fallback .ap-embed-kind')).toHaveText('poll');
+			await expect(embeds.locator('.ap-embed-fallback .ap-embed-kind')).toHaveText('ext:poll');
 			await expect(embeds.locator('.ap-embed-fallback a')).toHaveAttribute('href', 'https://example.com/poll/7');
 		} finally {
 			bot.close();
