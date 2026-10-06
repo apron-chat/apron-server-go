@@ -285,7 +285,6 @@ test('web push: register, wake rules, VAPID + aes128gcm delivery, service worker
 	const prefs = page.getByRole('dialog', { name: 'Preferences' });
 	const pushSwitch = prefs.getByRole('switch', { name: 'Push notifications' });
 	await expect(prefs.getByRole('heading', { name: 'Preferences' })).toBeVisible();
-	test.skip(await pushSwitch.count() === 0, 'This apron-web has no web push setting yet (apron-web#48)');
 	await expect(pushSwitch).toHaveAttribute('aria-checked', 'false');
 	await pushSwitch.click();
 	await expect(pushSwitch).toHaveAttribute('aria-checked', 'true');
@@ -507,12 +506,12 @@ test('web push: register, wake rules, VAPID + aes128gcm delivery, service worker
 });
 
 /**
- * The web client's way to set a status with `me` (§4.5), if it has one: a control named for
- * do not disturb in the profile editor or Preferences, shown directly (a radio, menu item, or
- * option) or behind a control named Status (a menu button or a select). Choosing picks the
- * status whose label matches and closes the dialog again.
+ * The web client's way to set a status with `me` (§4.5): a control named for do not disturb in
+ * the profile editor or Preferences, shown directly (a radio, menu item, or option) or behind a
+ * control named Status (a menu button or a select). Choosing picks the status whose label
+ * matches and closes the dialog again.
  */
-async function statusChooser(page: Page): Promise<((label: RegExp) => Promise<void>) | undefined> {
+async function statusChooser(page: Page): Promise<(label: RegExp) => Promise<void>> {
 	const DND = /do not disturb/i;
 	const surfaces = [
 		{ open: () => page.getByRole('button', { name: /^Your profile on/ }).click(), dialog: page.getByRole('dialog', { name: 'Edit profile' }) },
@@ -544,7 +543,7 @@ async function statusChooser(page: Page): Promise<((label: RegExp) => Promise<vo
 			if (await surface.dialog.isVisible()) await page.keyboard.press('Escape');
 		};
 	}
-	return undefined;
+	throw new Error('No control in the profile editor or Preferences sets a status');
 }
 
 test('status: set with me, derived online, idle, offline as other clients see it; mutes stay private and reach every connection', async ({ page, context, browser }) => {
@@ -553,7 +552,6 @@ test('status: set with me, derived online, idle, offline as other clients see it
 	await signUpWithPasskey(page, context);
 	const user1 = await userIdOf(page);
 	const choose = await statusChooser(page);
-	test.skip(!choose, 'This apron-web does not set status with `me` yet (§4.5 as of shazow/apron 9825e38)');
 
 	// Observer 1: a raw client. Observer 2: the web client as a guest in another context.
 	let observer = await Raw.connect('Observer');
@@ -563,23 +561,21 @@ test('status: set with me, derived online, idle, offline as other clients see it
 	await openChat(otherPage);
 	await new Promise((resolve) => setTimeout(resolve, 1_000));
 
-	// A web client that draws status dots shows them in its member list (apron-web 0ef07ea on).
+	// The web client draws status dots in its member list.
 	const memberToggle = otherPage.getByRole('button', { name: 'Show member list' });
 	if (await memberToggle.count()) await memberToggle.first().click();
 	const dot = otherPage.locator(`li.member[data-user="${user1}"]`);
-	const drawsDots = await dot.and(otherPage.locator('[data-status]')).waitFor({ timeout: 5_000 }).then(() => true, () => false);
-	evidence('other web client draws status dots', drawsDots);
 	const statusesSeen = (frames: Frame[]) => frames.filter((frame) => frame.method === 'user' && frame.params?.new?.user_id === user1).map((frame) => frame.params.new.status);
 	const lastSeen = (frames: Frame[]) => statusesSeen(frames).at(-1);
 	const expectBoth = async (status: string) => {
 		await expect.poll(() => lastSeen(observer.frames), { timeout: 15_000 }).toBe(status);
 		await expect.poll(() => lastSeen(otherTap.received), { timeout: 15_000 }).toBe(status);
-		if (drawsDots) await expect(dot).toHaveAttribute('data-status', status, { timeout: 15_000 });
+		await expect(dot).toHaveAttribute('data-status', status, { timeout: 15_000 });
 	};
 	/** Sets user1's status through the web client, which sends it with `me`; `you` shows the value set. */
 	const setStatus = async (label: RegExp, status: string) => {
 		const before = findSent(tap, 'me').length;
-		await choose!(label);
+		await choose(label);
 		await expect.poll(() => findSent(tap, 'me').slice(before).find((frame) => frame.params?.status === status), { timeout: 5_000 }).toBeTruthy();
 		const request = findSent(tap, 'me').slice(before).find((frame) => frame.params?.status === status)!;
 		await expect.poll(() => resultOf(tap, request.id)?.result?.you?.status).toBe(status);
@@ -587,8 +583,7 @@ test('status: set with me, derived online, idle, offline as other clients see it
 
 	// online derives online and idle from user1's connections. A connection starts attended, so
 	// a client implementing §4.5 sends its first `status` when it goes idle.
-	const sendsStatus = await goIdle(page, tap).then(() => true, () => false);
-	test.skip(!sendsStatus, 'This apron-web does not send status yet (apron-web#48)');
+	await goIdle(page, tap);
 	await expectBoth('idle');
 	await goAttended(page, tap);
 	await expectBoth('online');

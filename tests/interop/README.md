@@ -76,12 +76,8 @@ Notifications need full Chromium in its new headless mode (`channel:
 whatever is granted. `npx playwright install chromium` installs both builds;
 with `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH`, point it at full Chromium.
 
-Against an apron-web without web push and status (before apron-web#48), the
-tests skip themselves (the status test once the page sends no `status` on
-going idle), and the status test also skips against one that cannot
-set a status with `me` (a control named for do not disturb in the profile
-editor or Preferences, directly or behind one named Status). Skipped tests and their reasons are listed at the end
-of every run, and on GitHub Actions also as notices and in the job summary.
+The status test sets a status through a control named for do not disturb in
+the profile editor or Preferences, shown directly or behind one named Status.
 
 The UI contract used by the tests is an accessible textbox named `Message`, a
 `Send message` button, and message containers rendered as

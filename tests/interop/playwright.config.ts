@@ -30,8 +30,8 @@ export default defineConfig({
 		timeout: 10_000
 	},
 	reporter: process.env.CI
-		? [['line'], ['html', { open: 'never' }], ['./skip-reporter.ts']]
-		: [['list'], ['./skip-reporter.ts']],
+		? [['line'], ['html', { open: 'never' }]]
+		: 'list',
 	use: {
 		baseURL: 'http://127.0.0.1:5173',
 		trace: 'retain-on-failure',
@@ -59,8 +59,7 @@ export default defineConfig({
 			}
 		},
 		{
-			// Web push (§4.9) and status (§4.5); it skips itself, saying so, against an apron-web
-			// without them (before apron-web#48).
+			// Web push (§4.9) and status (§4.5).
 			name: 'push',
 			testMatch: /push\.spec\.ts$/,
 			// A connection turns idle only after 30 seconds unattended (§4.5), and the tests wait for it.
