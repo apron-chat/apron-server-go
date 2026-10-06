@@ -74,8 +74,8 @@ identity instead of upgrading guest ownership as the Go example does.
 The example starts with a guest identity. Use **Add passkey** in the profile
 editor's Sign-in row to retain that identity and its message ownership, and
 **Sign in with passkey** to return to it (or choose Passkey on the connect
-screen). Passkey sessions resume after transport disconnects;
-page reloads require signing in again. Guest reconnects receive a new identity.
+screen). Passkey and email sessions resume with their bearer token after a
+disconnect or a reload. Guest reconnects receive a new identity.
 Edit and delete permissions belong to the identity that created the message.
 Use `localhost` for the default passkey configuration; see
 [SERVER.md](SERVER.md#passkeys) for deployment settings.
@@ -97,7 +97,7 @@ threads included, with their members, sent right behind `auth` without waiting
 for its result ([§3.2](https://github.com/shazow/apron/blob/main/PROTOCOL.md#32-authentication)), and follows `room_update` from then on ([§4.3](https://github.com/shazow/apron/blob/main/PROTOCOL.md#43-rooms)). After
 a dropped connection it resumes each room's history from where it stopped in
 the same way, and a resumed passkey session lists only the rooms that changed
-since. Member lists start from those listings and follow the `membership`
+since. Member lists start from those listings and follow the membership
 records of joins and leaves ([§4.3.2](https://github.com/shazow/apron/blob/main/PROTOCOL.md#432-membership)), which also show in the room's
 timeline as quiet "Ada joined" lines, merged and netted out between messages so
 guest churn stays quiet. The sidebar lists top-level rooms; the
@@ -122,7 +122,7 @@ thread's `room_id`) when opened, newest page first, so message counts in the
 sidebar and on cards appear once a thread has loaded. The room settings
 edit a room's title and description (`/topic` sets the description); the save
 is a `room_set` request with the room's `room_id` that resubmits the other
-fields and `ext` unchanged. Any
+client fields, but not `ext`, which merges. Any
 authenticated user may create threads and edit rooms on the Go example;
 the Cloudflare demo allows creating threads but denies editing its permanent
 `general` room, and a denied request is reported like any other error.

@@ -191,7 +191,10 @@ as v6 showed it (none for a deleted message), and messages from `@room`, `@serve
 messages from `~room`, `~server`, and `~private`. A plain-text intro is
 escaped as CommonMark, since descriptions are CommonMark by convention. The description is a copy: unlike the v6
 intro, it stays when the message is later deleted, which only redacts the
-message itself.
+message itself. A store written by a protocol v7 server keeps push
+registrations under their URL alone, without scopes: each is kept under its
+user with the default scopes (`mentions` and `replies`) and its URL in the
+one form described in [Push](#push), and written back.
 
 ## Connections and liveness
 
@@ -257,9 +260,8 @@ guest counter, and `user_` to that of email accounts: a request such as
 `guest_7`, `GUEST_7`, `guest_07` or `guest_x` is refused rather than taking a
 number out of sequence or impersonating a counter-assigned guest. Every guest
 `auth` takes exactly one counter value unless its requested ID is honored, so
-the latest guest number is roughly how many guests the process has admitted
-(the counter is in memory and starts over with the process). No `user_id` is
-ever reissued.
+the latest guest number is roughly how many guests the server has admitted
+(the counter is kept in the store). No `user_id` is ever reissued.
 
 Accounts are users who signed in with a passkey or an email address; they
 keep their profile, rooms, and push registrations across connections and
@@ -918,7 +920,8 @@ expires. An expired token requires another passkey or email sign-in.
 Passkey users, their credentials, and unexpired tokens are kept in the store,
 so they survive a restart with the default SQLite store; with `--store memory`
 a restart invalidates them, including passkeys still present in your
-authenticator. Credential removal and account recovery are future work.
+authenticator. Credential removal is future work; an account with an
+address recovers through [email sign-in](#email-sign-in).
 
 ### Example WebAuthn exchange
 
