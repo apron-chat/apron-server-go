@@ -74,10 +74,15 @@ func TestMessageSavesMergeExt(t *testing.T) {
 	a.expectError(t, "message", "bad-ext", map[string]any{"room_id": "general", "body": map[string]any{"text": "x"}, "ext": []any{}}, codeInvalidParams)
 	a.expectQuiet(t)
 
-	// A tombstone carries no ext, and a later save starts from none.
+	// A tombstone carries no ext, and a save of a tombstone merges into an
+	// empty ext (§3.5).
 	_, tombstone := save(t, a, "delete", map[string]any{"message_id": id, "deleted": true, "ext": map[string]any{"irc": "x"}})
 	if _, has := tombstone["ext"]; has {
 		t.Fatalf("tombstone: %#v", tombstone)
+	}
+	_, restored := save(t, a, "restore", map[string]any{"message_id": id, "body": map[string]any{"text": "back"}, "ext": map[string]any{"irc": "x"}})
+	if want := map[string]any{"irc": "x"}; !reflect.DeepEqual(restored["ext"], any(want)) {
+		t.Fatalf("a save of a tombstone merged into %#v, want an empty ext", restored["ext"])
 	}
 }
 
@@ -176,8 +181,9 @@ func TestProfileExtLimitAppliesToTheMergedExt(t *testing.T) {
 	}
 }
 
-// Clients send every request with an id (§1.1). A request method without
-// one is ignored by this server, before sign-in and after, whatever it is.
+// Clients send every request with an id, and a server may ignore a request
+// method sent without one (§1.1): this one does, before sign-in and after,
+// whatever it is.
 func TestRequestsWithoutAnIDAreIgnored(t *testing.T) {
 	_, httpServer := newTestServer(t, DefaultConfig())
 	clients := dialGroup(t, httpServer, 2)

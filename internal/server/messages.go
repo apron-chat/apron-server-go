@@ -161,7 +161,8 @@ func (s *Server) saveMessage(c *client, req request) (any, bool, *rpcError) {
 		previous = current.snapshot()
 	}
 	// ext merges into the current snapshot's (§3.5), and the limit applies
-	// to the result. A tombstone carries none (§4.4).
+	// to the result. A creation, and a save of a tombstone, merges into an
+	// empty ext (§3.5), and a tombstone carries none (§4.4).
 	var ext extObject
 	if !deleted {
 		ext = mergeExt(extOf(previous["ext"]), extWrite)
@@ -425,7 +426,8 @@ func validateBody(body map[string]any) *rpcError {
 			return invalidParams("body.mentions must be an array of user_id strings")
 		}
 		if len(mentions) > maxMentions {
-			return invalidParams("body.mentions lists at most %d users", maxMentions)
+			// A count limit the server sets is denied (§1.1).
+			return &rpcError{Code: codeDenied, Message: fmt.Sprintf("A message mentions at most %d users", maxMentions)}
 		}
 		for _, value := range mentions {
 			if id, ok := value.(string); !ok || id == "" {
@@ -439,7 +441,7 @@ func validateBody(body map[string]any) *rpcError {
 			return invalidParams("body.embeds must be an array")
 		}
 		if len(embeds) > maxEmbedsPerMessage {
-			return invalidParams("body.embeds lists at most %d embeds", maxEmbedsPerMessage)
+			return &rpcError{Code: codeDenied, Message: fmt.Sprintf("A message holds at most %d embeds", maxEmbedsPerMessage)}
 		}
 		for i, value := range embeds {
 			embed, ok := value.(map[string]any)
@@ -522,15 +524,19 @@ func parseEmojis(params map[string]jsontext.Value) ([]string, *rpcError) {
 	emojis := make([]string, 0, len(values))
 	for _, value := range values {
 		var emoji string
-		if json.Unmarshal(value, &emoji) != nil || emoji == "" || len(emoji) > maxEmojiBytes {
-			return nil, invalidParams("emojis must be non-empty strings of at most %d bytes", maxEmojiBytes)
+		if json.Unmarshal(value, &emoji) != nil || emoji == "" {
+			return nil, invalidParams("emojis must be non-empty strings")
+		}
+		if len(emoji) > maxEmojiBytes {
+			return nil, &rpcError{Code: codeTooLarge, Message: fmt.Sprintf("An emoji is at most %d bytes", maxEmojiBytes)}
 		}
 		if !slices.Contains(emojis, emoji) {
 			emojis = append(emojis, emoji)
 		}
 	}
 	if len(emojis) > maxDistinctEmoji {
-		return nil, invalidParams("At most %d distinct emoji per message", maxDistinctEmoji)
+		// A count limit the server sets is denied (§1.1).
+		return nil, &rpcError{Code: codeDenied, Message: fmt.Sprintf("At most %d distinct emoji per message", maxDistinctEmoji)}
 	}
 	return emojis, nil
 }

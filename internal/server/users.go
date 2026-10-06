@@ -298,6 +298,8 @@ func (s *Server) authenticate(c *client, req request) (any, *rpcError) {
 	if err != nil {
 		return nil, err
 	}
+	// A scheme this document defines but the server does not offer is
+	// unsupported (§3.2).
 	switch scheme {
 	case "webauthn":
 		return s.authenticatePasskey(c, req)

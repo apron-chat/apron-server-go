@@ -243,7 +243,8 @@ they are not in.
 An `auth` request's `agent`, the client's implementation string, is
 accepted with any scheme and not used. A scheme this server does not know is
 `invalid_params` (§1); `webauthn`, `email`, and `token` while their sign-in
-is not configured are `unsupported`.
+is not configured are schemes the server does not offer, so `unsupported`
+(§3.2).
 
 `auth` with scheme `guest` assigns `guest_<n>` from a server-wide counter
 (`guest_1`, `guest_2`, …) and honors an optional requested `name`. A
@@ -470,13 +471,16 @@ Message notifications and history `messages` are flat snapshots:
 present, replaces every client field (`room_id`, `body`, `reply_to`,
 `deleted`) with the submitted state, and merges `ext` into the current
 snapshot's as `me` does (§3.5), so a save that leaves `ext` out keeps it.
+A creation, and a save of a tombstone, merges into an empty `ext`.
 Saves apply in server order, each merging into the snapshot current then,
 so concurrent saves of different `ext` keys both survive. The merged `ext`
 is at most 64 KiB of JSON, or the save is `too_large` and changes nothing. Without `room_id` the message goes to
 `general`; an unknown `room_id` is `invalid_params`. A new message with no
 `text` and no `embeds` is neither logged nor broadcast, and its result is
 `{}`. The broadcast reaches the sender's connection before the result when
-the sender has joined the room. `body.mentions` must be an array of at most 256 non-empty strings.
+the sender has joined the room. `body.mentions` must be an array of
+non-empty strings (`invalid_params` otherwise) and lists at most 256 users
+(`denied` past that).
 `from` is assigned from the authenticated connection and preserved across
 edits; server fields in requests are ignored, and unknown top-level keys are
 dropped (extension data belongs in `ext`, whose values are kept byte for
@@ -522,7 +526,7 @@ whose embed was removed, is answered `404` at once and its connection
 closed, without waiting for its body to end.
 
 - **Uploads** (at most 20 MiB each, and 20 MiB for one message's uploads
-  together; a message has at most 32 embeds). While pending the embed has no `url`. When
+  together; a message has at most 32 embeds, `denied` past that). While pending the embed has no `url`. When
   the write finishes the server publishes a snapshot with `url` set to the
   hosted file and, for images and playable media, `og`: `image` (PNG, JPEG,
   GIF, and WebP with `width` and `height`; the sender's `og.image.alt` is kept),
@@ -550,8 +554,9 @@ after the broadcast; the logged record is delivered as
 `{log_id, message_id, room_id, reactions: [{from, emojis}]}`, with `room_id`
 the message's current room. Duplicate emoji collapse, `[]`
 clears, and a request that leaves the set unchanged logs nothing. Unknown
-messages, non-string or empty entries, entries over 64 bytes, and more than 20
-distinct emoji per user are `invalid_params`.
+messages and non-string or empty entries are `invalid_params`, an entry
+over 64 bytes is `too_large`, and more than 20 distinct emoji per user is
+`denied`.
 
 ## Commands
 
@@ -817,7 +822,9 @@ a frame repeating an object key or holding invalid UTF-8 is a parse error.
 The server encodes JSON with `encoding/json/v2` and needs Go 1.27.
 
 Clients send `activity` and `ping` as notifications, and every other method
-as a request, with an `id` (§1.1). This server's policy:
+as a request, with an `id` (§1.1). A server may ignore a request method
+sent without an `id`, and a notification method sent with one (§1.1), and
+this server does both:
 
 - An `id` on `activity` or `ping`, of any type, is ignored: they are
   processed as the notification and never answered, not even with an error
@@ -841,9 +848,13 @@ Error codes follow §1.1: an ID that does not exist or that the user cannot
 see is `invalid_params`, and so is a request that depends on a name this
 server does not know, such as an auth scheme or a push kind (§1). A value
 refused for its size is `too_large`: a merged `ext`, a room `description`,
-an avatar `data:` URL, or a push `url` or `token`. `denied` is for a
-well-formed request that the user or the server does not allow, such as an
-edit of another user's message.
+an avatar `data:` URL, an emoji, or a push `url` or `token`. `denied` is
+for a well-formed request that the user or the server does not allow, such
+as an edit of another user's message, or one past a count limit the server
+sets: mentions or embeds in a message, distinct emoji in a reaction set,
+room mutes, or passkeys on an account. A malformed value stays
+`invalid_params`. Push registrations past ten per user replace the least
+recently registered rather than fail.
 
 Errors not tied to a request omit `id`. On shutdown every connection
 receives `retry_after` (`data.retry_after: 5`) before it closes; over

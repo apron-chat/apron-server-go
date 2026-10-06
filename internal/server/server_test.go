@@ -239,8 +239,8 @@ func TestLivenessPing(t *testing.T) {
 	}
 	ping(`{"method":"ping"}`)
 	ping(`{ "method": "ping", "params": {} }`)
-	// A ping with an id is a ping, answered with pong and nothing else, by
-	// this server's policy.
+	// A ping with an id is a ping, answered with pong and nothing else: a
+	// server may ignore an id on a notification method (§1.1).
 	ping(`{"method":"ping","id":"p1"}`)
 	guestAuth(t, c)
 	ping(`{"method":"ping"}`)
@@ -738,11 +738,14 @@ func TestReactions(t *testing.T) {
 		{"message_id": id, "emojis": "👍"},
 		{"message_id": id, "emojis": []any{12}},
 		{"message_id": id, "emojis": []any{""}},
-		{"message_id": id, "emojis": tooMany},
 		{"emojis": []any{"👍"}},
 	} {
 		c.expectError(t, "reactions", fmt.Sprint("bad-", i), params, codeInvalidParams)
 	}
+	// A count limit the server sets is denied, and an emoji over its size is
+	// too_large (§1.1).
+	c.expectError(t, "reactions", "too-many", map[string]any{"message_id": id, "emojis": tooMany}, codeDenied)
+	c.expectError(t, "reactions", "too-long", map[string]any{"message_id": id, "emojis": []any{strings.Repeat("x", maxEmojiBytes+1)}}, codeTooLarge)
 	c.expectQuiet(t)
 
 	page := historyPage(t, c, "general", map[string]any{})

@@ -964,8 +964,9 @@ func (s *Server) processFrame(c *client, payload []byte) {
 	req, parseErr := parseRequest(payload)
 	if parseErr != nil {
 		if notificationOnly[req.method] {
-			// Never answered, even with invalid params, by this server's
-			// policy; a ping is still a ping.
+			// A notification method sent with an id may be ignored (§1.1):
+			// it is never answered, even with invalid params; a ping is
+			// still a ping.
 			if req.method == "ping" {
 				c.pong()
 			}
@@ -982,17 +983,17 @@ func (s *Server) processFrame(c *client, payload []byte) {
 		return
 	}
 
-	// parseRequest drops an id on a notification-only method: this server
-	// never answers activity or ping, with or without one.
+	// parseRequest drops an id on a notification-only method, which a
+	// server may ignore (§1.1): activity and ping are never answered.
 	if req.method == "ping" {
 		// A ping with other spacing or keys is still a ping.
 		c.pong()
 		return
 	}
-	// Clients send every other method they send as a request, with an id
-	// (§1.1). One without an id may be ignored, and this server ignores it,
-	// whatever its method and params, before sign-in or after: guest auth
-	// and status alike.
+	// Clients send every other method they send as a request, with an id.
+	// A server may ignore a request method sent without one (§1.1), and
+	// this one does, whatever its method and params, before sign-in or
+	// after: guest auth and status alike.
 	if !req.hasID && !notificationOnly[req.method] {
 		return
 	}
