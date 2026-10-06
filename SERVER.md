@@ -80,7 +80,8 @@ Flags (`aprond --help` lists them all):
   over a minute. The excess gets `retry_after` with `data.retry_after` in
   seconds. Edits, reactions, and activity are not counted.
 - `--max-listed-members <n>` (1000) bounds the `members` of one room in
-  `room_list` and `room_update` `joined`, `0` for no bound; see
+  `room_list` and `room_update` `joined`, and so the statuses sent after a
+  sign-in ([Status](#status)), `0` for no bound; see
   [Rooms](#rooms-threads-and-membership).
 - `--welcome <commonmark>` sets `server.welcome`, which clients show on their
   sign-in screen, such as "Chat as a guest, or sign in with email to keep
@@ -645,12 +646,14 @@ the departure and the join it causes, the connection is sent `status` for
 each of the user's mutes in effect (below), the room
 mutes only of rooms the user can see, then `user` `{new: {user_id,
 status}}` with the status others see of each user who shares a room with
-it, since its client drops the statuses it kept at each sign-in. It leaves
-out users who show `offline` or `""`, so the snapshot tells neither who is
-invisible nor who opted out; a `dnd` user without a connection shows
-`offline` and is left out. Like a room's listed members, it holds at most
-`--max-listed-members` (1000) users, those most recently active (joined or
-posted) in the rooms they share with the user. An `auth` that adds a
+it, one `user` per user, since its client drops the statuses it kept at
+each sign-in. It leaves out users who show `offline` or `""`, so the
+snapshot tells neither who is invisible nor who opted out; a `dnd` user
+without a connection shows `offline` and is left out. A server may limit the
+snapshot to the users it would list in `members` (§4.5), and this one does:
+in a room of more than `--max-listed-members` (1000) members, only the
+members that the room lists, its most recently active
+([Rooms](#rooms-threads-and-membership)), count. An `auth` that adds a
 passkey or an address, and one that signs the connection in again as the
 user it is signed in as (a guest `auth` on a signed-in connection, or a
 `token` or passkey sign-in as the same user), is not a sign-in: its result

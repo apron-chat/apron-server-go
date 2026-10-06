@@ -2,7 +2,6 @@ package server
 
 import (
 	"bytes"
-	"cmp"
 	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"fmt"
@@ -255,12 +254,13 @@ func muteFrame(roomID string, mute muteState, now time.Time) jsontext.Value {
 
 // sendAfterAuthLocked sends a connection that has just signed in, after
 // its auth result (§4.5), one `status` for each of its user's mutes in
-// effect, of rooms the user can see, and the status others see of the users
-// who share a room with it. offline (a user without connections, or an
-// invisible one) and "" are left out, so it tells neither who is invisible
-// nor who opted out. Like a room's listed members (§4.3.1), the statuses
-// are at most Config.MaxListedMembers, of the users most recently active in
-// the rooms they share.
+// effect, of rooms the user can see, and one `user` with the status others
+// see of each user who shares a room with it. offline (a user without
+// connections, or an invisible one) and "" are left out, so it tells
+// neither who is invisible nor who opted out. A server may limit the
+// statuses to the users it would list in `members` (§4.5), and this one
+// does: in a room of more than Config.MaxListedMembers, only the members
+// that the room lists (§4.3.1) count.
 func (s *Server) sendAfterAuthLocked(c *client) {
 	u := c.user
 	if u == nil {
@@ -276,25 +276,20 @@ func (s *Server) sendAfterAuthLocked(c *client) {
 			frames = append(frames, muteFrame(id, mute, now))
 		}
 	}
-	var shown []*userState
-	for _, other := range s.sharersLocked(u) {
-		if status := other.shownStatus(); status != statusOffline && status != statusNone {
-			shown = append(shown, other)
-		}
-	}
-	if limit := s.config.MaxListedMembers; limit > 0 && len(shown) > limit {
-		// Each user's latest join or message in a room shared with u.
-		active := make(map[string]int64, len(shown))
-		for _, r := range u.joined {
-			for id := range r.members {
-				active[id] = max(active[id], r.active[id])
+	listed := make(map[string]*userState)
+	for _, r := range u.joined {
+		ids, _ := s.listedMemberIDsLocked(r)
+		for _, id := range ids {
+			if id != u.id {
+				listed[id] = r.members[id]
 			}
 		}
-		slices.SortStableFunc(shown, func(a, b *userState) int {
-			return cmp.Compare(active[b.id], active[a.id])
-		})
-		shown = shown[:limit]
-		slices.SortFunc(shown, func(a, b *userState) int { return cmp.Compare(a.id, b.id) })
+	}
+	var shown []*userState
+	for _, id := range slices.Sorted(maps.Keys(listed)) {
+		if other := listed[id]; other.shownStatus() != statusOffline && other.shownStatus() != statusNone {
+			shown = append(shown, other)
+		}
 	}
 	for _, other := range shown {
 		frames = append(frames, statusFrame(other, other.shownStatus()))

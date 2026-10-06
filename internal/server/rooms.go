@@ -292,26 +292,37 @@ func (s *Server) joinedUpdateLocked(r *roomState, membership jsontext.Value) jso
 // room with more than Config.MaxListedMembers lists only its most recently
 // active members and adds member_count, the total (§4.3.1).
 func (s *Server) addMembersLocked(record map[string]any, r *roomState) map[string]*userState {
-	ids := slices.Collect(maps.Keys(r.members))
+	ids, truncated := s.listedMemberIDsLocked(r)
 	listed := r.members
-	if limit := s.config.MaxListedMembers; limit > 0 && len(ids) > limit {
-		slices.SortFunc(ids, func(a, b string) int {
-			return cmp.Or(cmp.Compare(r.active[b], r.active[a]), cmp.Compare(a, b))
-		})
-		ids = ids[:limit]
-		listed = make(map[string]*userState, limit)
+	if truncated {
+		listed = make(map[string]*userState, len(ids))
 		for _, id := range ids {
 			listed[id] = r.members[id]
 		}
 		record["member_count"] = len(r.members)
 	}
-	slices.Sort(ids)
 	refs := make([]any, len(ids))
 	for i, id := range ids {
 		refs[i] = map[string]any{"user_id": id, "status": r.members[id].shownStatus()}
 	}
 	record["members"] = refs
 	return listed
+}
+
+// listedMemberIDsLocked returns the user_ids of the members that r lists
+// (§4.3.1), ordered by user_id: all of them, or, past
+// Config.MaxListedMembers, the most recently active, and then truncated is
+// set.
+func (s *Server) listedMemberIDsLocked(r *roomState) (ids []string, truncated bool) {
+	ids = slices.Collect(maps.Keys(r.members))
+	if limit := s.config.MaxListedMembers; limit > 0 && len(ids) > limit {
+		slices.SortFunc(ids, func(a, b string) int {
+			return cmp.Or(cmp.Compare(r.active[b], r.active[a]), cmp.Compare(a, b))
+		})
+		ids, truncated = ids[:limit], true
+	}
+	slices.Sort(ids)
+	return ids, truncated
 }
 
 // leaveLocked removes u from r (§4.3.2): the room's other members receive

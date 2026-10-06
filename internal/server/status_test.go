@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"path/filepath"
 	"reflect"
-	"slices"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -912,9 +911,9 @@ func TestListingsCarryStatus(t *testing.T) {
 	check("room_update joined", update["joined"].([]any)[0].(map[string]any)["members"].([]any), update["users"].([]any))
 }
 
-// The statuses sent after a sign-in are at most MaxListedMembers, of the
-// users most recently active in the rooms they share with the user
-// (§4.5).
+// The statuses sent after a sign-in are only of the users that the user's
+// rooms list in members (§4.5): past MaxListedMembers, a room lists its most
+// recently active members (§4.3.1), the user who just joined included.
 func TestAfterAuthStatusesAreBounded(t *testing.T) {
 	config := DefaultConfig()
 	config.MaxListedMembers = 2
@@ -932,10 +931,10 @@ func TestAfterAuthStatusesAreBounded(t *testing.T) {
 		object := notificationParams(t, frame, "user")["new"].(map[string]any)
 		got = append(got, object["user_id"].(string))
 	}
-	want := []string{clients[0].userID, clients[3].userID}
-	slices.Sort(want)
+	// general lists g, who joined last, and clients[0], who posted.
+	want := []string{clients[0].userID}
 	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("statuses after sign-in for %v, want the most recently active %v", got, want)
+		t.Fatalf("statuses after sign-in for %v, want the listed members %v", got, want)
 	}
 }
 
