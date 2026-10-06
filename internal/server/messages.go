@@ -56,11 +56,6 @@ func (m *messageState) info() *messageInfo {
 	return m.cached
 }
 
-// currentRaw is the JSON of the message's current snapshot.
-func (m *messageState) currentRaw() jsontext.Value {
-	return m.records[len(m.records)-1].raw
-}
-
 // snapshot decodes the message's current snapshot, a copy the caller owns.
 func (m *messageState) snapshot() map[string]any {
 	return m.records[len(m.records)-1].value()
@@ -315,9 +310,6 @@ func (s *Server) redactLocked(m *messageState) {
 }
 
 func tombstone(snapshot map[string]any) {
-	if _, embedded := snapshot["log_id"]; !embedded {
-		return
-	}
 	delete(snapshot, "body")
 	delete(snapshot, "ext")
 	snapshot["deleted"] = true

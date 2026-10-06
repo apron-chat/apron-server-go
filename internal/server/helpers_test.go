@@ -41,7 +41,10 @@ func (c *testClient) nextID(prefix string) string {
 
 func newTestServer(t *testing.T, config Config) (*Server, *httptest.Server) {
 	t.Helper()
-	app := New(config)
+	app, err := Open(config)
+	if err != nil {
+		t.Fatal(err)
+	}
 	httpServer := httptest.NewServer(app.Handler())
 	t.Cleanup(func() {
 		// Generous, since -race on a busy machine slows every goroutine.

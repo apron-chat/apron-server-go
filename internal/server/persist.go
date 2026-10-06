@@ -240,39 +240,6 @@ func (s *Server) flushLocked() {
 	}
 }
 
-// dumpLocked renders the whole state as the entries a store holding it
-// would have, for checking that every change reaches the store.
-func (s *Server) dumpLocked() []store.Entry {
-	all := newDirtySet()
-	for id := range s.usedIDs {
-		all.usedIDs = append(all.usedIDs, id)
-	}
-	for _, r := range s.rooms {
-		all.rooms[r.id] = true
-		for _, record := range r.log {
-			all.records[record] = true
-		}
-	}
-	for id := range s.messages {
-		all.messages[id] = true
-	}
-	for id := range s.users {
-		all.users[id] = true
-	}
-	for key := range s.sessions {
-		all.sessions[key] = true
-	}
-	for id := range s.embeds {
-		all.embeds[id] = true
-	}
-	for key := range s.pushes {
-		all.pushes[key] = true
-	}
-	all.vapid = s.vapidStored
-	meta := s.metaLocked()
-	return append(s.entriesLocked(all), store.Entry{Kind: entryMeta, ID: "counters", Value: encodeJSON(meta)})
-}
-
 // entriesLocked renders the state named by a dirty set as store entries.
 func (s *Server) entriesLocked(d dirtySet) []store.Entry {
 	var batch []store.Entry

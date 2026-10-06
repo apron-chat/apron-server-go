@@ -89,8 +89,8 @@ type Config struct {
 	// it but are never removed.
 	MaxUploadStorageBytes int64
 	// UploadDir holds hosted upload content. Empty uses a temporary directory
-	// removed on Shutdown. Uploads last only as long as the process, so files
-	// named *.upload left in UploadDir by a previous run are removed at start.
+	// removed on Shutdown. At start, files named *.upload in UploadDir that
+	// no stored embed holds are removed.
 	UploadDir string
 	// UploadStartTimeout is how long an unused write URL stays valid.
 	UploadStartTimeout time.Duration
@@ -428,16 +428,6 @@ type Server struct {
 	// stopped ends the background sweep of expired push registrations.
 	stopped     chan struct{}
 	connections sync.WaitGroup
-}
-
-// New starts a server with the state in config.Store, or an empty memory
-// store. It panics if the store cannot be read; Open returns the error.
-func New(config Config) *Server {
-	s, err := Open(config)
-	if err != nil {
-		panic(err)
-	}
-	return s
 }
 
 // Open starts a server with the state in config.Store, or an empty memory
