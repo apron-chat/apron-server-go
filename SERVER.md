@@ -1,7 +1,7 @@
 # aprond
 
 `cmd/aprond` serves the reference Apron backend: it implements protocol v8
-as of apron [6cab70f](https://github.com/shazow/apron/blob/6cab70ffad28522b6d444345c98649912f7453da/PROTOCOL.md),
+as of apron [3fd2244](https://github.com/shazow/apron/blob/3fd22449b1dede31b6a8030e1359563ead9e487d/PROTOCOL.md),
 the commit `testdata/apron` pins
 ([PROTOCOL.md](https://github.com/shazow/apron/blob/main/PROTOCOL.md)), every capability, private rooms,
 roles, passkey and email sign-in, and liveness ping, but not the designs
