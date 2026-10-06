@@ -50,5 +50,5 @@ client that falls behind its connection's outgoing queue is disconnected by
 the server as a slow consumer. The report counts these as server disconnects.
 
 Frames that break the protocol, such as a reply for an unknown `id`, a
-notification carrying an `id`, or snapshots out of order, are counted as protocol violations,
-with a few examples, in each scenario's report.
+notification carrying an `id`, or snapshots out of order, are counted as
+protocol violations, with a few examples, in each scenario's report.

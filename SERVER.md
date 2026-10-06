@@ -1,6 +1,8 @@
 # aprond
 
 `cmd/aprond` serves the reference Apron backend: it implements protocol v8
+as of apron [6cab70f](https://github.com/shazow/apron/blob/6cab70ffad28522b6d444345c98649912f7453da/PROTOCOL.md),
+the commit `testdata/apron` pins
 ([PROTOCOL.md](https://github.com/shazow/apron/blob/main/PROTOCOL.md)), every capability, private rooms,
 roles, passkey and email sign-in, and liveness ping, but not the designs
 under consideration in
@@ -82,7 +84,7 @@ Flags (`aprond --help` lists them all):
 - `--max-listed-members <n>` (1000) bounds the `members` of one room in
   `room_list` and `room_update` `joined`, `0` for no bound; see
   [Rooms](#rooms-threads-and-membership).
-- `--welcome <markdown>` sets `server.welcome`, which clients show on their
+- `--welcome <commonmark>` sets `server.welcome`, which clients show on their
   sign-in screen, such as "Chat as a guest, or sign in with email to keep
   your name. Codes expire after 10 minutes."
 - `--client-ip-header <header>`, behind a reverse proxy, names the header
@@ -189,7 +191,7 @@ of the intro snapshot each logged room record embedded, except that the
 current record and the latest logged one take the message's current text,
 as v6 showed it (none for a deleted message), and messages from `@room`, `@server`, and `@private` become
 messages from `~room`, `~server`, and `~private`. A plain-text intro is
-escaped as Markdown, since descriptions are Markdown by convention. The description is a copy: unlike the v6
+escaped as CommonMark, since descriptions are CommonMark by convention. The description is a copy: unlike the v6
 intro, it stays when the message is later deleted, which only redacts the
 message itself.
 
@@ -239,7 +241,9 @@ they are not in.
 ## Identity and profiles
 
 An `auth` request's `agent`, the client's implementation string, is
-accepted with any scheme and not used.
+accepted with any scheme and not used. A scheme this server does not know is
+`invalid_params` (§1); `webauthn`, `email`, and `token` while their sign-in
+is not configured are `unsupported`.
 
 `auth` with scheme `guest` assigns `guest_<n>` from a server-wide counter
 (`guest_1`, `guest_2`, …) and honors an optional requested `name`. A
@@ -279,10 +283,15 @@ with the PRECIS Nickname profile (RFC 8266: compatibility characters are
 mapped, runs of spaces folded, and the ends trimmed), after invisible
 characters such as controls and bidirectional overrides are dropped, and is
 capped at 64 characters; `avatar` must be an `https:` URL or a
-`data:image/{png,jpeg,gif,webp};base64,` URL of at most 64 KiB; `ext`
-(at most 16 KiB of JSON) replaces the profile extension object; `status`
-sets the user's status ([Status](#status)). The result's `you` and the `user`
-notifications carry removed fields as their empty values (`""`, `{}`).
+`data:image/{png,jpeg,gif,webp};base64,` URL of at most 64 KiB (a larger
+one is `too_large`); `ext` merges into the profile's one level deep (§3.5):
+each key it carries replaces that key's value whole, a key whose value is
+empty (`""`, `[]`, `{}`) is removed, keys it leaves out stay, `null` is kept
+as an ordinary value, and `"ext": {}` changes nothing. Values are kept byte
+for byte, integers beyond 2^53 included. The merged `ext` is at most 16 KiB
+of JSON, or the `me` is `too_large` and changes nothing. `status` sets the
+user's status ([Status](#status)). The result's `you` is complete and
+carries a removed `name` or `avatar` as `""`.
 Current user objects (`you`, `new` in `user`, and `users` in `room_list` and
 `room_update`) carry `avatar`, `ext`, and `roles`, an account's `roles` always,
 `[]` when it holds none, so a role taken away clears it (§3.3), and
@@ -294,6 +303,14 @@ carrying the status others see like every current object in `room_list`
 and `room_update`, `offline` and `""` included (§4.5), whose complete
 objects are in the accompanying `users`.
 
+`you` in `auth` and `me` results, and `users`, are complete (§3.3): they
+carry every profile field the server publishes, and clients replace the
+object they keep with them. A `user` notification carries `user_id` and at
+least the fields that changed, and clients merge it into the object they
+keep: a profile change sends the complete profile, with each field it
+removed, and each `ext` key it removed, as its empty value; a status change
+sends only `{user_id, status}` ([Status](#status)).
+
 `user` notifications carry profile and identity changes; joins and leaves
 are memberships. A profile change sends
 `user` with `you` to the user's other connections and with `new` to everyone
@@ -304,7 +321,8 @@ never reissued, so its records stay consistent. Accounts are never retired.
 A sign-in to an existing account on a guest's connection is the guest's
 departure, not a `user_id` change (§3.3): when that was its last
 connection, the guest is retired as above, its leaves reaching the rooms'
-members first, and the account then shows through its own status as on any
+members, the signing-in connection among them after its `auth` result
+(§3.2), and the account then shows through its own status as on any
 connection ([Status](#status)), so an invisible account, or one without a status,
 shows others nothing new. A guest becomes a new account in place, keeping
 its `user_id`, with a passkey registration or an email addition, so this
@@ -373,10 +391,12 @@ returned in `history`'s `memberships` array and delivered live in
 `room_update` with the room in `joined`, its `members` and `users`, and the
 membership; the leaving or removed user's get `left` and the membership;
 the room's other members get the membership alone. A new identity's join to
-`general` reaches its connection as the membership alone, before the `auth`
-result, since the client lists its rooms with `room_list`.
+`general` reaches its connection as the membership alone, after the `auth`
+result, since the client lists its rooms with `room_list`: every
+notification a sign-in causes on its connection, the departure of a guest
+identity it leaves included, follows the result (§3.2).
 The server logs memberships for every user, guests included: a new guest's
-join to `general` at `auth` (delivered to its connection before the `auth`
+join to `general` at `auth` (delivered to its connection after the `auth`
 result), `room_join` and `room_leave` (for oneself or another user), the
 creator's join when `room_set` creates a room, a `/kick` removal, a new email
 account's join to `general`, and a guest's leaves when it is retired.
@@ -423,14 +443,16 @@ account's join to `general`, and a guest's leaves when it is retired.
   the membership, then the result. A new thread that is not private goes to the parent's other members
   as `room_update` `updated`, without joining them. With `room_id` it
   replaces every client field except `parent_room_id` and `private`, which
-  are fixed at creation and kept, and other omitted fields are cleared; the edit goes as
+  are fixed at creation and kept, and `ext`, which merges as `me`'s does
+  (§3.5); other omitted fields are cleared. The merged `ext` is at most
+  16 KiB of JSON, or the request is `too_large`. The edit goes as
   `room_update` `updated` to the room's members, to the parent's members for
   a thread that is not private, and to the editor. Both return
   `{"room_id": ...}` after the `room_update`. Any authenticated user may
   create top-level rooms or threads (nested threads are allowed) and edit
   any room they can see, such as a bot keeping a thread's `description`
-  current. `description` is a string of at most 16 KiB, Markdown by
-  convention; the server never parses it. A thread saved without a title is
+  current. `description` is a string of at most 16 KiB (a longer one is
+  `too_large`), CommonMark by convention; the server never parses it. A thread saved without a title is
   titled from the first line of its description, or `Thread`.
 - Posting does not require joining a room one can see: a poster who has not
   joined gets the result but not the broadcast.
@@ -445,19 +467,25 @@ sent after `room_leave` never lists the room.
 Message notifications and history `messages` are flat snapshots:
 `{message_id, log_id, prev_log_id?, prev_room_id?, room_id, from, body?, reply_to?, deleted?, ext?}`.
 `message` creates a message when `message_id` is absent and, when it is
-present, replaces every client field (`room_id`, `body`, `reply_to`, `deleted`,
-`ext`) with the submitted state. Without `room_id` the message goes to
+present, replaces every client field (`room_id`, `body`, `reply_to`,
+`deleted`) with the submitted state, and merges `ext` into the current
+snapshot's as `me` does (§3.5), so a save that leaves `ext` out keeps it.
+Saves apply in server order, each merging into the snapshot current then,
+so concurrent saves of different `ext` keys both survive. The merged `ext`
+is at most 64 KiB of JSON, or the save is `too_large` and changes nothing. Without `room_id` the message goes to
 `general`; an unknown `room_id` is `invalid_params`. A new message with no
 `text` and no `embeds` is neither logged nor broadcast, and its result is
 `{}`. The broadcast reaches the sender's connection before the result when
 the sender has joined the room. `body.mentions` must be an array of at most 256 non-empty strings.
 `from` is assigned from the authenticated connection and preserved across
 edits; server fields in requests are ignored, and unknown top-level keys are
-dropped (extension data belongs in `ext`, which is passed through unchanged).
+dropped (extension data belongs in `ext`, whose values are kept byte for
+byte).
 Edits, deletion, and moves require the creating identity. A missing
 `body.format` means `plain`. Posting to a room does not join it.
 
-Deletion is a save with `deleted: true` and yields a tombstone without `body`.
+Deletion is a save with `deleted: true` and yields a tombstone without `body`
+or `ext`.
 The server then redacts the message: its earlier snapshots become tombstones
 at their original `log_id`s, and the content of its hosted embeds is deleted.
 
@@ -536,7 +564,7 @@ replies arrive before its result. Commands:
 
 - `/help` sends the calling connection, and only that connection, a
   `~private` notice
-  (`from: {user_id: "~private", name: "System message to you"}`, Markdown, no `message_id`
+  (`from: {user_id: "~private", name: "System message to you"}`, CommonMark, no `message_id`
   or `log_id`, not logged) in the command's room, listing the commands the
   sender may use there, and returns `{}`.
 - `/avatar` with exactly one `upload` embed returns
@@ -593,8 +621,9 @@ announced to a room's other members the same way, since a membership
 carries only a recorded user, unless their status is `offline` or `""`.
 
 A sign-in is an `auth` that signs the connection in as a user it is not
-already signed in as. After the result of every sign-in, the connection is
-sent `status` for each of the user's mutes in effect (below), the room
+already signed in as (§3.2). After the result of every sign-in, and after
+the departure and the join it causes, the connection is sent `status` for
+each of the user's mutes in effect (below), the room
 mutes only of rooms the user can see, then `user` `{new: {user_id,
 status}}` with the status others see of each user who shares a room with
 it, since its client drops the statuses it kept at each sign-in. It leaves
@@ -611,31 +640,31 @@ is followed by neither.
 Clients set `idle` and mutes with the `status` request, answered `{}`
 once the change is applied; a mute's echo (below) reaches the sending
 connection before the result. Before sign-in it is `denied`, like any
-request, and nothing is kept for later. A `status` without an `id` is a
-notification with no meaning: it is ignored like one with an unknown method
-(§1), before sign-in and after, whatever its params, and changes nothing.
+request, and nothing is kept for later. A `status` without an `id` is
+ignored like any request method without one
+([Requests and errors](#requests-and-errors)), and changes nothing.
 Absent fields leave their state unchanged. On an error nothing changes,
 the valid fields beside an invalid one included:
 
 - `invalid_params` for a `room_id` that is not a string, `idle` that is not
-  a boolean, `mute` that is not `true`, `false`, or a whole number of
-  seconds of at least 0, or a `mute` with a `room_id` that names a room the
-  user cannot see;
+  a boolean, `mute` that is not `true`, `false`, or a positive whole number
+  of seconds (`0` is not `false`), a `room_id` without `mute`, or a `mute`
+  with a `room_id` that names a room the user cannot see;
 - `denied` for a mute of another room once the user has 1,000 room mutes;
 - `retry_after` beyond the user's limit: a burst of 20 `status` requests,
   `idle` and mutes alike, across all of the user's connections, refilled one
   a second. `data.retry_after` is the whole seconds until the next is
   accepted. A refused or invalid request does not count.
 
-- `room_id` scopes only `mute`; without `mute` it is not looked at.
-- `idle` is the connection's, with or without `room_id`: a connection
+- `room_id` scopes only `mute`, so it comes only with `mute` (§4.5).
+- `idle` is the connection's, even beside a scoped `mute`: a connection
   starts attended, with nothing kept from the user's earlier or other
   connections, is attended until it sends `idle: true`, and idle until it
   sends `idle: false`. A message does not end it, and a connection that
   never sends `idle` is never taken as idle: such a client shows `online`
   while connected.
 - `mute` is the user's: seconds (longer ones are shortened to a year),
-  `true` until changed, or `false` or `0` for not muted, across
+  `true` until changed, or `false` for not muted, across
   connections and restarts. Without `room_id` it silences every push;
   with `room_id` it silences that room and its threads, mentions too,
   whether or not the user has joined it, and `false` removes the room's
@@ -687,7 +716,9 @@ wakes, and the user's next registration forget it, and a restart drops it.
 Guests may register; their registrations end with the guest, before its
 leaves, which then send no badge pushes.
 
-A new message selects, by scope:
+Only logged messages are pushed: a transient notice, such as a `~private`
+one, has no `message_id` and is never pushed (§4.9). A new message selects,
+by scope:
 
 - `mentions`: the users its `body.mentions` lists, in any room they can
   see. Text is never parsed for mentions.
@@ -785,10 +816,15 @@ Frames must be I-JSON ([RFC 7493](https://www.rfc-editor.org/rfc/rfc7493)):
 a frame repeating an object key or holding invalid UTF-8 is a parse error.
 The server encodes JSON with `encoding/json/v2` and needs Go 1.27.
 
-`activity` and `ping` are notifications only: their `id`, of
-any type, is ignored, and they are processed as the notification and
-never answered, not even with an error for invalid or malformed params
-(§1).
+Clients send `activity` and `ping` as notifications, and every other method
+as a request, with an `id` (§1.1). This server's policy:
+
+- An `id` on `activity` or `ping`, of any type, is ignored: they are
+  processed as the notification and never answered, not even with an error
+  for invalid or malformed params.
+- A request method sent without an `id` is ignored, whatever its params,
+  before sign-in or after: it is neither executed nor answered. This
+  includes guest `auth`, `me`, `message`, `room_set`, and `status`.
 
 Request `id`s must be strings (§1). They deduplicate per user, across all
 of that user's connections: a retry is not executed or broadcast again, and
@@ -800,6 +836,14 @@ method or params is `invalid_params`. The latest 1,024 IDs per user are kept;
 failed requests are not cached, and neither are `history` and `room_list`,
 which change nothing and may be large: a duplicate of one that has finished
 runs again. Unknown requests return `unsupported`.
+
+Error codes follow §1.1: an ID that does not exist or that the user cannot
+see is `invalid_params`, and so is a request that depends on a name this
+server does not know, such as an auth scheme or a push kind (§1). A value
+refused for its size is `too_large`: a merged `ext`, a room `description`,
+an avatar `data:` URL, or a push `url` or `token`. `denied` is for a
+well-formed request that the user or the server does not allow, such as an
+edit of another user's message.
 
 Errors not tied to a request omit `id`. On shutdown every connection
 receives `retry_after` (`data.retry_after: 5`) before it closes; over

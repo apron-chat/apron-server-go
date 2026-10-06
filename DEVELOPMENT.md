@@ -61,7 +61,7 @@ Open `http://localhost:5173`. The development server proxies `/ws` to
 To use the Cloudflare demo backend locally, run it from
 [apron-chat/apron-server-cloudflare](https://github.com/apron-chat/apron-server-cloudflare)
 with `npx wrangler dev --port 8080` instead of `make dev-server`. The web
-client, the Go server, and the worker speak protocol v7; the worker does so
+client, the Go server, and the worker speak protocol v8; the worker does so
 within the demo's budgets and policies (only threads under `general` can be
 created, guests only read until they sign in with a passkey, and guests'
 memberships are not logged, so its `room_list` ignores `latest_log_id`). A
