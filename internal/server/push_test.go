@@ -867,14 +867,13 @@ func TestPushUnreadAndBadge(t *testing.T) {
 // Registrations, with their keys, push_id, and scopes, survive a restart,
 // and so do the VAPID key and the status and mutes the user set (§4.11). A
 // registration stored by url alone, before registrations belonged to their
-// user, is kept, and so is an invisible flag stored before status was set
-// with `me`, as the invisible status.
+// user, is kept, and a stored status the server does not support loads as "".
 func TestPushAndStatusSurviveRestart(t *testing.T) {
 	memory := store.NewMemory()
 	_, keys := testSubscription(t)
 	if err := memory.Apply([]store.Entry{
 		{Kind: entryUser, ID: "erin", Value: encodeJSON(storedUser{Name: "Erin", Passkey: &storedPasskey{Handle: []byte("h")}})},
-		{Kind: entryUser, ID: "finn", Value: []byte(`{"name":"Finn","passkey":{"handle":"aA=="},"invisible":true}`)},
+		{Kind: entryUser, ID: "finn", Value: []byte(`{"name":"Finn","passkey":{"handle":"aA=="},"status":"invisible"}`)},
 		{Kind: entryUser, ID: "gail", Value: []byte(`{"name":"Gail","passkey":{"handle":"aQ=="},"status":"away"}`)},
 		{Kind: entryPush, ID: "https://relay.example/legacy", Value: []byte(`{"user":"erin","kind":"relay","token":"tok"}`)},
 	}); err != nil {

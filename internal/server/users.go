@@ -136,7 +136,7 @@ func (u *userState) hasRole(role string) bool {
 // user set instead.
 func (u *userState) profile() map[string]any {
 	value := maps.Clone(u.from())
-	value["status"] = u.statusAt(time.Now())
+	value["status"] = u.shownStatus()
 	if u.avatar != "" {
 		value["avatar"] = u.avatar
 	}
@@ -364,9 +364,9 @@ func (s *Server) switchUserLocked(c *client, req request, user *userState, extra
 	return result
 }
 
-// attachLocked makes user the connection's identity, applying the mutes
-// the connection sent before signing in (§4.11) and announcing the user's
-// new status. A guest identity left without connections is retired, logging
+// attachLocked makes user the connection's identity and announces the
+// status others see of it and of the identity the connection leaves
+// (§4.11). A guest identity left without connections is retired, logging
 // its leaves, and then others who shared a room with it learn of the
 // user_id change through a `user` notification with `new` and `old` (§3.3).
 func (s *Server) attachLocked(c *client, user *userState) {

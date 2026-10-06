@@ -1009,15 +1009,11 @@ func (s *Server) activity(c *client, req request) (any, bool, *rpcError) {
 	if hasRead && s.visibleMessageLocked(c.user, readID) == nil {
 		return nil, false, invalidParams("Unknown read_message_id %q", readID)
 	}
+	// The relays this request causes are queued before processFrame sends
+	// its result (§1).
 	result := map[string]any{}
-	// The relays this request causes precede its result (§1).
-	defer func() {
-		if req.hasID {
-			c.sendResult(req, result)
-		}
-	}()
 	if !inRoom {
-		return result, true, nil
+		return result, false, nil
 	}
 	u := c.user
 	params := map[string]any{"room_id": roomID, "from": u.from()}
@@ -1051,5 +1047,5 @@ func (s *Server) activity(c *client, req request) (any, bool, *rpcError) {
 		// Reading lowers the unread count the user's other devices show.
 		s.unreadChangedLocked(u, r.id)
 	}
-	return result, true, nil
+	return result, false, nil
 }

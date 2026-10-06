@@ -257,7 +257,7 @@ func (s *Server) sendAfterAuthLocked(c *client) {
 		}
 	}
 	for _, other := range s.sharersLocked(u) {
-		if status := other.statusAt(now); status != statusOffline && status != statusNone {
+		if status := other.shownStatus(); status != statusOffline && status != statusNone {
 			frames = append(frames, statusFrame(other, status))
 		}
 	}
@@ -363,8 +363,8 @@ func (u *userState) attended() bool {
 	return false
 }
 
-// statusAt is the user's status as others see it (§4.11).
-func (u *userState) statusAt(time.Time) string {
+// shownStatus is the user's status as others see it (§4.11).
+func (u *userState) shownStatus() string {
 	switch u.chosen {
 	case statusOnline:
 		switch {
@@ -401,7 +401,7 @@ func (u *userState) you() map[string]any {
 // whatever the status is then. The user's own connections are not told:
 // their `you` carries the status the user set, which this does not change.
 func (s *Server) announceStatusLocked(u *userState) {
-	status := u.statusAt(time.Now())
+	status := u.shownStatus()
 	if status == u.status || u.statusTimer != nil {
 		return
 	}
@@ -416,7 +416,7 @@ func (s *Server) announceStatusLocked(u *userState) {
 			if s.closed || s.users[u.id] != u {
 				return
 			}
-			if status := u.statusAt(time.Now()); status != u.status {
+			if status := u.shownStatus(); status != u.status {
 				u.status = status
 				s.sendStatusLocked(u, status, s.sharersLocked(u))
 			}
@@ -445,7 +445,7 @@ func statusFrame(u *userState, status string) jsontext.Value {
 // recorded user object. Like the snapshot after auth, it leaves out offline
 // and "", which would tell who is invisible or opted out.
 func (s *Server) announceJoinStatusLocked(u *userState, r *roomState) {
-	status := u.statusAt(time.Now())
+	status := u.shownStatus()
 	if status == statusOffline || status == statusNone {
 		return
 	}

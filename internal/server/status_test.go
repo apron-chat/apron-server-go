@@ -520,7 +520,7 @@ func TestAfterAuthMutesAndStatuses(t *testing.T) {
 	_ = owner.ws.Close(websocket.StatusNormalClosure, "bye")
 	attended.expectQuiet(t)
 	app.mu.RLock()
-	status := app.users[owner.userID].statusAt(time.Now())
+	status := app.users[owner.userID].shownStatus()
 	app.mu.RUnlock()
 	if status != statusOnline {
 		t.Fatalf("owner status: %s", status)
@@ -717,9 +717,9 @@ func TestStatusIsARequest(t *testing.T) {
 	a.expectQuiet(t)
 	app.mu.RLock()
 	u := app.users[b.userID]
-	if now := time.Now(); u.mute.active(now) || u.statusAt(now) != statusOnline {
+	if now := time.Now(); u.mute.active(now) || u.shownStatus() != statusOnline {
 		app.mu.RUnlock()
-		t.Fatalf("after status notifications: mute %#v, status %s", u.mute, u.statusAt(now))
+		t.Fatalf("after status notifications: mute %#v, status %s", u.mute, u.shownStatus())
 	}
 	app.mu.RUnlock()
 
@@ -799,7 +799,7 @@ func TestStatusRateLimit(t *testing.T) {
 	app.mu.RLock()
 	defer app.mu.RUnlock()
 	u := app.users[b.userID]
-	if now := time.Now(); !u.mute.forever || u.roomMuted(app.rooms["general"], now) || u.statusAt(now) != statusIdle {
-		t.Fatalf("after limited requests: mute %#v, room mutes %#v, status %s", u.mute, u.roomMutes, u.statusAt(now))
+	if now := time.Now(); !u.mute.forever || u.roomMuted(app.rooms["general"], now) || u.shownStatus() != statusIdle {
+		t.Fatalf("after limited requests: mute %#v, room mutes %#v, status %s", u.mute, u.roomMutes, u.shownStatus())
 	}
 }

@@ -165,11 +165,8 @@ type storedUser struct {
 	Email       string           `json:"email,omitzero"`
 	// Status is the status the user set (§4.11), absent for online, and
 	// Mute and RoomMutes their mutes; Pings are the rooms they have not
-	// joined that count toward unread. Invisible is the invisible flag
-	// stored before status was set with `me`: it loads as the invisible
-	// status.
+	// joined that count toward unread.
 	Status    *string               `json:"status,omitzero"`
-	Invisible bool                  `json:"invisible,omitzero"`
 	Mute      *storedMute           `json:"mute,omitzero"`
 	RoomMutes map[string]storedMute `json:"room_mutes,omitzero"`
 	Pings     map[string]int64      `json:"pings,omitzero"`
@@ -576,9 +573,6 @@ func (s *Server) restoreLocked() (map[string]bool, error) {
 			u.chosen = *stored.Status
 		case stored.Status != nil:
 			u.chosen = statusNone
-		case stored.Invisible:
-			u.chosen = statusInvisible
-			s.touchUser(id)
 		}
 		if stored.Mute != nil {
 			u.mute = muteState{forever: stored.Mute.Forever, until: stored.Mute.Until}
@@ -721,7 +715,7 @@ func (s *Server) restoreLocked() (map[string]bool, error) {
 			for id := range u.roomMutes {
 				s.scheduleRoomMuteLocked(u, id)
 			}
-			u.status = u.statusAt(now)
+			u.status = u.shownStatus()
 		}
 	}
 	for _, id := range slices.Sorted(maps.Keys(s.embeds)) {
