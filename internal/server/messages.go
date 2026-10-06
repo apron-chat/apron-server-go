@@ -168,9 +168,7 @@ func (s *Server) saveMessage(c *client, req request) (any, bool, *rpcError) {
 	if !replacing {
 		if text, _ := body["text"].(string); text == "" && len(asList(body["embeds"])) == 0 {
 			result := map[string]any{}
-			if req.hasID {
-				c.sendResult(req, result)
-			}
+			c.sendResult(req, result)
 			return result, true, nil
 		}
 		if err := s.admitPostLocked(u); err != nil {
@@ -243,9 +241,7 @@ func (s *Server) saveMessage(c *client, req request) (any, bool, *rpcError) {
 	if len(written) > 0 {
 		result["embeds"] = written
 	}
-	if req.hasID {
-		c.sendResult(req, result)
-	}
+	c.sendResult(req, result)
 	return result, true, nil
 }
 
@@ -483,9 +479,7 @@ func (s *Server) react(c *client, req request) (any, bool, *rpcError) {
 		s.commitReactionsLocked(m, []any{map[string]any{"from": cloneObject(from), "emojis": slices.Clone(emojis)}})
 	}
 	result := map[string]any{}
-	if req.hasID {
-		c.sendResult(req, result)
-	}
+	c.sendResult(req, result)
 	return result, true, nil
 }
 

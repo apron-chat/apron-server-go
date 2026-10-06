@@ -332,9 +332,7 @@ func (s *Server) authenticate(c *client, req request) (any, *rpcError) {
 		// has. It signs the connection in as no other user, so it is no
 		// sign-in and sends nothing after its result (§4.5).
 		result := map[string]any{"you": c.user.you()}
-		if req.hasID {
-			c.sendResult(req, result)
-		}
+		c.sendResult(req, result)
 		return result, nil
 	}
 	user := newUserState(s.assignUserIDLocked(requested), normalizeName(name))
@@ -357,9 +355,7 @@ func (s *Server) authenticate(c *client, req request) (any, *rpcError) {
 func (s *Server) switchUserLocked(c *client, req request, user *userState, extra map[string]any, signIn, joinDefault bool) map[string]any {
 	result := map[string]any{"you": user.you()}
 	maps.Copy(result, extra)
-	if req.hasID {
-		c.sendResult(req, result)
-	}
+	c.sendResult(req, result)
 	s.attachLocked(c, user)
 	if joinDefault {
 		s.joinDefaultRoomLocked(user)
@@ -618,9 +614,7 @@ func (s *Server) updateProfile(c *client, req request) (any, bool, *rpcError) {
 	if !jsonEqual(before, u.profile()) || !jsonEqual(beforeYou, u.you()) {
 		s.notifyProfileLocked(u, c, cleared, removed...)
 	}
-	if req.hasID {
-		c.sendResult(req, result)
-	}
+	c.sendResult(req, result)
 	return result, true, nil
 }
 

@@ -979,7 +979,7 @@ func (s *Server) processFrame(c *client, payload []byte) {
 	// Requests pipelined behind a failed auth, or behind a WebAuthn begin
 	// step, find no identity below and are denied.
 	if req.method == "auth" {
-		if _, err := s.authenticate(c, req); err != nil && req.hasID {
+		if _, err := s.authenticate(c, req); err != nil {
 			c.sendError(req, err)
 		}
 		return

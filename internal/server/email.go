@@ -358,10 +358,6 @@ func (s *Server) publicWebSocketURL() string {
 // authentication. A request with token approves the connection's proposal
 // with its code, or a sign-in proposal with its link token.
 func (s *Server) authenticateEmail(c *client, req request) (any, *rpcError) {
-	// A notification has no request ID to answer and changes nothing.
-	if !req.hasID {
-		return nil, nil
-	}
 	token, err := parseString(req.params, "token", false)
 	if err != nil {
 		return nil, err

@@ -103,9 +103,7 @@ func (s *Server) command(c *client, req request) (any, bool, *rpcError) {
 			if err != nil {
 				return nil, false, err
 			}
-			if req.hasID {
-				c.sendResult(req, result)
-			}
+			c.sendResult(req, result)
 			return result, true, nil
 		}
 	}

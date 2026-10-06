@@ -71,12 +71,6 @@ type session struct {
 // connection; finishing consumes it even on failure. Auth responses are never
 // deduplicated, so replay cannot resurrect a consumed challenge.
 func (s *Server) authenticatePasskey(c *client, req request) (any, *rpcError) {
-	// WebAuthn ceremonies are request/response operations. A notification has
-	// no request ID to correlate and must not create, consume, or resume any
-	// authentication state.
-	if !req.hasID {
-		return nil, nil
-	}
 	w := s.config.WebAuthn
 	if w == nil {
 		return nil, &rpcError{Code: codeUnsupported, Message: "Passkeys are disabled"}
@@ -340,9 +334,6 @@ func (s *Server) pruneSessionsLocked(now time.Time) {
 // example server's bearer token policy.
 func (s *Server) authenticateToken(c *client, req request) (any, *rpcError) {
 	now := time.Now()
-	if !req.hasID {
-		return nil, nil
-	}
 	c.ceremony = nil
 	token, err := parseString(req.params, "token", true)
 	if err != nil {

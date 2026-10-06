@@ -545,9 +545,7 @@ func (s *Server) setRoom(c *client, req request) (any, bool, *rpcError) {
 		}
 	}
 	result := map[string]any{"room_id": r.id}
-	if req.hasID {
-		c.sendResult(req, result)
-	}
+	c.sendResult(req, result)
 	return result, true, nil
 }
 
@@ -706,9 +704,6 @@ func (s *Server) listRooms(c *client, req request) (any, bool, *rpcError) {
 	for _, r := range slices.Concat(joined, others) {
 		frames = append(frames, s.cursorFramesLocked(u, r)...)
 	}
-	if !req.hasID {
-		frames = frames[1:]
-	}
 	c.enqueueBatch(frames...)
 	return result, true, nil
 }
@@ -762,9 +757,7 @@ func (s *Server) joinRoom(c *client, req request) (any, bool, *rpcError) {
 		c.enqueue(s.joinedUpdateLocked(r, nil))
 	}
 	result := map[string]any{}
-	if req.hasID {
-		c.sendResult(req, result)
-	}
+	c.sendResult(req, result)
 	return result, true, nil
 }
 
@@ -798,9 +791,7 @@ func (s *Server) leaveRoom(c *client, req request) (any, bool, *rpcError) {
 	}
 	s.leaveLocked(target, r)
 	result := map[string]any{}
-	if req.hasID {
-		c.sendResult(req, result)
-	}
+	c.sendResult(req, result)
 	return result, true, nil
 }
 
@@ -888,9 +879,7 @@ func (s *Server) history(c *client, req request) (any, bool, *rpcError) {
 	result := jsontext.Value(renderHistory(r, matching, more, size))
 	// The records are already JSON: the reply is assembled from them without
 	// decoding or re-encoding.
-	if req.hasID {
-		c.enqueue(rawResponse(req.id, result))
-	}
+	c.enqueue(rawResponse(req.id, result))
 	return result, true, nil
 }
 
