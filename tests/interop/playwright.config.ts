@@ -62,7 +62,8 @@ export default defineConfig({
 			// Web push (§4.9) and status (§4.5).
 			name: 'push',
 			testMatch: /push\.spec\.ts$/,
-			// A connection turns idle only after 30 seconds unattended (§4.5), and the tests wait for it.
+			// The web client goes idle after five minutes without input (§4.5); the tests move the page's clock on
+			// past it in steps, which still takes real seconds.
 			timeout: 180_000,
 			use: {
 				...devices['Desktop Chrome'],

@@ -64,8 +64,10 @@ mutes stay private, come back to the user's connections as `status`
 notifications, also after a reload, and are applied by the web client. The web
 client sends `status` as a request, each answered `{}`; the test's own room
 mutes are requests on the page's connection too, whose replies the page never
-sees. Both wait out the 30-second idle timeout, so the
-project allows three minutes a test. Run it alone with:
+sees. The web client goes idle after five minutes without input, so both move
+the page's clock (Playwright's `page.clock`) past it, in steps shorter than the
+30-second ping interval so the connection stays up; the project allows three
+minutes a test. Run it alone with:
 
 ```sh
 npx playwright test --project=push
