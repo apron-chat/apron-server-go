@@ -236,12 +236,35 @@ async function expectNoPost(posts: Captured[], label: string, before: number, ms
 	evidence(`no-push:${label}`, { posts: posts.length });
 }
 
+/** How long the web client's page goes without input before nobody is attending it (§4.5): apron-web's IDLE_AFTER_MS. */
+const IDLE_AFTER_MS = 5 * 60_000;
+
+/**
+ * Lets `ms` pass on the page's clock (`page.clock.install()` before the page loads) in steps shorter than the server's
+ * 30-second ping interval, with a moment of real time after each so that each ping's pong comes back: one jump of
+ * minutes would leave a ping unanswered, and the client would drop the socket as dead.
+ */
+async function passTime(page: Page, ms: number) {
+	for (let left = ms; left > 0; left -= 20_000) {
+		await page.clock.runFor(Math.min(20_000, left));
+		await new Promise((resolve) => setTimeout(resolve, 250));
+	}
+}
+
+/**
+ * Idle as the web client takes it: no input on the page for IDLE_AFTER_MS (losing focus alone doesn't count), so
+ * nothing goes before then. It reports how long in seconds, which this server, taking `idle` only as a boolean
+ * (§4.5), refuses; the client then says `true`. Returns the `idle` values sent.
+ */
 async function goIdle(page: Page, tap: Tap) {
 	const before = findSent(tap, 'status').length;
-	const started = Date.now();
+	const reports = () => findSent(tap, 'status').slice(before).map((frame) => frame.params?.idle).filter((idle) => idle !== undefined && idle !== false);
 	await page.evaluate(() => window.dispatchEvent(new Event('blur')));
-	await expect.poll(() => findSent(tap, 'status').slice(before).find((frame) => frame.params?.idle === true), { timeout: 45_000, intervals: [500] }).toBeTruthy();
-	return Date.now() - started;
+	await passTime(page, IDLE_AFTER_MS - 10_000);
+	expect(reports(), 'idle before the page went five minutes without input').toEqual([]);
+	await passTime(page, 20_000);
+	await expect.poll(() => reports().includes(true), { timeout: 10_000, intervals: [250] }).toBe(true);
+	return reports();
 }
 async function goAttended(page: Page, tap: Tap) {
 	const before = findSent(tap, 'status').length;
@@ -265,6 +288,8 @@ test('web push: register, wake rules, VAPID + aes128gcm delivery, service worker
 	const auth = b64u(authSecret);
 	await context.grantPermissions(['notifications'], { origin: ORIGIN });
 	await context.addInitScript(pushStub(endpoint, p256dh, auth), { endpoint, p256dh, auth });
+	// The page's clock, which goIdle moves on: the web client goes idle after five minutes without input.
+	await page.clock.install();
 	const tap = await tapSocket(page);
 	const swPromise = context.waitForEvent('serviceworker');
 
@@ -283,7 +308,7 @@ test('web push: register, wake rules, VAPID + aes128gcm delivery, service worker
 	// --- Turn on push in Preferences ---
 	await page.getByRole('button', { name: /^Open preferences/ }).click();
 	const prefs = page.getByRole('dialog', { name: 'Preferences' });
-	const pushSwitch = prefs.getByRole('switch', { name: 'Push notifications' });
+	const pushSwitch = prefs.getByRole('switch', { name: 'Notifications', exact: true });
 	await expect(prefs.getByRole('heading', { name: 'Preferences' })).toBeVisible();
 	await expect(pushSwitch).toHaveAttribute('aria-checked', 'false');
 	await pushSwitch.click();
@@ -303,10 +328,8 @@ test('web push: register, wake rules, VAPID + aes128gcm delivery, service worker
 	expect(pushId).not.toContain(user1);
 	await page.keyboard.press('Escape');
 
-	// --- Idle (real client path: window blur, idle after ~30s) ---
-	const idleAfter = await goIdle(page, tap);
-	evidence('idle sent after ms', idleAfter);
-	expect(idleAfter).toBeGreaterThan(25_000);
+	// --- Idle (real client path: no input for five minutes, on the page's clock) ---
+	evidence('idle reports', await goIdle(page, tap));
 
 	const user2 = await Raw.connect('Second');
 	evidence('user2', user2.userId);
@@ -349,8 +372,10 @@ test('web push: register, wake rules, VAPID + aes128gcm delivery, service worker
 	await expect.poll(async () => (await swNotifications(context)).filter((n: any) => n.tag === tag).length).toBe(1);
 	const shown = await swNotifications(context);
 	evidence('notifications after first delivery', shown);
-	const mine = shown.find((n: any) => n.tag === tag);
-	expect(mine.title).toBe(`Second · general`);
+	// The page, open though idle, notifies too (one Notifications switch turns on both), as `Second · <room title>`,
+	// and the push for the same message keeps the title of what is showing under its tag.
+	await expect.poll(async () => (await swNotifications(context)).find((n: any) => n.tag === tag)?.title).toBe(`Second · General`);
+	const mine = (await swNotifications(context)).find((n: any) => n.tag === tag);
 	expect(mine.body).toContain('ping');
 	await cdp.send('ServiceWorker.deliverPushMessage', { origin: ORIGIN, registrationId, data: decoded.plaintext });
 	await new Promise((resolve) => setTimeout(resolve, 1_000));
@@ -368,19 +393,16 @@ test('web push: register, wake rules, VAPID + aes128gcm delivery, service worker
 	// user2 sees user1's status changes once the server has applied them (§4.5).
 	const seenStatus = () => user2.frames.filter((f) => f.method === 'user' && f.params?.new?.user_id === user1).map((f) => f.params.new.status).at(-1);
 
-	// --- User 1's own message: no push. Sent through the UI while idle. ---
+	// --- User 1's own message: no push, even while idle. Sent on the page's connection, not typed: a key or a click
+	// is input, which ends idle in the web client. ---
 	const statusBefore = findSent(tap, 'status').length;
 	let before = capture.posts.length;
-	const own = `own-${Date.now()}`;
-	await page.getByRole('textbox', { name: 'Message', exact: true }).fill(own);
-	await page.getByRole('button', { name: 'Send message', exact: true }).click();
-	await expect.poll(() => findSent(tap, 'message').find((frame) => frame.params?.body?.text === own)).toBeTruthy();
-	const ownFrame = findSent(tap, 'message').find((frame) => frame.params?.body?.text === own)!;
+	const ownFrame = { method: 'message', id: 'tap-own-message', params: { room_id: 'general', body: { text: `own-${Date.now()}` } } };
+	tap.inject(ownFrame);
 	await expect.poll(() => resultOf(tap, ownFrame.id)?.result?.message_id).toBeTruthy();
 	const ownId = resultOf(tap, ownFrame.id)!.result.message_id as string;
-	evidence('status frames sent while composing', findSent(tap, 'status').slice(statusBefore));
-	expect(findSent(tap, 'status').slice(statusBefore).some((frame) => frame.params?.idle === false), 'sending did not end idle').toBe(false);
 	await expectNoPost(capture.posts, 'own message', before);
+	expect(findSent(tap, 'status').slice(statusBefore).some((frame) => frame.params?.idle === false), 'the page stayed idle').toBe(false);
 
 	// --- Plain message in a joined room: no push by default ---
 	before = capture.posts.length;
@@ -404,6 +426,8 @@ test('web push: register, wake rules, VAPID + aes128gcm delivery, service worker
 	evidence('mute frame sent', findSent(tap, 'status').find((frame) => frame.params?.mute === true));
 	evidence('mute echo', tap.received.filter((frame) => frame.method === 'status'));
 	await page.keyboard.press('Escape');
+	// Using the menu was input, which ended idle: idle again, so only the mute holds the pushes back.
+	await goIdle(page, tap);
 	before = capture.posts.length;
 	await user2.request('message', { room_id: 'general', body: { text: `muted mention @${user1}`, mentions: [user1] } });
 	await user2.request('message', { room_id: 'general', body: { text: 'muted reply' }, reply_to: { message_id: ownId } });
@@ -413,6 +437,7 @@ test('web push: register, wake rules, VAPID + aes128gcm delivery, service worker
 	await expect.poll(() => findSent(tap, 'status').find((frame) => frame.params?.mute === 0 || frame.params?.mute === false)).toBeTruthy();
 	await expect.poll(() => tap.received.find((frame) => frame.method === 'status' && frame.params?.mute === false && !('room_id' in frame.params))).toBeTruthy();
 	await page.keyboard.press('Escape');
+	await goIdle(page, tap);
 
 	// --- Room mute via raw status: it silences mentions and replies alike (§4.5) ---
 	await injectStatus(tap, { room_id: 'general', mute: true });
@@ -473,7 +498,9 @@ test('web push: register, wake rules, VAPID + aes128gcm delivery, service worker
 	await expectNoPost(capture.posts, 'mention after sign-out', before);
 	await expect.poll(enabledIds).not.toContain(pushId);
 	evidence('enabled push_ids after sign-out', await enabledIds());
-	// A late push for the signed-out account is dropped: nothing new shows.
+	// A late push for the signed-out account is dropped: none of it shows. Browsers expect each push to leave a
+	// notification showing, so the web client shows again what is showing, or with nothing showing, a stand-in that
+	// names nothing ("Open Apron to catch up.").
 	const shownBefore = await swNotifications(context);
 	const late = JSON.stringify({ push_id: pushId, unread: 1, message: { message_id: '9999999999999', room_id: 'general', from: { user_id: user2.userId, name: 'Second' }, body: { text: 'late push' } } });
 	// The first page's CDP session closed with it: find the registration again from this page.
@@ -487,7 +514,8 @@ test('web push: register, wake rules, VAPID + aes128gcm delivery, service worker
 	const shownAfter = await swNotifications(context);
 	evidence('notifications after a push for the signed-out account', { before: shownBefore, after: shownAfter });
 	expect(shownAfter.filter((n: any) => n.body === 'late push')).toHaveLength(0);
-	expect(shownAfter).toHaveLength(shownBefore.length);
+	const added = shownAfter.filter((n: any) => !shownBefore.some((shown: any) => shown.tag === n.tag));
+	expect(added, 'only the stand-in, and only with nothing showing before').toEqual(shownBefore.length ? [] : [expect.objectContaining({ title: 'Apron', tag: 'apron:push', data: null })]);
 
 	// --- Signing in again: push stays off, and the client unregisters this browser's endpoint ---
 	const sentBefore = tap2.sent.length;
@@ -497,8 +525,12 @@ test('web push: register, wake rules, VAPID + aes128gcm delivery, service worker
 	const afterSignIn = tap2.sent.slice(sentBefore).filter((frame) => frame.method === 'push_register' || frame.method === 'push_unregister');
 	evidence('push frames after signing in again', afterSignIn);
 	expect(afterSignIn.every((frame) => frame.method === 'push_unregister' && frame.params.url === endpoint)).toBe(true);
+	// The one Notifications switch stays on for this device's open page; it says push is off, and offers it.
 	await page2.getByRole('button', { name: /^Open preferences/ }).click();
-	await expect(page2.getByRole('dialog', { name: 'Preferences' }).getByRole('switch', { name: 'Push notifications' })).toHaveAttribute('aria-checked', 'false');
+	const prefs2 = page2.getByRole('dialog', { name: 'Preferences' });
+	await expect(prefs2.getByRole('switch', { name: 'Notifications', exact: true })).toHaveAttribute('aria-checked', 'true');
+	await expect(prefs2.locator('#ap-pref-notifications-note')).toHaveText('On · alerts while Apron is open. Not yet when it’s closed.');
+	await expect(prefs2.getByRole('button', { name: 'Alert when it’s closed, too' })).toBeVisible();
 	await page2.keyboard.press('Escape');
 	evidence('total posts', capture.posts.length);
 	user2.close();
@@ -547,6 +579,7 @@ async function statusChooser(page: Page): Promise<(label: RegExp) => Promise<voi
 }
 
 test('status: set with me, derived online, idle, offline as other clients see it; mutes stay private and reach every connection', async ({ page, context, browser }) => {
+	await page.clock.install();
 	const tap = await tapSocket(page);
 	await openChat(page);
 	await signUpWithPasskey(page, context);
@@ -632,12 +665,15 @@ test('status: set with me, derived online, idle, offline as other clients see it
 	await injectStatus(tap, { room_id: 'general', mute: false });
 	await expect.poll(() => tap.received.slice(receivedBefore).find((frame) => frame.method === 'status' && frame.params?.room_id === 'general' && frame.params?.mute === false)).toBeTruthy();
 
-	// The web client sends each `status` as a request, after sign-in, and the server answers {} (§4.5).
+	// The web client sends each `status` as a request, after sign-in, and the server answers {} (§4.5). Idle as
+	// seconds is the one exception: this server takes `idle` only as a boolean and refuses it as invalid_params,
+	// and the client sends `idle: true` instead.
 	const sentStatus = findSent(tap, 'status');
 	evidence('status requests and replies', sentStatus.map((frame) => ({ sent: frame, reply: resultOf(tap, frame.id) })));
 	for (const frame of sentStatus) {
 		expect(typeof frame.id, `status without an id: ${JSON.stringify(frame)}`).toBe('string');
-		await expect.poll(() => resultOf(tap, frame.id), { timeout: 5_000 }).toMatchObject({ result: {} });
+		const reply = typeof frame.params?.idle === 'number' ? { error: { code: -32602 } } : { result: {} };
+		await expect.poll(() => resultOf(tap, frame.id), { timeout: 5_000 }).toMatchObject(reply);
 	}
 
 	// The page closes: with no connection, user1 is offline.
