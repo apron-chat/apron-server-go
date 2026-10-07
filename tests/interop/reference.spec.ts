@@ -1,6 +1,6 @@
 import { deflateSync } from 'node:zlib';
 import { expect, test, type Page } from '@playwright/test';
-import { composer, messageAction, messageByText, openChat, openThread, sendMessage, setDisplayName, startThread, userIdOf, waitForMessage } from './test-helpers';
+import { composer, messageAction, messageByText, openChat, openThread, roomAction, sendMessage, setDisplayName, startThread, userIdOf, waitForMessage } from './test-helpers';
 
 /** The dev server proxies the Go server, so URLs the server mints use this host and load same-origin. */
 const PROXIED_WS = 'ws://127.0.0.1:5173/ws';
@@ -246,7 +246,7 @@ test.describe('reference features against the Go server', () => {
 		const card = page.locator(`[data-testid="thread-card"][data-thread="${threadId}"]`);
 
 		// Leaving a thread removes its row; its card stays in the room, and More threads… lists it to join.
-		await page.getByTestId('leave-room').click();
+		await (await roomAction(page, 'leave-room')).click();
 		await expect(row).toHaveCount(0);
 		await expect(card).toBeVisible();
 		await page.getByTestId('more-threads').click();
@@ -255,7 +255,7 @@ test.describe('reference features against the Go server', () => {
 		await page.getByRole('button', { name: 'Back to room', exact: true }).click();
 
 		// Threads are rooms of their own: leaving General keeps the thread, listed on its own.
-		await page.getByTestId('leave-room').click();
+		await (await roomAction(page, 'leave-room')).click();
 		await expect(page.getByTestId('room-list').locator(`button[data-room="general"]`)).toHaveCount(0);
 		await expect(page.getByTestId('room-list').locator(`button[data-room="${threadId}"]`)).toBeVisible();
 		await page.getByTestId('browse-rooms').click();

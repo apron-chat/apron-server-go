@@ -14,6 +14,7 @@ import {
 	reactionChip,
 	reactTo,
 	recordOffsiteRequests,
+	roomAction,
 	sendMessage,
 	setDisplayName,
 	startThread,
@@ -71,14 +72,14 @@ test.describe('chat protocol interoperability', () => {
 			// Opening a thread for the first time is not a reconnect.
 			await expect(pageB.getByTestId('reconnect-divider')).toHaveCount(0);
 			await expect(await waitForMessage(pageB, `${token}-latest`)).toBeVisible();
-			await pageB.getByRole('button', { name: 'Edit thread', exact: true }).click();
+			await (await roomAction(pageB, 'edit-room')).click();
 			const editor = pageB.getByRole('region', { name: 'Edit thread', exact: true });
 			const titleB = editor.getByRole('textbox', { name: 'Thread title', exact: true });
 			await expect(titleB).toHaveValue(`${token} first line`);
 			await titleB.fill('Cancelled title');
 			await editor.getByRole('button', { name: 'Cancel', exact: true }).click();
 			await expect(pageB.getByRole('heading', { level: 1 })).toContainText(`${token} first line`);
-			await pageB.getByRole('button', { name: 'Edit thread', exact: true }).click();
+			await (await roomAction(pageB, 'edit-room')).click();
 			await titleB.fill(`${token}-renamed`);
 			await editor.getByRole('button', { name: 'Save thread', exact: true }).click();
 			await expect(editor).toHaveCount(0);
@@ -103,7 +104,7 @@ test.describe('chat protocol interoperability', () => {
 			await expect(cardB.getByTestId('thread-preview')).toContainText('Fifth line');
 			// Without a description, the card previews the latest message.
 			await cardA.click();
-			await pageA.getByRole('button', { name: 'Edit thread', exact: true }).click();
+			await (await roomAction(pageA, 'edit-room')).click();
 			const editorA = pageA.getByRole('region', { name: 'Edit thread', exact: true });
 			await editorA.getByRole('textbox', { name: 'Thread summary', exact: true }).fill('');
 			await editorA.getByRole('button', { name: 'Save thread', exact: true }).click();
@@ -669,7 +670,8 @@ test.describe('chat protocol interoperability', () => {
 			await openThread(pageB, threadId);
 			await waitForMessage(pageB, `${token}-first`);
 			await expect(pageB.getByTestId('join-room')).toBeVisible();
-			await expect(pageB.getByTestId('leave-room')).toHaveCount(0);
+			await expect(await roomAction(pageB, 'leave-room')).toHaveCount(0);
+			await pageB.keyboard.press('Escape');
 			await pageB.getByRole('button', { name: 'Back to room', exact: true }).click();
 
 			// Only members receive a thread's messages: B hears the room, not the thread.
@@ -686,7 +688,8 @@ test.describe('chat protocol interoperability', () => {
 
 			// Joining catches up on what it missed, and from then on the thread is live.
 			await pageB.getByTestId('join-room').click();
-			await expect(pageB.getByTestId('leave-room')).toBeVisible();
+			await expect(await roomAction(pageB, 'leave-room')).toBeVisible();
+			await pageB.keyboard.press('Escape');
 			await expect(pageB.locator(`article[data-message-id="${secondId}"]`)).toBeVisible();
 			await openThread(pageA, threadId);
 			await sendMessage(pageA, `${token}-third`);

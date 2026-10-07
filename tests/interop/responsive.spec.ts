@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test';
-import { composer, deleteMessage, emojiPicker, messageAction, moreAction, openChat, pickFromEmojiPicker, reactionChip, reactTo, sendMessage, startThread, waitForMessage } from './test-helpers';
+import { composer, deleteMessage, emojiPicker, messageAction, moreAction, openChat, pickFromEmojiPicker, reactionChip, reactTo, roomAction, sendMessage, startThread, waitForMessage } from './test-helpers';
 
 test('chat remains usable without horizontal overflow on a phone viewport', async ({ page }) => {
 	await openChat(page);
@@ -22,7 +22,7 @@ test('thread summary previews and the thread editor fit a phone viewport', async
 	await sendMessage(page, text);
 	const message = await waitForMessage(page, token);
 	await startThread(page, message);
-	await page.getByRole('button', { name: 'Edit thread', exact: true }).click();
+	await (await roomAction(page, 'edit-room')).click();
 	const title = page.getByRole('textbox', { name: 'Thread title', exact: true });
 	await expect(title).toHaveValue(new RegExp(`^${token} longword`));
 	for (const field of [title, page.getByRole('textbox', { name: 'Thread summary', exact: true })]) {
