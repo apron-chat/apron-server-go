@@ -137,6 +137,17 @@ export async function startThread(page: Page, message: Locator): Promise<string>
  * its messages live). Waits until it is the open pane; with `join`, until it
  * is joined as well.
  */
+/**
+ * One of the room header's ⋯ actions (`edit-room`, `leave-room`), with the menu
+ * opened for it. A menu item closes the menu when clicked; to only look, press
+ * Escape after.
+ */
+export async function roomAction(page: Page, testId: 'edit-room' | 'leave-room'): Promise<Locator> {
+	const menu = page.getByTestId('room-actions');
+	if ((await menu.getAttribute('aria-expanded')) !== 'true') await menu.click();
+	return page.getByTestId(testId);
+}
+
 export async function openThread(page: Page, threadId: string, options: { join?: boolean } = {}): Promise<void> {
 	const row = page.locator(`[data-testid="thread-list"] button[data-thread="${threadId}"]`);
 	const card = page.locator(`[data-testid="thread-card"][data-thread="${threadId}"]`);
@@ -151,7 +162,8 @@ export async function openThread(page: Page, threadId: string, options: { join?:
 		await join.click();
 		await expect(join).toHaveCount(0);
 	}
-	await expect(page.getByTestId('leave-room')).toBeVisible();
+	await expect(await roomAction(page, 'leave-room')).toBeVisible();
+	await page.keyboard.press('Escape');
 }
 
 /** The full emoji picker's popover (emoji-mart inside it, in a shadow root Playwright's locators pierce). */
