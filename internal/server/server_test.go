@@ -52,26 +52,35 @@ func TestServerFrame(t *testing.T) {
 	_, httpServer := newTestServer(t, DefaultConfig())
 	_, frame := dialRaw(t, httpServer)
 	params := frame["params"].(map[string]any)
-	if params["apron"] != float64(7) || params["agent"] != "apron-go/7" || params["ping"] != float64(30) {
+	if params["apron"] != float64(8) || params["agent"] != "apron-go/8" || params["ping"] != float64(30) {
 		t.Fatalf("version, agent, and ping: %#v", params)
 	}
-	for _, old := range []string{"protocol", "name", "caps"} {
-		if _, has := params[old]; has {
-			t.Fatalf("pre-0bf4a27 field %q: %#v", old, params)
-		}
-	}
-	if !reflect.DeepEqual(params["capabilities"], []any{"history", "edit", "rooms", "reactions", "activity", "embed:upload", "embed:stream", "command"}) {
+	if !reflect.DeepEqual(params["capabilities"], []any{"history", "edit", "rooms", "reactions", "activity", "embed:upload", "embed:stream", "command", "status", "ext"}) {
 		t.Fatalf("capabilities: %#v", params["capabilities"])
+	}
+	// With capability status, server.status lists the optional statuses
+	// accepted (§4.5).
+	if !reflect.DeepEqual(params["status"], []any{"dnd", "invisible"}) {
+		t.Fatalf("status: %#v", params["status"])
 	}
 	if _, has := params["signup"]; !reflect.DeepEqual(params["auth"], []any{"guest"}) || has {
 		t.Fatalf("auth: %#v, signup: %#v", params["auth"], params["signup"])
 	}
-	if !reflect.DeepEqual(params["push"], map[string]any{"relay": map[string]any{}}) {
-		t.Fatalf("push: %#v", params["push"])
+	// push offers relay and webpush, with the server's VAPID key, and the
+	// wake scopes it implements (§4.9).
+	push, _ := params["push"].(map[string]any)
+	webpush, _ := push["webpush"].(map[string]any)
+	key, _ := webpush["key"].(string)
+	if point, err := decodeBase64URL(key); err != nil || len(point) != p256PointBytes || len(webpush) != 1 {
+		t.Fatalf("push.webpush: %#v", push["webpush"])
 	}
-	limits := params["ext"].(map[string]any)["apron-go"].(map[string]any)
-	if limits["max_upload_bytes"] != float64(defaultMaxUploadBytes) || limits["stream_keep_bytes"] != float64(defaultStreamKeepBytes) {
-		t.Fatalf("ext limits: %#v", limits)
+	if !reflect.DeepEqual(push["relay"], map[string]any{}) || !reflect.DeepEqual(push["wake"], []any{"mentions", "replies", "private", "joined", "badge"}) || len(push) != 3 {
+		t.Fatalf("push: %#v", push)
+	}
+	// ext is a capability (§4.12); the server frame carries no ext of its
+	// own.
+	if _, has := params["ext"]; has {
+		t.Fatalf("server.ext: %#v", params["ext"])
 	}
 
 	// A token only signs in, so signup lists the other schemes.
@@ -98,15 +107,19 @@ func TestGuestAuth(t *testing.T) {
 	_, httpServer := newTestServer(t, DefaultConfig())
 	c, _ := dialRaw(t, httpServer)
 	c.expectError(t, "message", "early", map[string]any{"room_id": "general", "body": map[string]any{}}, codeDenied)
-	c.expectError(t, "auth", "bad-scheme", map[string]any{"scheme": "password"}, codeUnsupported)
+	// An unknown scheme is a name the server does not know (§1).
+	c.expectError(t, "auth", "bad-scheme", map[string]any{"scheme": "password"}, codeInvalidParams)
+	// A request method without an id is ignored, guest auth included.
+	c.write(t, map[string]any{"method": "auth", "params": map[string]any{"scheme": "guest"}})
+	c.expectQuiet(t)
 	// The new guest's join to general is a logged membership, delivered to
-	// its connection before the auth result (§1).
+	// its connection after the auth result (§3.2).
 	before, result := c.request(t, "auth", "auth", map[string]any{"scheme": "guest", "name": "Ada", "agent": "apron-test/1"})
 	you := result["you"].(map[string]any)
-	if you["user_id"] != "guest_1" || you["name"] != "Ada" || len(before) != 1 {
+	if you["user_id"] != "guest_1" || you["name"] != "Ada" || len(before) != 0 {
 		t.Fatalf("guest identity %#v after %#v", you, before)
 	}
-	membership := membershipOnly(t, before[0])
+	membership := membershipOnly(t, c.read(t))
 	wantMembership := map[string]any{
 		"log_id": membership["log_id"], "room_id": "general",
 		"members": []any{map[string]any{"user": map[string]any{"user_id": "guest_1", "name": "Ada"}, "joined": true}},
@@ -125,7 +138,7 @@ func TestGuestAuth(t *testing.T) {
 	parseID(t, logID)
 	want := map[string]any{
 		"room_id": "general", "title": "General", "log_id": logID, "latest_log_id": membership["log_id"], "history_log_id": logID,
-		"members": []any{map[string]any{"user_id": "guest_1"}},
+		"members": []any{map[string]any{"user_id": "guest_1", "status": "online"}},
 	}
 	if !reflect.DeepEqual(general, want) || !reflect.DeepEqual(listed["users"], []any{you}) {
 		t.Fatalf("general = %#v with users %#v, want %#v", general, listed["users"], want)
@@ -222,7 +235,11 @@ func TestLivenessPing(t *testing.T) {
 	}
 	ping(`{"method":"ping"}`)
 	ping(`{ "method": "ping", "params": {} }`)
-	c.request(t, "auth", "auth", map[string]any{"scheme": "guest"})
+	// A ping with an id is a ping, answered with pong and nothing else: a
+	// server may ignore the id of a notification method, and handle the
+	// frame as a notification (§1.1).
+	ping(`{"method":"ping","id":"p1"}`)
+	guestAuth(t, c)
 	ping(`{"method":"ping"}`)
 
 	// A connection that pinged and then fell silent is closed.
@@ -256,13 +273,14 @@ func TestAuthIsABarrier(t *testing.T) {
 	for len(frames) < 6 {
 		frames = append(frames, c.read(t))
 	}
-	if got := methods(frames); !reflect.DeepEqual(got, []string{"room_update", "reply", "reply", "reply", "message", "reply"}) {
+	// The sign-in's join follows its result (§3.2).
+	if got := methods(frames); !reflect.DeepEqual(got, []string{"reply", "room_update", "reply", "reply", "message", "reply"}) {
 		t.Fatalf("pipelined frames: %v", got)
 	}
-	membership := membershipOnly(t, frames[0])
-	for i, id := range []string{"auth", "list", "history"} {
-		if frames[i+1]["id"] != id || frames[i+1]["result"] == nil {
-			t.Fatalf("reply %d = %#v, want a result for %s", i, frames[i+1], id)
+	membership := membershipOnly(t, frames[1])
+	for i, id := range []string{"auth", "", "list", "history"} {
+		if id != "" && (frames[i]["id"] != id || frames[i]["result"] == nil) {
+			t.Fatalf("reply %d = %#v, want a result for %s", i, frames[i], id)
 		}
 	}
 	listed := frames[2]["result"].(map[string]any)
@@ -311,14 +329,14 @@ func TestMessageSnapshotsReplaceEditableState(t *testing.T) {
 	observer := dialTestClient(t, httpServer)
 	expectMembership(t, owner, "general", observer.userID, true)
 	owner.result(t, "me", "name", map[string]any{"name": "Alice"})
-	if renamed := observer.notification(t, "user"); !reflect.DeepEqual(renamed, map[string]any{"new": map[string]any{"user_id": "guest_1", "name": "Alice"}}) {
+	if renamed := observer.notification(t, "user"); !reflect.DeepEqual(renamed, map[string]any{"new": map[string]any{"user_id": "guest_1", "name": "Alice", "status": "online"}}) {
 		t.Fatalf("rename notification: %#v", renamed)
 	}
 	ext := map[string]any{"irc": map[string]any{"nick": "ada_"}}
 	id, creation := save(t, owner, "create", map[string]any{
 		"from":    map[string]any{"user_id": "forged"},
 		"log_id":  "123",
-		"body":    map[string]any{"text": "hello", "format": "plain", "embeds": []any{map[string]any{"kind": "file"}}},
+		"body":    map[string]any{"text": "hello", "format": "plain", "embeds": []any{map[string]any{"kind": "ext:file"}}},
 		"ext":     ext,
 		"custom":  true,
 		"deleted": false,
@@ -342,13 +360,18 @@ func TestMessageSnapshotsReplaceEditableState(t *testing.T) {
 	if stable != id || parseID(t, edit["log_id"]) <= parseID(t, id) {
 		t.Fatalf("edit snapshot: %#v", edit)
 	}
-	if _, kept := edit["ext"]; kept || len(edit["body"].(map[string]any)) != 1 || edit["from"].(map[string]any)["name"] != "Alice" {
-		t.Fatalf("replacement merged editable fields or changed author: %#v", edit)
+	// A save replaces every client field but ext, which merges (§4.4): the
+	// edit that leaves ext out keeps it.
+	if !reflect.DeepEqual(edit["ext"], ext) || len(edit["body"].(map[string]any)) != 1 || edit["from"].(map[string]any)["name"] != "Alice" {
+		t.Fatalf("replacement merged editable fields, lost ext, or changed author: %#v", edit)
 	}
 
-	_, deleted := save(t, owner, "delete", map[string]any{"message_id": id, "deleted": true, "body": "discard even invalid body"})
+	// A tombstone carries neither body nor ext (§4.4).
+	_, deleted := save(t, owner, "delete", map[string]any{"message_id": id, "deleted": true, "body": "discard even invalid body", "ext": map[string]any{"irc": map[string]any{"nick": "x"}}})
 	observer.notification(t, "message")
-	if _, exists := deleted["body"]; exists || deleted["deleted"] != true {
+	_, hasBody := deleted["body"]
+	_, hasExt := deleted["ext"]
+	if hasBody || hasExt || deleted["deleted"] != true {
 		t.Fatalf("tombstone: %#v", deleted)
 	}
 
@@ -361,6 +384,7 @@ func TestMessageSnapshotsReplaceEditableState(t *testing.T) {
 	redacted := func(snapshot map[string]any) map[string]any {
 		value := maps.Clone(snapshot)
 		delete(value, "body")
+		delete(value, "ext")
 		value["deleted"] = true
 		return value
 	}
@@ -524,12 +548,13 @@ func TestRoomSetCreatesAndEditsRoomsAndThreads(t *testing.T) {
 		{"title": nil},
 		{"description": 12},
 		{"description": nil},
-		{"description": strings.Repeat("x", maxDescriptionBytes+1)},
 		{"ext": []any{}},
 		{"ext": nil},
 	} {
 		c.expectError(t, "room_set", fmt.Sprint("bad-room-", i), params, codeInvalidParams)
 	}
+	// A value rejected for its size is too_large (§1.1).
+	c.expectError(t, "room_set", "long-description", map[string]any{"description": strings.Repeat("x", maxDescriptionBytes+1)}, codeTooLarge)
 	c.expectQuiet(t)
 	observer.expectQuiet(t)
 
@@ -710,11 +735,14 @@ func TestReactions(t *testing.T) {
 		{"message_id": id, "emojis": "👍"},
 		{"message_id": id, "emojis": []any{12}},
 		{"message_id": id, "emojis": []any{""}},
-		{"message_id": id, "emojis": tooMany},
 		{"emojis": []any{"👍"}},
 	} {
 		c.expectError(t, "reactions", fmt.Sprint("bad-", i), params, codeInvalidParams)
 	}
+	// A count limit the server sets is denied, and an emoji over its size is
+	// too_large (§1.1).
+	c.expectError(t, "reactions", "too-many", map[string]any{"message_id": id, "emojis": tooMany}, codeDenied)
+	c.expectError(t, "reactions", "too-long", map[string]any{"message_id": id, "emojis": []any{strings.Repeat("x", maxEmojiBytes+1)}}, codeTooLarge)
 	c.expectQuiet(t)
 
 	page := historyPage(t, c, "general", map[string]any{})
@@ -963,12 +991,20 @@ func TestRequestDeduplication(t *testing.T) {
 	if len(logIDs(t, second, "messages")) != len(logIDs(t, first, "messages"))+1 {
 		t.Fatalf("a finished read was answered from the cache: %#v", second)
 	}
-	app.mu.RLock()
-	defer app.mu.RUnlock()
-	if entry := app.users[c.userID].dedup.get("read"); entry != nil {
+	// The server forgets a read just after sending its result, so the
+	// result can arrive first.
+	kept := func(id string) bool {
+		app.mu.RLock()
+		defer app.mu.RUnlock()
+		return app.users[c.userID].dedup.get(id) != nil
+	}
+	for deadline := time.Now().Add(time.Second); kept("read") && time.Now().Before(deadline); {
+		time.Sleep(time.Millisecond)
+	}
+	if kept("read") {
 		t.Fatal("history result kept for deduplication")
 	}
-	if entry := app.users[c.userID].dedup.get("post"); entry == nil {
+	if !kept("post") {
 		t.Fatal("message result not kept for deduplication")
 	}
 }
@@ -1042,12 +1078,104 @@ func TestActivityRelaysTypingWithInlineIdentity(t *testing.T) {
 	if stop := c.notification(t, "activity"); stop["typing"] != float64(0) {
 		t.Fatalf("stop: %#v", stop)
 	}
-	c.expectError(t, "activity", "missing", map[string]any{"room_id": "missing", "typing": 8}, codeInvalidParams)
-	c.expectError(t, "activity", "negative", map[string]any{"room_id": thread, "typing": -1}, codeInvalidParams)
-
-	// away applies to the connection and is never delivered.
-	c.write(t, map[string]any{"method": "activity", "params": map[string]any{"away": true}})
-	c.write(t, map[string]any{"method": "activity", "params": map[string]any{"room_id": thread, "away": false}})
+	// Invalid activity changes nothing, and, as a notification, is not
+	// answered even when sent with an id (§1).
+	c.write(t, map[string]any{"method": "activity", "id": "missing", "params": map[string]any{"room_id": "missing", "typing": 8}})
+	c.write(t, map[string]any{"method": "activity", "params": map[string]any{"room_id": thread, "typing": -1}})
+	c.write(t, map[string]any{"method": "activity", "id": "typing", "params": map[string]any{"room_id": thread, "typing": 1}})
+	if typing := c.notification(t, "activity"); typing["typing"] != float64(1) {
+		t.Fatalf("typing sent with an id: %#v", typing)
+	}
 	c.expectQuiet(t)
-	c.expectError(t, "activity", "bad-away", map[string]any{"away": "yes"}, codeInvalidParams)
+}
+
+// A notification-only method is never answered, whatever its id and even
+// with invalid or malformed params (§1). A ping is still answered with pong.
+func TestNotificationOnlyWithIDNeverAnswered(t *testing.T) {
+	_, httpServer := newTestServer(t, DefaultConfig())
+	c, _ := dialRaw(t, httpServer)
+	raw := func(frame string) {
+		t.Helper()
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		if err := c.ws.Write(ctx, websocket.MessageText, []byte(frame)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	frames := []string{
+		`{"method":"activity","id":"a1","params":[]}`,
+		`{"method":"activity","id":7,"params":{"typing":-1}}`,
+		`{"method":"activity","id":"a2","params":{"room_id":"missing","typing":3}}`,
+		`{"method":"activity","id":"a3","params":{"read_message_id":5}}`,
+	}
+	check := func() {
+		t.Helper()
+		for _, frame := range frames {
+			raw(frame)
+		}
+		c.expectQuiet(t)
+		for _, frame := range []string{`{"method":"ping","id":5}`, `{"method":"ping","id":"p","params":[]}`} {
+			raw(frame)
+			if pong := c.read(t); !reflect.DeepEqual(pong, map[string]any{"method": "pong"}) {
+				t.Fatalf("%s answered with %#v", frame, pong)
+			}
+		}
+		c.expectQuiet(t)
+	}
+	check()
+	guestAuth(t, c)
+	c.drain(t)
+	check()
+	// Other methods still reply to a bad id or bad params.
+	raw(`{"method":"room_list","id":5}`)
+	if reply := c.read(t); reply["error"].(map[string]any)["code"] != float64(codeInvalidRequest) {
+		t.Fatalf("bad id on a request: %#v", reply)
+	}
+	raw(`{"method":"room_list","id":"r1","params":[]}`)
+	if reply := c.read(t); reply["id"] != "r1" || reply["error"].(map[string]any)["code"] != float64(codeInvalidParams) {
+		t.Fatalf("bad params on a request: %#v", reply)
+	}
+}
+
+// Clients send every request with an id, and a server may ignore a request
+// method sent without one (§1.1): this one does, before sign-in and after,
+// whatever it is.
+func TestRequestsWithoutAnIDAreIgnored(t *testing.T) {
+	_, httpServer := newTestServer(t, DefaultConfig())
+	clients := dialGroup(t, httpServer, 2)
+	a, b := clients[0], clients[1]
+	for _, frame := range []map[string]any{
+		{"method": "me", "params": map[string]any{"name": "Nobody"}},
+		{"method": "message", "params": map[string]any{"room_id": "general", "body": map[string]any{"text": "hi"}}},
+		{"method": "room_set", "params": map[string]any{"title": "Nothing"}},
+		{"method": "room_join", "params": map[string]any{"room_id": "general"}},
+		{"method": "status", "params": map[string]any{"mute": true}},
+		{"method": "auth", "params": map[string]any{"scheme": "guest"}},
+	} {
+		a.write(t, frame)
+	}
+	a.expectQuiet(t)
+	b.expectQuiet(t)
+	if rooms := roomIDs(t, listRooms(t, a, map[string]any{})["joined"]); len(rooms) != 1 {
+		t.Fatalf("rooms after ignored requests: %v", rooms)
+	}
+}
+
+// Every notification a sign-in causes on its connection comes after the
+// auth result (§3.2): the new guest's join, then the statuses of those who
+// share a room (§4.5).
+func TestSignInNotificationsFollowTheResult(t *testing.T) {
+	_, httpServer := newTestServer(t, DefaultConfig())
+	a := dialTestClient(t, httpServer)
+	b, _ := dialRaw(t, httpServer)
+	watching(b)
+	b.write(t, map[string]any{"method": "auth", "id": "auth", "params": map[string]any{"scheme": "guest"}})
+	frames := []map[string]any{b.read(t), b.read(t), b.read(t)}
+	if got := methods(frames); !reflect.DeepEqual(got, []string{"reply", "room_update", "user"}) {
+		t.Fatalf("sign-in frames: %v", got)
+	}
+	b.userID = frames[0]["result"].(map[string]any)["you"].(map[string]any)["user_id"].(string)
+	checkMembership(t, membershipOnly(t, frames[1]), "general", b.userID, true)
+	checkStatus(t, frames[2], a.userID, "online")
+	b.expectQuiet(t)
 }

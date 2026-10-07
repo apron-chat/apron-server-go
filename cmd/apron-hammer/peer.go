@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"encoding/json/jsontext"
 	"encoding/json/v2"
@@ -11,6 +10,7 @@ import (
 	"strconv"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/coder/websocket"
 )
@@ -53,6 +53,10 @@ type peer struct {
 	// notify, when set before the read loop starts, sees every notification
 	// on the read goroutine. method is the frame's method.
 	notify func(method string, frame []byte)
+	// onReply, when set before the read loop starts, sees the id of every
+	// reply on the read goroutine, before a waiting call receives it, so
+	// that it orders replies among the notifications notify sees.
+	onReply func(id string)
 }
 
 type dialOptions struct {
@@ -61,8 +65,9 @@ type dialOptions struct {
 	// list pipelines room_list {filter: joined, members: true} right behind
 	// auth without waiting for its result, as clients do (auth is a
 	// barrier), and checks that it lists general with the new guest in it.
-	list   bool
-	notify func(method string, frame []byte)
+	list    bool
+	notify  func(method string, frame []byte)
+	onReply func(id string)
 }
 
 func (h *hammer) dial(ctx context.Context, options dialOptions) (*peer, error) {
@@ -76,7 +81,7 @@ func (h *hammer) dial(ctx context.Context, options dialOptions) (*peer, error) {
 	}
 	ws.SetReadLimit(1 << 30)
 	h.dials.Add(1)
-	p := &peer{h: h, ws: ws, pending: make(map[string]chan reply), done: make(chan struct{}), notify: options.notify}
+	p := &peer{h: h, ws: ws, pending: make(map[string]chan reply), done: make(chan struct{}), notify: options.notify, onReply: options.onReply}
 	if !options.noRead {
 		go p.readLoop()
 	}
@@ -166,8 +171,7 @@ func (p *peer) authAndList(ctx context.Context, auth map[string]any) error {
 				UserID string `json:"user_id"`
 			} `json:"members"`
 		} `json:"joined"`
-		NotJoined jsontext.Value   `json:"not_joined"`
-		Users     []jsontext.Value `json:"users"`
+		NotJoined jsontext.Value `json:"not_joined"`
 	}
 	if err := json.Unmarshal(raw, &listed); err != nil {
 		return fail(fmt.Errorf("room_list result: %w", err))
@@ -180,13 +184,13 @@ func (p *peer) authAndList(ctx context.Context, auth map[string]any) error {
 			}
 		}
 	}
-	if !member || listed.NotJoined != nil || len(listed.Users) == 0 {
+	// users SHOULD come with members: true (§4.3.1), so a listing without
+	// it is valid.
+	if !member || listed.NotJoined != nil {
 		p.h.protocolViolation("room_list joined with members behind auth did not list %s in %s: %s", p.userID, generalRoom, raw)
 	}
 	return nil
 }
-
-var notificationPrefix = []byte(`{"method":"`)
 
 func (p *peer) readLoop() {
 	defer func() {
@@ -210,15 +214,10 @@ func (p *peer) readLoop() {
 		}
 		p.h.framesIn.Add(1)
 		p.h.bytesIn.Add(int64(len(data)))
-		// The server marshals notifications from maps, so "method" is always
-		// the first key; replies are structs that start with id.
-		if rest, ok := bytes.CutPrefix(data, notificationPrefix); ok {
-			if end := bytes.IndexByte(rest, '"'); end >= 0 && p.notify != nil {
-				p.notify(string(rest[:end]), data)
-			}
-			continue
-		}
+		// A frame with a method is a notification, wherever its keys are:
+		// JSON objects are unordered.
 		var frame struct {
+			Method *string        `json:"method"`
 			ID     *string        `json:"id"`
 			Result jsontext.Value `json:"result"`
 			Error  *rpcError      `json:"error"`
@@ -227,11 +226,23 @@ func (p *peer) readLoop() {
 			p.h.protocolViolation("unparseable frame from server: %v", err)
 			continue
 		}
+		if frame.Method != nil {
+			if frame.ID != nil {
+				p.h.protocolViolation("%s notification from the server carries id %q", *frame.Method, *frame.ID)
+			}
+			if p.notify != nil {
+				p.notify(*frame.Method, data)
+			}
+			continue
+		}
 		if frame.ID == nil {
 			if frame.Error != nil {
 				p.connErr.Store(frame.Error)
 			}
 			continue
+		}
+		if p.onReply != nil {
+			p.onReply(*frame.ID)
 		}
 		p.mu.Lock()
 		ch := p.pending[*frame.ID]
@@ -275,20 +286,6 @@ func (p *peer) call(ctx context.Context, method string, params any) (jsontext.Va
 		return nil, err
 	}
 	if err := p.send(ctx, id, method, params); err != nil {
-		p.forget(id)
-		return nil, err
-	}
-	return p.wait(ctx, id, ch)
-}
-
-// callRaw sends a hand-written request frame carrying id and waits for its
-// reply.
-func (p *peer) callRaw(ctx context.Context, id string, payload []byte) (jsontext.Value, error) {
-	ch, err := p.expect(id)
-	if err != nil {
-		return nil, err
-	}
-	if err := p.sendRaw(ctx, payload); err != nil {
 		p.forget(id)
 		return nil, err
 	}
@@ -348,4 +345,30 @@ func (p *peer) close() {
 func (p *peer) closeGracefully() {
 	p.closedByUs.Store(true)
 	_ = p.ws.Close(websocket.StatusNormalClosure, "done")
+}
+
+// capabilities connects once and returns server.capabilities from the
+// server frame the server sends first (§3.1).
+func (h *hammer) capabilities() ([]string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	p, err := h.dial(ctx, dialOptions{noRead: true})
+	if err != nil {
+		return nil, err
+	}
+	defer p.close()
+	_, data, err := p.ws.Read(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var frame struct {
+		Method string `json:"method"`
+		Params struct {
+			Capabilities []string `json:"capabilities"`
+		} `json:"params"`
+	}
+	if err := json.Unmarshal(data, &frame); err != nil || frame.Method != "server" {
+		return nil, fmt.Errorf("the first frame is not a server frame: %s", data)
+	}
+	return frame.Params.Capabilities, nil
 }

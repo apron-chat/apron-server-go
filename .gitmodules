@@ -2,3 +2,7 @@
 	path = testdata/apron
 	url = https://github.com/shazow/apron.git
 	shallow = true
+[submodule ".apron-web"]
+	path = .apron-web
+	url = https://github.com/apron-chat/apron-web.git
+	shallow = true

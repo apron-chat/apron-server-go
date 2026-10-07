@@ -89,8 +89,8 @@ type Config struct {
 	// it but are never removed.
 	MaxUploadStorageBytes int64
 	// UploadDir holds hosted upload content. Empty uses a temporary directory
-	// removed on Shutdown. Uploads last only as long as the process, so files
-	// named *.upload left in UploadDir by a previous run are removed at start.
+	// removed on Shutdown. At start, files named *.upload in UploadDir that
+	// no stored embed holds are removed.
 	UploadDir string
 	// UploadStartTimeout is how long an unused write URL stays valid.
 	UploadStartTimeout time.Duration
@@ -107,6 +107,13 @@ type Config struct {
 	// AllowInsecurePush accepts http push endpoints and internal addresses.
 	// Use only for development and tests.
 	AllowInsecurePush bool
+	// VAPIDPrivateKey is the server's VAPID key for webpush (§4.9), the
+	// P-256 scalar in base64url. Empty uses the key kept in Store,
+	// generated at the first start.
+	VAPIDPrivateKey string
+	// VAPIDSubject is the contact push services may use, a mailto: or
+	// https: URL, sent in VAPID tokens. Empty uses PublicURL, if any.
+	VAPIDSubject string
 	// MaxConnections bounds concurrent WebSockets; 0 is unlimited.
 	MaxConnections int
 	// MessagesPerMinute bounds each user's new messages; 0 is unlimited.
@@ -123,7 +130,7 @@ type Config struct {
 	// shown beside names; "admin" and "moderator" may also remove others
 	// from rooms (§4.3.2).
 	Roles map[string][]string
-	// EmailSender enables email sign-in (§4.10) and delivers its codes; nil
+	// EmailSender enables email sign-in (§4.11) and delivers its codes; nil
 	// disables it. LogEmailSender logs codes, for development.
 	EmailSender EmailSender
 	// ClientIPHeader names the request header a reverse proxy puts the
@@ -222,16 +229,18 @@ const (
 // logRecord is one committed change: raw is the complete wire object
 // (including log_id) as it was at commit time, kept as JSON, which history
 // and broadcasts send as is and which costs far less memory than decoded
-// maps. Only redaction (§4.2) rewrites a record; raw is replaced, never
+// maps. Only redaction (§4.4) rewrites a record; raw is replaced, never
 // modified, so a reader may hold it after releasing s.mu. A record is
 // referenced from the log of every room it belongs to, so a move snapshot
-// appears in both the source and destination room logs (§4.1).
+// appears in both the source and destination room logs (§4.2).
 type logRecord struct {
 	id   int64
 	kind recordKind
 	raw  jsontext.Value
 	// rooms are the rooms whose logs hold the record.
 	rooms []string
+	// message is the message_id of a message snapshot.
+	message string
 }
 
 // newLogRecord encodes value. Values hold only JSON-decoded data and
@@ -259,11 +268,10 @@ func encodeJSON(value any) []byte {
 	return payload
 }
 
-// value decodes the record.
+// value decodes the record. Its ext keeps its values as raw JSON, so
+// re-encoding the record keeps them exactly.
 func (r *logRecord) value() map[string]any {
-	var value map[string]any
-	_ = json.Unmarshal(r.raw, &value)
-	return value
+	return decodeObject(r.raw)
 }
 
 // rewrite replaces the record with edit applied to its decoded value.
@@ -332,9 +340,9 @@ type client struct {
 	emailSends *rate.Limiter
 	proposal   *emailProposal
 	clientKey  string
-	// away reports that nobody is attending the connection (§4.4). Guarded
-	// by server.mu.
-	away bool
+	// idle reports that nobody is attending the connection (§4.5): false
+	// until the connection says otherwise. Guarded by server.mu.
+	idle bool
 	// closing is set once the final batch is queued; later frames are dropped.
 	closing atomic.Bool
 	// pinged is set by the first liveness ping (§1); lastFrame is when the
@@ -407,19 +415,19 @@ type Server struct {
 	// mailing tracks email deliveries in progress, which Shutdown awaits.
 	mailing sync.WaitGroup
 
-	ops         map[string]operation
-	push        *pushDeliverer
+	ops  map[string]operation
+	push *pushDeliverer
+	// vapid is the webpush key (§4.9); vapidStored reports that it is the
+	// one kept in the store.
+	vapid       *vapidKey
+	vapidStored bool
+	// badgeDelay is how long badge pushes wait to coalesce the changes to
+	// one user's unread count; badges counts the waits in progress.
+	badgeDelay time.Duration
+	badges     sync.WaitGroup
+	// stopped ends the background sweep of expired push registrations.
+	stopped     chan struct{}
 	connections sync.WaitGroup
-}
-
-// New starts a server with the state in config.Store, or an empty memory
-// store. It panics if the store cannot be read; Open returns the error.
-func New(config Config) *Server {
-	s, err := Open(config)
-	if err != nil {
-		panic(err)
-	}
-	return s
 }
 
 // Open starts a server with the state in config.Store, or an empty memory
@@ -449,6 +457,8 @@ func Open(config Config) (*Server, error) {
 		dirty:       newDirtySet(),
 		storeWrites: make(chan []store.Entry, storeQueue),
 		storeDone:   make(chan struct{}),
+		badgeDelay:  badgeDelay,
+		stopped:     make(chan struct{}),
 	}
 	for _, holders := range config.Roles {
 		for _, holder := range holders {
@@ -457,6 +467,17 @@ func Open(config Config) (*Server, error) {
 	}
 	s.ops = s.operations()
 	s.push = newPushDeliverer(config.AllowInsecurePush)
+	if config.VAPIDPrivateKey != "" {
+		key, err := parseVAPIDKey(config.VAPIDPrivateKey)
+		if err != nil {
+			return nil, err
+		}
+		s.vapid = key
+	}
+	s.push.subject = config.VAPIDSubject
+	if s.push.subject == "" && strings.HasPrefix(config.PublicURL, "https://") {
+		s.push.subject = config.PublicURL
+	}
 	s.openUploadDir()
 	go s.writeStore()
 	s.mu.Lock()
@@ -467,6 +488,7 @@ func Open(config Config) (*Server, error) {
 		s.mu.Unlock()
 		return nil, err
 	}
+	s.push.vapid = s.vapid
 	if s.rooms[defaultRoomID] == nil {
 		// The seeded default room has a logged creation record like any
 		// other room, so its history_log_id is never null.
@@ -474,11 +496,12 @@ func Open(config Config) (*Server, error) {
 	}
 	s.removeStaleUploads(files)
 	s.unlock()
+	go s.sweepPushes()
 	return s, nil
 }
 
 // defaultRoomID is the seeded room that requests without room_id address
-// (§3.5, §4.1) and that new guests join.
+// (§3.5, §4.2) and that new guests join.
 const defaultRoomID = "general"
 
 // Handler returns the HTTP handler serving /ws, /healthz, the upload, file,
@@ -547,11 +570,18 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	s.mu.Lock()
 	if !s.closed {
 		s.closed = true
+		close(s.stopped)
 		for c := range s.clients {
 			c.closeWithError(&rpcError{Code: codeRetryAfter, Message: "Server is shutting down; reconnect shortly", Data: map[string]any{"retry_after": 5}})
 		}
 		for _, e := range s.embeds {
 			e.endStream()
+		}
+		// Pending badge pushes would only be dropped once they fire, and
+		// the ends of timed mutes and coalesced statuses would find the
+		// server closed: none is kept waiting past it.
+		for _, u := range s.users {
+			s.stopTimersLocked(u)
 		}
 		if s.tempUploadDir {
 			_ = os.RemoveAll(s.uploadDir)
@@ -562,6 +592,7 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	done := make(chan struct{})
 	go func() {
 		s.connections.Wait()
+		s.badges.Wait()
 		s.push.wait()
 		s.mailing.Wait()
 		s.mu.Lock()
@@ -609,6 +640,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		clientKey: clientKey(s.clientIP(r)),
 		baseURL:   s.baseURL(r),
 	}
+	c.lastFrame.Store(time.Now().UnixNano())
 	go c.writeLoop()
 	go c.pingLoop()
 	s.mu.Lock()
@@ -717,27 +749,21 @@ func (s *Server) serverParams() map[string]any {
 	// guest makes the guest an account, and email and guest start one.
 	signup := slices.DeleteFunc(slices.Clone(authSchemes), func(scheme string) bool { return scheme == "token" })
 	params := map[string]any{
-		"apron":        7,
-		"agent":        "apron-go/7",
-		"capabilities": []string{"history", "edit", "rooms", "reactions", "activity", "embed:upload", "embed:stream", "command"},
+		"apron":        8,
+		"agent":        "apron-go/8",
+		"capabilities": []string{"history", "edit", "rooms", "reactions", "activity", "embed:upload", "embed:stream", "command", "status", "ext"},
 		"auth":         authSchemes,
 		"ping":         max(1, int(s.config.PingInterval/time.Second)),
-		"ext": map[string]any{"apron-go": map[string]any{
-			"max_frame_bytes":           s.config.ReadLimit,
-			"max_history_limit":         maxHistoryPageSize,
-			"max_upload_bytes":          s.config.MaxUploadBytes,
-			"max_message_upload_bytes":  s.config.MaxMessageUploadBytes,
-			"max_avatar_bytes":          s.config.MaxAvatarBytes,
-			"stream_keep_bytes":         s.config.StreamKeepBytes,
-			"max_stream_bytes":          s.config.StreamMaxBytes,
-			"max_stream_seconds":        int(s.config.StreamMaxDuration / time.Second),
-			"messages_per_minute":       s.config.MessagesPerMinute,
-			"write_url_timeout_seconds": int(s.config.UploadStartTimeout / time.Second),
-			"max_listed_members":        s.config.MaxListedMembers,
-		}},
+		// The optional statuses accepted with `me` (§4.5); online and ""
+		// always are, and are not listed.
+		"status": optionalStatuses,
 	}
 	if !s.config.DisablePush {
-		params["push"] = map[string]any{"relay": map[string]any{}}
+		push := map[string]any{"relay": map[string]any{}, "wake": (urgentScopes | wakeJoined | wakeBadge).names()}
+		if s.vapid != nil {
+			push["webpush"] = map[string]any{"key": s.vapid.public}
+		}
+		params["push"] = push
 	}
 	if s.config.Welcome != "" {
 		params["welcome"] = s.config.Welcome
@@ -898,6 +924,7 @@ func (s *Server) operations() map[string]operation {
 		"room_leave": (*Server).leaveRoom,
 		"reactions":  (*Server).react,
 		"activity":   (*Server).activity,
+		"status":     (*Server).status,
 	}
 	if !s.config.DisablePush {
 		ops["push_register"] = (*Server).registerPush
@@ -913,6 +940,15 @@ var readOnlyOps = map[string]bool{"history": true, "room_list": true}
 func (s *Server) processFrame(c *client, payload []byte) {
 	req, parseErr := parseRequest(payload)
 	if parseErr != nil {
+		if notificationOnly[req.method] {
+			// The id of a notification method may be ignored, and the frame
+			// handled as a notification (§1.1): it is never answered, even
+			// with invalid params, and a ping is still a ping.
+			if req.method == "ping" {
+				c.pong()
+			}
+			return
+		}
 		if parseErr.Code == codeInvalidParams && !req.hasID {
 			return
 		}
@@ -924,9 +960,20 @@ func (s *Server) processFrame(c *client, payload []byte) {
 		return
 	}
 
-	if req.method == "ping" && !req.hasID {
-		// A ping with other spacing or keys is still a ping.
+	// parseRequest drops the id of a notification method, which a server
+	// may ignore, handling the frame as a notification (§1.1): activity and
+	// ping are never answered.
+	if req.method == "ping" {
+		// A ping is answered before sign-in too (§3.2), and one with other
+		// spacing or keys is still a ping.
 		c.pong()
+		return
+	}
+	// Clients send every other method they send as a request, with an id.
+	// A server may ignore a request method sent without one (§1.1), and
+	// this one does, whatever its method and params, before sign-in or
+	// after: guest auth and status alike.
+	if !req.hasID && !notificationOnly[req.method] {
 		return
 	}
 	// auth is a barrier (§3.2): the read loop processes one frame at a time,
@@ -934,7 +981,7 @@ func (s *Server) processFrame(c *client, payload []byte) {
 	// Requests pipelined behind a failed auth, or behind a WebAuthn begin
 	// step, find no identity below and are denied.
 	if req.method == "auth" {
-		if _, err := s.authenticate(c, req); err != nil && req.hasID {
+		if _, err := s.authenticate(c, req); err != nil {
 			c.sendError(req, err)
 		}
 		return
@@ -1014,7 +1061,7 @@ func (s *Server) processFrame(c *client, payload []byte) {
 func (s *Server) currentResultLocked(u *userState, method string, result any) any {
 	switch method {
 	case "me":
-		return map[string]any{"you": u.profile()}
+		return map[string]any{"you": u.you()}
 	case "message", "command":
 		original, ok := result.(map[string]any)
 		if !ok || original["embeds"] == nil {

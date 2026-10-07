@@ -47,19 +47,24 @@ func (h *hammer) protocolViolation(format string, args ...any) {
 type scenario struct {
 	name        string
 	description string
+	// requires lists the capabilities the scenario needs; a server without
+	// one of them skips it.
+	requires []string
 	// run sets up what it needs, then calls st.window for the measured phase.
 	run func(h *hammer, st *stats)
 }
 
 var scenarios = []scenario{
-	{"churn", "connect, sign in as a guest (joining general), and disconnect (leaving it) as fast as possible", runChurn},
-	{"flood", "every client posts to general with one request in flight", runFlood},
-	{"activity", "every client sends typing activity to general", runActivity},
-	{"slow", "slow consumers that stop reading while others keep posting", runSlow},
-	{"history", "seed a room, then page its history concurrently", runHistory},
-	{"threads", "create many threads, then list them, sign in with a pipelined room_list, and join and leave concurrently", runThreads},
-	{"edits", "post, edit, react, and delete in a loop", runEdits},
-	{"embeds", "upload files and run live streams with readers", runEmbeds},
+	{"churn", "connect, sign in as a guest (joining general), and disconnect (leaving it) as fast as possible", nil, runChurn},
+	{"flood", "every client posts to general with one request in flight", nil, runFlood},
+	{"activity", "every client sends typing activity to general as notifications at a set pace", []string{"activity"}, runActivity},
+	{"slow", "slow consumers that stop reading while others keep posting", nil, runSlow},
+	{"history", "seed a room, then page its history concurrently", []string{"history", "rooms"}, runHistory},
+	{"threads", "create many threads, then list them, sign in with a pipelined room_list, and join and leave concurrently", []string{"rooms"}, runThreads},
+	{"edits", "post, edit, react, and delete in a loop", []string{"edit", "reactions"}, runEdits},
+	{"embeds", "upload files and run live streams with readers", []string{"embed:upload", "embed:stream"}, runEmbeds},
+	{"ext", "save messages through the ext merge's edge cases, pipelined saves of different keys included", []string{"edit", "ext"}, runExt},
+	{"signin", "sign guests in and check that nothing about the new identity precedes the auth result", nil, runSignIn},
 }
 
 func main() {
@@ -105,9 +110,18 @@ func main() {
 		}
 	}
 	mon := newMonitor(*debug, *profileDir)
+	capabilities, err := h.capabilities()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "server frame: %v\n", err)
+		os.Exit(1)
+	}
 
 	failed := false
 	for _, s := range run {
+		if missing := slices.DeleteFunc(slices.Clone(s.requires), func(name string) bool { return slices.Contains(capabilities, name) }); len(missing) > 0 {
+			fmt.Printf("\n== %s: skipped, the server lacks %s\n", s.name, strings.Join(missing, ", "))
+			continue
+		}
 		if !runScenario(h, mon, s) {
 			failed = true
 		}
@@ -293,14 +307,6 @@ func (st *stats) observe(op string, d time.Duration, err error) {
 		return
 	}
 	s.latencies = append(s.latencies, d)
-}
-
-// time runs f and records it under op.
-func (st *stats) time(op string, f func() error) error {
-	start := time.Now()
-	err := f()
-	st.observe(op, time.Since(start), err)
-	return err
 }
 
 func (st *stats) note(format string, args ...any) {

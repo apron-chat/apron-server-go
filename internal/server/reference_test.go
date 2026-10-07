@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"fmt"
 	"io"
@@ -56,13 +57,13 @@ func TestRoomListFiltersAndOrder(t *testing.T) {
 	b.notification(t, "user")
 	withMembers := listRooms(t, a, map[string]any{"members": true})
 	general := withMembers["joined"].([]any)[2].(map[string]any)
-	if !reflect.DeepEqual(memberIDs(general), []string{"guest_1", "guest_2"}) || !reflect.DeepEqual(general["members"].([]any)[0], map[string]any{"user_id": "guest_1"}) {
+	if !reflect.DeepEqual(memberIDs(general), []string{"guest_1", "guest_2"}) || !reflect.DeepEqual(general["members"].([]any)[0], map[string]any{"user_id": "guest_1", "status": "online"}) {
 		t.Fatalf("general members: %#v", general)
 	}
 	if randomEntry := withMembers["not_joined"].([]any)[0].(map[string]any); !reflect.DeepEqual(memberIDs(randomEntry), []string{"guest_2"}) {
 		t.Fatalf("unjoined room members: %#v", randomEntry)
 	}
-	wantUsers := []any{map[string]any{"user_id": "guest_1", "name": "Ada"}, map[string]any{"user_id": "guest_2"}}
+	wantUsers := []any{map[string]any{"user_id": "guest_1", "name": "Ada", "status": "online"}, map[string]any{"user_id": "guest_2", "status": "online"}}
 	if !reflect.DeepEqual(withMembers["users"], wantUsers) {
 		t.Fatalf("users: %#v", withMembers["users"])
 	}
@@ -376,7 +377,11 @@ func TestReadCursors(t *testing.T) {
 	a.write(t, map[string]any{"method": "activity", "params": map[string]any{"room_id": "general", "read_message_id": first}})
 	b.expectQuiet(t)
 	a.expectQuiet(t)
-	a.expectError(t, "activity", "unknown", map[string]any{"room_id": "general", "read_message_id": "999"}, codeInvalidParams)
+	// activity is a notification: one sent with an id is processed as one,
+	// unanswered, and an unknown cursor changes nothing (§1).
+	a.write(t, map[string]any{"method": "activity", "id": "unknown", "params": map[string]any{"room_id": "general", "read_message_id": "999"}})
+	a.expectQuiet(t)
+	b.expectQuiet(t)
 
 	// Kept cursors follow a room_list result that lists the room: every
 	// member's for a joined room, only the user's own for another.
@@ -409,7 +414,7 @@ func TestProfilesAndUserNotifications(t *testing.T) {
 	a, b := clients[0], clients[1]
 	ext := map[string]any{"example.org": map[string]any{"pronouns": "she/her"}}
 	you := a.result(t, "me", "profile", map[string]any{"name": "  Ada  ", "avatar": "data:image/png;base64,iVBORw0KGgo=", "ext": ext})["you"]
-	want := map[string]any{"user_id": "guest_1", "name": "Ada", "avatar": "data:image/png;base64,iVBORw0KGgo=", "ext": ext}
+	want := map[string]any{"user_id": "guest_1", "name": "Ada", "avatar": "data:image/png;base64,iVBORw0KGgo=", "ext": ext, "status": "online"}
 	if !reflect.DeepEqual(you, any(want)) {
 		t.Fatalf("you = %#v", you)
 	}
@@ -422,13 +427,13 @@ func TestProfilesAndUserNotifications(t *testing.T) {
 	if !reflect.DeepEqual(snapshot["from"], map[string]any{"user_id": "guest_1", "name": "Ada"}) {
 		t.Fatalf("from: %#v", snapshot["from"])
 	}
-	// room_list with members: true sends members bare, with complete
-	// objects in users.
+	// room_list with members: true sends members bare but for their status
+	// (§4.5), with complete objects in users.
 	if listed := listRooms(t, b, map[string]any{"filter": "joined"}); listed["users"] != nil {
 		t.Fatalf("users without members: true: %#v", listed)
 	}
 	listed := listRooms(t, b, map[string]any{"filter": "joined", "members": true})
-	if members := listed["joined"].([]any)[0].(map[string]any)["members"].([]any); !reflect.DeepEqual(members[0], map[string]any{"user_id": "guest_1"}) {
+	if members := listed["joined"].([]any)[0].(map[string]any)["members"].([]any); !reflect.DeepEqual(members[0], map[string]any{"user_id": "guest_1", "status": "online"}) {
 		t.Fatalf("members: %#v", members)
 	}
 	if users := listed["users"].([]any); !reflect.DeepEqual(users[0], any(want)) {
@@ -440,19 +445,39 @@ func TestProfilesAndUserNotifications(t *testing.T) {
 		t.Fatalf("empty me changed the profile: %#v", kept)
 	}
 	b.expectQuiet(t)
-	// An empty value removes a field, announced as that empty value.
-	you = a.result(t, "me", "clear", map[string]any{"ext": map[string]any{}, "avatar": ""})["you"]
-	cleared := map[string]any{"user_id": "guest_1", "name": "Ada", "avatar": "", "ext": map[string]any{}}
+	// "ext": {} changes nothing (§4.12).
+	if kept := a.result(t, "me", "empty-ext", map[string]any{"ext": map[string]any{}})["you"]; !reflect.DeepEqual(kept, any(want)) {
+		t.Fatalf("ext {} changed the profile: %#v", kept)
+	}
+	b.expectQuiet(t)
+	// ext merges one level deep: a key the write carries replaces the kept
+	// value whole, null included, and keys it leaves out stay.
+	you = a.result(t, "me", "merge", map[string]any{"ext": map[string]any{"example.net": nil}})["you"]
+	merged := maps.Clone(want)
+	merged["ext"] = map[string]any{"example.org": map[string]any{"pronouns": "she/her"}, "example.net": nil}
+	if !reflect.DeepEqual(you, any(merged)) {
+		t.Fatalf("merge result: %#v", you)
+	}
+	if notice := b.notification(t, "user"); !reflect.DeepEqual(notice, map[string]any{"new": merged}) {
+		t.Fatalf("merge notification: %#v", notice)
+	}
+	// An empty value removes a field or an ext key. The result is complete,
+	// and the notification, which clients merge, carries what it removed as
+	// those empty values.
+	you = a.result(t, "me", "clear", map[string]any{"ext": map[string]any{"example.org": "", "example.net": []any{}, "absent.example": map[string]any{}}, "avatar": ""})["you"]
+	cleared := map[string]any{"user_id": "guest_1", "name": "Ada", "avatar": "", "status": "online"}
 	if !reflect.DeepEqual(you, any(cleared)) {
 		t.Fatalf("removal result: %#v", you)
 	}
-	if notice := b.notification(t, "user"); !reflect.DeepEqual(notice, map[string]any{"new": cleared}) {
+	announced := maps.Clone(cleared)
+	announced["ext"] = map[string]any{"example.org": "", "example.net": []any{}}
+	if notice := b.notification(t, "user"); !reflect.DeepEqual(notice, map[string]any{"new": announced}) {
 		t.Fatalf("removal notification: %#v", notice)
 	}
-	if users := listRooms(t, b, map[string]any{"room_id": "general", "members": true})["users"].([]any); !reflect.DeepEqual(users[0], map[string]any{"user_id": "guest_1", "name": "Ada"}) {
+	if users := listRooms(t, b, map[string]any{"room_id": "general", "members": true})["users"].([]any); !reflect.DeepEqual(users[0], map[string]any{"user_id": "guest_1", "name": "Ada", "status": "online"}) {
 		t.Fatalf("profile after removal: %#v", users[0])
 	}
-	if you := a.result(t, "me", "clear-name", map[string]any{"name": ""})["you"]; !reflect.DeepEqual(you, map[string]any{"user_id": "guest_1", "name": ""}) {
+	if you := a.result(t, "me", "clear-name", map[string]any{"name": ""})["you"]; !reflect.DeepEqual(you, map[string]any{"user_id": "guest_1", "name": "", "status": "online"}) {
 		t.Fatalf("clearing the name: %#v", you)
 	}
 	b.notification(t, "user")
@@ -703,7 +728,8 @@ func TestStreamWriteConnectionCanReadAStream(t *testing.T) {
 	live := embedsOf(t, result["snapshot"].(map[string]any))
 	// One connection carries the finished write and then the read.
 	client := &http.Client{Transport: &http.Transport{MaxConnsPerHost: 1}}
-	response, err := client.Post(written[0].(map[string]any)["write_url"].(string), "text/plain", strings.NewReader("done"))
+	request, _ := http.NewRequest(http.MethodPut, written[0].(map[string]any)["write_url"].(string), strings.NewReader("done"))
+	response, err := client.Do(request)
 	if err != nil || response.StatusCode != http.StatusNoContent {
 		t.Fatalf("first stream write: %v %v", response, err)
 	}
@@ -722,14 +748,14 @@ func TestStreamWriteConnectionCanReadAStream(t *testing.T) {
 }
 
 func TestSavingWithoutAStreamEndsIt(t *testing.T) {
-	_, httpServer := newTestServer(t, DefaultConfig())
+	app, httpServer := newTestServer(t, DefaultConfig())
 	a := dialTestClient(t, httpServer)
 	result := postEmbeds(t, a, "stream", map[string]any{"room_id": "general", "body": map[string]any{"embeds": []any{map[string]any{"kind": "stream"}}}})
 	writeURL := result["embeds"].([]any)[0].(map[string]any)["write_url"].(string)
 	body, pipe := io.Pipe()
 	writerDone := make(chan int, 1)
 	go func() {
-		request, _ := http.NewRequest(http.MethodPost, writeURL, body)
+		request, _ := http.NewRequest(http.MethodPut, writeURL, body)
 		response, err := http.DefaultClient.Do(request)
 		if err != nil {
 			writerDone <- 0
@@ -739,12 +765,64 @@ func TestSavingWithoutAStreamEndsIt(t *testing.T) {
 		writerDone <- response.StatusCode
 	}()
 	_, _ = pipe.Write([]byte("partial"))
+	// The save must find the write started; one that arrives after it is
+	// refused instead (TestRefusedWriteDoesNotWaitForItsBody).
+	token := writeURL[strings.LastIndex(writeURL, "/")+1:]
+	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(5 * time.Millisecond) {
+		app.mu.RLock()
+		_, waiting := app.writes[token]
+		app.mu.RUnlock()
+		if !waiting {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the stream write never started")
+		}
+	}
 	save(t, a, "stop", map[string]any{"message_id": result["message_id"], "body": map[string]any{"text": "never mind"}})
 	if status := <-writerDone; status != http.StatusGone {
 		t.Fatalf("writer status %d", status)
 	}
 	_ = pipe.Close()
 	a.expectQuiet(t)
+}
+
+// Writes use PUT (§4.8.3); another method leaves the write URL unused.
+func TestWritesArePUT(t *testing.T) {
+	_, httpServer := newTestServer(t, DefaultConfig())
+	a := dialTestClient(t, httpServer)
+	result := postEmbeds(t, a, "upload", map[string]any{"room_id": "general", "body": map[string]any{"embeds": []any{map[string]any{"kind": "upload"}}}})
+	writeURL := result["embeds"].([]any)[0].(map[string]any)["write_url"].(string)
+	if status, header, _ := httpDo(t, http.MethodPost, writeURL, strings.NewReader("data"), "text/plain"); status != http.StatusMethodNotAllowed || header.Get("Allow") != "PUT, OPTIONS" {
+		t.Fatalf("POST: %d, Allow %q", status, header.Get("Allow"))
+	}
+	if status, _, _ := httpDo(t, http.MethodPut, writeURL, strings.NewReader("data"), "text/plain"); status != http.StatusCreated {
+		t.Fatalf("PUT after POST: %d", status)
+	}
+}
+
+// A write to a URL that is no longer usable is refused at once, even while
+// its body is still open: the server does not wait to read the body first.
+func TestRefusedWriteDoesNotWaitForItsBody(t *testing.T) {
+	_, httpServer := newTestServer(t, DefaultConfig())
+	a := dialTestClient(t, httpServer)
+	result := postEmbeds(t, a, "stream", map[string]any{"room_id": "general", "body": map[string]any{"embeds": []any{map[string]any{"kind": "stream"}}}})
+	writeURL := result["embeds"].([]any)[0].(map[string]any)["write_url"].(string)
+	save(t, a, "stop", map[string]any{"message_id": result["message_id"], "body": map[string]any{"text": "never mind"}})
+	body, pipe := io.Pipe()
+	defer pipe.Close()
+	go func() { _, _ = pipe.Write([]byte("late")) }()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	request, _ := http.NewRequestWithContext(ctx, http.MethodPut, writeURL, body)
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatalf("a refused write with an open body: %v", err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusNotFound {
+		t.Fatalf("status %d", response.StatusCode)
+	}
 }
 
 func TestAvatarCommand(t *testing.T) {
@@ -879,7 +957,7 @@ func TestCommands(t *testing.T) {
 	// The removal is a logged leave: the removed user's connections get
 	// room_update with left and the membership, the room's other members the
 	// membership alone and then a ~room notice, all before the result (§1,
-	// §4.8).
+	// §4.1).
 	before, result := a.request(t, "command", "kick", kick)
 	if len(result) != 0 || !reflect.DeepEqual(methods(before), []string{"room_update", "message"}) {
 		t.Fatalf("kick frames %#v then %#v", before, result)

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json/jsontext"
 	"encoding/json/v2"
+	"fmt"
 	"slices"
 	"sort"
 	"time"
@@ -28,11 +29,31 @@ type messageState struct {
 	reactions map[string]reactionSet
 	// records are every logged snapshot, for redaction; the last is current.
 	records []*logRecord
+	// cached is what push counting reads of the current snapshot, decoded
+	// once; nil until read, and after a new snapshot.
+	cached *messageInfo
 }
 
-// currentRaw is the JSON of the message's current snapshot.
-func (m *messageState) currentRaw() jsontext.Value {
-	return m.records[len(m.records)-1].raw
+// messageInfo is what unread counts (§4.9) read of a message's current
+// snapshot.
+type messageInfo struct {
+	deleted  bool
+	mentions []string
+	replyTo  string
+}
+
+// info returns what unread counts read of the current snapshot.
+func (m *messageState) info() *messageInfo {
+	if m.cached == nil {
+		snapshot := m.snapshot()
+		body, _ := snapshot["body"].(map[string]any)
+		info := &messageInfo{deleted: snapshot["deleted"] == true, mentions: mentions(body)}
+		if ref, ok := snapshot["reply_to"].(map[string]any); ok {
+			info.replyTo, _ = ref["message_id"].(string)
+		}
+		m.cached = info
+	}
+	return m.cached
 }
 
 // snapshot decodes the message's current snapshot, a copy the caller owns.
@@ -41,14 +62,14 @@ func (m *messageState) snapshot() map[string]any {
 }
 
 // saveMessage creates a message (no message_id) or saves an existing one
-// (§4.2): every client field is replaced by the submitted state. Without
+// (§4.4): every client field is replaced by the submitted state. Without
 // room_id the message goes to the default room (§3.5). A save naming a
 // different room_id moves the message; the snapshot is logged in and
 // broadcast to both rooms, followed by a reactions record in the destination
 // when the message has reactions. The broadcasts precede the result (§1),
 // so a sender who has joined receives a new upload's pending snapshot before
 // the result carrying its write URL. Posting does not join the room
-// (§4.3.5): a poster who has not joined gets only the result. A new message
+// (§4.3.2): a poster who has not joined gets only the result. A new message
 // with no text and no embeds is neither logged nor broadcast, and its
 // result is {}.
 func (s *Server) saveMessage(c *client, req request) (any, bool, *rpcError) {
@@ -88,7 +109,7 @@ func (s *Server) saveMessage(c *client, req request) (any, bool, *rpcError) {
 			return nil, false, err
 		}
 	}
-	ext, err := parseObject(req.params, "ext", false)
+	extWrite, _, err := parseExt(req.params, "ext")
 	if err != nil {
 		return nil, false, err
 	}
@@ -96,7 +117,6 @@ func (s *Server) saveMessage(c *client, req request) (any, bool, *rpcError) {
 	s.mu.Lock()
 	defer s.unlock()
 	u := c.user
-	c.away = false
 	destination := s.visibleRoomLocked(u, roomID)
 	if destination == nil {
 		return nil, false, invalidParams("Unknown room %q", roomID)
@@ -131,12 +151,29 @@ func (s *Server) saveMessage(c *client, req request) (any, bool, *rpcError) {
 			return nil, false, &rpcError{Code: codeDenied, Message: "A reply cannot quote a message that fewer people can see"}
 		}
 	}
+	var previous map[string]any
+	if current != nil {
+		previous = current.snapshot()
+	}
+	// ext merges into the current snapshot's, and the limit applies to the
+	// result: one over it is too_large and changes nothing (§4.12). A
+	// creation, and a save onto a tombstone, merges into an empty ext, and a
+	// save with deleted: true drops it (§4.12).
+	var ext extObject
+	if !deleted {
+		var kept extObject
+		if previous["deleted"] != true {
+			kept = extOf(previous["ext"])
+		}
+		ext = mergeExt(kept, extWrite)
+		if encodedSize(ext) > maxMessageExtBytes {
+			return nil, false, &rpcError{Code: codeTooLarge, Message: fmt.Sprintf("The message's ext would be over %d bytes", maxMessageExtBytes)}
+		}
+	}
 	if !replacing {
 		if text, _ := body["text"].(string); text == "" && len(asList(body["embeds"])) == 0 {
 			result := map[string]any{}
-			if req.hasID {
-				c.sendResult(req, result)
-			}
+			c.sendResult(req, result)
 			return result, true, nil
 		}
 		if err := s.admitPostLocked(u); err != nil {
@@ -147,10 +184,6 @@ func (s *Server) saveMessage(c *client, req request) (any, bool, *rpcError) {
 	logID := s.nextIDLocked()
 	if !replacing {
 		messageID = formatID(logID)
-	}
-	var previous map[string]any
-	if current != nil {
-		previous = current.snapshot()
 	}
 	// Embeds are resolved last: a new upload or stream embed reserves a write.
 	var written []any
@@ -183,7 +216,7 @@ func (s *Server) saveMessage(c *client, req request) (any, bool, *rpcError) {
 	if hasReply {
 		snapshot["reply_to"] = map[string]any{"message_id": replyID}
 	}
-	if ext != nil {
+	if len(ext) > 0 {
 		snapshot["ext"] = ext
 	}
 
@@ -191,6 +224,7 @@ func (s *Server) saveMessage(c *client, req request) (any, bool, *rpcError) {
 		current = &messageState{id: messageID, from: from, owner: u.id, reactions: make(map[string]reactionSet)}
 		s.messages[messageID] = current
 	}
+	source := current.roomID
 	moved := s.commitSnapshotLocked(current, snapshot, logID)
 	if deleted {
 		s.redactLocked(current)
@@ -198,14 +232,21 @@ func (s *Server) saveMessage(c *client, req request) (any, bool, *rpcError) {
 	if moved && len(current.reactions) > 0 {
 		s.commitReactionsLocked(current, current.reactionElements())
 	}
+	var movedFrom *roomState
+	if moved {
+		movedFrom = s.rooms[source]
+	}
+	s.messageUnreadLocked(current, previous, movedFrom)
+	if !replacing {
+		// The author's own message moves their read position (§4.9).
+		s.unreadChangedLocked(u, destination.id)
+	}
 	s.wakeLocked(current, snapshot, previous)
 	result := map[string]any{"message_id": messageID}
 	if len(written) > 0 {
 		result["embeds"] = written
 	}
-	if req.hasID {
-		c.sendResult(req, result)
-	}
+	c.sendResult(req, result)
 	return result, true, nil
 }
 
@@ -233,10 +274,12 @@ func (s *Server) commitSnapshotLocked(m *messageState, snapshot map[string]any, 
 	}
 	m.logID = logID
 	m.roomID = destination.id
+	m.cached = nil
 	if !moved && len(m.records) == 0 && destination.members[m.owner] != nil {
 		destination.active[m.owner] = logID
 	}
 	record := newLogRecord(logID, kindMessage, snapshot)
+	record.message = m.id
 	m.records = append(m.records, record)
 	s.touchMessage(m)
 	s.appendLocked(record, rooms...)
@@ -245,7 +288,7 @@ func (s *Server) commitSnapshotLocked(m *messageState, snapshot map[string]any, 
 }
 
 // republishLocked publishes a server-made snapshot of a message, such as a
-// finished upload or stream (§4.6.3): edit rewrites a copy of the
+// finished upload or stream (§4.8.3): edit rewrites a copy of the
 // current body, and nothing is published when it reports no change.
 func (s *Server) republishLocked(m *messageState, edit func(body map[string]any) bool) {
 	snapshot := m.snapshot()
@@ -259,7 +302,7 @@ func (s *Server) republishLocked(m *messageState, edit func(body map[string]any)
 }
 
 // redactLocked rewrites a deleted message's earlier snapshots into
-// tombstones at their original log_ids (§4.2).
+// tombstones at their original log_ids (§4.4).
 func (s *Server) redactLocked(m *messageState) {
 	for _, record := range m.records {
 		record.rewrite(tombstone)
@@ -268,10 +311,8 @@ func (s *Server) redactLocked(m *messageState) {
 }
 
 func tombstone(snapshot map[string]any) {
-	if _, embedded := snapshot["log_id"]; !embedded {
-		return
-	}
 	delete(snapshot, "body")
+	delete(snapshot, "ext")
 	snapshot["deleted"] = true
 }
 
@@ -341,8 +382,13 @@ func parseMessageRef(params map[string]jsontext.Value, name string) (string, boo
 	return id, true, nil
 }
 
-// maxMentions bounds body.mentions.
-const maxMentions = 256
+const (
+	// maxMentions bounds body.mentions.
+	maxMentions = 256
+	// maxMessageExtBytes bounds a message's ext, merged (§4.12), which
+	// every snapshot of the message carries.
+	maxMessageExtBytes = 64 << 10
+)
 
 // mentions returns a message body's body.mentions (§3.5).
 func mentions(body map[string]any) []string {
@@ -373,7 +419,8 @@ func validateBody(body map[string]any) *rpcError {
 			return invalidParams("body.mentions must be an array of user_id strings")
 		}
 		if len(mentions) > maxMentions {
-			return invalidParams("body.mentions lists at most %d users", maxMentions)
+			// A count limit the server sets is denied (§1.1).
+			return &rpcError{Code: codeDenied, Message: fmt.Sprintf("A message mentions at most %d users", maxMentions)}
 		}
 		for _, value := range mentions {
 			if id, ok := value.(string); !ok || id == "" {
@@ -387,7 +434,7 @@ func validateBody(body map[string]any) *rpcError {
 			return invalidParams("body.embeds must be an array")
 		}
 		if len(embeds) > maxEmbedsPerMessage {
-			return invalidParams("body.embeds lists at most %d embeds", maxEmbedsPerMessage)
+			return &rpcError{Code: codeDenied, Message: fmt.Sprintf("A message holds at most %d embeds", maxEmbedsPerMessage)}
 		}
 		for i, value := range embeds {
 			embed, ok := value.(map[string]any)
@@ -408,7 +455,7 @@ const (
 )
 
 // react replaces the caller's complete reaction set on one message
-// (§4.5). Duplicates collapse; an unchanged set logs nothing. The broadcast
+// (§4.7). Duplicates collapse; an unchanged set logs nothing. The broadcast
 // precedes the result (§1).
 func (s *Server) react(c *client, req request) (any, bool, *rpcError) {
 	messageID, err := parseString(req.params, "message_id", true)
@@ -437,9 +484,7 @@ func (s *Server) react(c *client, req request) (any, bool, *rpcError) {
 		s.commitReactionsLocked(m, []any{map[string]any{"from": cloneObject(from), "emojis": slices.Clone(emojis)}})
 	}
 	result := map[string]any{}
-	if req.hasID {
-		c.sendResult(req, result)
-	}
+	c.sendResult(req, result)
 	return result, true, nil
 }
 
@@ -470,15 +515,19 @@ func parseEmojis(params map[string]jsontext.Value) ([]string, *rpcError) {
 	emojis := make([]string, 0, len(values))
 	for _, value := range values {
 		var emoji string
-		if json.Unmarshal(value, &emoji) != nil || emoji == "" || len(emoji) > maxEmojiBytes {
-			return nil, invalidParams("emojis must be non-empty strings of at most %d bytes", maxEmojiBytes)
+		if json.Unmarshal(value, &emoji) != nil || emoji == "" {
+			return nil, invalidParams("emojis must be non-empty strings")
+		}
+		if len(emoji) > maxEmojiBytes {
+			return nil, &rpcError{Code: codeTooLarge, Message: fmt.Sprintf("An emoji is at most %d bytes", maxEmojiBytes)}
 		}
 		if !slices.Contains(emojis, emoji) {
 			emojis = append(emojis, emoji)
 		}
 	}
 	if len(emojis) > maxDistinctEmoji {
-		return nil, invalidParams("At most %d distinct emoji per message", maxDistinctEmoji)
+		// A count limit the server sets is denied (§1.1).
+		return nil, &rpcError{Code: codeDenied, Message: fmt.Sprintf("At most %d distinct emoji per message", maxDistinctEmoji)}
 	}
 	return emojis, nil
 }

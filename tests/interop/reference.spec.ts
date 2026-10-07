@@ -69,7 +69,10 @@ test.describe('reference features against the Go server', () => {
 			await Promise.all([openChat(pageA), openChat(pageB)]);
 			const token = `upload-${Date.now().toString(36)}`;
 			await composer(pageA).fill(`${token} chart`);
+			// Picked files are staged on the draft, and Send posts them with its text.
 			await pageA.getByTestId('attach-input').setInputFiles({ name: 'chart.png', mimeType: 'image/png', buffer: png(48, 24) });
+			await expect(pageA.getByTestId('staged-files')).toBeVisible();
+			await pageA.getByTestId('send-button').click();
 
 			// The server hosts the file and describes it with og.image; both sides show the picture.
 			for (const page of [pageA, pageB]) {
@@ -82,6 +85,8 @@ test.describe('reference features against the Go server', () => {
 
 			// A file without a preview is a file card linking to the download.
 			await pageA.getByTestId('attach-input').setInputFiles({ name: `${token}.txt`, mimeType: 'text/plain', buffer: Buffer.from('notes') });
+			await expect(pageA.getByTestId('staged-files')).toContainText(`${token}.txt`);
+			await pageA.getByTestId('send-button').click();
 			const card = pageB.locator('a.ap-embed-file').filter({ hasText: `${token}.txt` });
 			await expect(card).toBeVisible();
 			const href = await card.getAttribute('href');
@@ -139,7 +144,7 @@ test.describe('reference features against the Go server', () => {
 			await bot.request('message', { room_id: 'general', body: { text: token, embeds: [
 				{ kind: 'iframe', url: 'https://example.com/term', height: 900, title: 'Terminal' },
 				{ kind: 'html', html: '<table><tr><td><b>green</b></td></tr></table><img src=x onerror="window.pwned=1"><script>window.pwned=1</script>' },
-				{ kind: 'poll', url: 'https://example.com/poll/7' }
+				{ kind: 'ext:poll', url: 'https://example.com/poll/7' }
 			] } });
 			const embeds = embedOf(page, token);
 			// Live views stay paused until asked for, then load sandboxed and clamped.
@@ -152,7 +157,7 @@ test.describe('reference features against the Go server', () => {
 			await expect(embeds.locator('.ap-embed-html script')).toHaveCount(0);
 			expect(await page.evaluate(() => (window as { pwned?: number }).pwned)).toBeUndefined();
 			// An unknown kind is a fallback card with its link.
-			await expect(embeds.locator('.ap-embed-fallback .ap-embed-kind')).toHaveText('poll');
+			await expect(embeds.locator('.ap-embed-fallback .ap-embed-kind')).toHaveText('ext:poll');
 			await expect(embeds.locator('.ap-embed-fallback a')).toHaveAttribute('href', 'https://example.com/poll/7');
 		} finally {
 			bot.close();
@@ -223,7 +228,7 @@ test.describe('reference features against the Go server', () => {
 		const handle = `nick-${Date.now().toString(36)}`;
 		await field.fill(`/nick ${handle}`);
 		await run.click();
-		await expect(page.getByRole('button', { name: new RegExp(`^Your profile on .*: ${handle}\\.`) })).toBeVisible();
+		await expect(page.getByRole('button', { name: new RegExp(`^Your profile on .*: ${handle}[,.]`) })).toBeVisible();
 		const id = await userIdOf(page);
 		// The earlier message renders with the latest name; notices above it began its group.
 		await expect(posted.locator('.ap-msg-sender')).toHaveText(handle);

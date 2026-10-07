@@ -532,26 +532,24 @@ func TestSignInReplacesGuestAndDeduplicatesPerUser(t *testing.T) {
 	expectMembership(t, owner, "general", guestID, true)
 	expectMembership(t, observer, "general", guestID, true)
 
-	// Signing in replaces the guest identity, which is retired: its leave
-	// is logged in general and reaches general's members, the switching
-	// connection included, which now acts as the passkey user, before its
-	// result. Others who shared a room with the guest then learn of the
-	// user_id change.
+	// Signing in to an existing account replaces the guest identity, which
+	// is retired as when it disconnects: its leave is logged in general and
+	// reaches general's members, the switching connection included, which
+	// now acts as the passkey user, after its result: every notification a
+	// sign-in causes on its connection follows the result (§3.2). It is a
+	// departure, not a user_id change: no `user` with `old` follows (§3.3).
 	before, result := switcher.request(t, "auth", "resume", map[string]any{"scheme": "token", "token": registered["token"]})
-	if !reflect.DeepEqual(result["you"], registered["you"]) || len(before) != 1 {
+	if !reflect.DeepEqual(result["you"], registered["you"]) || len(before) != 0 {
 		t.Fatalf("sign-in %#v after %#v", result, before)
 	}
-	leave := membershipOnly(t, before[0])
+	leave := membershipOnly(t, switcher.read(t))
 	checkMembership(t, leave, "general", guestID, false)
 	for _, member := range []*testClient{owner, observer} {
 		if observed := expectMembership(t, member, "general", guestID, false); !reflect.DeepEqual(observed, leave) {
 			t.Fatalf("member's copy %#v differs from %#v", observed, leave)
 		}
 	}
-	notice := observer.notification(t, "user")
-	if !reflect.DeepEqual(notice, map[string]any{"new": registered["you"], "old": guest}) {
-		t.Fatalf("user notification = %#v", notice)
-	}
+	observer.expectQuiet(t)
 	owner.expectQuiet(t)
 	switcher.expectQuiet(t)
 

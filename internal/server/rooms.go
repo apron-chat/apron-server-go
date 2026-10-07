@@ -38,9 +38,9 @@ type roomState struct {
 	// them (§4.3.1).
 	active map[string]int64
 	// creator is the user_id that created the room, empty for the seeded
-	// room; only the creator may /kick (§4.8).
+	// room; only the creator may /kick (§4.1).
 	creator string
-	// reads holds each user's latest read cursor (§4.4).
+	// reads holds each user's latest read cursor (§4.6).
 	reads map[string]readCursor
 }
 
@@ -121,7 +121,7 @@ func (s *Server) visibleMessageLocked(u *userState, id string) *messageState {
 }
 
 // mayRemove reports whether u may remove others from r, with /kick or
-// room_leave's user_id (§4.3.2, §4.8): the room's creator, or a user with
+// room_leave's user_id (§4.3.2, §4.1): the room's creator, or a user with
 // the admin or moderator role.
 func (r *roomState) mayRemove(u *userState) bool {
 	return r.creator == u.id || u.hasRole("admin") || u.hasRole("moderator")
@@ -146,7 +146,7 @@ func (r *roomState) title() string {
 }
 
 // cursorFramesLocked renders the read cursors kept for a room that the
-// server sends after listing it (§4.4): every member's cursor for a room u
+// server sends after listing it (§4.6): every member's cursor for a room u
 // has joined, which delivers read receipts, and otherwise only u's own.
 func (s *Server) cursorFramesLocked(u *userState, r *roomState) []any {
 	var frames []any
@@ -245,13 +245,15 @@ func (s *Server) addMemberLocked(u *userState, r *roomState) jsontext.Value {
 	membership := s.logMembershipLocked(u, r, true)
 	r.active[u.id] = r.latestID
 	s.deliverMembershipLocked(membership, r, u)
+	s.announceJoinStatusLocked(u, r)
+	s.unreadChangedLocked(u, r.id)
 	return membership
 }
 
 // joinDefaultRoomLocked joins a new identity to the default room, so its
 // room list is not empty. Its connections receive the membership alone, as
-// room_update memberships before the auth result: the client lists its rooms
-// with room_list (§4.3.1).
+// room_update memberships after the auth result (§3.2): the client lists its
+// rooms with room_list (§4.3.1).
 func (s *Server) joinDefaultRoomLocked(u *userState) {
 	if membership := s.addMemberLocked(u, s.rooms[defaultRoomID]); membership != nil {
 		u.send(roomUpdate("memberships", membership))
@@ -271,8 +273,8 @@ func (s *Server) joinLocked(u *userState, r *roomState) bool {
 }
 
 // joinedUpdateLocked renders room_update joined for r: its record with its
-// members, as bare user objects, their current objects in `users`, and the
-// membership that joined the user, if any (§4.3.3).
+// members, as bare user objects with their status, their complete objects
+// in `users`, and the membership that joined the user, if any (§4.3.3).
 func (s *Server) joinedUpdateLocked(r *roomState, membership jsontext.Value) jsontext.Value {
 	record := s.roomParamsLocked(r)
 	listed := s.addMembersLocked(record, r)
@@ -284,30 +286,43 @@ func (s *Server) joinedUpdateLocked(r *roomState, membership jsontext.Value) jso
 }
 
 // addMembersLocked adds a room's members to its record as bare user
-// objects, ordered by user_id, and returns them. A room with more than
-// Config.MaxListedMembers lists only its most recently active members and
-// adds member_count, the total (§4.3.1).
+// objects, ordered by user_id, and returns them. Each carries the status
+// others see, offline and "" included, as every current user object a
+// listing carries does (§4.5); their complete objects go in `users`. A
+// room with more than Config.MaxListedMembers lists only its most recently
+// active members and adds member_count, the total (§4.3.1).
 func (s *Server) addMembersLocked(record map[string]any, r *roomState) map[string]*userState {
-	ids := slices.Collect(maps.Keys(r.members))
+	ids, truncated := s.listedMemberIDsLocked(r)
 	listed := r.members
-	if limit := s.config.MaxListedMembers; limit > 0 && len(ids) > limit {
-		slices.SortFunc(ids, func(a, b string) int {
-			return cmp.Or(cmp.Compare(r.active[b], r.active[a]), cmp.Compare(a, b))
-		})
-		ids = ids[:limit]
-		listed = make(map[string]*userState, limit)
+	if truncated {
+		listed = make(map[string]*userState, len(ids))
 		for _, id := range ids {
 			listed[id] = r.members[id]
 		}
 		record["member_count"] = len(r.members)
 	}
-	slices.Sort(ids)
 	refs := make([]any, len(ids))
 	for i, id := range ids {
-		refs[i] = map[string]any{"user_id": id}
+		refs[i] = map[string]any{"user_id": id, "status": r.members[id].shownStatus()}
 	}
 	record["members"] = refs
 	return listed
+}
+
+// listedMemberIDsLocked returns the user_ids of the members that r lists
+// (§4.3.1), ordered by user_id: all of them, or, past
+// Config.MaxListedMembers, the most recently active, and then truncated is
+// set.
+func (s *Server) listedMemberIDsLocked(r *roomState) (ids []string, truncated bool) {
+	ids = slices.Collect(maps.Keys(r.members))
+	if limit := s.config.MaxListedMembers; limit > 0 && len(ids) > limit {
+		slices.SortFunc(ids, func(a, b string) int {
+			return cmp.Or(cmp.Compare(r.active[b], r.active[a]), cmp.Compare(a, b))
+		})
+		ids, truncated = ids[:limit], true
+	}
+	slices.Sort(ids)
+	return ids, truncated
 }
 
 // leaveLocked removes u from r (§4.3.2): the room's other members receive
@@ -325,8 +340,14 @@ func (s *Server) leaveLocked(u *userState, r *roomState) bool {
 	delete(r.members, u.id)
 	delete(r.active, u.id)
 	u.send(notification("room_update", map[string]any{"left": []any{map[string]any{"room_id": r.id}}, "memberships": []any{membership}}))
+	// The room no longer counts toward the user's unread (§4.9), and
+	// neither do the threads of a private room, joined or not, which the
+	// user can no longer see: their counts are all taken again.
 	if r.private {
 		s.hideThreadsLocked(u, r)
+		s.unreadChangedLocked(u, "")
+	} else {
+		s.unreadChangedLocked(u, r.id)
 	}
 	return true
 }
@@ -452,9 +473,9 @@ func (s *Server) setRoom(c *client, req request) (any, bool, *rpcError) {
 		return nil, false, err
 	}
 	if len(description) > maxDescriptionBytes {
-		return nil, false, invalidParams("description is at most %d bytes", maxDescriptionBytes)
+		return nil, false, &rpcError{Code: codeTooLarge, Message: fmt.Sprintf("description is at most %d bytes", maxDescriptionBytes)}
 	}
-	ext, err := parseObject(req.params, "ext", false)
+	extWrite, _, err := parseExt(req.params, "ext")
 	if err != nil {
 		return nil, false, err
 	}
@@ -467,16 +488,24 @@ func (s *Server) setRoom(c *client, req request) (any, bool, *rpcError) {
 	defer s.unlock()
 	u := c.user
 	var parent *roomState
+	var keptExt extObject
 	if updating {
 		existing := s.visibleRoomLocked(u, roomID)
 		if existing == nil {
 			return nil, false, invalidParams("Unknown room %q", roomID)
 		}
 		parent = existing.parent
+		keptExt = extOf(existing.record["ext"])
 	} else if parentID != "" {
 		if parent = s.visibleRoomLocked(u, parentID); parent == nil {
 			return nil, false, invalidParams("Unknown parent room %q", parentID)
 		}
+	}
+	// ext merges into the room's (§4.12), and the limit applies to the
+	// result; other client fields are replaced (§4.3.4).
+	ext := mergeExt(keptExt, extWrite)
+	if encodedSize(ext) > maxRoomExtBytes {
+		return nil, false, &rpcError{Code: codeTooLarge, Message: fmt.Sprintf("The room's ext would be over %d bytes", maxRoomExtBytes)}
 	}
 	if err := s.admitPostLocked(u); err != nil {
 		return nil, false, err
@@ -492,7 +521,7 @@ func (s *Server) setRoom(c *client, req request) (any, bool, *rpcError) {
 	if description != "" {
 		fields["description"] = description
 	}
-	if ext != nil {
+	if len(ext) > 0 {
 		fields["ext"] = ext
 	}
 	if _, given := req.params["private"]; !given && !updating && parent != nil {
@@ -527,18 +556,17 @@ func (s *Server) setRoom(c *client, req request) (any, bool, *rpcError) {
 		}
 	}
 	result := map[string]any{"room_id": r.id}
-	if req.hasID {
-		c.sendResult(req, result)
-	}
+	c.sendResult(req, result)
 	return result, true, nil
 }
 
 const (
 	maxThreadTitleRunes = 60
 	defaultThreadTitle  = "Thread"
-	// maxDescriptionBytes bounds a room's description, which every room
-	// record carries.
+	// maxDescriptionBytes bounds a room's description, and maxRoomExtBytes
+	// its merged ext, which every room record carries.
 	maxDescriptionBytes = 16 << 10
+	maxRoomExtBytes     = 16 << 10
 )
 
 // threadTitle derives a default thread title from the first line of its
@@ -570,7 +598,7 @@ func threadTitle(description string) string {
 // room_id, is in `not_joined` too when the filter asks for it.
 //
 // The result is followed by the read cursors kept for the listed rooms
-// (§4.4).
+// (§4.6).
 func (s *Server) listRooms(c *client, req request) (any, bool, *rpcError) {
 	filter, err := parseString(req.params, "filter", false)
 	if err != nil {
@@ -687,9 +715,6 @@ func (s *Server) listRooms(c *client, req request) (any, bool, *rpcError) {
 	for _, r := range slices.Concat(joined, others) {
 		frames = append(frames, s.cursorFramesLocked(u, r)...)
 	}
-	if !req.hasID {
-		frames = frames[1:]
-	}
 	c.enqueueBatch(frames...)
 	return result, true, nil
 }
@@ -743,9 +768,7 @@ func (s *Server) joinRoom(c *client, req request) (any, bool, *rpcError) {
 		c.enqueue(s.joinedUpdateLocked(r, nil))
 	}
 	result := map[string]any{}
-	if req.hasID {
-		c.sendResult(req, result)
-	}
+	c.sendResult(req, result)
 	return result, true, nil
 }
 
@@ -779,9 +802,7 @@ func (s *Server) leaveRoom(c *client, req request) (any, bool, *rpcError) {
 	}
 	s.leaveLocked(target, r)
 	result := map[string]any{}
-	if req.hasID {
-		c.sendResult(req, result)
-	}
+	c.sendResult(req, result)
 	return result, true, nil
 }
 
@@ -801,7 +822,7 @@ func parseMembershipParams(params map[string]jsontext.Value) (roomID, userID str
 	return roomID, userID, hasUser, nil
 }
 
-// history returns a window of one room's log (§4.1), the default room's
+// history returns a window of one room's log (§4.2), the default room's
 // without room_id. limit counts records of every kind; the slice is
 // partitioned into rooms, messages, reactions, and membership, each omitted
 // when empty. The server retains all records and does not compact, and it
@@ -869,13 +890,11 @@ func (s *Server) history(c *client, req request) (any, bool, *rpcError) {
 	result := jsontext.Value(renderHistory(r, matching, more, size))
 	// The records are already JSON: the reply is assembled from them without
 	// decoding or re-encoding.
-	if req.hasID {
-		c.enqueue(rawResponse(req.id, result))
-	}
+	c.enqueue(rawResponse(req.id, result))
 	return result, true, nil
 }
 
-// renderHistory assembles a history result (§4.1) from a window of records.
+// renderHistory assembles a history result (§4.2) from a window of records.
 func renderHistory(r *roomState, matching []*logRecord, more bool, size int) []byte {
 	buf := make([]byte, 0, size+len(matching)+256)
 	buf = append(buf, `{"more":`...)
@@ -968,12 +987,11 @@ func parseLimit(params map[string]jsontext.Value, defaultLimit int) (int, *rpcEr
 	return min(value, maxHistoryPageSize), nil
 }
 
-// activity applies a connection's activity (§4.4). typing and a read cursor
+// activity applies a connection's activity (§4.6). typing and a read cursor
 // in a room are relayed to the room's members; a read cursor must name a
 // message and only advances, and the server keeps the latest per user and
 // sends it after the room is listed. A frame whose fields change nothing
-// relays nothing. away is kept per connection for push decisions and never
-// delivered; typing and a read cursor end it.
+// relays nothing.
 func (s *Server) activity(c *client, req request) (any, bool, *rpcError) {
 	roomID, err := parseString(req.params, "room_id", false)
 	if err != nil {
@@ -995,11 +1013,6 @@ func (s *Server) activity(c *client, req request) (any, bool, *rpcError) {
 		return nil, false, err
 	}
 	_, hasRead := req.params["read_message_id"]
-	away, err := parseBool(req.params, "away", false)
-	if err != nil {
-		return nil, false, err
-	}
-	_, hasAway := req.params["away"]
 	s.mu.Lock()
 	defer s.unlock()
 	inRoom := typing != nil || hasRead
@@ -1010,27 +1023,15 @@ func (s *Server) activity(c *client, req request) (any, bool, *rpcError) {
 	if hasRead && s.visibleMessageLocked(c.user, readID) == nil {
 		return nil, false, invalidParams("Unknown read_message_id %q", readID)
 	}
+	// The relays this request causes are queued before processFrame sends
+	// its result (§1).
 	result := map[string]any{}
-	// The relays this request causes precede its result (§1).
-	defer func() {
-		if req.hasID {
-			c.sendResult(req, result)
-		}
-	}()
-	if inRoom {
-		c.away = false
-	}
-	if hasAway {
-		c.away = away
-	}
 	if !inRoom {
-		return result, true, nil
+		return result, false, nil
 	}
 	u := c.user
 	params := map[string]any{"room_id": roomID, "from": u.from()}
-	if typing != nil {
-		params["typing"] = typing
-	}
+	read := false
 	if hasRead {
 		id, _ := strconv.ParseInt(readID, 10, 64)
 		if cursor, ok := r.reads[u.id]; !ok || id > cursor.id {
@@ -1040,12 +1041,25 @@ func (s *Server) activity(c *client, req request) (any, bool, *rpcError) {
 				// A cursor for a room the user has not joined still syncs
 				// across their own connections.
 				u.send(map[string]any{"method": "activity", "params": map[string]any{"room_id": roomID, "from": u.from(), "read_message_id": readID}})
+				if id >= r.latestID {
+					// Read to the end: no earlier mention there counts.
+					delete(u.pings, r.id)
+					s.touchUser(u.id)
+				}
 			}
 			params["read_message_id"] = readID
+			read = true
 		}
 	}
-	if len(params) > 2 {
+	if typing != nil {
+		params["typing"] = typing
+	}
+	if typing != nil || read {
 		s.deliverLocked(map[string]any{"method": "activity", "params": params}, r)
 	}
-	return result, true, nil
+	if read {
+		// Reading lowers the unread count the user's other devices show.
+		s.unreadChangedLocked(u, r.id)
+	}
+	return result, false, nil
 }

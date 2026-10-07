@@ -26,6 +26,11 @@ type testClient struct {
 	requests int
 	// userID is the identity the guest was assigned at auth.
 	userID string
+	// statuses keeps the bare status announcements of others (§4.5),
+	// `user` `{new: {user_id, status}}`, which read otherwise skips: they
+	// follow every connection, idle change, and join, and only the status
+	// tests look at them.
+	statuses bool
 }
 
 // nextID returns a request ID not used before on this client.
@@ -36,10 +41,14 @@ func (c *testClient) nextID(prefix string) string {
 
 func newTestServer(t *testing.T, config Config) (*Server, *httptest.Server) {
 	t.Helper()
-	app := New(config)
+	app, err := Open(config)
+	if err != nil {
+		t.Fatal(err)
+	}
 	httpServer := httptest.NewServer(app.Handler())
 	t.Cleanup(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		// Generous, since -race on a busy machine slows every goroutine.
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		if err := app.Shutdown(ctx); err != nil {
 			t.Errorf("shutdown: %v", err)
 		}
@@ -84,16 +93,17 @@ func dialOrigin(t *testing.T, httpServer *httptest.Server, origin string) (*test
 	return c, serverFrame
 }
 
-// guestAuth signs c in as a guest and returns the auth result, which follows
-// the membership of the guest's join to general.
+// guestAuth signs c in as a guest and returns the auth result. Every
+// notification the sign-in causes follows the result (§3.2): first the
+// membership of the guest's join to general.
 func guestAuth(t *testing.T, c *testClient) map[string]any {
 	t.Helper()
 	before, result := c.request(t, "auth", c.nextID("auth"), map[string]any{"scheme": "guest"})
 	c.userID = result["you"].(map[string]any)["user_id"].(string)
-	if len(before) != 1 {
+	if len(before) != 0 {
 		t.Fatalf("frames before the guest auth result: %#v", before)
 	}
-	checkMembership(t, membershipOnly(t, before[0]), "general", c.userID, true)
+	checkMembership(t, membershipOnly(t, c.read(t)), "general", c.userID, true)
 	return result
 }
 
@@ -120,8 +130,8 @@ func membershipOnly(t *testing.T, frame map[string]any) map[string]any {
 }
 
 // dialTestClient signs in a new guest. The guest's join to general is a
-// logged membership, delivered to its connection before the auth result;
-// nothing follows the result: clients list their rooms with room_list.
+// logged membership, delivered to its connection after the auth result
+// (§3.2); clients list their rooms with room_list.
 func dialTestClient(t *testing.T, httpServer *httptest.Server) *testClient {
 	t.Helper()
 	c, _ := dialRaw(t, httpServer)
@@ -260,7 +270,20 @@ func (c *testClient) read(t *testing.T) map[string]any {
 	if err := json.Unmarshal(payload, &frame); err != nil {
 		t.Fatalf("decode frame %q: %v", payload, err)
 	}
+	if !c.statuses && isStatusAnnouncement(frame) {
+		return c.read(t)
+	}
 	return frame
+}
+
+// isStatusAnnouncement reports whether frame is a bare announcement of
+// another user's status: `user` with only `new`, which has only user_id and
+// status.
+func isStatusAnnouncement(frame map[string]any) bool {
+	params, _ := frame["params"].(map[string]any)
+	object, _ := params["new"].(map[string]any)
+	_, hasStatus := object["status"]
+	return frame["method"] == "user" && len(params) == 1 && len(object) == 2 && hasStatus
 }
 
 // call sends a request and returns its reply frame, which must come next.

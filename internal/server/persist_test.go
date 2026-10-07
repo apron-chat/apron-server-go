@@ -345,6 +345,7 @@ func TestRolesAndWelcome(t *testing.T) {
 	_, authed := guest.request(t, "auth", "auth", map[string]any{"scheme": "guest", "user_id": "newbie"})
 	you := authed["you"].(map[string]any)
 	guest.userID = you["user_id"].(string)
+	expectMembership(t, guest, "general", guest.userID, true)
 	if guest.userID == "newbie" {
 		t.Fatal("a guest took a granted user_id")
 	}
@@ -402,4 +403,37 @@ func TestEscapeMarkdown(t *testing.T) {
 			t.Errorf("escapeMarkdown(%q) = %q, want %q", text, got, want)
 		}
 	}
+}
+
+// dumpLocked renders the whole state as the entries a store holding it
+// would have, for checking that every change reaches the store.
+func (s *Server) dumpLocked() []store.Entry {
+	all := newDirtySet()
+	for id := range s.usedIDs {
+		all.usedIDs = append(all.usedIDs, id)
+	}
+	for _, r := range s.rooms {
+		all.rooms[r.id] = true
+		for _, record := range r.log {
+			all.records[record] = true
+		}
+	}
+	for id := range s.messages {
+		all.messages[id] = true
+	}
+	for id := range s.users {
+		all.users[id] = true
+	}
+	for key := range s.sessions {
+		all.sessions[key] = true
+	}
+	for id := range s.embeds {
+		all.embeds[id] = true
+	}
+	for key := range s.pushes {
+		all.pushes[key] = true
+	}
+	all.vapid = s.vapidStored
+	meta := s.metaLocked()
+	return append(s.entriesLocked(all), store.Entry{Kind: entryMeta, ID: "counters", Value: encodeJSON(meta)})
 }

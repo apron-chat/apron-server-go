@@ -14,7 +14,7 @@ and errors shown only to you, leaving and rejoining rooms and threads through
 `room_list`, the New divider from read cursors, and `@user_id` and room
 mentions. It creates streams and raw embeds with a small protocol client
 connected through the Vite proxy, so the URLs the server mints load
-same-origin. Rooms follow protocol v7: a new guest has joined only `general`,
+same-origin. Rooms follow protocol v8: a new guest has joined only `general`,
 and a thread's members are those who joined it, so a second browser opens
 another's thread from its card, which reads it without joining it
 (`openThread` in `test-helpers.ts`); only joining, or replying, makes it live.
@@ -34,14 +34,50 @@ npm test
 
 The config starts both services itself with `reuseExistingServer: false`:
 
-* Go server: `127.0.0.1:8080`, started from the repository root with `--addr`
-* Vite dev server: `127.0.0.1:5173`, started from `.apron-web`, a checkout of
-  [apron-chat/apron-web](https://github.com/apron-chat/apron-web) that `make install`
-  clones (or a symlink to your own)
+* Go server: `127.0.0.1:8080`, started from the repository root with
+  `--store memory --addr 127.0.0.1:8080 --push.allow-insecure
+  --push.vapid-private-key <test key> --push.vapid-subject
+  mailto:interop@example.com`. The push flags are for `push.spec.ts` and
+  change nothing for the other tests, which register no push endpoint. The
+  key is the public test fixture in `push-test-vapid.ts`, never one for a real
+  server; `--push.allow-insecure` lets the test's capture endpoint on
+  `http://127.0.0.1` receive pushes, and aprond refuses it with `--public-url`
+  or `--tls.domain`.
+* Vite dev server: `127.0.0.1:5173`, started from `.apron-web`, a submodule of
+  [apron-chat/apron-web](https://github.com/apron-chat/apron-web) pinned to the
+  version under test, or from `APRON_WEB_DIR` when it is set
 
 Set `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH` when the browser is supplied by the
 environment (for example, the NixOS VM). If it is unset, Playwright uses its
 normal Chromium resolution.
+
+## Web push and status
+
+The `push` project runs `push.spec.ts`: a passkey user turns on push in
+Preferences, goes idle, and is mentioned and replied to by a second client;
+the test receives the pushes on a local capture endpoint, checks the VAPID
+token against the test key and decrypts the `aes128gcm` payload with its own
+subscription keys, and checks the service worker's notification. A second test
+checks `status` as other clients see it: the derived online, idle, and
+offline, and dnd and invisible set through the web client with `me`; and that
+mutes stay private, come back to the user's connections as `status`
+notifications, also after a reload, and are applied by the web client. The web
+client sends `status` as a request, each answered `{}`; the test's own room
+mutes are requests on the page's connection too, whose replies the page never
+sees. Both wait out the 30-second idle timeout, so the
+project allows three minutes a test. Run it alone with:
+
+```sh
+npx playwright test --project=push
+```
+
+Notifications need full Chromium in its new headless mode (`channel:
+'chromium'`): the headless shell reports `Notification.permission` as denied
+whatever is granted. `npx playwright install chromium` installs both builds;
+with `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH`, point it at full Chromium.
+
+The status test sets a status through a control named for do not disturb in
+the profile editor or Preferences, shown directly or behind one named Status.
 
 The UI contract used by the tests is an accessible textbox named `Message`, a
 `Send message` button, and message containers rendered as

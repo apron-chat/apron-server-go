@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -99,7 +100,17 @@ func TestMessagesAreLimitedToMaxEmbeds(t *testing.T) {
 	for i := range embeds {
 		embeds[i] = map[string]any{"kind": "upload"}
 	}
-	a.expectError(t, "message", "many", map[string]any{"room_id": "general", "body": map[string]any{"embeds": embeds}}, codeInvalidParams)
+	// A count limit the server sets is denied (§1.1).
+	a.expectError(t, "message", "many", map[string]any{"room_id": "general", "body": map[string]any{"embeds": embeds}}, codeDenied)
+	mentions := make([]any, maxMentions+1)
+	for i := range mentions {
+		mentions[i] = fmt.Sprint("user", i)
+	}
+	a.expectError(t, "message", "mentions", map[string]any{"room_id": "general", "body": map[string]any{"text": "hi", "mentions": mentions}}, codeDenied)
+	a.expectError(t, "command", "command-mentions", map[string]any{"room_id": "general", "body": map[string]any{"text": "/help", "mentions": mentions}}, codeDenied)
+	// A malformed value stays invalid_params.
+	a.expectError(t, "message", "bad-mentions", map[string]any{"room_id": "general", "body": map[string]any{"text": "hi", "mentions": []any{""}}}, codeInvalidParams)
+	a.expectQuiet(t)
 }
 
 func TestRoomSetCountsTowardMessagesPerMinute(t *testing.T) {
@@ -155,8 +166,9 @@ func TestProfileAndPushSizeLimits(t *testing.T) {
 	config.AllowInsecurePush = true
 	_, httpServer := newTestServer(t, config)
 	a := dialTestClient(t, httpServer)
-	a.expectError(t, "me", "ext", map[string]any{"ext": map[string]any{"x": strings.Repeat("y", maxProfileExtBytes)}}, codeInvalidParams)
-	a.expectError(t, "push_register", "url", map[string]any{"kind": "relay", "url": "http://relay.example/" + strings.Repeat("p", maxPushURLBytes)}, codeInvalidParams)
+	// A value rejected for its size is too_large (§1.1).
+	a.expectError(t, "me", "ext", map[string]any{"ext": map[string]any{"x": strings.Repeat("y", maxProfileExtBytes)}}, codeTooLarge)
+	a.expectError(t, "push_register", "url", map[string]any{"kind": "relay", "url": "http://relay.example/" + strings.Repeat("p", maxPushURLBytes)}, codeTooLarge)
 }
 
 func TestConnectionAndRateLimits(t *testing.T) {

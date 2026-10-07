@@ -52,7 +52,7 @@ func emailTestServer(t *testing.T, configure func(*Config)) (*Server, testMailbo
 }
 
 // propose proposes an email sign-in or addition on c, which must be answered
-// with {} (§4.10).
+// with {} (§4.11).
 func propose(t *testing.T, c *testClient, email string) {
 	t.Helper()
 	if result := c.result(t, "auth", c.nextID("propose"), map[string]any{"scheme": "email", "email": email}); len(result) != 0 {
@@ -175,7 +175,7 @@ func TestEmailSignIn(t *testing.T) {
 
 	// The code works only on the proposing connection; the link token on
 	// any connection not signed in, which it signs in: a new account, which
-	// joins general, before the result.
+	// joins general, after the result (§3.2).
 	reader, _ := dialRaw(t, httpServer)
 	reader.expectError(t, "auth", "code-elsewhere", map[string]any{"scheme": "email", "token": message.Code}, codeDenied)
 	reader.expectError(t, "auth", "wrong", map[string]any{"scheme": "email", "token": "wrong"}, codeDenied)
@@ -183,10 +183,10 @@ func TestEmailSignIn(t *testing.T) {
 	if you := result["you"].(map[string]any); you["user_id"] != "ada" || you["name"] != "Ada" {
 		t.Fatalf("new account: %#v", result)
 	}
-	if len(before) != 1 {
+	if len(before) != 0 {
 		t.Fatalf("frames before the sign-in result: %#v", before)
 	}
-	checkMembership(t, membershipOnly(t, before[0]), "general", "ada", true)
+	checkMembership(t, membershipOnly(t, reader.read(t)), "general", "ada", true)
 	// The proposal is consumed: neither token works again.
 	third, _ := dialRaw(t, httpServer)
 	third.expectError(t, "auth", "reuse", map[string]any{"scheme": "email", "token": link}, codeDenied)
@@ -275,9 +275,11 @@ func TestEmailAdditions(t *testing.T) {
 	link := linkToken(t, mailbox.receive(t))
 	victim.expectError(t, "auth", "link", map[string]any{"scheme": "email", "token": link}, codeDenied)
 	later, _ := dialRaw(t, httpServer)
-	if _, result := signInByEmail(t, later, link, nil); result["you"].(map[string]any)["user_id"] == victim.userID {
+	_, result := signInByEmail(t, later, link, nil)
+	if result["you"].(map[string]any)["user_id"] == victim.userID {
 		t.Fatalf("the attacker became the victim: %#v", result)
 	}
+	checkMembership(t, membershipOnly(t, later.read(t)), "general", result["you"].(map[string]any)["user_id"].(string), true)
 	later.expectError(t, "history", "diary", map[string]any{"room_id": diary}, codeInvalidParams)
 	victim.drain(t)
 
@@ -317,7 +319,7 @@ func TestEmailAdditions(t *testing.T) {
 	victim.expectError(t, "auth", "second", map[string]any{"scheme": "email", "token": pendingCode(t, app, victim.userID)}, codeDenied)
 
 	// A passkey registration on the signed-in account adds the passkey to
-	// it (§4.9), and signs in to it later.
+	// it (§4.10), and signs in to it later.
 	authenticator := newTestAuthenticator(t)
 	options := passkeyResult(t, passkeyCall(t, victim, "register-begin", "register", "begin", nil))
 	registered := passkeyResult(t, passkeyCall(t, victim, "register-finish", "register", "finish", map[string]any{"credential": authenticator.registration(t, options, testPasskeyOrigin)}))

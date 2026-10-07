@@ -71,12 +71,6 @@ type session struct {
 // connection; finishing consumes it even on failure. Auth responses are never
 // deduplicated, so replay cannot resurrect a consumed challenge.
 func (s *Server) authenticatePasskey(c *client, req request) (any, *rpcError) {
-	// WebAuthn ceremonies are request/response operations. A notification has
-	// no request ID to correlate and must not create, consume, or resume any
-	// authentication state.
-	if !req.hasID {
-		return nil, nil
-	}
 	w := s.config.WebAuthn
 	if w == nil {
 		return nil, &rpcError{Code: codeUnsupported, Message: "Passkeys are disabled"}
@@ -266,7 +260,7 @@ func (s *Server) finishPasskeyCeremony(c *client, req request, action string, w 
 		}
 		// A guest that becomes an account takes the roles its user_id was granted.
 		if s.grantRolesLocked(c.user) || renamed {
-			s.notifyProfileLocked(c.user, c)
+			s.notifyProfileLocked(c.user, c, nil)
 		}
 		s.passkeys[c.user.id] = user
 		s.credentials[string(credential.ID)] = user
@@ -297,13 +291,20 @@ func (s *Server) finishPasskeyCeremony(c *client, req request, action string, w 
 			}
 		}
 	}
-	return s.signInLocked(c, req, user.user, now)
+	// A registration adds the passkey to the signed-in connection's
+	// account, and a login as the user the connection is signed in as
+	// changes no user: neither is a sign-in (§4.5).
+	return s.signInLocked(c, req, user.user, now, ceremony.action != "register" && c.user != user.user, false)
 }
 
 // signInLocked makes an account the connection's identity after a passkey
-// or email sign-in, with a new bearer token for later connections in the
-// result (§3.2). The connection's previous token is forgotten.
-func (s *Server) signInLocked(c *client, req request, user *userState, now time.Time) (any, *rpcError) {
+// or email sign-in, or a passkey registration, with a new bearer token for
+// later connections in the result (§3.2). The connection's previous token
+// is forgotten. signIn is whether the auth signed the connection in as a
+// user it was not signed in as, rather than adding a passkey to it or
+// authenticating it again as the same user, which alone sends what follows
+// a sign-in (§4.5). joinDefault joins a new account to the default room.
+func (s *Server) signInLocked(c *client, req request, user *userState, now time.Time, signIn, joinDefault bool) (any, *rpcError) {
 	delete(s.sessions, c.token)
 	s.touchSession(c.token)
 	secret := make([]byte, 32)
@@ -314,7 +315,7 @@ func (s *Server) signInLocked(c *client, req request, user *userState, now time.
 	c.token = sha256.Sum256([]byte(token))
 	s.sessions[c.token] = session{user: user, origin: c.origin, expires: now.Add(sessionLifetime)}
 	s.touchSession(c.token)
-	return s.switchUserLocked(c, req, user, map[string]any{"token": token}), nil
+	return s.switchUserLocked(c, req, user, map[string]any{"token": token}, signIn, joinDefault), nil
 }
 
 // pruneSessionsLocked forgets expired sessions.
@@ -329,13 +330,10 @@ func (s *Server) pruneSessionsLocked(now time.Time) {
 
 // authenticateToken resumes a passkey or email sign-in through the
 // protocol's token scheme (§3.2). Keeping this outside the WebAuthn action
-// space preserves §4.9's register/login action grammar while retaining the
+// space preserves §4.10's register/login action grammar while retaining the
 // example server's bearer token policy.
 func (s *Server) authenticateToken(c *client, req request) (any, *rpcError) {
 	now := time.Now()
-	if !req.hasID {
-		return nil, nil
-	}
 	c.ceremony = nil
 	token, err := parseString(req.params, "token", true)
 	if err != nil {
@@ -358,7 +356,9 @@ func (s *Server) authenticateToken(c *client, req request) (any, *rpcError) {
 	s.sessions[key] = session
 	s.touchSession(key)
 	c.token = key
-	return s.switchUserLocked(c, req, session.user, map[string]any{"token": token}), nil
+	// Resuming the user the connection is signed in as is no sign-in
+	// (§4.5), and sends nothing after its result.
+	return s.switchUserLocked(c, req, session.user, map[string]any{"token": token}, c.user != session.user, false), nil
 }
 
 // parsePasskeyCredential performs only wire-shape validation. A syntactically

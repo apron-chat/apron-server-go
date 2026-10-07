@@ -12,9 +12,11 @@ forgets it on restart); see [SERVER.md](SERVER.md#storage).
   packages. See [SERVER.md](SERVER.md).
 - [apron-chat/apron-web](https://github.com/apron-chat/apron-web): the
   SvelteKit and TypeScript web client, deployed at `https://web.apron.chat`.
-  `make install` clones it into `.apron-web/` (ignored), where the browser
-  tests, `make dev-web`, and `make run` use it; replace that directory with a
-  symlink to work on your own checkout.
+  `.apron-web` is a submodule of it, pinned to the commit the browser tests,
+  `make dev-web`, and `make run` use; `make install` checks it out. To test
+  another version, check out that commit in `.apron-web` (and commit the new
+  pin to keep it), or point `APRON_WEB_DIR` at another checkout for the
+  interop tests.
 - `tests/interop`: Playwright tests against real clients and the Go backend.
 - `testdata/apron`: a submodule of [shazow/apron](https://github.com/shazow/apron),
   pinned to the protocol version this server implements. Its
@@ -61,7 +63,7 @@ Open `http://localhost:5173`. The development server proxies `/ws` to
 To use the Cloudflare demo backend locally, run it from
 [apron-chat/apron-server-cloudflare](https://github.com/apron-chat/apron-server-cloudflare)
 with `npx wrangler dev --port 8080` instead of `make dev-server`. The web
-client, the Go server, and the worker speak protocol v7; the worker does so
+client, the Go server, and the worker speak protocol v8; the worker does so
 within the demo's budgets and policies (only threads under `general` can be
 created, guests only read until they sign in with a passkey, and guests'
 memberships are not logged, so its `room_list` ignores `latest_log_id`). A
@@ -72,8 +74,8 @@ identity instead of upgrading guest ownership as the Go example does.
 The example starts with a guest identity. Use **Add passkey** in the profile
 editor's Sign-in row to retain that identity and its message ownership, and
 **Sign in with passkey** to return to it (or choose Passkey on the connect
-screen). Passkey sessions resume after transport disconnects;
-page reloads require signing in again. Guest reconnects receive a new identity.
+screen). Passkey and email sessions resume with their bearer token after a
+disconnect or a reload. Guest reconnects receive a new identity.
 Edit and delete permissions belong to the identity that created the message.
 Use `localhost` for the default passkey configuration; see
 [SERVER.md](SERVER.md#passkeys) for deployment settings.
@@ -95,7 +97,7 @@ threads included, with their members, sent right behind `auth` without waiting
 for its result ([§3.2](https://github.com/shazow/apron/blob/main/PROTOCOL.md#32-authentication)), and follows `room_update` from then on ([§4.3](https://github.com/shazow/apron/blob/main/PROTOCOL.md#43-rooms)). After
 a dropped connection it resumes each room's history from where it stopped in
 the same way, and a resumed passkey session lists only the rooms that changed
-since. Member lists start from those listings and follow the `membership`
+since. Member lists start from those listings and follow the membership
 records of joins and leaves ([§4.3.2](https://github.com/shazow/apron/blob/main/PROTOCOL.md#432-membership)), which also show in the room's
 timeline as quiet "Ada joined" lines, merged and netted out between messages so
 guest churn stays quiet. The sidebar lists top-level rooms; the
@@ -120,7 +122,7 @@ thread's `room_id`) when opened, newest page first, so message counts in the
 sidebar and on cards appear once a thread has loaded. The room settings
 edit a room's title and description (`/topic` sets the description); the save
 is a `room_set` request with the room's `room_id` that resubmits the other
-fields and `ext` unchanged. Any
+client fields, but not `ext`, which merges. Any
 authenticated user may create threads and edit rooms on the Go example;
 the Cloudflare demo allows creating threads but denies editing its permanent
 `general` room, and a denied request is reported like any other error.
@@ -138,7 +140,7 @@ move. Escape leaves select mode. Moved messages keep their reply references and
 reactions.
 
 Who a message mentions is its `body.mentions` ([PROTOCOL.md §3.5](https://github.com/shazow/apron/blob/main/PROTOCOL.md#35-messages)); in the text a
-mention follows the `@user_id` convention ([Appendix A.3](https://github.com/shazow/apron/blob/main/PROTOCOL.md#a3-mention-text)): a
+mention follows the `@user_id` convention ([Appendix A.3](https://github.com/shazow/apron/blob/main/PROTOCOL.md#a3-prefixes-in-text)): a
 known user renders as a chip with their current name, a room as a link, and
 unknown IDs as written, never inside code. A message whose `body.mentions` lists
 you tints its row and pulses once when it arrives (or an edit adds you), and
@@ -154,7 +156,7 @@ muted `@user_id` beside it, always when another user known to the client shows
 under the same name ([§3.3](https://github.com/shazow/apron/blob/main/PROTOCOL.md#33-identity)). A sender's name and avatar come from the latest
 profile the server sent for them, else from the message itself.
 
-With cap `command` ([PROTOCOL.md §4.8](https://github.com/shazow/apron/blob/main/PROTOCOL.md#48-command)), composer text starting with one `/` is
+With cap `command` ([PROTOCOL.md §4.1](https://github.com/shazow/apron/blob/main/PROTOCOL.md#41-command)), composer text starting with one `/` is
 a command: the composer tags it, and Run sends it as a `command` request
 (`/nick`, `/join`, `/leave` and `/topic` map to `me`, `room_join`, `room_leave`
 and `room_set` with `description`), while `//` posts a message starting with `/`. Replies arrive as
@@ -250,6 +252,18 @@ distributions). For a custom browser installation, set:
 ```sh
 PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/path/to/chromium make test-interop
 ```
+
+The `push` project (`push.spec.ts`) needs full Chromium, not the headless
+shell, which `npx playwright install chromium` also installs; with a custom
+browser, point the variable at full Chromium. To run against another
+apron-web checkout, such as a pull request's worktree, set `APRON_WEB_DIR`:
+
+```sh
+APRON_WEB_DIR=../apron-web-pr make test-interop
+```
+
+See [`tests/interop/README.md`](tests/interop/README.md) for what each suite
+covers and the flags the server is started with.
 
 No root JavaScript workspace or Go workspace is required.
 
