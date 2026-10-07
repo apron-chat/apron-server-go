@@ -308,7 +308,7 @@ test('web push: register, wake rules, VAPID + aes128gcm delivery, service worker
 	// --- Turn on push in Preferences ---
 	await page.getByRole('button', { name: /^Open preferences/ }).click();
 	const prefs = page.getByRole('dialog', { name: 'Preferences' });
-	const pushSwitch = prefs.getByRole('switch', { name: 'Push notifications' });
+	const pushSwitch = prefs.getByRole('switch', { name: 'Notifications', exact: true });
 	await expect(prefs.getByRole('heading', { name: 'Preferences' })).toBeVisible();
 	await expect(pushSwitch).toHaveAttribute('aria-checked', 'false');
 	await pushSwitch.click();
@@ -372,8 +372,10 @@ test('web push: register, wake rules, VAPID + aes128gcm delivery, service worker
 	await expect.poll(async () => (await swNotifications(context)).filter((n: any) => n.tag === tag).length).toBe(1);
 	const shown = await swNotifications(context);
 	evidence('notifications after first delivery', shown);
-	const mine = shown.find((n: any) => n.tag === tag);
-	expect(mine.title).toBe(`Second · general`);
+	// The page, open though idle, notifies too (one Notifications switch turns on both), as `Second · <room title>`,
+	// and the push for the same message keeps the title of what is showing under its tag.
+	await expect.poll(async () => (await swNotifications(context)).find((n: any) => n.tag === tag)?.title).toBe(`Second · General`);
+	const mine = (await swNotifications(context)).find((n: any) => n.tag === tag);
 	expect(mine.body).toContain('ping');
 	await cdp.send('ServiceWorker.deliverPushMessage', { origin: ORIGIN, registrationId, data: decoded.plaintext });
 	await new Promise((resolve) => setTimeout(resolve, 1_000));
@@ -523,8 +525,12 @@ test('web push: register, wake rules, VAPID + aes128gcm delivery, service worker
 	const afterSignIn = tap2.sent.slice(sentBefore).filter((frame) => frame.method === 'push_register' || frame.method === 'push_unregister');
 	evidence('push frames after signing in again', afterSignIn);
 	expect(afterSignIn.every((frame) => frame.method === 'push_unregister' && frame.params.url === endpoint)).toBe(true);
+	// The one Notifications switch stays on for this device's open page; it says push is off, and offers it.
 	await page2.getByRole('button', { name: /^Open preferences/ }).click();
-	await expect(page2.getByRole('dialog', { name: 'Preferences' }).getByRole('switch', { name: 'Push notifications' })).toHaveAttribute('aria-checked', 'false');
+	const prefs2 = page2.getByRole('dialog', { name: 'Preferences' });
+	await expect(prefs2.getByRole('switch', { name: 'Notifications', exact: true })).toHaveAttribute('aria-checked', 'true');
+	await expect(prefs2.locator('#ap-pref-notifications-note')).toHaveText('On · alerts while Apron is open. Not yet when it’s closed.');
+	await expect(prefs2.getByRole('button', { name: 'Alert when it’s closed, too' })).toBeVisible();
 	await page2.keyboard.press('Escape');
 	evidence('total posts', capture.posts.length);
 	user2.close();
