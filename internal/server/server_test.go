@@ -188,12 +188,13 @@ func TestAuthHonorsRequestedUserIDs(t *testing.T) {
 	}
 	// A user_id is never empty and has no whitespace or control characters
 	// (§2.4): requesting one that could be no user_id is invalid_params,
-	// with any scheme, and takes no guest number.
+	// with any scheme the server offers, and takes no guest number. A
+	// scheme it does not offer is unsupported first.
 	c, _ := dialRaw(t, httpServer)
 	for i, requested := range []any{5, nil, "", "bad id", "tab\tid", "line\n", "nbsp\u00a0id", "bell\u0007"} {
 		c.expectError(t, "auth", fmt.Sprint("bad", i), map[string]any{"scheme": "guest", "user_id": requested}, codeInvalidParams)
 	}
-	c.expectError(t, "auth", "bad-token", map[string]any{"scheme": "token", "token": "x", "user_id": "a b"}, codeInvalidParams)
+	c.expectError(t, "auth", "bad-token", map[string]any{"scheme": "token", "token": "x", "user_id": "a b"}, codeUnsupported)
 	if got := auth("after", map[string]any{}); got != "guest_101" {
 		t.Fatalf("counter after invalid requests: %q", got)
 	}

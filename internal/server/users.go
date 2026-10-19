@@ -300,8 +300,35 @@ func (s *Server) authenticate(c *client, req request) (any, *rpcError) {
 	if err != nil {
 		return nil, err
 	}
-	// A user_id requested with any scheme must be one that could be
-	// assigned (§2.4); one that this server would not assign is ignored.
+	// A scheme this document defines but the server does not offer is
+	// unsupported (§3.2), whatever else the request holds.
+	switch scheme {
+	case "webauthn":
+		if s.config.WebAuthn == nil {
+			return nil, &rpcError{Code: codeUnsupported, Message: "Passkeys are disabled"}
+		}
+	case "email":
+		if s.config.EmailSender == nil {
+			return nil, &rpcError{Code: codeUnsupported, Message: "Email sign-in is disabled"}
+		}
+	case "external":
+		// This server has no sign-in page (§4.11.5). One would propose
+		// here, and approve with approveLocked, which takes either scheme.
+		return nil, &rpcError{Code: codeUnsupported, Message: "External sign-in is not offered"}
+	case "token":
+		if s.config.WebAuthn == nil && s.config.EmailSender == nil {
+			return nil, &rpcError{Code: codeUnsupported, Message: "This server has no sign-in sessions; use guest"}
+		}
+	case "guest":
+	default:
+		// A request that depends on a name the server does not know is
+		// invalid_params (§1).
+		return nil, invalidParams("Unknown authentication scheme %q", scheme)
+	}
+	// A user_id is never empty, nor contains whitespace or control
+	// characters (§2.4): requesting one that could be no user_id is
+	// invalid_params, with any scheme. One that could be, but that this
+	// server would not assign, is ignored where the scheme assigns one.
 	if _, has := req.params["user_id"]; has {
 		requested, err := parseString(req.params, "user_id", true)
 		if err != nil {
@@ -311,30 +338,13 @@ func (s *Server) authenticate(c *client, req request) (any, *rpcError) {
 			return nil, invalidParams("user_id must not be empty, or contain whitespace or control characters")
 		}
 	}
-	// A scheme this document defines but the server does not offer is
-	// unsupported (§3.2).
 	switch scheme {
 	case "webauthn":
 		return s.authenticatePasskey(c, req)
 	case "email":
-		if s.config.EmailSender == nil {
-			return nil, &rpcError{Code: codeUnsupported, Message: "Email sign-in is disabled"}
-		}
 		return s.authenticateEmail(c, req)
-	case "external":
-		// This server has no sign-in page (§4.11.5). One would propose
-		// here, and approve with approveLocked, which takes either scheme.
-		return nil, &rpcError{Code: codeUnsupported, Message: "External sign-in is not offered"}
 	case "token":
-		if s.config.WebAuthn == nil && s.config.EmailSender == nil {
-			return nil, &rpcError{Code: codeUnsupported, Message: "This server has no sign-in sessions; use guest"}
-		}
 		return s.authenticateToken(c, req)
-	case "guest":
-	default:
-		// A request that depends on a name the server does not know is
-		// invalid_params (§1).
-		return nil, invalidParams("Unknown authentication scheme %q", scheme)
 	}
 	name, err := parseString(req.params, "name", false)
 	if err != nil {
@@ -406,6 +416,7 @@ func (s *Server) attachLocked(c *client, user *userState) {
 	// (§4.11.3).
 	if c.proposal != nil {
 		s.dropProposalLocked(c.proposal)
+		c.proposal = nil
 	}
 	c.user = user
 	user.clients[c] = struct{}{}

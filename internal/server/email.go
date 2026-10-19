@@ -123,13 +123,17 @@ func (l LogEmailSender) SendSignInCode(_ context.Context, m SignInEmail) error {
 // works only on that connection; its link token, a handle and an
 // unguessable secret, works on any connection that may approve it
 // (§4.11.3). It outlives its connection's disconnect, until it expires or
-// is approved. Guarded by s.mu.
+// is approved, and holds neither the connection nor the account, so a
+// closed connection, and a retired guest, are not kept for it: the
+// connection holds the proposal instead. Guarded by s.mu.
 type emailProposal struct {
 	email string
-	// account is the proposing account, for an addition.
-	account *userState
-	add     bool
-	code    string
+	// accountID is the user_id of the proposing account, for an addition.
+	// User_ids are never reissued, so only a connection signed in to that
+	// account has it.
+	accountID string
+	add       bool
+	code      string
 	// handle and secret make up the link token; both are empty when no
 	// link is sent.
 	handle, secret string
@@ -137,9 +141,11 @@ type emailProposal struct {
 	state    string
 	expires  time.Time
 	attempts int
-	// owner is the proposing connection; name and userID are what it
-	// requested for a new account.
-	owner        *client
+	// dropped reports that the proposal was forgotten, which its
+	// connection, still holding it, learns from this.
+	dropped bool
+	// name and userID are what the proposing connection requested for a
+	// new account.
 	name, userID string
 }
 
@@ -274,9 +280,7 @@ func evict(lru *list.List, scan int, forget func(value any) bool) bool {
 
 // dropProposalLocked forgets a proposal: its connection's, and its link.
 func (s *Server) dropProposalLocked(p *emailProposal) {
-	if p.owner != nil && p.owner.proposal == p {
-		p.owner.proposal = nil
-	}
+	p.dropped = true
 	if p.handle != "" && s.email.links[p.handle] == p {
 		delete(s.email.links, p.handle)
 	}
@@ -492,10 +496,10 @@ func (s *Server) proposeEmailLocked(c *client, req request) (any, *rpcError) {
 	}
 	p := &emailProposal{
 		email: email, add: add, code: fmt.Sprintf("%06d", number), state: state, expires: now.Add(emailCodeLifetime),
-		owner: c, name: name, userID: requested,
+		name: name, userID: requested,
 	}
 	if add {
-		p.account = c.user
+		p.accountID = c.user.id
 	}
 	message := SignInEmail{To: email, Code: p.code, Expires: p.expires, Add: add}
 	if linked {
@@ -562,8 +566,8 @@ func (s *Server) approveLocked(c *client, req request) (any, *rpcError) {
 		// Only the proposing account approves an addition: otherwise
 		// someone could lead a victim to add the victim's address to the
 		// other person's account.
-		account := p.account
-		if c.user != account {
+		account := c.user
+		if account == nil || account.id != p.accountID {
 			return nil, &rpcError{Code: codeDenied, Message: "Open this link where the account that asked for it is signed in"}
 		}
 		s.dropProposalLocked(p)
@@ -590,13 +594,14 @@ func (s *Server) approveLocked(c *client, req request) (any, *rpcError) {
 	if c.user != nil {
 		return nil, &rpcError{Code: codeDenied, Message: "Sign-in codes work on a connection that is not signed in"}
 	}
+	own := c.proposal == p
 	s.dropProposalLocked(p)
 	user := s.emails[p.email]
 	if user == nil {
 		// A proposal's own name and user_id apply only on its connection: a
 		// link opened elsewhere is someone reading the email, whose account
 		// the proposer must not name.
-		if c == p.owner {
+		if own {
 			if name == "" {
 				name = p.name
 			}
@@ -625,9 +630,9 @@ func (s *Server) approveLocked(c *client, req request) (any, *rpcError) {
 // Expired proposals are dropped.
 func (s *Server) proposalLocked(c *client, token string, now time.Time) *emailProposal {
 	own := c.proposal
-	if own != nil && !now.Before(own.expires) {
+	if own != nil && (own.dropped || !now.Before(own.expires)) {
 		s.dropProposalLocked(own)
-		own = nil
+		c.proposal, own = nil, nil
 	}
 	if own != nil && subtle.ConstantTimeCompare([]byte(token), []byte(own.code)) == 1 {
 		return own

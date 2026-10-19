@@ -335,9 +335,9 @@ type client struct {
 	ceremony *passkeyCeremony
 	token    [32]byte
 	// emailSends limits the email proposals made on the connection,
-	// proposal is its pending one, and clientKey names its client address
-	// for the limits of all its connections (email.go). Guarded by
-	// server.mu.
+	// proposal is its latest one, which may have been dropped since, and
+	// clientKey names its client address for the limits of all its
+	// connections (email.go). Guarded by server.mu.
 	emailSends *rate.Limiter
 	proposal   *emailProposal
 	clientKey  string

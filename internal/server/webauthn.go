@@ -67,14 +67,11 @@ type session struct {
 	expires time.Time
 }
 
-// authenticatePasskey runs under s.mu. One outstanding challenge is retained per
+// authenticatePasskey runs under s.mu, with passkeys configured. One outstanding challenge is retained per
 // connection; finishing consumes it even on failure. Auth responses are never
 // deduplicated, so replay cannot resurrect a consumed challenge.
 func (s *Server) authenticatePasskey(c *client, req request) (any, *rpcError) {
 	w := s.config.WebAuthn
-	if w == nil {
-		return nil, &rpcError{Code: codeUnsupported, Message: "Passkeys are disabled"}
-	}
 	action, rpcErr := parseString(req.params, "action", true)
 	if rpcErr != nil {
 		return nil, rpcErr

@@ -7,9 +7,11 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
+	"weak"
 
 	"github.com/coder/websocket"
 
@@ -502,6 +504,12 @@ func TestEmailProposalsExpireAndAreInvalidated(t *testing.T) {
 	guest.expectError(t, "auth", "email", map[string]any{"scheme": "email", "email": "ada@example.com"}, codeUnsupported)
 	guest.expectError(t, "auth", "token", map[string]any{"scheme": "token", "token": "x"}, codeUnsupported)
 	guest.expectError(t, "auth", "external", map[string]any{"scheme": "external", "return_url": "https://web.apron.chat/"}, codeUnsupported)
+	// A scheme not offered is unsupported before its user_id is read.
+	for _, scheme := range []string{"email", "token", "webauthn", "external"} {
+		guest.expectError(t, "auth", "bad-id-"+scheme, map[string]any{"scheme": scheme, "user_id": ""}, codeUnsupported)
+	}
+	fresh.expectError(t, "auth", "bad-id-offered", map[string]any{"scheme": "email", "email": "frank@example.com", "user_id": ""}, codeInvalidParams)
+	fresh.expectError(t, "auth", "bad-id-token", map[string]any{"scheme": "token", "token": "x", "user_id": ""}, codeInvalidParams)
 }
 
 // A disconnect does not cancel a proposal: its link still signs in
@@ -537,6 +545,49 @@ func TestEmailProposalsOutliveTheirConnection(t *testing.T) {
 	app.mu.Unlock()
 	late := dialTestClient(t, httpServer)
 	late.expectError(t, "auth", "expired-link", map[string]any{"scheme": "email", "token": linkToken(t, bob)}, codeDenied)
+}
+
+// A proposal kept after its connection closes keeps neither the closed
+// connection nor, for an addition, the retired guest that proposed it.
+func TestEmailProposalsKeepNoClosedConnection(t *testing.T) {
+	app, mailbox, httpServer := emailTestServer(t, nil)
+	signIn, _ := dialRaw(t, httpServer)
+	propose(t, signIn, "ada@example.com")
+	mailbox.receive(t)
+	guest := dialTestClient(t, httpServer)
+	propose(t, guest, "bob@example.com")
+	mailbox.receive(t)
+	var clients []weak.Pointer[client]
+	var user weak.Pointer[userState]
+	app.mu.RLock()
+	for c := range app.clients {
+		clients = append(clients, weak.Make(c))
+		if c.user != nil {
+			user = weak.Make(c.user)
+		}
+	}
+	app.mu.RUnlock()
+	_ = signIn.ws.Close(websocket.StatusNormalClosure, "gone")
+	_ = guest.ws.Close(websocket.StatusNormalClosure, "gone")
+	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+		runtime.GC()
+		kept := user.Value() != nil
+		for _, c := range clients {
+			kept = kept || c.Value() != nil
+		}
+		if !kept {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("a closed connection or its retired guest is still kept")
+		}
+	}
+	app.mu.RLock()
+	links := len(app.email.links)
+	app.mu.RUnlock()
+	if links != 2 {
+		t.Fatalf("%d proposals kept, want 2", links)
+	}
 }
 
 // Failed attempts count against the proposal a link token names, whichever
