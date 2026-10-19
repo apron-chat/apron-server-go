@@ -27,7 +27,7 @@ const (
 )
 
 // userState is everything the server keeps for one user_id across its
-// connections: the profile (§3.3), joined rooms (§4.3.2), request
+// connections: the profile (§3.3), joined rooms (§4.2.2), request
 // deduplication (§1.2), and push registrations (§4.9). Guest users
 // are retired when their last connection closes; accounts (passkey users)
 // persist.
@@ -52,7 +52,7 @@ type userState struct {
 	clients map[*client]struct{}
 	joined  map[string]*roomState
 	// leftAt maps each room the user left, and has not rejoined, to the
-	// log_id of the leave, for room_list's `left` (§4.3.1).
+	// log_id of the leave, for room_list's `left` (§4.2.1).
 	leftAt  map[string]int64
 	dedup   dedupCache
 	passkey *passkeyUser
@@ -233,9 +233,11 @@ func validAvatar(value string) bool {
 	return strings.HasPrefix(value, "https://") && len(value) <= 2048 && !strings.ContainsAny(value, " \t\r\n\"'<>")
 }
 
-// requestableUserID is the shape of a user_id a guest may request: a
-// mentionable ID (Appendix A.3) that starts with a letter, so it never looks
-// like a system identity or a log_id-derived room_id.
+// requestableUserID is the shape of a user_id a guest may request: the
+// suggested convention for user-chosen IDs (Appendix A.3), letters, digits,
+// _, ., and -, starting with a letter, so it never looks like a system
+// identity or a log_id-derived room_id, and ending with a letter, digit, or
+// _, so a mention of it ends where it does.
 var requestableUserID = regexp.MustCompile(`^[A-Za-z](?:[A-Za-z0-9_.-]{0,62}[A-Za-z0-9_])?$`)
 
 // guestIDPrefix starts every counter-assigned guest ID. The guest_
@@ -299,25 +301,50 @@ func (s *Server) authenticate(c *client, req request) (any, *rpcError) {
 		return nil, err
 	}
 	// A scheme this document defines but the server does not offer is
-	// unsupported (§3.2).
+	// unsupported (§3.2), whatever else the request holds.
 	switch scheme {
 	case "webauthn":
-		return s.authenticatePasskey(c, req)
+		if s.config.WebAuthn == nil {
+			return nil, &rpcError{Code: codeUnsupported, Message: "Passkeys are disabled"}
+		}
 	case "email":
 		if s.config.EmailSender == nil {
 			return nil, &rpcError{Code: codeUnsupported, Message: "Email sign-in is disabled"}
 		}
-		return s.authenticateEmail(c, req)
+	case "external":
+		// This server has no sign-in page (§4.11.5). One would propose
+		// here, and approve with approveLocked, which takes either scheme.
+		return nil, &rpcError{Code: codeUnsupported, Message: "External sign-in is not offered"}
 	case "token":
 		if s.config.WebAuthn == nil && s.config.EmailSender == nil {
 			return nil, &rpcError{Code: codeUnsupported, Message: "This server has no sign-in sessions; use guest"}
 		}
-		return s.authenticateToken(c, req)
 	case "guest":
 	default:
 		// A request that depends on a name the server does not know is
 		// invalid_params (§1).
 		return nil, invalidParams("Unknown authentication scheme %q", scheme)
+	}
+	// A user_id is never empty, nor contains whitespace or control
+	// characters (§2.4): requesting one that could be no user_id is
+	// invalid_params, with any scheme. One that could be, but that this
+	// server would not assign, is ignored where the scheme assigns one.
+	if _, has := req.params["user_id"]; has {
+		requested, err := parseString(req.params, "user_id", true)
+		if err != nil {
+			return nil, err
+		}
+		if !validID(requested) {
+			return nil, invalidParams("user_id must not be empty, or contain whitespace or control characters")
+		}
+	}
+	switch scheme {
+	case "webauthn":
+		return s.authenticatePasskey(c, req)
+	case "email":
+		return s.authenticateEmail(c, req)
+	case "token":
+		return s.authenticateToken(c, req)
 	}
 	name, err := parseString(req.params, "name", false)
 	if err != nil {
@@ -384,10 +411,12 @@ func (s *Server) attachLocked(c *client, user *userState) {
 	if previous != nil {
 		delete(previous.clients, c)
 	}
-	// A pending email proposal was made by the previous identity: an
-	// addition must not be approved as the next one (§4.11).
+	// A pending email proposal was made by the previous identity: it is
+	// dropped, so the connection cannot approve it as the next one
+	// (§4.11.3).
 	if c.proposal != nil {
 		s.dropProposalLocked(c.proposal)
+		c.proposal = nil
 	}
 	c.user = user
 	user.clients[c] = struct{}{}
@@ -420,7 +449,7 @@ func (s *Server) detachLocked(c *client) {
 
 // retireLocked removes a guest identity for good. It leaves every room it
 // joined, logging each leave as a membership for the remaining members
-// (§4.3.2). Its user_id is never reissued, so its records stay consistent
+// (§4.2.2). Its user_id is never reissued, so its records stay consistent
 // (§3.3).
 func (s *Server) retireLocked(u *userState) {
 	rooms := slices.SortedFunc(maps.Values(u.joined), func(a, b *roomState) int {

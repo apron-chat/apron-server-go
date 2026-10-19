@@ -5,10 +5,13 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
+	"weak"
 
 	"github.com/coder/websocket"
 
@@ -83,11 +86,21 @@ func signInByEmail(t *testing.T, c *testClient, token string, extra map[string]a
 	return before, result
 }
 
-// linkToken is the token in a sign-in email's link.
+// linkFragment is the form-encoded fragment of an email's link.
+func linkFragment(t *testing.T, message SignInEmail) url.Values {
+	t.Helper()
+	_, fragment, _ := strings.Cut(message.Link, "#")
+	values, err := url.ParseQuery(fragment)
+	if err != nil {
+		t.Fatalf("link fragment %q: %v", message.Link, err)
+	}
+	return values
+}
+
+// linkToken is the token in an email's link.
 func linkToken(t *testing.T, message SignInEmail) string {
 	t.Helper()
-	_, fragment, _ := strings.Cut(message.Link, "#token=")
-	token, _, _ := strings.Cut(fragment, "&")
+	token := linkFragment(t, message).Get("token")
 	if token == "" {
 		t.Fatalf("no link token in %q", message.Link)
 	}
@@ -146,7 +159,8 @@ func TestEmailSignIn(t *testing.T) {
 
 	// A proposal authenticates nothing, so on a connection not signed in the
 	// requests behind it are still denied; the address is normalized.
-	proposer.write(t, map[string]any{"method": "auth", "id": "propose", "params": map[string]any{"scheme": "email", "email": " Ada@Example.com "}})
+	state := "q8Rz/+&=é"
+	proposer.write(t, map[string]any{"method": "auth", "id": "propose", "params": map[string]any{"scheme": "email", "email": " Ada@Example.com ", "state": state}})
 	proposer.write(t, map[string]any{"method": "room_list", "id": "list", "params": map[string]any{}})
 	if reply := proposer.read(t); reply["id"] != "propose" || len(reply["result"].(map[string]any)) != 0 {
 		t.Fatalf("proposal reply: %#v", reply)
@@ -158,11 +172,12 @@ func TestEmailSignIn(t *testing.T) {
 	if message.To != "ada@example.com" || message.Add || len(message.Code) != 6 || strings.Trim(message.Code, "0123456789") != "" {
 		t.Fatalf("sent: %#v", message)
 	}
-	// The link is built from the configured page, with an unguessable token
-	// and this server's WebSocket URL in its fragment, and no address.
+	// The link is built from the configured page, with an unguessable token,
+	// the proposal's state unchanged, and this server's WebSocket URL in its
+	// fragment, and no address (§4.11.2).
 	link := linkToken(t, message)
-	want := "https://chat.example/login#token=" + link + "&server=wss%3A%2F%2Fchat.example%2Fapp%2Fws"
-	if message.Link != want || len(link) < 26 || strings.Contains(message.Link, "ada") {
+	want := "https://chat.example/login#token=" + link + "&state=" + url.QueryEscape(state) + "&server=wss%3A%2F%2Fchat.example%2Fapp%2Fws"
+	if message.Link != want || len(link) < 26 || strings.Contains(message.Link, "ada") || linkFragment(t, message).Get("state") != state {
 		t.Fatalf("link %q, want %q", message.Link, want)
 	}
 	if !strings.Contains(message.Text(), message.Code) || !strings.Contains(message.Text(), message.Link) {
@@ -172,6 +187,9 @@ func TestEmailSignIn(t *testing.T) {
 	proposer.expectError(t, "auth", "again", map[string]any{"scheme": "email", "email": "ada@example.com"}, codeRetryAfter)
 	proposer.expectError(t, "auth", "invalid", map[string]any{"scheme": "email", "email": "Ada <ada@example.com>"}, codeInvalidParams)
 	proposer.expectError(t, "auth", "missing", map[string]any{"scheme": "email"}, codeInvalidParams)
+	// state is a string of at most 256 bytes.
+	proposer.expectError(t, "auth", "long-state", map[string]any{"scheme": "email", "email": "bob@example.com", "state": strings.Repeat("s", maxStateBytes+1)}, codeTooLarge)
+	proposer.expectError(t, "auth", "state-type", map[string]any{"scheme": "email", "email": "bob@example.com", "state": 7}, codeInvalidParams)
 
 	// The code works only on the proposing connection; the link token on
 	// any connection not signed in, which it signs in: a new account, which
@@ -252,10 +270,12 @@ func TestEmailRequestsLeaveAuthenticationAlone(t *testing.T) {
 }
 
 // On a signed-in connection a proposal is to add the address to that
-// account, by a code only that connection can present, whose email has no
-// link. A sign-in link presented by someone signed in is denied, so an
-// attacker's link cannot join the attacker's address to their account, and
-// an address is never taken from another account.
+// account, by a code only that connection can present, or a link only a
+// connection signed in to that account can present. A sign-in link
+// presented by someone signed in is denied, so an attacker's link cannot
+// join the attacker's address to their account, nor can an attacker's
+// addition link join a victim's address to the attacker's, and an address
+// is never taken from another account.
 func TestEmailAdditions(t *testing.T) {
 	app, mailbox, httpServer := emailTestServer(t, func(config *Config) {
 		config.WebAuthn = testWebAuthn(t)
@@ -290,19 +310,24 @@ func TestEmailAdditions(t *testing.T) {
 	approveOwned := pendingCode(t, app, victim.userID)
 	victim.expectError(t, "auth", "owned", map[string]any{"scheme": "email", "token": approveOwned}, codeDenied)
 
-	// The victim proposes adding their own address: the email has no link.
+	// The victim proposes adding their own address.
 	propose(t, victim, "victim@example.com")
 	message := mailbox.receive(t)
-	if !message.Add || message.Link != "" || !strings.Contains(message.Text(), "add this address") {
+	if !message.Add || message.Link == "" || !strings.Contains(message.Text(), "add this address") || !strings.Contains(message.Text(), message.Link) {
 		t.Fatalf("addition email: %#v", message)
 	}
-	// Someone else's proposal for the address does not touch it, and the
-	// code works on no other connection.
+	// Someone else's proposal for the address does not touch it, the code
+	// works on no other connection, and the link on no connection of
+	// another account or none (§4.11.3), which leaves the proposal.
 	ageSends(app, "victim@example.com", time.Minute)
 	other, _ := dialRaw(t, httpServer)
 	propose(t, other, "victim@example.com")
 	mailbox.receive(t)
 	other.expectError(t, "auth", "elsewhere", map[string]any{"scheme": "email", "token": message.Code}, codeDenied)
+	other.expectError(t, "auth", "link-not-signed-in", map[string]any{"scheme": "email", "token": linkToken(t, message)}, codeDenied)
+	stranger := dialTestClient(t, httpServer)
+	stranger.expectError(t, "auth", "link-other-account", map[string]any{"scheme": "email", "token": linkToken(t, message)}, codeDenied)
+	victim.drain(t)
 	// Approving adds the address to the guest, which becomes an account
 	// keeping its messages, with the roles its address was granted: {} and
 	// a user notification with the new roles.
@@ -403,7 +428,8 @@ func TestEmailProposalsEndWithTheirIdentity(t *testing.T) {
 	reader.expectError(t, "auth", "stale-link", map[string]any{"scheme": "email", "token": link}, codeDenied)
 }
 
-// A passkey account adds an address on the connection that proposed it.
+// A passkey account adds an address by its link on another connection
+// signed in to it.
 func TestEmailAddsToAPasskeyAccount(t *testing.T) {
 	app, mailbox, httpServer := emailTestServer(t, func(config *Config) { config.WebAuthn = testWebAuthn(t) })
 	owner, _ := dialOrigin(t, httpServer, testPasskeyOrigin)
@@ -411,7 +437,10 @@ func TestEmailAddsToAPasskeyAccount(t *testing.T) {
 	ownerID := registered["you"].(map[string]any)["user_id"]
 	owner.drain(t)
 	propose(t, owner, "owner@example.com")
-	if _, result := approve(t, owner, mailbox.receive(t).Code, nil); len(result) != 0 {
+	tab, _ := dialOrigin(t, httpServer, testPasskeyOrigin)
+	tab.result(t, "auth", "resume", map[string]any{"scheme": "token", "token": registered["token"]})
+	tab.drain(t)
+	if _, result := approve(t, tab, linkToken(t, mailbox.receive(t)), nil); len(result) != 0 {
 		t.Fatalf("adding an address to a passkey account: %#v", result)
 	}
 	app.mu.RLock()
@@ -467,11 +496,118 @@ func TestEmailProposalsExpireAndAreInvalidated(t *testing.T) {
 	fresh, _ := dialRaw(t, httpServer)
 	propose(t, fresh, "erin@example.com")
 	signedIn.expectError(t, "auth", "signed-in", map[string]any{"scheme": "email", "token": linkToken(t, mailbox.receive(t))}, codeDenied)
-	// Email sign-in is not offered without a sender.
+	// Email sign-in is not offered without a sender, and external sign-in
+	// not at all, neither to propose nor to approve.
+	fresh.expectError(t, "auth", "external", map[string]any{"scheme": "external", "token": linkToken(t, second)}, codeUnsupported)
 	_, plain := newTestServer(t, DefaultConfig())
 	guest, _ := dialRaw(t, plain)
 	guest.expectError(t, "auth", "email", map[string]any{"scheme": "email", "email": "ada@example.com"}, codeUnsupported)
 	guest.expectError(t, "auth", "token", map[string]any{"scheme": "token", "token": "x"}, codeUnsupported)
+	guest.expectError(t, "auth", "external", map[string]any{"scheme": "external", "return_url": "https://web.apron.chat/"}, codeUnsupported)
+	// A scheme not offered is unsupported before its user_id is read.
+	for _, scheme := range []string{"email", "token", "webauthn", "external"} {
+		guest.expectError(t, "auth", "bad-id-"+scheme, map[string]any{"scheme": scheme, "user_id": ""}, codeUnsupported)
+	}
+	fresh.expectError(t, "auth", "bad-id-offered", map[string]any{"scheme": "email", "email": "frank@example.com", "user_id": ""}, codeInvalidParams)
+	fresh.expectError(t, "auth", "bad-id-token", map[string]any{"scheme": "token", "token": "x", "user_id": ""}, codeInvalidParams)
+}
+
+// A disconnect does not cancel a proposal: its link still signs in
+// elsewhere, until the proposal expires (§4.11.1).
+func TestEmailProposalsOutliveTheirConnection(t *testing.T) {
+	app, mailbox, httpServer := emailTestServer(t, nil)
+	c, _ := dialRaw(t, httpServer)
+	propose(t, c, "ada@example.com")
+	ada := mailbox.receive(t)
+	propose(t, dialTestClient(t, httpServer), "bob@example.com")
+	bob := mailbox.receive(t)
+	_ = c.ws.Close(websocket.StatusNormalClosure, "gone")
+	for deadline := time.Now().Add(time.Second); ; time.Sleep(time.Millisecond) {
+		app.mu.RLock()
+		open := len(app.clients)
+		app.mu.RUnlock()
+		if open == 1 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%d connections still open", open)
+		}
+	}
+	reader, _ := dialRaw(t, httpServer)
+	if _, result := signInByEmail(t, reader, linkToken(t, ada), nil); result["you"] == nil {
+		t.Fatalf("sign-in after the proposer left: %#v", result)
+	}
+	// An expired link is denied.
+	app.mu.Lock()
+	for _, p := range app.email.links {
+		p.expires = time.Now().Add(-time.Second)
+	}
+	app.mu.Unlock()
+	late := dialTestClient(t, httpServer)
+	late.expectError(t, "auth", "expired-link", map[string]any{"scheme": "email", "token": linkToken(t, bob)}, codeDenied)
+}
+
+// A proposal kept after its connection closes keeps neither the closed
+// connection nor, for an addition, the retired guest that proposed it.
+func TestEmailProposalsKeepNoClosedConnection(t *testing.T) {
+	app, mailbox, httpServer := emailTestServer(t, nil)
+	signIn, _ := dialRaw(t, httpServer)
+	propose(t, signIn, "ada@example.com")
+	mailbox.receive(t)
+	guest := dialTestClient(t, httpServer)
+	propose(t, guest, "bob@example.com")
+	mailbox.receive(t)
+	var clients []weak.Pointer[client]
+	var user weak.Pointer[userState]
+	app.mu.RLock()
+	for c := range app.clients {
+		clients = append(clients, weak.Make(c))
+		if c.user != nil {
+			user = weak.Make(c.user)
+		}
+	}
+	app.mu.RUnlock()
+	_ = signIn.ws.Close(websocket.StatusNormalClosure, "gone")
+	_ = guest.ws.Close(websocket.StatusNormalClosure, "gone")
+	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+		runtime.GC()
+		kept := user.Value() != nil
+		for _, c := range clients {
+			kept = kept || c.Value() != nil
+		}
+		if !kept {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("a closed connection or its retired guest is still kept")
+		}
+	}
+	app.mu.RLock()
+	links := len(app.email.links)
+	app.mu.RUnlock()
+	if links != 2 {
+		t.Fatalf("%d proposals kept, want 2", links)
+	}
+}
+
+// Failed attempts count against the proposal a link token names, whichever
+// connection makes them, and a few cancel it (§4.11.1).
+func TestEmailFailedAttemptsCountFromAnyConnection(t *testing.T) {
+	_, mailbox, httpServer := emailTestServer(t, nil)
+	c, _ := dialRaw(t, httpServer)
+	propose(t, c, "ada@example.com")
+	message := mailbox.receive(t)
+	link := linkToken(t, message)
+	wrong := link[:linkHandleBytes] + strings.Repeat("A", len(link)-linkHandleBytes)
+	for i := range maxEmailAttempts - 1 {
+		guesser, _ := dialRaw(t, httpServer)
+		guesser.expectError(t, "auth", fmt.Sprintf("guess-%d", i), map[string]any{"scheme": "email", "token": wrong}, codeDenied)
+	}
+	// One more attempt, a wrong code on its own connection, cancels it.
+	c.expectError(t, "auth", "last", map[string]any{"scheme": "email", "token": "wrong"}, codeDenied)
+	reader, _ := dialRaw(t, httpServer)
+	reader.expectError(t, "auth", "cancelled", map[string]any{"scheme": "email", "token": link}, codeDenied)
+	c.expectError(t, "auth", "cancelled-code", map[string]any{"scheme": "email", "token": message.Code}, codeDenied)
 }
 
 // Emails are limited per address and per client, deliveries in progress

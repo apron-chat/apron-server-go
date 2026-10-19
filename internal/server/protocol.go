@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"maps"
 	"slices"
+	"strings"
+	"unicode"
 )
 
 const (
@@ -129,6 +131,12 @@ func parseString(params map[string]jsontext.Value, name string, required bool) (
 		return "", invalidParams("%s must be a string", name)
 	}
 	return value, nil
+}
+
+// validID reports whether id can be a room_id or user_id (§2.4): one that is
+// not empty and has no whitespace or control characters.
+func validID(id string) bool {
+	return id != "" && !strings.ContainsFunc(id, func(r rune) bool { return unicode.IsSpace(r) || unicode.IsControl(r) })
 }
 
 func parseBool(params map[string]jsontext.Value, name string, required bool) (bool, *rpcError) {

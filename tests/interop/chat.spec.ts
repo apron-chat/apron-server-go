@@ -1,4 +1,4 @@
-import { expect, test, type BrowserContext } from '@playwright/test';
+import { expect, test, type BrowserContext, type WebSocketRoute } from '@playwright/test';
 import {
 	composer,
 	deleteMessage,
@@ -39,20 +39,23 @@ test.describe('chat protocol interoperability', () => {
 			await waitForMessage(pageB, `${token} first line`);
 			const threadId = await startThread(pageA, sourceA);
 			// The thread is titled after the message's first line and described by
-			// its text (§3.4), shown at its top; the message stays in the room, and
-			// the composer replies to it.
+			// its text, quoted (§4.2), shown at its top; the message stays in the
+			// room, and the composer replies to it.
 			await expect(pageA.getByRole('heading', { level: 1 })).toContainText(`${token} first line`);
 			const summaryA = pageA.getByTestId('thread-summary');
 			await expect(summaryA).toContainText('Fifth line');
 			await expect(pageA.getByTestId('reply-draft')).toContainText(`${token} first line`);
 			const cardA = pageA.locator(`[data-testid="thread-card"][data-thread="${threadId}"]`);
 			const cardB = pageB.locator(`[data-testid="thread-card"][data-thread="${threadId}"]`);
+			const summaryLineA = cardA.getByTestId('thread-preview-summary');
+			const summaryLineB = cardB.getByTestId('thread-preview-summary');
+			const latestLineB = cardB.getByTestId('thread-preview-latest');
 			// In the room feed the message stays, followed by its thread's card, which previews up to three lines of the description.
 			await expect(pageB.locator(`article[data-message-id="${sourceId}"]`)).toBeVisible();
-			await expect(cardB.getByTestId('thread-preview')).toContainText(`${token} first line`);
-			await expect(cardB.getByTestId('thread-preview')).toContainText('Fifth line');
+			await expect(summaryLineB).toContainText(`${token} first line`);
+			await expect(summaryLineB).toContainText('Fifth line');
 			await expect(pageB.getByTestId('reconnect-divider')).toHaveCount(0);
-			const previewBounds = await cardB.getByTestId('thread-preview').evaluate((node) => ({
+			const previewBounds = await summaryLineB.locator('.ap-tline-text').evaluate((node) => ({
 				height: node.clientHeight, fullHeight: node.scrollHeight, lineHeight: Number.parseFloat(getComputedStyle(node).lineHeight)
 			}));
 			expect(previewBounds.height).toBeLessThanOrEqual(previewBounds.lineHeight * 3 + 1);
@@ -63,17 +66,19 @@ test.describe('chat protocol interoperability', () => {
 			const latestId = await latest.getAttribute('data-message-id');
 			await expect(latest.getByTestId('reply-reference')).toContainText(`${token} first line`);
 			await pageA.getByRole('button', { name: 'Back to room', exact: true }).click();
-			await expect(cardA).toContainText('Last reply');
-			await expect(cardA.getByTestId('thread-preview')).toContainText('Fifth line');
+			// The card says when it was last replied to, and previews the newest reply under the description.
+			await expect(cardA.getByTestId('thread-last-reply')).toHaveAttribute('title', /^Last reply /);
+			await expect(summaryLineA).toContainText('Fifth line');
+			await expect(cardA.getByTestId('thread-preview-latest')).toContainText(`${token}-latest`);
 
 			await pageB.reload();
-			await expect(cardB.getByTestId('thread-preview')).toContainText('Fifth line');
+			await expect(summaryLineB).toContainText('Fifth line');
 			await cardB.click();
 			// Opening a thread for the first time is not a reconnect.
 			await expect(pageB.getByTestId('reconnect-divider')).toHaveCount(0);
 			await expect(await waitForMessage(pageB, `${token}-latest`)).toBeVisible();
 			await (await roomAction(pageB, 'edit-room')).click();
-			const editor = pageB.getByRole('region', { name: 'Edit thread', exact: true });
+			const editor = pageB.getByRole('dialog', { name: 'Edit thread', exact: true });
 			const titleB = editor.getByRole('textbox', { name: 'Thread title', exact: true });
 			await expect(titleB).toHaveValue(`${token} first line`);
 			await titleB.fill('Cancelled title');
@@ -81,7 +86,7 @@ test.describe('chat protocol interoperability', () => {
 			await expect(pageB.getByRole('heading', { level: 1 })).toContainText(`${token} first line`);
 			await (await roomAction(pageB, 'edit-room')).click();
 			await titleB.fill(`${token}-renamed`);
-			await editor.getByRole('button', { name: 'Save thread', exact: true }).click();
+			await editor.getByRole('button', { name: 'Save', exact: true }).click();
 			await expect(editor).toHaveCount(0);
 			await expect(pageB.getByRole('heading', { level: 1 })).toContainText(`${token}-renamed`);
 			await expect(cardA).toContainText(`${token}-renamed`);
@@ -101,20 +106,21 @@ test.describe('chat protocol interoperability', () => {
 			await expect(stableSource).toContainText(`${token} edited source`);
 			await deleteMessage(pageA, stableSource);
 			await expect(stableSource.getByText('Message deleted', { exact: true })).toBeVisible();
-			await expect(cardB.getByTestId('thread-preview')).toContainText('Fifth line');
-			// Without a description, the card previews the latest message.
+			await expect(summaryLineB).toContainText('Fifth line');
+			// Without a description, the card previews only the latest message.
 			await cardA.click();
 			await (await roomAction(pageA, 'edit-room')).click();
-			const editorA = pageA.getByRole('region', { name: 'Edit thread', exact: true });
+			const editorA = pageA.getByRole('dialog', { name: 'Edit thread', exact: true });
 			await editorA.getByRole('textbox', { name: 'Thread summary', exact: true }).fill('');
-			await editorA.getByRole('button', { name: 'Save thread', exact: true }).click();
+			await editorA.getByRole('button', { name: 'Save', exact: true }).click();
 			await expect(pageA.getByTestId('thread-summary')).toHaveCount(0);
-			await expect(cardB.getByTestId('thread-preview')).toHaveText(`${token}-latest`);
+			await expect(summaryLineB).toHaveCount(0);
+			await expect(latestLineB.locator('.ap-tline-text')).toHaveText(new RegExp(` ${token}-latest$`));
 			const stableLatest = pageA.locator(`article[data-message-id="${latestId}"]`);
 			await editMessage(stableLatest, `${token}-edited`);
-			await expect(cardB.getByTestId('thread-preview')).toContainText(`${token}-edited`);
+			await expect(latestLineB).toContainText(`${token}-edited`);
 			await deleteMessage(pageA, stableLatest);
-			await expect(cardB.getByTestId('thread-preview')).toHaveText('Message deleted');
+			await expect(latestLineB.locator('.ap-tline-text')).toHaveText('Message deleted');
 		} finally {
 			await Promise.all([owner.close(), reader.close()]);
 		}
@@ -157,7 +163,7 @@ test.describe('chat protocol interoperability', () => {
 		await expect(summary.locator('em')).toHaveCount(0);
 		await page.getByRole('button', { name: 'Back to room', exact: true }).click();
 		// The card previews the description's lines, one per line.
-		const preview = page.locator(`[data-testid="thread-card"][data-thread="${threadId}"]`).getByTestId('thread-preview');
+		const preview = page.locator(`[data-testid="thread-card"][data-thread="${threadId}"]`).getByTestId('thread-preview-summary').locator('.ap-tline-text');
 		expect(await preview.evaluate((node) => (node as HTMLElement).innerText)).toBe(`${token} first line\nsecond   line\nfourth *not emphasis*`);
 	});
 
@@ -234,7 +240,14 @@ test.describe('chat protocol interoperability', () => {
 		await expect(day).not.toHaveClass(/day-float-shown/);
 		await list.evaluate((node) => { node.scrollTop = 0; });
 		await expect(jump).toBeVisible();
-		// Scrolling back floats the day at the top, only while you're scrolling.
+		// At the top the day's own divider shows, and nothing floats over it.
+		await expect(page.locator('.ap-divider-date').first()).toBeInViewport();
+		await expect(day).not.toHaveClass(/day-float-shown/);
+		// Scrolled on past it, the day floats at the top, only while you're scrolling.
+		await list.evaluate((node) => {
+			const divider = node.querySelector('.ap-divider-date')!;
+			node.scrollTop += divider.getBoundingClientRect().bottom - node.getBoundingClientRect().top + 40;
+		});
 		await expect(day).toHaveClass(/day-float-shown/);
 		await expect(day).toHaveText('Today');
 		await expect(day).not.toHaveClass(/day-float-shown/, { timeout: 3000 });
@@ -446,6 +459,9 @@ test.describe('chat protocol interoperability', () => {
 		let contextD: BrowserContext | undefined;
 		try {
 			const pageA = await contextA.newPage();
+			// A's socket, passed through to the server, so the test can send on it too.
+			let socketA: WebSocketRoute | undefined;
+			await pageA.routeWebSocket('**/ws', (route) => { socketA = route.connectToServer(); });
 			const pageB = await contextB.newPage();
 			await Promise.all([openChat(pageA), openChat(pageB)]);
 
@@ -472,7 +488,10 @@ test.describe('chat protocol interoperability', () => {
 			const editor = stableMessageA.getByRole('textbox', { name: 'Edit message', exact: true });
 			await expect(editor).toHaveValue(replacement);
 			await editor.fill('unsaved draft to discard');
-			await deleteMessage(pageA, stableMessageA);
+			// While it is edited the message's toolbar steps aside for the editor's own Cancel and Save, so the
+			// deletion goes over A's own connection, as another of A's clients would send it (§4.4); the
+			// unsaved draft goes with it.
+			socketA!.send(JSON.stringify({ id: 'delete-while-editing', method: 'message', params: { message_id: eventId, room_id: 'general', deleted: true } }));
 			await waitForDeletedMessage(pageA, eventId as string);
 			await expect(editor).toHaveCount(0);
 			await expect(stableMessageA.getByRole('button', { name: 'Save changes', exact: true })).toHaveCount(0);
@@ -903,14 +922,17 @@ test.describe('chat protocol interoperability', () => {
 			await pageB.getByRole('button', { name: 'Back to room', exact: true }).click();
 			const row = pageB.locator(`[data-testid="thread-list"] button[data-thread="${threadId}"]`);
 			await expect(row).toBeVisible();
-			await expect(row.getByTestId('thread-mentions')).toHaveCount(0);
+			const badge = row.getByTestId('thread-unread');
+			await expect(badge).toHaveCount(0);
 
-			// B stays in the room; the mention lands in the thread.
+			// B stays in the room; the mention lands in the thread, and its row's bubble turns orange with an @.
 			await sendMessage(pageA, `@${id} ${token} please look`);
-			await expect(row.getByTestId('thread-mentions')).toHaveText('@');
+			await expect(badge).toHaveAttribute('aria-label', '1 unread reply, a mention of you');
+			await expect(badge).toHaveClass(/ap-count-at/);
+			await expect(badge).toHaveText('@\u202f1');
 			await row.click();
 			await waitForMessage(pageB, `${token} please look`);
-			await expect(row.getByTestId('thread-mentions')).toHaveCount(0);
+			await expect(badge).toHaveCount(0);
 		} finally {
 			await Promise.all([writer.close(), named.close()]);
 		}
@@ -936,7 +958,9 @@ test.describe('chat protocol interoperability', () => {
 			await openThread(pageB, threadId, { join: true });
 			await waitForMessage(pageB, `${handle}-first-reply`);
 			await pageB.getByTestId('message-list').evaluate((node) => { node.scrollTop = 0; });
-			await expect(pageB.getByTestId('jump-button')).toHaveAccessibleName('Jump to latest');
+			// The plain jump button. It counts the replies that were never in view, which here is the first one,
+			// or none when it was in view as the thread opened.
+			await expect(pageB.getByTestId('jump-button')).toHaveAccessibleName(/^(1 new message, jump|Jump) to latest$/);
 			await expect(pageB.locator('.ap-jumpfab')).toBeVisible();
 
 			// The mention arrives out of sight: the bar turns rust and offers the mention itself.
@@ -986,7 +1010,12 @@ test.describe('chat protocol interoperability', () => {
 
 			await first.click({ modifiers: ['Shift'] });
 			await last.click({ modifiers: ['Shift'] });
+			// New thread asks for a title first, suggesting the earliest message's, and moves the selection once the thread exists.
 			await pageA.getByTestId('new-thread').click();
+			const dialog = pageA.getByRole('dialog', { name: 'Move to a new thread', exact: true });
+			await expect(dialog.getByRole('textbox', { name: 'Thread title', exact: true })).toHaveValue(`${token}-one`);
+			await dialog.getByRole('button', { name: 'Move 3 messages', exact: true }).click();
+			await expect(dialog).toHaveCount(0);
 			const threadTab = pageA.locator('[data-testid="thread-list"] button[data-thread][aria-current="page"]');
 			await expect(threadTab).toBeVisible();
 			const threadId = await threadTab.getAttribute('data-thread');

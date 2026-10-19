@@ -253,8 +253,7 @@ async function passTime(page: Page, ms: number) {
 
 /**
  * Idle as the web client takes it: no input on the page for IDLE_AFTER_MS (losing focus alone doesn't count), so
- * nothing goes before then. It reports how long in seconds, which this server, taking `idle` only as a boolean
- * (§4.5), refuses; the client then says `true`. Returns the `idle` values sent.
+ * nothing goes before then. It reports how long in seconds (§4.5.3). Returns the `idle` values sent.
  */
 async function goIdle(page: Page, tap: Tap) {
 	const before = findSent(tap, 'status').length;
@@ -263,7 +262,7 @@ async function goIdle(page: Page, tap: Tap) {
 	await passTime(page, IDLE_AFTER_MS - 10_000);
 	expect(reports(), 'idle before the page went five minutes without input').toEqual([]);
 	await passTime(page, 20_000);
-	await expect.poll(() => reports().includes(true), { timeout: 10_000, intervals: [250] }).toBe(true);
+	await expect.poll(() => reports().some((idle) => typeof idle === 'number'), { timeout: 10_000, intervals: [250] }).toBe(true);
 	return reports();
 }
 async function goAttended(page: Page, tap: Tap) {
@@ -665,15 +664,13 @@ test('status: set with me, derived online, idle, offline as other clients see it
 	await injectStatus(tap, { room_id: 'general', mute: false });
 	await expect.poll(() => tap.received.slice(receivedBefore).find((frame) => frame.method === 'status' && frame.params?.room_id === 'general' && frame.params?.mute === false)).toBeTruthy();
 
-	// The web client sends each `status` as a request, after sign-in, and the server answers {} (§4.5). Idle as
-	// seconds is the one exception: this server takes `idle` only as a boolean and refuses it as invalid_params,
-	// and the client sends `idle: true` instead.
+	// The web client sends each `status` as a request, after sign-in, and the server answers {} (§4.5.3), idle
+	// as seconds included.
 	const sentStatus = findSent(tap, 'status');
 	evidence('status requests and replies', sentStatus.map((frame) => ({ sent: frame, reply: resultOf(tap, frame.id) })));
 	for (const frame of sentStatus) {
 		expect(typeof frame.id, `status without an id: ${JSON.stringify(frame)}`).toBe('string');
-		const reply = typeof frame.params?.idle === 'number' ? { error: { code: -32602 } } : { result: {} };
-		await expect.poll(() => resultOf(tap, frame.id), { timeout: 5_000 }).toMatchObject(reply);
+		await expect.poll(() => resultOf(tap, frame.id), { timeout: 5_000 }).toMatchObject({ result: {} });
 	}
 
 	// The page closes: with no connection, user1 is offline.

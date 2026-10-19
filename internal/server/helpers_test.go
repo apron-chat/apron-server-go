@@ -108,7 +108,7 @@ func guestAuth(t *testing.T, c *testClient) map[string]any {
 }
 
 // membershipOf returns the one membership record of a room_update frame
-// (§4.3.3).
+// (§4.2.3).
 func membershipOf(t *testing.T, frame map[string]any) map[string]any {
 	t.Helper()
 	update := notificationParams(t, frame, "room_update")
@@ -407,7 +407,7 @@ func saveRoom(t *testing.T, c *testClient, requestID string, params map[string]a
 		record = updateRecord(t, before[0], "updated")
 	} else {
 		// The creator receives the room with its members and the creator's
-		// membership in one room_update (§4.3.4).
+		// membership in one room_update (§4.2.4).
 		record = joinedRecord(t, before[0], c.userID)
 		membership := membershipOf(t, before[0])
 		checkMembership(t, membership, record["room_id"].(string), c.userID, true)

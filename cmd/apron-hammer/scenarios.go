@@ -126,7 +126,7 @@ func createRoom(ctx context.Context, p *peer, params map[string]any) (string, er
 
 // orderCheck verifies that a connection receives each room's message
 // snapshots in ascending log_id, the one order a live connection is promised
-// (§3.5), and counts the message creations it receives. A transient notice,
+// (§3.5.3), and counts the message creations it receives. A transient notice,
 // which has no log_id, is neither checked nor counted.
 type orderCheck struct {
 	h        *hammer
@@ -758,7 +758,8 @@ func awaitStreamURL(ctx context.Context, messages chan []byte, messageID string)
 const bigExtNumber = "12345678901234567891"
 
 // snapshotLog keeps the raw frame of the latest snapshot of each message a
-// connection receives.
+// connection receives: the greatest log_id, and at an equal log_id a
+// tombstone (§2.3).
 type snapshotLog struct {
 	mu     sync.Mutex
 	latest map[string][]byte
@@ -773,6 +774,7 @@ func (l *snapshotLog) notify(method string, frame []byte) {
 		Params struct {
 			MessageID string `json:"message_id"`
 			LogID     string `json:"log_id"`
+			Deleted   bool   `json:"deleted"`
 		} `json:"params"`
 	}
 	if json.Unmarshal(frame, &f) != nil || f.Params.LogID == "" {
@@ -781,7 +783,7 @@ func (l *snapshotLog) notify(method string, frame []byte) {
 	id, _ := strconv.ParseInt(f.Params.LogID, 10, 64)
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if id > l.logIDs[f.Params.MessageID] {
+	if kept := l.logIDs[f.Params.MessageID]; id > kept || id == kept && f.Params.Deleted {
 		l.logIDs[f.Params.MessageID] = id
 		l.latest[f.Params.MessageID] = frame
 	}

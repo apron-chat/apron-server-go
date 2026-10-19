@@ -19,6 +19,7 @@ type Step =
 	| { moveMessage: { as: string; message_id: string; room: string } }
 	| { deleteMessage: { as: string; message_id: string } }
 	| { react: { as: string; message_id: string; emojis: string[] } }
+	| { mute: { as: string; mute: number | boolean } }
 	| { createRoom: { as: string; parent_room_id?: string; title?: string; description?: string } }
 	| { updateRoom: { as: string; room: string; title?: string | null; description?: string | null } }
 	| { joinRoom: { as: string; room: string } }
@@ -26,6 +27,7 @@ type Step =
 	| { listRooms: { as: string; parent_room_id?: string } }
 	| { loadRoom: { as: string; room: string } }
 	| { loadOlder: { as: string; room: string } }
+	| { idle: number | false }
 	| { disconnect: true }
 	| { expect: ObjectValue };
 interface Fixture {
@@ -36,8 +38,8 @@ interface Fixture {
 	expected: ObjectValue;
 }
 
-const MUTATIONS = new Set(['message', 'command', 'room_set', 'room_join', 'room_leave', 'reactions']);
-const OPERATIONS = ['send', 'command', 'editMessage', 'moveMessage', 'deleteMessage', 'react', 'createRoom', 'updateRoom', 'joinRoom', 'leaveRoom', 'listRooms', 'loadRoom', 'loadOlder'];
+const MUTATIONS = new Set(['message', 'command', 'room_set', 'room_join', 'room_leave', 'reactions', 'status']);
+const OPERATIONS = ['send', 'command', 'editMessage', 'moveMessage', 'deleteMessage', 'react', 'mute', 'createRoom', 'updateRoom', 'joinRoom', 'leaveRoom', 'listRooms', 'loadRoom', 'loadOlder'];
 
 const directory = path.dirname(fileURLToPath(import.meta.url));
 const repository = path.resolve(directory, '../..');
@@ -130,6 +132,12 @@ function senderOf(snapshot: ReturnType<ChatClient['snapshot']>, from: Identity):
 		.filter(([key]) => key === 'user_id' || !(Object.hasOwn(kept, key) && cleared(kept[key])))) as Identity;
 }
 
+function keptUser(snapshot: ReturnType<ChatClient['snapshot']>, id: string): Identity {
+	if (!snapshot.heldStatuses?.includes(id)) return snapshot.users[id];
+	const { status: _held, ...kept } = snapshot.users[id];
+	return kept;
+}
+
 function logicalState(client: ChatClient, operations: Record<string, string>): ObjectValue {
 	const snapshot = client.snapshot();
 	// The default room before its `room_id` is known is the client's own placeholder, not a room;
@@ -142,7 +150,8 @@ function logicalState(client: ChatClient, operations: Record<string, string>): O
 		typing: snapshot.typing
 			.map((entry) => ({ room_id: entry.room, from: entry.from }))
 			.sort((left, right) => byString(left.room_id, right.room_id) || byString(left.from.user_id, right.from.user_id)),
-		users: Object.fromEntries(Object.keys(snapshot.users).sort(byString).map((id) => [id, snapshot.users[id]])),
+		// The kept users: a status only held on screen through a resume is not kept (README "Session state").
+		users: Object.fromEntries(Object.keys(snapshot.users).sort(byString).map((id) => [id, keptUser(snapshot, id)])),
 		members: Object.fromEntries(rooms.filter((room) => room.members !== undefined).sort((left, right) => byString(left.id, right.id))
 			.map((room) => [room.id, room.members!.map((member) => member.user_id).sort(byString)])),
 		senders: Object.fromEntries(rooms.flatMap((room) => room.timeline.order.map((id) => [id, senderOf(snapshot, room.timeline.events[id].from)]))),
@@ -150,6 +159,11 @@ function logicalState(client: ChatClient, operations: Record<string, string>): O
 			.sort((left, right) => left.at - right.at || byString(left.key, right.key))
 			.map(({ room_id, from, body }) => ({ room_id, from, ...(body ? { body } : {}) })),
 		directory: (snapshot.directory ?? []).map((listing) => listing.id),
+		// The mutes in effect, `""` for the one without `room_id`: `true` until unmuted, else "timed".
+		mutes: Object.fromEntries([
+			...(snapshot.mutedUntil !== undefined ? [['', snapshot.mutedUntil] as const] : []),
+			...Object.entries(snapshot.roomMutes ?? {})
+		].sort(([left], [right]) => byString(left, right)).map(([room, until]) => [room, until === true ? true : 'timed'])),
 		operations
 	}));
 }
@@ -190,6 +204,8 @@ for (const fixture of fixtures) {
 				const requests = new Map<string, ObjectValue>();
 				const unmatched: ObjectValue[] = [];
 				const operations: Record<string, string> = {};
+				/** When the latest `idle` step with seconds ran, which a `status` reporting them may add to. */
+				let idleAt = 0;
 				const wire = (frame: ObjectValue) => envelope === 'jsonrpc' ? { ...frame, jsonrpc: '2.0' } : frame;
 				const track = (as: string, promise: Promise<unknown>) => {
 					expect(Object.hasOwn(operations, as), `duplicate operation ${as}`).toBe(false);
@@ -207,18 +223,29 @@ for (const fixture of fixtures) {
 							if ('receive' in step) {
 								await control(`/connections/${connection}/send`, wire(structuredClone(step.receive)));
 							} else if ('request' in step) {
-								const { as, match } = step.request;
+								const { as } = step.request;
+								let { match } = step.request;
 								expect(requests.has(as), `duplicate capture ${as}`).toBe(false);
 								const wanted = isObject(match.params) ? match.params : {};
+								// A `status` also matches by which of `idle` and `mute` it carries, so the two queue separately.
+								const carries = (frame: ObjectValue, key: string) => Object.hasOwn(paramsOf(frame) ?? {}, key) === Object.hasOwn(wanted, key);
 								const selects = (frame: ObjectValue) => frame.method === match.method &&
 									paramsOf(frame)?.room_id === wanted.room_id &&
-									paramsOf(frame)?.message_id === wanted.message_id;
+									paramsOf(frame)?.message_id === wanted.message_id &&
+									(match.method !== 'status' || (carries(frame, 'idle') && carries(frame, 'mute')));
 								let position = unmatched.findIndex(selects);
 								while (position < 0) {
 									unmatched.push(await (await control(`/connections/${connection}/receive`)).json());
 									position = unmatched.findIndex(selects);
 								}
 								const [frame] = unmatched.splice(position, 1);
+								const idle = paramsOf(frame)?.idle;
+								if (typeof wanted.idle === 'number') {
+									// Time passes before the client sends: up to the whole seconds since the `idle` step.
+									expect(idle).toBeGreaterThanOrEqual(wanted.idle);
+									expect(idle).toBeLessThanOrEqual(wanted.idle + Math.floor((Date.now() - idleAt) / 1000));
+									match = { ...match, params: { ...wanted, idle } };
+								}
 								expect(restrict(frame, match)).toEqual(match);
 								if (MUTATIONS.has(match.method as string)) expect(frame.params).toEqual(match.params);
 								if ('jsonrpc' in frame) expect(frame.jsonrpc).toBe('2.0');
@@ -251,6 +278,16 @@ for (const fixture of fixtures) {
 							} else if ('react' in step) {
 								const { as, message_id, emojis } = step.react;
 								track(as, client.react(message_id, emojis).promise);
+							} else if ('mute' in step) {
+								const { as, mute } = step.mute;
+								track(as, client.setMute(mute));
+							} else if ('idle' in step) {
+								// Not an operation: what the page would say once its wait for input is over.
+								if (step.idle === false) client.setIdle(false);
+								else {
+									idleAt = Date.now();
+									client.setIdle(true, idleAt - step.idle * 1000);
+								}
 							} else if ('createRoom' in step) {
 								const { as, parent_room_id, title, description } = step.createRoom;
 								track(as, client.createRoom({

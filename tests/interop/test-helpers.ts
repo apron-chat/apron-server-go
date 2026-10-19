@@ -118,9 +118,16 @@ export function reactionChip(message: Locator, emoji: string): Locator {
 	return message.locator(`[data-testid="reaction-chip"][data-emoji="${emoji}"]`);
 }
 
-/** Starts a thread from a message and waits until the new thread is open; returns its room ID. */
+/**
+ * Starts a thread from a message, as its Start thread dialog suggests it (titled
+ * after the message's first line, the message quoted as its summary), and waits
+ * until the new thread is open; returns its room ID.
+ */
 export async function startThread(page: Page, message: Locator): Promise<string> {
 	await (await messageAction(message, 'Start thread')).click();
+	const dialog = page.getByRole('dialog', { name: 'Start thread', exact: true });
+	await dialog.getByRole('button', { name: 'Start thread', exact: true }).click();
+	await expect(dialog).toHaveCount(0);
 	await expect(page.getByRole('button', { name: 'Back to room', exact: true })).toBeVisible();
 	// The row is in the sidebar, which is a page of its own on phones: attached, not necessarily visible.
 	const selected = page.locator('[data-testid="thread-list"] button[data-thread][aria-current="page"]');
@@ -133,7 +140,7 @@ export async function startThread(page: Page, message: Locator): Promise<string>
 /**
  * Opens a thread: its sidebar row once this page has joined it, else its card
  * in the room, which reads it through history without joining it (a thread's
- * members are only those who joined, PROTOCOL.md §4.3.2, and only they receive
+ * members are only those who joined, PROTOCOL.md §4.2.2, and only they receive
  * its messages live). Waits until it is the open pane; with `join`, until it
  * is joined as well.
  */

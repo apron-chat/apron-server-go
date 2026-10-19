@@ -62,9 +62,9 @@ Open `http://localhost:5173`. The development server proxies `/ws` to
 
 To use the Cloudflare demo backend locally, run it from
 [apron-chat/apron-server-cloudflare](https://github.com/apron-chat/apron-server-cloudflare)
-with `npx wrangler dev --port 8080` instead of `make dev-server`. The web
-client, the Go server, and the worker speak protocol v8; the worker does so
-within the demo's budgets and policies (only threads under `general` can be
+with `npx wrangler dev --port 8080` instead of `make dev-server`. The Go
+server speaks protocol v9; the worker speaks the protocol within the demo's
+budgets and policies (only threads under `general` can be
 created, guests only read until they sign in with a passkey, and guests'
 memberships are not logged, so its `room_list` ignores `latest_log_id`). A
 signed-in user can run `/invite-bot` for a bot token. The public demo has
@@ -91,14 +91,14 @@ role, shown as a badge, that may remove people from any room.
 
 ## Threads
 
-A thread is a room with a `parent_room_id` (PROTOCOL.md [§3.4](https://github.com/shazow/apron/blob/main/PROTOCOL.md#34-rooms), [§4.3.4](https://github.com/shazow/apron/blob/main/PROTOCOL.md#434-creating-and-editing)). The
+A thread is a room with a `parent_room_id` (PROTOCOL.md [§4.2](https://github.com/shazow/apron/blob/main/PROTOCOL.md#42-rooms), [§4.2.4](https://github.com/shazow/apron/blob/main/PROTOCOL.md#424-creating-and-editing)). The
 client lists the rooms you have joined with `room_list`,
 threads included, with their members, sent right behind `auth` without waiting
-for its result ([§3.2](https://github.com/shazow/apron/blob/main/PROTOCOL.md#32-authentication)), and follows `room_update` from then on ([§4.3](https://github.com/shazow/apron/blob/main/PROTOCOL.md#43-rooms)). After
+for its result ([§3.2](https://github.com/shazow/apron/blob/main/PROTOCOL.md#32-authentication)), and follows `room_update` from then on ([§4.2](https://github.com/shazow/apron/blob/main/PROTOCOL.md#42-rooms)). After
 a dropped connection it resumes each room's history from where it stopped in
 the same way, and a resumed passkey session lists only the rooms that changed
 since. Member lists start from those listings and follow the membership
-records of joins and leaves ([§4.3.2](https://github.com/shazow/apron/blob/main/PROTOCOL.md#432-membership)), which also show in the room's
+records of joins and leaves ([§4.2.2](https://github.com/shazow/apron/blob/main/PROTOCOL.md#422-membership)), which also show in the room's
 timeline as quiet "Ada joined" lines, merged and netted out between messages so
 guest churn stays quiet. The sidebar lists top-level rooms; the
 open room's joined threads are listed under it, and every thread of the room,
@@ -110,7 +110,7 @@ refresh when the room is opened or its threads are listed, with `room_list`
 and the room as `parent_room_id`. Start a thread from any message in a room (Start
 thread in its toolbar; cap `rooms`): the client creates a room under the
 current one with `room_set`, titled after the message's first line, whose
-`description` carries the gist ([§3.4](https://github.com/shazow/apron/blob/main/PROTOCOL.md#34-rooms)), which joins you to it; by
+`description` carries the gist ([§4.2](https://github.com/shazow/apron/blob/main/PROTOCOL.md#42-rooms)), which joins you to it; by
 convention the thread's first message replies to the message it started
 from. The message stays where it is. A thread opens once its `room_update`
 arrives. Drafts and reply targets are kept for each room, and a thread is a room

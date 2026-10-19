@@ -52,7 +52,7 @@ func TestServerFrame(t *testing.T) {
 	_, httpServer := newTestServer(t, DefaultConfig())
 	_, frame := dialRaw(t, httpServer)
 	params := frame["params"].(map[string]any)
-	if params["apron"] != float64(8) || params["agent"] != "apron-go/8" || params["ping"] != float64(30) {
+	if params["apron"] != float64(9) || params["agent"] != "apron-go/9" || params["ping"] != float64(30) {
 		t.Fatalf("version, agent, and ping: %#v", params)
 	}
 	if !reflect.DeepEqual(params["capabilities"], []any{"history", "edit", "rooms", "reactions", "activity", "embed:upload", "embed:stream", "command", "status", "ext"}) {
@@ -160,10 +160,10 @@ func TestAuthHonorsRequestedUserIDs(t *testing.T) {
 		t.Fatalf("requested user_id: %q", got)
 	}
 	// A used ID, in any case, a system identity, a room, IDs outside the
-	// mentionable set, and anything in the counter's guest_ namespace are not
-	// honored; each such auth takes the next guest number.
+	// suggested convention, and anything in the counter's guest_ namespace
+	// are not honored; each such auth takes the next guest number.
 	next := 1
-	for i, requested := range []string{"ada", "ADA", "@server", "~server", "~alice", "general", "General", "1724803200042", "bad id", "trailing.", "", "guest_1", "guest_99", "GUEST_98", "Guest_7", "guest_05", "guest_abc", "guest_", "user_1", "USER_x"} {
+	for i, requested := range []string{"ada", "ADA", "@server", "~server", "~alice", "general", "General", "1724803200042", "ada@example.com", "carol:b.example", "trailing.", "guest_1", "guest_99", "GUEST_98", "Guest_7", "guest_05", "guest_abc", "guest_", "user_1", "USER_x"} {
 		want := fmt.Sprintf("guest_%d", next)
 		if got := auth(fmt.Sprint("r", i), map[string]any{"user_id": requested}); got != want {
 			t.Fatalf("requested %q was assigned %q, want %q", requested, got, want)
@@ -186,8 +186,18 @@ func TestAuthHonorsRequestedUserIDs(t *testing.T) {
 	if got := auth("last", map[string]any{}); got != "guest_100" {
 		t.Fatalf("counter after honored requests: %q", got)
 	}
+	// A user_id is never empty and has no whitespace or control characters
+	// (§2.4): requesting one that could be no user_id is invalid_params,
+	// with any scheme the server offers, and takes no guest number. A
+	// scheme it does not offer is unsupported first.
 	c, _ := dialRaw(t, httpServer)
-	c.expectError(t, "auth", "bad", map[string]any{"scheme": "guest", "user_id": 5}, codeInvalidParams)
+	for i, requested := range []any{5, nil, "", "bad id", "tab\tid", "line\n", "nbsp\u00a0id", "bell\u0007"} {
+		c.expectError(t, "auth", fmt.Sprint("bad", i), map[string]any{"scheme": "guest", "user_id": requested}, codeInvalidParams)
+	}
+	c.expectError(t, "auth", "bad-token", map[string]any{"scheme": "token", "token": "x", "user_id": "a b"}, codeUnsupported)
+	if got := auth("after", map[string]any{}); got != "guest_101" {
+		t.Fatalf("counter after invalid requests: %q", got)
+	}
 }
 
 func TestGuestNumbersAreSequentialAndNeverReused(t *testing.T) {
@@ -912,6 +922,9 @@ func TestInvalidSavesLeaveStateUnchanged(t *testing.T) {
 		{"body": map[string]any{"text": "x", "mentions": "guest_1"}},
 		{"body": map[string]any{"text": "x", "mentions": []any{7}}},
 		{"body": map[string]any{"text": "x", "mentions": []any{""}}},
+		// A user_id has no whitespace or control characters (§2.4).
+		{"body": map[string]any{"text": "x", "mentions": []any{"guest 1"}}},
+		{"body": map[string]any{"text": "x", "mentions": []any{"guest_1\n"}}},
 	} {
 		if _, ok := params["room_id"]; !ok {
 			params["room_id"] = "general"

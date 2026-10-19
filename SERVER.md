@@ -1,7 +1,7 @@
 # aprond
 
-`cmd/aprond` serves the reference Apron backend: it implements protocol v8
-as of apron [df331ea](https://github.com/shazow/apron/blob/df331eaadda656b31b89f747177ea1876b646d57/PROTOCOL.md),
+`cmd/aprond` serves the reference Apron backend: it implements protocol v9
+as of apron [9014fe6](https://github.com/shazow/apron/blob/9014fe67aea0252c3900235dc1ca634f74e128ab/PROTOCOL.md),
 the commit `testdata/apron` pins
 ([PROTOCOL.md](https://github.com/shazow/apron/blob/main/PROTOCOL.md)), every capability, private rooms,
 roles, passkey and email sign-in, and liveness ping, but not the designs
@@ -30,7 +30,7 @@ Defaults:
 - embed endpoints: `/write/<token>`, `/files/<embed_id>/<secret>`,
   `/streams/<embed_id>/<secret>`
 - WebSocket origins: `localhost`, `127.0.0.1`, and `::1` during development
-- `server` frame: `apron: 8`, `agent: "apron-go/8"`, and
+- `server` frame: `apron: 9`, `agent: "apron-go/9"`, and
   `capabilities`: `history`, `edit`, `rooms`, `reactions`, `activity`,
   `embed:upload`, `embed:stream`, `command`, `status`, `ext`; `server.push`: kinds
   `relay` and `webpush` (with the server's VAPID `key`) and `wake`:
@@ -184,19 +184,6 @@ left in the store is retired as if its last connection had just closed,
 logging its leaves; a write that had not finished fails, and its message is
 republished without the embed.
 
-A store written by a protocol v6 server is migrated at the first start and
-written back: a room's `intro_message` becomes its `description`, the text
-of the intro snapshot each logged room record embedded, except that the
-current record and the latest logged one take the message's current text,
-as v6 showed it (none for a deleted message), and messages from `@room`, `@server`, and `@private` become
-messages from `~room`, `~server`, and `~private`. A plain-text intro is
-escaped as CommonMark, since descriptions are CommonMark by convention. The description is a copy: unlike the v6
-intro, it stays when the message is later deleted, which only redacts the
-message itself. A store written by a protocol v7 server keeps push
-registrations under their URL alone, without scopes: each is kept under its
-user with the default scopes (`mentions` and `replies`) and its URL in the
-one form described in [Push](#push), and written back.
-
 ## Connections and liveness
 
 The server answers the liveness ping `{"method":"ping"}` with
@@ -250,7 +237,11 @@ is not configured are schemes the server does not offer, so `unsupported`
 
 `auth` with scheme `guest` assigns `guest_<n>` from a server-wide counter
 (`guest_1`, `guest_2`, …) and honors an optional requested `name`. A
-requested `user_id` is honored when it starts with a letter, uses only
+`user_id` is never empty and has no whitespace or control characters
+(§2.4), so requesting one that is (or one that is not a string) is
+`invalid_params` with any scheme, and the `auth` changes nothing. A
+requested `user_id` is honored when it follows the suggested convention for
+user-chosen IDs (Appendix A.3): when it starts with a letter, uses only
 `[A-Za-z0-9_.-]` (ending in a letter, digit, or `_`; at most 64 characters),
 does not start with `guest_` or `user_` in any case, names no room (ignoring case), was never
 assigned, ignoring case, and is not granted a role (`--role`); otherwise the
@@ -351,7 +342,7 @@ private.
 
 A room created with `private: true` is private for good: its record carries
 `private: true`, and it is visible only to its members. This server fixes
-`private` at creation (§4.3.4 lets it), so an edit keeps it whether it names
+`private` at creation (§4.2.4 lets it), so an edit keeps it whether it names
 it or not. A thread created without `private` takes its parent's, so a
 thread of a private room is private unless created with `private: false`. A user sees a room
 when they are a member of every private room among the room and the rooms
@@ -378,7 +369,7 @@ the message. So a message moves from a public room only to a public room,
 and from a private room or its threads to rooms visible to all their
 members, such as its public threads or any public room. A move out to where
 more people can see the message leaves out `prev_room_id`, so it does not
-name the private room to them. This deviates on purpose from PROTOCOL.md §2
+name the private room to them. This deviates on purpose from PROTOCOL.md §4.3.1
 and §4.4, which say a move snapshot names its source room: readers of the
 destination cannot walk the message's earlier snapshots, which are in a
 room they cannot see anyway. Its reactions go with it, showing who in
@@ -389,7 +380,7 @@ name it.
 Every membership change is a logged record in the room's log,
 `{"log_id", "room_id", "members": [{"user": {user_id, name}, "joined": true|false}]}`,
 returned in `history`'s `memberships` array and delivered live in
-`room_update` `memberships` (§4.3.3): the joining user's connections get one
+`room_update` `memberships` (§4.2.3): the joining user's connections get one
 `room_update` with the room in `joined`, its `members` and `users`, and the
 membership; the leaving or removed user's get `left` and the membership;
 the room's other members get the membership alone. A new identity's join to
@@ -494,6 +485,9 @@ Deletion is a save with `deleted: true` and yields a tombstone without `body`
 or `ext`: such a save drops `ext` (§4.12).
 The server then redacts the message: its earlier snapshots become tombstones
 at their original `log_id`s, and the content of its hosted embeds is deleted.
+A client that kept one of those snapshots replaces it with the tombstone at
+the same `log_id` when it reads it again, since at an equal `log_id` a
+tombstone wins (§2.3).
 
 `reply_to` is a bare `{"message_id": ...}` reference on input and in
 snapshots. It may name a message in any room the sender can see, including a
@@ -669,7 +663,8 @@ Absent fields leave their state unchanged. On an error nothing changes,
 the valid fields beside an invalid one included:
 
 - `invalid_params` for a `room_id` that is not a string, `idle` that is not
-  a boolean, `mute` that is not `true`, `false`, or a positive whole number
+  `false` or a non-negative whole number of seconds (`true` included), `mute`
+  that is not `true`, `false`, or a positive whole number
   of seconds (`0` is not `false`), a `room_id` without `mute`, or a `mute`
   with a `room_id` that names a room the user cannot see;
 - `denied` for a mute of another room once the user has 1,000 room mutes;
@@ -681,8 +676,11 @@ the valid fields beside an invalid one included:
 - `room_id` scopes only `mute`, so it comes only with `mute` (§4.5).
 - `idle` is the connection's, even beside a scoped `mute`: a connection
   starts attended, with nothing kept from the user's earlier or other
-  connections, is attended until it sends `idle: true`, and idle until it
-  sends `idle: false`. A message does not end it, and a connection that
+  connections, is attended until it sends `idle` with the seconds since
+  nobody attended it (§4.5.3), and idle until it sends `idle: false`. The
+  server takes the connection as idle from the report on, not from the
+  time the seconds count back to, so a message that arrived in between
+  woke no one. A message does not end it, and a connection that
   never sends `idle` is never taken as idle: such a client shows `online`
   while connected.
 - `mute` is the user's: seconds (longer ones are shortened to a year),
@@ -962,7 +960,7 @@ With both nil only guest authentication is enabled.
 
 ## Email sign-in
 
-With email sign-in ([PROTOCOL.md §4.11](https://github.com/shazow/apron/blob/main/PROTOCOL.md#411-email-authentication)),
+With email sign-in ([PROTOCOL.md §4.11](https://github.com/shazow/apron/blob/main/PROTOCOL.md#411-email-and-external-sign-in)),
 `server.auth` and `server.signup` list `email`. An `auth` with
 `scheme: "email"` and `email` **proposes**, and one with `token`
 **approves**. A proposal returns `{}`, whether or not the address has an
@@ -972,41 +970,53 @@ with a display name, an address literal such as `a@[10.0.0.5]`, or a
 domain without a dot such as `a@localhost` is `invalid_params`, and so is a
 malformed `name` or `user_id`, which leaves the proposal usable.
 
-A connection has one pending proposal, and a new one replaces it. It lasts
-ten minutes, is consumed when approved, and five wrong tokens on its
-connection invalidate it. It is dropped when the connection's identity
-changes (a guest `auth`, a token resume, an approval), so an addition
-proposed by one account cannot be approved by another. Proposals are kept
-in memory only.
+A proposal may carry `state`, a string of at most 256 bytes (longer is
+`too_large`), which its link returns unchanged. A connection has one
+pending proposal, and a new one replaces it. It lasts ten minutes, also
+after its connection closes, and is consumed when approved. Five wrong
+tokens cancel it: on its own connection any wrong token counts, and on any
+connection a link token whose handle (its first ten characters) names the
+proposal but whose secret is wrong. It is dropped when the connection's
+identity changes (a guest `auth`, a token resume, an approval). Proposals
+are kept in memory only. Approval takes either scheme the server offers;
+this server offers no `external` sign-in, which is `unsupported`.
+
+A link opens `--email.link-url` (or `--public-url`) with
+`#token=…&state=…&server=…` in its fragment: `state` when the proposal
+carried one, and `server`, this server's WebSocket URL, when
+`--public-url` is set.
 
 - **Signing in**, proposed on a connection not signed in. The email carries
   a six-digit code, which works only on the proposing connection, and, when
   `--email.link-url` (or `--public-url`) is set, a link with a long token
-  (130 random bits), which works on any connection not signed in, such as
-  one the link opens. Approving it signs the presenting connection in, which
+  (130 random bits behind its handle), which works on any connection not
+  signed in, such as one the link opens. Approving it signs the presenting connection in, which
   must not be signed in already: a known address to its account, an address
   new to the server to a new account, which takes a requested `user_id`
   by the guests' rules or else `user_<n>`, honors a requested `name`, and
-  joins `general`, delivered before the result. The `name` and `user_id`
+  joins `general`, delivered after the result. The `name` and `user_id`
   requested come from the approval, else, only when the proposing
   connection approves, from the proposal: a link opened elsewhere is the
   address's owner reading the email, whose account the proposer must not
   name. The result is `{you, token}`. Either token presented on
   a signed-in connection is `denied`, and the proposal stays.
 - **Adding** the address, proposed on a connection signed in, guests
-  included. The email carries only the code, which works only on the
-  proposing connection: a link would let someone propose adding their
-  victim's address to their own account and have the victim approve it by
-  clicking. It is sent only when the address could be added: no account
+  included. The email carries the code, which works only on the proposing
+  connection, and a link, whose token works only on a connection signed in
+  to the proposing account, such as another tab of it: so someone who
+  proposes adding their victim's address to their own account cannot have
+  the victim approve it by clicking. Elsewhere it is `denied`, and the
+  proposal stays. It is sent only when the address could be added: no account
   holds it, which is never moved, and the proposing account has no address
-  yet; otherwise the proposal still answers `{}`, and the code, never sent,
-  is `denied`. Approving adds the address to the proposing account, which a
+  yet; otherwise the proposal still answers `{}`, and its tokens, never
+  sent, are `denied`. Approving adds the address to the proposing account, which a
   guest becomes an account by, keeping its `user_id`, rooms, and messages,
   and returns `{}`, with a `user` notification when the account's roles
   change. A guest that added an address signs in with it later.
 
-A sign-in link proves only that its presenter read the mail, so it never
-adds an address, and an addition's code never signs anyone in.
+A sign-in's link proves only that its presenter read the mail, so a
+sign-in's tokens never add an address, and an addition's never sign anyone
+in.
 
 Limits keep proposals from flooding anyone with email. Each answers
 `retry_after` (`-32002`, with `data.retry_after` in seconds; PROTOCOL.md
@@ -1024,7 +1034,8 @@ Limits keep proposals from flooding anyone with email. Each answers
 A code can be guessed only on the connection that proposed it, five tries a
 proposal, and each proposal counts against its address, so the
 per-address limit bounds guessing to thirty tries an hour against a million codes; a link
-token cannot be guessed.
+token cannot be guessed, and wrong guesses at the secret behind a known
+handle cancel its proposal.
 
 The server tracks at most 10,000 addresses and 100,000 clients. A proposal
 that is refused records nothing; one accepted is tracked under its

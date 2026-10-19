@@ -245,12 +245,18 @@ test.describe('reference features against the Go server', () => {
 		const row = page.locator(`[data-testid="thread-list"] button[data-thread="${threadId}"]`);
 		const card = page.locator(`[data-testid="thread-card"][data-thread="${threadId}"]`);
 
-		// Leaving a thread removes its row; its card stays in the room, and More threads… lists it to join.
+		// Leaving a thread removes its row; its card stays in the room, and Other threads lists it to join
+		// (past the first few, behind N more…).
 		await (await roomAction(page, 'leave-room')).click();
 		await expect(row).toHaveCount(0);
 		await expect(card).toBeVisible();
-		await page.getByTestId('more-threads').click();
-		await page.locator(`[data-join="${threadId}"]`).click();
+		const join = page.locator(`[data-join="${threadId}"]`);
+		const more = page.getByTestId('more-threads');
+		await expect(join.or(more).first()).toBeVisible();
+		if (!(await join.count())) await more.click();
+		// Its door in shows on the row's hover, in place of when it was last active.
+		await page.locator(`[data-other-thread="${threadId}"]`).hover();
+		await join.click();
 		await expect(page.locator(`[data-testid="thread-list"] button[data-thread="${threadId}"][aria-current="page"]`)).toHaveCount(1);
 		await page.getByRole('button', { name: 'Back to room', exact: true }).click();
 
