@@ -133,7 +133,7 @@ export async function startThread(page: Page, message: Locator): Promise<string>
 /**
  * Opens a thread: its sidebar row once this page has joined it, else its card
  * in the room, which reads it through history without joining it (a thread's
- * members are only those who joined, PROTOCOL.md §4.3.2, and only they receive
+ * members are only those who joined, PROTOCOL.md §4.2.2, and only they receive
  * its messages live). Waits until it is the open pane; with `join`, until it
  * is joined as well.
  */

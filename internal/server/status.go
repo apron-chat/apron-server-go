@@ -28,8 +28,9 @@ import (
 // status silence pushes (§4.9). Both are set with the `status` request.
 // Mutes are private: each change goes to every connection of the user as a
 // `status` notification, and the mutes in effect to a connection after a
-// sign-in. A connection starts attended, and only its own `idle: true`
-// makes it idle: a connection that never sends idle is never taken as idle.
+// sign-in. A connection starts attended, and only its own `idle` with the
+// seconds since attention stopped makes it idle, until its `idle: false`
+// (§4.5.3): a connection that never sends idle is never taken as idle.
 const (
 	statusOnline    = "online"
 	statusIdle      = "idle"
@@ -107,10 +108,10 @@ type statusUpdate struct {
 
 // parseStatus reads a status request's params (§4.5). Any field of the
 // wrong type is invalid_params, and then nothing changes: room_id a string,
-// idle a boolean, and mute true, false, or a positive whole number of
-// seconds, a longer one shortened to maxMuteSeconds. room_id scopes only
-// the mute, so room_id without mute is invalid_params: idle is about the
-// connection either way.
+// idle false or a non-negative whole number of seconds, and mute true,
+// false, or a positive whole number of seconds, a longer one shortened to
+// maxMuteSeconds. room_id scopes only the mute, so room_id without mute is
+// invalid_params: idle is about the connection either way.
 func parseStatus(params map[string]jsontext.Value) (statusUpdate, *rpcError) {
 	var update statusUpdate
 	if _, has := params["room_id"]; has {
@@ -120,12 +121,18 @@ func parseStatus(params map[string]jsontext.Value) (statusUpdate, *rpcError) {
 		}
 		update.roomID, update.scoped = roomID, true
 	}
-	if _, has := params["idle"]; has {
-		value, err := parseBool(params, "idle", true)
-		if err != nil {
-			return update, err
+	if raw, has := params["idle"]; has {
+		// idle is false, or the seconds since attention stopped; this
+		// server takes the connection as idle from the report on.
+		var seconds int64
+		idle := true
+		switch raw := bytes.TrimSpace(raw); {
+		case bytes.Equal(raw, []byte("false")):
+			idle = false
+		case bytes.Equal(raw, []byte("null")) || json.Unmarshal(raw, &seconds) != nil || seconds < 0:
+			return update, invalidParams("idle must be false or a non-negative whole number of seconds")
 		}
-		update.idle = &value
+		update.idle = &idle
 	}
 	if raw, has := params["mute"]; has {
 		var seconds int64
@@ -260,7 +267,7 @@ func muteFrame(roomID string, mute muteState, now time.Time) jsontext.Value {
 // neither who is invisible nor who opted out. A server may limit the
 // statuses to the users it would list in `members` (§4.5), and this one
 // does: in a room of more than Config.MaxListedMembers, only the members
-// that the room lists (§4.3.1) count.
+// that the room lists (§4.2.1) count.
 func (s *Server) sendAfterAuthLocked(c *client) {
 	u := c.user
 	if u == nil {

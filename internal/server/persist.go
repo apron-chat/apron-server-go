@@ -9,10 +9,8 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
-	"regexp"
 	"slices"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/go-webauthn/webauthn/webauthn"
@@ -112,9 +110,6 @@ type storedRecord struct {
 	Kind  recordKind     `json:"kind"`
 	Raw   jsontext.Value `json:"raw"`
 	Rooms []string       `json:"rooms"`
-	// Intro is the log_id of the message snapshot a protocol v6 room record
-	// embedded as its intro_message; only migrateV6Locked reads it.
-	Intro int64 `json:"intro,omitzero"`
 }
 
 type storedCursor struct {
@@ -209,8 +204,7 @@ type storedPush struct {
 	// P256DH and Auth are the subscription's keys, in base64url.
 	P256DH string `json:"p256dh,omitzero"`
 	Auth   string `json:"auth,omitzero"`
-	// Wake lists the registration's scopes; nil, in a registration stored
-	// before scopes, is the default.
+	// Wake lists the registration's scopes.
 	Wake    []string  `json:"wake"`
 	Renewed time.Time `json:"renewed,omitzero"`
 }
@@ -449,7 +443,6 @@ func (s *Server) restoreLocked() (map[string]bool, error) {
 	}
 
 	records := make(map[int64]*logRecord)
-	storedRecords := make(map[int64]storedRecord)
 	for id, raw := range entries[entryRecord] {
 		var stored storedRecord
 		if err := decode(entryRecord, id, raw, &stored); err != nil {
@@ -457,7 +450,6 @@ func (s *Server) restoreLocked() (map[string]bool, error) {
 		}
 		logID, _ := strconv.ParseInt(id, 10, 64)
 		records[logID] = &logRecord{id: logID, kind: stored.Kind, raw: stored.Raw, rooms: stored.Rooms}
-		storedRecords[logID] = stored
 	}
 
 	storedRooms := make(map[string]storedRoom)
@@ -618,27 +610,9 @@ func (s *Server) restoreLocked() (map[string]bool, error) {
 		if err := decode(entryPush, key, raw, &stored); err != nil {
 			return nil, err
 		}
-		if stored.URL == "" {
-			// A registration stored by url alone, before registrations
-			// belonged to their user, is renewed under its new key.
-			stored.URL, stored.Renewed = key, now
-			s.touchPush(key)
-		}
-		if normalized, problem := normalizePushURL(stored.URL); problem != "" {
-			s.touchPush(key)
-			continue
-		} else if normalized != stored.URL {
-			// One stored before endpoints were normalized moves to the key
-			// of its normal form.
-			stored.URL = normalized
-			s.touchPush(key)
-		}
 		p := &pushRegistration{
 			userID: stored.User, kind: stored.Kind, url: stored.URL, token: stored.Token, pushID: stored.PushID,
-			wake: defaultWake, renewed: stored.Renewed, lastUnread: -1,
-		}
-		if stored.Wake != nil {
-			p.wake = parseWakeNames(stored.Wake)
+			wake: parseWakeNames(stored.Wake), renewed: stored.Renewed, lastUnread: -1,
 		}
 		if stored.P256DH != "" {
 			keys, err := parsePushKeys(stored.P256DH, stored.Auth)
@@ -668,8 +642,6 @@ func (s *Server) restoreLocked() (map[string]bool, error) {
 			s.touchSession([32]byte(key))
 		}
 	}
-
-	s.migrateV6Locked(records, storedRecords)
 
 	// Nothing is connected yet: guests are retired as if their last
 	// connections had just closed, and writes that had not finished fail.
@@ -728,114 +700,5 @@ func (s *Server) removeStaleUploads(keep map[string]bool) {
 		if !keep[name] {
 			_ = os.Remove(name)
 		}
-	}
-}
-
-// escapeMarkdown writes plain text as Markdown that renders as the same text:
-// inline markup characters are backslash-escaped everywhere, and block
-// markers (headings, quotes, list items, rules) at the start of a line.
-func escapeMarkdown(text string) string {
-	text = markdownInline.ReplaceAllString(text, `\$0`)
-	text = markdownBlock.ReplaceAllString(text, `$1\$2`)
-	return markdownOrdered.ReplaceAllString(text, `$1\$2`)
-}
-
-var (
-	markdownInline  = regexp.MustCompile("[\\\\`*_\\[\\]<>~|]")
-	markdownBlock   = regexp.MustCompile(`(?m)^([ \t]*)([#>+=-])`)
-	markdownOrdered = regexp.MustCompile(`(?m)^([ \t]*\d+)([.)])`)
-)
-
-// legacySystemIDs maps protocol v6 system identities to their v7 names
-// (Appendix A.1).
-var legacySystemIDs = map[string]string{"@server": "~server", "@room": roomNoticeID, "@private": privateNoticeID}
-
-// migrateV6Locked rewrites state stored by a protocol v6 server, once, in
-// place: the rewritten entries are written back with the first batch.
-//
-//   - A room's intro_message becomes its description (§3.4): the text of
-//     the intro snapshot each logged room record embedded, escaped as
-//     Markdown when it was plain text; the current record, and the latest
-//     logged one at the same log_id, take the message's current text, as
-//     v6 showed it. A deleted or empty intro leaves no description.
-//     The description is a copy: deleting the message later does not
-//     change it.
-//   - Messages from @server, @room, and @private are from ~server, ~room,
-//     and ~private (Appendix A.1).
-func (s *Server) migrateV6Locked(records map[int64]*logRecord, stored map[int64]storedRecord) {
-	introText := func(snapshot map[string]any) string {
-		body, _ := snapshot["body"].(map[string]any)
-		text, _ := body["text"].(string)
-		if snapshot["deleted"] == true || strings.TrimSpace(text) == "" {
-			return ""
-		}
-		if body["format"] != "markdown" {
-			return escapeMarkdown(text)
-		}
-		return text
-	}
-	for logID, entry := range stored {
-		record := records[logID]
-		if entry.Intro == 0 || record.kind != kindRoom {
-			continue
-		}
-		text := ""
-		if intro := records[entry.Intro]; intro != nil {
-			text = introText(intro.value())
-		}
-		record.rewrite(func(value map[string]any) {
-			delete(value, "intro_message")
-			if text != "" {
-				value["description"] = text
-			}
-		})
-		s.touchRecord(record)
-	}
-	for _, r := range s.rooms {
-		intro, ok := r.record["intro_message"].(map[string]any)
-		if !ok {
-			continue
-		}
-		// A v6 room's current record showed its intro message as it is now,
-		// so the current description is the message's current text, and the
-		// latest logged record, at the same log_id, is given it too.
-		text := ""
-		if id, _ := intro["message_id"].(string); s.messages[id] != nil {
-			text = introText(s.messages[id].snapshot())
-		}
-		delete(r.record, "intro_message")
-		delete(r.record, "description")
-		if text != "" {
-			r.record["description"] = text
-		}
-		if latest := records[r.recordLogID]; latest != nil && latest.kind == kindRoom {
-			latest.rewrite(func(value map[string]any) {
-				delete(value, "intro_message")
-				delete(value, "description")
-				if text != "" {
-					value["description"] = text
-				}
-			})
-			s.touchRecord(latest)
-		}
-		s.touchRoom(r)
-	}
-	for _, m := range s.messages {
-		legacy := legacySystemIDs[m.owner]
-		if legacy == "" {
-			continue
-		}
-		m.owner = legacy
-		m.from = maps.Clone(m.from)
-		m.from["user_id"] = legacy
-		for _, record := range m.records {
-			record.rewrite(func(value map[string]any) {
-				if from, ok := value["from"].(map[string]any); ok {
-					from["user_id"] = legacy
-				}
-			})
-			s.touchRecord(record)
-		}
-		s.touchMessage(m)
 	}
 }

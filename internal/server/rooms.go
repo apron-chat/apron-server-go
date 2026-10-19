@@ -12,14 +12,14 @@ import (
 )
 
 // maxListedRooms caps `not_joined` in a room_list result; `joined` is never
-// truncated (§4.3.1).
+// truncated (§4.2.1).
 const maxListedRooms = 200
 
 // roomState is a room's current record, its log, and its members. Every room,
 // including threads (rooms with parent_room_id), is visible to every
 // authenticated user, except that a private room and its threads are visible
-// only to their members (§4.3.4); members are the users who have joined it
-// and receive its deliveries (§3.4, §4.3.2).
+// only to their members (§4.2.4); members are the users who have joined it
+// and receive its deliveries (§3.4, §4.2.2).
 type roomState struct {
 	id       string
 	parent   *roomState
@@ -35,7 +35,7 @@ type roomState struct {
 	members     map[string]*userState
 	// active maps each member to the log_id of their latest join or new
 	// message in the room, which ranks members when a listing truncates
-	// them (§4.3.1).
+	// them (§4.2.1).
 	active map[string]int64
 	// creator is the user_id that created the room, empty for the seeded
 	// room; only the creator may /kick (§4.1).
@@ -50,7 +50,7 @@ type readCursor struct {
 	id        int64
 }
 
-// visibleTo reports whether u may see the room (§4.3.4): unless u is a
+// visibleTo reports whether u may see the room (§4.2.4): unless u is a
 // member of the room and of every private room it is a thread of, at any
 // depth, it is invisible, and answered like an unknown one. So a thread of a
 // private room is hidden from everyone outside that room, members of the
@@ -121,7 +121,7 @@ func (s *Server) visibleMessageLocked(u *userState, id string) *messageState {
 }
 
 // mayRemove reports whether u may remove others from r, with /kick or
-// room_leave's user_id (§4.3.2, §4.1): the room's creator, or a user with
+// room_leave's user_id (§4.2.2, §4.1): the room's creator, or a user with
 // the admin or moderator role.
 func (r *roomState) mayRemove(u *userState) bool {
 	return r.creator == u.id || u.hasRole("admin") || u.hasRole("moderator")
@@ -195,14 +195,14 @@ func render(frame any) jsontext.Value {
 	return encodeJSON(frame)
 }
 
-// roomUpdate renders a room_update notification (§4.3.3) with one field.
+// roomUpdate renders a room_update notification (§4.2.3) with one field.
 func roomUpdate(field string, records ...any) jsontext.Value {
 	return notification("room_update", map[string]any{field: records})
 }
 
-// logMembershipLocked logs one membership record (§4.3.2) of u in r,
+// logMembershipLocked logs one membership record (§4.2.2) of u in r,
 // advancing the room's latest_log_id, and returns the record for delivery
-// in a room_update's memberships (§4.3.3). The record carries u as a
+// in a room_update's memberships (§4.2.3). The record carries u as a
 // recorded object: user_id and name.
 func (s *Server) logMembershipLocked(u *userState, r *roomState, joined bool) jsontext.Value {
 	logID := s.nextIDLocked()
@@ -219,7 +219,7 @@ func (s *Server) logMembershipLocked(u *userState, r *roomState, joined bool) js
 }
 
 // deliverMembershipLocked sends a membership record to the room's members
-// but u, as room_update memberships (§4.3.3); u's connections receive it
+// but u, as room_update memberships (§4.2.3); u's connections receive it
 // with the room_update that tells them of the change.
 func (s *Server) deliverMembershipLocked(membership jsontext.Value, r *roomState, u *userState) {
 	frame := roomUpdate("memberships", membership)
@@ -231,7 +231,7 @@ func (s *Server) deliverMembershipLocked(membership jsontext.Value, r *roomState
 }
 
 // addMemberLocked joins u to r, logs the membership, and delivers it to the
-// room's other members (§4.3.2). It returns the membership record, nil if
+// room's other members (§4.2.2). It returns the membership record, nil if
 // u was a member already.
 func (s *Server) addMemberLocked(u *userState, r *roomState) jsontext.Value {
 	if u.joined[r.id] != nil {
@@ -253,7 +253,7 @@ func (s *Server) addMemberLocked(u *userState, r *roomState) jsontext.Value {
 // joinDefaultRoomLocked joins a new identity to the default room, so its
 // room list is not empty. Its connections receive the membership alone, as
 // room_update memberships after the auth result (§3.2): the client lists its
-// rooms with room_list (§4.3.1).
+// rooms with room_list (§4.2.1).
 func (s *Server) joinDefaultRoomLocked(u *userState) {
 	if membership := s.addMemberLocked(u, s.rooms[defaultRoomID]); membership != nil {
 		u.send(roomUpdate("memberships", membership))
@@ -262,7 +262,7 @@ func (s *Server) joinDefaultRoomLocked(u *userState) {
 
 // joinLocked joins u to r: the room's other members receive the membership,
 // and u's connections one room_update with the room, its members, and the
-// membership (§4.3.2). It reports whether u was not a member before.
+// membership (§4.2.2). It reports whether u was not a member before.
 func (s *Server) joinLocked(u *userState, r *roomState) bool {
 	membership := s.addMemberLocked(u, r)
 	if membership == nil {
@@ -274,7 +274,7 @@ func (s *Server) joinLocked(u *userState, r *roomState) bool {
 
 // joinedUpdateLocked renders room_update joined for r: its record with its
 // members, as bare user objects with their status, their complete objects
-// in `users`, and the membership that joined the user, if any (§4.3.3).
+// in `users`, and the membership that joined the user, if any (§4.2.3).
 func (s *Server) joinedUpdateLocked(r *roomState, membership jsontext.Value) jsontext.Value {
 	record := s.roomParamsLocked(r)
 	listed := s.addMembersLocked(record, r)
@@ -290,7 +290,7 @@ func (s *Server) joinedUpdateLocked(r *roomState, membership jsontext.Value) jso
 // others see, offline and "" included, as every current user object a
 // listing carries does (§4.5); their complete objects go in `users`. A
 // room with more than Config.MaxListedMembers lists only its most recently
-// active members and adds member_count, the total (§4.3.1).
+// active members and adds member_count, the total (§4.2.1).
 func (s *Server) addMembersLocked(record map[string]any, r *roomState) map[string]*userState {
 	ids, truncated := s.listedMemberIDsLocked(r)
 	listed := r.members
@@ -310,7 +310,7 @@ func (s *Server) addMembersLocked(record map[string]any, r *roomState) map[strin
 }
 
 // listedMemberIDsLocked returns the user_ids of the members that r lists
-// (§4.3.1), ordered by user_id: all of them, or, past
+// (§4.2.1), ordered by user_id: all of them, or, past
 // Config.MaxListedMembers, the most recently active, and then truncated is
 // set.
 func (s *Server) listedMemberIDsLocked(r *roomState) (ids []string, truncated bool) {
@@ -325,7 +325,7 @@ func (s *Server) listedMemberIDsLocked(r *roomState) (ids []string, truncated bo
 	return ids, truncated
 }
 
-// leaveLocked removes u from r (§4.3.2): the room's other members receive
+// leaveLocked removes u from r (§4.2.2): the room's other members receive
 // the logged membership, and u's connections one room_update with left and
 // the membership. It reports whether u was a member.
 func (s *Server) leaveLocked(u *userState, r *roomState) bool {
@@ -355,7 +355,7 @@ func (s *Server) leaveLocked(u *userState, r *roomState) bool {
 // hideThreadsLocked follows u leaving the private room r: u can no longer see
 // the threads it could see there, at any depth, so u leaves those it joined,
 // which stops their deliveries, and u's connections receive room_update left
-// for the others, which they may know from room_update updated (§4.3.3). A
+// for the others, which they may know from room_update updated (§4.2.3). A
 // private thread u was not in was never visible to u, so it and its threads
 // are passed over, and one u was in is left, which hides its own threads.
 func (s *Server) hideThreadsLocked(u *userState, r *roomState) {
@@ -435,7 +435,7 @@ func (s *Server) announceRoomLocked(r *roomState, editor *userState) {
 }
 
 // setRoom creates a room (no room_id) or replaces an existing room's client
-// fields (§4.3.4). parent_room_id and private are fixed at creation and
+// fields (§4.2.4). parent_room_id and private are fixed at creation and
 // ignored on updates, so an omitted private is kept; a thread created
 // without private takes its parent's. Any authenticated user may create rooms and threads and
 // update any room they can see.
@@ -502,7 +502,7 @@ func (s *Server) setRoom(c *client, req request) (any, bool, *rpcError) {
 		}
 	}
 	// ext merges into the room's (§4.12), and the limit applies to the
-	// result; other client fields are replaced (§4.3.4).
+	// result; other client fields are replaced (§4.2.4).
 	ext := mergeExt(keptExt, extWrite)
 	if encodedSize(ext) > maxRoomExtBytes {
 		return nil, false, &rpcError{Code: codeTooLarge, Message: fmt.Sprintf("The room's ext would be over %d bytes", maxRoomExtBytes)}
@@ -525,7 +525,7 @@ func (s *Server) setRoom(c *client, req request) (any, bool, *rpcError) {
 		fields["ext"] = ext
 	}
 	if _, given := req.params["private"]; !given && !updating && parent != nil {
-		// A thread created without private takes its parent's (§4.3.4).
+		// A thread created without private takes its parent's (§4.2.4).
 		private = parent.private
 	}
 	r := s.commitRoomLocked(roomID, parent, private, fields)
@@ -583,7 +583,7 @@ func threadTitle(description string) string {
 	return line
 }
 
-// listRooms answers room_list (§4.3.1): the rooms matching its filters,
+// listRooms answers room_list (§4.2.1): the rooms matching its filters,
 // joined ones in `joined` (never truncated) and visible unjoined ones in
 // `not_joined` (the most recently active maxListedRooms), each most recently
 // active first. `filter` leaves either array out; one it asks for is present
@@ -729,7 +729,7 @@ func profiles(users map[string]*userState) []any {
 	return list
 }
 
-// joinRoom joins a visible room (§4.3.2): the logged membership goes to the
+// joinRoom joins a visible room (§4.2.2): the logged membership goes to the
 // room's members, the joining user's connections included, then room_update
 // joined to the joining user's connections, then the result. Joining a room
 // already joined logs nothing and re-sends room_update joined to the calling
@@ -772,7 +772,7 @@ func (s *Server) joinRoom(c *client, req request) (any, bool, *rpcError) {
 	return result, true, nil
 }
 
-// leaveRoom leaves a room (§4.3.2): the logged membership goes to the room's
+// leaveRoom leaves a room (§4.2.2): the logged membership goes to the room's
 // members, the leaving user's connections included, then room_update left to
 // the leaving user's connections, then the result. The room stays visible in
 // room_list unless it is private. Leaving a room not joined changes nothing.
@@ -807,7 +807,7 @@ func (s *Server) leaveRoom(c *client, req request) (any, bool, *rpcError) {
 }
 
 // parseMembershipParams reads room_join and room_leave params: room_id and
-// an optional user_id (§4.3.2).
+// an optional user_id (§4.2.2).
 func parseMembershipParams(params map[string]jsontext.Value) (roomID, userID string, hasUser bool, err *rpcError) {
 	if roomID, err = parseString(params, "room_id", true); err != nil {
 		return "", "", false, err
@@ -816,13 +816,13 @@ func parseMembershipParams(params map[string]jsontext.Value) (roomID, userID str
 		return "", "", false, err
 	}
 	_, hasUser = params["user_id"]
-	if hasUser && userID == "" {
-		return "", "", false, invalidParams("user_id must be a non-empty string")
+	if hasUser && !validID(userID) {
+		return "", "", false, invalidParams("user_id must be a user_id: not empty, without whitespace or control characters")
 	}
 	return roomID, userID, hasUser, nil
 }
 
-// history returns a window of one room's log (§4.2), the default room's
+// history returns a window of one room's log (§4.3), the default room's
 // without room_id. limit counts records of every kind; the slice is
 // partitioned into rooms, messages, reactions, and membership, each omitted
 // when empty. The server retains all records and does not compact, and it
@@ -832,7 +832,7 @@ func parseMembershipParams(params map[string]jsontext.Value) (roomID, userID str
 // A move snapshot is in both rooms' logs and names the source room in
 // prev_room_id, so a window bounded to one log_id (after == before) in the
 // room a snapshot names walks prev_log_id back through a message's edits
-// (§2).
+// (§4.3.1).
 func (s *Server) history(c *client, req request) (any, bool, *rpcError) {
 	roomID, err := parseString(req.params, "room_id", false)
 	if err != nil {
@@ -894,7 +894,7 @@ func (s *Server) history(c *client, req request) (any, bool, *rpcError) {
 	return result, true, nil
 }
 
-// renderHistory assembles a history result (§4.2) from a window of records.
+// renderHistory assembles a history result (§4.3) from a window of records.
 func renderHistory(r *roomState, matching []*logRecord, more bool, size int) []byte {
 	buf := make([]byte, 0, size+len(matching)+256)
 	buf = append(buf, `{"more":`...)

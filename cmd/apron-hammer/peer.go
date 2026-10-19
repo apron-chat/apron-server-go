@@ -184,7 +184,7 @@ func (p *peer) authAndList(ctx context.Context, auth map[string]any) error {
 			}
 		}
 	}
-	// users SHOULD come with members: true (§4.3.1), so a listing without
+	// users SHOULD come with members: true (§4.2.1), so a listing without
 	// it is valid.
 	if !member || listed.NotJoined != nil {
 		p.h.protocolViolation("room_list joined with members behind auth did not list %s in %s: %s", p.userID, generalRoom, raw)

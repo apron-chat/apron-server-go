@@ -18,10 +18,17 @@ import (
 )
 
 const (
-	// emailCodeLifetime is how long a proposal's tokens stay valid.
+	// emailCodeLifetime is how long a proposal and its tokens, emailed as
+	// it is made, stay valid.
 	emailCodeLifetime = 10 * time.Minute
-	// maxEmailAttempts wrong tokens on a connection invalidate its proposal.
+	// maxEmailAttempts wrong tokens, on any connection, cancel a proposal.
 	maxEmailAttempts = 5
+	// linkHandleBytes starts each link token with a handle naming its
+	// proposal, so a wrong secret behind it counts against that proposal
+	// from any connection.
+	linkHandleBytes = 10
+	// maxStateBytes bounds the state a proposal carries (§4.11.1).
+	maxStateBytes = 256
 	// emailResendInterval is the least time between emails to one address,
 	// and emailWindow the window of maxEmailSendsPerWindow emails to it.
 	emailResendInterval    = 30 * time.Second
@@ -66,13 +73,14 @@ type SignInEmail struct {
 	// connection that made the proposal.
 	Code string
 	// Link opens Config.EmailLinkURL with the long token in its fragment,
-	// which works on any connection not signed in; empty for an addition
-	// and when no link is configured.
+	// which works on any connection: for a sign-in, one not signed in, and
+	// for an addition, one signed in to the proposing account. Empty when
+	// no link is configured.
 	Link string
-	// Expires is when the code stops working.
+	// Expires is when the code and the link stop working.
 	Expires time.Time
 	// Add reports a proposal to add the address to a signed-in account,
-	// which signs nobody in and carries no link.
+	// which signs nobody in.
 	Add bool
 }
 
@@ -84,7 +92,11 @@ func (m SignInEmail) Text() string {
 	} else {
 		fmt.Fprintf(&b, "Your sign-in code is %s.\n", m.Code)
 	}
-	if m.Link != "" {
+	switch {
+	case m.Link == "":
+	case m.Add:
+		fmt.Fprintf(&b, "\nOr open this link where you are signed in to add it:\n%s\n", m.Link)
+	default:
 		fmt.Fprintf(&b, "\nOr open this link to sign in:\n%s\n", m.Link)
 	}
 	fmt.Fprintf(&b, "\nThe code expires in %d minutes. If you did not ask for it, ignore this email.\n", int(time.Until(m.Expires).Round(time.Minute)/time.Minute))
@@ -106,19 +118,25 @@ func (l LogEmailSender) SendSignInCode(_ context.Context, m SignInEmail) error {
 	return nil
 }
 
-// emailProposal is a connection's pending proposal (§4.11): to sign in
+// emailProposal is a connection's pending proposal (§4.11.1): to sign in
 // with an address, or to add it to the proposing account. Its short code
-// works only on that connection; a sign-in's link token, unguessable, works
-// on any connection not signed in. Guarded by s.mu.
+// works only on that connection; its link token, a handle and an
+// unguessable secret, works on any connection that may approve it
+// (§4.11.3). It outlives its connection's disconnect, until it expires or
+// is approved. Guarded by s.mu.
 type emailProposal struct {
 	email string
-	// accountID is the proposing account, for an addition.
-	accountID string
-	add       bool
-	code      string
-	link      string
-	expires   time.Time
-	attempts  int
+	// account is the proposing account, for an addition.
+	account *userState
+	add     bool
+	code    string
+	// handle and secret make up the link token; both are empty when no
+	// link is sent.
+	handle, secret string
+	// state is the client's, returned in the link.
+	state    string
+	expires  time.Time
+	attempts int
 	// owner is the proposing connection; name and userID are what it
 	// requested for a new account.
 	owner        *client
@@ -157,7 +175,8 @@ type emailState struct {
 	addressLRU *list.List
 	clients    map[string]*emailClient
 	clientLRU  *list.List
-	// links maps each outstanding link token to its proposal.
+	// links maps the handle of each outstanding link token to its
+	// proposal.
 	links map[string]*emailProposal
 	// slots holds a token for each delivery in progress.
 	slots chan struct{}
@@ -258,8 +277,8 @@ func (s *Server) dropProposalLocked(p *emailProposal) {
 	if p.owner != nil && p.owner.proposal == p {
 		p.owner.proposal = nil
 	}
-	if p.link != "" && s.email.links[p.link] == p {
-		delete(s.email.links, p.link)
+	if p.handle != "" && s.email.links[p.handle] == p {
+		delete(s.email.links, p.handle)
 	}
 }
 
@@ -314,17 +333,19 @@ func normalizeEmail(value string) string {
 	return value
 }
 
-// signInLink builds a sign-in link from the configured page, never from
-// request fields, with the token in the fragment so it stays out of server
-// logs (§4.11): #token=<token>, and &server=<URL> with this server's public
-// WebSocket URL when it is known, so a client that speaks to several
-// servers presents it to the right one. Values are form-encoded.
-func signInLink(page, token, server string) string {
-	if page == "" {
-		return ""
-	}
+// signInLink builds a link from the configured page, never from request
+// fields other than state, with the token in the fragment so it stays out
+// of server logs (§4.11.2): #token=<token>, &state=<state> with the
+// proposal's state, unchanged, when it carried one, and &server=<URL> with
+// this server's public WebSocket URL when it is known, so a client that
+// speaks to several servers presents it to the right one. Values are
+// form-encoded.
+func signInLink(page, token, state, server string) string {
 	page, _, _ = strings.Cut(page, "#")
 	link := page + "#token=" + url.QueryEscape(token)
+	if state != "" {
+		link += "&state=" + url.QueryEscape(state)
+	}
 	if server != "" {
 		link += "&server=" + url.QueryEscape(server)
 	}
@@ -352,27 +373,52 @@ func (s *Server) publicWebSocketURL() string {
 }
 
 // authenticateEmail runs the email scheme under s.mu (§4.11). A request
-// with email proposes: on a connection signed in, guests included, adding
-// the address to that account, else signing in with it. It returns {},
-// whether or not the address has an account, and changes no
-// authentication. A request with token approves the connection's proposal
-// with its code, or a sign-in proposal with its link token.
+// without token proposes, by email; one with token approves a proposal
+// (§4.11.3), which takes either scheme the server offers.
 func (s *Server) authenticateEmail(c *client, req request) (any, *rpcError) {
-	token, err := parseString(req.params, "token", false)
-	if err != nil {
-		return nil, err
-	}
-	name, err := parseString(req.params, "name", false)
-	if err != nil {
-		return nil, err
-	}
-	requested, err := parseString(req.params, "user_id", false)
-	if err != nil {
-		return nil, err
-	}
-	now := time.Now()
 	if _, has := req.params["token"]; has {
-		return s.approveEmailLocked(c, req, token, name, requested, now)
+		return s.approveLocked(c, req)
+	}
+	return s.proposeEmailLocked(c, req)
+}
+
+// parseRequested parses the name and user_id that a proposal or an
+// approval may request for a new account.
+func parseRequested(req request) (name, requested string, err *rpcError) {
+	if name, err = parseString(req.params, "name", false); err != nil {
+		return "", "", err
+	}
+	if requested, err = parseString(req.params, "user_id", false); err != nil {
+		return "", "", err
+	}
+	return name, requested, nil
+}
+
+// proposeEmailLocked replaces the connection's proposal with a new one
+// (§4.11.1) and emails its tokens in the background: a code to type and,
+// when a link page is configured, a link with the proposal's state. On a
+// connection signed in, guests included, it proposes adding the address to
+// that account, else signing in with it. It returns {}, whether or not the
+// address has an account, and changes no authentication. An addition is
+// emailed only when the address could be added: no account holds it, and
+// the proposing one has none.
+//
+// Emails to one address are at least emailResendInterval apart and at most
+// maxEmailSendsPerWindow an hour; a client address and a connection may
+// propose a few; and at most maxConcurrentEmailSends deliveries run at once.
+// Beyond any of these the request is retry_after, whether or not the
+// address has an account.
+func (s *Server) proposeEmailLocked(c *client, req request) (any, *rpcError) {
+	name, requested, err := parseRequested(req)
+	if err != nil {
+		return nil, err
+	}
+	state, err := parseString(req.params, "state", false)
+	if err != nil {
+		return nil, err
+	}
+	if len(state) > maxStateBytes {
+		return nil, &rpcError{Code: codeTooLarge, Message: fmt.Sprintf("state is at most %d bytes", maxStateBytes)}
 	}
 	raw, err := parseString(req.params, "email", true)
 	if err != nil {
@@ -382,30 +428,16 @@ func (s *Server) authenticateEmail(c *client, req request) (any, *rpcError) {
 	if email == "" {
 		return nil, invalidParams("email must be an email address at a domain name")
 	}
-	return s.proposeEmailLocked(c, req, email, name, requested, now)
-}
-
-// proposeEmailLocked replaces the connection's proposal with a new one and
-// emails its tokens in the background: a code to type and, for a sign-in, a
-// link. An addition is proposed by code only, so only the proposing
-// connection can approve it, and is emailed only when the address could be
-// added: no account holds it, and the proposing one has none.
-//
-// Emails to one address are at least emailResendInterval apart and at most
-// maxEmailSendsPerWindow an hour; a client address and a connection may
-// propose a few; and at most maxConcurrentEmailSends deliveries run at once.
-// Beyond any of these the request is retry_after, whether or not the
-// address has an account.
-func (s *Server) proposeEmailLocked(c *client, req request, email, name, requested string, now time.Time) (any, *rpcError) {
+	now := time.Now()
 	busy := retryAfter("Too many sign-ins in progress; try again shortly", emailResendInterval)
-	state := s.email.address(email, now)
-	if state != nil {
-		n := len(state.sends)
-		if wait := state.sends[n-1].Add(emailResendInterval).Sub(now); wait > 0 {
+	address := s.email.address(email, now)
+	if address != nil {
+		n := len(address.sends)
+		if wait := address.sends[n-1].Add(emailResendInterval).Sub(now); wait > 0 {
 			return nil, retryAfter("An email was just sent to this address; try again shortly", wait)
 		}
 		if n >= maxEmailSendsPerWindow {
-			return nil, retryAfter("Too many emails were sent to this address; try again later", state.sends[0].Add(emailWindow).Sub(now))
+			return nil, retryAfter("Too many emails were sent to this address; try again later", address.sends[0].Add(emailWindow).Sub(now))
 		}
 	}
 	budget := s.email.client(c.clientKey, now)
@@ -422,22 +454,23 @@ func (s *Server) proposeEmailLocked(c *client, req request, email, name, request
 		return nil, retryAfter("Too many sign-ins proposed; try again later", delay)
 	}
 	add := c.user != nil
-	if !add && len(s.email.links) >= maxEmailLinks {
-		for token, p := range s.email.links {
+	deliver := !add || (s.emails[email] == nil && c.user.email == "")
+	linked := deliver && s.config.EmailLinkURL != ""
+	if linked && len(s.email.links) >= maxEmailLinks {
+		for _, p := range s.email.links {
 			if !now.Before(p.expires) {
 				s.dropProposalLocked(p)
-				delete(s.email.links, token)
 			}
 		}
 		if len(s.email.links) >= maxEmailLinks {
 			return nil, busy
 		}
 	}
-	if state == nil {
+	if address == nil {
 		// The entry is made only for a proposal that is accepted, emailed
 		// or not: an addition sends nothing for an address with an
 		// account, and must count the same as one that does.
-		if state = s.email.createAddress(email, now); state == nil {
+		if address = s.email.createAddress(email, now); address == nil {
 			return nil, busy
 		}
 	}
@@ -453,23 +486,22 @@ func (s *Server) proposeEmailLocked(c *client, req request, email, name, request
 	}
 	budget.sends.AllowN(now, 1)
 	c.emailSends.AllowN(now, 1)
-	state.sends = append(state.sends, now)
+	address.sends = append(address.sends, now)
 	if c.proposal != nil {
 		s.dropProposalLocked(c.proposal)
 	}
 	p := &emailProposal{
-		email: email, add: add, code: fmt.Sprintf("%06d", number), expires: now.Add(emailCodeLifetime),
+		email: email, add: add, code: fmt.Sprintf("%06d", number), state: state, expires: now.Add(emailCodeLifetime),
 		owner: c, name: name, userID: requested,
 	}
-	message := SignInEmail{To: email, Code: p.code, Expires: p.expires, Add: add}
-	deliver := true
 	if add {
-		p.accountID = c.user.id
-		deliver = s.emails[email] == nil && c.user.email == ""
-	} else {
-		p.link = rand.Text()
-		s.email.links[p.link] = p
-		message.Link = signInLink(s.config.EmailLinkURL, p.link, s.publicWebSocketURL())
+		p.account = c.user
+	}
+	message := SignInEmail{To: email, Code: p.code, Expires: p.expires, Add: add}
+	if linked {
+		p.handle, p.secret = s.newLinkHandleLocked(), rand.Text()
+		s.email.links[p.handle] = p
+		message.Link = signInLink(s.config.EmailLinkURL, p.handle+p.secret, state, s.publicWebSocketURL())
 	}
 	c.proposal = p
 	if !deliver {
@@ -492,43 +524,50 @@ func (s *Server) proposeEmailLocked(c *client, req request, email, name, request
 	return result, nil
 }
 
-// approveEmailLocked approves a proposal with a token (§4.11): the code of
-// the connection's own proposal, or the link token of a sign-in proposal
-// made anywhere. Approving a sign-in authenticates this connection, which
-// must not be signed in, to the address's account or a new one, taking a
-// requested user_id as guests do, or user_<n>, and returns {you, token}.
-// Approving an addition adds the address to the proposing account and
-// returns {}. A wrong token counts against the connection's proposal, which
-// a few wrong tokens invalidate.
-func (s *Server) approveEmailLocked(c *client, req request, token, name, requested string, now time.Time) (any, *rpcError) {
-	denied := &rpcError{Code: codeDenied, Message: "The code is invalid or expired; ask for a new one"}
-	if own := c.proposal; own != nil && !now.Before(own.expires) {
-		s.dropProposalLocked(own)
+// newLinkHandleLocked returns a link handle no outstanding link has.
+func (s *Server) newLinkHandleLocked() string {
+	for {
+		if handle := rand.Text()[:linkHandleBytes]; s.email.links[handle] == nil {
+			return handle
+		}
 	}
-	var p *emailProposal
-	switch own := c.proposal; {
-	case token != "" && own != nil && subtle.ConstantTimeCompare([]byte(token), []byte(own.code)) == 1:
-		p = own
-	case token != "" && s.email.links[token] != nil:
-		if p = s.email.links[token]; !now.Before(p.expires) {
-			s.dropProposalLocked(p)
-			return nil, denied
-		}
-	default:
-		if own != nil {
-			if own.attempts++; own.attempts >= maxEmailAttempts {
-				s.dropProposalLocked(own)
-			}
-		}
-		return nil, denied
+}
+
+// approveLocked approves a proposal with its temporary token (§4.11.3),
+// under either scheme the server offers: the code of the connection's own
+// proposal, or the link token of a proposal made on any connection.
+// Approving a sign-in authenticates this connection, which must not be
+// signed in, to the address's account or a new one, taking a requested
+// user_id as guests do, or user_<n>, and returns {you, token}. Approving an
+// addition, only on a connection signed in to the proposing account, adds
+// the address to that account and returns {}. A token presented on a
+// connection that may not approve it is denied, and its proposal stays for
+// one that may.
+func (s *Server) approveLocked(c *client, req request) (any, *rpcError) {
+	token, err := parseString(req.params, "token", true)
+	if err != nil {
+		return nil, err
+	}
+	name, requested, err := parseRequested(req)
+	if err != nil {
+		return nil, err
+	}
+	now := time.Now()
+	p := s.proposalLocked(c, token, now)
+	if p == nil {
+		return nil, &rpcError{Code: codeDenied, Message: "The code is invalid or expired; ask for a new one"}
 	}
 
 	if p.add {
-		account := s.users[p.accountID]
+		// Only the proposing account approves an addition: otherwise
+		// someone could lead a victim to add the victim's address to the
+		// other person's account.
+		account := p.account
+		if c.user != account {
+			return nil, &rpcError{Code: codeDenied, Message: "Open this link where the account that asked for it is signed in"}
+		}
 		s.dropProposalLocked(p)
 		switch {
-		case account == nil:
-			return nil, denied
 		case s.emails[p.email] != nil:
 			return nil, &rpcError{Code: codeDenied, Message: "This address belongs to an account"}
 		case account.email != "":
@@ -572,10 +611,46 @@ func (s *Server) approveEmailLocked(c *client, req request, token, name, request
 		s.touchUser(user.id)
 		s.grantRolesLocked(user)
 		// A new account joins the default room, as a new guest does, after
-		// the result (§3.2).
+		// the result (§3.2.2).
 		return s.signInLocked(c, req, user, now, true, true)
 	}
 	return s.signInLocked(c, req, user, now, true, false)
+}
+
+// proposalLocked returns the live proposal that token approves: the
+// connection's own, by its code, or any, by its link token. Otherwise it
+// returns nil, and counts a failed attempt against the proposal that token
+// names by its link handle, else against the connection's own, whichever
+// connection presents it (§4.11.1): maxEmailAttempts of them cancel it.
+// Expired proposals are dropped.
+func (s *Server) proposalLocked(c *client, token string, now time.Time) *emailProposal {
+	own := c.proposal
+	if own != nil && !now.Before(own.expires) {
+		s.dropProposalLocked(own)
+		own = nil
+	}
+	if own != nil && subtle.ConstantTimeCompare([]byte(token), []byte(own.code)) == 1 {
+		return own
+	}
+	target := own
+	if len(token) > linkHandleBytes {
+		if p := s.email.links[token[:linkHandleBytes]]; p != nil {
+			if !now.Before(p.expires) {
+				s.dropProposalLocked(p)
+				return nil
+			}
+			if subtle.ConstantTimeCompare([]byte(token[linkHandleBytes:]), []byte(p.secret)) == 1 {
+				return p
+			}
+			target = p
+		}
+	}
+	if target != nil {
+		if target.attempts++; target.attempts >= maxEmailAttempts {
+			s.dropProposalLocked(target)
+		}
+	}
+	return nil
 }
 
 // assignAccountIDLocked honors a requested user_id as assignUserIDLocked

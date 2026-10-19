@@ -106,7 +106,7 @@ func TestRoomListFiltersAndOrder(t *testing.T) {
 }
 
 // With latest_log_id, room_list lists only rooms changed since, and `left`
-// the rooms the user left since (§4.3.1).
+// the rooms the user left since (§4.2.1).
 func TestRoomListLatestLogIDDelta(t *testing.T) {
 	_, httpServer := newTestServer(t, DefaultConfig())
 	clients := dialGroup(t, httpServer, 2)
@@ -189,7 +189,7 @@ func TestRoomListTruncatesOnlyUnjoinedRooms(t *testing.T) {
 
 // Every join and leave is a logged membership, delivered to the room's
 // members before and after the change and ordered before the room_update
-// and the result on the requesting connection (§4.3.2).
+// and the result on the requesting connection (§4.2.2).
 func TestJoinLeaveAndDeliveries(t *testing.T) {
 	_, httpServer := newTestServer(t, DefaultConfig())
 	clients := dialGroup(t, httpServer, 3)
@@ -288,7 +288,7 @@ func TestJoinLeaveAndDeliveries(t *testing.T) {
 }
 
 // A thread's messages go only to its members; the parent's members get only
-// its room record changes, as room_update updated (§3.4, §4.3.3).
+// its room record changes, as room_update updated (§4.2, §4.2.3).
 func TestThreadMessagesReachOnlyThreadMembers(t *testing.T) {
 	_, httpServer := newTestServer(t, DefaultConfig())
 	clients := dialGroup(t, httpServer, 3)
@@ -343,7 +343,7 @@ func TestPrevLogIDLinksRecords(t *testing.T) {
 	if _, has := record["prev_log_id"]; has || updated["prev_log_id"] != record["log_id"] {
 		t.Fatalf("room prev_log_id: %#v then %#v", record, updated)
 	}
-	// Only room records and message snapshots carry prev_log_id (§2).
+	// Only room records and message snapshots carry prev_log_id (§4.3.1).
 	first := react(t, c, "r1", id, "👍")
 	second := react(t, c, "r2", id, "🎉")
 	if first["prev_log_id"] != nil || second["prev_log_id"] != nil {
@@ -1003,7 +1003,7 @@ func TestCommands(t *testing.T) {
 // A private room and its threads are invisible to non-members, who get
 // invalid_params as for an unknown room; members bring others in with
 // room_join's user_id, and the room's creator removes them with
-// room_leave's (§4.3.2, §4.3.4).
+// room_leave's (§4.2.2, §4.2.4).
 func TestPrivateRoomsAndMembershipByUserID(t *testing.T) {
 	_, httpServer := newTestServer(t, DefaultConfig())
 	clients := dialGroup(t, httpServer, 3)
@@ -1015,7 +1015,7 @@ func TestPrivateRoomsAndMembershipByUserID(t *testing.T) {
 	}
 	secret, _ := save(t, a, "secret", map[string]any{"room_id": room, "body": map[string]any{"text": "just us"}})
 	thread, _ := saveRoom(t, a, "thread", map[string]any{"parent_room_id": room, "description": "Plans", "private": false})
-	// A thread created without private takes its parent's (§4.3.4).
+	// A thread created without private takes its parent's (§4.2.4).
 	if _, inherited := saveRoom(t, a, "inherits", map[string]any{"parent_room_id": room}); inherited["private"] != true {
 		t.Fatalf("thread of a private room: %#v", inherited)
 	}
@@ -1054,6 +1054,7 @@ func TestPrivateRoomsAndMembershipByUserID(t *testing.T) {
 	b.expectError(t, "room_join", "not-a-member", map[string]any{"room_id": open, "user_id": "guest_3"}, codeDenied)
 	a.expectError(t, "room_join", "unknown-user", map[string]any{"room_id": room, "user_id": "nobody"}, codeInvalidParams)
 	a.expectError(t, "room_join", "empty-user", map[string]any{"room_id": room, "user_id": ""}, codeInvalidParams)
+	a.expectError(t, "room_join", "spaced-user", map[string]any{"room_id": room, "user_id": "guest 2"}, codeInvalidParams)
 	before, result := a.request(t, "room_join", "add", map[string]any{"room_id": room, "user_id": "guest_2"})
 	if len(result) != 0 || !reflect.DeepEqual(methods(before), []string{"room_update"}) {
 		t.Fatalf("adding a member: %#v then %#v", before, result)
@@ -1132,7 +1133,7 @@ func TestPrivateRoomsAndMembershipByUserID(t *testing.T) {
 }
 
 // A room with more members than MaxListedMembers lists its most recently
-// active members and member_count, the total (§4.3.1).
+// active members and member_count, the total (§4.2.1).
 func TestMemberListsAreTruncatedWithMemberCount(t *testing.T) {
 	config := DefaultConfig()
 	config.MaxListedMembers = 2

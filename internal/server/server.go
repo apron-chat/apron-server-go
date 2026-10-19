@@ -120,7 +120,7 @@ type Config struct {
 	MessagesPerMinute int
 	// MaxListedMembers bounds a room's members in room_list and room_update
 	// joined; a larger room lists its most recently active members and
-	// member_count (§4.3.1). 0 is unlimited.
+	// member_count (§4.2.1). 0 is unlimited.
 	MaxListedMembers int
 	// Welcome is server.welcome (§3.2): Markdown shown on the sign-in
 	// screen. Empty omits it.
@@ -128,7 +128,7 @@ type Config struct {
 	// Roles grants server roles (§3.3), such as "admin", to accounts: each
 	// role lists the user_ids or email addresses that hold it. Roles are
 	// shown beside names; "admin" and "moderator" may also remove others
-	// from rooms (§4.3.2).
+	// from rooms (§4.2.2).
 	Roles map[string][]string
 	// EmailSender enables email sign-in (§4.11) and delivers its codes; nil
 	// disables it. LogEmailSender logs codes, for development.
@@ -138,9 +138,10 @@ type Config struct {
 	// used) or X-Real-IP, for per-client rate limits. Empty uses the
 	// connection's own address. Set it only behind a proxy that sets it.
 	ClientIPHeader string
-	// EmailLinkURL is the page sign-in links open, such as
-	// https://chat.example/, with the address and code in its fragment.
-	// Empty sends codes without a link.
+	// EmailLinkURL is the page the links in sign-in emails open, such as
+	// https://chat.example/, with a token, the proposal's state, and this
+	// server's WebSocket URL in its fragment (§4.11.2). Empty sends codes
+	// without a link.
 	EmailLinkURL string
 }
 
@@ -232,7 +233,7 @@ const (
 // maps. Only redaction (§4.4) rewrites a record; raw is replaced, never
 // modified, so a reader may hold it after releasing s.mu. A record is
 // referenced from the log of every room it belongs to, so a move snapshot
-// appears in both the source and destination room logs (§4.2).
+// appears in both the source and destination room logs (§4.3.1).
 type logRecord struct {
 	id   int64
 	kind recordKind
@@ -501,7 +502,7 @@ func Open(config Config) (*Server, error) {
 }
 
 // defaultRoomID is the seeded room that requests without room_id address
-// (§3.5, §4.2) and that new guests join.
+// (§3.5.1, §4.3) and that new guests join.
 const defaultRoomID = "general"
 
 // Handler returns the HTTP handler serving /ws, /healthz, the upload, file,
@@ -749,8 +750,8 @@ func (s *Server) serverParams() map[string]any {
 	// guest makes the guest an account, and email and guest start one.
 	signup := slices.DeleteFunc(slices.Clone(authSchemes), func(scheme string) bool { return scheme == "token" })
 	params := map[string]any{
-		"apron":        8,
-		"agent":        "apron-go/8",
+		"apron":        9,
+		"agent":        "apron-go/9",
 		"capabilities": []string{"history", "edit", "rooms", "reactions", "activity", "embed:upload", "embed:stream", "command", "status", "ext"},
 		"auth":         authSchemes,
 		"ping":         max(1, int(s.config.PingInterval/time.Second)),

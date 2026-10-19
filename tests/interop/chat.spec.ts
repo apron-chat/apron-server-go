@@ -39,7 +39,7 @@ test.describe('chat protocol interoperability', () => {
 			await waitForMessage(pageB, `${token} first line`);
 			const threadId = await startThread(pageA, sourceA);
 			// The thread is titled after the message's first line and described by
-			// its text (§3.4), shown at its top; the message stays in the room, and
+			// its text (§4.2), shown at its top; the message stays in the room, and
 			// the composer replies to it.
 			await expect(pageA.getByRole('heading', { level: 1 })).toContainText(`${token} first line`);
 			const summaryA = pageA.getByTestId('thread-summary');

@@ -139,7 +139,7 @@ func TestStatusValuesAndDerivation(t *testing.T) {
 	// online: idle once no connection is attended, online again when one
 	// is, offline without connections. The user's own connections are not
 	// told: their `you` shows the status they set.
-	if frames := b.status(t, map[string]any{"idle": true}); len(frames) != 0 {
+	if frames := b.status(t, map[string]any{"idle": 300}); len(frames) != 0 {
 		t.Fatalf("frames after idle: %#v", frames)
 	}
 	expectStatus(t, a, b.userID, "idle")
@@ -151,7 +151,8 @@ func TestStatusValuesAndDerivation(t *testing.T) {
 	second, _ := dialOrigin(t, httpServer, testPasskeyOrigin)
 	second.result(t, "auth", "resume", map[string]any{"scheme": "token", "token": registered["token"]})
 	expectStatus(t, a, b.userID, "online")
-	second.status(t, map[string]any{"idle": true})
+	// Zero seconds since attention stopped is idle too (§4.5.3).
+	second.status(t, map[string]any{"idle": 0})
 	expectStatus(t, a, b.userID, "idle")
 	b.status(t, map[string]any{"idle": false})
 	expectStatus(t, a, b.userID, "online")
@@ -160,9 +161,9 @@ func TestStatusValuesAndDerivation(t *testing.T) {
 	}
 	// room_id scopes only mute, so room_id without mute is invalid_params
 	// and changes nothing (§4.5).
-	b.statusError(t, map[string]any{"room_id": "general", "idle": true}, codeInvalidParams)
+	b.statusError(t, map[string]any{"room_id": "general", "idle": 300}, codeInvalidParams)
 	a.expectQuiet(t)
-	b.status(t, map[string]any{"idle": true})
+	b.status(t, map[string]any{"idle": 300})
 	expectStatus(t, a, b.userID, "idle")
 	_ = second.ws.Close(websocket.StatusNormalClosure, "bye")
 	_ = b.ws.Close(websocket.StatusNormalClosure, "bye")
@@ -183,7 +184,7 @@ func TestStatusValuesAndDerivation(t *testing.T) {
 		t.Fatalf("you after dnd: %v", got)
 	}
 	expectProfileStatus(t, a, b.userID, "dnd")
-	b.status(t, map[string]any{"idle": true})
+	b.status(t, map[string]any{"idle": 300})
 	b.status(t, map[string]any{"idle": false})
 	if got := listedStatus(t, a, b.userID); got != "dnd" {
 		t.Fatalf("listed status while dnd: %v", got)
@@ -204,7 +205,7 @@ func TestStatusValuesAndDerivation(t *testing.T) {
 		t.Fatalf("you after none: %v", got)
 	}
 	expectProfileStatus(t, a, b.userID, "")
-	b.status(t, map[string]any{"idle": true})
+	b.status(t, map[string]any{"idle": 300})
 	if got := listedStatus(t, a, b.userID); got != "" {
 		t.Fatalf("listed status after none: %v", got)
 	}
@@ -313,7 +314,7 @@ func TestInvisiblePrivacy(t *testing.T) {
 		b.drain(t)
 		want := map[string]string{"invisible": "offline", "": ""}[status]
 		expectProfileStatus(t, a, b.userID, want)
-		b.status(t, map[string]any{"idle": true})
+		b.status(t, map[string]any{"idle": 300})
 		b.status(t, map[string]any{"idle": false})
 		second, _ := dialOrigin(t, httpServer, testPasskeyOrigin)
 		second.result(t, "auth", "resume", map[string]any{"scheme": "token", "token": registered["token"]})
@@ -359,12 +360,12 @@ func TestStatusChangesCoalesce(t *testing.T) {
 	// b's first status, online when it signed in, took one of the burst.
 	for i := range statusBurst - 1 {
 		idle := i%2 == 0
-		b.status(t, map[string]any{"idle": idle})
+		b.status(t, map[string]any{"idle": idleParam(idle)})
 		expectStatus(t, a, b.userID, map[bool]string{true: "idle", false: "online"}[idle])
 	}
 	// Past the burst, changes wait, and only the latest is sent.
 	for _, idle := range []bool{false, true, false} {
-		b.status(t, map[string]any{"idle": idle})
+		b.status(t, map[string]any{"idle": idleParam(idle)})
 	}
 	a.expectQuiet(t)
 	time.Sleep(statusCoalesce + 200*time.Millisecond)
@@ -412,6 +413,8 @@ func TestMuteEchoToAllConnections(t *testing.T) {
 		{"room_id": "general"}, {"room_id": "general", "idle": false},
 		{"room_id": "missing", "mute": true}, {"room_id": 5, "mute": true},
 		{"mute": true, "idle": "yes"}, {"mute": true, "room_id": nil},
+		// idle is false or seconds since attention stopped (§4.5.3).
+		{"mute": true, "idle": true}, {"mute": true, "idle": -1}, {"mute": true, "idle": 1.5}, {"mute": true, "idle": nil},
 	} {
 		second.statusError(t, params, codeInvalidParams)
 	}
@@ -459,7 +462,7 @@ func TestAfterAuthMutesAndStatuses(t *testing.T) {
 	app, httpServer := newTestServer(t, config)
 	clients := dialGroup(t, httpServer, 3)
 	attended, idle, dnd := clients[0], clients[1], clients[2]
-	idle.status(t, map[string]any{"idle": true})
+	idle.status(t, map[string]any{"idle": 300})
 	setStatus(t, dnd, "dnd")
 	invisible := dialTestClient(t, httpServer)
 	setStatus(t, invisible, "invisible")
@@ -493,9 +496,9 @@ func TestAfterAuthMutesAndStatuses(t *testing.T) {
 	c, _ := dialOrigin(t, httpServer, testPasskeyOrigin)
 	watching(c)
 	c.write(t, map[string]any{"method": "status", "params": map[string]any{"mute": false}})
-	c.write(t, map[string]any{"method": "status", "params": map[string]any{"idle": true}})
+	c.write(t, map[string]any{"method": "status", "params": map[string]any{"idle": 300}})
 	c.statusError(t, map[string]any{"mute": false}, codeDenied)
-	c.statusError(t, map[string]any{"idle": true}, codeDenied)
+	c.statusError(t, map[string]any{"idle": 300}, codeDenied)
 	c.statusError(t, map[string]any{"room_id": "missing", "mute": true}, codeDenied)
 	before, _ := c.request(t, "auth", "resume", map[string]any{"scheme": "token", "token": registered["token"]})
 	if len(before) != 0 {
@@ -529,7 +532,7 @@ func TestAfterAuthMutesAndStatuses(t *testing.T) {
 	if status != statusOnline {
 		t.Fatalf("owner status: %s", status)
 	}
-	c.status(t, map[string]any{"idle": true})
+	c.status(t, map[string]any{"idle": 300})
 	expectStatus(t, attended, owner.userID, "idle")
 	c.expectQuiet(t)
 
@@ -652,13 +655,13 @@ func TestRoomIDScopesOnlyMute(t *testing.T) {
 	a.drain(t)
 
 	// A mute of a room the user cannot see changes nothing.
-	b.statusError(t, map[string]any{"room_id": "missing", "idle": true, "mute": true}, codeInvalidParams)
+	b.statusError(t, map[string]any{"room_id": "missing", "idle": 300, "mute": true}, codeInvalidParams)
 	a.expectQuiet(t)
 	// Without a mute, room_id is invalid_params (§4.5), and the idle beside
 	// it does not apply either.
-	b.statusError(t, map[string]any{"room_id": "missing", "idle": true}, codeInvalidParams)
+	b.statusError(t, map[string]any{"room_id": "missing", "idle": 300}, codeInvalidParams)
 	a.expectQuiet(t)
-	if frames := b.status(t, map[string]any{"idle": true}); len(frames) != 0 {
+	if frames := b.status(t, map[string]any{"idle": 300}); len(frames) != 0 {
 		t.Fatalf("frames after an idle: %#v", frames)
 	}
 	expectStatus(t, a, b.userID, "idle")
@@ -709,7 +712,7 @@ func TestStatusIsARequest(t *testing.T) {
 		raw(frame)
 	}
 	b.expectQuiet(t)
-	b.statusError(t, map[string]any{"idle": true}, codeDenied)
+	b.statusError(t, map[string]any{"idle": 300}, codeDenied)
 	b.statusError(t, map[string]any{"mute": true}, codeDenied)
 
 	guestAuth(t, b)
@@ -731,7 +734,7 @@ func TestStatusIsARequest(t *testing.T) {
 	app.mu.RUnlock()
 
 	// As a request it applies, and answers {}.
-	if frames := b.status(t, map[string]any{"idle": true}); len(frames) != 0 {
+	if frames := b.status(t, map[string]any{"idle": 300}); len(frames) != 0 {
 		t.Fatalf("frames before the idle result: %#v", frames)
 	}
 	expectStatus(t, a, b.userID, "idle")
@@ -790,7 +793,7 @@ func TestStatusRateLimit(t *testing.T) {
 	app.mu.Lock()
 	app.users[b.userID].statusRequests = rate.NewLimiter(rate.Every(time.Hour), 2)
 	app.unlock()
-	b.status(t, map[string]any{"idle": true})
+	b.status(t, map[string]any{"idle": 300})
 	expectStatus(t, a, b.userID, "idle")
 	expectEcho(t, b, map[string]any{"mute": true}, "", true)
 	for _, params := range []map[string]any{
@@ -913,7 +916,7 @@ func TestListingsCarryStatus(t *testing.T) {
 
 // The statuses sent after a sign-in are only of the users that the user's
 // rooms list in members (§4.5): past MaxListedMembers, a room lists its most
-// recently active members (§4.3.1), the user who just joined included.
+// recently active members (§4.2.1), the user who just joined included.
 func TestAfterAuthStatusesAreBounded(t *testing.T) {
 	config := DefaultConfig()
 	config.MaxListedMembers = 2
@@ -1040,4 +1043,13 @@ func TestSignInToExistingAccountIsADeparture(t *testing.T) {
 		_ = guest.ws.Close(websocket.StatusNormalClosure, "done")
 		observer.drain(t)
 	}
+}
+
+// idleParam is the `idle` of a status request: false, or seconds since
+// attention stopped (§4.5.3).
+func idleParam(idle bool) any {
+	if idle {
+		return 300
+	}
+	return false
 }

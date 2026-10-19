@@ -134,7 +134,7 @@ func TestConcurrentSavesOfDifferentExtKeysBothSurvive(t *testing.T) {
 	}
 }
 
-// room_set replaces the client fields of a room, but merges ext (§4.3.4,
+// room_set replaces the client fields of a room, but merges ext (§4.2.4,
 // §4.12); the limit applies to the merged ext.
 func TestRoomSetMergesExt(t *testing.T) {
 	_, httpServer := newTestServer(t, DefaultConfig())

@@ -139,7 +139,7 @@ func addPush(app *Server, u *userState, p pushRegistration) *pushRegistration {
 // goIdle tells the server nobody attends c, which tells c nothing.
 func goIdle(t *testing.T, c *testClient) {
 	t.Helper()
-	if frames := c.status(t, map[string]any{"idle": true}); len(frames) != 0 {
+	if frames := c.status(t, map[string]any{"idle": 300}); len(frames) != 0 {
 		t.Fatalf("frames after idle: %#v", frames)
 	}
 }
@@ -243,7 +243,7 @@ func TestPushWakesMentionsAndRepliesOfIdleUsers(t *testing.T) {
 	if got := relay.pushes(t, app, a); len(got) != 1 {
 		t.Fatalf("reply in an unjoined room woke %d", len(got))
 	}
-	// A mention in a private room wakes only its members (§4.3.4).
+	// A mention in a private room wakes only its members (§4.2.4).
 	hidden, _ := saveRoom(t, a, "hidden", map[string]any{"title": "Hidden", "private": true})
 	save(t, a, "hidden-mention", map[string]any{"room_id": hidden, "body": map[string]any{"text": "@guest_2", "mentions": []any{"guest_2"}}})
 	if got := relay.pushes(t, app, a); len(got) != 0 {
@@ -869,8 +869,7 @@ func TestPushUnreadAndBadge(t *testing.T) {
 
 // Registrations, with their keys, push_id, and scopes, survive a restart,
 // and so do the VAPID key and the status and mutes the user set (§4.5). A
-// registration stored by url alone, before registrations belonged to their
-// user, is kept, and a stored status the server does not support loads as "".
+// stored status the server does not support loads as "".
 func TestPushAndStatusSurviveRestart(t *testing.T) {
 	memory := store.NewMemory()
 	_, keys := testSubscription(t)
@@ -878,7 +877,7 @@ func TestPushAndStatusSurviveRestart(t *testing.T) {
 		{Kind: entryUser, ID: "erin", Value: encodeJSON(storedUser{Name: "Erin", Passkey: &storedPasskey{Handle: []byte("h")}})},
 		{Kind: entryUser, ID: "finn", Value: []byte(`{"name":"Finn","passkey":{"handle":"aA=="},"status":"invisible"}`)},
 		{Kind: entryUser, ID: "gail", Value: []byte(`{"name":"Gail","passkey":{"handle":"aQ=="},"status":"away"}`)},
-		{Kind: entryPush, ID: "https://relay.example/legacy", Value: []byte(`{"user":"erin","kind":"relay","token":"tok"}`)},
+		{Kind: entryPush, ID: pushKey("erin", "https://relay.example/erin"), Value: encodeJSON(storedPush{User: "erin", Kind: "relay", URL: "https://relay.example/erin", Token: "tok", Wake: defaultWake.names(), Renewed: time.Now()})},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -887,10 +886,10 @@ func TestPushAndStatusSurviveRestart(t *testing.T) {
 	key := frame["params"].(map[string]any)["push"].(map[string]any)["webpush"].(map[string]any)["key"]
 	app.mu.Lock()
 	erin := app.users["erin"]
-	migrated := erin.pushes["https://relay.example/legacy"]
-	if migrated == nil || migrated.token != "tok" || migrated.wake != defaultWake || !migrated.live(time.Now()) {
+	relay := erin.pushes["https://relay.example/erin"]
+	if relay == nil || relay.token != "tok" || relay.wake != defaultWake || !relay.live(time.Now()) {
 		app.mu.Unlock()
-		t.Fatalf("legacy registration: %#v", migrated)
+		t.Fatalf("relay registration: %#v", relay)
 	}
 	subscription, _ := parsePushKeys(keys["p256dh"].(string), keys["auth"].(string))
 	app.addPushLocked(erin, &pushRegistration{
@@ -921,7 +920,7 @@ func TestPushAndStatusSurviveRestart(t *testing.T) {
 	if web == nil || web.kind != "webpush" || web.pushID != "p1" || web.wake != wakeJoined|wakeBadge || web.keys == nil || encodeBase64URL(web.keys.auth) != keys["auth"] {
 		t.Fatalf("webpush registration after restart: %#v", web)
 	}
-	if erin.pushes["https://relay.example/legacy"] == nil || len(app.pushes) != 2 {
+	if erin.pushes["https://relay.example/erin"] == nil || len(app.pushes) != 2 {
 		t.Fatalf("registrations after restart: %v", app.pushes)
 	}
 	if erin.chosen != statusDND || app.users["finn"].chosen != statusNone || !erin.mute.active(time.Now()) || !erin.roomMutes["general"].forever {
@@ -936,7 +935,7 @@ func TestPushAndStatusSurviveRestart(t *testing.T) {
 		return nil
 	})
 	slices.Sort(stored)
-	if !reflect.DeepEqual(stored, []string{"erin https://push.example/s", "erin https://relay.example/legacy"}) {
+	if !reflect.DeepEqual(stored, []string{"erin https://push.example/s", "erin https://relay.example/erin"}) {
 		t.Fatalf("stored registrations: %v", stored)
 	}
 	// A configured VAPID key replaces the stored one, and a malformed one

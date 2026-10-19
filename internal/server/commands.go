@@ -173,7 +173,7 @@ const maxKickReasonRunes = 200
 
 // kickCommand removes the one mentioned user from the room: the room's
 // members, the target included, receive the logged leave membership
-// (§4.3.2), the target room_update left, and the remaining members a ~room
+// (§4.2.2), the target room_update left, and the remaining members a ~room
 // notice with the reason. Only the room's creator and admins or moderators
 // may kick.
 func (s *Server) kickCommand(c *client, r *roomState, body map[string]any, args string) (map[string]any, *rpcError) {
@@ -192,7 +192,9 @@ func (s *Server) kickCommand(c *client, r *roomState, body map[string]any, args 
 	if target == u {
 		return nil, invalidParams("You cannot remove yourself; leave the room instead")
 	}
-	// The first argument names the target as the user typed it.
+	// The first argument names the target as the user typed it. Only
+	// body.mentions says who it is (§3.5.5); a user_id has no whitespace
+	// (§2.4), so the typed mention ends with the first word at the latest.
 	reason := args
 	if first, rest, _ := strings.Cut(args, " "); strings.HasPrefix(first, "@") {
 		reason = strings.TrimSpace(rest)

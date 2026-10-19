@@ -69,7 +69,7 @@ func (m *messageState) snapshot() map[string]any {
 // when the message has reactions. The broadcasts precede the result (§1),
 // so a sender who has joined receives a new upload's pending snapshot before
 // the result carrying its write URL. Posting does not join the room
-// (§4.3.2): a poster who has not joined gets only the result. A new message
+// (§4.2.2): a poster who has not joined gets only the result. A new message
 // with no text and no embeds is neither logged nor broadcast, and its
 // result is {}.
 func (s *Server) saveMessage(c *client, req request) (any, bool, *rpcError) {
@@ -253,7 +253,7 @@ func (s *Server) saveMessage(c *client, req request) (any, bool, *rpcError) {
 // commitSnapshotLocked logs and delivers a message snapshot, adding
 // prev_log_id, in the message's room and, for a move, the previous one too;
 // a move snapshot names the previous room in prev_room_id, since the
-// previous snapshot is in that room's log (§2). It reports whether the
+// previous snapshot is in that room's log (§4.3.1). It reports whether the
 // snapshot moved the message.
 func (s *Server) commitSnapshotLocked(m *messageState, snapshot map[string]any, logID int64) bool {
 	delete(snapshot, "prev_room_id")
@@ -302,7 +302,9 @@ func (s *Server) republishLocked(m *messageState, edit func(body map[string]any)
 }
 
 // redactLocked rewrites a deleted message's earlier snapshots into
-// tombstones at their original log_ids (§4.4).
+// tombstones at their original log_ids (§4.4). At an equal log_id a
+// tombstone wins (§2.3), so a client that kept one of them as it was
+// replaces it with the redacted one it reads later.
 func (s *Server) redactLocked(m *messageState) {
 	for _, record := range m.records {
 		record.rewrite(tombstone)
@@ -423,7 +425,7 @@ func validateBody(body map[string]any) *rpcError {
 			return &rpcError{Code: codeDenied, Message: fmt.Sprintf("A message mentions at most %d users", maxMentions)}
 		}
 		for _, value := range mentions {
-			if id, ok := value.(string); !ok || id == "" {
+			if id, ok := value.(string); !ok || !validID(id) {
 				return invalidParams("body.mentions must be an array of user_id strings")
 			}
 		}
@@ -489,7 +491,7 @@ func (s *Server) react(c *client, req request) (any, bool, *rpcError) {
 }
 
 // commitReactionsLocked logs and delivers one reactions record in the
-// message's current room. Reaction sets carry no prev_log_id (§2).
+// message's current room. Reaction sets carry no prev_log_id (§4.3.1).
 func (s *Server) commitReactionsLocked(m *messageState, elements []any) {
 	logID := s.nextIDLocked()
 	r := s.rooms[m.roomID]

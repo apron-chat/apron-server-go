@@ -233,78 +233,6 @@ func TestRestoreAfterACrash(t *testing.T) {
 	}
 }
 
-// TestRestoreMigratesProtocolV6State restores entries as a protocol v6
-// server stored them: a thread whose intro_message was a message, embedded
-// by reference in its logged record, and a @room notice. The intro text
-// becomes the room's description and the notice is from ~room, in memory
-// and, rewritten once, in the store.
-func TestRestoreMigratesProtocolV6State(t *testing.T) {
-	v6 := store.NewMemory()
-	entry := func(kind, id, value string) store.Entry {
-		return store.Entry{Kind: kind, ID: id, Value: []byte(value)}
-	}
-	intro := `{"body":{"text":"Why *the* deploy failed\n- 4pm"},"from":{"user_id":"alice"},"log_id":"1000","message_id":"1000","room_id":"general"}`
-	edited := `{"body":{"text":"Why the 4pm deploy failed"},"from":{"user_id":"alice"},"log_id":"1003","message_id":"1000","prev_log_id":"1000","room_id":"general"}`
-	notice := `{"body":{"text":"@bob was removed by @alice"},"from":{"name":"General","user_id":"@room"},"log_id":"1002","message_id":"1002","room_id":"general"}`
-	if err := v6.Apply([]store.Entry{
-		entry(entryMeta, "counters", `{"last_id":1004}`),
-		entry(entryRecord, "999", `{"kind":0,"raw":{"log_id":"999","room_id":"general","title":"General"},"rooms":["general"]}`),
-		entry(entryRecord, "1000", `{"kind":1,"raw":`+intro+`,"rooms":["general"]}`),
-		entry(entryRecord, "1001", `{"kind":0,"raw":{"log_id":"1001","parent_room_id":"general","room_id":"1001","title":"Why the deploy failed"},"intro":1000,"rooms":["1001"]}`),
-		entry(entryRecord, "1004", `{"kind":0,"raw":{"log_id":"1004","prev_log_id":"1001","parent_room_id":"general","room_id":"1001","title":"Deploy"},"intro":1000,"rooms":["1001"]}`),
-		entry(entryRecord, "1002", `{"kind":1,"raw":`+notice+`,"rooms":["general"]}`),
-		entry(entryRecord, "1003", `{"kind":1,"raw":`+edited+`,"rooms":["general"]}`),
-		entry(entryRoom, "general", `{"record":{"log_id":"999","room_id":"general","title":"General"},"record_log_id":999,"created_id":999,"latest_id":1003,"members":[]}`),
-		entry(entryRoom, "1001", `{"parent":"general","record":{"intro_message":{"message_id":"1000"},"log_id":"1004","prev_log_id":"1001","parent_room_id":"general","room_id":"1001","title":"Deploy"},"record_log_id":1004,"created_id":1001,"latest_id":1004,"members":[],"title_from":"1000"}`),
-		entry(entryMessage, "1000", `{"from":{"user_id":"alice"},"log_id":1003,"owner":"alice","room_id":"general","records":[1000,1003],"titled_rooms":["1001"]}`),
-		entry(entryMessage, "1002", `{"from":{"name":"General","user_id":"@room"},"log_id":1002,"owner":"@room","room_id":"general","records":[1002]}`),
-	}); err != nil {
-		t.Fatal(err)
-	}
-	check := func(httpServer *httptest.Server) {
-		t.Helper()
-		c := dialTestClient(t, httpServer)
-		// An earlier logged record takes the text of the intro snapshot it
-		// embedded, escaped as Markdown since it was plain text; the current
-		// record takes the message's current text, as v6 showed it, and so
-		// does the latest logged record, at the same log_id.
-		rooms := records(t, historyPage(t, c, "1001", map[string]any{}), "rooms")
-		first := map[string]any{"log_id": "1001", "parent_room_id": "general", "room_id": "1001", "title": "Why the deploy failed", "description": "Why \\*the\\* deploy failed\n\\- 4pm"}
-		want := map[string]any{"log_id": "1004", "prev_log_id": "1001", "parent_room_id": "general", "room_id": "1001", "title": "Deploy", "description": "Why the 4pm deploy failed"}
-		if len(rooms) != 2 || !reflect.DeepEqual(rooms[0], any(first)) || !reflect.DeepEqual(rooms[1], any(want)) {
-			t.Fatalf("migrated room records: %#v", rooms)
-		}
-		listed := listRooms(t, c, map[string]any{"room_id": "1001"})["not_joined"].([]any)
-		room := listed[0].(map[string]any)
-		delete(room, "latest_log_id")
-		delete(room, "history_log_id")
-		if !reflect.DeepEqual(room, want) {
-			t.Fatalf("migrated current record: %#v", room)
-		}
-		messages := records(t, historyPage(t, c, "general", map[string]any{}), "messages")
-		from := messages[1].(map[string]any)["from"]
-		if !reflect.DeepEqual(from, map[string]any{"user_id": "~room", "name": "General"}) {
-			t.Fatalf("migrated notice sender: %#v", messages)
-		}
-	}
-	_, httpServer, stop := startWithStore(t, v6, t.TempDir())
-	check(httpServer)
-	stop()
-	// The migration was written back: a second start finds only v7 state.
-	var legacy []string
-	_ = v6.Load(func(e store.Entry) error {
-		if bytes.Contains(e.Value, []byte("intro")) || bytes.Contains(e.Value, []byte(`"@room"`)) {
-			legacy = append(legacy, e.Kind+" "+e.ID)
-		}
-		return nil
-	})
-	if len(legacy) != 0 {
-		t.Fatalf("v6 state left in the store: %v", legacy)
-	}
-	_, httpServer, _ = startWithStore(t, v6, t.TempDir())
-	check(httpServer)
-}
-
 // Roles from the configuration are granted to accounts, shown in their
 // current user objects, and never settable with `me`; a granted user_id
 // that was never used is not given to a guest. server.welcome is the
@@ -389,20 +317,6 @@ func TestRolesAndWelcome(t *testing.T) {
 	ada.result(t, "room_leave", "remove", map[string]any{"room_id": room, "user_id": guest.userID})
 	expectLeft(t, guest, room, guest.userID)
 	guest.expectError(t, "room_leave", "remove-admin", map[string]any{"room_id": "general", "user_id": adaID}, codeDenied)
-}
-
-func TestEscapeMarkdown(t *testing.T) {
-	for text, want := range map[string]string{
-		"plain words":            "plain words",
-		"*bold* _it_ `code` [x]": `\*bold\* \_it\_ \` + "`" + `code\` + "`" + ` \[x\]`,
-		"# title\n> quote\n- item\n  + sub\n1. one\n2) two": "\\# title\n\\> quote\n\\- item\n  \\+ sub\n1\\. one\n2\\) two",
-		"a - b 1. c <tag> ~x~ |p|":                          `a - b 1. c \<tag\> \~x\~ \|p\|`,
-		`back\slash`:                                        `back\\slash`,
-	} {
-		if got := escapeMarkdown(text); got != want {
-			t.Errorf("escapeMarkdown(%q) = %q, want %q", text, got, want)
-		}
-	}
 }
 
 // dumpLocked renders the whole state as the entries a store holding it
