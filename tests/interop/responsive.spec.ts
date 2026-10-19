@@ -31,12 +31,12 @@ test('thread summary previews and the thread editor fit a phone viewport', async
 		expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(320);
 	}
 	await title.fill(`${token} renamed`);
-	await page.getByRole('button', { name: 'Save thread', exact: true }).click();
+	await page.getByRole('dialog', { name: 'Edit thread', exact: true }).getByRole('button', { name: 'Save', exact: true }).click();
 	await expect(page.getByRole('heading', { level: 1 })).toContainText(`${token} renamed`);
 	await page.getByRole('button', { name: 'Back to room', exact: true }).click();
 	const card = page.getByTestId('thread-card').filter({ hasText: token });
 	await expect(card).toBeVisible();
-	const preview = card.getByTestId('thread-preview');
+	const preview = card.getByTestId('thread-preview-summary').locator('.ap-tline-text');
 	await expect(preview).toHaveText(text);
 	const height = await preview.evaluate((node) => ({ height: node.clientHeight, line: Number.parseFloat(getComputedStyle(node).lineHeight) }));
 	expect(height.height).toBeLessThanOrEqual(height.line * 3 + 1);

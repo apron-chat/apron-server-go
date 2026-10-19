@@ -130,6 +130,12 @@ function senderOf(snapshot: ReturnType<ChatClient['snapshot']>, from: Identity):
 		.filter(([key]) => key === 'user_id' || !(Object.hasOwn(kept, key) && cleared(kept[key])))) as Identity;
 }
 
+function keptUser(snapshot: ReturnType<ChatClient['snapshot']>, id: string): Identity {
+	if (!snapshot.heldStatuses?.includes(id)) return snapshot.users[id];
+	const { status: _held, ...kept } = snapshot.users[id];
+	return kept;
+}
+
 function logicalState(client: ChatClient, operations: Record<string, string>): ObjectValue {
 	const snapshot = client.snapshot();
 	// The default room before its `room_id` is known is the client's own placeholder, not a room;
@@ -142,7 +148,8 @@ function logicalState(client: ChatClient, operations: Record<string, string>): O
 		typing: snapshot.typing
 			.map((entry) => ({ room_id: entry.room, from: entry.from }))
 			.sort((left, right) => byString(left.room_id, right.room_id) || byString(left.from.user_id, right.from.user_id)),
-		users: Object.fromEntries(Object.keys(snapshot.users).sort(byString).map((id) => [id, snapshot.users[id]])),
+		// The kept users: a status only held on screen through a resume is not kept (README "Session state").
+		users: Object.fromEntries(Object.keys(snapshot.users).sort(byString).map((id) => [id, keptUser(snapshot, id)])),
 		members: Object.fromEntries(rooms.filter((room) => room.members !== undefined).sort((left, right) => byString(left.id, right.id))
 			.map((room) => [room.id, room.members!.map((member) => member.user_id).sort(byString)])),
 		senders: Object.fromEntries(rooms.flatMap((room) => room.timeline.order.map((id) => [id, senderOf(snapshot, room.timeline.events[id].from)]))),
