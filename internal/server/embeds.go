@@ -19,6 +19,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	_ "golang.org/x/image/webp" // Registered for image.DecodeConfig.
@@ -88,8 +89,9 @@ func (e *embedState) streamURL() string {
 // body. An embed with embed_id keeps that embed of the current snapshot, with
 // its kind and server-owned fields restored from the server's records; one
 // without is new and gets an embed_id, and a new upload or stream embed gets
-// a write URL, listed in written. Senders' og is dropped: the server only
-// describes media it hosts.
+// a write URL, listed in written. Senders' og keeps only its text, on
+// embeds the server doesn't host, such as link previews (senderOG): the
+// server only describes media it hosts.
 func (s *Server) resolveEmbedsLocked(c *client, messageID string, current map[string]any, body map[string]any) ([]any, []any, *rpcError) {
 	submitted, _ := body["embeds"].([]any)
 	previous := make(map[string]map[string]any)
@@ -130,6 +132,8 @@ func (s *Server) resolveEmbedsLocked(c *client, messageID string, current map[st
 				delete(embed, "url")
 				delete(embed, "text")
 				maps.Copy(embed, cloneObject(e.owned))
+			} else if og, ok := previous[id]["og"].(map[string]any); ok {
+				embed["og"] = cloneObject(og)
 			}
 			embeds = append(embeds, embed)
 			continue
@@ -138,9 +142,13 @@ func (s *Server) resolveEmbedsLocked(c *client, messageID string, current map[st
 		s.embedNumber++
 		id := fmt.Sprintf("embed_%d", s.embedNumber)
 		alt := ogImageAlt(embed["og"])
+		og := senderOG(embed["og"])
 		delete(embed, "og")
 		delete(embed, "write_url")
 		embed["embed_id"] = id
+		if kind != "upload" && kind != "stream" && og != nil {
+			embed["og"] = og
+		}
 		if kind == "upload" || kind == "stream" {
 			delete(embed, "url")
 			delete(embed, "text")
@@ -162,6 +170,46 @@ func (s *Server) resolveEmbedsLocked(c *client, messageID string, current map[st
 func asList(value any) []any {
 	list, _ := value.([]any)
 	return list
+}
+
+// ogTextRunes are the og text a sender may set (§4.8.1), with the most runes
+// each keeps.
+var ogTextRunes = map[string]int{"title": 256, "description": 512, "site_name": 128}
+
+// senderOG is the text of a sender's og, each field one line of plain text
+// bounded by ogTextRunes, or nil when none is left. Media are dropped.
+func senderOG(og any) map[string]any {
+	fields, ok := og.(map[string]any)
+	if !ok {
+		return nil
+	}
+	kept := make(map[string]any)
+	for field, limit := range ogTextRunes {
+		if line := ogLine(fields[field], limit); line != "" {
+			kept[field] = line
+		}
+	}
+	if len(kept) == 0 {
+		return nil
+	}
+	return kept
+}
+
+// ogLine is value as one line of plain text: control, bidirectional control
+// and line or paragraph separator characters become spaces, runs of space
+// collapse, and a line over limit runes is cut short with an ellipsis.
+func ogLine(value any, limit int) string {
+	text, _ := value.(string)
+	text = strings.Join(strings.Fields(strings.Map(func(r rune) rune {
+		if unicode.In(r, unicode.Cc, unicode.Zl, unicode.Zp, unicode.Bidi_Control) {
+			return ' '
+		}
+		return r
+	}, text)), " ")
+	if runes := []rune(text); len(runes) > limit {
+		text = strings.TrimSpace(string(runes[:limit-1])) + "…"
+	}
+	return text
 }
 
 func ogImageAlt(og any) string {

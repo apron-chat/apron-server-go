@@ -579,6 +579,60 @@ func TestUploadsAreHostedWithOpenGraph(t *testing.T) {
 	}
 }
 
+func TestLinkPreviewsKeepTheSendersText(t *testing.T) {
+	_, httpServer := newTestServer(t, DefaultConfig())
+	a := dialGroup(t, httpServer, 1)[0]
+	// A sender's og keeps its text, as one bounded line each, and loses its media (§4.8.1).
+	pin := "https://www.openstreetmap.org/?mlat=51.5&mlon=-0.12"
+	messageID, sent := save(t, a, "pin", map[string]any{"body": map[string]any{"text": "📍 " + pin, "embeds": []any{
+		map[string]any{"kind": "link", "url": pin, "og": map[string]any{
+			"site_name":   "OpenStreetMap",
+			"title":       "Shared\u202e\nlocation 👩‍💻",
+			"description": strings.Repeat("é", 600),
+			"image":       map[string]any{"url": "https://tracker.example/pixel.png"},
+		}},
+		map[string]any{"kind": "link", "url": "https://example.com/", "og": map[string]any{"image": map[string]any{"url": "https://tracker.example/x.png"}}},
+	}}})
+	wantOG := map[string]any{"site_name": "OpenStreetMap", "title": "Shared location 👩‍💻", "description": strings.Repeat("é", 511) + "…"}
+	embeds := embedsOf(t, sent)
+	if !reflect.DeepEqual(embeds[0]["og"], any(wantOG)) || embeds[0]["url"] != pin {
+		t.Fatalf("link embed: %#v", embeds[0])
+	}
+	if _, has := embeds[1]["og"]; has {
+		t.Fatalf("media-only og kept: %#v", embeds[1])
+	}
+
+	// An edit that keeps the embed keeps the og it was sent with, not a new one.
+	kept := map[string]any{"embed_id": embeds[0]["embed_id"], "kind": "link", "url": pin, "og": map[string]any{"title": "Somewhere else"}}
+	_, edited := save(t, a, "edit", map[string]any{"message_id": messageID, "body": map[string]any{"text": "here", "embeds": []any{kept}}})
+	if got := embedsOf(t, edited)[0]["og"]; !reflect.DeepEqual(got, any(wantOG)) {
+		t.Fatalf("edited og: %#v", got)
+	}
+}
+
+func TestVideoUploadsArePlayable(t *testing.T) {
+	_, httpServer := newTestServer(t, DefaultConfig())
+	a := dialGroup(t, httpServer, 1)[0]
+	// A screen recording, as MediaRecorder labels it: its codecs are dropped from the type.
+	_, result := a.request(t, "message", "video", map[string]any{"room_id": "general", "body": map[string]any{
+		"embeds": []any{map[string]any{"kind": "upload", "title": "screen-recording.webm"}},
+	}})
+	writeURL := result["embeds"].([]any)[0].(map[string]any)["write_url"].(string)
+	webm := []byte{0x1a, 0x45, 0xdf, 0xa3, 0x42, 0x82, 0x84, 'w', 'e', 'b', 'm'}
+	if status, _, _ := httpDo(t, http.MethodPut, writeURL, bytes.NewReader(webm), "video/webm;codecs=vp9,opus"); status != http.StatusCreated {
+		t.Fatalf("upload status %d", status)
+	}
+	upload := embedsOf(t, a.notification(t, "message"))[0]
+	fileURL, _ := upload["url"].(string)
+	if want := map[string]any{"title": "screen-recording.webm", "video": map[string]any{"url": fileURL, "type": "video/webm"}}; !reflect.DeepEqual(upload["og"], any(want)) {
+		t.Fatalf("og: %#v", upload["og"])
+	}
+	status, header, _ := httpDo(t, http.MethodGet, fileURL, nil, "")
+	if status != http.StatusOK || header.Get("Content-Type") != "video/webm" || !strings.HasPrefix(header.Get("Content-Disposition"), "inline") || header.Get("Accept-Ranges") != "bytes" {
+		t.Fatalf("file: %d %#v", status, header)
+	}
+}
+
 func TestUploadTypesThatCouldRunAreServedAsDownloads(t *testing.T) {
 	for declared, want := range map[string]string{
 		"image/png":        "image/png",
