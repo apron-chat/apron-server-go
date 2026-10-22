@@ -41,7 +41,7 @@ test('thread summary previews and the thread editor fit a phone viewport', async
 	const height = await preview.evaluate((node) => ({ height: node.clientHeight, line: Number.parseFloat(getComputedStyle(node).lineHeight) }));
 	expect(height.height).toBeLessThanOrEqual(height.line * 3 + 1);
 	await card.click();
-	await expect(page.getByTestId('thread-summary')).toBeInViewport();
+	await expect(page.getByTestId('pane-summary')).toBeInViewport();
 	const width = await page.evaluate(() => document.documentElement.scrollWidth);
 	expect(width).toBeLessThanOrEqual(321);
 });
@@ -58,7 +58,7 @@ test('thread replies and a deleted source message remain usable on a phone viewp
 	await expect(page.locator(`[data-testid="thread-list"] button[data-thread="${threadId}"]`)).toHaveAttribute('aria-current', 'page');
 	await page.locator(`[data-testid="thread-list"] button[data-thread="${threadId}"]`).click();
 	// The thread shows its description; its composer replies to the message it started from.
-	await expect(page.getByTestId('thread-summary')).toContainText('mobile-thread-');
+	await expect(page.getByTestId('pane-summary')).toContainText('mobile-thread-');
 	await expect(page.getByTestId('reply-draft')).toContainText('mobile-thread-');
 	const reply = `mobile-reply-${Date.now()}`;
 	await sendMessage(page, reply);
@@ -77,7 +77,7 @@ test('thread replies and a deleted source message remain usable on a phone viewp
 	await page.locator(`[data-testid="thread-list"] button[data-thread="${threadId}"]`).click();
 	await expect(await waitForMessage(page, reply)).toBeVisible();
 	await expect(page.locator(`article[data-message-id="${replyId}"]`).getByTestId('reply-reference')).toContainText('Message deleted');
-	await expect(page.getByTestId('thread-summary')).toContainText('mobile-thread-');
+	await expect(page.getByTestId('pane-summary')).toContainText('mobile-thread-');
 	const dimensions = await page.evaluate(() => ({
 		width: window.innerWidth,
 		document: document.documentElement.scrollWidth,
