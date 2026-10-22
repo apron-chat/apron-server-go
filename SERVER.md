@@ -384,10 +384,10 @@ returned in `history`'s `memberships` array and delivered live in
 `room_update` with the room in `joined`, its `members` and `users`, and the
 membership; the leaving or removed user's get `left` and the membership;
 the room's other members get the membership alone. A new identity's join to
-`general` reaches its connection as the membership alone, after the `auth`
-result, since the client lists its rooms with `room_list`: every
-notification a sign-in causes on its connection, the departure of a guest
-identity it leaves included, follows the result (§3.2).
+`general` is no exception: its connections get the same `room_update`
+`joined`, after the `auth` result, since every notification a sign-in
+causes on its connection, the departure of a guest identity it leaves
+included, follows the result (§3.2).
 The server logs memberships for every user, guests included: a new guest's
 join to `general` at `auth` (delivered to its connection after the `auth`
 result), `room_join` and `room_leave` (for oneself or another user), the

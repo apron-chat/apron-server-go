@@ -251,13 +251,11 @@ func (s *Server) addMemberLocked(u *userState, r *roomState) jsontext.Value {
 }
 
 // joinDefaultRoomLocked joins a new identity to the default room, so its
-// room list is not empty. Its connections receive the membership alone, as
-// room_update memberships after the auth result (§3.2): the client lists its
-// rooms with room_list (§4.2.1).
+// room list is not empty. Like any join, its connections receive
+// room_update joined with the membership (§4.2.3), after the auth result
+// (§3.2).
 func (s *Server) joinDefaultRoomLocked(u *userState) {
-	if membership := s.addMemberLocked(u, s.rooms[defaultRoomID]); membership != nil {
-		u.send(roomUpdate("memberships", membership))
-	}
+	s.joinLocked(u, s.rooms[defaultRoomID])
 }
 
 // joinLocked joins u to r: the room's other members receive the membership,

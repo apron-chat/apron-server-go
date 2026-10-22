@@ -94,8 +94,8 @@ func dialOrigin(t *testing.T, httpServer *httptest.Server, origin string) (*test
 }
 
 // guestAuth signs c in as a guest and returns the auth result. Every
-// notification the sign-in causes follows the result (§3.2): first the
-// membership of the guest's join to general.
+// notification the sign-in causes follows the result (§3.2): first
+// room_update joined for the guest's join to general.
 func guestAuth(t *testing.T, c *testClient) map[string]any {
 	t.Helper()
 	before, result := c.request(t, "auth", c.nextID("auth"), map[string]any{"scheme": "guest"})
@@ -103,8 +103,28 @@ func guestAuth(t *testing.T, c *testClient) map[string]any {
 	if len(before) != 0 {
 		t.Fatalf("frames before the guest auth result: %#v", before)
 	}
-	checkMembership(t, membershipOnly(t, c.read(t)), "general", c.userID, true)
+	expectJoinedDefault(t, c, c.userID)
 	return result
+}
+
+// expectJoinedDefault reads the room_update that tells userID's connection
+// of its join to general at sign-in: joined, with the room's members, and
+// the membership, as any join sends (§4.2.3).
+func expectJoinedDefault(t *testing.T, c *testClient, userID string) map[string]any {
+	t.Helper()
+	return checkJoinedDefault(t, c.read(t), userID)
+}
+
+// checkJoinedDefault checks a room_update joined for userID's join to
+// general and returns its membership record.
+func checkJoinedDefault(t *testing.T, frame map[string]any, userID string) map[string]any {
+	t.Helper()
+	if record := joinedRecord(t, frame, userID); record["room_id"] != "general" {
+		t.Fatalf("joined %#v, want general", record)
+	}
+	membership := membershipOf(t, frame)
+	checkMembership(t, membership, "general", userID, true)
+	return membership
 }
 
 // membershipOf returns the one membership record of a room_update frame
@@ -129,9 +149,8 @@ func membershipOnly(t *testing.T, frame map[string]any) map[string]any {
 	return membershipOf(t, frame)
 }
 
-// dialTestClient signs in a new guest. The guest's join to general is a
-// logged membership, delivered to its connection after the auth result
-// (§3.2); clients list their rooms with room_list.
+// dialTestClient signs in a new guest. The guest's join to general is
+// delivered to its connection after the auth result (§3.2).
 func dialTestClient(t *testing.T, httpServer *httptest.Server) *testClient {
 	t.Helper()
 	c, _ := dialRaw(t, httpServer)

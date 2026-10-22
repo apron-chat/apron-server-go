@@ -377,8 +377,8 @@ func (s *Server) authenticate(c *client, req request) (any, *rpcError) {
 // follows a sign-in (§4.5). A sign-in signs the connection in as a user it
 // was not signed in as: an auth that adds a passkey or address, or that
 // signs in again as the same user, is not one, and is sent nothing after
-// its result. No room_update is sent for the new identity's rooms: the
-// client lists them with room_list.
+// its result. No room_update is sent for rooms the identity had already
+// joined: the client lists them with room_list.
 func (s *Server) switchUserLocked(c *client, req request, user *userState, extra map[string]any, signIn, joinDefault bool) map[string]any {
 	result := map[string]any{"you": user.you()}
 	maps.Copy(result, extra)
