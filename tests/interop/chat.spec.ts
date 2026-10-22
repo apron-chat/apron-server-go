@@ -42,7 +42,7 @@ test.describe('chat protocol interoperability', () => {
 			// its text, quoted (§4.2), shown at its top; the message stays in the
 			// room, and the composer replies to it.
 			await expect(pageA.getByRole('heading', { level: 1 })).toContainText(`${token} first line`);
-			const summaryA = pageA.getByTestId('thread-summary');
+			const summaryA = pageA.getByTestId('pane-summary');
 			await expect(summaryA).toContainText('Fifth line');
 			await expect(pageA.getByTestId('reply-draft')).toContainText(`${token} first line`);
 			const cardA = pageA.locator(`[data-testid="thread-card"][data-thread="${threadId}"]`);
@@ -113,7 +113,7 @@ test.describe('chat protocol interoperability', () => {
 			const editorA = pageA.getByRole('dialog', { name: 'Edit thread', exact: true });
 			await editorA.getByRole('textbox', { name: 'Thread summary', exact: true }).fill('');
 			await editorA.getByRole('button', { name: 'Save', exact: true }).click();
-			await expect(pageA.getByTestId('thread-summary')).toHaveCount(0);
+			await expect(pageA.getByTestId('pane-summary')).toHaveCount(0);
 			await expect(summaryLineB).toHaveCount(0);
 			await expect(latestLineB.locator('.ap-tline-text')).toHaveText(new RegExp(` ${token}-latest$`));
 			const stableLatest = pageA.locator(`article[data-message-id="${latestId}"]`);
@@ -158,7 +158,7 @@ test.describe('chat protocol interoperability', () => {
 		const threadId = await startThread(page, page.locator(`article[data-message-id="${messageId}"]`));
 		// A thread started from a plain message is described by its text,
 		// escaped as Markdown, so it reads as written.
-		const summary = page.getByTestId('thread-summary');
+		const summary = page.getByTestId('pane-summary');
 		await expect(summary).toContainText('fourth *not emphasis*');
 		await expect(summary.locator('em')).toHaveCount(0);
 		await page.getByRole('button', { name: 'Back to room', exact: true }).click();
@@ -231,8 +231,11 @@ test.describe('chat protocol interoperability', () => {
 		const jump = page.getByRole('button', { name: /jump to latest$/i });
 		const list = page.getByTestId('message-list');
 		await expect(jump).toHaveCount(0);
-		// Opening a thread starts at its beginning, with the latest reply below the fold.
+		// A thread opens at its latest reply, as a room does; scrolled back to its start, the latest is below the fold.
 		await page.locator(`[data-testid="thread-card"][data-thread="${threadId}"]`).click();
+		await waitForMessage(page, `${token}-reply`);
+		await expect(jump).toHaveCount(0);
+		await list.evaluate((node) => { node.scrollTop = 0; });
 		await expect(jump).toBeVisible();
 		await jump.click();
 		await expect(jump).toHaveCount(0);
@@ -950,15 +953,18 @@ test.describe('chat protocol interoperability', () => {
 			await setDisplayName(pageB, handle);
 			const id = await userIdOf(pageB);
 
-			await sendMessage(pageA, [`${handle}-root`, ...Array.from({ length: 40 }, (_, line) => `Intro line ${line}`)].join('\n\n'));
+			// The thread's summary is pinned above its timeline, so a long reply puts the latest below the fold.
+			await sendMessage(pageA, `${handle}-root`);
 			const threadId = await startThread(pageA, await waitForMessage(pageA, `${handle}-root`));
+			await sendMessage(pageA, [`${handle}-intro`, ...Array.from({ length: 40 }, (_, line) => `Intro line ${line}`)].join('\n\n'));
+			await waitForMessage(pageA, `${handle}-intro`);
 			await sendMessage(pageA, `${handle}-first-reply`);
 			await waitForMessage(pageA, `${handle}-first-reply`);
 
 			await openThread(pageB, threadId, { join: true });
 			await waitForMessage(pageB, `${handle}-first-reply`);
 			await pageB.getByTestId('message-list').evaluate((node) => { node.scrollTop = 0; });
-			// The plain jump button. It counts the replies that were never in view, which here is the first one,
+			// The plain jump button. It counts the replies that were never in view, which here is the short latest one,
 			// or none when it was in view as the thread opened.
 			await expect(pageB.getByTestId('jump-button')).toHaveAccessibleName(/^(1 new message, jump|Jump) to latest$/);
 			await expect(pageB.locator('.ap-jumpfab')).toBeVisible();
