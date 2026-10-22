@@ -1002,7 +1002,7 @@ func TestRoomMutesAreBounded(t *testing.T) {
 // connected. A guest that becomes a new account keeps its user_id, so
 // others are told of no change at all.
 func TestSignInToExistingAccountIsADeparture(t *testing.T) {
-	_, httpServer := passkeyTestServer(t)
+	app, httpServer := passkeyTestServer(t)
 	observer := dialTestClient(t, httpServer)
 	watching(observer)
 	observer.drain(t)
@@ -1020,6 +1020,19 @@ func TestSignInToExistingAccountIsADeparture(t *testing.T) {
 		registered := registerTestPasskey(t, owner, newTestAuthenticator(t))
 		setStatus(t, owner, status)
 		_ = owner.ws.Close(websocket.StatusNormalClosure, "away")
+		// The server detaches the closed connection on its own time: wait
+		// for it, so the account's going offline is drained here.
+		for deadline := time.Now().Add(time.Second); ; time.Sleep(time.Millisecond) {
+			app.mu.RLock()
+			open := len(app.users[owner.userID].clients)
+			app.mu.RUnlock()
+			if open == 0 {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("%s still has %d connections", owner.userID, open)
+			}
+		}
 		observer.drain(t)
 
 		guest, _ := dialOrigin(t, httpServer, testPasskeyOrigin)
