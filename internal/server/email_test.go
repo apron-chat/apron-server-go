@@ -204,7 +204,7 @@ func TestEmailSignIn(t *testing.T) {
 	if len(before) != 0 {
 		t.Fatalf("frames before the sign-in result: %#v", before)
 	}
-	checkMembership(t, membershipOnly(t, reader.read(t)), "general", "ada", true)
+	expectJoinedDefault(t, reader, "ada")
 	// The proposal is consumed: neither token works again.
 	third, _ := dialRaw(t, httpServer)
 	third.expectError(t, "auth", "reuse", map[string]any{"scheme": "email", "token": link}, codeDenied)
@@ -299,7 +299,7 @@ func TestEmailAdditions(t *testing.T) {
 	if result["you"].(map[string]any)["user_id"] == victim.userID {
 		t.Fatalf("the attacker became the victim: %#v", result)
 	}
-	checkMembership(t, membershipOnly(t, later.read(t)), "general", result["you"].(map[string]any)["user_id"].(string), true)
+	expectJoinedDefault(t, later, result["you"].(map[string]any)["user_id"].(string))
 	later.expectError(t, "history", "diary", map[string]any{"room_id": diary}, codeInvalidParams)
 	victim.drain(t)
 

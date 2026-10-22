@@ -112,14 +112,15 @@ func TestGuestAuth(t *testing.T) {
 	// A request method without an id is ignored, guest auth included.
 	c.write(t, map[string]any{"method": "auth", "params": map[string]any{"scheme": "guest"}})
 	c.expectQuiet(t)
-	// The new guest's join to general is a logged membership, delivered to
-	// its connection after the auth result (§3.2).
+	// The new guest's join to general is room_update joined, as any join
+	// sends (§4.2.3), delivered to its connection after the auth result
+	// (§3.2).
 	before, result := c.request(t, "auth", "auth", map[string]any{"scheme": "guest", "name": "Ada", "agent": "apron-test/1"})
 	you := result["you"].(map[string]any)
 	if you["user_id"] != "guest_1" || you["name"] != "Ada" || len(before) != 0 {
 		t.Fatalf("guest identity %#v after %#v", you, before)
 	}
-	membership := membershipOnly(t, c.read(t))
+	membership := checkJoinedDefault(t, c.read(t), "guest_1")
 	wantMembership := map[string]any{
 		"log_id": membership["log_id"], "room_id": "general",
 		"members": []any{map[string]any{"user": map[string]any{"user_id": "guest_1", "name": "Ada"}, "joined": true}},
@@ -287,7 +288,7 @@ func TestAuthIsABarrier(t *testing.T) {
 	if got := methods(frames); !reflect.DeepEqual(got, []string{"reply", "room_update", "reply", "reply", "message", "reply"}) {
 		t.Fatalf("pipelined frames: %v", got)
 	}
-	membership := membershipOnly(t, frames[1])
+	membership := checkJoinedDefault(t, frames[1], "guest_1")
 	for i, id := range []string{"auth", "", "list", "history"} {
 		if id != "" && (frames[i]["id"] != id || frames[i]["result"] == nil) {
 			t.Fatalf("reply %d = %#v, want a result for %s", i, frames[i], id)
@@ -296,6 +297,10 @@ func TestAuthIsABarrier(t *testing.T) {
 	listed := frames[2]["result"].(map[string]any)
 	if got := roomIDs(t, listed["joined"]); !reflect.DeepEqual(got, []string{"general"}) || !reflect.DeepEqual(memberIDs(listed["joined"].([]any)[0].(map[string]any)), []string{"guest_1"}) {
 		t.Fatalf("room_list behind auth: %#v", listed)
+	}
+	// The joined record repeats what room_list says of the room (§4.2.3).
+	if joined := frames[1]["params"].(map[string]any)["joined"].([]any)[0]; !reflect.DeepEqual(joined, listed["joined"].([]any)[0]) {
+		t.Fatalf("joined %#v, room_list %#v", joined, listed["joined"])
 	}
 	page := frames[3]["result"].(map[string]any)
 	if got := logIDs(t, page, "memberships"); !reflect.DeepEqual(got, []string{membership["log_id"].(string)}) || page["latest_log_id"] != membership["log_id"] {
@@ -1188,7 +1193,7 @@ func TestSignInNotificationsFollowTheResult(t *testing.T) {
 		t.Fatalf("sign-in frames: %v", got)
 	}
 	b.userID = frames[0]["result"].(map[string]any)["you"].(map[string]any)["user_id"].(string)
-	checkMembership(t, membershipOnly(t, frames[1]), "general", b.userID, true)
+	checkJoinedDefault(t, frames[1], b.userID)
 	checkStatus(t, frames[2], a.userID, "online")
 	b.expectQuiet(t)
 }
