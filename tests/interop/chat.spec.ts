@@ -239,21 +239,29 @@ test.describe('chat protocol interoperability', () => {
 		await expect(jump).toBeVisible();
 		await jump.click();
 		await expect(jump).toHaveCount(0);
+		// The floating day is decoration (aria-hidden): it shows by fading its label in, and stays in the DOM when hidden.
 		const day = page.getByTestId('floating-day');
-		await expect(day).not.toHaveClass(/day-float-shown/);
+		const dayOpacity = () => day.evaluate((row) => {
+			// How opaque its label is as drawn: its own opacity and that of each element around it, up to the row.
+			let node: Element | null = [...row.querySelectorAll('*')].find((child) => child.childElementCount === 0) ?? row;
+			let opacity = 1;
+			for (; node && node !== row.parentElement; node = node.parentElement) opacity *= Number(getComputedStyle(node).opacity);
+			return opacity;
+		});
+		await expect.poll(dayOpacity).toBe(0);
 		await list.evaluate((node) => { node.scrollTop = 0; });
 		await expect(jump).toBeVisible();
 		// At the top the day's own divider shows, and nothing floats over it.
 		await expect(page.locator('.ap-divider-date').first()).toBeInViewport();
-		await expect(day).not.toHaveClass(/day-float-shown/);
+		await expect.poll(dayOpacity).toBe(0);
 		// Scrolled on past it, the day floats at the top, only while you're scrolling.
 		await list.evaluate((node) => {
 			const divider = node.querySelector('.ap-divider-date')!;
 			node.scrollTop += divider.getBoundingClientRect().bottom - node.getBoundingClientRect().top + 40;
 		});
-		await expect(day).toHaveClass(/day-float-shown/);
+		await expect.poll(dayOpacity).toBe(1);
 		await expect(day).toHaveText('Today');
-		await expect(day).not.toHaveClass(/day-float-shown/, { timeout: 3000 });
+		await expect.poll(dayOpacity, { timeout: 3000 }).toBe(0);
 		await page.setViewportSize({ width: 900, height: 1800 });
 		await expect(jump).toHaveCount(0);
 		await page.setViewportSize({ width: 900, height: 700 });
