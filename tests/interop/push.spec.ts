@@ -593,10 +593,10 @@ test('status: set with me, derived online, idle, offline as other clients see it
 	await openChat(otherPage);
 	await new Promise((resolve) => setTimeout(resolve, 1_000));
 
-	// The web client draws status dots in its member list.
+	// The web client draws status dots in its member list, on each member's row (`data-user`) as `data-status`.
 	const memberToggle = otherPage.getByRole('button', { name: 'Show member list' });
 	if (await memberToggle.count()) await memberToggle.first().click();
-	const dot = otherPage.locator(`li.member[data-user="${user1}"]`);
+	const dot = otherPage.getByRole('complementary', { name: 'Room member list', exact: true }).locator(`[data-user="${user1}"]`);
 	const statusesSeen = (frames: Frame[]) => frames.filter((frame) => frame.method === 'user' && frame.params?.new?.user_id === user1).map((frame) => frame.params.new.status);
 	const lastSeen = (frames: Frame[]) => statusesSeen(frames).at(-1);
 	const expectBoth = async (status: string) => {

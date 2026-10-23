@@ -224,15 +224,17 @@ test.describe('reference features against the Go server', () => {
 		const posted = await waitForMessage(page, `/${token} is a path`);
 		await expect(posted).not.toContainText(`//${token}`);
 
-		// `/nick` is the client's own: a `me` request. The header then shows Name (@user_id).
+		// `/nick` is the client's own: a `me` request.
 		const handle = `nick-${Date.now().toString(36)}`;
 		await field.fill(`/nick ${handle}`);
 		await run.click();
 		await expect(page.getByRole('button', { name: new RegExp(`^Your profile on .*: ${handle}[,.]`) })).toBeVisible();
 		const id = await userIdOf(page);
-		// The earlier message renders with the latest name; notices above it began its group.
-		await expect(posted.locator('.ap-msg-sender')).toHaveText(handle);
-		await expect(posted.getByTestId('sender-handle')).toHaveText(`@${id}`);
+		// The earlier message renders with the latest name; notices above it began its group. Its sender's name
+		// opens the profile of this session's user_id: the message came from that user, and the rename reached it.
+		// (Whether the muted @user_id shows beside the name is the client's choice, §3.3, so it isn't checked.)
+		const sender = posted.getByRole('button', { name: handle, exact: true });
+		await expect(sender).toHaveAttribute('data-user-id', id);
 		await expect(messageByText(page, `/${token} is a path`)).toBeVisible();
 	});
 
