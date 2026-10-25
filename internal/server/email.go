@@ -356,11 +356,13 @@ func signInLink(page, token, state, server string) string {
 	return link
 }
 
-// publicWebSocketURL is the WebSocket endpoint under Config.PublicURL, such
-// as wss://chat.example/ws, or "" when no public URL is configured.
-func (s *Server) publicWebSocketURL() string {
-	parsed, err := url.Parse(s.config.PublicURL)
-	if s.config.PublicURL == "" || err != nil {
+// webSocketURL is the WebSocket endpoint under base, such as
+// wss://chat.example/ws for https://chat.example: a connection's baseURL,
+// Config.PublicURL or else the scheme and host it arrived on. It is "" for a
+// base that isn't an http or https URL.
+func webSocketURL(base string) string {
+	parsed, err := url.Parse(base)
+	if base == "" || err != nil {
 		return ""
 	}
 	switch parsed.Scheme {
@@ -506,7 +508,10 @@ func (s *Server) proposeEmailLocked(c *client, req request) (any, *rpcError) {
 	if linked {
 		p.handle, p.secret = s.newLinkHandleLocked(), rand.Text()
 		s.email.links[p.handle] = p
-		message.Link = signInLink(s.config.EmailLinkURL, p.handle+p.secret, state, s.publicWebSocketURL())
+		// The server's address goes in the link even without a public URL, so a
+		// link that opens a client not tied to one server, such as one on
+		// link.apron.chat, says where to sign in (§4.11.2).
+		message.Link = signInLink(s.config.EmailLinkURL, p.handle+p.secret, state, webSocketURL(c.baseURL))
 	}
 	c.proposal = p
 	if !deliver {

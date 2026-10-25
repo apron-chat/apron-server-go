@@ -610,6 +610,18 @@ func TestEmailFailedAttemptsCountFromAnyConnection(t *testing.T) {
 	c.expectError(t, "auth", "cancelled-code", map[string]any{"scheme": "email", "token": message.Code}, codeDenied)
 }
 
+// Without a public URL, a link carries the WebSocket URL its proposal's
+// connection reached, so a page such as link.apron.chat knows where to sign in.
+func TestEmailLinksNameTheServerWithoutAPublicURL(t *testing.T) {
+	_, mailbox, httpServer := emailTestServer(t, func(config *Config) { config.EmailLinkURL = "https://link.apron.chat/" })
+	c, _ := dialRaw(t, httpServer)
+	propose(t, c, "ada@example.com")
+	message := mailbox.receive(t)
+	if server := linkFragment(t, message).Get("server"); server != wsURL(httpServer) || !strings.HasPrefix(message.Link, "https://link.apron.chat/#token=") {
+		t.Fatalf("link %q, want server %q", message.Link, wsURL(httpServer))
+	}
+}
+
 // A link's token approves with scheme token too, as a client presents a
 // link that isn't its own (§4.11.2); wrong tokens still count against the
 // proposal, and a bearer token for no session is still an expired session.
