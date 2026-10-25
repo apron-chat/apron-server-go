@@ -25,7 +25,7 @@ test('thread summary previews and the thread editor fit a phone viewport', async
 	await (await roomAction(page, 'edit-room')).click();
 	const title = page.getByRole('textbox', { name: 'Thread title', exact: true });
 	await expect(title).toHaveValue(new RegExp(`^${token} longword`));
-	for (const field of [title, page.getByRole('textbox', { name: 'Thread summary', exact: true })]) {
+	for (const field of [title, page.getByRole('textbox', { name: 'Thread description', exact: true })]) {
 		const bounds = await field.boundingBox();
 		expect(bounds!.x).toBeGreaterThanOrEqual(0);
 		expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(320);

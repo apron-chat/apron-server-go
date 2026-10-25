@@ -111,7 +111,7 @@ test.describe('chat protocol interoperability', () => {
 			await cardA.click();
 			await (await roomAction(pageA, 'edit-room')).click();
 			const editorA = pageA.getByRole('dialog', { name: 'Edit thread', exact: true });
-			await editorA.getByRole('textbox', { name: 'Thread summary', exact: true }).fill('');
+			await editorA.getByRole('textbox', { name: 'Thread description', exact: true }).fill('');
 			await editorA.getByRole('button', { name: 'Save', exact: true }).click();
 			await expect(pageA.getByTestId('pane-summary')).toHaveCount(0);
 			await expect(summaryLineB).toHaveCount(0);
