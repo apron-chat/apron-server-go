@@ -343,6 +343,11 @@ func (s *Server) authenticateToken(c *client, req request) (any, *rpcError) {
 	key := sha256.Sum256([]byte(token))
 	session, ok := s.sessions[key]
 	if !ok || session.origin != c.origin || !now.Before(session.expires) {
+		// A temporary token approves its proposal with this scheme too, as
+		// a client presents the token of a link that isn't its own (§4.11.2).
+		if s.config.EmailSender != nil && s.mayApproveLocked(c, token) {
+			return s.approveLocked(c, req)
+		}
 		return nil, &rpcError{Code: codeDenied, Message: "Session expired; sign in again"}
 	}
 	// Each successful resume renews the session for a full lifetime, so an

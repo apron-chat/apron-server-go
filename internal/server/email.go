@@ -378,7 +378,8 @@ func (s *Server) publicWebSocketURL() string {
 
 // authenticateEmail runs the email scheme under s.mu (§4.11). A request
 // without token proposes, by email; one with token approves a proposal
-// (§4.11.3), which takes either scheme the server offers.
+// (§4.11.3), which takes either scheme the server offers, or token
+// (authenticateToken).
 func (s *Server) authenticateEmail(c *client, req request) (any, *rpcError) {
 	if _, has := req.params["token"]; has {
 		return s.approveLocked(c, req)
@@ -620,6 +621,14 @@ func (s *Server) approveLocked(c *client, req request) (any, *rpcError) {
 		return s.signInLocked(c, req, user, now, true, true)
 	}
 	return s.signInLocked(c, req, user, now, true, false)
+}
+
+// mayApproveLocked reports whether token is one that proposalLocked would
+// check against a proposal: the connection's own, or the one its link
+// handle names. Then a wrong token counts as a failed attempt under any
+// scheme; any other token is no temporary token.
+func (s *Server) mayApproveLocked(c *client, token string) bool {
+	return c.proposal != nil || len(token) > linkHandleBytes && s.email.links[token[:linkHandleBytes]] != nil
 }
 
 // proposalLocked returns the live proposal that token approves: the

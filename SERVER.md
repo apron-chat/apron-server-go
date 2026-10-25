@@ -978,8 +978,10 @@ tokens cancel it: on its own connection any wrong token counts, and on any
 connection a link token whose handle (its first ten characters) names the
 proposal but whose secret is wrong. It is dropped when the connection's
 identity changes (a guest `auth`, a token resume, an approval). Proposals
-are kept in memory only. Approval takes either scheme the server offers;
-this server offers no `external` sign-in, which is `unsupported`.
+are kept in memory only. Approval takes `email`, or `token` (§4.11.3): a
+`token` that resumes no session approves a proposal when the connection
+has one pending, or when its handle names one, and wrong tokens count the
+same way. This server offers no `external` sign-in, which is `unsupported`.
 
 A link opens `--email.link-url` (or `--public-url`) with
 `#token=…&state=…&server=…` in its fragment: `state` when the proposal
