@@ -407,7 +407,8 @@ account's join to `general`, and a guest's leaves when it is retired.
   `--max-listed-members` (1000) members: then it lists that many, the most
   recently active (by their latest join or new message in the room), and the
   room carries `member_count`, the number of users who have joined it. The same holds for `room_update`
-  `joined`. With `latest_log_id`, only rooms whose `latest_log_id` is greater
+  `joined`. With `members: true` and `user_id`, `members` and `users` hold only
+  that user, if they are a member, also past the limit, and no `member_count`. With `latest_log_id`, only rooms whose `latest_log_id` is greater
   are listed, and a result with `joined` also carries `left` (present even
   when empty): `[{room_id}]` of the rooms among those listed the user left or
   was removed from since then. Such a room is also in `not_joined` when the

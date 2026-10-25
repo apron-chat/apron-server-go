@@ -586,7 +586,8 @@ func threadTitle(description string) string {
 // `not_joined` (the most recently active maxListedRooms), each most recently
 // active first. `filter` leaves either array out; one it asks for is present
 // even when empty. With `members: true` every room carries its complete
-// members as bare user objects, whose complete objects are in `users`.
+// members as bare user objects, whose complete objects are in `users`;
+// `user_id` then lists only that user, if they are a member.
 //
 // With `latest_log_id`, only rooms whose latest_log_id is greater are
 // listed, and a result with `joined` carries `left`: the rooms among the
@@ -624,6 +625,11 @@ func (s *Server) listRooms(c *client, req request) (any, bool, *rpcError) {
 		return nil, false, err
 	}
 	_, hasRoom := req.params["room_id"]
+	onlyUser, err := parseString(req.params, "user_id", false)
+	if err != nil {
+		return nil, false, err
+	}
+	_, hasUser := req.params["user_id"]
 	since, hasSince, err := parseBound(req.params, "latest_log_id")
 	if err != nil {
 		return nil, false, err
@@ -685,7 +691,15 @@ func (s *Server) listRooms(c *client, req request) (any, bool, *rpcError) {
 		entries := make([]any, len(rooms))
 		for i, r := range rooms {
 			entry := s.roomParamsLocked(r)
-			if withMembers {
+			switch {
+			case withMembers && hasUser:
+				refs := []any{}
+				if m := r.members[onlyUser]; m != nil {
+					refs = append(refs, map[string]any{"user_id": onlyUser, "status": m.shownStatus()})
+					users[onlyUser] = m
+				}
+				entry["members"] = refs
+			case withMembers:
 				maps.Copy(users, s.addMembersLocked(entry, r))
 			}
 			entries[i] = entry
