@@ -200,7 +200,10 @@ for (const fixture of fixtures) {
 			test(`${fixture.name} / ${variant.name} / ${envelope}`, async () => {
 				expect(fixture.format).toBe(4);
 				expect(fixture.kind).toBe('session');
-				const client = new ChatClient(peerUrl.replace('http:', 'ws:') + '/ws');
+				// The fixtures page a room with no checkpoint forward from its lower bound, and interleave history
+				// requests, several out at once, which the protocol allows; the client's defaults are its newest
+				// page and one history request at a time, so it's asked for the fixtures' way, as its own test does.
+				const client = new ChatClient(peerUrl.replace('http:', 'ws:') + '/ws', '', undefined, undefined, { historyStart: 'forward', historyConcurrency: Infinity });
 				const requests = new Map<string, ObjectValue>();
 				const unmatched: ObjectValue[] = [];
 				const operations: Record<string, string> = {};
