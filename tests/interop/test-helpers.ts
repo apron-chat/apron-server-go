@@ -120,7 +120,7 @@ export function reactionChip(message: Locator, emoji: string): Locator {
 
 /**
  * Starts a thread from a message, as its Start thread dialog suggests it (titled
- * after the message's first line, the message quoted as its summary), and waits
+ * after the message's first line, the message quoted as its description), and waits
  * until the new thread is open; returns its room ID.
  */
 export async function startThread(page: Page, message: Locator): Promise<string> {

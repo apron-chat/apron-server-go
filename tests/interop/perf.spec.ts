@@ -17,6 +17,8 @@ import { openChat } from './test-helpers';
  */
 
 const MESSAGES_PER_ROOM = 200;
+/** The client opens a room on its newest page of history, this many records; older ones load on scrolling back. */
+const PAGE = 50;
 const ROUND_TRIPS = 10;
 const CPU_THROTTLE = 4;
 
@@ -69,7 +71,8 @@ async function seed(): Promise<{ perfRoom: string; first: Record<string, string>
 		for (let index = 0; index < MESSAGES_PER_ROOM; index++) {
 			const sender = people[Math.floor(index / 3) % people.length];
 			const result = await sender.call('message', { room_id: room, body: body(index, 'guest') });
-			first[room] ??= result.message_id as string;
+			// The oldest message of the page a room opens on.
+			if (index === MESSAGES_PER_ROOM - PAGE) first[room] = result.message_id as string;
 			last[room] = result.message_id as string;
 		}
 	}
@@ -84,7 +87,7 @@ async function metrics(cdp: CDPSession): Promise<Record<string, number>> {
 
 /**
  * Clicks a room and times the first painted frame, which must hold its latest
- * message, and the frame in which its oldest message is in place too.
+ * message, and the frame in which the oldest message of its page is in place too.
  * Counts elements inserted, descendants included, up to the first frame.
  */
 async function switchTo(page: Page, room: string, first: string, last: string): Promise<{ ms: number; completeMs: number; inserted: number }> {
@@ -171,7 +174,7 @@ test('switching rooms back and forth', async ({ page }) => {
 		switches,
 		'median ms (4x CPU)': Number(median(times).toFixed(1)),
 		'max ms (4x CPU)': Number(Math.max(...times).toFixed(1)),
-		'median ms to whole room (4x CPU)': Number(median(complete).toFixed(1)),
+		'median ms to its whole page (4x CPU)': Number(median(complete).toFixed(1)),
 		'elements inserted / switch': median(inserted),
 		'layouts / switch': per('LayoutCount'),
 		'style recalcs / switch': per('RecalcStyleCount'),

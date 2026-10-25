@@ -24,14 +24,14 @@ import {
 } from './test-helpers';
 
 test.describe('chat protocol interoperability', () => {
-	test('previews thread summaries, falls back to the latest message, and edits shared thread titles', async ({ browser }) => {
+	test('previews thread descriptions, falls back to the latest message, and edits shared thread titles', async ({ browser }) => {
 		const owner = await browser.newContext();
 		const reader = await browser.newContext();
 		try {
 			const pageA = await owner.newPage();
 			const pageB = await reader.newPage();
 			await Promise.all([openChat(pageA), openChat(pageB)]);
-			const token = `summary-${Date.now()}`;
+			const token = `description-${Date.now()}`;
 			const sourceText = `${token} first line\nSecond line\nThird line\nFourth line\nFifth line`;
 			await sendMessage(pageA, sourceText);
 			const sourceA = await waitForMessage(pageA, `${token} first line`);
@@ -42,20 +42,20 @@ test.describe('chat protocol interoperability', () => {
 			// its text, quoted (§4.2), shown at its top; the message stays in the
 			// room, and the composer replies to it.
 			await expect(pageA.getByRole('heading', { level: 1 })).toContainText(`${token} first line`);
-			const summaryA = pageA.getByTestId('pane-summary');
-			await expect(summaryA).toContainText('Fifth line');
+			const descriptionA = pageA.getByTestId('pane-description');
+			await expect(descriptionA).toContainText('Fifth line');
 			await expect(pageA.getByTestId('reply-draft')).toContainText(`${token} first line`);
 			const cardA = pageA.locator(`[data-testid="thread-card"][data-thread="${threadId}"]`);
 			const cardB = pageB.locator(`[data-testid="thread-card"][data-thread="${threadId}"]`);
-			const summaryLineA = cardA.getByTestId('thread-preview-summary');
-			const summaryLineB = cardB.getByTestId('thread-preview-summary');
+			const descriptionLineA = cardA.getByTestId('thread-preview-description');
+			const descriptionLineB = cardB.getByTestId('thread-preview-description');
 			const latestLineB = cardB.getByTestId('thread-preview-latest');
 			// In the room feed the message stays, followed by its thread's card, which previews up to three lines of the description.
 			await expect(pageB.locator(`article[data-message-id="${sourceId}"]`)).toBeVisible();
-			await expect(summaryLineB).toContainText(`${token} first line`);
-			await expect(summaryLineB).toContainText('Fifth line');
+			await expect(descriptionLineB).toContainText(`${token} first line`);
+			await expect(descriptionLineB).toContainText('Fifth line');
 			await expect(pageB.getByTestId('reconnect-divider')).toHaveCount(0);
-			const previewBounds = await summaryLineB.locator('.ap-tline-text').evaluate((node) => ({
+			const previewBounds = await descriptionLineB.locator('.ap-tline-text').evaluate((node) => ({
 				height: node.clientHeight, fullHeight: node.scrollHeight, lineHeight: Number.parseFloat(getComputedStyle(node).lineHeight)
 			}));
 			expect(previewBounds.height).toBeLessThanOrEqual(previewBounds.lineHeight * 3 + 1);
@@ -68,11 +68,11 @@ test.describe('chat protocol interoperability', () => {
 			await pageA.getByRole('button', { name: 'Back to room', exact: true }).click();
 			// The card says when it was last replied to, and previews the newest reply under the description.
 			await expect(cardA.getByTestId('thread-last-reply')).toHaveAttribute('title', /^Last reply /);
-			await expect(summaryLineA).toContainText('Fifth line');
+			await expect(descriptionLineA).toContainText('Fifth line');
 			await expect(cardA.getByTestId('thread-preview-latest')).toContainText(`${token}-latest`);
 
 			await pageB.reload();
-			await expect(summaryLineB).toContainText('Fifth line');
+			await expect(descriptionLineB).toContainText('Fifth line');
 			await cardB.click();
 			// Opening a thread for the first time is not a reconnect.
 			await expect(pageB.getByTestId('reconnect-divider')).toHaveCount(0);
@@ -106,15 +106,15 @@ test.describe('chat protocol interoperability', () => {
 			await expect(stableSource).toContainText(`${token} edited source`);
 			await deleteMessage(pageA, stableSource);
 			await expect(stableSource.getByText('Message deleted', { exact: true })).toBeVisible();
-			await expect(summaryLineB).toContainText('Fifth line');
+			await expect(descriptionLineB).toContainText('Fifth line');
 			// Without a description, the card previews only the latest message.
 			await cardA.click();
 			await (await roomAction(pageA, 'edit-room')).click();
 			const editorA = pageA.getByRole('dialog', { name: 'Edit thread', exact: true });
-			await editorA.getByRole('textbox', { name: 'Thread summary', exact: true }).fill('');
+			await editorA.getByRole('textbox', { name: 'Thread description', exact: true }).fill('');
 			await editorA.getByRole('button', { name: 'Save', exact: true }).click();
-			await expect(pageA.getByTestId('pane-summary')).toHaveCount(0);
-			await expect(summaryLineB).toHaveCount(0);
+			await expect(pageA.getByTestId('pane-description')).toHaveCount(0);
+			await expect(descriptionLineB).toHaveCount(0);
 			await expect(latestLineB.locator('.ap-tline-text')).toHaveText(new RegExp(` ${token}-latest$`));
 			const stableLatest = pageA.locator(`article[data-message-id="${latestId}"]`);
 			await editMessage(stableLatest, `${token}-edited`);
@@ -126,7 +126,7 @@ test.describe('chat protocol interoperability', () => {
 		}
 	});
 
-	test('keeps line breaks in plain-format bodies, their thread summary and card, and a reply quote', async ({ page }) => {
+	test('keeps line breaks in plain-format bodies, their thread description and card, and a reply quote', async ({ page }) => {
 		await openChat(page);
 		const token = `plain-${Date.now()}`;
 		const text = `${token} first line\nsecond   line\n\nfourth *not emphasis*`;
@@ -158,12 +158,12 @@ test.describe('chat protocol interoperability', () => {
 		const threadId = await startThread(page, page.locator(`article[data-message-id="${messageId}"]`));
 		// A thread started from a plain message is described by its text,
 		// escaped as Markdown, so it reads as written.
-		const summary = page.getByTestId('pane-summary');
-		await expect(summary).toContainText('fourth *not emphasis*');
-		await expect(summary.locator('em')).toHaveCount(0);
+		const description = page.getByTestId('pane-description');
+		await expect(description).toContainText('fourth *not emphasis*');
+		await expect(description.locator('em')).toHaveCount(0);
 		await page.getByRole('button', { name: 'Back to room', exact: true }).click();
 		// The card previews the description's lines, one per line.
-		const preview = page.locator(`[data-testid="thread-card"][data-thread="${threadId}"]`).getByTestId('thread-preview-summary').locator('.ap-tline-text');
+		const preview = page.locator(`[data-testid="thread-card"][data-thread="${threadId}"]`).getByTestId('thread-preview-description').locator('.ap-tline-text');
 		expect(await preview.evaluate((node) => (node as HTMLElement).innerText)).toBe(`${token} first line\nsecond   line\nfourth *not emphasis*`);
 	});
 
@@ -961,7 +961,7 @@ test.describe('chat protocol interoperability', () => {
 			await setDisplayName(pageB, handle);
 			const id = await userIdOf(pageB);
 
-			// The thread's summary is pinned above its timeline, so a long reply puts the latest below the fold.
+			// The thread's description is pinned above its timeline, so a long reply puts the latest below the fold.
 			await sendMessage(pageA, `${handle}-root`);
 			const threadId = await startThread(pageA, await waitForMessage(pageA, `${handle}-root`));
 			await sendMessage(pageA, [`${handle}-intro`, ...Array.from({ length: 40 }, (_, line) => `Intro line ${line}`)].join('\n\n'));

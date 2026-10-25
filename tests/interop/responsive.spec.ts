@@ -14,10 +14,10 @@ test('chat remains usable without horizontal overflow on a phone viewport', asyn
 	expect(dimensions.bodyWidth).toBeLessThanOrEqual(dimensions.innerWidth + 1);
 });
 
-test('thread summary previews and the thread editor fit a phone viewport', async ({ page }) => {
+test('thread description previews and the thread editor fit a phone viewport', async ({ page }) => {
 	await page.setViewportSize({ width: 320, height: 740 });
 	await openChat(page);
-	const token = `mobile-summary-${Date.now()}`;
+	const token = `mobile-description-${Date.now()}`;
 	const text = `${token} ${'longword'.repeat(30)}\nSecond line\nThird line\nFourth line\nLast line`;
 	await sendMessage(page, text);
 	const message = await waitForMessage(page, token);
@@ -25,7 +25,7 @@ test('thread summary previews and the thread editor fit a phone viewport', async
 	await (await roomAction(page, 'edit-room')).click();
 	const title = page.getByRole('textbox', { name: 'Thread title', exact: true });
 	await expect(title).toHaveValue(new RegExp(`^${token} longword`));
-	for (const field of [title, page.getByRole('textbox', { name: 'Thread summary', exact: true })]) {
+	for (const field of [title, page.getByRole('textbox', { name: 'Thread description', exact: true })]) {
 		const bounds = await field.boundingBox();
 		expect(bounds!.x).toBeGreaterThanOrEqual(0);
 		expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(320);
@@ -36,12 +36,12 @@ test('thread summary previews and the thread editor fit a phone viewport', async
 	await page.getByRole('button', { name: 'Back to room', exact: true }).click();
 	const card = page.getByTestId('thread-card').filter({ hasText: token });
 	await expect(card).toBeVisible();
-	const preview = card.getByTestId('thread-preview-summary').locator('.ap-tline-text');
+	const preview = card.getByTestId('thread-preview-description').locator('.ap-tline-text');
 	await expect(preview).toHaveText(text);
 	const height = await preview.evaluate((node) => ({ height: node.clientHeight, line: Number.parseFloat(getComputedStyle(node).lineHeight) }));
 	expect(height.height).toBeLessThanOrEqual(height.line * 3 + 1);
 	await card.click();
-	await expect(page.getByTestId('pane-summary')).toBeInViewport();
+	await expect(page.getByTestId('pane-description')).toBeInViewport();
 	const width = await page.evaluate(() => document.documentElement.scrollWidth);
 	expect(width).toBeLessThanOrEqual(321);
 });
@@ -58,7 +58,7 @@ test('thread replies and a deleted source message remain usable on a phone viewp
 	await expect(page.locator(`[data-testid="thread-list"] button[data-thread="${threadId}"]`)).toHaveAttribute('aria-current', 'page');
 	await page.locator(`[data-testid="thread-list"] button[data-thread="${threadId}"]`).click();
 	// The thread shows its description; its composer replies to the message it started from.
-	await expect(page.getByTestId('pane-summary')).toContainText('mobile-thread-');
+	await expect(page.getByTestId('pane-description')).toContainText('mobile-thread-');
 	await expect(page.getByTestId('reply-draft')).toContainText('mobile-thread-');
 	const reply = `mobile-reply-${Date.now()}`;
 	await sendMessage(page, reply);
@@ -77,7 +77,7 @@ test('thread replies and a deleted source message remain usable on a phone viewp
 	await page.locator(`[data-testid="thread-list"] button[data-thread="${threadId}"]`).click();
 	await expect(await waitForMessage(page, reply)).toBeVisible();
 	await expect(page.locator(`article[data-message-id="${replyId}"]`).getByTestId('reply-reference')).toContainText('Message deleted');
-	await expect(page.getByTestId('pane-summary')).toContainText('mobile-thread-');
+	await expect(page.getByTestId('pane-description')).toContainText('mobile-thread-');
 	const dimensions = await page.evaluate(() => ({
 		width: window.innerWidth,
 		document: document.documentElement.scrollWidth,
