@@ -610,6 +610,63 @@ func TestEmailFailedAttemptsCountFromAnyConnection(t *testing.T) {
 	c.expectError(t, "auth", "cancelled-code", map[string]any{"scheme": "email", "token": message.Code}, codeDenied)
 }
 
+// Without a public URL, a link carries the WebSocket URL its proposal's
+// connection reached, so a page such as link.apron.chat knows where to sign in.
+func TestEmailLinksNameTheServerWithoutAPublicURL(t *testing.T) {
+	_, mailbox, httpServer := emailTestServer(t, func(config *Config) { config.EmailLinkURL = "https://link.apron.chat/" })
+	c, _ := dialRaw(t, httpServer)
+	propose(t, c, "ada@example.com")
+	message := mailbox.receive(t)
+	if server := linkFragment(t, message).Get("server"); server != wsURL(httpServer) || !strings.HasPrefix(message.Link, "https://link.apron.chat/#token=") {
+		t.Fatalf("link %q, want server %q", message.Link, wsURL(httpServer))
+	}
+}
+
+// A link's token approves with scheme token too, as a client presents a
+// link that isn't its own (§4.11.2); wrong tokens still count against the
+// proposal, and a bearer token for no session is still an expired session.
+func TestEmailApprovesWithTheTokenScheme(t *testing.T) {
+	_, mailbox, httpServer := emailTestServer(t, nil)
+	proposer, _ := dialRaw(t, httpServer)
+	propose(t, proposer, "ada@example.com")
+	message := mailbox.receive(t)
+	link := linkToken(t, message)
+	reader, _ := dialRaw(t, httpServer)
+	result := reader.result(t, "auth", "link", map[string]any{"scheme": "token", "token": link})
+	if result["you"].(map[string]any)["user_id"] == nil || result["token"] == nil {
+		t.Fatalf("sign-in by link with scheme token: %#v", result)
+	}
+	// Used up, under either scheme.
+	again, _ := dialRaw(t, httpServer)
+	again.expectError(t, "auth", "reuse", map[string]any{"scheme": "email", "token": link}, codeDenied)
+
+	// A code on the proposing connection approves with scheme token as well.
+	second, _ := dialRaw(t, httpServer)
+	propose(t, second, "bob@example.com")
+	if code := second.result(t, "auth", "code", map[string]any{"scheme": "token", "token": mailbox.receive(t).Code}); code["you"] == nil {
+		t.Fatalf("sign-in by code with scheme token: %#v", code)
+	}
+
+	// Wrong tokens behind a link's handle count against its proposal under scheme token too.
+	third, _ := dialRaw(t, httpServer)
+	propose(t, third, "carol@example.com")
+	link = linkToken(t, mailbox.receive(t))
+	wrong := link[:linkHandleBytes] + strings.Repeat("A", len(link)-linkHandleBytes)
+	for i := range maxEmailAttempts {
+		guesser, _ := dialRaw(t, httpServer)
+		guesser.expectError(t, "auth", fmt.Sprintf("guess-%d", i), map[string]any{"scheme": "token", "token": wrong}, codeDenied)
+	}
+	late, _ := dialRaw(t, httpServer)
+	late.expectError(t, "auth", "cancelled", map[string]any{"scheme": "token", "token": link}, codeDenied)
+
+	// Any other token is no temporary token: its resume fails as before.
+	stranger, _ := dialRaw(t, httpServer)
+	frame := stranger.call(t, "auth", "resume", map[string]any{"scheme": "token", "token": "st_unknown"})
+	if failure := frame["error"].(map[string]any); failure["message"] != "Session expired; sign in again" {
+		t.Fatalf("unknown bearer token: %#v", frame)
+	}
+}
+
 // Emails are limited per address and per client, deliveries in progress
 // are bounded, refused proposals leave nothing behind, and a full table
 // forgets only entries whose limits have lapsed.

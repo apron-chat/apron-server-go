@@ -1154,6 +1154,19 @@ func TestMemberListsAreTruncatedWithMemberCount(t *testing.T) {
 	if general["member_count"] != float64(3) || !reflect.DeepEqual(memberIDs(general), []string{"guest_1", "guest_3"}) || len(listed["users"].([]any)) != 2 {
 		t.Fatalf("truncated listing: %#v", listed)
 	}
+	// user_id lists only that member, also one the truncated listing leaves
+	// out, and no one for a user who isn't a member.
+	for id, want := range map[string][]string{"guest_2": {"guest_2"}, "nobody": {}} {
+		one := listRooms(t, clients[1], map[string]any{"room_id": "general", "members": true, "user_id": id})
+		rooms := one["not_joined"].([]any)
+		if len(rooms) == 0 {
+			rooms = one["joined"].([]any)
+		}
+		room := rooms[0].(map[string]any)
+		if _, has := room["member_count"]; has || !reflect.DeepEqual(memberIDs(room), want) || len(one["users"].([]any)) != len(want) {
+			t.Fatalf("listing of %s: %#v", id, one)
+		}
+	}
 	// 0 lists every member.
 	unlimited := DefaultConfig()
 	unlimited.MaxListedMembers = 0

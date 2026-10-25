@@ -407,7 +407,8 @@ account's join to `general`, and a guest's leaves when it is retired.
   `--max-listed-members` (1000) members: then it lists that many, the most
   recently active (by their latest join or new message in the room), and the
   room carries `member_count`, the number of users who have joined it. The same holds for `room_update`
-  `joined`. With `latest_log_id`, only rooms whose `latest_log_id` is greater
+  `joined`. With `members: true` and `user_id`, `members` and `users` hold only
+  that user, if they are a member, also past the limit, and no `member_count`. With `latest_log_id`, only rooms whose `latest_log_id` is greater
   are listed, and a result with `joined` also carries `left` (present even
   when empty): `[{room_id}]` of the rooms among those listed the user left or
   was removed from since then. Such a room is also in `not_joined` when the
@@ -978,8 +979,10 @@ tokens cancel it: on its own connection any wrong token counts, and on any
 connection a link token whose handle (its first ten characters) names the
 proposal but whose secret is wrong. It is dropped when the connection's
 identity changes (a guest `auth`, a token resume, an approval). Proposals
-are kept in memory only. Approval takes either scheme the server offers;
-this server offers no `external` sign-in, which is `unsupported`.
+are kept in memory only. Approval takes `email`, or `token` (§4.11.3): a
+`token` that resumes no session approves a proposal when the connection
+has one pending, or when its handle names one, and wrong tokens count the
+same way. This server offers no `external` sign-in, which is `unsupported`.
 
 A link opens `--email.link-url` (or `--public-url`) with
 `#token=…&state=…&server=…` in its fragment: `state` when the proposal
