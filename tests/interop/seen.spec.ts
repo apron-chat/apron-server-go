@@ -5,8 +5,8 @@
  *   npx playwright test --project=push seen
  *
  * The subject is an account, signed up with a passkey on Chromium's virtual authenticator: a
- * guest is retired when its connection ends (a reconnect is a new guest), so it never shows
- * offline with a seen. The watcher is the web client as a guest in another browser context.
+ * guest is retired when its connection ends (a reconnect is a new guest), so it is never shown
+ * offline after it leaves. The watcher is the web client as a guest in another browser context.
  */
 import { expect, test, type Browser, type BrowserContext, type Locator, type Page } from '@playwright/test';
 import { openChat, signUpWithPasskey, userIdOf } from './test-helpers';
@@ -115,8 +115,25 @@ test('an account that leaves, comes back, and goes invisible shows Last seen onl
 	expect(hidden, 'seen is when it chose invisible').toBeGreaterThanOrEqual(Math.max(left, choosing - 1_000));
 	expect(hidden, 'seen is when it chose invisible').toBeLessThanOrEqual(shownInvisible + 1_000);
 
+	// While invisible, its tab closes and another opens: others are told nothing, so the row stays
+	// offline and Last seen stays when it chose invisible, telling nothing of its connections. The
+	// server sends nothing to wait for, so each step gets a moment to arrive if it were sent.
+	await back.close();
+	await page.waitForTimeout(1_000);
+	await expect(row).toHaveAttribute('data-status', 'offline');
+	card = await profileCard(page, list, userId);
+	expect(await seenAt(card), 'seen stays when an invisible account leaves').toBe(hidden);
+	const again = await subject.context.newPage();
+	await openChat(again);
+	expect(await userIdOf(again)).toBe(userId);
+	await page.waitForTimeout(1_000);
+	await expect(row).toHaveAttribute('data-status', 'offline');
+	card = await profileCard(page, list, userId);
+	await expect(card.getByTestId('profile-status')).toHaveText('Offline');
+	expect(await seenAt(card), 'seen stays when an invisible account comes back').toBe(hidden);
+
 	// Online again: no Last seen.
-	await chooseStatus(back, /^Online/, 'Others see you online, idle or offline, as you come and go.');
+	await chooseStatus(again, /^Online/, 'Others see you online, idle or offline, as you come and go.');
 	await expect(row).toHaveAttribute('data-status', 'online', SHOWN);
 	card = await profileCard(page, list, userId);
 	await expect(card.getByTestId('profile-seen')).toHaveCount(0);

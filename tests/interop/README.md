@@ -90,11 +90,12 @@ member list (`room-member-list`, `li[data-user]` with `data-status`) and the
 profile card it opens, which says "Last seen just now" (`profile-seen`, a
 `<time>` whose `datetime` is checked against when it happened). The subject is
 an account, made with a passkey on Chromium's virtual authenticator, since a
-guest is retired when its connection ends and so is never shown offline with a
-`seen`; the watchers are guests. When the account's last tab closes it shows
+guest is retired when its connection ends and so is never shown offline after
+it leaves; the watchers are guests. When the account's last tab closes it shows
 offline with Last seen; back in a new tab, resuming its session, it shows
 online without it; choosing Invisible in its Preferences shows it offline with
-a new Last seen; and a browser that opens after the account left learns `seen`
+a new Last seen, which stays, with the row offline, while its tab closes and
+another opens; and a browser that opens after the account left learns `seen`
 from its `room_list`. Run it alone with `npx playwright test --project=push seen`.
 
 The UI contract used by the tests is an accessible textbox named `Message`, a
