@@ -159,10 +159,11 @@ type storedUser struct {
 	Passkey     *storedPasskey   `json:"passkey,omitzero"`
 	Email       string           `json:"email,omitzero"`
 	// Status is the chosen status (§4.5.1), absent for online; Seen the
-	// Unix milliseconds when the shown status last became offline, absent
-	// if unknown, as for users stored before it was kept (§4.5.2); Shown
-	// true while the shown status is other than offline, which a restart
-	// after a crash finds still set; and Mute and RoomMutes their mutes.
+	// Unix milliseconds when the shown status others are sent last became
+	// offline, absent if unknown, as for users stored before it was kept
+	// (§4.5.2); Shown true while that status is other than offline, which a
+	// restart after a crash finds still set; and Mute and RoomMutes their
+	// mutes.
 	// Pings are the rooms they have not joined that count toward unread.
 	Status    *string               `json:"status,omitzero"`
 	Seen      int64                 `json:"seen,omitzero"`
@@ -348,7 +349,7 @@ func storedMessageOf(m *messageState) storedMessage {
 }
 
 func storedUserOf(u *userState) storedUser {
-	stored := storedUser{Name: u.name, Avatar: u.avatar, Ext: u.ext, LeftAt: u.leftAt, Email: u.email, Pings: u.pings, Seen: u.seen, Shown: u.shown != statusOffline}
+	stored := storedUser{Name: u.name, Avatar: u.avatar, Ext: u.ext, LeftAt: u.leftAt, Email: u.email, Pings: u.pings, Seen: u.seen, Shown: u.status != statusOffline}
 	if status := u.chosen; status != statusOnline {
 		stored.Status = &status
 	}

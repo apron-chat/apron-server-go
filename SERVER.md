@@ -662,26 +662,39 @@ of the presence that changes the shown status goes to their connections as
 `user` `{new: {user_id, status}}`, with `seen` (below) when `offline`: at
 once ten times, then at most once
 every two seconds, the latest status winning, so a flapping connection
-costs its rooms little. A new member is announced to a room's other members
-the same way, since a membership carries only a recorded user, unless their
-status is `offline` or `""`.
+costs its rooms little. A change held back so is sent with the status, and
+the `seen`, as they are when it goes, and until then shows nowhere: every
+listing, and the snapshot after a sign-in, carries the status last sent,
+with its `seen`, so those who list and those who are notified see the same
+changes. A flap undone before it would be sent, such as a reconnect and
+its close within those two seconds, is never sent, so it shows to nobody
+and leaves `seen` as it was: nobody sees `seen` change while the status
+they see stays `offline` (§4.5.2). A new member is announced to a room's
+other members the same way, since a membership carries only a recorded
+user, unless their status is `offline` or `""`.
 
 `seen` (§4.5.2) is when the shown status last became `offline`, in Unix
 milliseconds like a `log_id`: for a user who chose `online` or `dnd`, when
 their last connection closed (a shutdown closes them too) or signed in as
 another account, and for a connected user, when they chose `invisible`. It
-is set only then, so an invisible user's connections coming and going
-never move it, and it is kept in the store with the user. Every user
-object with a shown `offline` other than `you` carries it when it is
-known, the `user` notification of the change, `members`, and `users`
-alike, so a client that signs in later learns it from a listing; `you`
-never does. An account not shown `offline` since `seen` was first kept,
-such as one stored by an earlier version, is shown `offline` without
-`seen` until its next change to `offline`.
+is set only when that change is sent to others (above), to the time it
+happened, so an invisible user's connections coming and going never move
+it, nor does a flap that is never sent, and it is kept in the store with
+the user. Every user object with a shown `offline` other than `you`
+carries it when it is known, the `user` notification of the change,
+`members`, and `users` alike, so a client that signs in later learns it
+from a listing; `you` never does. An account not shown `offline` since
+`seen` was first kept, such as one stored by an earlier version, is shown
+`offline` without `seen` until its next change to `offline`. A conformance
+run against a store upgraded so, rather than a fresh one, can then report
+such an account under conform.py's `shown-seen` check, as a complete user
+object with a shown `offline` and no `seen`; a fresh store, or one whose
+accounts have each been shown `offline` again since the upgrade, has none.
 
 A crash closes no connection, so nothing sets `seen` for the users then
-connected. The store also keeps whether each user's shown status is other
-than `offline`, so the next start finds who was shown so, and gives each
+connected. The store also keeps whether the shown status each user's
+sharers were last sent is other than `offline`, so the next start finds
+who was shown so, and gives each
 such account a `seen` at that start, when it is shown `offline` again: the
 store has no time of the crash, and the last time it wrote can be earlier
 than when others last saw the user, while nobody could see them between

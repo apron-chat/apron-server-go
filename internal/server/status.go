@@ -25,11 +25,15 @@ import (
 //	invisible  offline          offline        offline
 //	""         ""               ""             ""
 //
-// and the user sees, in `you`, the chosen status. seen is when the shown
-// status last became offline: it is set only then, so an invisible user's
-// connections never move it, and it goes with each shown offline, in
-// complete objects, bare members, and the `user` notification of the
-// change, but never in `you` (§4.5.2). Separately, each
+// and the user sees, in `you`, the chosen status. Others see the shown
+// status as last announced (publishLocked): a change held back to coalesce
+// a flapping user's changes shows nowhere, in no notification and no
+// listing, until it is sent, so everyone sees the same changes. seen is
+// when the announced shown status last became offline: it is set only
+// then, so an invisible user's connections never move it, nor does a flap
+// that coalescing hides, and it goes with each shown offline, in complete
+// objects, bare members, and the `user` notification of the change, but
+// never in `you` (§4.5.2). Separately, each
 // connection reports whether it is idle, and the user mutes their
 // notifications everywhere or in one room and its threads; mutes and a dnd
 // status silence pushes (§4.9). Both are set with the `status` request.
@@ -58,7 +62,8 @@ const (
 	// A user's shown status changes go to others at once up to
 	// statusBurst times, then at most once per statusCoalesce, the latest
 	// status winning, so a flapping connection costs its rooms little
-	// (§4.5 lets servers delay them).
+	// (§4.5 lets servers delay them). A change that is undone before it is
+	// sent is never sent, and moves no seen.
 	statusBurst    = 10
 	statusCoalesce = 2 * time.Second
 )
@@ -301,7 +306,7 @@ func (s *Server) sendAfterAuthLocked(c *client) {
 	}
 	var shown []*userState
 	for _, id := range slices.Sorted(maps.Keys(listed)) {
-		if other := listed[id]; other.shownStatus() != statusOffline && other.shownStatus() != statusNone {
+		if other := listed[id]; other.status != statusOffline && other.status != statusNone {
 			shown = append(shown, other)
 		}
 	}
@@ -445,27 +450,48 @@ func (u *userState) you() map[string]any {
 }
 
 // noteShownLocked notes u's shown status after a change to its chosen
-// status or its connections, and when the shown status has just become
-// offline, sets seen to now (§4.5.2). Only that change sets it: a user
-// whose chosen invisible keeps them shown offline can connect and leave
-// without moving it. The store keeps whether the shown status is offline,
-// so a change out of offline is stored too: after a crash, which closes no
-// connection, restoreLocked gives the users who were shown otherwise a
-// seen then.
+// status or its connections, and when it has just become offline, the
+// time it did. Others do not see it until it is published.
 func (s *Server) noteShownLocked(u *userState) {
 	shown := u.shownStatus()
 	if shown == u.shown {
 		return
 	}
-	wasOffline := u.shown == statusOffline
 	u.shown = shown
+	if shown == statusOffline {
+		u.offlineAt = time.Now().UnixMilli()
+	}
+}
+
+// publishLocked notes u's shown status and makes it the one others see
+// (§4.5.2), reporting whether that changed; the caller sends it to those
+// who share a room with u. When the published status becomes offline, seen
+// is the time the shown status became offline, which is after it was last
+// published otherwise: only that change sets seen, so a user whose chosen
+// invisible keeps them shown offline can connect and leave without moving
+// it, and neither does a flap held back and undone before it is sent,
+// which nobody saw. The store keeps whether the published status is
+// offline, so a change out of offline is stored too: after a crash, which
+// closes no connection, restoreLocked gives the users who were shown
+// otherwise a seen then.
+func (s *Server) publishLocked(u *userState) bool {
+	s.noteShownLocked(u)
+	if u.shown == u.status {
+		return false
+	}
+	wasOffline := u.status == statusOffline
+	u.status = u.shown
 	switch {
-	case shown == statusOffline:
-		u.seen = time.Now().UnixMilli()
+	case u.status == statusOffline:
+		u.seen = u.offlineAt
+		if u.seen == 0 {
+			u.seen = time.Now().UnixMilli()
+		}
 		s.touchUser(u.id)
 	case wasOffline:
 		s.touchUser(u.id)
 	}
+	return true
 }
 
 // addSeen adds u's seen to a current object of u that carries a shown
@@ -477,24 +503,30 @@ func (u *userState) addSeen(object map[string]any) {
 }
 
 // shownObject is the bare current object of u that others see: user_id and
-// the shown status, with seen when it is offline (§4.5.2).
+// the published shown status, with seen when it is offline (§4.5.2).
 func (u *userState) shownObject() map[string]any {
-	object := map[string]any{"user_id": u.id, "status": u.shownStatus()}
+	object := map[string]any{"user_id": u.id, "status": u.status}
 	u.addSeen(object)
 	return object
 }
 
-// announceStatusLocked notes u's shown status (noteShownLocked), then sends
-// it to the connections of those who share a room with u, as `user` `new`,
-// when it differs from the one last sent: at once within the user's burst,
-// else once statusCoalesce has passed, with whatever the status is then.
-// The user's own connections are not told: their `you` carries the chosen
-// status, which this does not change. A shutdown sends nothing, but still
-// notes the seen of each user whose connections it closes.
+// announceStatusLocked notes u's shown status (noteShownLocked), then
+// publishes it and sends it to the connections of those who share a room
+// with u, as `user` `new`, when it differs from the one last published: at
+// once within the user's burst, else once statusCoalesce has passed, with
+// whatever the status is then. Until then others see the one published
+// before, and a status back to it by then is not sent, nor seen moved: a
+// flap nobody saw is not one. The user's own connections are not told:
+// their `you` carries the chosen status, which this does not change. A
+// shutdown sends nothing, but still publishes, noting the seen of each
+// user whose connections it closes.
 func (s *Server) announceStatusLocked(u *userState) {
 	s.noteShownLocked(u)
-	status := u.shownStatus()
-	if s.closed || status == u.status || u.statusTimer != nil {
+	if s.closed {
+		s.publishLocked(u)
+		return
+	}
+	if u.shown == u.status || u.statusTimer != nil {
 		return
 	}
 	if u.statusLimit == nil {
@@ -508,18 +540,18 @@ func (s *Server) announceStatusLocked(u *userState) {
 			if s.closed || s.users[u.id] != u {
 				return
 			}
-			if status := u.shownStatus(); status != u.status {
-				u.status = status
+			if s.publishLocked(u) {
 				s.sendStatusLocked(u, s.sharersLocked(u))
 			}
 		})
 		return
 	}
-	u.status = status
+	s.publishLocked(u)
 	s.sendStatusLocked(u, s.sharersLocked(u))
 }
 
-// sendStatusLocked tells the connections of users u's shown status.
+// sendStatusLocked tells the connections of users u's published shown
+// status.
 func (s *Server) sendStatusLocked(u *userState, users []*userState) {
 	frame := statusFrame(u)
 	for _, other := range users {
@@ -527,18 +559,20 @@ func (s *Server) sendStatusLocked(u *userState, users []*userState) {
 	}
 }
 
-// statusFrame is the `user` notification of u's shown status: `{new:
-// {user_id, status}}`, with seen when it is offline (§4.5.2).
+// statusFrame is the `user` notification of u's published shown status:
+// `{new: {user_id, status}}`, with seen when it is offline (§4.5.2).
 func statusFrame(u *userState) jsontext.Value {
 	return notification("user", map[string]any{"new": u.shownObject()})
 }
 
-// announceJoinStatusLocked tells the other members of r the status of the
-// user who just joined it, since its membership record carries only a
-// recorded user object. Like the snapshot after auth, it leaves out offline
-// and "", which would tell who is invisible or opted out.
+// announceJoinStatusLocked tells the other members of r the published
+// status of the user who just joined it, since its membership record
+// carries only a recorded user object; a change still held back reaches
+// them with the user's other sharers. Like the snapshot after auth, it
+// leaves out offline and "", which would tell who is invisible or opted
+// out.
 func (s *Server) announceJoinStatusLocked(u *userState, r *roomState) {
-	if status := u.shownStatus(); status == statusOffline || status == statusNone {
+	if status := u.status; status == statusOffline || status == statusNone {
 		return
 	}
 	users := make([]*userState, 0, len(r.members))

@@ -63,17 +63,19 @@ type userState struct {
 	// chosen is the chosen status, set with `me` (§4.5.1), and mute and
 	// roomMutes their mutes; muteTimer ends a timed mute, and
 	// roomMuteTimers each timed room mute. shown is the shown status as
-	// last noted (noteShownLocked), and seen the Unix milliseconds when it
-	// last became offline, 0 if unknown (§4.5.2). status is the shown
-	// status last sent to others; statusLimit and statusTimer coalesce a
-	// flapping user's changes. statusRequests limits the user's `status`
-	// requests.
+	// last noted (noteShownLocked), and offlineAt the Unix milliseconds
+	// when it last became offline. status is the shown status published to
+	// others (publishLocked), the one every object they are sent carries,
+	// and seen the Unix milliseconds when it last became offline, 0 if
+	// unknown (§4.5.2); statusLimit and statusTimer coalesce a flapping
+	// user's changes. statusRequests limits the user's `status` requests.
 	chosen         string
 	mute           muteState
 	roomMutes      map[string]muteState
 	muteTimer      *time.Timer
 	roomMuteTimers map[string]*time.Timer
 	shown          string
+	offlineAt      int64
 	seen           int64
 	status         string
 	statusLimit    *rate.Limiter
@@ -138,11 +140,11 @@ func (u *userState) hasRole(role string) bool {
 }
 
 // profile is the complete current user object for user and users (§3.3),
-// with the shown status, and seen when it is offline (§4.5.2); you has the
-// chosen status instead.
+// with the published shown status, and seen when it is offline (§4.5.2);
+// you has the chosen status instead.
 func (u *userState) profile() map[string]any {
 	value := maps.Clone(u.from())
-	value["status"] = u.shownStatus()
+	value["status"] = u.status
 	u.addSeen(value)
 	if u.avatar != "" {
 		value["avatar"] = u.avatar
@@ -526,6 +528,9 @@ func (s *Server) sharersLocked(u *userState) []*userState {
 // removed, and cleared the ext keys it removed, both announced as empty
 // values, since clients merge a notification into the object they keep.
 func (s *Server) notifyProfileLocked(u *userState, except *client, cleared extObject, removed ...string) {
+	// The profile goes to every sharer, so it publishes the shown status,
+	// one held back to coalesce included.
+	s.publishLocked(u)
 	profile := withCleared(withRemoved(u.profile(), removed), cleared)
 	you := notification("user", map[string]any{"you": withCleared(withRemoved(u.you(), removed), cleared)})
 	for c := range u.clients {
@@ -533,8 +538,6 @@ func (s *Server) notifyProfileLocked(u *userState, except *client, cleared extOb
 			c.enqueue(you)
 		}
 	}
-	// The profile carries the shown status, so it is the last sent.
-	u.status = profile["status"].(string)
 	others := notification("user", map[string]any{"new": profile})
 	for _, other := range s.sharersLocked(u) {
 		other.send(others)
@@ -644,8 +647,9 @@ func (s *Server) updateProfile(c *client, req request) (any, bool, *rpcError) {
 	cleared := clearedExt(u.ext, extWrite)
 	u.ext = ext
 	if hasStatus {
+		// A change of the chosen status is sent at once, with the profile.
 		u.chosen = status
-		s.noteShownLocked(u)
+		s.publishLocked(u)
 	}
 	result := map[string]any{"you": withRemoved(u.you(), removed)}
 	if !jsonEqual(before, u.profile()) || !jsonEqual(beforeYou, u.you()) {

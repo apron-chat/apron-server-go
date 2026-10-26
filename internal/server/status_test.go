@@ -1385,6 +1385,48 @@ func TestCoalescedOfflineCarriesSeen(t *testing.T) {
 	a.expectQuiet(t)
 }
 
+// A flap that coalescing hides from others, online and back to offline
+// within statusCoalesce once the user's burst is spent, is hidden
+// everywhere: no listing shows it, and seen stays the one announced, so
+// nobody sees seen change while the shown status stays offline (§4.5.2).
+func TestHiddenFlapKeepsSeen(t *testing.T) {
+	app, httpServer := passkeyTestServer(t)
+	a := dialTestClient(t, httpServer)
+	b, _ := dialOrigin(t, httpServer, testPasskeyOrigin)
+	token := registerTestPasskey(t, b, newTestAuthenticator(t))["token"]
+	userID := b.userID
+	expectMembership(t, a, "general", userID, true)
+	watching(a)
+	a.drain(t)
+	// b has one change of its burst left, which refills no more.
+	app.mu.Lock()
+	app.users[userID].statusLimit = rate.NewLimiter(rate.Every(time.Hour), 1)
+	app.unlock()
+	_ = b.ws.Close(websocket.StatusNormalClosure, "bye")
+	seen := expectStatus(t, a, userID, "offline")
+	expectListedSeen(t, a, userID, "offline", seen)
+
+	time.Sleep(2 * time.Millisecond)
+	flap := resume(t, httpServer, token, userID)
+	a.expectQuiet(t)
+	// Until the change is sent, a listing shows what was last announced.
+	expectListedSeen(t, a, userID, "offline", seen)
+	time.Sleep(2 * time.Millisecond)
+	_ = flap.ws.Close(websocket.StatusNormalClosure, "bye")
+	waitConnections(t, app, userID, 0)
+	a.expectQuiet(t)
+	expectListedSeen(t, a, userID, "offline", seen)
+	time.Sleep(statusCoalesce + 200*time.Millisecond)
+	a.expectQuiet(t)
+	expectListedSeen(t, a, userID, "offline", seen)
+	app.mu.RLock()
+	kept := app.users[userID].seen
+	app.mu.RUnlock()
+	if kept != seenMillis(t, seen) {
+		t.Fatalf("seen after a hidden flap = %d, want %s", kept, seen)
+	}
+}
+
 // Closing one of a user's connections while another stays open changes
 // nothing others see: nothing is sent, and seen stays as it was (§4.5.2).
 // The last one's close sets a later seen.
