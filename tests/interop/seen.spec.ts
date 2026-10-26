@@ -49,10 +49,14 @@ async function profileCard(page: Page, list: Locator, userId: string): Promise<L
 	return card;
 }
 
-/** The card's "Last seen" as its `<time datetime>` says it, in Unix milliseconds. */
-async function seenAt(card: Locator): Promise<number> {
+/**
+ * The card's "Last seen" as its `<time datetime>` says it, in Unix milliseconds. Just after the
+ * change it says "just now"; a later look (`justNow: false`) checks only that it says when, since
+ * a slow run can take long enough after the change for it to say "1m ago".
+ */
+async function seenAt(card: Locator, { justNow = true } = {}): Promise<number> {
 	const seen = card.getByTestId('profile-seen');
-	await expect(seen).toHaveText('Last seen just now');
+	await expect(seen).toHaveText(justNow ? 'Last seen just now' : /^Last seen /);
 	const datetime = await seen.getAttribute('datetime');
 	expect(datetime, 'profile-seen has a datetime').toBeTruthy();
 	return Date.parse(datetime!);
@@ -122,7 +126,7 @@ test('an account that leaves, comes back, and goes invisible shows Last seen onl
 	await page.waitForTimeout(1_000);
 	await expect(row).toHaveAttribute('data-status', 'offline');
 	card = await profileCard(page, list, userId);
-	expect(await seenAt(card), 'seen stays when an invisible account leaves').toBe(hidden);
+	expect(await seenAt(card, { justNow: false }), 'seen stays when an invisible account leaves').toBe(hidden);
 	const again = await subject.context.newPage();
 	await openChat(again);
 	expect(await userIdOf(again)).toBe(userId);
@@ -130,7 +134,7 @@ test('an account that leaves, comes back, and goes invisible shows Last seen onl
 	await expect(row).toHaveAttribute('data-status', 'offline');
 	card = await profileCard(page, list, userId);
 	await expect(card.getByTestId('profile-status')).toHaveText('Offline');
-	expect(await seenAt(card), 'seen stays when an invisible account comes back').toBe(hidden);
+	expect(await seenAt(card, { justNow: false }), 'seen stays when an invisible account comes back').toBe(hidden);
 
 	// Online again: no Last seen.
 	await chooseStatus(again, /^Online/, 'Others see you online, idle or offline, as you come and go.');

@@ -159,7 +159,7 @@ function logicalState(client: ChatClient, operations: Record<string, string>): O
 	// a room open without joining it is not visible either.
 	const rooms = snapshot.rooms.filter((room) => room.id !== DEFAULT_ROOM_ID && room.joined);
 	return JSON.parse(JSON.stringify({
-		you: snapshot.you ? withoutSeen(snapshot.you) : null,
+		you: snapshot.you ?? null,
 		capabilities: [...(snapshot.server?.capabilities ?? [])].sort(byString),
 		rooms: [...rooms].sort((left, right) => byString(left.id, right.id)).map(projectRoom),
 		typing: snapshot.typing
