@@ -54,7 +54,10 @@ normal Chromium resolution.
 ## Web push and status
 
 The `push` project runs `push.spec.ts`: a passkey user turns on push in
-Preferences, goes idle, and is mentioned and replied to by a second client;
+Preferences, registering the wake scopes the web client notifies about by
+default that the server advertises (mentions, replies, and private rooms),
+goes idle, and is mentioned, replied to, and written to in a private room by a
+second client;
 the test receives the pushes on a local capture endpoint, checks the VAPID
 token against the test key and decrypts the `aes128gcm` payload with its own
 subscription keys, and checks the service worker's notification. A second test
