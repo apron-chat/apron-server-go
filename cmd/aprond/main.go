@@ -44,6 +44,7 @@ type Options struct {
 	MaxListenerConnections int      `long:"max-listener-connections" description:"Maximum concurrent TCP connections on the listener, HTTP included; 0 is unlimited"`
 	MessagesPerMinute      int      `long:"messages-per-minute" description:"Burst of new messages, room_set requests, and /avatar commands per user, refilled over a minute; 0 is unlimited"`
 	MaxListedMembers       int      `long:"max-listed-members" default:"1000" description:"Members listed per room in room_list and room_update; a larger room lists its most recently active ones and member_count. 0 is unlimited"`
+	MaxPrivateRooms        int      `long:"max-private-rooms" description:"Top-level private rooms one user may be in at once, created or added to, such as on a public deployment; 0 is unlimited"`
 	DebugAddr              string   `long:"debug-addr" description:"Listen address for unauthenticated pprof and expvar under /debug/, such as 127.0.0.1:6060; empty disables"`
 	Store                  string   `long:"store" description:"Where state is kept: sqlite:<path> for a SQLite database, or memory to keep nothing across restarts"`
 	ClientIPHeader         string   `long:"client-ip-header" description:"Request header a reverse proxy puts the client's address in, such as X-Forwarded-For (its last entry) or X-Real-IP, for per-client limits; set only behind a proxy that sets it"`
@@ -135,6 +136,7 @@ func serverConfig(options Options) (server.Config, error) {
 	config.MaxConnections = options.MaxConnections
 	config.MessagesPerMinute = options.MessagesPerMinute
 	config.MaxListedMembers = options.MaxListedMembers
+	config.MaxPrivateRooms = options.MaxPrivateRooms
 	config.Welcome = options.Welcome
 	config.ClientIPHeader = options.ClientIPHeader
 	for _, grant := range options.Roles {

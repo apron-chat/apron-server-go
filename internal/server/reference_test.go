@@ -1000,6 +1000,44 @@ func TestCommands(t *testing.T) {
 	}
 }
 
+// Config.MaxPrivateRooms bounds the top-level private rooms one user is in,
+// created or added to: past it, creating one or being added to one is
+// denied. Public rooms and threads are not counted, and leaving a private
+// room makes room for another.
+func TestPrivateRoomsPerUserBound(t *testing.T) {
+	config := DefaultConfig()
+	config.MaxPrivateRooms = 2
+	_, httpServer := newTestServer(t, config)
+	clients := dialGroup(t, httpServer, 2)
+	a, b := clients[0], clients[1]
+
+	first, _ := saveRoom(t, a, "first", map[string]any{"private": true})
+	saveRoom(t, a, "second", map[string]any{"private": true})
+	a.expectError(t, "room_set", "third", map[string]any{"private": true}, codeDenied)
+	// Not counted: a public room, a private thread of a public room, and a
+	// thread of a private room, whose members alone can be added to it.
+	saveRoom(t, a, "open", map[string]any{"title": "Open"})
+	saveRoom(t, a, "aside", map[string]any{"parent_room_id": "general", "private": true})
+	saveRoom(t, a, "side", map[string]any{"parent_room_id": first})
+
+	// b is in two private rooms of its own, so nobody can add b to another.
+	full, _ := saveRoom(t, b, "b1", map[string]any{"private": true})
+	saveRoom(t, b, "b2", map[string]any{"private": true})
+	a.expectError(t, "room_join", "full", map[string]any{"room_id": first, "user_id": b.userID}, codeDenied)
+	b.expectQuiet(t)
+	// Leaving one makes room for the next.
+	leaveRoom(t, b, full)
+	if _, result := a.request(t, "room_join", "added", map[string]any{"room_id": first, "user_id": b.userID}); len(result) != 0 {
+		t.Fatalf("adding b: %#v", result)
+	}
+	if joined := joinedRecord(t, b.read(t), b.userID); joined["room_id"] != first || joined["private"] != true {
+		t.Fatalf("b's room_update: %#v", joined)
+	}
+	b.expectError(t, "room_set", "b3", map[string]any{"private": true}, codeDenied)
+	// Adding someone already in the room changes nothing, bound or not.
+	a.result(t, "room_join", "again", map[string]any{"room_id": first, "user_id": b.userID})
+}
+
 // A private room and its threads are invisible to non-members, who get
 // invalid_params as for an unknown room; members bring others in with
 // room_join's user_id, and the room's creator removes them with

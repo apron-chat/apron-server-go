@@ -77,10 +77,20 @@ func TestServerFrame(t *testing.T) {
 	if !reflect.DeepEqual(push["relay"], map[string]any{}) || !reflect.DeepEqual(push["wake"], []any{"mentions", "replies", "private", "joined", "badge"}) || len(push) != 3 {
 		t.Fatalf("push: %#v", push)
 	}
-	// ext is a capability (§4.12); the server frame carries no ext of its
-	// own.
+	// ext is a capability (§4.12); by default the server frame carries no
+	// ext of its own.
 	if _, has := params["ext"]; has {
 		t.Fatalf("server.ext: %#v", params["ext"])
+	}
+	// A bound on the private rooms a user may be in is ext:settings'
+	// private_rooms.
+	bounded := DefaultConfig()
+	bounded.MaxPrivateRooms = 20
+	_, boundedServer := newTestServer(t, bounded)
+	_, frame = dialRaw(t, boundedServer)
+	if params := frame["params"].(map[string]any); !slices.Contains(params["capabilities"].([]any), "ext:settings") ||
+		!reflect.DeepEqual(params["ext"], map[string]any{"settings": map[string]any{"private_rooms": float64(20)}}) {
+		t.Fatalf("bounded private rooms: %#v", params)
 	}
 
 	// A token only signs in, so signup lists the other schemes.

@@ -32,7 +32,9 @@ Defaults:
 - WebSocket origins: `localhost`, `127.0.0.1`, and `::1` during development
 - `server` frame: `apron: 9`, `agent: "apron-go/9"`, and
   `capabilities`: `history`, `edit`, `rooms`, `reactions`, `activity`,
-  `embed:upload`, `embed:stream`, `command`, `status`, `ext`; `server.push`: kinds
+  `embed:upload`, `embed:stream`, `command`, `status`, `ext`, and, while
+  `--max-private-rooms` bounds private rooms, `ext:settings`, with
+  `server.ext.settings.private_rooms` the bound (below); `server.push`: kinds
   `relay` and `webpush` (with the server's VAPID `key`) and `wake`:
   `mentions`, `replies`, `private`, `joined`, `badge`; `server.status`:
   `dnd`, `invisible`; `server.ping`: 30 seconds
@@ -82,6 +84,10 @@ Flags (`aprond --help` lists them all):
 - `--max-listed-members <n>` (1000) bounds the `members` of one room in
   `room_list` and `room_update` `joined`, and so the statuses sent after a
   sign-in ([Status](#status)), `0` for no bound; see
+  [Rooms](#rooms-threads-and-membership).
+- `--max-private-rooms <n>` bounds the top-level private rooms one user is
+  in at once, such as on a public deployment; `0`, the default, sets no
+  bound; see
   [Rooms](#rooms-threads-and-membership).
 - `--welcome <commonmark>` sets `server.welcome`, which clients show on their
   sign-in screen, such as "Chat as a guest, or sign in with email to keep
@@ -361,6 +367,24 @@ naming them (`history`, `room_list`, `room_join`, `room_leave`, `room_set`,
 unknown ID, and `room_list` never lists them. An author removed from a
 private room can no longer edit or delete their messages there. Mentions in
 a private room wake only its members.
+
+Private rooms are how people talk directly: a client starts one with
+`room_set` and `private: true`, often untitled (this server titles only
+threads, so clients name it after its members), and adds the other people
+with `room_join` and their `user_id`. Anyone can add anyone they share
+nothing with, so a public deployment can bound the top-level private rooms
+one user is in at once with `--max-private-rooms` (no bound by default),
+guests included, whether they created them or were added: past it, creating one or being added to one is `denied`, and
+the user leaves one to make room. Threads are not counted, since only a
+private room's members can be added to its threads. With a bound, the
+`server` frame advertises it as `ext.settings.private_rooms` under capability
+`ext:settings`, the extension
+[apron-web's EXT.md](https://github.com/apron-chat/apron-web/blob/main/EXT.md)
+defines; its other keys are booleans that an absent key makes `true`, as
+they are here: guests post, read cursors are kept, and members add others.
+There is no server-wide bound, and a private room is never removed: like
+every room it keeps its full history, so one everyone has left stays, which
+nobody can see or be added to again.
 
 A message cannot move to a room that some who can see its current room
 cannot see (`denied`): a move snapshot is logged in and delivered to both

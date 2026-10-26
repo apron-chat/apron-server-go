@@ -103,6 +103,25 @@ func (r *roomState) revealsTo(to *roomState) bool {
 	return false
 }
 
+// privateRooms counts the top-level private rooms u is in, which
+// Config.MaxPrivateRooms bounds. Their threads are not counted: only their
+// members can be added to those.
+func (u *userState) privateRooms() int {
+	n := 0
+	for _, r := range u.joined {
+		if r.private && r.parent == nil {
+			n++
+		}
+	}
+	return n
+}
+
+// privateRoomsFullLocked reports whether u is in as many top-level private
+// rooms as Config.MaxPrivateRooms allows, so may not be in another.
+func (s *Server) privateRoomsFullLocked(u *userState) bool {
+	return s.config.MaxPrivateRooms > 0 && u.privateRooms() >= s.config.MaxPrivateRooms
+}
+
 // visibleRoomLocked returns the room named id if u may see it, or nil.
 func (s *Server) visibleRoomLocked(u *userState, id string) *roomState {
 	if r := s.rooms[id]; r != nil && r.visibleTo(u) {
@@ -498,6 +517,8 @@ func (s *Server) setRoom(c *client, req request) (any, bool, *rpcError) {
 		if parent = s.visibleRoomLocked(u, parentID); parent == nil {
 			return nil, false, invalidParams("Unknown parent room %q", parentID)
 		}
+	} else if private && s.privateRoomsFullLocked(u) {
+		return nil, false, &rpcError{Code: codeDenied, Message: fmt.Sprintf("You are in %d private rooms, the most at once; leave one to start another", s.config.MaxPrivateRooms)}
 	}
 	// ext merges into the room's (§4.12), and the limit applies to the
 	// result; other client fields are replaced (§4.2.4).
@@ -774,6 +795,9 @@ func (s *Server) joinRoom(c *client, req request) (any, bool, *rpcError) {
 		// that room first.
 		if r.parent != nil && !r.parent.visibleTo(target) {
 			return nil, false, &rpcError{Code: codeDenied, Message: fmt.Sprintf("Add %s to the private room %s is in first", targetID, r.title())}
+		}
+		if r.private && r.parent == nil && r.members[target.id] == nil && s.privateRoomsFullLocked(target) {
+			return nil, false, &rpcError{Code: codeDenied, Message: fmt.Sprintf("%s is in as many private rooms as anyone may be, so cannot be added to another", targetID)}
 		}
 	}
 	if !s.joinLocked(target, r) && target == u {
