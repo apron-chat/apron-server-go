@@ -51,6 +51,7 @@ const (
 	defaultStreamMaxBytes     int64 = 16 << 20
 	defaultStreamMaxDuration        = time.Hour
 	defaultMaxListedMembers         = 1000
+	defaultMaxPrivateRooms          = 100
 	// retryAfterSeconds is the delay suggested by connection-level
 	// retry_after errors (capacity and shutdown).
 	retryAfterSeconds = 30
@@ -122,6 +123,12 @@ type Config struct {
 	// joined; a larger room lists its most recently active members and
 	// member_count (§4.2.1). 0 is unlimited.
 	MaxListedMembers int
+	// MaxPrivateRooms bounds the top-level private rooms (§4.2.4) one user
+	// is in at once, whether they created them or were added: past it,
+	// creating one or being added to one is denied, so nobody can be pulled
+	// into private rooms without end. It is advertised as ext:settings
+	// private_rooms. 0 is unlimited.
+	MaxPrivateRooms int
 	// Welcome is server.welcome (§3.2): Markdown shown on the sign-in
 	// screen. Empty omits it.
 	Welcome string
@@ -163,6 +170,7 @@ func DefaultConfig() Config {
 		StreamMaxBytes:        defaultStreamMaxBytes,
 		StreamMaxDuration:     defaultStreamMaxDuration,
 		MaxListedMembers:      defaultMaxListedMembers,
+		MaxPrivateRooms:       defaultMaxPrivateRooms,
 	}
 }
 
@@ -768,6 +776,13 @@ func (s *Server) serverParams() map[string]any {
 	}
 	if s.config.Welcome != "" {
 		params["welcome"] = s.config.Welcome
+	}
+	if s.config.MaxPrivateRooms > 0 {
+		// ext:settings, the extension apron-web defines (its EXT.md §3):
+		// private_rooms is a number, where its other keys are booleans
+		// that an absent key makes true, as they are here.
+		params["capabilities"] = append(params["capabilities"].([]string), "ext:settings")
+		params["ext"] = map[string]any{"settings": map[string]any{"private_rooms": s.config.MaxPrivateRooms}}
 	}
 	if !slices.Equal(signup, authSchemes) {
 		params["signup"] = signup

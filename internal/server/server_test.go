@@ -55,7 +55,7 @@ func TestServerFrame(t *testing.T) {
 	if params["apron"] != float64(9) || params["agent"] != "apron-go/9" || params["ping"] != float64(30) {
 		t.Fatalf("version, agent, and ping: %#v", params)
 	}
-	if !reflect.DeepEqual(params["capabilities"], []any{"history", "edit", "rooms", "reactions", "activity", "embed:upload", "embed:stream", "command", "status", "ext"}) {
+	if !reflect.DeepEqual(params["capabilities"], []any{"history", "edit", "rooms", "reactions", "activity", "embed:upload", "embed:stream", "command", "status", "ext", "ext:settings"}) {
 		t.Fatalf("capabilities: %#v", params["capabilities"])
 	}
 	// With capability status, server.status lists the optional statuses
@@ -77,10 +77,18 @@ func TestServerFrame(t *testing.T) {
 	if !reflect.DeepEqual(push["relay"], map[string]any{}) || !reflect.DeepEqual(push["wake"], []any{"mentions", "replies", "private", "joined", "badge"}) || len(push) != 3 {
 		t.Fatalf("push: %#v", push)
 	}
-	// ext is a capability (§4.12); the server frame carries no ext of its
-	// own.
-	if _, has := params["ext"]; has {
+	// ext is a capability (§4.12); the server frame's own ext is only
+	// ext:settings, the bound on private rooms a user may be in.
+	if !reflect.DeepEqual(params["ext"], map[string]any{"settings": map[string]any{"private_rooms": float64(defaultMaxPrivateRooms)}}) {
 		t.Fatalf("server.ext: %#v", params["ext"])
+	}
+	// Without the bound there is nothing to say, and no ext:settings.
+	unbounded := DefaultConfig()
+	unbounded.MaxPrivateRooms = 0
+	_, unboundedServer := newTestServer(t, unbounded)
+	_, frame = dialRaw(t, unboundedServer)
+	if params := frame["params"].(map[string]any); slices.Contains(params["capabilities"].([]any), "ext:settings") || params["ext"] != nil {
+		t.Fatalf("unbounded private rooms: %#v", params)
 	}
 
 	// A token only signs in, so signup lists the other schemes.
