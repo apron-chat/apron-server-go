@@ -167,6 +167,46 @@ func TestRoomListLatestLogIDDelta(t *testing.T) {
 	}
 }
 
+// A delta listing (§4.2.1) carries the private rooms and threads the user
+// was added to since the position, at their latest activity, and the ones
+// they left; it never carries one they are not in.
+func TestRoomListLatestLogIDDeltaPrivateRooms(t *testing.T) {
+	_, httpServer := newTestServer(t, DefaultConfig())
+	clients := dialGroup(t, httpServer, 3)
+	a, b, c := clients[0], clients[1], clients[2]
+	since := listRooms(t, b, map[string]any{"filter": "joined"})["joined"].([]any)[0].(map[string]any)["latest_log_id"].(string)
+
+	dm, _ := saveRoom(t, a, "dm", map[string]any{"private": true})
+	a.request(t, "room_join", "add", map[string]any{"room_id": dm, "user_id": b.userID})
+	thread, _ := saveRoom(t, a, "thread", map[string]any{"parent_room_id": dm, "title": "Plans"})
+	a.request(t, "room_join", "add-thread", map[string]any{"room_id": thread, "user_id": b.userID})
+	a.drain(t)
+	save(t, a, "in-thread", map[string]any{"room_id": thread, "body": map[string]any{"text": "in the thread"}})
+	_, last := save(t, a, "in-dm", map[string]any{"room_id": dm, "body": map[string]any{"text": "just us"}})
+	other, _ := saveRoom(t, c, "other", map[string]any{"private": true})
+	b.drain(t)
+
+	delta := listRooms(t, b, map[string]any{"filter": "joined", "latest_log_id": since})
+	if ids := roomIDs(t, delta["joined"]); !reflect.DeepEqual(ids, []string{dm, thread}) || !reflect.DeepEqual(delta["left"], []any{}) {
+		t.Fatalf("delta after being added: %#v", delta)
+	}
+	if head := delta["joined"].([]any)[0].(map[string]any)["latest_log_id"]; head != last["log_id"] {
+		t.Fatalf("private room's latest_log_id %v, want its last message's %v", head, last["log_id"])
+	}
+	if ids := roomIDs(t, listRooms(t, b, map[string]any{"latest_log_id": since})["not_joined"]); slices.Contains(ids, other) {
+		t.Fatalf("someone else's private room in a delta: %v", ids)
+	}
+
+	// Removed from the room, its thread goes too.
+	a.request(t, "room_leave", "remove", map[string]any{"room_id": dm, "user_id": b.userID})
+	b.drain(t)
+	delta = listRooms(t, b, map[string]any{"filter": "joined", "latest_log_id": since})
+	if ids := roomIDs(t, delta["joined"]); len(ids) != 0 || len(delta["left"].([]any)) == 0 {
+		t.Fatalf("delta after removal: %#v", delta)
+	}
+	c.drain(t)
+}
+
 func TestRoomListTruncatesOnlyUnjoinedRooms(t *testing.T) {
 	_, httpServer := newTestServer(t, DefaultConfig())
 	clients := dialGroup(t, httpServer, 2)
