@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/json/v2"
 	"fmt"
 	"net/http/httptest"
 	"path/filepath"
@@ -1488,4 +1489,109 @@ func TestListingsCarrySeen(t *testing.T) {
 		t.Fatalf("room_list members for %s: %#v", userID, members)
 	}
 	check("room_list by user_id", members, listed["users"].([]any))
+}
+
+// waitStored waits until the SQLite store at path, which a running server
+// writes in the background, holds a user entry for userID that want
+// accepts, and returns it.
+func waitStored(t *testing.T, path, userID string, want func(storedUser) bool) storedUser {
+	t.Helper()
+	for deadline := time.Now().Add(2 * time.Second); ; time.Sleep(5 * time.Millisecond) {
+		s, err := store.OpenSQLite(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var stored storedUser
+		found := false
+		err = s.Load(func(e store.Entry) error {
+			if e.Kind != entryUser || e.ID != userID {
+				return nil
+			}
+			found = true
+			return json.Unmarshal(e.Value, &stored)
+		})
+		_ = s.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if found && want(stored) {
+			return stored
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("stored %s = %#v (found %v)", userID, stored, found)
+		}
+	}
+}
+
+// A crash closes no connection, so nothing sets the seen of the accounts
+// then connected. A server started on the store afterwards gives each one
+// stored as shown other than offline a seen at its start, which is no
+// earlier than when others last saw it (§4.5.2): one that had come back
+// since its last seen, and one that had never been offline. Its seen is
+// stored again. An invisible account, always shown offline, keeps its seen,
+// so a crash tells nothing of its connections; one shown "" stays so, and
+// one that never connected stays without seen.
+func TestSeenAfterCrash(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "aprond.db")
+	open := func() store.Store {
+		s, err := store.OpenSQLite(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return s
+	}
+	app, httpServer, _ := startWithStore(t, open(), filepath.Join(dir, "uploads"))
+	a := dialTestClient(t, httpServer)
+	signUp := func() (*testClient, any) {
+		c, _ := dialOrigin(t, httpServer, testPasskeyOrigin)
+		token := registerTestPasskey(t, c, newTestAuthenticator(t))["token"]
+		expectMembership(t, a, "general", c.userID, true)
+		return c, token
+	}
+	back, token := signUp()
+	fresh, _ := signUp()
+	hidden, _ := signUp()
+	none, _ := signUp()
+	addAccount(t, app, "never", a)
+	watching(a)
+	for _, c := range []*testClient{a, back, fresh, hidden, none} {
+		c.drain(t)
+	}
+
+	_ = back.ws.Close(websocket.StatusNormalClosure, "bye")
+	left := seenMillis(t, expectStatus(t, a, back.userID, "offline"))
+	time.Sleep(2 * time.Millisecond)
+	back = resume(t, httpServer, token, back.userID)
+	expectStatus(t, a, back.userID, "online")
+	returned := time.Now().UnixMilli()
+	setStatus(t, hidden, "invisible")
+	expectProfileStatus(t, a, hidden.userID, "offline")
+	_, user := listedObjects(t, a, hidden.userID)
+	hiddenSeen, _ := user["seen"].(string)
+	none.drain(t)
+	setStatus(t, none, "")
+	expectProfileStatus(t, a, none.userID, "")
+
+	// The store has all of it, and the server crashes: it goes on running,
+	// unseen, while another starts on the same file.
+	waitStored(t, path, back.userID, func(u storedUser) bool { return u.Shown && u.Seen == left })
+	waitStored(t, path, fresh.userID, func(u storedUser) bool { return u.Shown && u.Seen == 0 })
+	waitStored(t, path, hidden.userID, func(u storedUser) bool { return !u.Shown && u.Seen == seenMillis(t, hiddenSeen) })
+	waitStored(t, path, none.userID, func(u storedUser) bool { return u.Shown && u.Seen == 0 })
+	crashed := time.Now().UnixMilli()
+	_, httpServer, _ = startWithStore(t, open(), filepath.Join(dir, "uploads"))
+	restored := time.Now().UnixMilli()
+	g := dialTestClient(t, httpServer)
+	g.drain(t)
+	for _, id := range []string{back.userID, fresh.userID} {
+		_, user := listedObjects(t, g, id)
+		seen, _ := user["seen"].(string)
+		expectSeenBetween(t, id+" after a crash", seen, max(crashed, returned), restored)
+		expectListedSeen(t, g, id, "offline", seen)
+		waitStored(t, path, id, func(u storedUser) bool { return !u.Shown && u.Seen == seenMillis(t, seen) })
+	}
+	expectListedSeen(t, g, hidden.userID, "offline", hiddenSeen)
+	expectListedSeen(t, g, none.userID, "", "")
+	expectListedSeen(t, g, "never", "offline", "")
 }

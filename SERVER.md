@@ -179,7 +179,9 @@ state and reactions, read cursors, accounts (passkey and email users) with
 their credentials, addresses, profiles, memberships, push registrations
 (with their keys, `push_id`, scopes, and when they were last registered),
 the status they choose with `me`, when they were last shown `offline`
-(`seen`), and their mutes and room mutes, unexpired
+(`seen`) and whether they are shown otherwise, so that after a crash those
+who were get a `seen` at the next start (see Status), and their mutes and
+room mutes, unexpired
 sessions, finished uploads and their files, the VAPID key, and the
 `log_id`, guest, account, and embed counters, so no `log_id` or `user_id`
 is reused. What does not: connections and their `idle`, request
@@ -677,8 +679,15 @@ never does. An account not shown `offline` since `seen` was first kept,
 such as one stored by an earlier version, is shown `offline` without
 `seen` until its next change to `offline`.
 
-A crash closes no connection, so the users who were connected then keep
-their `seen` from before it.
+A crash closes no connection, so nothing sets `seen` for the users then
+connected. The store also keeps whether each user's shown status is other
+than `offline`, so the next start finds who was shown so, and gives each
+such account a `seen` at that start, when it is shown `offline` again: the
+store has no time of the crash, and the last time it wrote can be earlier
+than when others last saw the user, while nobody could see them between
+the crash and the start. Such a `seen` is late by as long as the server
+was down, but never earlier than when the user was last seen. An invisible
+user is always shown `offline`, so a crash leaves their `seen` as it is.
 
 A sign-in is an `auth` that signs the connection in as a user it is not
 already signed in as (§3.2). After the result of every sign-in, and after

@@ -448,15 +448,22 @@ func (u *userState) you() map[string]any {
 // status or its connections, and when the shown status has just become
 // offline, sets seen to now (§4.5.2). Only that change sets it: a user
 // whose chosen invisible keeps them shown offline can connect and leave
-// without moving it.
+// without moving it. The store keeps whether the shown status is offline,
+// so a change out of offline is stored too: after a crash, which closes no
+// connection, restoreLocked gives the users who were shown otherwise a
+// seen then.
 func (s *Server) noteShownLocked(u *userState) {
 	shown := u.shownStatus()
 	if shown == u.shown {
 		return
 	}
+	wasOffline := u.shown == statusOffline
 	u.shown = shown
-	if shown == statusOffline {
+	switch {
+	case shown == statusOffline:
 		u.seen = time.Now().UnixMilli()
+		s.touchUser(u.id)
+	case wasOffline:
 		s.touchUser(u.id)
 	}
 }

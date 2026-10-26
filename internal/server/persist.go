@@ -160,11 +160,13 @@ type storedUser struct {
 	Email       string           `json:"email,omitzero"`
 	// Status is the chosen status (§4.5.1), absent for online; Seen the
 	// Unix milliseconds when the shown status last became offline, absent
-	// if unknown, as for users stored before it was kept (§4.5.2); and
-	// Mute and RoomMutes their mutes. Pings are the rooms they have not
-	// joined that count toward unread.
+	// if unknown, as for users stored before it was kept (§4.5.2); Shown
+	// true while the shown status is other than offline, which a restart
+	// after a crash finds still set; and Mute and RoomMutes their mutes.
+	// Pings are the rooms they have not joined that count toward unread.
 	Status    *string               `json:"status,omitzero"`
 	Seen      int64                 `json:"seen,omitzero"`
+	Shown     bool                  `json:"shown,omitzero"`
 	Mute      *storedMute           `json:"mute,omitzero"`
 	RoomMutes map[string]storedMute `json:"room_mutes,omitzero"`
 	Pings     map[string]int64      `json:"pings,omitzero"`
@@ -346,7 +348,7 @@ func storedMessageOf(m *messageState) storedMessage {
 }
 
 func storedUserOf(u *userState) storedUser {
-	stored := storedUser{Name: u.name, Avatar: u.avatar, Ext: u.ext, LeftAt: u.leftAt, Email: u.email, Pings: u.pings, Seen: u.seen}
+	stored := storedUser{Name: u.name, Avatar: u.avatar, Ext: u.ext, LeftAt: u.leftAt, Email: u.email, Pings: u.pings, Seen: u.seen, Shown: u.shown != statusOffline}
 	if status := u.chosen; status != statusOnline {
 		stored.Status = &status
 	}
@@ -649,6 +651,14 @@ func (s *Server) restoreLocked() (map[string]bool, error) {
 
 	// Nothing is connected yet: guests are retired as if their last
 	// connections had just closed, and writes that had not finished fail.
+	// An account stored as shown other than offline was connected when the
+	// server stopped without closing its connections, as in a crash, which
+	// stores nothing. The shown status becomes offline now, so seen is now,
+	// as for a disconnect (§4.5.2): no earlier time is known not to be
+	// before others last saw the account, since the store holds no time of
+	// the crash, and nobody could see it in between. A shutdown, which
+	// closes every connection first, leaves no account stored so; an
+	// invisible one is never stored so, so its connections never move seen.
 	for _, id := range slices.Sorted(maps.Keys(s.users)) {
 		if u := s.users[id]; !u.account() {
 			s.retireLocked(u)
@@ -660,6 +670,10 @@ func (s *Server) restoreLocked() (map[string]bool, error) {
 			}
 			u.shown = u.shownStatus()
 			u.status = u.shown
+			if storedUsers[id].Shown && u.shown == statusOffline {
+				u.seen = now.UnixMilli()
+				s.touchUser(id)
+			}
 		}
 	}
 	for _, id := range slices.Sorted(maps.Keys(s.embeds)) {

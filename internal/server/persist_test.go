@@ -133,12 +133,13 @@ func TestStateSurvivesRestart(t *testing.T) {
 			}
 			_ = reopened.Close()
 			// Shutdown closes the owner's connection, which shows them
-			// offline, so it adds their seen (§4.5.2).
+			// offline, so it adds their seen and stores them as no longer
+			// shown otherwise (§4.5.2).
 			var ownerUser storedUser
-			if err := json.Unmarshal([]byte(stored["user/"+owner.userID]), &ownerUser); err != nil || ownerUser.Seen < stopping {
-				t.Fatalf("owner's seen after shutdown = %d (%v), want at least %d", ownerUser.Seen, err, stopping)
+			if err := json.Unmarshal([]byte(stored["user/"+owner.userID]), &ownerUser); err != nil || ownerUser.Seen < stopping || ownerUser.Shown {
+				t.Fatalf("owner after shutdown: seen %d, shown %v (%v), want seen at least %d, not shown", ownerUser.Seen, ownerUser.Shown, err, stopping)
 			}
-			ownerUser.Seen = 0
+			ownerUser.Seen, ownerUser.Shown = 0, true
 			stored["user/"+owner.userID] = string(encodeJSON(ownerUser))
 			for key, value := range want {
 				if stored[key] != value {
