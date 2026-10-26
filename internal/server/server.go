@@ -51,7 +51,6 @@ const (
 	defaultStreamMaxBytes     int64 = 16 << 20
 	defaultStreamMaxDuration        = time.Hour
 	defaultMaxListedMembers         = 1000
-	defaultMaxPrivateRooms          = 100
 	// retryAfterSeconds is the delay suggested by connection-level
 	// retry_after errors (capacity and shutdown).
 	retryAfterSeconds = 30
@@ -126,8 +125,8 @@ type Config struct {
 	// MaxPrivateRooms bounds the top-level private rooms (§4.2.4) one user
 	// is in at once, whether they created them or were added: past it,
 	// creating one or being added to one is denied, so nobody can be pulled
-	// into private rooms without end. It is advertised as ext:settings
-	// private_rooms. 0 is unlimited.
+	// into private rooms without end, as on a public deployment. It is
+	// advertised as ext:settings private_rooms. 0, the default, is unlimited.
 	MaxPrivateRooms int
 	// Welcome is server.welcome (§3.2): Markdown shown on the sign-in
 	// screen. Empty omits it.
@@ -170,7 +169,6 @@ func DefaultConfig() Config {
 		StreamMaxBytes:        defaultStreamMaxBytes,
 		StreamMaxDuration:     defaultStreamMaxDuration,
 		MaxListedMembers:      defaultMaxListedMembers,
-		MaxPrivateRooms:       defaultMaxPrivateRooms,
 	}
 }
 

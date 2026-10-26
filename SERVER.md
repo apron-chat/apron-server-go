@@ -85,8 +85,9 @@ Flags (`aprond --help` lists them all):
   `room_list` and `room_update` `joined`, and so the statuses sent after a
   sign-in ([Status](#status)), `0` for no bound; see
   [Rooms](#rooms-threads-and-membership).
-- `--max-private-rooms <n>` (100) bounds the top-level private rooms one
-  user is in at once, `0` for no bound; see
+- `--max-private-rooms <n>` bounds the top-level private rooms one user is
+  in at once, such as on a public deployment; `0`, the default, sets no
+  bound; see
   [Rooms](#rooms-threads-and-membership).
 - `--welcome <commonmark>` sets `server.welcome`, which clients show on their
   sign-in screen, such as "Chat as a guest, or sign in with email to keep
@@ -371,12 +372,12 @@ Private rooms are how people talk directly: a client starts one with
 `room_set` and `private: true`, often untitled (this server titles only
 threads, so clients name it after its members), and adds the other people
 with `room_join` and their `user_id`. Anyone can add anyone they share
-nothing with, so `--max-private-rooms` (100) bounds the top-level private
-rooms one user is in at once, guests included, whether they created them or
-were added: past it, creating one or being added to one is `denied`, and
+nothing with, so a public deployment can bound the top-level private rooms
+one user is in at once with `--max-private-rooms` (no bound by default),
+guests included, whether they created them or were added: past it, creating one or being added to one is `denied`, and
 the user leaves one to make room. Threads are not counted, since only a
-private room's members can be added to its threads. The `server` frame
-advertises the bound as `ext.settings.private_rooms` under capability
+private room's members can be added to its threads. With a bound, the
+`server` frame advertises it as `ext.settings.private_rooms` under capability
 `ext:settings`, the extension
 [apron-web's EXT.md](https://github.com/apron-chat/apron-web/blob/main/EXT.md)
 defines; its other keys are booleans that an absent key makes `true`, as
