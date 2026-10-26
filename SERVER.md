@@ -665,18 +665,20 @@ the same way, since a membership carries only a recorded user, unless their
 status is `offline` or `""`.
 
 `seen` (§4.5.2) is when the shown status last became `offline`, in Unix
-milliseconds like a `log_id`: when the last connection closed of a user
-who chose `online` or `dnd` (a shutdown closes them too), or when a
-connected user chose `invisible`. It
+milliseconds like a `log_id`: for a user who chose `online` or `dnd`, when
+their last connection closed (a shutdown closes them too) or signed in as
+another account, and for a connected user, when they chose `invisible`. It
 is set only then, so an invisible user's connections coming and going
 never move it, and it is kept in the store with the user. Every user
-object with a shown `offline` other than `you` carries it, the `user`
-notification of the change, `members`, and `users` alike, so a client that
-signs in later learns it from a listing; `you` never does. An account
-not shown `offline` since `seen` was first kept, such as one stored by an
-earlier version, is shown `offline` without `seen` until its next change to
-`offline`. A crash closes no connection, so the users who were connected
-then keep their `seen` from before it.
+object with a shown `offline` other than `you` carries it when it is
+known, the `user` notification of the change, `members`, and `users`
+alike, so a client that signs in later learns it from a listing; `you`
+never does. An account not shown `offline` since `seen` was first kept,
+such as one stored by an earlier version, is shown `offline` without
+`seen` until its next change to `offline`.
+
+A crash closes no connection, so the users who were connected then keep
+their `seen` from before it.
 
 A sign-in is an `auth` that signs the connection in as a user it is not
 already signed in as (§3.2). After the result of every sign-in, and after

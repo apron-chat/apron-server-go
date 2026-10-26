@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"fmt"
+	"net/http/httptest"
 	"path/filepath"
 	"reflect"
 	"strconv"
@@ -1042,19 +1043,9 @@ func TestSignInToExistingAccountIsADeparture(t *testing.T) {
 		registered := registerTestPasskey(t, owner, newTestAuthenticator(t))
 		setStatus(t, owner, status)
 		_ = owner.ws.Close(websocket.StatusNormalClosure, "away")
-		// The server detaches the closed connection on its own time: wait
-		// for it, so the account's going offline is drained here.
-		for deadline := time.Now().Add(time.Second); ; time.Sleep(time.Millisecond) {
-			app.mu.RLock()
-			open := len(app.users[owner.userID].clients)
-			app.mu.RUnlock()
-			if open == 0 {
-				break
-			}
-			if time.Now().After(deadline) {
-				t.Fatalf("%s still has %d connections", owner.userID, open)
-			}
-		}
+		// Wait for the detach, so the account's going offline is drained
+		// here.
+		waitConnections(t, app, owner.userID, 0)
 		observer.drain(t)
 
 		guest, _ := dialOrigin(t, httpServer, testPasskeyOrigin)
@@ -1077,6 +1068,24 @@ func TestSignInToExistingAccountIsADeparture(t *testing.T) {
 		}
 		_ = guest.ws.Close(websocket.StatusNormalClosure, "done")
 		observer.drain(t)
+	}
+}
+
+// waitConnections waits until userID has n connections: the server
+// detaches a closed connection on its own time, so a test that closes one
+// waits for it before it checks what the close did, or did not, send.
+func waitConnections(t *testing.T, app *Server, userID string, n int) {
+	t.Helper()
+	for deadline := time.Now().Add(time.Second); ; time.Sleep(time.Millisecond) {
+		app.mu.RLock()
+		open := len(app.users[userID].clients)
+		app.mu.RUnlock()
+		if open == n {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%s has %d connections, want %d", userID, open, n)
+		}
 	}
 }
 
@@ -1192,10 +1201,12 @@ func TestSeenOnDisconnect(t *testing.T) {
 	expectListedSeen(t, a, userID, "idle", "")
 	b.status(t, map[string]any{"idle": false})
 	expectStatus(t, a, userID, "online")
-	for status, shown := range map[string]string{"dnd": "dnd", "": ""} {
+	// In order, so each is a change and the last leaves "" for the dnd
+	// below to change.
+	for _, status := range []string{"dnd", ""} {
 		setStatus(t, b, status)
-		expectProfileStatus(t, a, userID, shown)
-		expectListedSeen(t, a, userID, shown, "")
+		expectProfileStatus(t, a, userID, status)
+		expectListedSeen(t, a, userID, status, "")
 	}
 	// dnd shows offline without a connection, with a new seen.
 	setStatus(t, b, "dnd")
@@ -1214,9 +1225,7 @@ func TestSeenOnDisconnect(t *testing.T) {
 // listings too, so seen tells nothing of them (§5.3). Choosing online again
 // shows them without seen, and a later disconnect brings a new one.
 func TestSeenWithInvisible(t *testing.T) {
-	config := DefaultConfig()
-	config.WebAuthn = testWebAuthn(t)
-	_, httpServer := newTestServer(t, config)
+	app, httpServer := passkeyTestServer(t)
 	a := dialTestClient(t, httpServer)
 	b, _ := dialOrigin(t, httpServer, testPasskeyOrigin)
 	registered := registerTestPasskey(t, b, newTestAuthenticator(t))
@@ -1249,6 +1258,7 @@ func TestSeenWithInvisible(t *testing.T) {
 	_ = third.ws.Close(websocket.StatusNormalClosure, "bye")
 	_ = other.ws.Close(websocket.StatusNormalClosure, "bye")
 	_ = b.ws.Close(websocket.StatusNormalClosure, "bye")
+	waitConnections(t, app, userID, 0)
 	a.expectQuiet(t)
 	expectListedSeen(t, a, userID, "offline", seen)
 	b, _ = dialOrigin(t, httpServer, testPasskeyOrigin)
@@ -1314,4 +1324,168 @@ func TestSeenSurvivesRestart(t *testing.T) {
 	c.drain(t)
 	expectListedSeen(t, c, userID, "offline", seen)
 	expectListedSeen(t, c, "never", "offline", "")
+}
+
+// resume signs a new connection in to userID's account with its session
+// token, and drains what follows the result.
+func resume(t *testing.T, httpServer *httptest.Server, token any, userID string) *testClient {
+	t.Helper()
+	c, _ := dialOrigin(t, httpServer, testPasskeyOrigin)
+	c.result(t, "auth", c.nextID("resume"), map[string]any{"scheme": "token", "token": token})
+	c.userID = userID
+	c.drain(t)
+	return c
+}
+
+// seenMillis is seen, in the format of a log_id, as a number.
+func seenMillis(t *testing.T, seen string) int64 {
+	t.Helper()
+	checkSeen(t, seen)
+	ms, _ := strconv.ParseInt(seen, 10, 64)
+	return ms
+}
+
+// expectSeenBetween requires seen to be no earlier than from and no later
+// than to, in Unix milliseconds.
+func expectSeenBetween(t *testing.T, what, seen string, from, to int64) {
+	t.Helper()
+	if ms := seenMillis(t, seen); ms < from || ms > to {
+		t.Fatalf("%s: seen %d is not within [%d, %d]", what, ms, from, to)
+	}
+}
+
+// A shown offline that waits past the user's burst of status changes, to
+// be sent statusCoalesce later, carries seen too: when the shown status
+// became offline, not when it was sent (§4.5.2).
+func TestCoalescedOfflineCarriesSeen(t *testing.T) {
+	app, httpServer := passkeyTestServer(t)
+	a := dialTestClient(t, httpServer)
+	b, _ := dialOrigin(t, httpServer, testPasskeyOrigin)
+	registerTestPasskey(t, b, newTestAuthenticator(t))
+	userID := b.userID
+	expectMembership(t, a, "general", userID, true)
+	watching(a)
+	a.drain(t)
+	// b's first status, online when it signed in, took one of the burst.
+	for i := range statusBurst - 1 {
+		idle := i%2 == 0
+		b.status(t, map[string]any{"idle": idleParam(idle)})
+		expectStatus(t, a, userID, map[bool]string{true: "idle", false: "online"}[idle])
+	}
+	closing := time.Now().UnixMilli()
+	_ = b.ws.Close(websocket.StatusNormalClosure, "bye")
+	waitConnections(t, app, userID, 0)
+	closed := time.Now().UnixMilli()
+	a.expectQuiet(t)
+	time.Sleep(statusCoalesce + 200*time.Millisecond)
+	seen := expectStatus(t, a, userID, "offline")
+	expectSeenBetween(t, "coalesced offline", seen, closing, closed)
+	expectListedSeen(t, a, userID, "offline", seen)
+	a.expectQuiet(t)
+}
+
+// Closing one of a user's connections while another stays open changes
+// nothing others see: nothing is sent, and seen stays as it was (§4.5.2).
+// The last one's close sets a later seen.
+func TestSeenOnlyWithTheLastConnection(t *testing.T) {
+	app, httpServer := passkeyTestServer(t)
+	a := dialTestClient(t, httpServer)
+	b, _ := dialOrigin(t, httpServer, testPasskeyOrigin)
+	token := registerTestPasskey(t, b, newTestAuthenticator(t))["token"]
+	userID := b.userID
+	expectMembership(t, a, "general", userID, true)
+	watching(a)
+	a.drain(t)
+	_ = b.ws.Close(websocket.StatusNormalClosure, "bye")
+	seen := expectStatus(t, a, userID, "offline")
+
+	time.Sleep(2 * time.Millisecond)
+	first := resume(t, httpServer, token, userID)
+	expectStatus(t, a, userID, "online")
+	second := resume(t, httpServer, token, userID)
+	a.expectQuiet(t)
+	_ = first.ws.Close(websocket.StatusNormalClosure, "bye")
+	waitConnections(t, app, userID, 1)
+	a.expectQuiet(t)
+	expectListedSeen(t, a, userID, "online", "")
+	app.mu.RLock()
+	kept := app.users[userID].seen
+	app.mu.RUnlock()
+	if kept != seenMillis(t, seen) {
+		t.Fatalf("seen after closing one of two connections = %d, want %s", kept, seen)
+	}
+
+	_ = second.ws.Close(websocket.StatusNormalClosure, "bye")
+	later := expectStatus(t, a, userID, "offline")
+	seenAfter(t, later, seen)
+	expectListedSeen(t, a, userID, "offline", later)
+}
+
+// When an account's last connection signs in as another account, the
+// first is left without connections: others are told it is offline, with
+// seen, before the status of the second (§4.5.2).
+func TestSeenWhenTheLastConnectionSignsInElsewhere(t *testing.T) {
+	_, httpServer := passkeyTestServer(t)
+	a := dialTestClient(t, httpServer)
+	b, _ := dialOrigin(t, httpServer, testPasskeyOrigin)
+	registerTestPasskey(t, b, newTestAuthenticator(t))
+	expectMembership(t, a, "general", b.userID, true)
+	c, _ := dialOrigin(t, httpServer, testPasskeyOrigin)
+	other := registerTestPasskey(t, c, newTestAuthenticator(t))
+	expectMembership(t, a, "general", c.userID, true)
+	watching(a)
+	a.drain(t)
+	_ = c.ws.Close(websocket.StatusNormalClosure, "bye")
+	expectStatus(t, a, c.userID, "offline")
+
+	b.drain(t)
+	switching := time.Now().UnixMilli()
+	b.result(t, "auth", "elsewhere", map[string]any{"scheme": "token", "token": other["token"]})
+	switched := time.Now().UnixMilli()
+	seen := expectStatus(t, a, b.userID, "offline")
+	expectSeenBetween(t, "the account left", seen, switching, switched)
+	expectStatus(t, a, c.userID, "online")
+	a.expectQuiet(t)
+	expectListedSeen(t, a, b.userID, "offline", seen)
+}
+
+// seen goes with a shown offline in every listing (§4.5.2): the members and
+// users of a room_update joined, and of a room_list filtered to one
+// user_id.
+func TestListingsCarrySeen(t *testing.T) {
+	_, httpServer := passkeyTestServer(t)
+	a := dialTestClient(t, httpServer)
+	b, _ := dialOrigin(t, httpServer, testPasskeyOrigin)
+	registerTestPasskey(t, b, newTestAuthenticator(t))
+	userID := b.userID
+	expectMembership(t, a, "general", userID, true)
+	room, _ := saveRoom(t, b, "room", map[string]any{"title": "Room"})
+	watching(a)
+	a.drain(t)
+	_ = b.ws.Close(websocket.StatusNormalClosure, "bye")
+	seen := expectStatus(t, a, userID, "offline")
+	check := func(what string, lists ...[]any) {
+		t.Helper()
+		for _, list := range lists {
+			var found map[string]any
+			for _, object := range list {
+				if object := object.(map[string]any); object["user_id"] == userID {
+					found = object
+				}
+			}
+			if found == nil || found["status"] != "offline" || found["seen"] != seen {
+				t.Fatalf("%s: %#v, want %s offline with seen %s", what, list, userID, seen)
+			}
+		}
+	}
+
+	before, _ := a.request(t, "room_join", "join", map[string]any{"room_id": room})
+	update := notificationParams(t, before[0], "room_update")
+	check("room_update joined", update["joined"].([]any)[0].(map[string]any)["members"].([]any), update["users"].([]any))
+	listed := listRooms(t, a, map[string]any{"room_id": room, "members": true, "user_id": userID})
+	members := listed["joined"].([]any)[0].(map[string]any)["members"].([]any)
+	if len(members) != 1 {
+		t.Fatalf("room_list members for %s: %#v", userID, members)
+	}
+	check("room_list by user_id", members, listed["users"].([]any))
 }

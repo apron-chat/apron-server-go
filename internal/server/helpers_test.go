@@ -296,14 +296,26 @@ func (c *testClient) read(t *testing.T) map[string]any {
 }
 
 // isStatusAnnouncement reports whether frame is a bare announcement of
-// another user's status: `user` with only `new`, which has only user_id,
-// status, and, with offline, seen.
+// another user's status: `user` with only `new`, which has only user_id and
+// status, and seen only with offline (§4.5.2). The profile change of a user
+// with no other fields is the same frame, and either way it tells the shown
+// status.
 func isStatusAnnouncement(frame map[string]any) bool {
 	params, _ := frame["params"].(map[string]any)
 	object, _ := params["new"].(map[string]any)
+	if frame["method"] != "user" || len(params) != 1 {
+		return false
+	}
+	_, hasID := object["user_id"]
 	_, hasStatus := object["status"]
 	_, hasSeen := object["seen"]
-	return frame["method"] == "user" && len(params) == 1 && hasStatus && (len(object) == 2 || len(object) == 3 && hasSeen)
+	switch {
+	case !hasID || !hasStatus:
+		return false
+	case hasSeen:
+		return len(object) == 3 && object["status"] == statusOffline
+	}
+	return len(object) == 2
 }
 
 // call sends a request and returns its reply frame, which must come next.
