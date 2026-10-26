@@ -7,22 +7,29 @@ import (
 	"fmt"
 	"maps"
 	"slices"
+	"strconv"
 	"time"
 
 	"golang.org/x/time/rate"
 )
 
-// Status (§4.5). A user sets a status with `me`: online (the default), ""
-// for none, dnd, or invisible; the server stores "" for any other value.
-// Others see it as:
+// Status (§4.5). The chosen status is set with `me`: online (the default),
+// "" for none, dnd, or invisible; the server stores "" for any other value.
+// The presence is online while a connection is attended, idle while
+// connected with none attended, and offline without a connection. Others
+// see the shown status, which the two give (§4.5.1):
 //
-//	online     online while a connection is attended, idle while connected
-//	           with none attended, offline without a connection
-//	""         ""
-//	dnd        dnd while connected, offline without a connection
-//	invisible  offline
+//	chosen     presence online  presence idle  presence offline
+//	online     online           idle           offline
+//	dnd        dnd              dnd            offline
+//	invisible  offline          offline        offline
+//	""         ""               ""             ""
 //
-// and the user sees, in `you`, the value they set. Separately, each
+// and the user sees, in `you`, the chosen status. seen is when the shown
+// status last became offline: it is set only then, so an invisible user's
+// connections never move it, and it goes with each shown offline, in
+// complete objects, bare members, and the `user` notification of the
+// change, but never in `you` (§4.5.2). Separately, each
 // connection reports whether it is idle, and the user mutes their
 // notifications everywhere or in one room and its threads; mutes and a dnd
 // status silence pushes (§4.9). Both are set with the `status` request.
@@ -48,7 +55,7 @@ const (
 	// retry_after (§4.5).
 	statusRequestBurst  = 20
 	statusRequestRefill = time.Second
-	// A user's derived status changes go to others at once up to
+	// A user's shown status changes go to others at once up to
 	// statusBurst times, then at most once per statusCoalesce, the latest
 	// status winning, so a flapping connection costs its rooms little
 	// (§4.5 lets servers delay them).
@@ -261,8 +268,8 @@ func muteFrame(roomID string, mute muteState, now time.Time) jsontext.Value {
 
 // sendAfterAuthLocked sends a connection that has just signed in, after
 // its auth result (§4.5), one `status` for each of its user's mutes in
-// effect, of rooms the user can see, and one `user` with the status others
-// see of each user who shares a room with it. offline (a user without
+// effect, of rooms the user can see, and one `user` with the shown status
+// of each user who shares a room with it. offline (a user without
 // connections, or an invisible one) and "" are left out, so it tells
 // neither who is invisible nor who opted out. A server may limit the
 // statuses to the users it would list in `members` (§4.5), and this one
@@ -299,7 +306,7 @@ func (s *Server) sendAfterAuthLocked(c *client) {
 		}
 	}
 	for _, other := range shown {
-		frames = append(frames, statusFrame(other, other.shownStatus()))
+		frames = append(frames, statusFrame(other))
 	}
 	if len(frames) > 0 {
 		c.enqueueBatch(frames...)
@@ -403,7 +410,8 @@ func (u *userState) attended() bool {
 	return false
 }
 
-// shownStatus is the user's status as others see it (§4.5).
+// shownStatus is the user's shown status, from the chosen status and the
+// presence (§4.5.1).
 func (u *userState) shownStatus() string {
 	switch u.chosen {
 	case statusOnline:
@@ -428,19 +436,56 @@ func (u *userState) shownStatus() string {
 }
 
 // you is the user's own current object (§3.3): its profile, with the
-// status the user set in place of the one others see.
+// chosen status in place of the shown one, and never seen (§4.5.2).
 func (u *userState) you() map[string]any {
 	profile := u.profile()
 	profile["status"] = u.chosen
+	delete(profile, "seen")
 	return profile
 }
 
-// announceStatusLocked sends the connections of those who share a room with
-// u its status, as `user` `new`, when it differs from the one last sent: at
-// once within the user's burst, else once statusCoalesce has passed, with
-// whatever the status is then. The user's own connections are not told:
-// their `you` carries the status the user set, which this does not change.
+// noteShownLocked notes u's shown status after a change to its chosen
+// status or its connections, and when the shown status has just become
+// offline, sets seen to now (§4.5.2). Only that change sets it: a user
+// whose chosen invisible keeps them shown offline can connect and leave
+// without moving it.
+func (s *Server) noteShownLocked(u *userState) {
+	shown := u.shownStatus()
+	if shown == u.shown {
+		return
+	}
+	u.shown = shown
+	if shown == statusOffline {
+		u.seen = time.Now().UnixMilli()
+		s.touchUser(u.id)
+	}
+}
+
+// addSeen adds u's seen to a current object of u that carries a shown
+// offline, if it is known (§4.5.2).
+func (u *userState) addSeen(object map[string]any) {
+	if object["status"] == statusOffline && u.seen > 0 {
+		object["seen"] = strconv.FormatInt(u.seen, 10)
+	}
+}
+
+// shownObject is the bare current object of u that others see: user_id and
+// the shown status, with seen when it is offline (§4.5.2).
+func (u *userState) shownObject() map[string]any {
+	object := map[string]any{"user_id": u.id, "status": u.shownStatus()}
+	u.addSeen(object)
+	return object
+}
+
+// announceStatusLocked notes u's shown status (noteShownLocked), then sends
+// it to the connections of those who share a room with u, as `user` `new`,
+// when it differs from the one last sent: at once within the user's burst,
+// else once statusCoalesce has passed, with whatever the status is then.
+// The user's own connections are not told: their `you` carries the chosen
+// status, which this does not change. A shutdown sends nothing, but still
+// notes the seen of each user whose connections it closes.
 func (s *Server) announceStatusLocked(u *userState) {
+	s.noteShownLocked(u)
 	status := u.shownStatus()
 	if s.closed || status == u.status || u.statusTimer != nil {
 		return
@@ -458,26 +503,27 @@ func (s *Server) announceStatusLocked(u *userState) {
 			}
 			if status := u.shownStatus(); status != u.status {
 				u.status = status
-				s.sendStatusLocked(u, status, s.sharersLocked(u))
+				s.sendStatusLocked(u, s.sharersLocked(u))
 			}
 		})
 		return
 	}
 	u.status = status
-	s.sendStatusLocked(u, status, s.sharersLocked(u))
+	s.sendStatusLocked(u, s.sharersLocked(u))
 }
 
-// sendStatusLocked tells the connections of users that u's status is
-// status.
-func (s *Server) sendStatusLocked(u *userState, status string, users []*userState) {
-	frame := statusFrame(u, status)
+// sendStatusLocked tells the connections of users u's shown status.
+func (s *Server) sendStatusLocked(u *userState, users []*userState) {
+	frame := statusFrame(u)
 	for _, other := range users {
 		other.send(frame)
 	}
 }
 
-func statusFrame(u *userState, status string) jsontext.Value {
-	return notification("user", map[string]any{"new": map[string]any{"user_id": u.id, "status": status}})
+// statusFrame is the `user` notification of u's shown status: `{new:
+// {user_id, status}}`, with seen when it is offline (§4.5.2).
+func statusFrame(u *userState) jsontext.Value {
+	return notification("user", map[string]any{"new": u.shownObject()})
 }
 
 // announceJoinStatusLocked tells the other members of r the status of the
@@ -485,8 +531,7 @@ func statusFrame(u *userState, status string) jsontext.Value {
 // recorded user object. Like the snapshot after auth, it leaves out offline
 // and "", which would tell who is invisible or opted out.
 func (s *Server) announceJoinStatusLocked(u *userState, r *roomState) {
-	status := u.shownStatus()
-	if status == statusOffline || status == statusNone {
+	if status := u.shownStatus(); status == statusOffline || status == statusNone {
 		return
 	}
 	users := make([]*userState, 0, len(r.members))
@@ -495,5 +540,5 @@ func (s *Server) announceJoinStatusLocked(u *userState, r *roomState) {
 			users = append(users, other)
 		}
 	}
-	s.sendStatusLocked(u, status, users)
+	s.sendStatusLocked(u, users)
 }

@@ -158,10 +158,13 @@ type storedUser struct {
 	LeftAt      map[string]int64 `json:"left_at,omitzero"`
 	Passkey     *storedPasskey   `json:"passkey,omitzero"`
 	Email       string           `json:"email,omitzero"`
-	// Status is the status the user set (§4.5), absent for online, and
-	// Mute and RoomMutes their mutes; Pings are the rooms they have not
+	// Status is the chosen status (§4.5.1), absent for online; Seen the
+	// Unix milliseconds when the shown status last became offline, absent
+	// if unknown, as for users stored before it was kept (§4.5.2); and
+	// Mute and RoomMutes their mutes. Pings are the rooms they have not
 	// joined that count toward unread.
 	Status    *string               `json:"status,omitzero"`
+	Seen      int64                 `json:"seen,omitzero"`
 	Mute      *storedMute           `json:"mute,omitzero"`
 	RoomMutes map[string]storedMute `json:"room_mutes,omitzero"`
 	Pings     map[string]int64      `json:"pings,omitzero"`
@@ -343,7 +346,7 @@ func storedMessageOf(m *messageState) storedMessage {
 }
 
 func storedUserOf(u *userState) storedUser {
-	stored := storedUser{Name: u.name, Avatar: u.avatar, Ext: u.ext, LeftAt: u.leftAt, Email: u.email, Pings: u.pings}
+	stored := storedUser{Name: u.name, Avatar: u.avatar, Ext: u.ext, LeftAt: u.leftAt, Email: u.email, Pings: u.pings, Seen: u.seen}
 	if status := u.chosen; status != statusOnline {
 		stored.Status = &status
 	}
@@ -533,6 +536,7 @@ func (s *Server) restoreLocked() (map[string]bool, error) {
 		case stored.Status != nil:
 			u.chosen = statusNone
 		}
+		u.seen = stored.Seen
 		if stored.Mute != nil {
 			u.mute = muteState{forever: stored.Mute.Forever, until: stored.Mute.Until}
 		}
@@ -654,7 +658,8 @@ func (s *Server) restoreLocked() (map[string]bool, error) {
 			for id := range u.roomMutes {
 				s.scheduleRoomMuteLocked(u, id)
 			}
-			u.status = u.shownStatus()
+			u.shown = u.shownStatus()
+			u.status = u.shown
 		}
 	}
 	for _, id := range slices.Sorted(maps.Keys(s.embeds)) {

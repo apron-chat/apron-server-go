@@ -10,7 +10,7 @@ under consideration in
 WebRTC, multiplexing, and the actions embed.
 State is kept in a store, by default a SQLite database in the user data
 directory, so rooms, history, accounts, sessions, uploads, push
-registrations, and the status users set survive a restart; see
+registrations, and the status users choose survive a restart; see
 [Storage](#storage).
 
 This document describes how the server is configured and how it behaves where
@@ -178,7 +178,8 @@ What survives a restart: rooms and threads with their complete logs, message
 state and reactions, read cursors, accounts (passkey and email users) with
 their credentials, addresses, profiles, memberships, push registrations
 (with their keys, `push_id`, scopes, and when they were last registered),
-the status they set with `me`, and their mutes and room mutes, unexpired
+the status they choose with `me`, when they were last shown `offline`
+(`seen`), and their mutes and room mutes, unexpired
 sessions, finished uploads and their files, the VAPID key, and the
 `log_id`, guest, account, and embed counters, so no `log_id` or `user_id`
 is reused. What does not: connections and their `idle`, request
@@ -294,13 +295,14 @@ carries a removed `name` or `avatar` as `""`.
 Current user objects (`you`, `new` in `user`, and `users` in `room_list` and
 `room_update`) carry `avatar`, `ext`, and `roles`, an account's `roles` always,
 `[]` when it holds none, so a role taken away clears it (§3.3), and
-`status` ([Status](#status)): in `you`, the status the user set, and
-elsewhere the status others see. Recorded objects (`from`
-in messages and reactions, `user` in memberships) carry only `user_id` and `name` as they
-were when logged. Room `members` are bare `{user_id, status}` objects,
-carrying the status others see like every current object in `room_list`
-and `room_update`, `offline` and `""` included (§4.5), whose complete
-objects are in the accompanying `users`.
+`status` ([Status](#status)): in `you`, the chosen status, and
+elsewhere the shown status, with `seen` when it is `offline`. Recorded
+objects (`from` in messages and reactions, `user` in memberships) carry
+only `user_id` and `name` as they were when logged. Room `members` are bare
+`{user_id, status}` objects, carrying the shown status like every current
+object in `room_list` and `room_update`, `offline` and `""` included
+(§4.5), and `seen` with `offline`, whose complete objects are in the
+accompanying `users`.
 
 `you` in `auth` and `me` results, and `users`, are complete (§3.3): they
 carry every profile field the server publishes, and clients replace the
@@ -308,7 +310,8 @@ object they keep with them. A `user` notification carries `user_id` and at
 least the fields that changed, and clients merge it into the object they
 keep: a profile change sends the complete profile, with each field it
 removed, and each `ext` key it removed, as its empty value; a status change
-sends only `{user_id, status}` ([Status](#status)).
+sends only `{user_id, status}`, and `seen` with `offline`
+([Status](#status)).
 
 `user` notifications carry profile and identity changes; joins and leaves
 are memberships. A profile change sends
@@ -629,42 +632,58 @@ read cursors go to every connection of the room's members.
 
 ## Status
 
-The `status` capability (§4.5) implements every status value: a user sets
-`status` with `me` to `online` (the default), `""` (none), `dnd`, or
+The `status` capability (§4.5) implements every status value: a user
+chooses `status` with `me`: `online` (the default), `""` (none), `dnd`, or
 `invisible`. `server.status` lists the optional ones, `dnd` and
-`invisible`. Any other string, the derived `idle` and `offline` included,
+`invisible`. Any other string, the shown `idle` and `offline` included,
 is stored as `""`; a `status` that is not a string is `invalid_params`.
-The status lasts until changed, across connections and restarts. Others
-see:
+The chosen status lasts until changed, across connections and restarts.
+The presence is `online` while a connection of the user is attended, `idle`
+while the user is connected but no connection is, and `offline` without
+connections. Others see the shown status (§4.5.1):
 
-- for `online`: `online` while a connection of the user is attended,
-  `idle` while the user is connected but no connection is, and `offline`
-  without connections;
+- for `online`: the presence;
 - for `""`: `""`;
 - for `dnd`: `dnd` while the user has a connection, and `offline`
   without one, announced on the last disconnect and on a reconnect;
 - for `invisible`: `offline`.
 
-`you` shows the value the user set, so the user's own connections learn
-of a change to it, as with any profile change, but not of the derived
-changes. Every other current user object carries the status others see,
+`you` shows the chosen status, so the user's own connections learn
+of a change to it, as with any profile change, but not of changes to the
+presence. Every other current user object carries the shown status,
 so a listing shows it: each room's `members` and `users` in `room_list` and
 `room_update` carry it, `offline` and `""` included. A `me` that changes
 the status sends `user` `new` with the profile to those who share a room
 with the user, and counts against the user's limit on `status` requests
-(below): beyond it the `me` is `retry_after` and changes nothing. A derived
-change goes to their connections as `user` `{new: {user_id, status}}`: at
-once ten times, then at most once every two seconds, the latest status
-winning, so a flapping connection costs its rooms little. A new member is
-announced to a room's other members the same way, since a membership
-carries only a recorded user, unless their status is `offline` or `""`.
+(below): beyond it the `me` is `retry_after` and changes nothing. A change
+of the presence that changes the shown status goes to their connections as
+`user` `{new: {user_id, status}}`, with `seen` (below) when `offline`: at
+once ten times, then at most once
+every two seconds, the latest status winning, so a flapping connection
+costs its rooms little. A new member is announced to a room's other members
+the same way, since a membership carries only a recorded user, unless their
+status is `offline` or `""`.
+
+`seen` (§4.5.2) is when the shown status last became `offline`, in Unix
+milliseconds like a `log_id`: when the last connection closed of a user
+who chose `online` or `dnd` (a shutdown closes them too), or when a
+connected user chose `invisible`. It
+is set only then, so an invisible user's connections coming and going
+never move it, and it is kept in the store with the user. Every user
+object with a shown `offline` other than `you` carries it, the `user`
+notification of the change, `members`, and `users` alike, so a client that
+signs in later learns it from a listing; `you` never does. An account
+not shown `offline` since `seen` was first kept, such as one stored by an
+earlier version, is shown `offline` without `seen` until its next change to
+`offline`. A crash closes no connection, so the users who were connected
+then keep their `seen` from before it.
 
 A sign-in is an `auth` that signs the connection in as a user it is not
 already signed in as (§3.2). After the result of every sign-in, and after
 the departure and the join it causes, the connection is sent `status` for
 each of the user's mutes in effect (below), the room
 mutes only of rooms the user can see, then `user` `{new: {user_id,
-status}}` with the status others see of each user who shares a room with
+status}}` with the shown status of each user who shares a room with
 it, one `user` per user, since its client drops the statuses it kept at
 each sign-in. It leaves out users who show `offline` or `""`, so the
 snapshot tells neither who is invisible nor who opted out; a `dnd` user
