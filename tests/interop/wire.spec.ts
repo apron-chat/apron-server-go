@@ -132,10 +132,25 @@ function senderOf(snapshot: ReturnType<ChatClient['snapshot']>, from: Identity):
 		.filter(([key]) => key === 'user_id' || !(Object.hasOwn(kept, key) && cleared(kept[key])))) as Identity;
 }
 
+/** A kept user object less `seen`, which the session state keeps under its own key (README "Session state"). */
+function withoutSeen(user: Identity): Identity {
+	const { seen: _seen, ...rest } = user as Identity & { seen?: unknown };
+	return rest as Identity;
+}
+
 function keptUser(snapshot: ReturnType<ChatClient['snapshot']>, id: string): Identity {
-	if (!snapshot.heldStatuses?.includes(id)) return snapshot.users[id];
-	const { status: _held, ...kept } = snapshot.users[id];
+	const user = withoutSeen(snapshot.users[id]);
+	if (!snapshot.heldStatuses?.includes(id)) return user;
+	const { status: _held, ...kept } = user;
 	return kept;
+}
+
+/** The kept `seen` of each kept user whose kept `status` is `offline` (README "Session state"). */
+function keptSeen(snapshot: ReturnType<ChatClient['snapshot']>): Record<string, string> {
+	return Object.fromEntries(Object.keys(snapshot.users).sort(byString).flatMap((id) => {
+		const seen = (snapshot.users[id] as Identity & { seen?: unknown }).seen;
+		return keptUser(snapshot, id).status === 'offline' && typeof seen === 'string' ? [[id, seen]] : [];
+	}));
 }
 
 function logicalState(client: ChatClient, operations: Record<string, string>): ObjectValue {
@@ -144,7 +159,7 @@ function logicalState(client: ChatClient, operations: Record<string, string>): O
 	// a room open without joining it is not visible either.
 	const rooms = snapshot.rooms.filter((room) => room.id !== DEFAULT_ROOM_ID && room.joined);
 	return JSON.parse(JSON.stringify({
-		you: snapshot.you ?? null,
+		you: snapshot.you ? withoutSeen(snapshot.you) : null,
 		capabilities: [...(snapshot.server?.capabilities ?? [])].sort(byString),
 		rooms: [...rooms].sort((left, right) => byString(left.id, right.id)).map(projectRoom),
 		typing: snapshot.typing
@@ -152,6 +167,7 @@ function logicalState(client: ChatClient, operations: Record<string, string>): O
 			.sort((left, right) => byString(left.room_id, right.room_id) || byString(left.from.user_id, right.from.user_id)),
 		// The kept users: a status only held on screen through a resume is not kept (README "Session state").
 		users: Object.fromEntries(Object.keys(snapshot.users).sort(byString).map((id) => [id, keptUser(snapshot, id)])),
+		seen: keptSeen(snapshot),
 		members: Object.fromEntries(rooms.filter((room) => room.members !== undefined).sort((left, right) => byString(left.id, right.id))
 			.map((room) => [room.id, room.members!.map((member) => member.user_id).sort(byString)])),
 		senders: Object.fromEntries(rooms.flatMap((room) => room.timeline.order.map((id) => [id, senderOf(snapshot, room.timeline.events[id].from)]))),
