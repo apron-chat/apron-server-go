@@ -1,4 +1,4 @@
-import { expect, type Locator, type Page } from '@playwright/test';
+import { expect, type BrowserContext, type Locator, type Page } from '@playwright/test';
 
 export function composer(page: Page): Locator {
 	return page.getByRole('textbox', { name: 'Message', exact: true });
@@ -90,6 +90,37 @@ export async function userIdOf(page: Page): Promise<string> {
 	await dialog.getByRole('button', { name: 'Cancel', exact: true }).click();
 	expect(id).toMatch(/\S/);
 	return id;
+}
+
+/**
+ * A virtual authenticator (Chromium's WebAuthn domain) on the page, holding the given credentials, for passkeys
+ * against the real Go verifier; the page must be on localhost, the default RP ID.
+ */
+export async function addAuthenticator(page: Page, context: BrowserContext, credentials: any[] = []) {
+	const cdp = await context.newCDPSession(page);
+	await cdp.send('WebAuthn.enable');
+	const { authenticatorId } = await cdp.send('WebAuthn.addVirtualAuthenticator', { options: {
+		protocol: 'ctap2', transport: 'internal', hasResidentKey: true,
+		hasUserVerification: true, isUserVerified: true, automaticPresenceSimulation: true
+	} });
+	for (const credential of credentials) await cdp.send('WebAuthn.addCredential', { authenticatorId, credential });
+	return { credentials: async () => (await cdp.send('WebAuthn.getCredentials', { authenticatorId })).credentials };
+}
+
+/**
+ * Makes the page's guest an account with a new passkey, through the profile editor's sign-in: it keeps its
+ * `user_id`, and its session resumes with a bearer token after a disconnect or a reload (a guest's ends with its
+ * connection).
+ */
+export async function signUpWithPasskey(page: Page, context: BrowserContext): Promise<{ credentials: () => Promise<any[]> }> {
+	const authenticator = await addAuthenticator(page, context);
+	await page.getByRole('button', { name: /^Your profile on/ }).click();
+	await page.getByRole('dialog', { name: 'Edit profile' }).getByRole('button', { name: 'Sign in with a passkey', exact: true }).click();
+	const card = page.getByRole('form', { name: 'Sign in' });
+	await card.getByRole('radiogroup', { name: 'Passkey', exact: true }).getByRole('radio', { name: /^Create account/ }).click();
+	await card.getByRole('button', { name: 'Create account with passkey', exact: true }).click();
+	await expect(card).toHaveCount(0);
+	return authenticator;
 }
 
 /** Picks one message with a shift-click and moves it through the selection bar: to a thread by title, or back to the room. */

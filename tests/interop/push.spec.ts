@@ -10,7 +10,7 @@ import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { expect, test, type BrowserContext, type Page, type WebSocketRoute } from '@playwright/test';
 import { TEST_VAPID_PRIVATE_KEY as VAPID_PRIVATE, TEST_VAPID_SUBJECT as VAPID_SUBJECT } from './push-test-vapid';
-import { openChat, userIdOf } from './test-helpers';
+import { addAuthenticator, openChat, signUpWithPasskey, userIdOf } from './test-helpers';
 
 const PROXIED_WS = 'ws://127.0.0.1:5173/ws';
 const ORIGIN = 'http://localhost:5173';
@@ -148,29 +148,6 @@ async function tapSocket(page: Page): Promise<Tap> {
 }
 
 // ---------- Passkey account ----------
-/** A virtual authenticator on the page, with the given credentials. */
-async function addAuthenticator(page: Page, context: BrowserContext, credentials: any[] = []) {
-	const cdp = await context.newCDPSession(page);
-	await cdp.send('WebAuthn.enable');
-	const { authenticatorId } = await cdp.send('WebAuthn.addVirtualAuthenticator', { options: {
-		protocol: 'ctap2', transport: 'internal', hasResidentKey: true,
-		hasUserVerification: true, isUserVerified: true, automaticPresenceSimulation: true
-	} });
-	for (const credential of credentials) await cdp.send('WebAuthn.addCredential', { authenticatorId, credential });
-	return { credentials: async () => (await cdp.send('WebAuthn.getCredentials', { authenticatorId })).credentials };
-}
-
-async function signUpWithPasskey(page: Page, context: BrowserContext): Promise<{ credentials: () => Promise<any[]> }> {
-	const authenticator = await addAuthenticator(page, context);
-	await page.getByRole('button', { name: /^Your profile on/ }).click();
-	await page.getByRole('dialog', { name: 'Edit profile' }).getByRole('button', { name: 'Sign in with a passkey', exact: true }).click();
-	const card = page.getByRole('form', { name: 'Sign in' });
-	await card.getByRole('radiogroup', { name: 'Passkey', exact: true }).getByRole('radio', { name: /^Create account/ }).click();
-	await card.getByRole('button', { name: 'Create account with passkey', exact: true }).click();
-	await expect(card).toHaveCount(0);
-	return authenticator;
-}
-
 async function signInWithPasskey(page: Page): Promise<void> {
 	// Signing out leaves the profile editor open.
 	if (!(await page.getByRole('dialog', { name: 'Edit profile' }).count())) await page.getByRole('button', { name: /^Your profile on/ }).click();
