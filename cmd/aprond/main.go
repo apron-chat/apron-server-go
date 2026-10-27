@@ -49,6 +49,9 @@ type Options struct {
 	Store                  string   `long:"store" description:"Where state is kept: sqlite:<path> for a SQLite database, or memory to keep nothing across restarts"`
 	ClientIPHeader         string   `long:"client-ip-header" description:"Request header a reverse proxy puts the client's address in, such as X-Forwarded-For (its last entry) or X-Real-IP, for per-client limits; set only behind a proxy that sets it"`
 	Welcome                string   `long:"welcome" description:"Markdown clients show on their sign-in screen (server.welcome), such as how this server's sign-in methods fit together"`
+	Title                  string   `long:"title" description:"Plain name clients show for this server (server.title), such as in a list of servers"`
+	Description            string   `long:"description" description:"CommonMark saying in a few words what this server is about (server.description)"`
+	Avatar                 string   `long:"avatar" description:"Square icon of this server, at least 256 pixels wide (server.avatar): an https: URL or a small data:image URL"`
 	Roles                  []string `long:"role" description:"Grant a role to an account as role=user_id or role=email, such as admin=ada; repeat for more. admin and moderator may remove others from rooms"`
 
 	WebAuthn struct {
@@ -138,6 +141,9 @@ func serverConfig(options Options) (server.Config, error) {
 	config.MaxListedMembers = options.MaxListedMembers
 	config.MaxPrivateRooms = options.MaxPrivateRooms
 	config.Welcome = options.Welcome
+	config.Title = strings.TrimSpace(options.Title)
+	config.Description = strings.TrimSpace(options.Description)
+	config.Avatar = strings.TrimSpace(options.Avatar)
 	config.ClientIPHeader = options.ClientIPHeader
 	for _, grant := range options.Roles {
 		role, holder, ok := strings.Cut(grant, "=")

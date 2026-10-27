@@ -46,7 +46,7 @@ Defaults:
   becomes an account, and an email sign-in with a new address creates one
 - passkey RP ID: `localhost`; frontend origins: `http://localhost:5173` and
   `http://localhost:8080`
-- no `server.welcome` and no roles
+- no `server.welcome`, `title`, `description`, or `avatar`, and no roles
 
 Flags (`aprond --help` lists them all):
 
@@ -92,6 +92,13 @@ Flags (`aprond --help` lists them all):
 - `--welcome <commonmark>` sets `server.welcome`, which clients show on their
   sign-in screen, such as "Chat as a guest, or sign in with email to keep
   your name. Codes expire after 10 minutes."
+- `--title <name>`, `--description <commonmark>`, and `--avatar <url>` set
+  `server.title`, `server.description`, and `server.avatar`, which show
+  people which server this is, such as in a list of servers: a plain name,
+  a few words on what the server is about, and a square icon at least 256
+  pixels wide. The avatar must be an `https:` URL or a `data:image` URL of
+  at most 64 KiB, as for user avatars; the server refuses to start
+  otherwise.
 - `--client-ip-header <header>`, behind a reverse proxy, names the header
   that carries the client's address, such as `X-Forwarded-For` or
   `X-Real-IP`, for the per-client limits of email sign-in. The server takes

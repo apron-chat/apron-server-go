@@ -93,6 +93,26 @@ func TestServerFrame(t *testing.T) {
 		t.Fatalf("bounded private rooms: %#v", params)
 	}
 
+	// title, description, and avatar show which server this is (§3.1).
+	identity := DefaultConfig()
+	identity.Title, identity.Description, identity.Avatar = "Example", "Talk about *examples*.", "https://chat.example/icon.png"
+	_, identityServer := newTestServer(t, identity)
+	_, frame = dialRaw(t, identityServer)
+	if params := frame["params"].(map[string]any); params["title"] != "Example" || params["description"] != "Talk about *examples*." || params["avatar"] != "https://chat.example/icon.png" {
+		t.Fatalf("server identity: %#v", params)
+	}
+	for _, field := range []string{"title", "description", "avatar"} {
+		if _, has := params[field]; has {
+			t.Fatalf("default server frame has %s", field)
+		}
+	}
+	// The avatar follows the rules for user avatars (§4.8.6).
+	invalid := DefaultConfig()
+	invalid.Avatar = "javascript:alert(1)"
+	if _, err := Open(invalid); err == nil {
+		t.Fatal("Open accepted an avatar that is not an https: or data:image URL")
+	}
+
 	// A token only signs in, so signup lists the other schemes.
 	config := DefaultConfig()
 	config.WebAuthn = testWebAuthn(t)

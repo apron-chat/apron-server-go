@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/json/jsontext"
 	"encoding/json/v2"
+	"fmt"
 	"io/fs"
 	"maps"
 	"net"
@@ -131,6 +132,13 @@ type Config struct {
 	// Welcome is server.welcome (§3.2): Markdown shown on the sign-in
 	// screen. Empty omits it.
 	Welcome string
+	// Title, Description, and Avatar show people which server this is
+	// (§3.1): a plain display name, CommonMark saying in a few words what
+	// the server is about, and a square icon URL that follows the rules
+	// for user avatars (§4.8.6). Empty omits each.
+	Title       string
+	Description string
+	Avatar      string
 	// Roles grants server roles (§3.3), such as "admin", to accounts: each
 	// role lists the user_ids or email addresses that hold it. Roles are
 	// shown beside names; "admin" and "moderator" may also remove others
@@ -448,6 +456,9 @@ type Server struct {
 // store when it is nil.
 func Open(config Config) (*Server, error) {
 	config = config.withDefaults()
+	if config.Avatar != "" && !validAvatar(config.Avatar) {
+		return nil, fmt.Errorf("the server avatar must be an https: URL or a data:image URL of at most %d bytes", maxAvatarDataURLBytes)
+	}
 	if config.Store == nil {
 		config.Store = store.NewMemory()
 	}
@@ -780,8 +791,10 @@ func (s *Server) serverParams() map[string]any {
 		}
 		params["push"] = push
 	}
-	if s.config.Welcome != "" {
-		params["welcome"] = s.config.Welcome
+	for key, value := range map[string]string{"welcome": s.config.Welcome, "title": s.config.Title, "description": s.config.Description, "avatar": s.config.Avatar} {
+		if value != "" {
+			params[key] = value
+		}
 	}
 	if s.config.MaxPrivateRooms > 0 {
 		// ext:settings, the extension apron-web defines (its EXT.md §3):
