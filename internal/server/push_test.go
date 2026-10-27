@@ -1307,6 +1307,33 @@ func TestPrivateWakesForThreadsOfJoinedRooms(t *testing.T) {
 	}
 }
 
+// A mention in a private room wakes a member who wakes for mentions alone,
+// and never someone outside it, mentioned or not (§4.9, §4.2.4).
+func TestMentionsWakeInPrivateRooms(t *testing.T) {
+	relay := newTestRelay(t)
+	app, httpServer := pushTestServer(t)
+	a := dialTestClient(t, httpServer)
+	carol := addAccount(t, app, "carol", a)
+	addPush(app, carol, pushRegistration{url: relay.URL + "/carol", wake: wakeMentions})
+	dave := addAccount(t, app, "dave", a)
+	addPush(app, dave, pushRegistration{url: relay.URL + "/dave", wake: wakeMentions})
+	dm, _ := saveRoom(t, a, "dm", map[string]any{"private": true})
+	a.request(t, "room_join", "add-carol", map[string]any{"room_id": dm, "user_id": "carol"})
+	relay.pushes(t, app, a)
+	save(t, a, "plain", map[string]any{"room_id": dm, "body": map[string]any{"text": "no mention"}})
+	if got := relay.pushes(t, app, a); len(got) != 0 {
+		t.Fatalf("a message without a mention woke %v", paths(got))
+	}
+	save(t, a, "mention", map[string]any{"room_id": dm, "body": map[string]any{"text": "@carol @dave look", "mentions": []any{"carol", "dave"}}})
+	got := relay.pushes(t, app, a)
+	if !reflect.DeepEqual(paths(got), []string{"/carol"}) || got[0].header.Get("Urgency") != "high" {
+		t.Fatalf("a mention in a private room woke %v", paths(got))
+	}
+	if message, _ := got[0].payload["message"].(map[string]any); message["room_id"] != dm {
+		t.Fatalf("pushed %#v", got[0].payload)
+	}
+}
+
 // unreadState is u's unread count as kept, and as counted again from the
 // log.
 func unreadState(app *Server, u *userState) (kept, fresh int) {

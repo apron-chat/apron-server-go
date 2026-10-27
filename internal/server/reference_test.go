@@ -11,6 +11,7 @@ import (
 	"os"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -164,6 +165,156 @@ func TestRoomListLatestLogIDDelta(t *testing.T) {
 	delta = listRooms(t, b, map[string]any{"filter": "joined", "latest_log_id": since})
 	if !reflect.DeepEqual(roomIDs(t, delta["joined"]), []string{mine}) || !reflect.DeepEqual(delta["left"], []any{map[string]any{"room_id": ops}}) {
 		t.Fatalf("delta after removal: %#v", delta)
+	}
+}
+
+// A delta listing (§4.2.1) carries the private rooms and threads the user
+// was added to since the position, at their latest activity, and the ones
+// they left; it never carries one they are not in.
+func TestRoomListLatestLogIDDeltaPrivateRooms(t *testing.T) {
+	_, httpServer := newTestServer(t, DefaultConfig())
+	clients := dialGroup(t, httpServer, 3)
+	a, b, c := clients[0], clients[1], clients[2]
+	since := listRooms(t, b, map[string]any{"filter": "joined"})["joined"].([]any)[0].(map[string]any)["latest_log_id"].(string)
+
+	dm, _ := saveRoom(t, a, "dm", map[string]any{"private": true})
+	a.request(t, "room_join", "add", map[string]any{"room_id": dm, "user_id": b.userID})
+	thread, _ := saveRoom(t, a, "thread", map[string]any{"parent_room_id": dm, "title": "Plans"})
+	a.request(t, "room_join", "add-thread", map[string]any{"room_id": thread, "user_id": b.userID})
+	a.drain(t)
+	save(t, a, "in-thread", map[string]any{"room_id": thread, "body": map[string]any{"text": "in the thread"}})
+	_, last := save(t, a, "in-dm", map[string]any{"room_id": dm, "body": map[string]any{"text": "just us"}})
+	other, _ := saveRoom(t, c, "other", map[string]any{"private": true})
+	b.drain(t)
+
+	delta := listRooms(t, b, map[string]any{"filter": "joined", "latest_log_id": since})
+	if ids := roomIDs(t, delta["joined"]); !reflect.DeepEqual(ids, []string{dm, thread}) || !reflect.DeepEqual(delta["left"], []any{}) {
+		t.Fatalf("delta after being added: %#v", delta)
+	}
+	if head := delta["joined"].([]any)[0].(map[string]any)["latest_log_id"]; head != last["log_id"] {
+		t.Fatalf("private room's latest_log_id %v, want its last message's %v", head, last["log_id"])
+	}
+	if ids := roomIDs(t, listRooms(t, b, map[string]any{"latest_log_id": since})["not_joined"]); slices.Contains(ids, other) {
+		t.Fatalf("someone else's private room in a delta: %v", ids)
+	}
+
+	// Removed from the room, its thread goes too.
+	a.request(t, "room_leave", "remove", map[string]any{"room_id": dm, "user_id": b.userID})
+	b.drain(t)
+	delta = listRooms(t, b, map[string]any{"filter": "joined", "latest_log_id": since})
+	if ids := roomIDs(t, delta["joined"]); len(ids) != 0 || len(delta["left"].([]any)) == 0 {
+		t.Fatalf("delta after removal: %#v", delta)
+	}
+	c.drain(t)
+}
+
+// Without room_id, history pages the log of every room the user joined as
+// one log (§4.3): private rooms included, nothing of rooms not joined or not
+// visible, a moved message once, in log_id order both ways.
+func TestHistoryWithoutRoomIDPagesJoinedRooms(t *testing.T) {
+	_, httpServer := newTestServer(t, DefaultConfig())
+	clients := dialGroup(t, httpServer, 3)
+	a, b, c := clients[0], clients[1], clients[2]
+	since := listRooms(t, b, map[string]any{"filter": "joined"})["joined"].([]any)[0].(map[string]any)["latest_log_id"].(string)
+
+	dm, _ := saveRoom(t, a, "dm", map[string]any{"private": true})
+	a.request(t, "room_join", "add", map[string]any{"room_id": dm, "user_id": b.userID})
+	theirs, _ := saveRoom(t, c, "theirs", map[string]any{"private": true})
+	aside, _ := saveRoom(t, c, "aside", map[string]any{"parent_room_id": "general", "title": "Aside"})
+	a.drain(t)
+	ops, _ := saveRoom(t, a, "ops", map[string]any{"title": "Ops"})
+	b.drain(t)
+	joinRoom(t, b, ops)
+	a.drain(t)
+	c.drain(t)
+	var mine []string
+	post := func(cl *testClient, id, room string, keep bool) string {
+		cl.drain(t)
+		message, _ := save(t, cl, id, map[string]any{"room_id": room, "body": map[string]any{"text": id}})
+		if keep {
+			mine = append(mine, message)
+		}
+		return message
+	}
+	post(a, "dm-1", dm, true)
+	moved := post(a, "general-1", "general", true)
+	post(c, "theirs-1", theirs, false)
+	post(c, "aside-1", aside, false)
+	post(a, "dm-2", dm, true)
+	// Moved from general into ops, both joined: its move snapshot is in both
+	// logs, and comes once.
+	a.drain(t)
+	a.request(t, "message", "move", map[string]any{"message_id": moved, "room_id": ops, "body": map[string]any{"text": "general-1"}})
+	b.drain(t)
+
+	page := b.result(t, "history", "all", map[string]any{"after": since, "limit": 50})
+	ids := logIDs(t, page, "messages")
+	if len(ids) != 4 || ids[0] != mine[0] || ids[1] != mine[1] || ids[2] != mine[2] || page["more"] != false {
+		t.Fatalf("joined rooms' log: %v, want %v and the move", ids, mine)
+	}
+	for _, key := range []string{"rooms", "memberships", "messages"} {
+		records, _ := page[key].([]any)
+		if len(records) == 0 {
+			t.Fatalf("no %s in %#v", key, page)
+		}
+		for _, record := range records {
+			if room := record.(map[string]any)["room_id"]; room != "general" && room != dm && room != ops {
+				t.Fatalf("a record of %v, which bob did not join: %#v", room, record)
+			}
+		}
+	}
+	if page["latest_log_id"] != ids[3] {
+		t.Fatalf("latest_log_id %v, want the move %v", page["latest_log_id"], ids[3])
+	}
+
+	// One record at a time forward, and the newest backward.
+	var forward []string
+	after := since
+	for range 50 {
+		next := b.result(t, "history", b.nextID("forward"), map[string]any{"after": after, "limit": 1})
+		forward = append(forward, logIDs(t, next, "messages")...)
+		if next["more"] == false {
+			break
+		}
+		last, _ := strconv.ParseInt(next["last_log_id"].(string), 10, 64)
+		after = strconv.FormatInt(last+1, 10)
+	}
+	if !reflect.DeepEqual(forward, ids) {
+		t.Fatalf("forward pages: %v, want %v", forward, ids)
+	}
+	if newest := b.result(t, "history", "newest", map[string]any{"limit": 1}); !reflect.DeepEqual(logIDs(t, newest, "messages"), ids[3:]) || newest["more"] != true {
+		t.Fatalf("newest page: %#v", newest)
+	}
+	// Bounded on both sides, across rooms; and the move snapshot alone.
+	if middle := b.result(t, "history", "middle", map[string]any{"after": ids[0], "before": ids[2]}); !reflect.DeepEqual(logIDs(t, middle, "messages"), ids[:3]) {
+		t.Fatalf("bounded page: %#v", middle)
+	}
+	if one := b.result(t, "history", "one", map[string]any{"after": ids[3], "before": ids[3]}); !reflect.DeepEqual(logIDs(t, one, "messages"), ids[3:]) || one["more"] != false {
+		t.Fatalf("the move snapshot alone: %#v", one)
+	}
+
+	// The log's lower bound is the server's, whatever rooms the user is in,
+	// so it never moves (§4.3.3); in no rooms, the log is empty and ends
+	// just before it.
+	start := page["history_log_id"]
+	if general := historyPage(t, b, "general", map[string]any{}); start != general["history_log_id"] {
+		t.Fatalf("history_log_id %v, want general's %v", start, general["history_log_id"])
+	}
+	for _, room := range []string{"general", ops, dm} {
+		leaveRoom(t, b, room)
+		b.drain(t)
+		if bound := b.result(t, "history", b.nextID("left"), map[string]any{"limit": 1})["history_log_id"]; bound != start && room != dm {
+			t.Fatalf("history_log_id after leaving %s: %v, want %v", room, bound, start)
+		}
+	}
+	empty := b.result(t, "history", "none", map[string]any{})
+	first, _ := strconv.ParseInt(start.(string), 10, 64)
+	if empty["history_log_id"] != nil || empty["latest_log_id"] != strconv.FormatInt(first-1, 10) || empty["more"] != false || empty["messages"] != nil {
+		t.Fatalf("history in no rooms: %#v", empty)
+	}
+	joinRoom(t, b, "general")
+	if bound := b.result(t, "history", "rejoined", map[string]any{"limit": 1})["history_log_id"]; bound != start {
+		t.Fatalf("history_log_id after rejoining: %v, want %v", bound, start)
 	}
 }
 
