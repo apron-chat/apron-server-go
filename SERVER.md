@@ -594,7 +594,12 @@ closed, without waiting for its body to end.
 `reactions` sets the caller's complete emoji set on a message and returns `{}`
 after the broadcast; the logged record is delivered as
 `{log_id, message_id, room_id, reactions: [{from, emojis}]}`, with `room_id`
-the message's current room. Duplicate emoji collapse, `[]`
+the message's current room. Each entry is kept fully qualified (UTS #51,
+from Unicode 17.0's emoji data): the server drops every U+FE0F, then adds
+one after each emoji character of text presentation, such as `❤`, unless a
+skin tone follows it; `#`, `*`, and digits take one only before U+20E3. So
+`❤` becomes `❤️`, and entries that differ only in U+FE0F are one. Other
+entries are kept as sent, without U+FE0F. Duplicate entries collapse, `[]`
 clears, and a request that leaves the set unchanged logs nothing. Unknown
 messages and non-string or empty entries are `invalid_params`, an entry
 over 64 bytes is `too_large`, and more than 20 distinct emoji per user is

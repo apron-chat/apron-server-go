@@ -457,7 +457,8 @@ const (
 )
 
 // react replaces the caller's complete reaction set on one message
-// (§4.7). Duplicates collapse; an unchanged set logs nothing. The broadcast
+// (§4.7). Entries are kept fully qualified, and duplicates collapse; an
+// unchanged set logs nothing. The broadcast
 // precedes the result (§1).
 func (s *Server) react(c *client, req request) (any, bool, *rpcError) {
 	messageID, err := parseString(req.params, "message_id", true)
@@ -518,6 +519,11 @@ func parseEmojis(params map[string]jsontext.Value) ([]string, *rpcError) {
 	for _, value := range values {
 		var emoji string
 		if json.Unmarshal(value, &emoji) != nil || emoji == "" {
+			return nil, invalidParams("emojis must be non-empty strings")
+		}
+		// Entries that differ only in U+FE0F are the same entry, kept fully
+		// qualified (§4.7).
+		if emoji = qualifyEmoji(emoji); emoji == "" {
 			return nil, invalidParams("emojis must be non-empty strings")
 		}
 		if len(emoji) > maxEmojiBytes {
