@@ -3,6 +3,7 @@ package server
 import (
 	"bytes"
 	"context"
+	"encoding/json/v2"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -120,6 +121,7 @@ func TestStateSurvivesRestart(t *testing.T) {
 			for _, room := range []string{"general", thread, ops} {
 				before[room] = historyPage(t, owner, room, map[string]any{"limit": 1000})
 			}
+			stopping := time.Now().UnixMilli()
 			stop()
 			reopened := open(t, dbPath)
 			stored := make(map[string]string)
@@ -130,6 +132,15 @@ func TestStateSurvivesRestart(t *testing.T) {
 				t.Fatal(err)
 			}
 			_ = reopened.Close()
+			// Shutdown closes the owner's connection, which shows them
+			// offline, so it adds their seen and stores them as no longer
+			// shown otherwise (§4.5.2).
+			var ownerUser storedUser
+			if err := json.Unmarshal([]byte(stored["user/"+owner.userID]), &ownerUser); err != nil || ownerUser.Seen < stopping || ownerUser.Shown {
+				t.Fatalf("owner after shutdown: seen %d, shown %v (%v), want seen at least %d, not shown", ownerUser.Seen, ownerUser.Shown, err, stopping)
+			}
+			ownerUser.Seen, ownerUser.Shown = 0, true
+			stored["user/"+owner.userID] = string(encodeJSON(ownerUser))
 			for key, value := range want {
 				if stored[key] != value {
 					t.Errorf("stored %s = %s\nwant %s", key, stored[key], value)

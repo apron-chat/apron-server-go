@@ -59,9 +59,9 @@ export default defineConfig({
 			}
 		},
 		{
-			// Web push (§4.9) and status (§4.5).
+			// Web push (§4.9) and status (§4.5), last seen (§4.5.2) included.
 			name: 'push',
-			testMatch: /push\.spec\.ts$/,
+			testMatch: /(push|seen)\.spec\.ts$/,
 			// The web client goes idle after five minutes without input (§4.5); the tests move the page's clock on
 			// past it in steps, which still takes real seconds.
 			timeout: 180_000,

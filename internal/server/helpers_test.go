@@ -27,7 +27,7 @@ type testClient struct {
 	// userID is the identity the guest was assigned at auth.
 	userID string
 	// statuses keeps the bare status announcements of others (§4.5),
-	// `user` `{new: {user_id, status}}`, which read otherwise skips: they
+	// `user` `{new: {user_id, status, seen?}}`, which read otherwise skips: they
 	// follow every connection, idle change, and join, and only the status
 	// tests look at them.
 	statuses bool
@@ -297,12 +297,25 @@ func (c *testClient) read(t *testing.T) map[string]any {
 
 // isStatusAnnouncement reports whether frame is a bare announcement of
 // another user's status: `user` with only `new`, which has only user_id and
+// status, and seen only with offline (§4.5.2). The profile change of a user
+// with no other fields is the same frame, and either way it tells the shown
 // status.
 func isStatusAnnouncement(frame map[string]any) bool {
 	params, _ := frame["params"].(map[string]any)
 	object, _ := params["new"].(map[string]any)
+	if frame["method"] != "user" || len(params) != 1 {
+		return false
+	}
+	_, hasID := object["user_id"]
 	_, hasStatus := object["status"]
-	return frame["method"] == "user" && len(params) == 1 && len(object) == 2 && hasStatus
+	_, hasSeen := object["seen"]
+	switch {
+	case !hasID || !hasStatus:
+		return false
+	case hasSeen:
+		return len(object) == 3 && object["status"] == statusOffline
+	}
+	return len(object) == 2
 }
 
 // call sends a request and returns its reply frame, which must come next.

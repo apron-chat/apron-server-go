@@ -53,8 +53,11 @@ normal Chromium resolution.
 
 ## Web push and status
 
-The `push` project runs `push.spec.ts`: a passkey user turns on push in
-Preferences, goes idle, and is mentioned and replied to by a second client;
+The `push` project runs `push.spec.ts` and `seen.spec.ts`. In `push.spec.ts`,
+a passkey user turns on push in Preferences, registering the wake scopes the
+web client notifies about by default that the server advertises (mentions,
+replies, and private rooms), goes idle, and is mentioned, replied to, and
+written to in a private room by a second client;
 the test receives the pushes on a local capture endpoint, checks the VAPID
 token against the test key and decrypts the `aes128gcm` payload with its own
 subscription keys, and checks the service worker's notification. A second test
@@ -64,10 +67,10 @@ mutes stay private, come back to the user's connections as `status`
 notifications, also after a reload, and are applied by the web client. The web
 client sends `status` as a request, each answered `{}`; the test's own room
 mutes are requests on the page's connection too, whose replies the page never
-sees. The web client goes idle after five minutes without input, so both move
-the page's clock (Playwright's `page.clock`) past it, in steps shorter than the
-30-second ping interval so the connection stays up; the project allows three
-minutes a test. Run it alone with:
+sees. The web client goes idle after five minutes without input, so both
+tests in `push.spec.ts` move the page's clock (Playwright's `page.clock`) past
+it, in steps shorter than the 30-second ping interval so the connection stays
+up; the project allows three minutes a test. Run it alone with:
 
 ```sh
 npx playwright test --project=push
@@ -80,6 +83,25 @@ with `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH`, point it at full Chromium.
 
 The status test sets a status through a control named for do not disturb in
 the profile editor or Preferences, shown directly or behind one named Status.
+
+`seen.spec.ts` checks `seen` (§4.5.2), when a user was last shown offline, as
+the web client shows it in another browser: an offline member's row in the
+member list (`room-member-list`, `li[data-user]` with `data-status`) and the
+profile card it opens, which says "Last seen recently" within ten minutes
+(`profile-seen`, a `<time>` whose tooltip then says "Last seen within the last
+10 minutes" and whose `datetime` is checked against when it happened). A
+browser that watched the change happen shows the later of the server's `seen`
+and when it received the change (the web client's local floor), so the
+server's own is read from a browser that opens afterwards, whose `room_list`
+carries it, and the watcher's must be no earlier than that. The subject is
+an account, made with a passkey on Chromium's virtual authenticator, since a
+guest is retired when its connection ends and so is never shown offline after
+it leaves; the watchers are guests. When the account's last tab closes it shows
+offline with Last seen; back in a new tab, resuming its session, it shows
+online without it; choosing Invisible in its Preferences shows it offline with
+a new Last seen, which stays, with the row offline, while its tab closes and
+another opens; and a browser that opens after the account left learns `seen`
+from its `room_list`. Run it alone with `npx playwright test --project=push seen`.
 
 The UI contract used by the tests is an accessible textbox named `Message`, a
 `Send message` button, and message containers rendered as

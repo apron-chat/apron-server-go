@@ -303,9 +303,10 @@ func (s *Server) joinedUpdateLocked(r *roomState, membership jsontext.Value) jso
 }
 
 // addMembersLocked adds a room's members to its record as bare user
-// objects, ordered by user_id, and returns them. Each carries the status
-// others see, offline and "" included, as every current user object a
-// listing carries does (§4.5); their complete objects go in `users`. A
+// objects, ordered by user_id, and returns them. Each carries the shown
+// status, offline and "" included, and seen with offline, as every current
+// user object a listing carries does (§4.5.2); their complete objects go
+// in `users`. A
 // room with more than Config.MaxListedMembers lists only its most recently
 // active members and adds member_count, the total (§4.2.1).
 func (s *Server) addMembersLocked(record map[string]any, r *roomState) map[string]*userState {
@@ -320,7 +321,7 @@ func (s *Server) addMembersLocked(record map[string]any, r *roomState) map[strin
 	}
 	refs := make([]any, len(ids))
 	for i, id := range ids {
-		refs[i] = map[string]any{"user_id": id, "status": r.members[id].shownStatus()}
+		refs[i] = r.members[id].shownObject()
 	}
 	record["members"] = refs
 	return listed
@@ -716,7 +717,7 @@ func (s *Server) listRooms(c *client, req request) (any, bool, *rpcError) {
 			case withMembers && hasUser:
 				refs := []any{}
 				if m := r.members[onlyUser]; m != nil {
-					refs = append(refs, map[string]any{"user_id": onlyUser, "status": m.shownStatus()})
+					refs = append(refs, m.shownObject())
 					users[onlyUser] = m
 				}
 				entry["members"] = refs

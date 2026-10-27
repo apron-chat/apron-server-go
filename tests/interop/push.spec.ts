@@ -10,7 +10,7 @@ import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { expect, test, type BrowserContext, type Page, type WebSocketRoute } from '@playwright/test';
 import { TEST_VAPID_PRIVATE_KEY as VAPID_PRIVATE, TEST_VAPID_SUBJECT as VAPID_SUBJECT } from './push-test-vapid';
-import { openChat, userIdOf } from './test-helpers';
+import { addAuthenticator, openChat, signUpWithPasskey, userIdOf } from './test-helpers';
 
 const PROXIED_WS = 'ws://127.0.0.1:5173/ws';
 const ORIGIN = 'http://localhost:5173';
@@ -148,29 +148,6 @@ async function tapSocket(page: Page): Promise<Tap> {
 }
 
 // ---------- Passkey account ----------
-/** A virtual authenticator on the page, with the given credentials. */
-async function addAuthenticator(page: Page, context: BrowserContext, credentials: any[] = []) {
-	const cdp = await context.newCDPSession(page);
-	await cdp.send('WebAuthn.enable');
-	const { authenticatorId } = await cdp.send('WebAuthn.addVirtualAuthenticator', { options: {
-		protocol: 'ctap2', transport: 'internal', hasResidentKey: true,
-		hasUserVerification: true, isUserVerified: true, automaticPresenceSimulation: true
-	} });
-	for (const credential of credentials) await cdp.send('WebAuthn.addCredential', { authenticatorId, credential });
-	return { credentials: async () => (await cdp.send('WebAuthn.getCredentials', { authenticatorId })).credentials };
-}
-
-async function signUpWithPasskey(page: Page, context: BrowserContext): Promise<{ credentials: () => Promise<any[]> }> {
-	const authenticator = await addAuthenticator(page, context);
-	await page.getByRole('button', { name: /^Your profile on/ }).click();
-	await page.getByRole('dialog', { name: 'Edit profile' }).getByRole('button', { name: 'Sign in with a passkey', exact: true }).click();
-	const card = page.getByRole('form', { name: 'Sign in' });
-	await card.getByRole('radiogroup', { name: 'Passkey', exact: true }).getByRole('radio', { name: /^Create account/ }).click();
-	await card.getByRole('button', { name: 'Create account with passkey', exact: true }).click();
-	await expect(card).toHaveCount(0);
-	return authenticator;
-}
-
 async function signInWithPasskey(page: Page): Promise<void> {
 	// Signing out leaves the profile editor open.
 	if (!(await page.getByRole('dialog', { name: 'Edit profile' }).count())) await page.getByRole('button', { name: /^Your profile on/ }).click();
@@ -321,7 +298,13 @@ test('web push: register, wake rules, VAPID + aes128gcm delivery, service worker
 	expect(register.params.url).toBe(endpoint);
 	expect(register.params.keys).toEqual({ p256dh, auth });
 	expect(register.params.push_id).toMatch(/^[A-Za-z0-9_-]{1,64}$/);
-	expect(register.params.wake).toEqual(['mentions', 'replies']);
+	// wake is what the web client notifies about until an account chooses (its Preferences' What to notify about):
+	// mentions and replies, the protocol's default wake scopes, and every message in a private room, sent as the
+	// ones of them the server pushes (§4.9 server.push.wake), which aprond lists in full.
+	const offeredWake: string[] = serverFrame?.params?.push?.wake ?? [];
+	evidence('server.push.wake', offeredWake);
+	expect(offeredWake).toEqual(expect.arrayContaining(['mentions', 'replies', 'private']));
+	expect(register.params.wake).toEqual(['mentions', 'replies', 'private']);
 	const pushId = register.params.push_id as string;
 	// Opaque (§4.9): it names neither the server nor the account.
 	expect(pushId).not.toContain(user1);
@@ -414,6 +397,15 @@ test('web push: register, wake rules, VAPID + aes128gcm delivery, service worker
 	evidence('reply push', { urgency: replyPush.post.headers.urgency, ttl: replyPush.post.headers.ttl, payload: replyPush.payload });
 	expect(replyPush.payload.message.reply_to?.message_id).toBe(ownId);
 	expect(replyPush.post.headers.urgency).toBe('high');
+
+	// --- Plain message in a private room user1 is in: push (wake private), urgent like a mention ---
+	const { room_id: privateRoom } = await user2.request('room_set', { title: `Private ${Date.now()}`, private: true });
+	await user2.request('room_join', { room_id: privateRoom, user_id: user1 });
+	const privateMessage = await user2.request('message', { room_id: privateRoom, body: { text: 'just between us' } });
+	const privatePush = await pushOf(privateMessage.message_id);
+	evidence('private room push', { urgency: privatePush.post.headers.urgency, payload: privatePush.payload });
+	expect(privatePush.payload.message.room_id).toBe(privateRoom);
+	expect(privatePush.post.headers.urgency).toBe('high');
 
 	// --- Unscoped mute through the UI pause menu ---
 	await page.getByRole('button', { name: /^Open preferences/ }).click();
