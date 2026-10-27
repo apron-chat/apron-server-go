@@ -318,9 +318,9 @@ func tombstone(snapshot map[string]any) {
 	snapshot["deleted"] = true
 }
 
-// admitPostLocked applies MessagesPerMinute to new messages, room_set, and
-// /avatar: each user may send a burst of MessagesPerMinute, refilled evenly
-// over a minute.
+// admitPostLocked applies MessagesPerMinute to new messages, room_set,
+// /avatar, and /emoji add: each user may send a burst of
+// MessagesPerMinute, refilled evenly over a minute.
 func (s *Server) admitPostLocked(u *userState) *rpcError {
 	limit := s.config.MessagesPerMinute
 	if limit <= 0 {
@@ -458,8 +458,7 @@ const (
 
 // react replaces the caller's complete reaction set on one message
 // (§4.7). Entries are kept fully qualified, and duplicates collapse; an
-// unchanged set logs nothing. The broadcast
-// precedes the result (§1).
+// unchanged set logs nothing. The broadcast precedes the result (§1).
 func (s *Server) react(c *client, req request) (any, bool, *rpcError) {
 	messageID, err := parseString(req.params, "message_id", true)
 	if err != nil {
@@ -475,6 +474,14 @@ func (s *Server) react(c *client, req request) (any, bool, *rpcError) {
 	m := s.visibleMessageLocked(u, messageID)
 	if m == nil {
 		return nil, false, invalidParams("Unknown message %q", messageID)
+	}
+	// A key must be a custom emoji (ext:emoji), unless the set has it
+	// already, so that a removed one does not keep the user from changing
+	// the rest of their set.
+	for _, emoji := range emojis {
+		if emojiKeyPattern.MatchString(emoji) && s.emoji[emoji] == nil && !slices.Contains(m.reactions[u.id].emojis, emoji) {
+			return nil, false, invalidParams("Unknown custom emoji %s", emoji)
+		}
 	}
 	if !sameEmojiSet(m.reactions[u.id].emojis, emojis) {
 		s.touchMessage(m)

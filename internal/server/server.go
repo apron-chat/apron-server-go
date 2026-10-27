@@ -142,7 +142,8 @@ type Config struct {
 	// Roles grants server roles (§3.3), such as "admin", to accounts: each
 	// role lists the user_ids or email addresses that hold it. Roles are
 	// shown beside names; "admin" and "moderator" may also remove others
-	// from rooms (§4.2.2).
+	// from rooms (§4.2.2), and "admin" may replace and remove any custom
+	// emoji (ext:emoji).
 	Roles map[string][]string
 	// EmailSender enables email sign-in (§4.11) and delivers its codes; nil
 	// disables it. LogEmailSender logs codes, for development.
@@ -416,6 +417,11 @@ type Server struct {
 	tempUploadDir bool
 	// uploadSeq orders finished uploads across restarts.
 	uploadSeq int64
+	// emoji is the custom emoji catalog by key (ext:emoji); emojiCatalog
+	// is its JSON, served at emojiPath + emojiName.
+	emoji        map[string]*customEmoji
+	emojiCatalog []byte
+	emojiName    string
 
 	// dirty is the state changed under mu since it was last written to the
 	// store; storeWrites queues batches for the store writer.
@@ -473,6 +479,7 @@ func Open(config Config) (*Server, error) {
 		embeds:      make(map[string]*embedState),
 		writes:      make(map[string]*embedState),
 		uploads:     list.New(),
+		emoji:       make(map[string]*customEmoji),
 		pushes:      make(map[string]*pushRegistration),
 		passkeys:    make(map[string]*passkeyUser),
 		credentials: make(map[string]*passkeyUser),
@@ -531,7 +538,7 @@ func Open(config Config) (*Server, error) {
 const defaultRoomID = "general"
 
 // Handler returns the HTTP handler serving /ws, /healthz, the upload, file,
-// and stream endpoints, and StaticDir.
+// stream, and emoji catalog endpoints, and StaticDir.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ws", s.handleWebSocket)
@@ -539,6 +546,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc(writePath, s.handleWrite)
 	mux.HandleFunc(filePath, s.handleFile)
 	mux.HandleFunc(streamPath, s.handleStream)
+	mux.HandleFunc(emojiPath, s.handleEmoji)
 	if s.config.StaticDir != "" {
 		root := filepath.Clean(s.config.StaticDir)
 		mux.Handle("/", http.FileServer(staticFS{http.Dir(root)}))
@@ -677,7 +685,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 	if s.config.MaxConnections > 0 && len(s.clients) >= s.config.MaxConnections {
 		// An error about the connection as a whole omits id (§1.1).
-		c.enqueue(map[string]any{"method": "server", "params": s.serverParams()})
+		c.enqueue(map[string]any{"method": "server", "params": s.serverParams(c.baseURL)})
 		c.closeWithError(&rpcError{Code: codeRetryAfter, Message: "Server at capacity; try again shortly", Data: map[string]any{"retry_after": retryAfterSeconds}})
 		s.unlock()
 		<-c.done
@@ -685,7 +693,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 	s.clients[c] = struct{}{}
 	// The server announcement is queued before the reader starts accepting auth.
-	c.enqueue(map[string]any{"method": "server", "params": s.serverParams()})
+	c.enqueue(map[string]any{"method": "server", "params": s.serverParams(c.baseURL)})
 	s.unlock()
 
 	defer func() {
@@ -757,8 +765,9 @@ func (s *Server) baseURL(r *http.Request) string {
 	return (&url.URL{Scheme: scheme, Host: r.Host}).String()
 }
 
-// serverParams is the `server` frame (PROTOCOL.md §3.1).
-func (s *Server) serverParams() map[string]any {
+// serverParams is the `server` frame (PROTOCOL.md §3.1) for a connection
+// whose URLs start with baseURL. Callers hold s.mu.
+func (s *Server) serverParams(baseURL string) map[string]any {
 	var authSchemes []string
 	if s.config.WebAuthn != nil {
 		authSchemes = append(authSchemes, "webauthn")
@@ -777,12 +786,13 @@ func (s *Server) serverParams() map[string]any {
 	params := map[string]any{
 		"apron":        9,
 		"agent":        "apron-go/9",
-		"capabilities": []string{"history", "edit", "rooms", "reactions", "activity", "embed:upload", "embed:stream", "command", "status", "ext"},
+		"capabilities": []string{"history", "edit", "rooms", "reactions", "activity", "embed:upload", "embed:stream", "command", "status", "ext", "ext:emoji"},
 		"auth":         authSchemes,
 		"ping":         max(1, int(s.config.PingInterval/time.Second)),
 		// The optional statuses accepted with `me` (§4.5); online and ""
 		// always are, and are not listed.
 		"status": optionalStatuses,
+		"ext":    map[string]any{"emoji": s.emojiExt(baseURL)},
 	}
 	if !s.config.DisablePush {
 		push := map[string]any{"relay": map[string]any{}, "wake": (urgentScopes | wakeJoined | wakeBadge).names()}
@@ -800,7 +810,7 @@ func (s *Server) serverParams() map[string]any {
 		// ext:settings (apron's EXTENSIONS.md): read_cursors is absent,
 		// so true, since the server keeps read_message_id (§4.6).
 		params["capabilities"] = append(params["capabilities"].([]string), "ext:settings")
-		params["ext"] = map[string]any{"settings": map[string]any{"private_rooms": s.config.MaxPrivateRooms}}
+		params["ext"].(map[string]any)["settings"] = map[string]any{"private_rooms": s.config.MaxPrivateRooms}
 	}
 	if !slices.Equal(signup, authSchemes) {
 		params["signup"] = signup

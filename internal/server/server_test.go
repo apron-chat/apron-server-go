@@ -55,7 +55,7 @@ func TestServerFrame(t *testing.T) {
 	if params["apron"] != float64(9) || params["agent"] != "apron-go/9" || params["ping"] != float64(30) {
 		t.Fatalf("version, agent, and ping: %#v", params)
 	}
-	if !reflect.DeepEqual(params["capabilities"], []any{"history", "edit", "rooms", "reactions", "activity", "embed:upload", "embed:stream", "command", "status", "ext"}) {
+	if !reflect.DeepEqual(params["capabilities"], []any{"history", "edit", "rooms", "reactions", "activity", "embed:upload", "embed:stream", "command", "status", "ext", "ext:emoji"}) {
 		t.Fatalf("capabilities: %#v", params["capabilities"])
 	}
 	// With capability status, server.status lists the optional statuses
@@ -77,9 +77,11 @@ func TestServerFrame(t *testing.T) {
 	if !reflect.DeepEqual(push["relay"], map[string]any{}) || !reflect.DeepEqual(push["wake"], []any{"mentions", "replies", "private", "joined", "badge"}) || len(push) != 3 {
 		t.Fatalf("push: %#v", push)
 	}
-	// ext is a capability (§4.12); by default the server frame carries no
-	// ext of its own.
-	if _, has := params["ext"]; has {
+	// ext is a capability (§4.12); the server frame's ext carries the
+	// custom emoji catalog's URL (ext:emoji).
+	ext, _ := params["ext"].(map[string]any)
+	emoji, _ := ext["emoji"].(map[string]any)
+	if catalog, _ := emoji["catalog_url"].(string); len(ext) != 1 || len(emoji) != 1 || !strings.HasPrefix(catalog, httpServer.URL+emojiPath) {
 		t.Fatalf("server.ext: %#v", params["ext"])
 	}
 	// A bound on the private rooms a user may be in is ext:settings'
@@ -89,7 +91,7 @@ func TestServerFrame(t *testing.T) {
 	_, boundedServer := newTestServer(t, bounded)
 	_, frame = dialRaw(t, boundedServer)
 	if params := frame["params"].(map[string]any); !slices.Contains(params["capabilities"].([]any), "ext:settings") ||
-		!reflect.DeepEqual(params["ext"], map[string]any{"settings": map[string]any{"private_rooms": float64(20)}}) {
+		!reflect.DeepEqual(params["ext"].(map[string]any)["settings"], map[string]any{"private_rooms": float64(20)}) {
 		t.Fatalf("bounded private rooms: %#v", params)
 	}
 

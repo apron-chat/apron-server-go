@@ -28,6 +28,7 @@ import (
 //
 //	meta     "counters"   log_id, guest, embed, and upload sequences
 //	meta     "vapid"      the webpush VAPID private key (§4.9)
+//	meta     "emoji"      the custom emoji catalog (ext:emoji)
 //	used_id  lowercased user_id ever assigned
 //	record   log_id       a logged record and the rooms whose logs hold it
 //	room     room_id
@@ -69,6 +70,7 @@ type dirtySet struct {
 	pushes   map[string]bool
 	usedIDs  []string
 	vapid    bool
+	emoji    bool
 }
 
 func newDirtySet() dirtySet {
@@ -199,6 +201,7 @@ type storedEmbed struct {
 	Kind        string         `json:"kind"`
 	MessageID   string         `json:"message_id,omitzero"`
 	AvatarFor   string         `json:"avatar_for,omitzero"`
+	EmojiFor    string         `json:"emoji_for,omitzero"`
 	BaseURL     string         `json:"base_url"`
 	Secret      string         `json:"secret"`
 	Title       string         `json:"title,omitzero"`
@@ -332,6 +335,9 @@ func (s *Server) entriesLocked(d dirtySet) []store.Entry {
 	if d.vapid && s.vapidStored {
 		put(entryMeta, "vapid", s.vapid.encoded())
 	}
+	if d.emoji {
+		put(entryMeta, "emoji", s.storedEmojiLocked())
+	}
 	return batch
 }
 
@@ -407,6 +413,7 @@ func storedEmbedOf(e *embedState) storedEmbed {
 	if e.avatarFor != nil {
 		stored.AvatarFor = e.avatarFor.id
 	}
+	stored.EmojiFor = e.emojiKey
 	if e.path != "" {
 		stored.File = filepath.Base(e.path)
 	}
@@ -600,7 +607,7 @@ func (s *Server) restoreLocked() (map[string]bool, error) {
 			return nil, err
 		}
 		e := &embedState{
-			id: id, kind: stored.Kind, messageID: stored.MessageID, avatarFor: s.users[stored.AvatarFor],
+			id: id, kind: stored.Kind, messageID: stored.MessageID, avatarFor: s.users[stored.AvatarFor], emojiKey: stored.EmojiFor,
 			baseURL: stored.BaseURL, secret: stored.Secret, title: stored.Title, alt: stored.Alt,
 			finished: stored.Finished, started: stored.Finished, owned: stored.Owned, size: stored.Size,
 			contentType: stored.ContentType, seq: stored.Seq,
@@ -627,6 +634,9 @@ func (s *Server) restoreLocked() (map[string]bool, error) {
 		if e := s.embeds[stored.AvatarEmbed]; e != nil {
 			s.users[id].avatarEmbed = e
 		}
+	}
+	if err := s.restoreEmojiLocked(entries[entryMeta]["emoji"]); err != nil {
+		return nil, err
 	}
 
 	now := time.Now()

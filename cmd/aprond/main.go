@@ -42,7 +42,7 @@ type Options struct {
 	PublicURL              string   `long:"public-url" description:"External base URL of upload, file, and stream links, such as https://chat.example (default: each request's host, or https://<tls.domain>)"`
 	MaxConnections         int      `long:"max-connections" description:"Maximum concurrent WebSockets; 0 is unlimited"`
 	MaxListenerConnections int      `long:"max-listener-connections" description:"Maximum concurrent TCP connections on the listener, HTTP included; 0 is unlimited"`
-	MessagesPerMinute      int      `long:"messages-per-minute" description:"Burst of new messages, room_set requests, and /avatar commands per user, refilled over a minute; 0 is unlimited"`
+	MessagesPerMinute      int      `long:"messages-per-minute" description:"Burst of new messages, room_set requests, and /avatar and /emoji add commands per user, refilled over a minute; 0 is unlimited"`
 	MaxListedMembers       int      `long:"max-listed-members" default:"1000" description:"Members listed per room in room_list and room_update; a larger room lists its most recently active ones and member_count. 0 is unlimited"`
 	MaxPrivateRooms        int      `long:"max-private-rooms" description:"Top-level private rooms one user may be in at once, created or added to, such as on a public deployment; 0 is unlimited"`
 	DebugAddr              string   `long:"debug-addr" description:"Listen address for unauthenticated pprof and expvar under /debug/, such as 127.0.0.1:6060; empty disables"`
@@ -52,7 +52,7 @@ type Options struct {
 	Title                  string   `long:"title" description:"Plain name clients show for this server (server.title), such as in a list of servers"`
 	Description            string   `long:"description" description:"CommonMark saying in a few words what this server is about (server.description)"`
 	Avatar                 string   `long:"avatar" description:"Square icon of this server, at least 256 pixels wide (server.avatar): an https: URL or a small data:image URL"`
-	Roles                  []string `long:"role" description:"Grant a role to an account as role=user_id or role=email, such as admin=ada; repeat for more. admin and moderator may remove others from rooms"`
+	Roles                  []string `long:"role" description:"Grant a role to an account as role=user_id or role=email, such as admin=ada; repeat for more. admin and moderator may remove others from rooms, and admin may replace and remove custom emoji"`
 
 	WebAuthn struct {
 		RPID    string   `long:"rp-id" default:"localhost" description:"Passkey relying party domain; empty disables passkeys"`

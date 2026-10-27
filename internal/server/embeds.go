@@ -42,9 +42,12 @@ type embedState struct {
 	id   string
 	kind string
 	// messageID is the message the embed belongs to; avatarFor is set instead
-	// for a /avatar upload (§4.8.6).
+	// for a /avatar upload (§4.8.6), and emojiKey for an /emoji add upload,
+	// which emojiBy sent (ext:emoji).
 	messageID string
 	avatarFor *userState
+	emojiKey  string
+	emojiBy   string
 	baseURL   string
 	secret    string
 	token     string
@@ -68,6 +71,12 @@ type embedState struct {
 	seq         int64
 	contentType string
 	stream      *streamBuffer
+}
+
+// image reports whether the embed is an avatar or a custom emoji: an image
+// that follows the rules for avatars (§4.8.6) and belongs to no message.
+func (e *embedState) image() bool {
+	return e.avatarFor != nil || e.emojiKey != ""
 }
 
 func (e *embedState) endStream() {
@@ -344,7 +353,7 @@ func refuseWrite(w http.ResponseWriter, message string, status int) {
 func (s *Server) writeUpload(w http.ResponseWriter, r *http.Request, e *embedState) {
 	limit := s.config.MaxUploadBytes
 	s.mu.RLock()
-	if e.avatarFor != nil {
+	if e.image() {
 		limit = s.config.MaxAvatarBytes
 	} else {
 		limit = min(limit, s.config.MaxMessageUploadBytes-s.messageUploadBytesLocked(e.messageID))
@@ -359,7 +368,7 @@ func (s *Server) writeUpload(w http.ResponseWriter, r *http.Request, e *embedSta
 		head = head[:n]
 	}
 	contentType := uploadContentType(r.Header.Get("Content-Type"), head)
-	if err == nil && e.avatarFor != nil && !validAvatarImage(contentType, file) {
+	if err == nil && e.image() && !validAvatarImage(contentType, file) {
 		err = errNotAvatar
 	}
 	var og map[string]any
@@ -390,12 +399,12 @@ func (s *Server) writeUpload(w http.ResponseWriter, r *http.Request, e *embedSta
 		fail(http.StatusRequestEntityTooLarge, fmt.Sprintf("This upload is limited to %d bytes", limit))
 		return
 	case errors.Is(err, errNotAvatar):
-		fail(http.StatusUnsupportedMediaType, "Avatars must be PNG, JPEG, GIF, or WebP images")
+		fail(http.StatusUnsupportedMediaType, "Avatars and emoji must be PNG, JPEG, GIF, or WebP images")
 		return
 	case err != nil:
 		fail(http.StatusBadRequest, "The upload did not finish")
 		return
-	case e.avatarFor == nil && s.messageUploadBytesLocked(e.messageID)+size > s.config.MaxMessageUploadBytes:
+	case !e.image() && s.messageUploadBytesLocked(e.messageID)+size > s.config.MaxMessageUploadBytes:
 		// Another upload for the message finished while this one arrived.
 		fail(http.StatusRequestEntityTooLarge, fmt.Sprintf("A message's uploads are limited to %d bytes", s.config.MaxMessageUploadBytes))
 		return
@@ -421,6 +430,8 @@ func (s *Server) writeUpload(w http.ResponseWriter, r *http.Request, e *embedSta
 		} else {
 			s.removeEmbedLocked(e.id)
 		}
+	} else if e.emojiKey != "" {
+		s.setEmojiLocked(e, og)
 	} else if m := s.messages[e.messageID]; m != nil {
 		s.republishLocked(m, func(body map[string]any) bool {
 			return replaceEmbed(body, e.id, func(embed map[string]any) {
@@ -456,7 +467,7 @@ func (s *Server) receiveUpload(w http.ResponseWriter, r *http.Request, limit int
 func (s *Server) messageUploadBytesLocked(messageID string) int64 {
 	var total int64
 	for element := s.uploads.Front(); element != nil; element = element.Next() {
-		if e := element.Value.(*embedState); e.messageID == messageID && e.avatarFor == nil {
+		if e := element.Value.(*embedState); e.messageID == messageID && !e.image() {
 			total += e.size
 		}
 	}
@@ -466,14 +477,15 @@ func (s *Server) messageUploadBytesLocked(messageID string) int64 {
 // evictUploadsLocked removes the oldest message uploads, other than keep,
 // while hosted uploads exceed MaxUploadStorageBytes. Each affected message
 // is republished once without its evicted embeds, as for a failed write
-// (§4.8.3). Avatars count toward the total but are never removed.
+// (§4.8.3). Avatars and custom emoji count toward the total but are never
+// removed.
 func (s *Server) evictUploadsLocked(keep *embedState) {
 	evicted := make(map[string][]string)
 	var order []string
 	for element := s.uploads.Front(); element != nil && s.uploadBytes > s.config.MaxUploadStorageBytes; {
 		e := element.Value.(*embedState)
 		element = element.Next()
-		if e == keep || e.avatarFor != nil {
+		if e == keep || e.image() {
 			continue
 		}
 		if _, seen := evicted[e.messageID]; !seen {
