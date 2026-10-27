@@ -804,7 +804,7 @@ func TestHistoryPaginatesAcrossRecordKinds(t *testing.T) {
 		t.Fatalf("logged room record carries delivery fields: %#v", lobby)
 	}
 	// Records keep the user objects they were logged with; without room_id,
-	// history pages the default room.
+	// history pages the log of the rooms the user joined, here only general.
 	c.result(t, "me", "rename", map[string]any{"name": "Ada"})
 	defaulted := c.result(t, "history", "default", map[string]any{})
 	if defaulted["last_log_id"] != all[5] {

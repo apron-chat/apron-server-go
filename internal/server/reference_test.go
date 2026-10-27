@@ -11,6 +11,7 @@ import (
 	"os"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -205,6 +206,81 @@ func TestRoomListLatestLogIDDeltaPrivateRooms(t *testing.T) {
 		t.Fatalf("delta after removal: %#v", delta)
 	}
 	c.drain(t)
+}
+
+// Without room_id, history pages the log of every room the user joined as
+// one log (§4.3): private rooms included, nothing of rooms not joined or not
+// visible, a moved message once, in log_id order both ways.
+func TestHistoryWithoutRoomIDPagesJoinedRooms(t *testing.T) {
+	_, httpServer := newTestServer(t, DefaultConfig())
+	clients := dialGroup(t, httpServer, 3)
+	a, b, c := clients[0], clients[1], clients[2]
+	since := listRooms(t, b, map[string]any{"filter": "joined"})["joined"].([]any)[0].(map[string]any)["latest_log_id"].(string)
+
+	dm, _ := saveRoom(t, a, "dm", map[string]any{"private": true})
+	a.request(t, "room_join", "add", map[string]any{"room_id": dm, "user_id": b.userID})
+	theirs, _ := saveRoom(t, c, "theirs", map[string]any{"private": true})
+	aside, _ := saveRoom(t, c, "aside", map[string]any{"parent_room_id": "general", "title": "Aside"})
+	a.drain(t)
+	ops, _ := saveRoom(t, a, "ops", map[string]any{"title": "Ops"})
+	b.drain(t)
+	joinRoom(t, b, ops)
+	a.drain(t)
+	c.drain(t)
+	var mine []string
+	post := func(cl *testClient, id, room string, keep bool) string {
+		cl.drain(t)
+		message, _ := save(t, cl, id, map[string]any{"room_id": room, "body": map[string]any{"text": id}})
+		if keep {
+			mine = append(mine, message)
+		}
+		return message
+	}
+	post(a, "dm-1", dm, true)
+	moved := post(a, "general-1", "general", true)
+	post(c, "theirs-1", theirs, false)
+	post(c, "aside-1", aside, false)
+	post(a, "dm-2", dm, true)
+	// Moved from general into ops, both joined: its move snapshot is in both
+	// logs, and comes once.
+	a.drain(t)
+	a.request(t, "message", "move", map[string]any{"message_id": moved, "room_id": ops, "body": map[string]any{"text": "general-1"}})
+	b.drain(t)
+
+	page := b.result(t, "history", "all", map[string]any{"after": since, "limit": 50})
+	ids := logIDs(t, page, "messages")
+	if len(ids) != 4 || ids[0] != mine[0] || ids[1] != mine[1] || ids[2] != mine[2] || page["more"] != false {
+		t.Fatalf("joined rooms' log: %v, want %v and the move", ids, mine)
+	}
+	for _, key := range []string{"rooms", "memberships", "messages"} {
+		for _, record := range page[key].([]any) {
+			if room := record.(map[string]any)["room_id"]; room != "general" && room != dm && room != ops {
+				t.Fatalf("a record of %v, which bob did not join: %#v", room, record)
+			}
+		}
+	}
+	if page["latest_log_id"] != ids[3] {
+		t.Fatalf("latest_log_id %v, want the move %v", page["latest_log_id"], ids[3])
+	}
+
+	// One record at a time forward, and the newest backward.
+	var forward []string
+	after := since
+	for range 50 {
+		next := b.result(t, "history", b.nextID("forward"), map[string]any{"after": after, "limit": 1})
+		forward = append(forward, logIDs(t, next, "messages")...)
+		if next["more"] == false {
+			break
+		}
+		last, _ := strconv.ParseInt(next["last_log_id"].(string), 10, 64)
+		after = strconv.FormatInt(last+1, 10)
+	}
+	if !reflect.DeepEqual(forward, ids) {
+		t.Fatalf("forward pages: %v, want %v", forward, ids)
+	}
+	if newest := b.result(t, "history", "newest", map[string]any{"limit": 1}); !reflect.DeepEqual(logIDs(t, newest, "messages"), ids[3:]) || newest["more"] != true {
+		t.Fatalf("newest page: %#v", newest)
+	}
 }
 
 func TestRoomListTruncatesOnlyUnjoinedRooms(t *testing.T) {

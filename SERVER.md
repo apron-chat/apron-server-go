@@ -217,7 +217,11 @@ record, `latest_log_id` is the newest record in that room's log, memberships
 included, and the server never needs the full-member record the spec asks for
 before discarding a prefix.
 
-`history` returns a window of one room's log, `general`'s without `room_id`,
+`history` returns a window of one room's log, or without `room_id` of the
+log of every room the user joined, private rooms included, as one log: its
+`latest_log_id` is the newest of those rooms' and its `history_log_id` the
+earliest, and a move snapshot in two of them comes once. One request without
+`room_id` catches a client up on all its rooms. Either is
 partitioned into `rooms`, `messages`, `reactions`, and `memberships`; an empty
 array is omitted. `limit` (default 100, clamped to 1000) counts records of
 every kind, and `first_log_id`/`last_log_id` span all of them; an empty window

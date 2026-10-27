@@ -858,25 +858,25 @@ func parseMembershipParams(params map[string]jsontext.Value) (roomID, userID str
 	return roomID, userID, hasUser, nil
 }
 
-// history returns a window of one room's log (§4.3), the default room's
-// without room_id. limit counts records of every kind; the slice is
-// partitioned into rooms, messages, reactions, and membership, each omitted
-// when empty. The server retains all records and does not compact, and it
-// discards no prefix, so it never appends a full-member record. History needs
-// no membership, only a room the user can see.
+// history returns a window of the log (§4.3): with room_id, that room's
+// log, which needs no membership, only a room the user can see; without it,
+// the log of every room the user joined, whose deliveries their connections
+// receive, as one log, so a client catches up on all its rooms with one
+// request. limit counts records of every kind; the slice is partitioned into
+// rooms, messages, reactions, and membership, each omitted when empty. The
+// server retains all records and does not compact, and it discards no
+// prefix, so it never appends a full-member record.
 //
 // A move snapshot is in both rooms' logs and names the source room in
 // prev_room_id, so a window bounded to one log_id (after == before) in the
 // room a snapshot names walks prev_log_id back through a message's edits
-// (§4.3.1).
+// (§4.3.1). Across rooms, it comes once.
 func (s *Server) history(c *client, req request) (any, bool, *rpcError) {
 	roomID, err := parseString(req.params, "room_id", false)
 	if err != nil {
 		return nil, false, err
 	}
-	if _, has := req.params["room_id"]; !has {
-		roomID = defaultRoomID
-	}
+	_, hasRoom := req.params["room_id"]
 	after, hasAfter, err := parseBound(req.params, "after")
 	if err != nil {
 		return nil, false, err
@@ -892,11 +892,49 @@ func (s *Server) history(c *client, req request) (any, bool, *rpcError) {
 
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	r := s.visibleRoomLocked(c.user, roomID)
-	if r == nil {
-		return nil, false, invalidParams("Unknown room %q", roomID)
+	var rooms []*roomState
+	if hasRoom {
+		r := s.visibleRoomLocked(c.user, roomID)
+		if r == nil {
+			return nil, false, invalidParams("Unknown room %q", roomID)
+		}
+		rooms = []*roomState{r}
+	} else {
+		for _, r := range c.user.joined {
+			if r.visibleTo(c.user) {
+				rooms = append(rooms, r)
+			}
+		}
 	}
-	matching := window(r.log, after, hasAfter, before, hasBefore)
+	// Each room's window, at most limit+1 records from the end the page
+	// starts at, merged by log_id: the first limit+1 of the merge are the
+	// log's.
+	var matching []*logRecord
+	seen := make(map[*logRecord]bool)
+	var latest, created int64
+	for i, r := range rooms {
+		latest = max(latest, r.latestID)
+		if i == 0 || r.createdID < created {
+			created = r.createdID
+		}
+		records := window(r.log, after, hasAfter, before, hasBefore)
+		if len(records) > limit+1 {
+			if hasAfter {
+				records = records[:limit+1]
+			} else {
+				records = records[len(records)-limit-1:]
+			}
+		}
+		for _, record := range records {
+			if !seen[record] {
+				seen[record] = true
+				matching = append(matching, record)
+			}
+		}
+	}
+	if len(rooms) > 1 {
+		slices.SortFunc(matching, func(a, b *logRecord) int { return cmp.Compare(a.id, b.id) })
+	}
 	more := len(matching) > limit
 	if more {
 		if hasAfter {
@@ -923,15 +961,17 @@ func (s *Server) history(c *client, req request) (any, bool, *rpcError) {
 			break
 		}
 	}
-	result := jsontext.Value(renderHistory(r, matching, more, size))
+	result := jsontext.Value(renderHistory(latest, created, len(rooms) > 0, matching, more, size))
 	// The records are already JSON: the reply is assembled from them without
 	// decoding or re-encoding.
 	c.enqueue(rawResponse(req.id, result))
 	return result, true, nil
 }
 
-// renderHistory assembles a history result (§4.3) from a window of records.
-func renderHistory(r *roomState, matching []*logRecord, more bool, size int) []byte {
+// renderHistory assembles a history result (§4.3) from a window of records,
+// with the queried log's head and the start of its history, which is null
+// for a log of no rooms.
+func renderHistory(latest, created int64, hasHistory bool, matching []*logRecord, more bool, size int) []byte {
 	buf := make([]byte, 0, size+len(matching)+256)
 	buf = append(buf, `{"more":`...)
 	buf = strconv.AppendBool(buf, more)
@@ -965,8 +1005,12 @@ func renderHistory(r *roomState, matching []*logRecord, more bool, size int) []b
 		buf = strconv.AppendInt(buf, id, 10)
 		buf = append(buf, '"')
 	}
-	field("latest_log_id", r.latestID)
-	field("history_log_id", r.createdID)
+	field("latest_log_id", latest)
+	if hasHistory {
+		field("history_log_id", created)
+	} else {
+		buf = append(buf, `,"history_log_id":null`...)
+	}
 	if len(matching) > 0 {
 		field("first_log_id", matching[0].id)
 		field("last_log_id", matching[len(matching)-1].id)
