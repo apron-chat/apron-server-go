@@ -797,9 +797,8 @@ func (s *Server) serverParams() map[string]any {
 		}
 	}
 	if s.config.MaxPrivateRooms > 0 {
-		// ext:settings, the extension apron-web defines (its EXT.md §3):
-		// private_rooms is a number, where its other keys are booleans
-		// that an absent key makes true, as they are here.
+		// ext:settings (apron's EXTENSIONS.md): read_cursors is absent,
+		// so true, since the server keeps read_message_id (§4.6).
 		params["capabilities"] = append(params["capabilities"].([]string), "ext:settings")
 		params["ext"] = map[string]any{"settings": map[string]any{"private_rooms": s.config.MaxPrivateRooms}}
 	}

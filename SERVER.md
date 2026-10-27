@@ -399,10 +399,10 @@ guests included, whether they created them or were added: past it, creating one 
 the user leaves one to make room. Threads are not counted, since only a
 private room's members can be added to its threads. With a bound, the
 `server` frame advertises it as `ext.settings.private_rooms` under capability
-`ext:settings`, the extension
-[apron-web's EXT.md](https://github.com/apron-chat/apron-web/blob/main/EXT.md)
-defines; its other keys are booleans that an absent key makes `true`, as
-they are here: guests post, read cursors are kept, and members add others.
+`ext:settings`, which
+[apron's EXTENSIONS.md](https://github.com/shazow/apron/blob/main/EXTENSIONS.md#extsettings)
+defines; its `read_cursors` is absent, so `true`, since the server keeps
+read cursors.
 There is no server-wide bound, and a private room is never removed: like
 every room it keeps its full history, so one everyone has left stays, which
 nobody can see or be added to again.
