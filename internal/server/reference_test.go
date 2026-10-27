@@ -253,7 +253,11 @@ func TestHistoryWithoutRoomIDPagesJoinedRooms(t *testing.T) {
 		t.Fatalf("joined rooms' log: %v, want %v and the move", ids, mine)
 	}
 	for _, key := range []string{"rooms", "memberships", "messages"} {
-		for _, record := range page[key].([]any) {
+		records, _ := page[key].([]any)
+		if len(records) == 0 {
+			t.Fatalf("no %s in %#v", key, page)
+		}
+		for _, record := range records {
 			if room := record.(map[string]any)["room_id"]; room != "general" && room != dm && room != ops {
 				t.Fatalf("a record of %v, which bob did not join: %#v", room, record)
 			}
@@ -280,6 +284,37 @@ func TestHistoryWithoutRoomIDPagesJoinedRooms(t *testing.T) {
 	}
 	if newest := b.result(t, "history", "newest", map[string]any{"limit": 1}); !reflect.DeepEqual(logIDs(t, newest, "messages"), ids[3:]) || newest["more"] != true {
 		t.Fatalf("newest page: %#v", newest)
+	}
+	// Bounded on both sides, across rooms; and the move snapshot alone.
+	if middle := b.result(t, "history", "middle", map[string]any{"after": ids[0], "before": ids[2]}); !reflect.DeepEqual(logIDs(t, middle, "messages"), ids[:3]) {
+		t.Fatalf("bounded page: %#v", middle)
+	}
+	if one := b.result(t, "history", "one", map[string]any{"after": ids[3], "before": ids[3]}); !reflect.DeepEqual(logIDs(t, one, "messages"), ids[3:]) || one["more"] != false {
+		t.Fatalf("the move snapshot alone: %#v", one)
+	}
+
+	// The log's lower bound is the server's, whatever rooms the user is in,
+	// so it never moves (§4.3.3); in no rooms, the log is empty and ends
+	// just before it.
+	start := page["history_log_id"]
+	if general := historyPage(t, b, "general", map[string]any{}); start != general["history_log_id"] {
+		t.Fatalf("history_log_id %v, want general's %v", start, general["history_log_id"])
+	}
+	for _, room := range []string{"general", ops, dm} {
+		leaveRoom(t, b, room)
+		b.drain(t)
+		if bound := b.result(t, "history", b.nextID("left"), map[string]any{"limit": 1})["history_log_id"]; bound != start && room != dm {
+			t.Fatalf("history_log_id after leaving %s: %v, want %v", room, bound, start)
+		}
+	}
+	empty := b.result(t, "history", "none", map[string]any{})
+	first, _ := strconv.ParseInt(start.(string), 10, 64)
+	if empty["history_log_id"] != nil || empty["latest_log_id"] != strconv.FormatInt(first-1, 10) || empty["more"] != false || empty["messages"] != nil {
+		t.Fatalf("history in no rooms: %#v", empty)
+	}
+	joinRoom(t, b, "general")
+	if bound := b.result(t, "history", "rejoined", map[string]any{"limit": 1})["history_log_id"]; bound != start {
+		t.Fatalf("history_log_id after rejoining: %v, want %v", bound, start)
 	}
 }
 

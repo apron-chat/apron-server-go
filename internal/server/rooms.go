@@ -906,41 +906,66 @@ func (s *Server) history(c *client, req request) (any, bool, *rpcError) {
 			}
 		}
 	}
-	// Each room's window, at most limit+1 records from the end the page
-	// starts at, merged by log_id: the first limit+1 of the merge are the
-	// log's.
-	var matching []*logRecord
-	seen := make(map[*logRecord]bool)
-	var latest, created int64
-	for i, r := range rooms {
+	// The rooms' windows merge by log_id from the end the page starts at,
+	// until limit+1 records: a move snapshot in two of them is one record,
+	// the same in both logs, and comes once.
+	windows := make([][]*logRecord, 0, len(rooms))
+	var latest int64
+	for _, r := range rooms {
 		latest = max(latest, r.latestID)
-		if i == 0 || r.createdID < created {
-			created = r.createdID
+		if records := window(r.log, after, hasAfter, before, hasBefore); len(records) > 0 {
+			windows = append(windows, records)
 		}
-		records := window(r.log, after, hasAfter, before, hasBefore)
-		if len(records) > limit+1 {
-			if hasAfter {
-				records = records[:limit+1]
-			} else {
-				records = records[len(records)-limit-1:]
+	}
+	matching := make([]*logRecord, 0, min(limit+1, 64))
+	for len(matching) <= limit {
+		var next *logRecord
+		for _, records := range windows {
+			if len(records) == 0 {
+				continue
+			}
+			head := records[0]
+			if !hasAfter {
+				head = records[len(records)-1]
+			}
+			if next == nil || (hasAfter && head.id < next.id) || (!hasAfter && head.id > next.id) {
+				next = head
 			}
 		}
-		for _, record := range records {
-			if !seen[record] {
-				seen[record] = true
-				matching = append(matching, record)
+		if next == nil {
+			break
+		}
+		matching = append(matching, next)
+		for i, records := range windows {
+			switch {
+			case len(records) == 0:
+			case hasAfter && records[0] == next:
+				windows[i] = records[1:]
+			case !hasAfter && records[len(records)-1] == next:
+				windows[i] = records[:len(records)-1]
 			}
 		}
 	}
-	if len(rooms) > 1 {
-		slices.SortFunc(matching, func(a, b *logRecord) int { return cmp.Compare(a.id, b.id) })
+	if !hasAfter {
+		slices.Reverse(matching)
+	}
+	// With room_id, the room's log starts at its creation. Without it, the
+	// log of the joined rooms starts where the server's does, at the default
+	// room's creation, whoever is in which room, so the lower bound never
+	// moves (§4.3.3); for a user in no rooms it is empty, ending just before.
+	created := s.rooms[defaultRoomID].createdID
+	if hasRoom {
+		created = rooms[0].createdID
+	}
+	if len(rooms) == 0 {
+		latest = created - 1
 	}
 	more := len(matching) > limit
 	if more {
 		if hasAfter {
 			matching = matching[:limit]
 		} else {
-			matching = matching[len(matching)-limit:]
+			matching = matching[1:]
 		}
 	}
 	// A page also stops at maxHistoryReplyBytes of records, keeping at least
