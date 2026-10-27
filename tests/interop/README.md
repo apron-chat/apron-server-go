@@ -87,8 +87,13 @@ the profile editor or Preferences, shown directly or behind one named Status.
 `seen.spec.ts` checks `seen` (§4.5.2), when a user was last shown offline, as
 the web client shows it in another browser: an offline member's row in the
 member list (`room-member-list`, `li[data-user]` with `data-status`) and the
-profile card it opens, which says "Last seen just now" (`profile-seen`, a
-`<time>` whose `datetime` is checked against when it happened). The subject is
+profile card it opens, which says "Last seen recently" within ten minutes
+(`profile-seen`, a `<time>` whose tooltip then says "Last seen within the last
+10 minutes" and whose `datetime` is checked against when it happened). A
+browser that watched the change happen shows the later of the server's `seen`
+and when it received the change (the web client's local floor), so the
+server's own is read from a browser that opens afterwards, whose `room_list`
+carries it, and the watcher's must be no earlier than that. The subject is
 an account, made with a passkey on Chromium's virtual authenticator, since a
 guest is retired when its connection ends and so is never shown offline after
 it leaves; the watchers are guests. When the account's last tab closes it shows
