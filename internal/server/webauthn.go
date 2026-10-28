@@ -304,15 +304,32 @@ func (s *Server) finishPasskeyCeremony(c *client, req request, action string, w 
 func (s *Server) signInLocked(c *client, req request, user *userState, now time.Time, signIn, joinDefault bool) (any, *rpcError) {
 	delete(s.sessions, c.token)
 	s.touchSession(c.token)
+	token, key, err := s.newSessionLocked(user, c.origin, now)
+	if err != nil {
+		return nil, err
+	}
+	c.token = key
+	return s.switchUserLocked(c, req, user, map[string]any{"token": token}, signIn, joinDefault), nil
+}
+
+// newSessionLocked stores a new session for user, bound to origin, and
+// returns its bearer token and the token's key in s.sessions.
+func (s *Server) newSessionLocked(user *userState, origin string, now time.Time) (string, [32]byte, *rpcError) {
 	secret := make([]byte, 32)
 	if _, err := rand.Read(secret); err != nil {
-		return nil, &rpcError{Code: codeInternalError, Message: "Unable to create a sign-in session"}
+		return "", [32]byte{}, &rpcError{Code: codeInternalError, Message: "Unable to create a sign-in session"}
 	}
 	token := base64.RawURLEncoding.EncodeToString(secret)
-	c.token = sha256.Sum256([]byte(token))
-	s.sessions[c.token] = session{user: user, origin: c.origin, expires: now.Add(sessionLifetime)}
-	s.touchSession(c.token)
-	return s.switchUserLocked(c, req, user, map[string]any{"token": token}, signIn, joinDefault), nil
+	key := sha256.Sum256([]byte(token))
+	s.sessions[key] = session{user: user, origin: origin, expires: now.Add(sessionLifetime)}
+	s.touchSession(key)
+	return token, key, nil
+}
+
+// offersSessions reports whether the server keeps sign-in sessions, which
+// the token scheme resumes: only passkey and email sign-ins start one.
+func (s *Server) offersSessions() bool {
+	return s.config.WebAuthn != nil || s.config.EmailSender != nil
 }
 
 // pruneSessionsLocked forgets expired sessions.

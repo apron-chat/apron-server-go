@@ -81,6 +81,8 @@ type userState struct {
 	statusLimit    *rate.Limiter
 	statusTimer    *time.Timer
 	statusRequests *rate.Limiter
+	// deviceAdds limits the tokens the user issues for other devices.
+	deviceAdds *rate.Limiter
 	// pushes are the user's push registrations by url (§4.9), and pings the
 	// rooms they have not joined where a message mentioned or replied to
 	// them, from the first such message, for unread counts. unread holds
@@ -325,7 +327,7 @@ func (s *Server) authenticate(c *client, req request) (any, *rpcError) {
 		// here, and approve with approveLocked, which takes either scheme.
 		return nil, &rpcError{Code: codeUnsupported, Message: "External sign-in is not offered"}
 	case "token":
-		if s.config.WebAuthn == nil && s.config.EmailSender == nil {
+		if !s.offersSessions() {
 			return nil, &rpcError{Code: codeUnsupported, Message: "This server has no sign-in sessions; use guest"}
 		}
 	case "guest":

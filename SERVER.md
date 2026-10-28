@@ -34,7 +34,9 @@ Defaults:
   `capabilities`: `history`, `edit`, `rooms`, `reactions`, `activity`,
   `embed:upload`, `embed:stream`, `command`, `status`, `ext`, and, while
   `--max-private-rooms` bounds private rooms, `ext:settings`, with
-  `server.ext.settings.private_rooms` the bound (below); `server.push`: kinds
+  `server.ext.settings.private_rooms` the bound (below), and, while passkeys
+  or email sign-in are on, `ext:device_add` ([below](#adding-a-device));
+  `server.push`: kinds
   `relay` and `webpush` (with the server's VAPID `key`) and `wake`:
   `mentions`, `replies`, `private`, `joined`, `badge`; `server.status`:
   `dnd`, `invisible`; `server.ping`: 30 seconds
@@ -997,6 +999,32 @@ several tabs may share it; clients that keep the latest token keep it.
 Sign-out drops the local token and reconnects. Already authenticated
 connections and disconnected clients retain their server-side token until it
 expires. An expired token requires another passkey or email sign-in.
+
+### Adding a device
+
+A passkey works only on its RP ID, so a native app, or a client on another
+origin, cannot sign in with the account's passkeys
+([PROTOCOL.md §4.10](https://github.com/shazow/apron/blob/main/PROTOCOL.md#410-webauthn-authentication)).
+A signed-in account, by passkey or email, issues a token for it with
+`ext:device_add`, the extension
+[apron-web's EXT.md](https://github.com/apron-chat/apron-web/blob/main/EXT.md)
+defines:
+
+```jsonc
+// -> on a connection from https://chat.example.com
+{"method": "ext:device_add", "id": "c70", "params": {}}
+// <-
+{"id": "c70", "result": {"token": "Zk9…", "origin": "https://chat.example.com"}}
+```
+
+The token is a session of its own, like a sign-in's: it is bound to the
+issuing connection's `Origin` (`""` without one), lasts 30 days from its
+latest use, and resumes with `scheme: "token"` from a client that sends the
+same `Origin`. The issuing connection keeps its own token. A guest is
+`denied`. Each account adds five devices at once, refilled one every 12
+minutes, across its connections; beyond that the request is `retry_after`.
+A retry with the same request `id` answers with the same token. The method
+and capability exist only while the server keeps sign-in sessions.
 
 Passkey users, their credentials, and unexpired tokens are kept in the store,
 so they survive a restart with the default SQLite store; with `--store memory`

@@ -747,7 +747,7 @@ func (s *Server) serverParams() map[string]any {
 	if s.config.EmailSender != nil {
 		authSchemes = append(authSchemes, "email")
 	}
-	if len(authSchemes) > 0 {
+	if s.offersSessions() {
 		authSchemes = append(authSchemes, "token")
 	}
 	authSchemes = append(authSchemes, "guest")
@@ -781,6 +781,9 @@ func (s *Server) serverParams() map[string]any {
 		// that an absent key makes true, as they are here.
 		params["capabilities"] = append(params["capabilities"].([]string), "ext:settings")
 		params["ext"] = map[string]any{"settings": map[string]any{"private_rooms": s.config.MaxPrivateRooms}}
+	}
+	if s.offersSessions() {
+		params["capabilities"] = append(params["capabilities"].([]string), deviceAddMethod)
 	}
 	if !slices.Equal(signup, authSchemes) {
 		params["signup"] = signup
@@ -943,6 +946,9 @@ func (s *Server) operations() map[string]operation {
 	if !s.config.DisablePush {
 		ops["push_register"] = (*Server).registerPush
 		ops["push_unregister"] = (*Server).unregisterPush
+	}
+	if s.offersSessions() {
+		ops[deviceAddMethod] = (*Server).addDevice
 	}
 	return ops
 }
