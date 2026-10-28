@@ -34,6 +34,7 @@ import (
 //	message  message_id
 //	user     user_id      guests too, retired at the next start
 //	session  hex SHA-256 of the bearer token
+//	device   hex SHA-256 of the /invite-device token
 //	embed    embed_id
 //	push     user_id, a space, and url (url alone before registrations
 //	         belonged to their user)
@@ -45,6 +46,7 @@ const (
 	entryMessage = "message"
 	entryUser    = "user"
 	entrySession = "session"
+	entryDevice  = "device"
 	entryEmbed   = "embed"
 	entryPush    = "push"
 )
@@ -62,6 +64,7 @@ type dirtySet struct {
 	messages map[string]bool
 	users    map[string]bool
 	sessions map[[32]byte]bool
+	devices  map[[32]byte]bool
 	embeds   map[string]bool
 	pushes   map[string]bool
 	usedIDs  []string
@@ -75,6 +78,7 @@ func newDirtySet() dirtySet {
 		messages: make(map[string]bool),
 		users:    make(map[string]bool),
 		sessions: make(map[[32]byte]bool),
+		devices:  make(map[[32]byte]bool),
 		embeds:   make(map[string]bool),
 		pushes:   make(map[string]bool),
 	}
@@ -85,6 +89,7 @@ func (s *Server) touchRoom(r *roomState)       { s.dirty.rooms[r.id] = true }
 func (s *Server) touchMessage(m *messageState) { s.dirty.messages[m.id] = true }
 func (s *Server) touchUser(id string)          { s.dirty.users[id] = true }
 func (s *Server) touchSession(key [32]byte)    { s.dirty.sessions[key] = true }
+func (s *Server) touchDevice(key [32]byte)     { s.dirty.devices[key] = true }
 func (s *Server) touchEmbed(id string)         { s.dirty.embeds[id] = true }
 func (s *Server) touchPush(key string)         { s.dirty.pushes[key] = true }
 func (s *Server) touchUsedID(lowercased string) {
@@ -182,6 +187,12 @@ type storedSession struct {
 	User    string    `json:"user"`
 	Origin  string    `json:"origin"`
 	Expires time.Time `json:"expires"`
+}
+
+type storedDevice struct {
+	User    string    `json:"user"`
+	Name    string    `json:"name"`
+	Created time.Time `json:"created"`
 }
 
 type storedEmbed struct {
@@ -282,6 +293,13 @@ func (s *Server) entriesLocked(d dirtySet) []store.Entry {
 			put(entrySession, sessionID(key), storedSession{User: session.user.id, Origin: session.origin, Expires: session.expires})
 		} else {
 			del(entrySession, sessionID(key))
+		}
+	}
+	for key := range d.devices {
+		if device, ok := s.devices[key]; ok {
+			put(entryDevice, sessionID(key), storedDevice{User: device.user.id, Name: device.name, Created: device.created})
+		} else {
+			del(entryDevice, sessionID(key))
 		}
 	}
 	for id := range d.embeds {
@@ -647,6 +665,21 @@ func (s *Server) restoreLocked() (map[string]bool, error) {
 			s.sessions[[32]byte(key)] = session{user: u, origin: stored.Origin, expires: stored.Expires}
 		} else {
 			s.touchSession([32]byte(key))
+		}
+	}
+	for id, raw := range entries[entryDevice] {
+		var stored storedDevice
+		key, err := hex.DecodeString(id)
+		if err != nil || len(key) != 32 {
+			continue
+		}
+		if err := decode(entryDevice, id, raw, &stored); err != nil {
+			return nil, err
+		}
+		if u := s.users[stored.User]; u != nil && u.account() {
+			s.devices[[32]byte(key)] = deviceToken{user: u, name: stored.Name, created: stored.Created}
+		} else {
+			s.touchDevice([32]byte(key))
 		}
 	}
 

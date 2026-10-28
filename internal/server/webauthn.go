@@ -8,6 +8,7 @@ import (
 	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/go-webauthn/webauthn/protocol"
@@ -326,7 +327,8 @@ func (s *Server) pruneSessionsLocked(now time.Time) {
 }
 
 // authenticateToken resumes a passkey or email sign-in through the
-// protocol's token scheme (§3.2). Keeping this outside the WebAuthn action
+// protocol's token scheme (§3.2), or signs in with a device token
+// (devices.go). Keeping this outside the WebAuthn action
 // space preserves §4.10's register/login action grammar while retaining the
 // example server's bearer token policy.
 func (s *Server) authenticateToken(c *client, req request) (any, *rpcError) {
@@ -338,6 +340,9 @@ func (s *Server) authenticateToken(c *client, req request) (any, *rpcError) {
 	}
 	if token == "" {
 		return nil, invalidParams("token must be a non-empty string")
+	}
+	if strings.HasPrefix(token, deviceTokenPrefix) {
+		return s.authenticateDeviceLocked(c, req, token)
 	}
 	s.pruneSessionsLocked(now)
 	key := sha256.Sum256([]byte(token))

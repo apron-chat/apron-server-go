@@ -39,6 +39,11 @@ func init() {
 			run: (*Server).avatarCommand,
 		},
 		{
+			name: "invite-device", usage: "/invite-device <name>", help: fmt.Sprintf("get a token that signs in as you on another device, named <name>; at most %d names, and a name again replaces its token", maxDeviceTokens),
+			available: func(u *userState, _ *roomState) bool { return u.account() },
+			run:       (*Server).inviteDeviceCommand,
+		},
+		{
 			name: "kick", usage: "/kick @user [reason]", help: "remove someone from this room (its creator or a moderator)",
 			available: func(u *userState, r *roomState) bool { return r.mayRemove(u) },
 			run:       (*Server).kickCommand,

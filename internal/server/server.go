@@ -415,6 +415,7 @@ type Server struct {
 	passkeys    map[string]*passkeyUser
 	credentials map[string]*passkeyUser
 	sessions    map[[32]byte]session
+	devices     map[[32]byte]deviceToken
 	// emails maps sign-in addresses to their accounts; email holds the
 	// outstanding codes and budgets, in memory only.
 	emails map[string]*userState
@@ -459,6 +460,7 @@ func Open(config Config) (*Server, error) {
 		passkeys:    make(map[string]*passkeyUser),
 		credentials: make(map[string]*passkeyUser),
 		sessions:    make(map[[32]byte]session),
+		devices:     make(map[[32]byte]deviceToken),
 		emails:      make(map[string]*userState),
 		email:       newEmailState(),
 		dirty:       newDirtySet(),
