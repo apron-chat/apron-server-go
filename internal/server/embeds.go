@@ -74,7 +74,7 @@ type embedState struct {
 }
 
 // image reports whether the embed is an avatar or a custom emoji: an image
-// that follows the rules for avatars (§4.8.6) and belongs to no message.
+// of a type avatars take (§4.8.6) that belongs to no message.
 func (e *embedState) image() bool {
 	return e.avatarFor != nil || e.emojiKey != ""
 }
@@ -352,13 +352,23 @@ func refuseWrite(w http.ResponseWriter, message string, status int) {
 
 func (s *Server) writeUpload(w http.ResponseWriter, r *http.Request, e *embedState) {
 	limit := s.config.MaxUploadBytes
+	tooLargeMessage := ""
 	s.mu.RLock()
-	if e.image() {
+	switch {
+	case e.avatarFor != nil:
 		limit = s.config.MaxAvatarBytes
-	} else {
+	case e.emojiKey != "":
+		limit = s.emojiRoomLocked(e.emojiKey)
+		if limit < s.config.MaxEmojiBytes {
+			tooLargeMessage = s.emojiFullMessage()
+		}
+	default:
 		limit = min(limit, s.config.MaxMessageUploadBytes-s.messageUploadBytesLocked(e.messageID))
 	}
 	s.mu.RUnlock()
+	if tooLargeMessage == "" {
+		tooLargeMessage = fmt.Sprintf("This upload is limited to %d bytes", limit)
+	}
 	_ = http.NewResponseController(w).SetReadDeadline(time.Now().Add(uploadReadTimeout))
 	file, size, err := s.receiveUpload(w, r, limit)
 	var head []byte
@@ -396,7 +406,7 @@ func (s *Server) writeUpload(w http.ResponseWriter, r *http.Request, e *embedSta
 		fail(http.StatusGone, "The embed was removed from its message")
 		return
 	case errors.As(err, &tooLarge):
-		fail(http.StatusRequestEntityTooLarge, fmt.Sprintf("This upload is limited to %d bytes", limit))
+		fail(http.StatusRequestEntityTooLarge, tooLargeMessage)
 		return
 	case errors.Is(err, errNotAvatar):
 		fail(http.StatusUnsupportedMediaType, "Avatars and emoji must be PNG, JPEG, GIF, or WebP images")
@@ -409,13 +419,22 @@ func (s *Server) writeUpload(w http.ResponseWriter, r *http.Request, e *embedSta
 		fail(http.StatusRequestEntityTooLarge, fmt.Sprintf("A message's uploads are limited to %d bytes", s.config.MaxMessageUploadBytes))
 		return
 	}
+	if e.emojiKey != "" {
+		if status, message := s.refuseEmojiLocked(e, size); status != 0 {
+			fail(status, message)
+			return
+		}
+	}
 	e.finished = true
 	e.path = file.Name()
 	e.size = size
-	e.upload = s.uploads.PushBack(e)
+	if e.emojiKey == "" {
+		// Custom emoji have a bound of their own (MaxEmojiStorageBytes).
+		e.upload = s.uploads.PushBack(e)
+		s.uploadBytes += size
+	}
 	s.uploadSeq++
 	e.seq = s.uploadSeq
-	s.uploadBytes += size
 	s.touchEmbed(e.id)
 	e.owned = map[string]any{"url": e.fileURL()}
 	if og != nil {
@@ -477,8 +496,8 @@ func (s *Server) messageUploadBytesLocked(messageID string) int64 {
 // evictUploadsLocked removes the oldest message uploads, other than keep,
 // while hosted uploads exceed MaxUploadStorageBytes. Each affected message
 // is republished once without its evicted embeds, as for a failed write
-// (§4.8.3). Avatars and custom emoji count toward the total but are never
-// removed.
+// (§4.8.3). Avatars count toward the total but are never removed; custom
+// emoji are not in it.
 func (s *Server) evictUploadsLocked(keep *embedState) {
 	evicted := make(map[string][]string)
 	var order []string

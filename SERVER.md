@@ -34,12 +34,13 @@ Defaults:
 - `server` frame: `apron: 9`, `agent: "apron-go/9"`, and
   `capabilities`: `history`, `edit`, `rooms`, `reactions`, `activity`,
   `embed:upload`, `embed:stream`, `command`, `status`, `ext`, `ext:emoji`,
-  with `server.ext.emoji.catalog_url` (see [Custom emoji](#custom-emoji)),
-  and, while `--max-private-rooms` bounds private rooms, `ext:settings`, with
-  `server.ext.settings.private_rooms` the bound (below); `server.push`: kinds
-  `relay` and `webpush` (with the server's VAPID `key`) and `wake`:
-  `mentions`, `replies`, `private`, `joined`, `badge`; `server.status`:
-  `dnd`, `invisible`; `server.ping`: 30 seconds
+  with `server.ext.emoji.catalog_url` (see [Custom emoji](#custom-emoji);
+  not on a connection whose URLs would be plain `http:` on a host other than
+  a loopback one), and, while `--max-private-rooms` bounds private rooms,
+  `ext:settings`, with `server.ext.settings.private_rooms` the bound
+  (below); `server.push`: kinds `relay` and `webpush` (with the server's
+  VAPID `key`) and `wake`: `mentions`, `replies`, `private`, `joined`,
+  `badge`; `server.status`: `dnd`, `invisible`; `server.ping`: 30 seconds
 - seeded default room: `general` (title `General`)
 - authentication (`server.auth`, in this order): WebAuthn passkeys, email
   codes with `--email.enable` (off by default), bearer-token resume,
@@ -74,7 +75,10 @@ Flags (`aprond --help` lists them all):
   stream URLs. Without it they use the host each WebSocket request arrived
   on (or `https://` and the first `--tls.domain`), which suits local
   development but lets a client choose the host in URLs others see; set it
-  in any deployment.
+  in any deployment. Behind a reverse proxy that terminates TLS, set it to
+  the `https:` URL: the server sees plain HTTP from the proxy, and without
+  it builds `http:` URLs, so it does not offer custom emoji (clients ignore
+  an `http:` catalog off a loopback host; see [Custom emoji](#custom-emoji)).
 - `--max-connections <n>` refuses WebSockets beyond `n` with an error without
   `id` (`retry_after`), then closes them. `--max-listener-connections <n>`
   caps concurrent TCP connections on the listener, HTTP included; further
@@ -133,8 +137,14 @@ Flags (`aprond --help` lists them all):
   (20) all of one message's uploads, and `--upload.max-storage-mb <n>`
   (1000) every hosted upload together, all in MiB. Past the storage bound the
   oldest message uploads are removed: their files are deleted and each
-  affected message is republished without them. Avatars and custom emoji
-  count toward the bound but are never removed.
+  affected message is republished without them. Avatars count toward the
+  bound but are never removed; custom emoji have their own bounds, below.
+- `--emoji.max-kb <n>` (256) bounds one custom emoji image, in KiB, and
+  `--emoji.max-storage-mb <n>` (250, room for the 1000 emoji the server
+  keeps at 256 KiB each) all of them together, in MiB. Custom emoji do not
+  count toward `--upload.max-storage-mb`, and nothing is removed to make
+  room for one: past the storage bound `/emoji add` is refused (see
+  [Custom emoji](#custom-emoji)).
 - `--push.disable` removes push. Stored registrations are kept but not
   loaded, and apply again once push is enabled. `--push.allow-insecure` is for tests only:
   it accepts `http` push endpoints and ones on internal addresses, so any
@@ -592,37 +602,56 @@ closed, without waiting for its body to end.
   becomes the sender's `avatar`, followed by a `user` notification; replacing
   or removing the avatar deletes the upload.
 - **Custom emoji**: `/emoji add :name:` with one `upload` embed takes the same
-  images as avatars; see [Custom emoji](#custom-emoji).
+  types of image as avatars, of at most 256 KiB; see
+  [Custom emoji](#custom-emoji).
 
 ## Custom emoji
 
 The server offers custom emoji as
 [apron's EXTENSIONS.md](https://github.com/shazow/apron/blob/main/EXTENSIONS.md#extemoji)
 defines them, under capability `ext:emoji`. Every `server` frame carries
-`ext.emoji.catalog_url`, before sign-in too: the catalog is a JSON object
+`ext.emoji.catalog_url`, before sign-in too, except on a connection whose
+URLs would start with `http:` and a host other than a loopback one
+(`localhost`, a name under `.localhost`, `127.0.0.0/8`, or `::1`), since
+clients ignore such a catalog URL: such a connection is offered neither
+`ext:emoji` nor `ext.emoji`, and gets no `server` frame when the catalog
+changes. Behind a reverse proxy that speaks plain HTTP to the server, set
+`--public-url` to the deployment's `https:` URL. The catalog is a JSON object
 that maps each key, `:name:`, to `{url, width, height, alt?}`. The server
 serves it at `/emoji/catalog-<hash>.json`, named after a hash of its content,
 with `Cache-Control: public, max-age=31536000, immutable` and
 `Access-Control-Allow-Origin: *`; only the current catalog is served, and
-other names are `404`. The catalog is kept in the store, and its images with
-the uploads.
+other names are `404`. The catalog is kept in the store, and its images in
+the upload directory.
 
 - `/emoji add :name:` with exactly one `upload` embed returns
   `{"embeds": [{embed_id, kind, write_url}]}`, as `/avatar` does. A name is
   letters, digits, `_`, `+`, and `-`, and a key at most 64 bytes. The write
-  takes a PNG, JPEG, GIF, or WebP of at most 2 MiB, which must decode as the
-  type it declares (`415` otherwise). When it finishes, the image becomes the
-  key's, with its size as `width` and `height` and the embed's
-  `og.image.alt` as `alt`.
+  takes a PNG, JPEG, GIF, or WebP of at most 256 KiB (`--emoji.max-kb`;
+  `413` past it), which must decode as the type it declares (`415`
+  otherwise). When it finishes, the image becomes the key's, with its size
+  as `width` and `height` and the embed's `og.image.alt` as `alt`.
+- Custom emoji images together take at most 250 MiB
+  (`--emoji.max-storage-mb`), apart from the uploads that
+  `--upload.max-storage-mb` bounds. `/emoji add` is `denied` when the
+  images leave no room, counting a replaced image's as free, and a write
+  that would pass the bound is refused with `413`; nothing is removed to
+  make room.
 - Anyone signed in may add a new key, up to 1000 keys (`denied` past that).
   Only the user who added a key, or an `admin`, may replace its image
   (`denied` otherwise); the replaced image is deleted.
+- The write is checked again when it finishes, since the catalog may have
+  changed after the command: if someone the writer may not replace has
+  added the key meanwhile, or the catalog has filled up, the write is
+  refused with `409`, and if other images have taken the room, with `413`.
+  A refused write's upload is deleted and the catalog is unchanged.
 - `/emoji remove :name:` removes the key and deletes its image. Only an
   `admin` may remove keys (`denied` otherwise); an unknown key is
   `invalid_params`.
 - Each change gives the catalog a new URL, and the server sends every
-  connection, signed in or not, a new `server` frame: for a removal before
-  the command's result, and for an addition when the write finishes.
+  connection offered `ext:emoji`, signed in or not, a new `server` frame:
+  for a removal before the command's result, and for an addition when the
+  write finishes.
 - A `reactions` entry that has the shape of a key must be in the catalog,
   or in the caller's current set on that message, so that a removed key does
   not keep the caller from changing the rest of the set; other keys are
@@ -658,10 +687,12 @@ message's `ext`, so a tombstone carries none, and a save onto a tombstone
 merges into an empty one. A `command`'s `ext` is an argument, like the rest
 of its params: it must be an object, and is not kept. The `server` frame's
 `ext` carries the server's own extension data: `emoji` (see
-[Custom emoji](#custom-emoji)) and, with `--max-private-rooms`, `settings`.
-The server does not send `ext:permissions`: every user may write,
-`room_join` with a `user_id` takes membership of the room, and only a
-message's author may move it, which are the extension's defaults.
+[Custom emoji](#custom-emoji)) and, with `--max-private-rooms`, `settings`;
+without either, it is absent. The server does not offer `ext:permissions`,
+so clients offer what PROTOCOL.md allows and handle `denied`, as the
+extension asks of them without it: every user may write, any member of a
+room may add others to it with `room_join` and a `user_id`, and only a
+message's author may move it.
 
 ## Commands
 

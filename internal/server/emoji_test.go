@@ -2,13 +2,20 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"encoding/json/v2"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"path"
+	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/coder/websocket"
 
 	"github.com/apron-chat/apron-server-go/internal/store"
 )
@@ -90,11 +97,34 @@ func catalogOf(t *testing.T, params map[string]any) (string, map[string]any) {
 // the returned write URL, and returns the write's HTTP status.
 func addEmoji(t *testing.T, c *testClient, key string, content []byte, contentType string) int {
 	t.Helper()
+	return putEmoji(t, emojiWriteURL(t, c, key), content, contentType)
+}
+
+// emojiWriteURL runs /emoji add key on c with one upload embed and returns
+// its write URL.
+func emojiWriteURL(t *testing.T, c *testClient, key string) string {
+	t.Helper()
 	embed := map[string]any{"kind": "upload", "og": map[string]any{"image": map[string]any{"alt": "A party"}}}
 	result := c.result(t, "command", c.nextID("emoji"), map[string]any{"body": map[string]any{"text": "/emoji add " + key, "embeds": []any{embed}}})
-	writeURL := result["embeds"].([]any)[0].(map[string]any)["write_url"].(string)
+	return result["embeds"].([]any)[0].(map[string]any)["write_url"].(string)
+}
+
+// putEmoji writes content to an /emoji add write URL and returns the HTTP
+// status.
+func putEmoji(t *testing.T, writeURL string, content []byte, contentType string) int {
+	t.Helper()
 	status, _, _ := httpDo(t, http.MethodPut, writeURL, bytes.NewReader(content), contentType)
 	return status
+}
+
+// uploadFiles counts the upload files in dir.
+func uploadFiles(t *testing.T, dir string) int {
+	t.Helper()
+	files, err := filepath.Glob(filepath.Join(dir, "*"+uploadSuffix))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return len(files)
 }
 
 // /emoji add and /emoji remove change the catalog, which the server serves
@@ -216,9 +246,17 @@ func TestCustomEmojiSurvivesRestart(t *testing.T) {
 	url, catalog := catalogOf(t, c.notification(t, "server"))
 	stop()
 
-	_, httpServer, _ = startWithStore(t, kept, uploads)
+	app, httpServer, _ := startWithStore(t, kept, uploads)
 	_, frame := dialRaw(t, httpServer)
 	restartedURL, restored := catalogOf(t, frame["params"].(map[string]any))
+	// Restored emoji images stay out of the uploads that
+	// MaxUploadStorageBytes bounds.
+	app.mu.RLock()
+	uploadCount, uploadBytes := app.uploads.Len(), app.uploadBytes
+	app.mu.RUnlock()
+	if uploadCount != 0 || uploadBytes != 0 {
+		t.Fatalf("restored uploads: %d, %d bytes", uploadCount, uploadBytes)
+	}
 	// The restarted test server listens on another port.
 	if path.Base(restartedURL) != path.Base(url) || !reflect.DeepEqual(restored, catalog) {
 		t.Fatalf("catalog %s %#v after a restart, want %s %#v", restartedURL, restored, url, catalog)
@@ -226,5 +264,197 @@ func TestCustomEmojiSurvivesRestart(t *testing.T) {
 	image := restored[":party:"].(map[string]any)["url"].(string)
 	if status, _, _ := httpDo(t, http.MethodGet, httpServer.URL+image[strings.Index(image, filePath):], nil, ""); status != http.StatusOK {
 		t.Fatalf("restored image: %d", status)
+	}
+}
+
+// Custom emoji images have a size cap and a storage quota of their own
+// (MaxEmojiBytes, MaxEmojiStorageBytes): they do not count toward
+// MaxUploadStorageBytes, so they never push message uploads out, and an
+// image past the quota is refused rather than making room.
+func TestCustomEmojiHaveTheirOwnLimits(t *testing.T) {
+	image := testPNG(t)
+	size := int64(len(image))
+	dir := t.TempDir()
+	config := DefaultConfig()
+	config.UploadDir = dir
+	config.MaxEmojiBytes = size
+	config.MaxEmojiStorageBytes = 2 * size
+	config.MaxUploadBytes = size
+	config.MaxUploadStorageBytes = 2 * size
+	_, httpServer := newTestServer(t, config)
+	a := dialTestClient(t, httpServer)
+
+	// One image is at most MaxEmojiBytes, though avatars may be larger.
+	if status := addEmoji(t, a, ":big:", append(bytes.Clone(image), make([]byte, 1)...), "image/png"); status != http.StatusRequestEntityTooLarge {
+		t.Fatalf("an emoji over MaxEmojiBytes: %d", status)
+	}
+	for _, key := range []string{":a:", ":b:"} {
+		if status := addEmoji(t, a, key, image, "image/png"); status != http.StatusCreated {
+			t.Fatalf("emoji %s: %d", key, status)
+		}
+		a.notification(t, "server")
+	}
+
+	// The quota is full: a new key is denied, while a replacement fits in
+	// the room its old image leaves.
+	a.expectError(t, "command", "full", map[string]any{"body": map[string]any{"text": "/emoji add :c:", "embeds": []any{map[string]any{"kind": "upload"}}}}, codeDenied)
+	if status := addEmoji(t, a, ":a:", image, "image/png"); status != http.StatusCreated {
+		t.Fatalf("replacing an emoji in a full quota: %d", status)
+	}
+	_, catalog := catalogOf(t, a.notification(t, "server"))
+	if len(catalog) != 2 || uploadFiles(t, dir) != 2 {
+		t.Fatalf("catalog %#v with %d files", catalog, uploadFiles(t, dir))
+	}
+
+	// Message uploads use all of MaxUploadStorageBytes, so none is evicted.
+	var files []string
+	for i := range 2 {
+		result := postEmbeds(t, a, fmt.Sprint("post-", i), map[string]any{"room_id": "general", "body": map[string]any{"embeds": []any{map[string]any{"kind": "upload"}}}})
+		writeURL := result["embeds"].([]any)[0].(map[string]any)["write_url"].(string)
+		if status, _, _ := httpDo(t, http.MethodPut, writeURL, bytes.NewReader(image), "image/png"); status != http.StatusCreated {
+			t.Fatalf("message upload %d: %d", i, status)
+		}
+		files = append(files, embedsOf(t, a.notification(t, "message"))[0]["url"].(string))
+	}
+	a.expectQuiet(t)
+	for _, file := range files {
+		if status, _, _ := httpDo(t, http.MethodGet, file, nil, ""); status != http.StatusOK {
+			t.Fatalf("message upload %s after emoji: %d", file, status)
+		}
+	}
+
+	// Writes that each fit when their command ran are checked again when
+	// they finish: the one that would pass the quota is refused, and its
+	// file is removed.
+	raceDir := t.TempDir()
+	config.UploadDir = raceDir
+	_, raceServer := newTestServer(t, config)
+	c := dialTestClient(t, raceServer)
+	if status := addEmoji(t, c, ":a:", image, "image/png"); status != http.StatusCreated {
+		t.Fatalf("emoji :a:: %d", status)
+	}
+	c.notification(t, "server")
+	first, second := emojiWriteURL(t, c, ":b:"), emojiWriteURL(t, c, ":c:")
+	if status := putEmoji(t, first, image, "image/png"); status != http.StatusCreated {
+		t.Fatalf("first pending emoji: %d", status)
+	}
+	c.notification(t, "server")
+	if status := putEmoji(t, second, image, "image/png"); status != http.StatusRequestEntityTooLarge {
+		t.Fatalf("second pending emoji past the quota: %d", status)
+	}
+	c.expectQuiet(t)
+	if files := uploadFiles(t, raceDir); files != 2 {
+		t.Fatalf("upload files after the refused write: %d", files)
+	}
+}
+
+// A write for a key that someone else took meanwhile, who the writer may not
+// replace, is dropped when it finishes rather than replacing their image: the
+// ownership check of /emoji add holds at the write as well.
+func TestCustomEmojiWriteRechecksOwnership(t *testing.T) {
+	dir := t.TempDir()
+	_, mailbox, httpServer := emailTestServer(t, func(config *Config) {
+		config.UploadDir = dir
+		config.Roles = map[string][]string{"admin": {"ada@example.com"}}
+	})
+	b := dialTestClient(t, httpServer)
+	admin, _ := dialRaw(t, httpServer)
+	propose(t, admin, "ada@example.com")
+	signInByEmail(t, admin, mailbox.receive(t).Code, nil)
+	admin.drain(t)
+	b.drain(t)
+
+	// b asks for :x: while it is free, and keeps the write URL.
+	stale := emojiWriteURL(t, b, ":x:")
+	if status := addEmoji(t, admin, ":x:", testPNG(t), "image/png"); status != http.StatusCreated {
+		t.Fatalf("admin's emoji: %d", status)
+	}
+	_, catalog := catalogOf(t, admin.notification(t, "server"))
+	b.notification(t, "server")
+	image := catalog[":x:"].(map[string]any)["url"].(string)
+
+	if status := putEmoji(t, stale, testPNG(t), "image/png"); status != http.StatusConflict {
+		t.Fatalf("b's stale write: %d", status)
+	}
+	admin.expectQuiet(t)
+	b.expectQuiet(t)
+	if status, _, _ := httpDo(t, http.MethodGet, image, nil, ""); status != http.StatusOK {
+		t.Fatalf("admin's image after b's write: %d", status)
+	}
+	if files := uploadFiles(t, dir); files != 1 {
+		t.Fatalf("upload files after the dropped write: %d", files)
+	}
+	// :x: is still the admin's: b may not replace it.
+	b.expectError(t, "command", "replace", map[string]any{"body": map[string]any{"text": "/emoji add :x:", "embeds": []any{map[string]any{"kind": "upload"}}}}, codeDenied)
+
+	// An admin's stale write still replaces another user's key.
+	adminWrite := emojiWriteURL(t, admin, ":y:")
+	if status := addEmoji(t, b, ":y:", testPNG(t), "image/png"); status != http.StatusCreated {
+		t.Fatalf("b's emoji: %d", status)
+	}
+	admin.notification(t, "server")
+	b.notification(t, "server")
+	if status := putEmoji(t, adminWrite, testPNG(t), "image/png"); status != http.StatusCreated {
+		t.Fatalf("admin's write over b's key: %d", status)
+	}
+	admin.notification(t, "server")
+	b.notification(t, "server")
+}
+
+// dialHost connects to httpServer as if through a reverse proxy for host,
+// over plain HTTP, and returns the server frame's params.
+func dialHost(t *testing.T, httpServer *httptest.Server, host string) (*testClient, map[string]any) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	ws, _, err := websocket.Dial(ctx, wsURL(httpServer), &websocket.DialOptions{Host: host})
+	cancel()
+	if err != nil {
+		t.Fatalf("dial as %s: %v", host, err)
+	}
+	c := &testClient{ws: ws}
+	t.Cleanup(func() { _ = ws.Close(websocket.StatusNormalClosure, "test finished") })
+	return c, notificationParams(t, c.read(t), "server")
+}
+
+// Clients ignore a catalog_url that is http: on another host than a
+// loopback one (ext:emoji), so a connection whose URLs would be such, as
+// behind a plain-HTTP reverse proxy without PublicURL, is not offered
+// ext:emoji, nor sent server frames when the catalog changes.
+func TestCustomEmojiNeedAUsableCatalogURL(t *testing.T) {
+	offered := func(params map[string]any) bool {
+		ext, _ := params["ext"].(map[string]any)
+		_, has := ext["emoji"]
+		if slices.Contains(params["capabilities"].([]any), "ext:emoji") != has {
+			t.Fatalf("ext:emoji and ext.emoji disagree: %#v", params)
+		}
+		return has
+	}
+	_, httpServer := newTestServer(t, DefaultConfig())
+	proxied, params := dialHost(t, httpServer, "chat.example")
+	if offered(params) {
+		t.Fatalf("ext:emoji offered over plain HTTP to chat.example: %#v", params)
+	}
+	if _, has := params["ext"]; has {
+		t.Fatalf("an empty ext: %#v", params)
+	}
+	for _, host := range []string{"localhost:8080", "app.localhost", "127.0.0.2:8080", "[::1]:8080"} {
+		if _, params := dialHost(t, httpServer, host); !offered(params) {
+			t.Fatalf("ext:emoji not offered to loopback %s: %#v", host, params)
+		}
+	}
+	c := dialTestClient(t, httpServer)
+	if status := addEmoji(t, c, ":party:", testPNG(t), "image/png"); status != http.StatusCreated {
+		t.Fatalf("emoji upload: %d", status)
+	}
+	c.notification(t, "server")
+	proxied.expectQuiet(t)
+
+	// With an https: PublicURL, every connection is offered it.
+	config := DefaultConfig()
+	config.PublicURL = "https://chat.example"
+	_, publicServer := newTestServer(t, config)
+	_, params = dialHost(t, publicServer, "chat.example")
+	if !offered(params) || !strings.HasPrefix(params["ext"].(map[string]any)["emoji"].(map[string]any)["catalog_url"].(string), "https://chat.example"+emojiPath) {
+		t.Fatalf("ext:emoji with an https: PublicURL: %#v", params)
 	}
 }

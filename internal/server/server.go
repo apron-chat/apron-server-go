@@ -42,6 +42,10 @@ const (
 	defaultMaxAvatarBytes    int64 = 2 << 20
 	defaultMaxMessageUploads int64 = 20 << 20
 	defaultMaxUploadStorage  int64 = 1000 << 20
+	defaultMaxEmojiBytes     int64 = 256 << 10
+	// defaultMaxEmojiStorage holds the most custom emoji at the default
+	// size cap: 250 MiB.
+	defaultMaxEmojiStorage = maxCustomEmoji * defaultMaxEmojiBytes
 	// uploadReadTimeout bounds how long one upload body may take to arrive.
 	uploadReadTimeout = 15 * time.Minute
 	// maxHistoryReplyBytes bounds the records in one history page; a page
@@ -85,10 +89,15 @@ type Config struct {
 	MaxAvatarBytes int64
 	// MaxMessageUploadBytes bounds the uploads hosted for one message.
 	MaxMessageUploadBytes int64
-	// MaxUploadStorageBytes bounds all hosted uploads; beyond it the oldest
-	// message uploads are removed from their messages. Avatars count toward
-	// it but are never removed.
+	// MaxUploadStorageBytes bounds all hosted uploads but custom emoji;
+	// beyond it the oldest message uploads are removed from their messages.
+	// Avatars count toward it but are never removed.
 	MaxUploadStorageBytes int64
+	// MaxEmojiBytes bounds one custom emoji's image (ext:emoji), and
+	// MaxEmojiStorageBytes all of them together: an image that would pass
+	// it is refused, and nothing is removed to make room.
+	MaxEmojiBytes        int64
+	MaxEmojiStorageBytes int64
 	// UploadDir holds hosted upload content. Empty uses a temporary directory
 	// removed on Shutdown. At start, files named *.upload in UploadDir that
 	// no stored embed holds are removed.
@@ -173,6 +182,8 @@ func DefaultConfig() Config {
 		MaxAvatarBytes:        defaultMaxAvatarBytes,
 		MaxMessageUploadBytes: defaultMaxMessageUploads,
 		MaxUploadStorageBytes: defaultMaxUploadStorage,
+		MaxEmojiBytes:         defaultMaxEmojiBytes,
+		MaxEmojiStorageBytes:  defaultMaxEmojiStorage,
 		UploadStartTimeout:    defaultUploadStartTimeout,
 		StreamKeepBytes:       defaultStreamKeepBytes,
 		StreamMaxBytes:        defaultStreamMaxBytes,
@@ -215,6 +226,12 @@ func (c Config) withDefaults() Config {
 	}
 	if c.MaxUploadStorageBytes <= 0 {
 		c.MaxUploadStorageBytes = defaults.MaxUploadStorageBytes
+	}
+	if c.MaxEmojiBytes <= 0 {
+		c.MaxEmojiBytes = defaults.MaxEmojiBytes
+	}
+	if c.MaxEmojiStorageBytes <= 0 {
+		c.MaxEmojiStorageBytes = defaults.MaxEmojiStorageBytes
 	}
 	if c.UploadStartTimeout <= 0 {
 		c.UploadStartTimeout = defaults.UploadStartTimeout
@@ -408,8 +425,9 @@ type Server struct {
 	embeds        map[string]*embedState
 	// writes maps an unused or in-progress write token to its embed.
 	writes map[string]*embedState
-	// uploads lists finished uploads, oldest first, for eviction beyond
-	// MaxUploadStorageBytes; uploadBytes is their total size.
+	// uploads lists finished uploads but custom emoji, oldest first, for
+	// eviction beyond MaxUploadStorageBytes; uploadBytes is their total
+	// size. Custom emoji have their own bound, MaxEmojiStorageBytes.
 	uploads     *list.List
 	uploadBytes int64
 	// uploadDir holds upload content; tempUploadDir is removed on Shutdown.
@@ -786,13 +804,17 @@ func (s *Server) serverParams(baseURL string) map[string]any {
 	params := map[string]any{
 		"apron":        9,
 		"agent":        "apron-go/9",
-		"capabilities": []string{"history", "edit", "rooms", "reactions", "activity", "embed:upload", "embed:stream", "command", "status", "ext", "ext:emoji"},
+		"capabilities": []string{"history", "edit", "rooms", "reactions", "activity", "embed:upload", "embed:stream", "command", "status", "ext"},
 		"auth":         authSchemes,
 		"ping":         max(1, int(s.config.PingInterval/time.Second)),
 		// The optional statuses accepted with `me` (§4.5); online and ""
 		// always are, and are not listed.
 		"status": optionalStatuses,
-		"ext":    map[string]any{"emoji": s.emojiExt(baseURL)},
+	}
+	ext := make(map[string]any)
+	if emoji := s.emojiExt(baseURL); emoji != nil {
+		params["capabilities"] = append(params["capabilities"].([]string), "ext:emoji")
+		ext["emoji"] = emoji
 	}
 	if !s.config.DisablePush {
 		push := map[string]any{"relay": map[string]any{}, "wake": (urgentScopes | wakeJoined | wakeBadge).names()}
@@ -810,7 +832,10 @@ func (s *Server) serverParams(baseURL string) map[string]any {
 		// ext:settings (apron's EXTENSIONS.md): read_cursors is absent,
 		// so true, since the server keeps read_message_id (§4.6).
 		params["capabilities"] = append(params["capabilities"].([]string), "ext:settings")
-		params["ext"].(map[string]any)["settings"] = map[string]any{"private_rooms": s.config.MaxPrivateRooms}
+		ext["settings"] = map[string]any{"private_rooms": s.config.MaxPrivateRooms}
+	}
+	if len(ext) > 0 {
+		params["ext"] = ext
 	}
 	if !slices.Equal(signup, authSchemes) {
 		params["signup"] = signup

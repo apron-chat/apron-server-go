@@ -7,8 +7,12 @@ import (
 	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"fmt"
+	"maps"
+	"net"
 	"net/http"
+	"net/url"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 	"unicode"
@@ -102,9 +106,84 @@ func (s *Server) renderEmojiLocked() {
 }
 
 // emojiExt is server.ext.emoji for a connection whose URLs start with
-// baseURL.
+// baseURL, or nil when clients would ignore its catalog_url: one that is
+// neither https: nor http: on a loopback host, such as behind a plain-HTTP
+// reverse proxy without PublicURL. The server then does not offer
+// ext:emoji on that connection.
 func (s *Server) emojiExt(baseURL string) map[string]any {
-	return map[string]any{"catalog_url": baseURL + emojiPath + s.emojiName}
+	catalogURL := baseURL + emojiPath + s.emojiName
+	parsed, err := url.Parse(catalogURL)
+	if err != nil || !(parsed.Scheme == "https" || parsed.Scheme == "http" && loopbackHost(parsed.Hostname())) {
+		return nil
+	}
+	return map[string]any{"catalog_url": catalogURL}
+}
+
+// loopbackHost reports whether host, a URL's hostname, is a loopback host,
+// as clients judge one: localhost, a name under .localhost, ::1, or an
+// address in 127.0.0.0/8.
+func loopbackHost(host string) bool {
+	host = strings.ToLower(host)
+	if host == "localhost" || strings.HasSuffix(host, ".localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+// emojiBytesLocked totals the images of the custom emoji, which
+// MaxEmojiStorageBytes bounds.
+func (s *Server) emojiBytesLocked() int64 {
+	var total int64
+	for _, emoji := range s.emoji {
+		total += emoji.embed.size
+	}
+	return total
+}
+
+// emojiRoomLocked is how many bytes an image for key may take: at most
+// MaxEmojiBytes, and what MaxEmojiStorageBytes leaves once the image it
+// would replace is gone.
+func (s *Server) emojiRoomLocked(key string) int64 {
+	room := s.config.MaxEmojiStorageBytes - s.emojiBytesLocked()
+	if previous := s.emoji[key]; previous != nil {
+		room += previous.embed.size
+	}
+	return min(s.config.MaxEmojiBytes, room)
+}
+
+// mayReplaceEmojiLocked reports whether the user userID may give an
+// existing key a new image: the user who added it, or an admin.
+func (s *Server) mayReplaceEmojiLocked(existing *customEmoji, userID string) bool {
+	if existing.by == userID {
+		return true
+	}
+	u := s.users[userID]
+	return u != nil && u.hasRole("admin")
+}
+
+// refuseEmojiLocked checks a finished /emoji add write of size bytes
+// again, since the catalog may have changed since the command: the key
+// may have been added by someone the writer may not replace, the catalog
+// may be full, or other images may have taken the storage. It returns the
+// HTTP status and message to refuse the write with, or 0.
+func (s *Server) refuseEmojiLocked(e *embedState, size int64) (int, string) {
+	existing := s.emoji[e.emojiKey]
+	switch {
+	case existing != nil && existing.embed != e && !s.mayReplaceEmojiLocked(existing, e.emojiBy):
+		return http.StatusConflict, fmt.Sprintf("%s was added by someone else meanwhile; only who added it or an admin can replace it", e.emojiKey)
+	case existing == nil && len(s.emoji) >= maxCustomEmoji:
+		return http.StatusConflict, fmt.Sprintf("This server has %d custom emoji, the most it keeps", maxCustomEmoji)
+	case size > s.emojiRoomLocked(e.emojiKey):
+		return http.StatusRequestEntityTooLarge, s.emojiFullMessage()
+	}
+	return 0, ""
+}
+
+// emojiFullMessage explains that custom emoji images have used their
+// storage.
+func (s *Server) emojiFullMessage() string {
+	return fmt.Sprintf("Custom emoji images are limited to %d bytes together; remove some to add more", s.config.MaxEmojiStorageBytes)
 }
 
 // setEmojiLocked makes a finished /emoji add upload its key's image,
@@ -139,12 +218,18 @@ func (s *Server) emojiChangedLocked() {
 	s.renderEmojiLocked()
 	frames := make(map[string]jsontext.Value)
 	for c := range s.clients {
-		frame := frames[c.baseURL]
-		if frame == nil {
-			frame = notification("server", s.serverParams(c.baseURL))
+		frame, seen := frames[c.baseURL]
+		if !seen {
+			// A connection not offered ext:emoji has no catalog_url to
+			// change.
+			if s.emojiExt(c.baseURL) != nil {
+				frame = notification("server", s.serverParams(c.baseURL))
+			}
 			frames[c.baseURL] = frame
 		}
-		c.enqueue(frame)
+		if frame != nil {
+			c.enqueue(frame)
+		}
 	}
 }
 
@@ -157,7 +242,8 @@ func (s *Server) storedEmojiLocked() map[string]storedEmoji {
 }
 
 // restoreEmojiLocked rebuilds the catalog from the store, after the embeds.
-// A key whose upload is gone is dropped.
+// A key whose upload is gone is dropped, and so is a finished emoji upload
+// that no key holds.
 func (s *Server) restoreEmojiLocked(raw jsontext.Value) error {
 	if raw != nil {
 		var stored map[string]storedEmoji
@@ -171,6 +257,11 @@ func (s *Server) restoreEmojiLocked(raw jsontext.Value) error {
 				continue
 			}
 			s.emoji[key] = &customEmoji{embed: e, by: entry.By, width: entry.Width, height: entry.Height}
+		}
+	}
+	for _, id := range slices.Sorted(maps.Keys(s.embeds)) {
+		if e := s.embeds[id]; e.emojiKey != "" && e.finished && (s.emoji[e.emojiKey] == nil || s.emoji[e.emojiKey].embed != e) {
+			s.removeEmbedLocked(id)
 		}
 	}
 	s.renderEmojiLocked()
@@ -204,7 +295,8 @@ func (s *Server) handleEmoji(w http.ResponseWriter, r *http.Request) {
 // image as that key or replaces the image of a key the sender added, and
 // /emoji remove :name:, which admins use to remove a key. Either sends
 // every connection a new server frame: remove at once, add when the
-// upload's write finishes.
+// upload's write finishes, which checks the catalog again
+// (refuseEmojiLocked).
 func (s *Server) emojiCommand(c *client, _ *roomState, body map[string]any, args string) (map[string]any, *rpcError) {
 	u := c.user
 	action, key, _ := strings.Cut(args, " ")
@@ -219,11 +311,14 @@ func (s *Server) emojiCommand(c *client, _ *roomState, body map[string]any, args
 		if len(embeds) != 1 || embeds[0].(map[string]any)["kind"] != "upload" {
 			return nil, invalidParams("/emoji add takes exactly one upload embed: attach an image")
 		}
-		if existing != nil && existing.by != u.id && !u.hasRole("admin") {
+		if existing != nil && !s.mayReplaceEmojiLocked(existing, u.id) {
 			return nil, &rpcError{Code: codeDenied, Message: fmt.Sprintf("%s is taken; only who added it or an admin can replace it", key)}
 		}
 		if existing == nil && len(s.emoji) >= maxCustomEmoji {
 			return nil, &rpcError{Code: codeDenied, Message: fmt.Sprintf("This server has %d custom emoji, the most it keeps", maxCustomEmoji)}
+		}
+		if s.emojiRoomLocked(key) <= 0 {
+			return nil, &rpcError{Code: codeDenied, Message: s.emojiFullMessage()}
 		}
 		if err := s.admitPostLocked(u); err != nil {
 			return nil, err

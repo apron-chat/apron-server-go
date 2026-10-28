@@ -63,8 +63,13 @@ type Options struct {
 		Dir          string `long:"dir" description:"Directory holding uploaded files; upload files the store does not refer to are removed at start"`
 		MaxMB        int64  `long:"max-mb" default:"20" description:"Maximum size of one upload, in MiB"`
 		MaxMessageMB int64  `long:"max-message-mb" default:"20" description:"Maximum total size of one message's uploads, in MiB"`
-		MaxStorageMB int64  `long:"max-storage-mb" default:"1000" description:"Total size of hosted uploads, in MiB, beyond which the oldest are removed from their messages"`
+		MaxStorageMB int64  `long:"max-storage-mb" default:"1000" description:"Total size of hosted uploads but custom emoji, in MiB, beyond which the oldest are removed from their messages"`
 	} `group:"Uploads" namespace:"upload"`
+
+	Emoji struct {
+		MaxKB        int64 `long:"max-kb" default:"256" description:"Maximum size of one custom emoji image, in KiB"`
+		MaxStorageMB int64 `long:"max-storage-mb" default:"250" description:"Total size of custom emoji images, in MiB; past it /emoji add is refused, and nothing is removed"`
+	} `group:"Custom emoji" namespace:"emoji"`
 
 	Email struct {
 		Enable       bool   `long:"enable" description:"Offer email sign-in (off by default)"`
@@ -170,6 +175,8 @@ func serverConfig(options Options) (server.Config, error) {
 	config.MaxUploadBytes = options.Upload.MaxMB << 20
 	config.MaxMessageUploadBytes = options.Upload.MaxMessageMB << 20
 	config.MaxUploadStorageBytes = options.Upload.MaxStorageMB << 20
+	config.MaxEmojiBytes = options.Emoji.MaxKB << 10
+	config.MaxEmojiStorageBytes = options.Emoji.MaxStorageMB << 20
 	if len(options.Origins) > 0 {
 		config.OriginPatterns = options.Origins
 	}

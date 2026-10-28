@@ -627,8 +627,10 @@ func (s *Server) restoreLocked() (map[string]bool, error) {
 	}
 	slices.SortFunc(uploads, func(a, b *embedState) int { return int(a.seq - b.seq) })
 	for _, e := range uploads {
-		e.upload = s.uploads.PushBack(e)
-		s.uploadBytes += e.size
+		if e.emojiKey == "" {
+			e.upload = s.uploads.PushBack(e)
+			s.uploadBytes += e.size
+		}
 	}
 	for id, stored := range storedUsers {
 		if e := s.embeds[stored.AvatarEmbed]; e != nil {
