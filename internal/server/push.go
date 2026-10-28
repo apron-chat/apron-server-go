@@ -118,6 +118,10 @@ type pushRegistration struct {
 	// token is a relay's bearer token.
 	token  string
 	pushID string
+	// device is the key of the /invite-device token the registering
+	// connection signed in with, zero for none, so replacing that token
+	// removes only the registrations it made.
+	device [32]byte
 	// keys, for webpush and optionally relay, encrypt the payload.
 	keys *pushKeys
 	wake wakeScope
@@ -253,7 +257,7 @@ func (s *Server) registerPush(c *client, req request) (any, bool, *rpcError) {
 		s.removePushLocked(oldest)
 	}
 	s.addPushLocked(u, &pushRegistration{
-		userID: u.id, kind: kind, url: endpoint, token: token, pushID: pushID,
+		userID: u.id, kind: kind, url: endpoint, token: token, pushID: pushID, device: c.device,
 		keys: keys, wake: wake, renewed: now, lastUnread: -1,
 	})
 	return map[string]any{}, false, nil

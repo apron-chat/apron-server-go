@@ -339,7 +339,13 @@ type client struct {
 	baseURL  string
 	origin   string
 	ceremony *passkeyCeremony
-	token    [32]byte
+	// token is the key of the session token the connection last signed in
+	// or resumed with, which a later sign-in forgets. device is the key of
+	// the /invite-device token it signed in with, zero for none; a later
+	// session token leaves it, so replacing the device token still closes
+	// the connection.
+	token  [32]byte
+	device [32]byte
 	// emailSends limits the email proposals made on the connection,
 	// proposal is its latest one, which may have been dropped since, and
 	// clientKey names its client address for the limits of all its
@@ -415,6 +421,7 @@ type Server struct {
 	passkeys    map[string]*passkeyUser
 	credentials map[string]*passkeyUser
 	sessions    map[[32]byte]session
+	devices     map[[32]byte]deviceToken
 	// emails maps sign-in addresses to their accounts; email holds the
 	// outstanding codes and budgets, in memory only.
 	emails map[string]*userState
@@ -459,6 +466,7 @@ func Open(config Config) (*Server, error) {
 		passkeys:    make(map[string]*passkeyUser),
 		credentials: make(map[string]*passkeyUser),
 		sessions:    make(map[[32]byte]session),
+		devices:     make(map[[32]byte]deviceToken),
 		emails:      make(map[string]*userState),
 		email:       newEmailState(),
 		dirty:       newDirtySet(),

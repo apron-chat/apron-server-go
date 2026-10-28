@@ -182,7 +182,7 @@ the status they choose with `me`, when they were last shown `offline`
 (`seen`) and whether they are shown otherwise, so that after a crash those
 who were get a `seen` at the next start (see Status), and their mutes and
 room mutes, unexpired
-sessions, finished uploads and their files, the VAPID key, and the
+sessions, device tokens, finished uploads and their files, the VAPID key, and the
 `log_id`, guest, account, and embed counters, so no `log_id` or `user_id`
 is reused. What does not: connections and their `idle`, request
 deduplication, email proposals, live streams, the unread counts kept per
@@ -631,6 +631,26 @@ replies arrive before its result. Commands:
   and then a logged `~room` message (`from: {user_id: "~room", name: <room title>}`),
   such as `@guest_3 was removed by @guest_1: spamming`. The reason is the first line
   of the rest of the text, at most 200 characters.
+- `/invite-device <name>`, as on apron-server-cloudflare, gives an account
+  (a passkey or email user; a guest is `denied`) a bearer token that signs
+  it in on another device. The name is 1 to 32 letters, digits, `_`, `.`
+  or `-`, starting with a letter or digit (`invalid_params` otherwise). The
+  sender's connection gets a `~private` notice with the token,
+  `apron_device_` and 43 base64url characters, in a code block; a sign-in
+  link to `https://link.apron.chat/#server=<WebSocket URL>&token=<token>`
+  (PROTOCOL.md Appendix A.4), whose WebSocket URL is `/ws` under
+  `--public-url`, or else under the scheme and host the connection arrived
+  on; and the `auth` request that uses it.
+  `auth` with `scheme: "token"` and the token signs in as the account from
+  any origin, or with none, and its result has no `token`. Device tokens do
+  not expire and are stored only as their SHA-256. An account holds at most
+  3, one per name; a fourth name is `denied`. The same name again replaces
+  its token: the old one no longer signs in, the account's other
+  connections that signed in with it close with a `denied` error, and the
+  push registrations made by connections signed in with it are removed.
+  The asking connection stays open. A replacement undoes nothing else done
+  with the old token: a passkey added with `register`, and the session
+  token it returned, keep working.
 
 ## Activity
 

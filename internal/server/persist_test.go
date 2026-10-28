@@ -352,6 +352,9 @@ func (s *Server) dumpLocked() []store.Entry {
 	for key := range s.sessions {
 		all.sessions[key] = true
 	}
+	for key := range s.devices {
+		all.devices[key] = true
+	}
 	for id := range s.embeds {
 		all.embeds[id] = true
 	}

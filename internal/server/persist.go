@@ -34,6 +34,7 @@ import (
 //	message  message_id
 //	user     user_id      guests too, retired at the next start
 //	session  hex SHA-256 of the bearer token
+//	device   hex SHA-256 of the /invite-device token
 //	embed    embed_id
 //	push     user_id, a space, and url (url alone before registrations
 //	         belonged to their user)
@@ -45,6 +46,7 @@ const (
 	entryMessage = "message"
 	entryUser    = "user"
 	entrySession = "session"
+	entryDevice  = "device"
 	entryEmbed   = "embed"
 	entryPush    = "push"
 )
@@ -62,6 +64,7 @@ type dirtySet struct {
 	messages map[string]bool
 	users    map[string]bool
 	sessions map[[32]byte]bool
+	devices  map[[32]byte]bool
 	embeds   map[string]bool
 	pushes   map[string]bool
 	usedIDs  []string
@@ -75,6 +78,7 @@ func newDirtySet() dirtySet {
 		messages: make(map[string]bool),
 		users:    make(map[string]bool),
 		sessions: make(map[[32]byte]bool),
+		devices:  make(map[[32]byte]bool),
 		embeds:   make(map[string]bool),
 		pushes:   make(map[string]bool),
 	}
@@ -85,6 +89,7 @@ func (s *Server) touchRoom(r *roomState)       { s.dirty.rooms[r.id] = true }
 func (s *Server) touchMessage(m *messageState) { s.dirty.messages[m.id] = true }
 func (s *Server) touchUser(id string)          { s.dirty.users[id] = true }
 func (s *Server) touchSession(key [32]byte)    { s.dirty.sessions[key] = true }
+func (s *Server) touchDevice(key [32]byte)     { s.dirty.devices[key] = true }
 func (s *Server) touchEmbed(id string)         { s.dirty.embeds[id] = true }
 func (s *Server) touchPush(key string)         { s.dirty.pushes[key] = true }
 func (s *Server) touchUsedID(lowercased string) {
@@ -184,6 +189,12 @@ type storedSession struct {
 	Expires time.Time `json:"expires"`
 }
 
+type storedDevice struct {
+	User    string    `json:"user"`
+	Name    string    `json:"name"`
+	Created time.Time `json:"created"`
+}
+
 type storedEmbed struct {
 	Kind        string         `json:"kind"`
 	MessageID   string         `json:"message_id,omitzero"`
@@ -207,6 +218,9 @@ type storedPush struct {
 	URL    string `json:"url,omitzero"`
 	Token  string `json:"token,omitzero"`
 	PushID string `json:"push_id,omitzero"`
+	// Device is the hex SHA-256 of the /invite-device token the registering
+	// connection signed in with.
+	Device string `json:"device,omitzero"`
 	// P256DH and Auth are the subscription's keys, in base64url.
 	P256DH string `json:"p256dh,omitzero"`
 	Auth   string `json:"auth,omitzero"`
@@ -284,6 +298,13 @@ func (s *Server) entriesLocked(d dirtySet) []store.Entry {
 			del(entrySession, sessionID(key))
 		}
 	}
+	for key := range d.devices {
+		if device, ok := s.devices[key]; ok {
+			put(entryDevice, sessionID(key), storedDevice{User: device.user.id, Name: device.name, Created: device.created})
+		} else {
+			del(entryDevice, sessionID(key))
+		}
+	}
 	for id := range d.embeds {
 		if e := s.embeds[id]; e != nil {
 			put(entryEmbed, id, storedEmbedOf(e))
@@ -296,6 +317,9 @@ func (s *Server) entriesLocked(d dirtySet) []store.Entry {
 			stored := storedPush{
 				User: p.userID, Kind: p.kind, URL: p.url, Token: p.token, PushID: p.pushID,
 				Wake: p.wake.names(), Renewed: p.renewed,
+			}
+			if p.device != [32]byte{} {
+				stored.Device = sessionID(p.device)
 			}
 			if p.keys != nil {
 				stored.P256DH, stored.Auth = encodeBase64URL(p.keys.p256dh), encodeBase64URL(p.keys.auth)
@@ -628,6 +652,9 @@ func (s *Server) restoreLocked() (map[string]bool, error) {
 			}
 			p.keys = &keys
 		}
+		if device, err := hex.DecodeString(stored.Device); err == nil && len(device) == 32 {
+			p.device = [32]byte(device)
+		}
 		if u := s.users[stored.User]; u != nil && p.live(now) {
 			s.addPushLocked(u, p)
 		} else {
@@ -647,6 +674,21 @@ func (s *Server) restoreLocked() (map[string]bool, error) {
 			s.sessions[[32]byte(key)] = session{user: u, origin: stored.Origin, expires: stored.Expires}
 		} else {
 			s.touchSession([32]byte(key))
+		}
+	}
+	for id, raw := range entries[entryDevice] {
+		var stored storedDevice
+		key, err := hex.DecodeString(id)
+		if err != nil || len(key) != 32 {
+			continue
+		}
+		if err := decode(entryDevice, id, raw, &stored); err != nil {
+			return nil, err
+		}
+		if u := s.users[stored.User]; u != nil && u.account() {
+			s.devices[[32]byte(key)] = deviceToken{user: u, name: stored.Name, created: stored.Created}
+		} else {
+			s.touchDevice([32]byte(key))
 		}
 	}
 
