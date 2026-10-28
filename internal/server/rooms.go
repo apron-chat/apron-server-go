@@ -548,6 +548,8 @@ func (s *Server) setRoom(c *client, req request) (any, bool, *rpcError) {
 		// A thread created without private takes its parent's (§4.2.4).
 		private = parent.private
 	}
+	// The server description may be the default room's.
+	serverDescription, _ := s.profileValueLocked("description")
 	r := s.commitRoomLocked(roomID, parent, private, fields)
 	if !updating {
 		r.creator = u.id
@@ -556,6 +558,9 @@ func (s *Server) setRoom(c *client, req request) (any, bool, *rpcError) {
 	// Room updates precede the result, so the room is known when it arrives.
 	if updating {
 		s.announceRoomLocked(r, u)
+		if description, _ := s.profileValueLocked("description"); description != serverDescription {
+			s.announceServerLocked()
+		}
 	} else {
 		// The room record and the membership are both logged before the
 		// room_update, whose latest_log_id is then the membership's.

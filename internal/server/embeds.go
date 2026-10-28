@@ -42,16 +42,18 @@ type embedState struct {
 	id   string
 	kind string
 	// messageID is the message the embed belongs to; avatarFor is set instead
-	// for a /avatar upload (§4.8.6), and emojiKey for an /emoji add upload,
-	// which emojiBy sent (ext:emoji).
-	messageID string
-	avatarFor *userState
-	emojiKey  string
-	emojiBy   string
-	baseURL   string
-	secret    string
-	token     string
-	title     string
+	// for a /avatar upload (§4.8.6), emojiKey for an /emoji add upload,
+	// which emojiBy sent (ext:emoji), and serverAvatarBy, the sender's
+	// user_id, for a /server avatar upload (§3.1).
+	messageID      string
+	avatarFor      *userState
+	emojiKey       string
+	emojiBy        string
+	serverAvatarBy string
+	baseURL        string
+	secret         string
+	token          string
+	title          string
 	// alt is the sender's og.image.alt, kept in the server's og.
 	alt string
 	// timer expires an unused write URL, then bounds a stream's duration.
@@ -73,10 +75,18 @@ type embedState struct {
 	stream      *streamBuffer
 }
 
-// image reports whether the embed is an avatar or a custom emoji: an image
-// of a type avatars take (§4.8.6) that belongs to no message.
+// image reports whether the embed is an avatar, the server's included, or
+// a custom emoji: an image of a type avatars take (§4.8.6) that belongs to
+// no message.
 func (e *embedState) image() bool {
-	return e.avatarFor != nil || e.emojiKey != ""
+	return e.avatarFor != nil || e.emojiKey != "" || e.serverAvatarBy != ""
+}
+
+// apart reports whether the upload is kept apart from Server.uploads and
+// MaxUploadStorageBytes: custom emoji have a bound of their own
+// (MaxEmojiStorageBytes), and the server avatar is one image.
+func (e *embedState) apart() bool {
+	return e.emojiKey != "" || e.serverAvatarBy != ""
 }
 
 func (e *embedState) endStream() {
@@ -355,7 +365,7 @@ func (s *Server) writeUpload(w http.ResponseWriter, r *http.Request, e *embedSta
 	tooLargeMessage := ""
 	s.mu.RLock()
 	switch {
-	case e.avatarFor != nil:
+	case e.avatarFor != nil, e.serverAvatarBy != "":
 		limit = s.config.MaxAvatarBytes
 	case e.emojiKey != "":
 		limit = s.emojiRoomLocked(e.emojiKey)
@@ -425,11 +435,16 @@ func (s *Server) writeUpload(w http.ResponseWriter, r *http.Request, e *embedSta
 			return
 		}
 	}
+	if e.serverAvatarBy != "" {
+		if status, message := s.refuseServerAvatarLocked(e); status != 0 {
+			fail(status, message)
+			return
+		}
+	}
 	e.finished = true
 	e.path = file.Name()
 	e.size = size
-	if e.emojiKey == "" {
-		// Custom emoji have a bound of their own (MaxEmojiStorageBytes).
+	if !e.apart() {
 		e.upload = s.uploads.PushBack(e)
 		s.uploadBytes += size
 	}
@@ -451,6 +466,8 @@ func (s *Server) writeUpload(w http.ResponseWriter, r *http.Request, e *embedSta
 		}
 	} else if e.emojiKey != "" {
 		s.setEmojiLocked(e, og)
+	} else if e.serverAvatarBy != "" {
+		s.setServerAvatarLocked(e)
 	} else if m := s.messages[e.messageID]; m != nil {
 		s.republishLocked(m, func(body map[string]any) bool {
 			return replaceEmbed(body, e.id, func(embed map[string]any) {
@@ -497,7 +514,7 @@ func (s *Server) messageUploadBytesLocked(messageID string) int64 {
 // while hosted uploads exceed MaxUploadStorageBytes. Each affected message
 // is republished once without its evicted embeds, as for a failed write
 // (§4.8.3). Avatars count toward the total but are never removed; custom
-// emoji are not in it.
+// emoji and the server avatar are not in it.
 func (s *Server) evictUploadsLocked(keep *embedState) {
 	evicted := make(map[string][]string)
 	var order []string

@@ -29,6 +29,8 @@ import (
 //	meta     "counters"   log_id, guest, embed, and upload sequences
 //	meta     "vapid"      the webpush VAPID private key (§4.9)
 //	meta     "emoji"      the custom emoji catalog (ext:emoji)
+//	meta     "profile"    the server's title, description, and avatar set
+//	                      with /server (§3.1)
 //	used_id  lowercased user_id ever assigned
 //	record   log_id       a logged record and the rooms whose logs hold it
 //	room     room_id
@@ -71,6 +73,7 @@ type dirtySet struct {
 	usedIDs  []string
 	vapid    bool
 	emoji    bool
+	profile  bool
 }
 
 func newDirtySet() dirtySet {
@@ -198,21 +201,23 @@ type storedDevice struct {
 }
 
 type storedEmbed struct {
-	Kind        string         `json:"kind"`
-	MessageID   string         `json:"message_id,omitzero"`
-	AvatarFor   string         `json:"avatar_for,omitzero"`
-	EmojiFor    string         `json:"emoji_for,omitzero"`
-	BaseURL     string         `json:"base_url"`
-	Secret      string         `json:"secret"`
-	Title       string         `json:"title,omitzero"`
-	Alt         string         `json:"alt,omitzero"`
-	Stream      bool           `json:"stream,omitzero"`
-	Finished    bool           `json:"finished,omitzero"`
-	Owned       map[string]any `json:"owned,omitzero"`
-	File        string         `json:"file,omitzero"`
-	Size        int64          `json:"size,omitzero"`
-	ContentType string         `json:"content_type,omitzero"`
-	Seq         int64          `json:"seq,omitzero"`
+	Kind      string `json:"kind"`
+	MessageID string `json:"message_id,omitzero"`
+	AvatarFor string `json:"avatar_for,omitzero"`
+	EmojiFor  string `json:"emoji_for,omitzero"`
+	// ServerAvatarBy is who sent a /server avatar upload.
+	ServerAvatarBy string         `json:"server_avatar_by,omitzero"`
+	BaseURL        string         `json:"base_url"`
+	Secret         string         `json:"secret"`
+	Title          string         `json:"title,omitzero"`
+	Alt            string         `json:"alt,omitzero"`
+	Stream         bool           `json:"stream,omitzero"`
+	Finished       bool           `json:"finished,omitzero"`
+	Owned          map[string]any `json:"owned,omitzero"`
+	File           string         `json:"file,omitzero"`
+	Size           int64          `json:"size,omitzero"`
+	ContentType    string         `json:"content_type,omitzero"`
+	Seq            int64          `json:"seq,omitzero"`
 }
 
 type storedPush struct {
@@ -338,6 +343,9 @@ func (s *Server) entriesLocked(d dirtySet) []store.Entry {
 	if d.emoji {
 		put(entryMeta, "emoji", s.storedEmojiLocked())
 	}
+	if d.profile {
+		put(entryMeta, "profile", s.storedProfileLocked())
+	}
 	return batch
 }
 
@@ -414,6 +422,7 @@ func storedEmbedOf(e *embedState) storedEmbed {
 		stored.AvatarFor = e.avatarFor.id
 	}
 	stored.EmojiFor = e.emojiKey
+	stored.ServerAvatarBy = e.serverAvatarBy
 	if e.path != "" {
 		stored.File = filepath.Base(e.path)
 	}
@@ -608,7 +617,8 @@ func (s *Server) restoreLocked() (map[string]bool, error) {
 		}
 		e := &embedState{
 			id: id, kind: stored.Kind, messageID: stored.MessageID, avatarFor: s.users[stored.AvatarFor], emojiKey: stored.EmojiFor,
-			baseURL: stored.BaseURL, secret: stored.Secret, title: stored.Title, alt: stored.Alt,
+			serverAvatarBy: stored.ServerAvatarBy,
+			baseURL:        stored.BaseURL, secret: stored.Secret, title: stored.Title, alt: stored.Alt,
 			finished: stored.Finished, started: stored.Finished, owned: stored.Owned, size: stored.Size,
 			contentType: stored.ContentType, seq: stored.Seq,
 		}
@@ -627,7 +637,7 @@ func (s *Server) restoreLocked() (map[string]bool, error) {
 	}
 	slices.SortFunc(uploads, func(a, b *embedState) int { return int(a.seq - b.seq) })
 	for _, e := range uploads {
-		if e.emojiKey == "" {
+		if !e.apart() {
 			e.upload = s.uploads.PushBack(e)
 			s.uploadBytes += e.size
 		}
@@ -638,6 +648,9 @@ func (s *Server) restoreLocked() (map[string]bool, error) {
 		}
 	}
 	if err := s.restoreEmojiLocked(entries[entryMeta]["emoji"]); err != nil {
+		return nil, err
+	}
+	if err := s.restoreProfileLocked(entries[entryMeta]["profile"]); err != nil {
 		return nil, err
 	}
 

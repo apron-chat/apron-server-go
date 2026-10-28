@@ -49,7 +49,8 @@ Defaults:
   becomes an account, and an email sign-in with a new address creates one
 - passkey RP ID: `localhost`; frontend origins: `http://localhost:5173` and
   `http://localhost:8080`
-- no `server.welcome`, `title`, `description`, or `avatar`, and no roles
+- no `server.welcome`, `title`, or `avatar`, `description` the `general`
+  room's (none at first), and no roles
 
 Flags (`aprond --help` lists them all):
 
@@ -77,8 +78,9 @@ Flags (`aprond --help` lists them all):
   development but lets a client choose the host in URLs others see; set it
   in any deployment. Behind a reverse proxy that terminates TLS, set it to
   the `https:` URL: the server sees plain HTTP from the proxy, and without
-  it builds `http:` URLs, so it does not offer custom emoji (clients ignore
-  an `http:` catalog off a loopback host; see [Custom emoji](#custom-emoji)).
+  it builds `http:` URLs, so it does not offer custom emoji and refuses
+  `/emoji add` and `/server avatar` (clients ignore `http:` images and
+  catalogs off a loopback host; see [Custom emoji](#custom-emoji)).
 - `--max-connections <n>` refuses WebSockets beyond `n` with an error without
   `id` (`retry_after`), then closes them. `--max-listener-connections <n>`
   caps concurrent TCP connections on the listener, HTTP included; further
@@ -104,7 +106,13 @@ Flags (`aprond --help` lists them all):
   a few words on what the server is about, and a square icon at least 256
   pixels wide. The avatar must be an `https:` URL or a `data:image` URL of
   at most 64 KiB, as for user avatars; the server refuses to start
-  otherwise.
+  otherwise. An admin's `/server title`, `/server description`, and
+  `/server avatar` override them, and clearing a value there falls back to
+  its flag; see [Commands](#commands). Without a description from either
+  (an empty one is none), `server.description` is the `general` room's
+  `description`, left out rather than cut when it is over 500 bytes; while
+  it is, a `room_set` that changes it sends every connection, signed in or
+  not, a new `server` frame after the `room_update` and before the result.
 - `--client-ip-header <header>`, behind a reverse proxy, names the header
   that carries the client's address, such as `X-Forwarded-For` or
   `X-Real-IP`, for the per-client limits of email sign-in. The server takes
@@ -201,7 +209,9 @@ the status they choose with `me`, when they were last shown `offline`
 (`seen`) and whether they are shown otherwise, so that after a crash those
 who were get a `seen` at the next start (see Status), and their mutes and
 room mutes, unexpired
-sessions, device tokens, finished uploads and their files, the VAPID key, and the
+sessions, device tokens, finished uploads and their files, the custom emoji
+catalog, the title, description, and avatar set with `/server`, the VAPID key,
+and the
 `log_id`, guest, account, and embed counters, so no `log_id` or `user_id`
 is reused. What does not: connections and their `idle`, request
 deduplication, email proposals, live streams, the unread counts kept per
@@ -299,7 +309,8 @@ restarts. `--role` grants them roles, such as
 address. Roles are sent in current user objects (below), sorted, and are
 shown beside names; `admin` and `moderator` may also remove people from
 rooms, and `admin` may replace and remove any
-[custom emoji](#custom-emoji). Role names are lowercased, so `--role Admin=ada` grants `admin`.
+[custom emoji](#custom-emoji) and set the server's title, description, and
+avatar with [`/server`](#commands). Role names are lowercased, so `--role Admin=ada` grants `admin`.
 Guests hold no roles. A `user_id` granted a role but never used is reserved:
 no guest or new account is given it, so nobody can claim it and then add a
 passkey or address to inherit the role. So a grant by `user_id` applies to
@@ -600,7 +611,8 @@ closed, without waiting for its body to end.
 - **Avatars** ([PROTOCOL.md §4.8.6](https://github.com/shazow/apron/blob/main/PROTOCOL.md#486-avatars)): the `/avatar` command with one `upload`
   embed returns a write URL. A PNG, JPEG, GIF, or WebP of at most 2 MiB
   becomes the sender's `avatar`, followed by a `user` notification; replacing
-  or removing the avatar deletes the upload.
+  or removing the avatar deletes the upload. `/server avatar` sets the
+  server's avatar the same way, with the same rules; see [Commands](#commands).
 - **Custom emoji**: `/emoji add :name:` with one `upload` embed takes the same
   types of image as avatars, of at most 256 KiB; see
   [Custom emoji](#custom-emoji).
@@ -716,6 +728,35 @@ replies arrive before its result. Commands:
   `{"embeds": [{embed_id, kind, write_url}]}`; see Avatars above.
 - `/emoji add :name:` and `/emoji remove :name:` add and remove custom
   emoji; see [Custom emoji](#custom-emoji).
+- `/server` is for users with the `admin` role (`denied` otherwise, and
+  not listed in their `/help`), following PROTOCOL.md §4.1's suggested
+  convention. Alone, it sends a `~private` notice with the server frame's
+  current `title`, `description`, and `avatar`, each marked as set with
+  `/server` or taken from its flag (`--title`, `--description`,
+  `--avatar`). `/server title <text>` sets the title, prepared as a display
+  name is (see [Identity and profiles](#identity-and-profiles)): one line
+  (`invalid_params` otherwise) of at most 64 characters (`too_large`).
+  `/server description <text>` sets the description, CommonMark of at most
+  500 bytes (`too_large`) without control characters other than line
+  breaks (`invalid_params`). `/server avatar` with exactly one `upload`
+  embed returns `{"embeds": [{embed_id, kind, write_url}]}`, as `/avatar`
+  does; the write takes a PNG, JPEG, GIF, or WebP of at most 2 MiB, which
+  becomes the avatar when it finishes. The write is checked again then: if
+  its sender is no longer an admin, it is refused with `403` and its
+  upload deleted. The avatar's upload is kept apart from
+  `--upload.max-storage-mb`, so it is never removed to make room. On a
+  connection whose URLs clients would refuse, `http:` off a loopback host,
+  `/server avatar` with an embed is `denied` ("The server avatar needs an
+  https address; set --public-url to the server's https: URL"). Without
+  the text, `/server title` and `/server description` clear the value, and
+  `/server avatar` without an embed clears the avatar and deletes its
+  upload; a cleared value falls back to its flag, or is absent without
+  one, except that the description then falls back to the `general`
+  room's (see `--description` above). Values set with `/server` override the flags and are kept in the
+  store across restarts. Each change sends every connection, signed in or
+  not, a new `server` frame: before the command's result, or for a new
+  avatar when its write finishes. A command that sets or clears a value
+  also sends the sender a `~private` notice with the result.
 - `/kick @user [reason]` removes the one user named in `body.mentions` from
   the room. Only the room's creator and users with the `admin` or
   `moderator` role may kick (`denied` otherwise, so only they can kick in

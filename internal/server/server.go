@@ -144,7 +144,10 @@ type Config struct {
 	// Title, Description, and Avatar show people which server this is
 	// (§3.1): a plain display name, CommonMark saying in a few words what
 	// the server is about, and a square icon URL that follows the rules
-	// for user avatars (§4.8.6). Empty omits each.
+	// for user avatars (§4.8.6). Empty omits each. Admins may override each
+	// with /server, which keeps its value in the store; clearing it there
+	// falls back to these. Without either, the description is the default
+	// room's.
 	Title       string
 	Description string
 	Avatar      string
@@ -152,7 +155,8 @@ type Config struct {
 	// role lists the user_ids or email addresses that hold it. Roles are
 	// shown beside names; "admin" and "moderator" may also remove others
 	// from rooms (§4.2.2), and "admin" may replace and remove any custom
-	// emoji (ext:emoji).
+	// emoji (ext:emoji) and set the server's title, description, and avatar
+	// with /server.
 	Roles map[string][]string
 	// EmailSender enables email sign-in (§4.11) and delivers its codes; nil
 	// disables it. LogEmailSender logs codes, for development.
@@ -440,6 +444,9 @@ type Server struct {
 	emoji        map[string]*customEmoji
 	emojiCatalog []byte
 	emojiName    string
+	// profile is the server's title, description, and avatar as admins set
+	// them with /server (§3.1), which override Config's.
+	profile serverProfile
 
 	// dirty is the state changed under mu since it was last written to the
 	// store; storeWrites queues batches for the store writer.
@@ -823,9 +830,12 @@ func (s *Server) serverParams(baseURL string) map[string]any {
 		}
 		params["push"] = push
 	}
-	for key, value := range map[string]string{"welcome": s.config.Welcome, "title": s.config.Title, "description": s.config.Description, "avatar": s.config.Avatar} {
-		if value != "" {
-			params[key] = value
+	if s.config.Welcome != "" {
+		params["welcome"] = s.config.Welcome
+	}
+	for _, field := range profileFields {
+		if value, _ := s.profileValueLocked(field); value != "" {
+			params[field] = value
 		}
 	}
 	if s.config.MaxPrivateRooms > 0 {

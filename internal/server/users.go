@@ -216,6 +216,15 @@ func isClosed(done chan struct{}) bool {
 // at maxNameRunes. The server may alter names (§3.3) and `you.name` is the
 // answer.
 func normalizeName(name string) string {
+	name = prepareName(name)
+	if utf8.RuneCountInString(name) > maxNameRunes {
+		name = strings.TrimSpace(string([]rune(name)[:maxNameRunes]))
+	}
+	return name
+}
+
+// prepareName is normalizeName without the cap.
+func prepareName(name string) string {
 	name = strings.Map(func(r rune) rune {
 		if unicode.In(r, unicode.Cc, unicode.Cf, unicode.Co, unicode.Cs) {
 			return -1
@@ -225,9 +234,6 @@ func normalizeName(name string) string {
 	name, err := precis.Nickname.String(name)
 	if err != nil {
 		return ""
-	}
-	if utf8.RuneCountInString(name) > maxNameRunes {
-		name = strings.TrimSpace(string([]rune(name)[:maxNameRunes]))
 	}
 	return name
 }

@@ -49,10 +49,10 @@ type Options struct {
 	Store                  string   `long:"store" description:"Where state is kept: sqlite:<path> for a SQLite database, or memory to keep nothing across restarts"`
 	ClientIPHeader         string   `long:"client-ip-header" description:"Request header a reverse proxy puts the client's address in, such as X-Forwarded-For (its last entry) or X-Real-IP, for per-client limits; set only behind a proxy that sets it"`
 	Welcome                string   `long:"welcome" description:"Markdown clients show on their sign-in screen (server.welcome), such as how this server's sign-in methods fit together"`
-	Title                  string   `long:"title" description:"Plain name clients show for this server (server.title), such as in a list of servers"`
-	Description            string   `long:"description" description:"CommonMark saying in a few words what this server is about (server.description)"`
-	Avatar                 string   `long:"avatar" description:"Square icon of this server, at least 256 pixels wide (server.avatar): an https: URL or a small data:image URL"`
-	Roles                  []string `long:"role" description:"Grant a role to an account as role=user_id or role=email, such as admin=ada; repeat for more. admin and moderator may remove others from rooms, and admin may replace and remove custom emoji"`
+	Title                  string   `long:"title" description:"Plain name clients show for this server (server.title), such as in a list of servers; an admin's /server title overrides it"`
+	Description            string   `long:"description" description:"CommonMark saying in a few words what this server is about (server.description; default: the general room's description, up to 500 bytes); an admin's /server description overrides it"`
+	Avatar                 string   `long:"avatar" description:"Square icon of this server, at least 256 pixels wide (server.avatar): an https: URL or a small data:image URL; an admin's /server avatar overrides it"`
+	Roles                  []string `long:"role" description:"Grant a role to an account as role=user_id or role=email, such as admin=ada; repeat for more. admin and moderator may remove others from rooms, and admin may replace and remove custom emoji and set the server's title, description, and avatar with /server"`
 
 	WebAuthn struct {
 		RPID    string   `long:"rp-id" default:"localhost" description:"Passkey relying party domain; empty disables passkeys"`
