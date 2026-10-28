@@ -645,10 +645,12 @@ replies arrive before its result. Commands:
   any origin, or with none, and its result has no `token`. Device tokens do
   not expire and are stored only as their SHA-256. An account holds at most
   3, one per name; a fourth name is `denied`. The same name again replaces
-  its token: the account's other connections that signed in with the old
-  one close with a `denied` error, and the account's push registrations are
-  removed, so the replaced device stops getting its messages. The asking
-  connection stays open.
+  its token: the old one no longer signs in, the account's other
+  connections that signed in with it close with a `denied` error, and the
+  push registrations made by connections signed in with it are removed.
+  The asking connection stays open. A replacement undoes nothing else done
+  with the old token: a passkey added with `register`, and the session
+  token it returned, keep working.
 
 ## Activity
 

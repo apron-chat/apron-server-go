@@ -218,6 +218,9 @@ type storedPush struct {
 	URL    string `json:"url,omitzero"`
 	Token  string `json:"token,omitzero"`
 	PushID string `json:"push_id,omitzero"`
+	// Device is the hex SHA-256 of the /invite-device token the registering
+	// connection signed in with.
+	Device string `json:"device,omitzero"`
 	// P256DH and Auth are the subscription's keys, in base64url.
 	P256DH string `json:"p256dh,omitzero"`
 	Auth   string `json:"auth,omitzero"`
@@ -314,6 +317,9 @@ func (s *Server) entriesLocked(d dirtySet) []store.Entry {
 			stored := storedPush{
 				User: p.userID, Kind: p.kind, URL: p.url, Token: p.token, PushID: p.pushID,
 				Wake: p.wake.names(), Renewed: p.renewed,
+			}
+			if p.device != [32]byte{} {
+				stored.Device = sessionID(p.device)
 			}
 			if p.keys != nil {
 				stored.P256DH, stored.Auth = encodeBase64URL(p.keys.p256dh), encodeBase64URL(p.keys.auth)
@@ -645,6 +651,9 @@ func (s *Server) restoreLocked() (map[string]bool, error) {
 				return nil, fmt.Errorf("stored push %q: %w", key, err)
 			}
 			p.keys = &keys
+		}
+		if device, err := hex.DecodeString(stored.Device); err == nil && len(device) == 32 {
+			p.device = [32]byte(device)
 		}
 		if u := s.users[stored.User]; u != nil && p.live(now) {
 			s.addPushLocked(u, p)

@@ -3,9 +3,11 @@ package server
 import (
 	"context"
 	"fmt"
+	"maps"
 	"net/http/httptest"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -122,6 +124,13 @@ func expectClosedWithError(t *testing.T, c *testClient, code int, message string
 	}
 }
 
+// pushURLs lists the urls of a user's push registrations, sorted.
+func pushURLs(app *Server, userID string) []string {
+	app.mu.Lock()
+	defer app.unlock()
+	return slices.Sorted(maps.Keys(app.users[userID].pushes))
+}
+
 func TestInviteDeviceSignsInFromAnyOrigin(t *testing.T) {
 	_, httpServer := passkeyTestServer(t)
 	ada, adaID := passkeyAccount(t, httpServer)
@@ -201,20 +210,16 @@ func TestInviteDeviceReplacesTheNamesToken(t *testing.T) {
 	phone, _ := deviceSignIn(t, httpServer, "", old)
 	other, _ := deviceSignIn(t, httpServer, "", tablet)
 	ada.drain(t)
-	app.mu.Lock()
-	u := app.users[adaID]
-	app.unlock()
-	addPush(app, u, pushRegistration{url: "https://push.example/ada"})
+	ada.result(t, "push_register", "ada-push", map[string]any{"kind": "relay", "url": "https://push.example/ada"})
+	phone.result(t, "push_register", "phone-push", map[string]any{"kind": "relay", "url": "https://push.example/phone"})
+	other.result(t, "push_register", "tablet-push", map[string]any{"kind": "relay", "url": "https://push.example/tablet"})
 
 	current := inviteDevice(t, ada, adaID, "phone", true, link)
 	expectClosedWithError(t, phone, codeDenied, "Device token replaced; sign in with the new one")
 	ada.expectQuiet(t)
 	other.expectQuiet(t)
-	app.mu.Lock()
-	pushes := len(app.pushes)
-	app.unlock()
-	if pushes != 0 {
-		t.Fatalf("%d push registrations kept after a replacement", pushes)
+	if urls := pushURLs(app, adaID); !slices.Equal(urls, []string{"https://push.example/ada", "https://push.example/tablet"}) {
+		t.Fatalf("push registrations after a replacement: %q", urls)
 	}
 	again, _ := dialRaw(t, httpServer)
 	expectFailure(t, again.call(t, "auth", "old", map[string]any{"scheme": "token", "token": old})["error"].(map[string]any), codeDenied, invalidDeviceToken)
@@ -228,6 +233,26 @@ func TestInviteDeviceReplacesTheNamesToken(t *testing.T) {
 	inviteDevice(t, ada, adaID, "phone", true, link)
 	expectClosedWithError(t, phone, codeDenied, "Device token replaced; sign in with the new one")
 	other.expectQuiet(t)
+}
+
+func TestInviteDeviceClosesADeviceThatGotASessionToken(t *testing.T) {
+	_, httpServer := passkeyTestServer(t)
+	ada, adaID := passkeyAccount(t, httpServer)
+	link := wsURL(httpServer)
+	phone, _ := deviceSignIn(t, httpServer, testPasskeyOrigin, inviteDevice(t, ada, adaID, "phone", false, link))
+	ada.drain(t)
+
+	// Whoever holds a device token can add a passkey, which gives the
+	// connection a session token.
+	options := passkeyResult(t, passkeyCall(t, phone, "register-start", "register", "begin", nil))
+	registered := passkeyResult(t, passkeyCall(t, phone, "register-end", "register", "finish", map[string]any{"credential": newTestAuthenticator(t).registration(t, options, testPasskeyOrigin)}))
+	if _, ok := registered["token"].(string); !ok || registered["you"].(map[string]any)["user_id"] != adaID {
+		t.Fatalf("register on a device connection: %#v", registered)
+	}
+	phone.drain(t)
+
+	inviteDevice(t, ada, adaID, "phone", true, link)
+	expectClosedWithError(t, phone, codeDenied, "Device token replaced; sign in with the new one")
 }
 
 func TestInviteDeviceDeniesGuests(t *testing.T) {
@@ -260,16 +285,26 @@ func TestDeviceTokensSurviveRestart(t *testing.T) {
 			dir := t.TempDir()
 			dbPath, uploadDir := filepath.Join(dir, "aprond.db"), filepath.Join(dir, "uploads")
 
-			_, httpServer, stop := startWithStore(t, open(t, dbPath), uploadDir)
+			app, httpServer, stop := startWithStore(t, open(t, dbPath), uploadDir)
 			ada, adaID := passkeyAccount(t, httpServer)
 			link := wsURL(httpServer)
 			replaced := inviteDevice(t, ada, adaID, "phone", false, link)
 			phone := inviteDevice(t, ada, adaID, "phone", true, link)
 			tablet := inviteDevice(t, ada, adaID, "tablet", false, link)
 			inviteDevice(t, ada, adaID, "laptop", false, link)
+			for name, token := range map[string]string{"phone": phone, "tablet": tablet} {
+				device, _ := deviceSignIn(t, httpServer, "", token)
+				device.result(t, "push_register", name, map[string]any{"kind": "relay", "url": "https://push.example/" + name})
+			}
+			// A registration stored before /invite-device existed records
+			// no device token.
+			app.mu.Lock()
+			u := app.users[adaID]
+			app.unlock()
+			addPush(app, u, pushRegistration{url: "https://push.example/untagged"})
 			stop()
 
-			_, httpServer, _ = startWithStore(t, open(t, dbPath), uploadDir)
+			app, httpServer, _ = startWithStore(t, open(t, dbPath), uploadDir)
 			for _, token := range []string{phone, tablet} {
 				if _, result := deviceSignIn(t, httpServer, otherOrigin, token); result["you"].(map[string]any)["user_id"] != adaID {
 					t.Fatalf("after a restart, signed in as %#v", result["you"])
@@ -280,6 +315,10 @@ func TestDeviceTokensSurviveRestart(t *testing.T) {
 			device, _ := deviceSignIn(t, httpServer, "", tablet)
 			expectFailure(t, commandError(t, device, "/invite-device watch"), codeDenied,
 				"You have 3 device tokens (`phone`, `tablet`, `laptop`); run /invite-device with one of those names to replace its token")
+			inviteDevice(t, device, adaID, "phone", true, wsURL(httpServer))
+			if urls := pushURLs(app, adaID); !slices.Equal(urls, []string{"https://push.example/tablet", "https://push.example/untagged"}) {
+				t.Fatalf("push registrations after a restart and a replacement: %q", urls)
+			}
 		})
 	}
 }

@@ -70,12 +70,11 @@ func (s *Server) devicesOfLocked(u *userState) ([][32]byte, []deviceToken) {
 }
 
 // inviteDeviceCommand mints a device token for the sender's account under
-// the one name in args. The same name again replaces its token: the
-// account's other connections that signed in with the old one close, and
-// its push registrations are removed, so the replaced device stops getting
-// its messages; its other devices register again when they next connect.
-// The token goes to this connection only, in a ~private notice before the
-// result (§1).
+// the one name in args. The same name again replaces its token: the old one
+// no longer signs in, and the account's other connections that signed in
+// with it close and its push registrations go. A passkey or session token
+// someone got while signed in with the old token stays. The token goes to
+// this connection only, in a ~private notice before the result (§1).
 func (s *Server) inviteDeviceCommand(c *client, r *roomState, _ map[string]any, args string) (map[string]any, *rpcError) {
 	u := c.user
 	if !u.account() {
@@ -126,21 +125,23 @@ func (s *Server) inviteDeviceCommand(c *client, r *roomState, _ map[string]any, 
 // revokeDeviceLocked forgets the token under old and closes the account's
 // connections, other than the asking one, that signed in with it; the
 // asking connection now counts as signed in with the replacement, so a
-// later replacement closes it. The account's push registrations go after
-// the connections close.
+// later replacement closes it. The push registrations made by connections
+// signed in with old go too, the asking connection's among them.
 func (s *Server) revokeDeviceLocked(c *client, old, replacement [32]byte) {
 	delete(s.devices, old)
 	s.touchDevice(old)
-	if c.token == old {
-		c.token = replacement
+	if c.device == old {
+		c.device = replacement
 	}
 	for peer := range c.user.clients {
-		if peer != c && peer.token == old {
+		if peer != c && peer.device == old {
 			peer.closeWithError(&rpcError{Code: codeDenied, Message: "Device token replaced; sign in with the new one"})
 		}
 	}
 	for _, registration := range c.user.pushes {
-		s.removePushLocked(registration)
+		if registration.device == old {
+			s.removePushLocked(registration)
+		}
 	}
 }
 
@@ -153,7 +154,7 @@ func (s *Server) authenticateDeviceLocked(c *client, req request, token string) 
 	if !ok {
 		return nil, &rpcError{Code: codeDenied, Message: "This device token is not valid; get a new one with /invite-device on a signed-in device"}
 	}
-	c.token = key
+	c.device = key
 	return s.switchUserLocked(c, req, device.user, nil, c.user != device.user, false), nil
 }
 
