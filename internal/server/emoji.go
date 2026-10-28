@@ -111,13 +111,29 @@ func (s *Server) renderEmojiLocked() {
 // reverse proxy without PublicURL. The server then does not offer
 // ext:emoji on that connection.
 func (s *Server) emojiExt(baseURL string) map[string]any {
-	catalogURL := baseURL + emojiPath + s.emojiName
-	parsed, err := url.Parse(catalogURL)
-	if err != nil || !(parsed.Scheme == "https" || parsed.Scheme == "http" && loopbackHost(parsed.Hostname())) {
+	if !clientsLoad(baseURL) {
 		return nil
 	}
-	return map[string]any{"catalog_url": catalogURL}
+	return map[string]any{"catalog_url": baseURL + emojiPath + s.emojiName}
 }
+
+// clientsLoad reports whether clients load images and catalogs from URLs
+// that start with baseURL: https:, or http: on a loopback host. Behind a
+// plain-HTTP reverse proxy without PublicURL, a connection's URLs are
+// http: on the proxy's host, which clients refuse, so custom emoji and the
+// server avatar are not taken from such a connection.
+func clientsLoad(baseURL string) bool {
+	parsed, err := url.Parse(baseURL)
+	return err == nil && (parsed.Scheme == "https" || parsed.Scheme == "http" && loopbackHost(parsed.Hostname()))
+}
+
+// setPublicURL ends the messages that refuse an image, such as a custom
+// emoji, from a connection whose URLs clients would not load
+// (clientsLoad).
+const setPublicURL = "; set --public-url to the server's https: URL"
+
+// emojiNeedHTTPS refuses custom emoji on such a connection.
+const emojiNeedHTTPS = "Custom emoji need an https address" + setPublicURL
 
 // loopbackHost reports whether host, a URL's hostname, is a loopback host,
 // as clients judge one: localhost, a name under .localhost, ::1, or an
@@ -165,11 +181,14 @@ func (s *Server) mayReplaceEmojiLocked(existing *customEmoji, userID string) boo
 // refuseEmojiLocked checks a finished /emoji add write of size bytes
 // again, since the catalog may have changed since the command: the key
 // may have been added by someone the writer may not replace, the catalog
-// may be full, or other images may have taken the storage. It returns the
+// may be full, or other images may have taken the storage; and the image's
+// URL must be one clients load. It returns the
 // HTTP status and message to refuse the write with, or 0.
 func (s *Server) refuseEmojiLocked(e *embedState, size int64) (int, string) {
 	existing := s.emoji[e.emojiKey]
 	switch {
+	case !clientsLoad(e.baseURL):
+		return http.StatusForbidden, emojiNeedHTTPS
 	case existing != nil && existing.embed != e && !s.mayReplaceEmojiLocked(existing, e.emojiBy):
 		return http.StatusConflict, fmt.Sprintf("%s was added by someone else meanwhile; only who added it or an admin can replace it", e.emojiKey)
 	case existing == nil && len(s.emoji) >= maxCustomEmoji:
@@ -296,7 +315,8 @@ func (s *Server) handleEmoji(w http.ResponseWriter, r *http.Request) {
 // /emoji remove :name:, which admins use to remove a key. Either sends
 // every connection a new server frame: remove at once, add when the
 // upload's write finishes, which checks the catalog again
-// (refuseEmojiLocked).
+// (refuseEmojiLocked). A connection not offered ext:emoji, whose image
+// URLs clients would refuse, may not add one.
 func (s *Server) emojiCommand(c *client, _ *roomState, body map[string]any, args string) (map[string]any, *rpcError) {
 	u := c.user
 	action, key, _ := strings.Cut(args, " ")
@@ -310,6 +330,11 @@ func (s *Server) emojiCommand(c *client, _ *roomState, body map[string]any, args
 		embeds := asList(body["embeds"])
 		if len(embeds) != 1 || embeds[0].(map[string]any)["kind"] != "upload" {
 			return nil, invalidParams("/emoji add takes exactly one upload embed: attach an image")
+		}
+		if s.emojiExt(c.baseURL) == nil {
+			// This connection is not offered ext:emoji: the image's URL
+			// would be one clients refuse.
+			return nil, &rpcError{Code: codeDenied, Message: emojiNeedHTTPS}
 		}
 		if existing != nil && !s.mayReplaceEmojiLocked(existing, u.id) {
 			return nil, &rpcError{Code: codeDenied, Message: fmt.Sprintf("%s is taken; only who added it or an admin can replace it", key)}

@@ -458,3 +458,30 @@ func TestCustomEmojiNeedAUsableCatalogURL(t *testing.T) {
 		t.Fatalf("ext:emoji with an https: PublicURL: %#v", params)
 	}
 }
+
+// A connection not offered ext:emoji, whose image URLs clients would
+// refuse, may not add custom emoji either.
+func TestCustomEmojiAddNeedsAUsableURL(t *testing.T) {
+	app, httpServer := newTestServer(t, DefaultConfig())
+	proxied, _ := dialHost(t, httpServer, "chat.example")
+	guestAuth(t, proxied)
+	proxied.expectError(t, "command", "emoji", map[string]any{"body": map[string]any{"text": "/emoji add :party:", "embeds": []any{map[string]any{"kind": "upload"}}}}, codeDenied)
+	proxied.drain(t)
+
+	// A loopback connection may.
+	local := dialTestClient(t, httpServer)
+	if status := addEmoji(t, local, ":party:", testPNG(t), "image/png"); status != http.StatusCreated {
+		t.Fatalf("emoji upload on a loopback connection: %d", status)
+	}
+	local.notification(t, "server")
+
+	// The write checks the image's URL again when it finishes.
+	writeURL := emojiWriteURL(t, local, ":late:")
+	app.mu.Lock()
+	app.writes[path.Base(writeURL)].baseURL = "http://chat.example"
+	app.mu.Unlock()
+	if status := putEmoji(t, writeURL, testPNG(t), "image/png"); status != http.StatusForbidden {
+		t.Fatalf("a write whose image URL clients refuse: %d", status)
+	}
+	local.expectQuiet(t)
+}

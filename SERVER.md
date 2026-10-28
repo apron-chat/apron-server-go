@@ -625,7 +625,10 @@ other names are `404`. The catalog is kept in the store, and its images in
 the upload directory.
 
 - `/emoji add :name:` with exactly one `upload` embed returns
-  `{"embeds": [{embed_id, kind, write_url}]}`, as `/avatar` does. A name is
+  `{"embeds": [{embed_id, kind, write_url}]}`, as `/avatar` does. On a
+  connection not offered `ext:emoji` it is `denied` ("Custom emoji need an
+  https address; set --public-url to the server's https: URL"), since the
+  image's URL would be one clients refuse. A name is
   letters, digits, `_`, `+`, and `-`, and a key at most 64 bytes. The write
   takes a PNG, JPEG, GIF, or WebP of at most 256 KiB (`--emoji.max-kb`;
   `413` past it), which must decode as the type it declares (`415`
@@ -643,7 +646,8 @@ the upload directory.
 - The write is checked again when it finishes, since the catalog may have
   changed after the command: if someone the writer may not replace has
   added the key meanwhile, or the catalog has filled up, the write is
-  refused with `409`, and if other images have taken the room, with `413`.
+  refused with `409`, if other images have taken the room, with `413`, and
+  if the image's URL is one clients refuse, with `403`.
   A refused write's upload is deleted and the catalog is unchanged.
 - `/emoji remove :name:` removes the key and deletes its image. Only an
   `admin` may remove keys (`denied` otherwise); an unknown key is
