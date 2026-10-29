@@ -42,14 +42,21 @@ async function memberList(page: Page): Promise<Locator> {
 
 const memberRow = (list: Locator, userId: string) => list.locator(`li[data-user="${userId}"]`);
 
-/** Opens a member's profile card from their member list row, closing one already open. */
+/**
+ * Opens a member's profile card from their member list row, closing one already open. apron-web drops a menu down from
+ * a row that offers more than the profile (`aria-haspopup="menu"`), whose Profile opens it; older versions, and a row
+ * with only the profile to offer, open it at once.
+ */
 async function profileCard(page: Page, list: Locator, userId: string): Promise<Locator> {
 	const card = page.getByTestId('profile-card');
 	if (await card.count()) {
 		await page.keyboard.press('Escape');
 		await expect(card).toHaveCount(0);
 	}
-	await memberRow(list, userId).locator(`button[data-user-id="${userId}"]`).click();
+	const who = memberRow(list, userId).locator(`button[data-user-id="${userId}"]`);
+	const menu = (await who.getAttribute('aria-haspopup')) === 'menu';
+	await who.click();
+	if (menu) await page.getByRole('menu').getByRole('menuitem', { name: 'Profile', exact: true }).click();
 	await expect(card).toBeVisible();
 	return card;
 }
