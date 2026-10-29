@@ -175,7 +175,9 @@ test('cancelling an active passkey prompt leaves sign-in and server changes usab
 	await createAccount(page).click();
 	await expect(card.getByRole('button', { name: 'Signing in…', exact: true })).toBeVisible();
 	await card.getByRole('button', { name: 'Cancel', exact: true }).click();
-	await page.getByRole('button', { name: 'Connection settings', exact: true }).click();
+	// The connect screen as it is, from the profile's Connect to a server… button.
+	await profileButton(page).click();
+	await profileDialog(page).getByRole('button', { name: 'Connect to a server…', exact: true }).click();
 	await page.getByTestId('server-url-input').fill('ws://localhost:8080/ws');
 	await card.getByRole('button', { name: 'Connect', exact: true }).click();
 	await expect(page.getByTestId('connection-status')).toHaveText('Connected');
