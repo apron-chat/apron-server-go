@@ -1,6 +1,7 @@
 import { deflateSync } from 'node:zlib';
 import { expect, test, type Page } from '@playwright/test';
-import { composer, messageAction, messageByText, openChat, openThread, roomAction, sendMessage, setDisplayName, startThread, userIdOf, waitForMessage } from './test-helpers';
+import { SERVER_AVATAR, SERVER_DESCRIPTION, SERVER_TITLE } from './server-look';
+import { composer, messageAction, messageByText, openChat, openThread, reactionChip, reactTo, roomAction, sendMessage, setDisplayName, startThread, userIdOf, waitForMessage } from './test-helpers';
 
 /** The dev server proxies the Go server, so URLs the server mints use this host and load same-origin. */
 const PROXIED_WS = 'ws://127.0.0.1:5173/ws';
@@ -309,6 +310,55 @@ test.describe('reference features against the Go server', () => {
 			await (await messageAction(ping, 'Reply to message')).click();
 		} finally {
 			await Promise.all([writer.close(), reader.close()]);
+		}
+	});
+
+	test('shows the server by its title and avatar over its host, and its description on the connect screen', async ({ page }) => {
+		await openChat(page);
+		// The sidebar head: the server's title (--title) and avatar (--avatar), always with the host it was reached at (§5.3).
+		const head = page.getByRole('complementary', { name: 'Rooms', exact: true });
+		await expect(head.locator('.ap-shell-sidehead-name')).toHaveText(SERVER_TITLE);
+		await expect(head.locator('.ap-shell-sidehead-host')).toHaveText(new URL(page.url()).host);
+		await expect(head.locator('img.ap-shell-sidehead-avatar')).toHaveAttribute('src', SERVER_AVATAR);
+
+		// The connect screen, for the server you're on: its title and its description (--description).
+		await page.getByRole('button', { name: /^Your profile on/ }).click();
+		await page.getByRole('dialog', { name: 'Edit profile', exact: true }).getByRole('button', { name: 'Connect to a server…', exact: true }).click();
+		const card = page.getByRole('form', { name: 'Sign in' });
+		await expect(card.getByTestId('connect-server')).toContainText(SERVER_TITLE);
+		await expect(card).toContainText(SERVER_DESCRIPTION);
+	});
+
+	test('counts ❤ and ❤️ from two users as one reaction', async ({ browser, page }) => {
+		await openChat(page);
+		const token = `heart-${Date.now().toString(36)}`;
+		await sendMessage(page, token);
+		const messageId = await (await waitForMessage(page, token)).getAttribute('data-message-id');
+		const message = page.locator(`article[data-message-id="${messageId}"]`);
+		await reactTo(message, '❤️');
+		await expect(reactionChip(message, '❤️')).toHaveText('❤️1');
+
+		// Another user reacts with the text-presentation ❤ (U+2764 alone), which the web client never sends: the
+		// server keeps it fully qualified, as ❤️, and entries that differ only in U+FE0F are one (§4.7).
+		// It stays connected throughout: a guest is retired when its connection ends.
+		const raw = await rawGuest();
+		const reader = await browser.newContext();
+		try {
+			await raw.request('reactions', { message_id: messageId, emojis: ['\u2764'] });
+			await expect(message.getByTestId('reaction-chip')).toHaveCount(1);
+			await expect(reactionChip(message, '❤️')).toHaveText('❤️2');
+			await expect(reactionChip(message, '❤️')).toHaveAttribute('aria-pressed', 'true');
+
+			// A new reader replays them as one too.
+			const pageB = await reader.newPage();
+			await openChat(pageB);
+			const onB = pageB.locator(`article[data-message-id="${messageId}"]`);
+			await expect(onB.getByTestId('reaction-chip')).toHaveCount(1);
+			await expect(reactionChip(onB, '❤️')).toHaveText('❤️2');
+			await expect(reactionChip(onB, '❤️')).toHaveAttribute('aria-pressed', 'false');
+		} finally {
+			raw.close();
+			await reader.close();
 		}
 	});
 });

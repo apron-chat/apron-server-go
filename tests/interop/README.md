@@ -11,8 +11,10 @@ with `og` previews, live streams written over HTTP, `iframe`/`html`/unknown
 embeds, avatar uploads through the `/avatar` command and renames shown on
 earlier messages, commands run from the composer with their `~private` replies
 and errors shown only to you, leaving and rejoining rooms and threads through
-`room_list`, the New divider from read cursors, and `@user_id` and room
-mentions. It creates streams and raw embeds with a small protocol client
+`room_list`, the New divider from read cursors, `@user_id` and room
+mentions, the server's title, avatar, and host in the sidebar head and its
+description on the connect screen, and ❤ and ❤️ from two users counted as
+one reaction. It creates streams, raw embeds, and the bare ❤ with a small protocol client
 connected through the Vite proxy, so the URLs the server mints load
 same-origin. Rooms follow protocol v9: a new guest has joined only `general`,
 and a thread's members are those who joined it, so a second browser opens
@@ -37,7 +39,9 @@ The config starts both services itself with `reuseExistingServer: false`:
 * Go server: `127.0.0.1:8080`, started from the repository root with
   `--store memory --addr 127.0.0.1:8080 --push.allow-insecure
   --push.vapid-private-key <test key> --push.vapid-subject
-  mailto:interop@example.com`. The push flags are for `push.spec.ts` and
+  mailto:interop@example.com --title <title> --description <text> --avatar
+  <data:image URL>`. The title, description, and avatar are in
+  `server-look.ts`, for `reference.spec.ts`. The push flags are for `push.spec.ts` and
   change nothing for the other tests, which register no push endpoint. The
   key is the public test fixture in `push-test-vapid.ts`, never one for a real
   server; `--push.allow-insecure` lets the test's capture endpoint on

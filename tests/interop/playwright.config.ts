@@ -2,6 +2,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { defineConfig, devices } from '@playwright/test';
 import { TEST_VAPID_PRIVATE_KEY, TEST_VAPID_SUBJECT } from './push-test-vapid';
+import { SERVER_AVATAR, SERVER_DESCRIPTION, SERVER_TITLE } from './server-look';
 
 const configDirectory = path.dirname(fileURLToPath(import.meta.url));
 const repositoryRoot = path.resolve(configDirectory, '../..');
@@ -9,13 +10,17 @@ const chromiumExecutablePath = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH;
 const webDirectory = process.env.APRON_WEB_DIR ? path.resolve(process.env.APRON_WEB_DIR) : path.join(repositoryRoot, '.apron-web');
 // The push flags serve push.spec.ts and change nothing for the other tests, which register no
 // push endpoint: a fixed VAPID key, whose public half the test checks tokens against, and
-// --push.allow-insecure, so the test's capture endpoint on http://127.0.0.1 is accepted.
+// --push.allow-insecure, so the test's capture endpoint on http://127.0.0.1 is accepted. The title,
+// description and avatar are how the server shows itself, for reference.spec.ts.
 const aprondFlags = [
 	'--store memory',
 	'--addr 127.0.0.1:8080',
 	'--push.allow-insecure',
 	`--push.vapid-private-key ${TEST_VAPID_PRIVATE_KEY}`,
-	`--push.vapid-subject ${TEST_VAPID_SUBJECT}`
+	`--push.vapid-subject ${TEST_VAPID_SUBJECT}`,
+	`--title '${SERVER_TITLE}'`,
+	`--description '${SERVER_DESCRIPTION}'`,
+	`--avatar '${SERVER_AVATAR}'`
 ].join(' ');
 // TODO: Make server ports configurable so browser tests can run beside local development servers.
 
