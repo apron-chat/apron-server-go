@@ -155,6 +155,17 @@ func TestWelcomeAndRoles(t *testing.T) {
 	}
 }
 
+func TestServerIdentity(t *testing.T) {
+	options, _ := parse(t, "--title", " Example chat ", "--description", "Talk about *examples*.", "--avatar", "https://chat.example/icon.png")
+	config, err := serverConfig(*options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.Title != "Example chat" || config.Description != "Talk about *examples*." || config.Avatar != "https://chat.example/icon.png" {
+		t.Fatalf("title %q, description %q, avatar %q", config.Title, config.Description, config.Avatar)
+	}
+}
+
 func TestEmailSenders(t *testing.T) {
 	// Email sign-in is off unless --email.enable is set, whatever the sender.
 	for _, args := range [][]string{

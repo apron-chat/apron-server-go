@@ -44,6 +44,15 @@ func init() {
 			run:       (*Server).inviteDeviceCommand,
 		},
 		{
+			name: "emoji", usage: "/emoji add|remove :name:", help: "with one image attached, add a custom emoji or replace one you added; admins also remove them",
+			run: (*Server).emojiCommand,
+		},
+		{
+			name: "server", usage: "/server [title|description|avatar] [text]", help: "show the server's title, description, and avatar, or set one (the avatar with one image attached); without the text or image, clear it back to its flag's",
+			available: func(u *userState, _ *roomState) bool { return u.hasRole("admin") },
+			run:       (*Server).serverCommand,
+		},
+		{
 			name: "kick", usage: "/kick @user [reason]", help: "remove someone from this room (its creator or a moderator)",
 			available: func(u *userState, r *roomState) bool { return r.mayRemove(u) },
 			run:       (*Server).kickCommand,

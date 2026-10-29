@@ -28,16 +28,19 @@ Defaults:
 - HTTP and WebSocket listener: `127.0.0.1:8080` (`--addr`)
 - WebSocket endpoint: `/ws`; health endpoint: `/healthz`
 - embed endpoints: `/write/<token>`, `/files/<embed_id>/<secret>`,
-  `/streams/<embed_id>/<secret>`
+  `/streams/<embed_id>/<secret>`; custom emoji catalog:
+  `/emoji/catalog-<hash>.json`
 - WebSocket origins: `localhost`, `127.0.0.1`, and `::1` during development
 - `server` frame: `apron: 9`, `agent: "apron-go/9"`, and
   `capabilities`: `history`, `edit`, `rooms`, `reactions`, `activity`,
-  `embed:upload`, `embed:stream`, `command`, `status`, `ext`, and, while
-  `--max-private-rooms` bounds private rooms, `ext:settings`, with
-  `server.ext.settings.private_rooms` the bound (below); `server.push`: kinds
-  `relay` and `webpush` (with the server's VAPID `key`) and `wake`:
-  `mentions`, `replies`, `private`, `joined`, `badge`; `server.status`:
-  `dnd`, `invisible`; `server.ping`: 30 seconds
+  `embed:upload`, `embed:stream`, `command`, `status`, `ext`, `ext:emoji`,
+  with `server.ext.emoji.catalog_url` (see [Custom emoji](#custom-emoji);
+  not on a connection whose URLs would be plain `http:` on a host other than
+  a loopback one), and, while `--max-private-rooms` bounds private rooms,
+  `ext:settings`, with `server.ext.settings.private_rooms` the bound
+  (below); `server.push`: kinds `relay` and `webpush` (with the server's
+  VAPID `key`) and `wake`: `mentions`, `replies`, `private`, `joined`,
+  `badge`; `server.status`: `dnd`, `invisible`; `server.ping`: 30 seconds
 - seeded default room: `general` (title `General`)
 - authentication (`server.auth`, in this order): WebAuthn passkeys, email
   codes with `--email.enable` (off by default), bearer-token resume,
@@ -46,7 +49,8 @@ Defaults:
   becomes an account, and an email sign-in with a new address creates one
 - passkey RP ID: `localhost`; frontend origins: `http://localhost:5173` and
   `http://localhost:8080`
-- no `server.welcome` and no roles
+- no `server.welcome`, `title`, or `avatar`, `description` the `general`
+  room's (none at first), and no roles
 
 Flags (`aprond --help` lists them all):
 
@@ -72,13 +76,17 @@ Flags (`aprond --help` lists them all):
   stream URLs. Without it they use the host each WebSocket request arrived
   on (or `https://` and the first `--tls.domain`), which suits local
   development but lets a client choose the host in URLs others see; set it
-  in any deployment.
+  in any deployment. Behind a reverse proxy that terminates TLS, set it to
+  the `https:` URL: the server sees plain HTTP from the proxy, and without
+  it builds `http:` URLs, so it does not offer custom emoji and refuses
+  `/emoji add` and `/server avatar` (clients ignore `http:` images and
+  catalogs off a loopback host; see [Custom emoji](#custom-emoji)).
 - `--max-connections <n>` refuses WebSockets beyond `n` with an error without
   `id` (`retry_after`), then closes them. `--max-listener-connections <n>`
   caps concurrent TCP connections on the listener, HTTP included; further
   connections wait to be accepted.
 - `--messages-per-minute <n>` limits each user's new messages, `room_set`
-  requests, and `/avatar` commands together: a burst of `n`, refilled evenly
+  requests, and `/avatar` and `/emoji add` commands together: a burst of `n`, refilled evenly
   over a minute. The excess gets `retry_after` with `data.retry_after` in
   seconds. Edits, reactions, and activity are not counted.
 - `--max-listed-members <n>` (1000) bounds the `members` of one room in
@@ -92,6 +100,19 @@ Flags (`aprond --help` lists them all):
 - `--welcome <commonmark>` sets `server.welcome`, which clients show on their
   sign-in screen, such as "Chat as a guest, or sign in with email to keep
   your name. Codes expire after 10 minutes."
+- `--title <name>`, `--description <commonmark>`, and `--avatar <url>` set
+  `server.title`, `server.description`, and `server.avatar`, which show
+  people which server this is, such as in a list of servers: a plain name,
+  a few words on what the server is about, and a square icon at least 256
+  pixels wide. The avatar must be an `https:` URL or a `data:image` URL of
+  at most 64 KiB, as for user avatars; the server refuses to start
+  otherwise. An admin's `/server title`, `/server description`, and
+  `/server avatar` override them, and clearing a value there falls back to
+  its flag; see [Commands](#commands). Without a description from either
+  (an empty one is none), `server.description` is the `general` room's
+  `description`, left out rather than cut when it is over 500 bytes; while
+  it is, a `room_set` that changes it sends every connection, signed in or
+  not, a new `server` frame after the `room_update` and before the result.
 - `--client-ip-header <header>`, behind a reverse proxy, names the header
   that carries the client's address, such as `X-Forwarded-For` or
   `X-Real-IP`, for the per-client limits of email sign-in. The server takes
@@ -125,7 +146,13 @@ Flags (`aprond --help` lists them all):
   (1000) every hosted upload together, all in MiB. Past the storage bound the
   oldest message uploads are removed: their files are deleted and each
   affected message is republished without them. Avatars count toward the
-  bound but are never removed.
+  bound but are never removed; custom emoji have their own bounds, below.
+- `--emoji.max-kb <n>` (256) bounds one custom emoji image, in KiB, and
+  `--emoji.max-storage-mb <n>` (250, room for the 1000 emoji the server
+  keeps at 256 KiB each) all of them together, in MiB. Custom emoji do not
+  count toward `--upload.max-storage-mb`, and nothing is removed to make
+  room for one: past the storage bound `/emoji add` is refused (see
+  [Custom emoji](#custom-emoji)).
 - `--push.disable` removes push. Stored registrations are kept but not
   loaded, and apply again once push is enabled. `--push.allow-insecure` is for tests only:
   it accepts `http` push endpoints and ones on internal addresses, so any
@@ -182,7 +209,9 @@ the status they choose with `me`, when they were last shown `offline`
 (`seen`) and whether they are shown otherwise, so that after a crash those
 who were get a `seen` at the next start (see Status), and their mutes and
 room mutes, unexpired
-sessions, device tokens, finished uploads and their files, the VAPID key, and the
+sessions, device tokens, finished uploads and their files, the custom emoji
+catalog, the title, description, and avatar set with `/server`, the VAPID key,
+and the
 `log_id`, guest, account, and embed counters, so no `log_id` or `user_id`
 is reused. What does not: connections and their `idle`, request
 deduplication, email proposals, live streams, the unread counts kept per
@@ -279,7 +308,9 @@ restarts. `--role` grants them roles, such as
 `--role admin=ada --role moderator=bob@example.com`, by `user_id` or email
 address. Roles are sent in current user objects (below), sorted, and are
 shown beside names; `admin` and `moderator` may also remove people from
-rooms. Role names are lowercased, so `--role Admin=ada` grants `admin`.
+rooms, and `admin` may replace and remove any
+[custom emoji](#custom-emoji) and set the server's title, description, and
+avatar with [`/server`](#commands). Role names are lowercased, so `--role Admin=ada` grants `admin`.
 Guests hold no roles. A `user_id` granted a role but never used is reserved:
 no guest or new account is given it, so nobody can claim it and then add a
 passkey or address to inherit the role. So a grant by `user_id` applies to
@@ -392,10 +423,10 @@ guests included, whether they created them or were added: past it, creating one 
 the user leaves one to make room. Threads are not counted, since only a
 private room's members can be added to its threads. With a bound, the
 `server` frame advertises it as `ext.settings.private_rooms` under capability
-`ext:settings`, the extension
-[apron-web's EXT.md](https://github.com/apron-chat/apron-web/blob/main/EXT.md)
-defines; its other keys are booleans that an absent key makes `true`, as
-they are here: guests post, read cursors are kept, and members add others.
+`ext:settings`, which
+[apron's EXTENSIONS.md](https://github.com/shazow/apron/blob/main/EXTENSIONS.md#extsettings)
+defines; its `read_cursors` is absent, so `true`, since the server keeps
+read cursors.
 There is no server-wide bound, and a private room is never removed: like
 every room it keeps its full history, so one everyone has left stays, which
 nobody can see or be added to again.
@@ -580,18 +611,85 @@ closed, without waiting for its body to end.
 - **Avatars** ([PROTOCOL.md §4.8.6](https://github.com/shazow/apron/blob/main/PROTOCOL.md#486-avatars)): the `/avatar` command with one `upload`
   embed returns a write URL. A PNG, JPEG, GIF, or WebP of at most 2 MiB
   becomes the sender's `avatar`, followed by a `user` notification; replacing
-  or removing the avatar deletes the upload.
+  or removing the avatar deletes the upload. `/server avatar` sets the
+  server's avatar the same way, with the same rules; see [Commands](#commands).
+- **Custom emoji**: `/emoji add :name:` with one `upload` embed takes the same
+  types of image as avatars, of at most 256 KiB; see
+  [Custom emoji](#custom-emoji).
+
+## Custom emoji
+
+The server offers custom emoji as
+[apron's EXTENSIONS.md](https://github.com/shazow/apron/blob/main/EXTENSIONS.md#extemoji)
+defines them, under capability `ext:emoji`. Every `server` frame carries
+`ext.emoji.catalog_url`, before sign-in too, except on a connection whose
+URLs would start with `http:` and a host other than a loopback one
+(`localhost`, a name under `.localhost`, `127.0.0.0/8`, or `::1`), since
+clients ignore such a catalog URL: such a connection is offered neither
+`ext:emoji` nor `ext.emoji`, and gets no `server` frame when the catalog
+changes. Behind a reverse proxy that speaks plain HTTP to the server, set
+`--public-url` to the deployment's `https:` URL. The catalog is a JSON object
+that maps each key, `:name:`, to `{url, width, height, alt?}`. The server
+serves it at `/emoji/catalog-<hash>.json`, named after a hash of its content,
+with `Cache-Control: public, max-age=31536000, immutable` and
+`Access-Control-Allow-Origin: *`; only the current catalog is served, and
+other names are `404`. The catalog is kept in the store, and its images in
+the upload directory.
+
+- `/emoji add :name:` with exactly one `upload` embed returns
+  `{"embeds": [{embed_id, kind, write_url}]}`, as `/avatar` does. On a
+  connection not offered `ext:emoji` it is `denied` ("Custom emoji need an
+  https address; set --public-url to the server's https: URL"), since the
+  image's URL would be one clients refuse. A name is
+  letters, digits, `_`, `+`, and `-`, and a key at most 64 bytes. The write
+  takes a PNG, JPEG, GIF, or WebP of at most 256 KiB (`--emoji.max-kb`;
+  `413` past it), which must decode as the type it declares (`415`
+  otherwise). When it finishes, the image becomes the key's, with its size
+  as `width` and `height` and the embed's `og.image.alt` as `alt`.
+- Custom emoji images together take at most 250 MiB
+  (`--emoji.max-storage-mb`), apart from the uploads that
+  `--upload.max-storage-mb` bounds. `/emoji add` is `denied` when the
+  images leave no room, counting a replaced image's as free, and a write
+  that would pass the bound is refused with `413`; nothing is removed to
+  make room.
+- Anyone signed in may add a new key, up to 1000 keys (`denied` past that).
+  Only the user who added a key, or an `admin`, may replace its image
+  (`denied` otherwise); the replaced image is deleted.
+- The write is checked again when it finishes, since the catalog may have
+  changed after the command: if someone the writer may not replace has
+  added the key meanwhile, or the catalog has filled up, the write is
+  refused with `409`, if other images have taken the room, with `413`, and
+  if the image's URL is one clients refuse, with `403`.
+  A refused write's upload is deleted and the catalog is unchanged.
+- `/emoji remove :name:` removes the key and deletes its image. Only an
+  `admin` may remove keys (`denied` otherwise); an unknown key is
+  `invalid_params`.
+- Each change gives the catalog a new URL, and the server sends every
+  connection offered `ext:emoji`, signed in or not, a new `server` frame:
+  for a removal before the command's result, and for an addition when the
+  write finishes.
+- A `reactions` entry that has the shape of a key must be in the catalog,
+  or in the caller's current set on that message, so that a removed key does
+  not keep the caller from changing the rest of the set; other keys are
+  `invalid_params`.
 
 ## Reactions
 
 `reactions` sets the caller's complete emoji set on a message and returns `{}`
 after the broadcast; the logged record is delivered as
 `{log_id, message_id, room_id, reactions: [{from, emojis}]}`, with `room_id`
-the message's current room. Duplicate emoji collapse, `[]`
+the message's current room. Each entry is kept fully qualified (UTS #51,
+from Unicode 17.0's emoji data): the server drops every U+FE0F, then adds
+one after each emoji character of text presentation, such as `❤`, unless a
+skin tone follows it; `#`, `*`, and digits take one only before U+20E3. So
+`❤` becomes `❤️`, and entries that differ only in U+FE0F are one. Other
+entries are kept as sent, without U+FE0F. Duplicate entries collapse, `[]`
 clears, and a request that leaves the set unchanged logs nothing. Unknown
 messages and non-string or empty entries are `invalid_params`, an entry
 over 64 bytes is `too_large`, and more than 20 distinct emoji per user is
-`denied`.
+`denied`. An entry that has the shape of a custom emoji key, such as
+`:party:`, must be in the [catalog](#custom-emoji) or already in the
+caller's set (`invalid_params` otherwise).
 
 ## Extension data
 
@@ -603,8 +701,14 @@ profile or a room, and 64 KiB on a message; past that the write is
 `too_large` and changes nothing. A save with `deleted: true` drops a
 message's `ext`, so a tombstone carries none, and a save onto a tombstone
 merges into an empty one. A `command`'s `ext` is an argument, like the rest
-of its params: it must be an object, and is not kept. The server keeps no
-extension data of its own, so the `server` frame carries no `ext`.
+of its params: it must be an object, and is not kept. The `server` frame's
+`ext` carries the server's own extension data: `emoji` (see
+[Custom emoji](#custom-emoji)) and, with `--max-private-rooms`, `settings`;
+without either, it is absent. The server does not offer `ext:permissions`,
+so clients offer what PROTOCOL.md allows and handle `denied`, as the
+extension asks of them without it: every user may write, any member of a
+room may add others to it with `room_join` and a `user_id`, and only a
+message's author may move it.
 
 ## Commands
 
@@ -622,6 +726,37 @@ replies arrive before its result. Commands:
   sender may use there, and returns `{}`.
 - `/avatar` with exactly one `upload` embed returns
   `{"embeds": [{embed_id, kind, write_url}]}`; see Avatars above.
+- `/emoji add :name:` and `/emoji remove :name:` add and remove custom
+  emoji; see [Custom emoji](#custom-emoji).
+- `/server` is for users with the `admin` role (`denied` otherwise, and
+  not listed in their `/help`), following PROTOCOL.md §4.1's suggested
+  convention. Alone, it sends a `~private` notice with the server frame's
+  current `title`, `description`, and `avatar`, each marked as set with
+  `/server` or taken from its flag (`--title`, `--description`,
+  `--avatar`). `/server title <text>` sets the title, prepared as a display
+  name is (see [Identity and profiles](#identity-and-profiles)): one line
+  (`invalid_params` otherwise) of at most 64 characters (`too_large`).
+  `/server description <text>` sets the description, CommonMark of at most
+  500 bytes (`too_large`) without control characters other than line
+  breaks (`invalid_params`). `/server avatar` with exactly one `upload`
+  embed returns `{"embeds": [{embed_id, kind, write_url}]}`, as `/avatar`
+  does; the write takes a PNG, JPEG, GIF, or WebP of at most 2 MiB, which
+  becomes the avatar when it finishes. The write is checked again then: if
+  its sender is no longer an admin, it is refused with `403` and its
+  upload deleted. The avatar's upload is kept apart from
+  `--upload.max-storage-mb`, so it is never removed to make room. On a
+  connection whose URLs clients would refuse, `http:` off a loopback host,
+  `/server avatar` with an embed is `denied` ("The server avatar needs an
+  https address; set --public-url to the server's https: URL"). Without
+  the text, `/server title` and `/server description` clear the value, and
+  `/server avatar` without an embed clears the avatar and deletes its
+  upload; a cleared value falls back to its flag, or is absent without
+  one, except that the description then falls back to the `general`
+  room's (see `--description` above). Values set with `/server` override the flags and are kept in the
+  store across restarts. Each change sends every connection, signed in or
+  not, a new `server` frame: before the command's result, or for a new
+  avatar when its write finishes. A command that sets or clears a value
+  also sends the sender a `~private` notice with the result.
 - `/kick @user [reason]` removes the one user named in `body.mentions` from
   the room. Only the room's creator and users with the `admin` or
   `moderator` role may kick (`denied` otherwise, so only they can kick in

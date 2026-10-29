@@ -42,14 +42,17 @@ type Options struct {
 	PublicURL              string   `long:"public-url" description:"External base URL of upload, file, and stream links, such as https://chat.example (default: each request's host, or https://<tls.domain>)"`
 	MaxConnections         int      `long:"max-connections" description:"Maximum concurrent WebSockets; 0 is unlimited"`
 	MaxListenerConnections int      `long:"max-listener-connections" description:"Maximum concurrent TCP connections on the listener, HTTP included; 0 is unlimited"`
-	MessagesPerMinute      int      `long:"messages-per-minute" description:"Burst of new messages, room_set requests, and /avatar commands per user, refilled over a minute; 0 is unlimited"`
+	MessagesPerMinute      int      `long:"messages-per-minute" description:"Burst of new messages, room_set requests, and /avatar and /emoji add commands per user, refilled over a minute; 0 is unlimited"`
 	MaxListedMembers       int      `long:"max-listed-members" default:"1000" description:"Members listed per room in room_list and room_update; a larger room lists its most recently active ones and member_count. 0 is unlimited"`
 	MaxPrivateRooms        int      `long:"max-private-rooms" description:"Top-level private rooms one user may be in at once, created or added to, such as on a public deployment; 0 is unlimited"`
 	DebugAddr              string   `long:"debug-addr" description:"Listen address for unauthenticated pprof and expvar under /debug/, such as 127.0.0.1:6060; empty disables"`
 	Store                  string   `long:"store" description:"Where state is kept: sqlite:<path> for a SQLite database, or memory to keep nothing across restarts"`
 	ClientIPHeader         string   `long:"client-ip-header" description:"Request header a reverse proxy puts the client's address in, such as X-Forwarded-For (its last entry) or X-Real-IP, for per-client limits; set only behind a proxy that sets it"`
 	Welcome                string   `long:"welcome" description:"Markdown clients show on their sign-in screen (server.welcome), such as how this server's sign-in methods fit together"`
-	Roles                  []string `long:"role" description:"Grant a role to an account as role=user_id or role=email, such as admin=ada; repeat for more. admin and moderator may remove others from rooms"`
+	Title                  string   `long:"title" description:"Plain name clients show for this server (server.title), such as in a list of servers; an admin's /server title overrides it"`
+	Description            string   `long:"description" description:"CommonMark saying in a few words what this server is about (server.description; default: the general room's description, up to 500 bytes); an admin's /server description overrides it"`
+	Avatar                 string   `long:"avatar" description:"Square icon of this server, at least 256 pixels wide (server.avatar): an https: URL or a small data:image URL; an admin's /server avatar overrides it"`
+	Roles                  []string `long:"role" description:"Grant a role to an account as role=user_id or role=email, such as admin=ada; repeat for more. admin and moderator may remove others from rooms, and admin may replace and remove custom emoji and set the server's title, description, and avatar with /server"`
 
 	WebAuthn struct {
 		RPID    string   `long:"rp-id" default:"localhost" description:"Passkey relying party domain; empty disables passkeys"`
@@ -60,8 +63,13 @@ type Options struct {
 		Dir          string `long:"dir" description:"Directory holding uploaded files; upload files the store does not refer to are removed at start"`
 		MaxMB        int64  `long:"max-mb" default:"20" description:"Maximum size of one upload, in MiB"`
 		MaxMessageMB int64  `long:"max-message-mb" default:"20" description:"Maximum total size of one message's uploads, in MiB"`
-		MaxStorageMB int64  `long:"max-storage-mb" default:"1000" description:"Total size of hosted uploads, in MiB, beyond which the oldest are removed from their messages"`
+		MaxStorageMB int64  `long:"max-storage-mb" default:"1000" description:"Total size of hosted uploads but custom emoji, in MiB, beyond which the oldest are removed from their messages"`
 	} `group:"Uploads" namespace:"upload"`
+
+	Emoji struct {
+		MaxKB        int64 `long:"max-kb" default:"256" description:"Maximum size of one custom emoji image, in KiB"`
+		MaxStorageMB int64 `long:"max-storage-mb" default:"250" description:"Total size of custom emoji images, in MiB; past it /emoji add is refused, and nothing is removed"`
+	} `group:"Custom emoji" namespace:"emoji"`
 
 	Email struct {
 		Enable       bool   `long:"enable" description:"Offer email sign-in (off by default)"`
@@ -138,6 +146,9 @@ func serverConfig(options Options) (server.Config, error) {
 	config.MaxListedMembers = options.MaxListedMembers
 	config.MaxPrivateRooms = options.MaxPrivateRooms
 	config.Welcome = options.Welcome
+	config.Title = strings.TrimSpace(options.Title)
+	config.Description = strings.TrimSpace(options.Description)
+	config.Avatar = strings.TrimSpace(options.Avatar)
 	config.ClientIPHeader = options.ClientIPHeader
 	for _, grant := range options.Roles {
 		role, holder, ok := strings.Cut(grant, "=")
@@ -164,6 +175,8 @@ func serverConfig(options Options) (server.Config, error) {
 	config.MaxUploadBytes = options.Upload.MaxMB << 20
 	config.MaxMessageUploadBytes = options.Upload.MaxMessageMB << 20
 	config.MaxUploadStorageBytes = options.Upload.MaxStorageMB << 20
+	config.MaxEmojiBytes = options.Emoji.MaxKB << 10
+	config.MaxEmojiStorageBytes = options.Emoji.MaxStorageMB << 20
 	if len(options.Origins) > 0 {
 		config.OriginPatterns = options.Origins
 	}

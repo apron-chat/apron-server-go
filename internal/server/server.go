@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/json/jsontext"
 	"encoding/json/v2"
+	"fmt"
 	"io/fs"
 	"maps"
 	"net"
@@ -41,6 +42,10 @@ const (
 	defaultMaxAvatarBytes    int64 = 2 << 20
 	defaultMaxMessageUploads int64 = 20 << 20
 	defaultMaxUploadStorage  int64 = 1000 << 20
+	defaultMaxEmojiBytes     int64 = 256 << 10
+	// defaultMaxEmojiStorage holds the most custom emoji at the default
+	// size cap: 250 MiB.
+	defaultMaxEmojiStorage = maxCustomEmoji * defaultMaxEmojiBytes
 	// uploadReadTimeout bounds how long one upload body may take to arrive.
 	uploadReadTimeout = 15 * time.Minute
 	// maxHistoryReplyBytes bounds the records in one history page; a page
@@ -84,10 +89,15 @@ type Config struct {
 	MaxAvatarBytes int64
 	// MaxMessageUploadBytes bounds the uploads hosted for one message.
 	MaxMessageUploadBytes int64
-	// MaxUploadStorageBytes bounds all hosted uploads; beyond it the oldest
-	// message uploads are removed from their messages. Avatars count toward
-	// it but are never removed.
+	// MaxUploadStorageBytes bounds all hosted uploads but custom emoji;
+	// beyond it the oldest message uploads are removed from their messages.
+	// Avatars count toward it but are never removed.
 	MaxUploadStorageBytes int64
+	// MaxEmojiBytes bounds one custom emoji's image (ext:emoji), and
+	// MaxEmojiStorageBytes all of them together: an image that would pass
+	// it is refused, and nothing is removed to make room.
+	MaxEmojiBytes        int64
+	MaxEmojiStorageBytes int64
 	// UploadDir holds hosted upload content. Empty uses a temporary directory
 	// removed on Shutdown. At start, files named *.upload in UploadDir that
 	// no stored embed holds are removed.
@@ -131,10 +141,22 @@ type Config struct {
 	// Welcome is server.welcome (§3.2): Markdown shown on the sign-in
 	// screen. Empty omits it.
 	Welcome string
+	// Title, Description, and Avatar show people which server this is
+	// (§3.1): a plain display name, CommonMark saying in a few words what
+	// the server is about, and a square icon URL that follows the rules
+	// for user avatars (§4.8.6). Empty omits each. Admins may override each
+	// with /server, which keeps its value in the store; clearing it there
+	// falls back to these. Without either, the description is the default
+	// room's.
+	Title       string
+	Description string
+	Avatar      string
 	// Roles grants server roles (§3.3), such as "admin", to accounts: each
 	// role lists the user_ids or email addresses that hold it. Roles are
 	// shown beside names; "admin" and "moderator" may also remove others
-	// from rooms (§4.2.2).
+	// from rooms (§4.2.2), and "admin" may replace and remove any custom
+	// emoji (ext:emoji) and set the server's title, description, and avatar
+	// with /server.
 	Roles map[string][]string
 	// EmailSender enables email sign-in (§4.11) and delivers its codes; nil
 	// disables it. LogEmailSender logs codes, for development.
@@ -164,6 +186,8 @@ func DefaultConfig() Config {
 		MaxAvatarBytes:        defaultMaxAvatarBytes,
 		MaxMessageUploadBytes: defaultMaxMessageUploads,
 		MaxUploadStorageBytes: defaultMaxUploadStorage,
+		MaxEmojiBytes:         defaultMaxEmojiBytes,
+		MaxEmojiStorageBytes:  defaultMaxEmojiStorage,
 		UploadStartTimeout:    defaultUploadStartTimeout,
 		StreamKeepBytes:       defaultStreamKeepBytes,
 		StreamMaxBytes:        defaultStreamMaxBytes,
@@ -206,6 +230,12 @@ func (c Config) withDefaults() Config {
 	}
 	if c.MaxUploadStorageBytes <= 0 {
 		c.MaxUploadStorageBytes = defaults.MaxUploadStorageBytes
+	}
+	if c.MaxEmojiBytes <= 0 {
+		c.MaxEmojiBytes = defaults.MaxEmojiBytes
+	}
+	if c.MaxEmojiStorageBytes <= 0 {
+		c.MaxEmojiStorageBytes = defaults.MaxEmojiStorageBytes
 	}
 	if c.UploadStartTimeout <= 0 {
 		c.UploadStartTimeout = defaults.UploadStartTimeout
@@ -399,8 +429,9 @@ type Server struct {
 	embeds        map[string]*embedState
 	// writes maps an unused or in-progress write token to its embed.
 	writes map[string]*embedState
-	// uploads lists finished uploads, oldest first, for eviction beyond
-	// MaxUploadStorageBytes; uploadBytes is their total size.
+	// uploads lists finished uploads but custom emoji, oldest first, for
+	// eviction beyond MaxUploadStorageBytes; uploadBytes is their total
+	// size. Custom emoji have their own bound, MaxEmojiStorageBytes.
 	uploads     *list.List
 	uploadBytes int64
 	// uploadDir holds upload content; tempUploadDir is removed on Shutdown.
@@ -408,6 +439,14 @@ type Server struct {
 	tempUploadDir bool
 	// uploadSeq orders finished uploads across restarts.
 	uploadSeq int64
+	// emoji is the custom emoji catalog by key (ext:emoji); emojiCatalog
+	// is its JSON, served at emojiPath + emojiName.
+	emoji        map[string]*customEmoji
+	emojiCatalog []byte
+	emojiName    string
+	// profile is the server's title, description, and avatar as admins set
+	// them with /server (§3.1), which override Config's.
+	profile serverProfile
 
 	// dirty is the state changed under mu since it was last written to the
 	// store; storeWrites queues batches for the store writer.
@@ -448,6 +487,9 @@ type Server struct {
 // store when it is nil.
 func Open(config Config) (*Server, error) {
 	config = config.withDefaults()
+	if config.Avatar != "" && !validAvatar(config.Avatar) {
+		return nil, fmt.Errorf("the server avatar must be an https: URL or a data:image URL of at most %d bytes", maxAvatarDataURLBytes)
+	}
 	if config.Store == nil {
 		config.Store = store.NewMemory()
 	}
@@ -462,6 +504,7 @@ func Open(config Config) (*Server, error) {
 		embeds:      make(map[string]*embedState),
 		writes:      make(map[string]*embedState),
 		uploads:     list.New(),
+		emoji:       make(map[string]*customEmoji),
 		pushes:      make(map[string]*pushRegistration),
 		passkeys:    make(map[string]*passkeyUser),
 		credentials: make(map[string]*passkeyUser),
@@ -520,7 +563,7 @@ func Open(config Config) (*Server, error) {
 const defaultRoomID = "general"
 
 // Handler returns the HTTP handler serving /ws, /healthz, the upload, file,
-// and stream endpoints, and StaticDir.
+// stream, and emoji catalog endpoints, and StaticDir.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ws", s.handleWebSocket)
@@ -528,6 +571,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc(writePath, s.handleWrite)
 	mux.HandleFunc(filePath, s.handleFile)
 	mux.HandleFunc(streamPath, s.handleStream)
+	mux.HandleFunc(emojiPath, s.handleEmoji)
 	if s.config.StaticDir != "" {
 		root := filepath.Clean(s.config.StaticDir)
 		mux.Handle("/", http.FileServer(staticFS{http.Dir(root)}))
@@ -666,7 +710,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 	if s.config.MaxConnections > 0 && len(s.clients) >= s.config.MaxConnections {
 		// An error about the connection as a whole omits id (§1.1).
-		c.enqueue(map[string]any{"method": "server", "params": s.serverParams()})
+		c.enqueue(map[string]any{"method": "server", "params": s.serverParams(c.baseURL)})
 		c.closeWithError(&rpcError{Code: codeRetryAfter, Message: "Server at capacity; try again shortly", Data: map[string]any{"retry_after": retryAfterSeconds}})
 		s.unlock()
 		<-c.done
@@ -674,7 +718,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 	s.clients[c] = struct{}{}
 	// The server announcement is queued before the reader starts accepting auth.
-	c.enqueue(map[string]any{"method": "server", "params": s.serverParams()})
+	c.enqueue(map[string]any{"method": "server", "params": s.serverParams(c.baseURL)})
 	s.unlock()
 
 	defer func() {
@@ -746,8 +790,9 @@ func (s *Server) baseURL(r *http.Request) string {
 	return (&url.URL{Scheme: scheme, Host: r.Host}).String()
 }
 
-// serverParams is the `server` frame (PROTOCOL.md §3.1).
-func (s *Server) serverParams() map[string]any {
+// serverParams is the `server` frame (PROTOCOL.md §3.1) for a connection
+// whose URLs start with baseURL. Callers hold s.mu.
+func (s *Server) serverParams(baseURL string) map[string]any {
 	var authSchemes []string
 	if s.config.WebAuthn != nil {
 		authSchemes = append(authSchemes, "webauthn")
@@ -773,6 +818,11 @@ func (s *Server) serverParams() map[string]any {
 		// always are, and are not listed.
 		"status": optionalStatuses,
 	}
+	ext := make(map[string]any)
+	if emoji := s.emojiExt(baseURL); emoji != nil {
+		params["capabilities"] = append(params["capabilities"].([]string), "ext:emoji")
+		ext["emoji"] = emoji
+	}
 	if !s.config.DisablePush {
 		push := map[string]any{"relay": map[string]any{}, "wake": (urgentScopes | wakeJoined | wakeBadge).names()}
 		if s.vapid != nil {
@@ -783,12 +833,19 @@ func (s *Server) serverParams() map[string]any {
 	if s.config.Welcome != "" {
 		params["welcome"] = s.config.Welcome
 	}
+	for _, field := range profileFields {
+		if value, _ := s.profileValueLocked(field); value != "" {
+			params[field] = value
+		}
+	}
 	if s.config.MaxPrivateRooms > 0 {
-		// ext:settings, the extension apron-web defines (its EXT.md §3):
-		// private_rooms is a number, where its other keys are booleans
-		// that an absent key makes true, as they are here.
+		// ext:settings (apron's EXTENSIONS.md): read_cursors is absent,
+		// so true, since the server keeps read_message_id (§4.6).
 		params["capabilities"] = append(params["capabilities"].([]string), "ext:settings")
-		params["ext"] = map[string]any{"settings": map[string]any{"private_rooms": s.config.MaxPrivateRooms}}
+		ext["settings"] = map[string]any{"private_rooms": s.config.MaxPrivateRooms}
+	}
+	if len(ext) > 0 {
+		params["ext"] = ext
 	}
 	if !slices.Equal(signup, authSchemes) {
 		params["signup"] = signup
