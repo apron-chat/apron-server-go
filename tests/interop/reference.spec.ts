@@ -1,7 +1,7 @@
 import { deflateSync } from 'node:zlib';
 import { expect, test, type Page } from '@playwright/test';
 import { SERVER_AVATAR, SERVER_DESCRIPTION, SERVER_TITLE } from './server-look';
-import { composer, messageAction, messageByText, openChat, openThread, reactionChip, reactTo, roomAction, sendMessage, setDisplayName, startThread, userIdOf, waitForMessage } from './test-helpers';
+import { composer, joinListedRoom, messageAction, messageByText, openChat, openThread, reactionChip, reactTo, roomAction, sendMessage, setDisplayName, startThread, userIdOf, waitForMessage } from './test-helpers';
 
 /** The dev server proxies the Go server, so URLs the server mints use this host and load same-origin. */
 const PROXIED_WS = 'ws://127.0.0.1:5173/ws';
@@ -267,9 +267,7 @@ test.describe('reference features against the Go server', () => {
 		await (await roomAction(page, 'leave-room')).click();
 		await expect(page.getByTestId('room-list').locator(`button[data-room="general"]`)).toHaveCount(0);
 		await expect(page.getByTestId('room-list').locator(`button[data-room="${threadId}"]`)).toBeVisible();
-		await page.getByTestId('browse-rooms').click();
-		await expect(page.getByTestId('room-directory')).toContainText('Most active rooms');
-		await page.getByTestId('room-directory').locator('[data-join="general"]').click();
+		await joinListedRoom(page, 'general');
 		await expect(page.getByRole('main', { name: 'Conversation' }).getByRole('heading', { name: 'General', exact: true })).toBeVisible();
 		// The thread is still joined: its row is back under General, beside its card.
 		await expect(card).toBeVisible();

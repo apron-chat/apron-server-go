@@ -186,6 +186,16 @@ export async function roomAction(page: Page, testId: 'edit-room' | 'leave-room')
 	return page.getByTestId(testId);
 }
 
+/**
+ * Joins a room you haven't, from the sidebar's listing of them (`room_list` with `not_joined`), opening that section
+ * first when it is folded: apron-web shows it open, but it folds and older versions start it folded.
+ */
+export async function joinListedRoom(page: Page, roomId: string): Promise<void> {
+	const section = page.getByTestId('browse-rooms');
+	if ((await section.getAttribute('aria-expanded')) !== 'true') await section.click();
+	await page.getByTestId('room-directory').locator(`[data-join="${roomId}"]`).click();
+}
+
 export async function openThread(page: Page, threadId: string, options: { join?: boolean } = {}): Promise<void> {
 	const row = page.locator(`[data-testid="thread-list"] button[data-thread="${threadId}"]`);
 	const card = page.locator(`[data-testid="thread-card"][data-thread="${threadId}"]`);
