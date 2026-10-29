@@ -190,8 +190,8 @@ complete emoji set for that message with `reactions`. Tombstones hide their
 reactions.
 
 A new guest on the Go server has joined `general`; other rooms are joined
-from Browse rooms, and threads from More threads…, a thread's Join, or by
-replying in it. A thread's members are only those who joined it (its creator
+from the sidebar's list of rooms you haven't joined (Other Rooms), and threads
+from More threads…, a thread's Join, or by replying in it. A thread's members are only those who joined it (its creator
 first), independent of its parent room. Empty threads remain available;
 deleting or moving the message they were started from does not remove them.
 Private rooms and private threads are visible only to their members, who add
