@@ -75,7 +75,7 @@ func (s *Server) devicesOfLocked(u *userState) ([][32]byte, []deviceToken) {
 // with it close and its push registrations go. A passkey or session token
 // someone got while signed in with the old token stays. The token goes to
 // this connection only, in a ~private notice before the result (§1).
-func (s *Server) inviteDeviceCommand(c *client, r *roomState, _ map[string]any, args string) (map[string]any, *rpcError) {
+func (s *Server) inviteDeviceCommand(c *client, r *roomState, _ map[string]any, args, _ string) (map[string]any, *rpcError) {
 	u := c.user
 	if !u.account() {
 		return nil, &rpcError{Code: codeDenied, Message: "Sign in with a passkey or email to use /invite-device"}

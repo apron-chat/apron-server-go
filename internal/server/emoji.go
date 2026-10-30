@@ -317,7 +317,7 @@ func (s *Server) handleEmoji(w http.ResponseWriter, r *http.Request) {
 // upload's write finishes, which checks the catalog again
 // (refuseEmojiLocked). A connection not offered ext:emoji, whose image
 // URLs clients would refuse, may not add one.
-func (s *Server) emojiCommand(c *client, _ *roomState, body map[string]any, args string) (map[string]any, *rpcError) {
+func (s *Server) emojiCommand(c *client, _ *roomState, body map[string]any, args, _ string) (map[string]any, *rpcError) {
 	u := c.user
 	action, key, _ := strings.Cut(args, " ")
 	key = strings.TrimSpace(key)

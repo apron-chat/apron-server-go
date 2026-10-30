@@ -17,27 +17,25 @@ import (
 	"net/http"
 	"os"
 	"strings"
-	"sync"
 	"time"
-	"unicode/utf8"
 
 	_ "golang.org/x/image/webp" // Registered for image.DecodeConfig.
 )
 
-// HTTP paths for embed content (§4.8.3, §4.8.5). Write URLs carry a one-time
-// token; file and stream URLs carry the embed_id and an unguessable secret,
-// since HTTP requests are not authenticated.
+// HTTP paths for embed content (§4.8.3). Write URLs carry a one-time token;
+// file and live text URLs (livePath, live.go) carry the embed_id and an
+// unguessable secret, since HTTP requests are not authenticated.
 const (
-	writePath  = "/write/"
-	filePath   = "/files/"
-	streamPath = "/streams/"
+	writePath = "/write/"
+	filePath  = "/files/"
 )
 
 // maxEmbedsPerMessage bounds body.embeds.
 const maxEmbedsPerMessage = 32
 
-// embedState is a server-hosted embed: an upload or a stream. Other embed
-// kinds are body content with only an embed_id.
+// embedState is a server-hosted embed: an upload, or live text (terminal or
+// append, live.go). Other embed kinds are body content with only an
+// embed_id.
 type embedState struct {
 	id   string
 	kind string
@@ -56,14 +54,21 @@ type embedState struct {
 	title          string
 	// alt is the sender's og.image.alt, kept in the server's og.
 	alt string
-	// timer expires an unused write URL, then bounds a stream's duration.
+	// timer expires an unused write URL, then bounds live text's duration;
+	// grace ends live text whose writer disconnected and did not return.
 	timer    *time.Timer
+	grace    *time.Timer
 	started  bool
 	finished bool
 	removed  bool
+	// writing is set while a writer sends live text.
+	writing bool
 	// owned holds the server fields restored on every save: an upload's url
-	// and og, a live stream's url, a finished stream's text.
+	// and og, live text's url, a finished terminal's output.
 	owned map[string]any
+	// post is the message a /embed-terminal or /embed-append command posts
+	// when its write starts; nil for an embed sent in a message.
+	post *pendingPost
 
 	// path is the file holding a finished upload's content, size its length,
 	// and upload its element in Server.uploads.
@@ -72,7 +77,7 @@ type embedState struct {
 	upload      *list.Element
 	seq         int64
 	contentType string
-	stream      *streamBuffer
+	live        *liveText
 }
 
 // image reports whether the embed is an avatar, the server's included, or
@@ -89,9 +94,9 @@ func (e *embedState) apart() bool {
 	return e.emojiKey != "" || e.serverAvatarBy != ""
 }
 
-func (e *embedState) endStream() {
-	if e.stream != nil {
-		e.stream.end()
+func (e *embedState) endLive() {
+	if e.live != nil {
+		e.live.end()
 	}
 }
 
@@ -99,16 +104,13 @@ func (e *embedState) fileURL() string {
 	return e.baseURL + filePath + e.id + "/" + e.secret
 }
 
-func (e *embedState) streamURL() string {
-	return e.baseURL + streamPath + e.id + "/" + e.secret
-}
-
 // resolveEmbedsLocked applies embed identity (§4.8.2) to a submitted
 // body. An embed with embed_id keeps that embed of the current snapshot, with
 // its kind and server-owned fields restored from the server's records; one
-// without is new and gets an embed_id, and a new upload or stream embed gets
-// a write URL, listed in written. Senders' og is dropped: the server only
-// describes media it hosts.
+// without is new and gets an embed_id, and a new upload, terminal, or append
+// embed gets a write URL, listed in written. Senders' og is dropped: the
+// server only describes media it hosts. A message has at most one append
+// embed (§4.8.5).
 func (s *Server) resolveEmbedsLocked(c *client, messageID string, current map[string]any, body map[string]any) ([]any, []any, *rpcError) {
 	submitted, _ := body["embeds"].([]any)
 	previous := make(map[string]map[string]any)
@@ -124,10 +126,14 @@ func (s *Server) resolveEmbedsLocked(c *client, messageID string, current map[st
 		}
 	}
 	kept := make(map[string]bool)
+	appends := 0
 	for i, value := range submitted {
 		embed := value.(map[string]any)
 		raw, has := embed["embed_id"]
 		if !has {
+			if embed["kind"] == kindAppend {
+				appends++
+			}
 			continue
 		}
 		id, _ := raw.(string)
@@ -135,6 +141,12 @@ func (s *Server) resolveEmbedsLocked(c *client, messageID string, current map[st
 			return nil, nil, invalidParams("body.embeds[%d]: unknown embed_id %v", i, raw)
 		}
 		kept[id] = true
+		if previous[id]["kind"] == kindAppend {
+			appends++
+		}
+	}
+	if appends > 1 {
+		return nil, nil, invalidParams("A message has at most one append embed")
 	}
 
 	embeds := make([]any, 0, len(submitted))
@@ -147,7 +159,7 @@ func (s *Server) resolveEmbedsLocked(c *client, messageID string, current map[st
 			delete(embed, "write_url")
 			if e := s.embeds[id]; e != nil {
 				delete(embed, "url")
-				delete(embed, "text")
+				delete(embed, "output")
 				maps.Copy(embed, cloneObject(e.owned))
 			}
 			embeds = append(embeds, embed)
@@ -160,22 +172,26 @@ func (s *Server) resolveEmbedsLocked(c *client, messageID string, current map[st
 		delete(embed, "og")
 		delete(embed, "write_url")
 		embed["embed_id"] = id
-		if kind == "upload" || kind == "stream" {
+		if kind == "upload" || liveKind(kind) {
 			delete(embed, "url")
-			delete(embed, "text")
+			delete(embed, "output")
 			e := s.newWriteLocked(c, id, kind, messageID)
 			e.alt = alt
 			e.title, _ = embed["title"].(string)
-			if kind == "stream" {
-				e.stream = newStreamBuffer(s.config.StreamKeepBytes, s.config.StreamMaxBytes)
-				e.owned = map[string]any{"url": e.streamURL()}
-				embed["url"] = e.streamURL()
+			if liveKind(kind) {
+				text, _ := body["text"].(string)
+				s.startLiveLocked(e, text)
+				embed["url"] = e.liveURL()
 			}
-			written = append(written, map[string]any{"embed_id": id, "kind": kind, "write_url": e.baseURL + writePath + e.token})
+			written = append(written, map[string]any{"embed_id": id, "kind": kind, "write_url": e.writeURL()})
 		}
 		embeds = append(embeds, embed)
 	}
 	return embeds, written, nil
+}
+
+func (e *embedState) writeURL() string {
+	return e.baseURL + writePath + e.token
 }
 
 func asList(value any) []any {
@@ -241,7 +257,7 @@ func (s *Server) releaseEmbedsLocked(current map[string]any, body map[string]any
 }
 
 // removeEmbedLocked forgets a hosted embed and its content, invalidating its
-// write, file, and stream URLs.
+// write, file, and live text URLs.
 func (s *Server) removeEmbedLocked(id string) {
 	e := s.embeds[id]
 	if e == nil {
@@ -251,7 +267,10 @@ func (s *Server) removeEmbedLocked(id string) {
 	if e.timer != nil {
 		e.timer.Stop()
 	}
-	e.endStream()
+	if e.grace != nil {
+		e.grace.Stop()
+	}
+	e.endLive()
 	if e.upload != nil {
 		s.uploads.Remove(e.upload)
 		e.upload = nil
@@ -266,12 +285,16 @@ func (s *Server) removeEmbedLocked(id string) {
 }
 
 // failWriteLocked finishes a write that never started or failed: the embed is
-// published out of its message (§4.8.3).
+// published out of its message (§4.8.3). A command's pending message is
+// never posted.
 func (s *Server) failWriteLocked(e *embedState) {
 	if m := s.messages[e.messageID]; m != nil {
 		s.republishLocked(m, func(body map[string]any) bool {
 			return replaceEmbed(body, e.id, nil)
 		})
+		s.removeEmbedLocked(e.id)
+		s.releasePushLocked(m)
+		return
 	}
 	s.removeEmbedLocked(e.id)
 }
@@ -316,7 +339,8 @@ func setEmbedCORS(w http.ResponseWriter, methods string) {
 	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
 }
 
-// handleWrite accepts an upload or stream body at its write URL, once.
+// handleWrite accepts an upload body at its write URL, once, or live text
+// (writeLive).
 func (s *Server) handleWrite(w http.ResponseWriter, r *http.Request) {
 	setEmbedCORS(w, "PUT, OPTIONS")
 	if r.Method == http.MethodOptions {
@@ -331,29 +355,32 @@ func (s *Server) handleWrite(w http.ResponseWriter, r *http.Request) {
 	token := strings.TrimPrefix(r.URL.Path, writePath)
 	s.mu.Lock()
 	e := s.writes[token]
-	if e == nil || e.started || e.removed {
+	if e == nil || e.removed || e.finished || (e.started && e.live == nil) {
 		s.unlock()
 		refuseWrite(w, "This write URL is unknown, used, or expired", http.StatusNotFound)
+		return
+	}
+	if e.live != nil {
+		if status, message := s.startWriterLocked(e); status != 0 {
+			s.unlock()
+			refuseWrite(w, message, status)
+			return
+		}
+		s.unlock()
+		s.writeLive(w, r, e)
 		return
 	}
 	e.started = true
 	delete(s.writes, token)
 	e.timer.Stop()
-	if e.stream != nil {
-		e.timer = time.AfterFunc(s.config.StreamMaxDuration, e.endStream)
-	}
 	s.unlock()
-	if e.stream != nil {
-		s.writeStream(w, r, e)
-	} else {
-		s.writeUpload(w, r, e)
-	}
+	s.writeUpload(w, r, e)
 }
 
 // refuseWrite answers a write without reading its body, and closes the
 // connection. net/http would otherwise read what is left of the body before
 // answering, to reuse the connection, and wait for as long as the writer
-// holds the body open, such as a stream writer waiting for the answer.
+// holds the body open, such as a live text writer waiting for the answer.
 func refuseWrite(w http.ResponseWriter, message string, status int) {
 	w.Header().Set("Connection", "close")
 	_ = http.NewResponseController(w).SetReadDeadline(time.Now())
@@ -658,7 +685,7 @@ func (s *Server) handleFile(w http.ResponseWriter, r *http.Request) {
 	}
 	s.mu.RLock()
 	e := s.lookupEmbedLocked(strings.TrimPrefix(r.URL.Path, filePath))
-	if e == nil || !e.finished || e.stream != nil {
+	if e == nil || !e.finished || e.kind != "upload" {
 		s.mu.RUnlock()
 		http.NotFound(w, r)
 		return
@@ -688,7 +715,7 @@ func (s *Server) handleFile(w http.ResponseWriter, r *http.Request) {
 	http.ServeContent(w, r, "", time.Time{}, content)
 }
 
-// lookupEmbedLocked resolves "embed_id/secret" from a file or stream path.
+// lookupEmbedLocked resolves "embed_id/secret" from a file or live text path.
 func (s *Server) lookupEmbedLocked(path string) *embedState {
 	id, secret, ok := strings.Cut(path, "/")
 	e := s.embeds[id]
@@ -696,208 +723,4 @@ func (s *Server) lookupEmbedLocked(path string) *embedState {
 		return nil
 	}
 	return e
-}
-
-// writeStream copies the request body into a stream until it ends: the body
-// ends, a limit is reached, or the embed is removed (§4.8.5).
-func (s *Server) writeStream(w http.ResponseWriter, r *http.Request, e *embedState) {
-	// The reply may come before the body ends, as when the stream is removed.
-	controller := http.NewResponseController(w)
-	_ = controller.EnableFullDuplex()
-	chunks := make(chan []byte)
-	go func() {
-		defer close(chunks)
-		for {
-			buf := make([]byte, 32<<10)
-			n, err := r.Body.Read(buf)
-			if n > 0 {
-				select {
-				case chunks <- buf[:n]:
-				case <-e.stream.finished:
-					return
-				}
-			}
-			if err != nil {
-				return
-			}
-		}
-	}()
-	bodyEnded := false
-	for open := true; open; {
-		select {
-		case chunk, ok := <-chunks:
-			bodyEnded = !ok
-			open = ok && e.stream.write(chunk)
-		case <-e.stream.finished:
-			open = false
-		}
-	}
-	e.stream.end()
-	if !bodyEnded {
-		// Unblock a body read still waiting on the writer, and let it finish.
-		// The expired deadline also cancels the connection's context, so the
-		// connection must not serve another request.
-		w.Header().Set("Connection", "close")
-		_ = controller.SetReadDeadline(time.Now())
-		for range chunks {
-		}
-	}
-	s.mu.Lock()
-	defer s.unlock()
-	e.timer.Stop()
-	if e.removed {
-		http.Error(w, "The stream was removed from its message", http.StatusGone)
-		return
-	}
-	s.touchEmbed(e.id)
-	e.finished = true
-	e.owned = map[string]any{"text": e.stream.text()}
-	if m := s.messages[e.messageID]; m != nil {
-		s.republishLocked(m, func(body map[string]any) bool {
-			return replaceEmbed(body, e.id, func(embed map[string]any) {
-				delete(embed, "url")
-				embed["text"] = e.owned["text"]
-			})
-		})
-	}
-	if e.stream.limited() {
-		http.Error(w, fmt.Sprintf("Streams are limited to %d bytes; the stream ended", s.config.StreamMaxBytes), http.StatusRequestEntityTooLarge)
-		return
-	}
-	w.WriteHeader(http.StatusNoContent)
-}
-
-// handleStream serves a live stream: the kept text, then more as it arrives,
-// until the stream ends. A finished stream's URL no longer works.
-func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Access-Control-Allow-Origin", "*")
-	if r.Method != http.MethodGet {
-		http.Error(w, "Read with GET", http.StatusMethodNotAllowed)
-		return
-	}
-	s.mu.RLock()
-	e := s.lookupEmbedLocked(strings.TrimPrefix(r.URL.Path, streamPath))
-	if e == nil || e.stream == nil || e.finished {
-		s.mu.RUnlock()
-		http.NotFound(w, r)
-		return
-	}
-	stream := e.stream
-	s.mu.RUnlock()
-	header := w.Header()
-	header.Set("Content-Type", "text/plain; charset=utf-8")
-	header.Set("X-Content-Type-Options", "nosniff")
-	header.Set("Cache-Control", "no-store")
-	controller := http.NewResponseController(w)
-	position := int64(-1)
-	for {
-		chunk, next, changed, ended := stream.read(position)
-		if len(chunk) > 0 {
-			if _, err := w.Write(chunk); err != nil {
-				return
-			}
-		}
-		_ = controller.Flush()
-		position = next
-		if ended {
-			return
-		}
-		select {
-		case <-changed:
-		case <-r.Context().Done():
-			return
-		}
-	}
-}
-
-// streamBuffer keeps a stream's trailing text and wakes readers as it grows.
-type streamBuffer struct {
-	mu       sync.Mutex
-	keep     int
-	maxBytes int64
-	// data holds the kept bytes, starting at absolute offset start.
-	data    []byte
-	start   int64
-	total   int64
-	changed chan struct{}
-	ended   bool
-	atLimit bool
-	// finished closes when the stream ends, for its writer.
-	finished chan struct{}
-}
-
-func newStreamBuffer(keep int, maxBytes int64) *streamBuffer {
-	return &streamBuffer{keep: keep, maxBytes: maxBytes, changed: make(chan struct{}), finished: make(chan struct{})}
-}
-
-// write appends to the stream and reports whether it still accepts more. At
-// the size limit it keeps what fits and ends.
-func (b *streamBuffer) write(p []byte) bool {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	if b.ended {
-		return false
-	}
-	if room := b.maxBytes - b.total; int64(len(p)) >= room {
-		p = p[:room]
-		b.atLimit = true
-	}
-	b.data = append(b.data, p...)
-	b.total += int64(len(p))
-	if excess := len(b.data) - b.keep; excess > 0 {
-		// Trim to a rune boundary so the kept text starts with a whole rune.
-		for excess < len(b.data) && !utf8.RuneStart(b.data[excess]) {
-			excess++
-		}
-		b.data = append([]byte(nil), b.data[excess:]...)
-		b.start += int64(excess)
-	}
-	b.signalLocked()
-	if b.atLimit {
-		b.endLocked()
-	}
-	return !b.ended
-}
-
-func (b *streamBuffer) end() {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	b.endLocked()
-}
-
-func (b *streamBuffer) endLocked() {
-	if !b.ended {
-		b.ended = true
-		close(b.finished)
-		b.signalLocked()
-	}
-}
-
-func (b *streamBuffer) signalLocked() {
-	close(b.changed)
-	b.changed = make(chan struct{})
-}
-
-func (b *streamBuffer) limited() bool {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.atLimit
-}
-
-// read returns the bytes from position on (from the start of the kept text
-// when position is before it), the next position, a channel closed on the
-// next change, and whether the stream has ended with nothing more to read.
-func (b *streamBuffer) read(position int64) ([]byte, int64, chan struct{}, bool) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	position = max(position, b.start)
-	chunk := append([]byte(nil), b.data[position-b.start:]...)
-	return chunk, b.start + int64(len(b.data)), b.changed, b.ended
-}
-
-// text is the kept text as valid UTF-8.
-func (b *streamBuffer) text() string {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return strings.ToValidUTF8(string(b.data), "�")
 }

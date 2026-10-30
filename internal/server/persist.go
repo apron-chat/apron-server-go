@@ -211,7 +211,6 @@ type storedEmbed struct {
 	Secret         string         `json:"secret"`
 	Title          string         `json:"title,omitzero"`
 	Alt            string         `json:"alt,omitzero"`
-	Stream         bool           `json:"stream,omitzero"`
 	Finished       bool           `json:"finished,omitzero"`
 	Owned          map[string]any `json:"owned,omitzero"`
 	File           string         `json:"file,omitzero"`
@@ -415,7 +414,7 @@ func storedUserOf(u *userState) storedUser {
 func storedEmbedOf(e *embedState) storedEmbed {
 	stored := storedEmbed{
 		Kind: e.kind, MessageID: e.messageID, BaseURL: e.baseURL, Secret: e.secret,
-		Title: e.title, Alt: e.alt, Stream: e.stream != nil, Finished: e.finished,
+		Title: e.title, Alt: e.alt, Finished: e.finished,
 		Owned: e.owned, Size: e.size, ContentType: e.contentType, Seq: e.seq,
 	}
 	if e.avatarFor != nil {
@@ -621,12 +620,6 @@ func (s *Server) restoreLocked() (map[string]bool, error) {
 			baseURL:        stored.BaseURL, secret: stored.Secret, title: stored.Title, alt: stored.Alt,
 			finished: stored.Finished, started: stored.Finished, owned: stored.Owned, size: stored.Size,
 			contentType: stored.ContentType, seq: stored.Seq,
-		}
-		if stored.Stream {
-			e.stream = newStreamBuffer(s.config.StreamKeepBytes, s.config.StreamMaxBytes)
-			if stored.Finished {
-				e.stream.end()
-			}
 		}
 		if stored.File != "" {
 			e.path = filepath.Join(s.uploadDir, stored.File)
