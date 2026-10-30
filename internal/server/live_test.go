@@ -149,7 +149,7 @@ func TestAppendGrowsTheBodyThenMovesIntoIt(t *testing.T) {
 		t.Fatalf("live reader: %v %v", reader, err)
 	}
 	defer reader.Body.Close()
-	if reader.Header.Get("Content-Type") != "text/plain; charset=utf-8" || reader.Header.Get("X-Content-Type-Options") != "nosniff" {
+	if reader.Header.Get("Content-Type") != "text/plain; charset=utf-8" || reader.Header.Get("X-Content-Type-Options") != "nosniff" || reader.Header.Get("Cache-Control") != "no-store, no-transform" {
 		t.Fatalf("live text headers: %#v", reader.Header)
 	}
 	text := "1. Roll back.\n2. Renew the cert, @guest_1.\n"

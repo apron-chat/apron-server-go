@@ -313,7 +313,8 @@ func (s *Server) handleLive(w http.ResponseWriter, r *http.Request) {
 	header.Set("Content-Type", "text/plain; charset=utf-8")
 	header.Set("X-Content-Type-Options", "nosniff")
 	header.Set("Content-Security-Policy", "sandbox; default-src 'none'")
-	header.Set("Cache-Control", "no-store")
+	// no-transform: a proxy that compresses it holds the stream back until it ends.
+	header.Set("Cache-Control", "no-store, no-transform")
 	if finished {
 		_, _ = io.WriteString(w, output)
 		return

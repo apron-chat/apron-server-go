@@ -622,7 +622,8 @@ publishes the snapshot that finishes a write before it answers the `PUT`.
   its start, followed by more as it arrives, until the text ends; it is
   served as `text/plain; charset=utf-8` with `X-Content-Type-Options:
   nosniff`, `Content-Security-Policy: sandbox`, and `Cache-Control:
-  no-store`. The writer sends a streaming `PUT` body, such as `curl -T -`
+  no-store, no-transform` (a proxy in front that compressed it would hold
+  the stream back until it ends). The writer sends a streaming `PUT` body, such as `curl -T -`
   from a pipe, and one writer at a time (another is `409`). The text ends
   when the body ends (the writer gets `204`), after one hour, or once the
   writer has sent 16 MiB or an append is full (`413`); see the `--live.*`
