@@ -223,17 +223,17 @@ func TestLiveTextSettings(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if config.LiveTextMaxDuration != time.Hour || config.LiveTextMaxBytes != 16<<20 || config.LiveTextGrace != 10*time.Second ||
+	if config.LiveTextMaxDuration != time.Hour || config.LiveTextMaxBytes != 16<<20 ||
 		config.TerminalKeepBytes != 64<<10 || config.AppendMaxBytes != 64<<10 {
-		t.Fatalf("defaults: %v %d %v %d %d", config.LiveTextMaxDuration, config.LiveTextMaxBytes, config.LiveTextGrace, config.TerminalKeepBytes, config.AppendMaxBytes)
+		t.Fatalf("defaults: %v %d %d %d", config.LiveTextMaxDuration, config.LiveTextMaxBytes, config.TerminalKeepBytes, config.AppendMaxBytes)
 	}
-	options, _ = parse(t, "--live.max-minutes", "2", "--live.max-mb", "1", "--live.grace-seconds", "0", "--live.terminal-keep-kb", "8", "--live.append-max-kb", "256")
+	options, _ = parse(t, "--live.max-minutes", "2", "--live.max-mb", "1", "--live.terminal-keep-kb", "8", "--live.append-max-kb", "256")
 	if config, err = serverConfig(*options); err != nil {
 		t.Fatal(err)
 	}
-	if config.LiveTextMaxDuration != 2*time.Minute || config.LiveTextMaxBytes != 1<<20 || config.LiveTextGrace != 0 ||
+	if config.LiveTextMaxDuration != 2*time.Minute || config.LiveTextMaxBytes != 1<<20 ||
 		config.TerminalKeepBytes != 8<<10 || config.AppendMaxBytes != 256<<10 {
-		t.Fatalf("set: %v %d %v %d %d", config.LiveTextMaxDuration, config.LiveTextMaxBytes, config.LiveTextGrace, config.TerminalKeepBytes, config.AppendMaxBytes)
+		t.Fatalf("set: %v %d %d %d", config.LiveTextMaxDuration, config.LiveTextMaxBytes, config.TerminalKeepBytes, config.AppendMaxBytes)
 	}
 	// An append is part of a message's text, which a request carries.
 	options, _ = parse(t, "--live.append-max-kb", "257")

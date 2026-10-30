@@ -8,6 +8,8 @@ import (
 	"sync"
 	"time"
 	"unicode/utf8"
+
+	"golang.org/x/text/encoding/unicode"
 )
 
 // Live text (§4.8.3): terminal (§4.8.6) and append (§4.8.5) embeds, which
@@ -55,32 +57,27 @@ func (s *Server) startLiveLocked(e *embedState, opening string) {
 	e.owned = map[string]any{"url": e.liveURL()}
 }
 
-// startWriterLocked admits a writer to live text: the first, which posts a
-// command's pending message and starts the duration limit, or one that
-// returns within the grace period after its writer disconnected. It returns
-// the refusal's status and message, if any.
+// startWriterLocked admits live text's one writer, which posts a command's
+// pending message and starts the duration limit. It returns the refusal's
+// status and message, if any.
 func (s *Server) startWriterLocked(e *embedState) (int, string) {
-	if e.writing {
+	if e.started {
 		return http.StatusConflict, "This live text already has a writer"
 	}
-	if !e.started {
-		if e.post != nil && !s.postPendingLocked(e) {
-			s.removeEmbedLocked(e.id)
-			return http.StatusGone, "The room or the message this was to reply to is no longer available"
-		}
-		e.started = true
-		e.timer.Stop()
-		e.timer = time.AfterFunc(s.config.LiveTextMaxDuration, func() {
-			s.mu.Lock()
-			defer s.unlock()
-			e.live.end()
-			if !e.writing {
-				s.finishLiveLocked(e)
-			}
-		})
-	} else if e.grace != nil {
-		e.grace.Stop()
+	if e.post != nil && !s.postPendingLocked(e) {
+		s.removeEmbedLocked(e.id)
+		return http.StatusGone, "The room or the message this was to reply to is no longer available"
 	}
+	e.started = true
+	e.timer.Stop()
+	e.timer = time.AfterFunc(s.config.LiveTextMaxDuration, func() {
+		s.mu.Lock()
+		defer s.unlock()
+		e.live.end()
+		if !e.writing {
+			s.finishLiveLocked(e)
+		}
+	})
 	e.writing = true
 	return 0, ""
 }
@@ -168,16 +165,14 @@ func hasLiveAppend(snapshot map[string]any) bool {
 }
 
 // writeLive copies the request body into live text until the text ends:
-// the body ends, a limit is reached, or the embed is removed. A writer that
-// disconnects before its body ends may PUT again within the grace period
-// (LiveTextGrace) and continue the text; otherwise the text ends then.
+// the body ends, the writer disconnects, a limit is reached, or the embed is
+// removed. The text keeps what arrived (§4.8.3); a writer cannot continue it.
 func (s *Server) writeLive(w http.ResponseWriter, r *http.Request, e *embedState) {
 	live := e.live
 	// The reply may come before the body ends, as when the embed is removed.
 	controller := http.NewResponseController(w)
 	_ = controller.EnableFullDuplex()
 	chunks := make(chan []byte)
-	var readErr error
 	go func() {
 		defer close(chunks)
 		for {
@@ -191,7 +186,6 @@ func (s *Server) writeLive(w http.ResponseWriter, r *http.Request, e *embedState
 				}
 			}
 			if err != nil {
-				readErr = err
 				return
 			}
 		}
@@ -206,7 +200,6 @@ func (s *Server) writeLive(w http.ResponseWriter, r *http.Request, e *embedState
 			open = false
 		}
 	}
-	disconnected := bodyEnded && readErr != io.EOF
 	if !bodyEnded {
 		// Unblock a body read still waiting on the writer, and let it finish.
 		// The expired deadline also cancels the connection's context, so the
@@ -221,17 +214,6 @@ func (s *Server) writeLive(w http.ResponseWriter, r *http.Request, e *embedState
 	e.writing = false
 	if e.removed {
 		http.Error(w, "The live text was removed from its message", http.StatusGone)
-		return
-	}
-	if disconnected && !live.isEnded() && s.config.LiveTextGrace > 0 {
-		e.grace = time.AfterFunc(s.config.LiveTextGrace, func() {
-			s.mu.Lock()
-			defer s.unlock()
-			if !e.writing {
-				s.finishLiveLocked(e)
-			}
-		})
-		http.Error(w, "The body did not finish; PUT again to continue", http.StatusBadRequest)
 		return
 	}
 	s.finishLiveLocked(e)
@@ -253,9 +235,6 @@ func (s *Server) finishLiveLocked(e *embedState) {
 	e.finished = true
 	e.live.end()
 	e.timer.Stop()
-	if e.grace != nil {
-		e.grace.Stop()
-	}
 	delete(s.writes, e.token)
 	s.touchEmbed(e.id)
 	m := s.messages[e.messageID]
@@ -471,12 +450,15 @@ func (b *liveText) read(position int64) ([]byte, int64, chan struct{}, bool) {
 	return chunk, end, b.changed, b.ended
 }
 
-// text is the kept text as valid UTF-8.
+// text is the kept text, converted with WHATWG's UTF-8 decode without BOM
+// (§4.8.3): each invalid sequence, and an incomplete one at the end, becomes
+// one U+FFFD, as a browser's TextDecoder shows it.
 func (b *liveText) text() string {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	kept := b.data[b.keptStartLocked()-b.start:]
-	text := strings.ToValidUTF8(string(kept), "\uFFFD")
+	decoded, _ := unicode.UTF8.NewDecoder().Bytes(kept) // x/text's UTF8 never fails, and keeps a BOM
+	text := string(decoded)
 	if !b.terminal && len(text) > b.keep {
 		// Replacement characters can be longer than the bytes they replace.
 		text = string(wholeRunes([]byte(text[:b.keep])))

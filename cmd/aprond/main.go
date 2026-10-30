@@ -69,7 +69,6 @@ type Options struct {
 	Live struct {
 		MaxMinutes     int64 `long:"max-minutes" default:"60" description:"Longest a live text (a terminal or append embed) runs, in minutes, before it ends"`
 		MaxMB          int64 `long:"max-mb" default:"16" description:"Most a live text's writer may send, in MiB, before the text ends"`
-		GraceSeconds   int64 `long:"grace-seconds" default:"10" description:"How long live text waits, in seconds, for a writer that disconnected to PUT again and continue it before it ends; 0 ends it at once"`
 		TerminalKeepKB int   `long:"terminal-keep-kb" default:"64" description:"How much of a terminal's output is kept, in KiB: its last part"`
 		AppendMaxKB    int   `long:"append-max-kb" default:"64" description:"How much text an append embed adds to its message, in KiB: its first part (at most 256, what a request may carry)"`
 	} `group:"Live text" namespace:"live"`
@@ -185,7 +184,6 @@ func serverConfig(options Options) (server.Config, error) {
 	config.MaxUploadStorageBytes = options.Upload.MaxStorageMB << 20
 	config.LiveTextMaxDuration = time.Duration(options.Live.MaxMinutes) * time.Minute
 	config.LiveTextMaxBytes = options.Live.MaxMB << 20
-	config.LiveTextGrace = time.Duration(options.Live.GraceSeconds) * time.Second
 	config.TerminalKeepBytes = options.Live.TerminalKeepKB << 10
 	config.AppendMaxBytes = options.Live.AppendMaxKB << 10
 	if int64(config.AppendMaxBytes) > config.ReadLimit {

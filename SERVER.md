@@ -161,9 +161,8 @@ Flags (`aprond --help` lists them all):
   terminal's output is kept, its last part, and `--live.append-max-kb <n>`
   (64) how much text an append adds to its message, its first part; it is
   at most 256, what a request may carry, and the server refuses to start
-  otherwise. `--live.grace-seconds <n>` (10) is how long live text waits
-  for a writer that disconnected before its body ended to `PUT` again and
-  continue it; `0` ends the text at once. See
+  otherwise. A writer that disconnects before its body ends ends the text,
+  which keeps what arrived; it cannot continue it. See
   [Embeds, uploads, and live text](#embeds-uploads-and-live-text).
 - `--push.disable` removes push. Stored registrations are kept but not
   loaded, and apply again once push is enabled. `--push.allow-insecure` is for tests only:

@@ -429,12 +429,10 @@ func TestEmbedCommandWritesExpire(t *testing.T) {
 	}
 }
 
-// A writer that disconnects may PUT again within the grace period and
-// continue the text; otherwise the text ends with what it has.
-func TestLiveTextWaitsForItsWriterToReturn(t *testing.T) {
-	config := DefaultConfig()
-	config.LiveTextGrace = 300 * time.Millisecond
-	app, httpServer := newTestServer(t, config)
+// A writer that disconnects ends the text, which keeps what arrived (§4.8.3),
+// and the write URL is used up: a writer cannot continue the text.
+func TestLiveTextEndsWhenItsWriterDisconnects(t *testing.T) {
+	app, httpServer := newTestServer(t, DefaultConfig())
 	a := dialTestClient(t, httpServer)
 	disconnect := func(writeURL, text string) {
 		t.Helper()
@@ -457,37 +455,42 @@ func TestLiveTextWaitsForItsWriterToReturn(t *testing.T) {
 			}
 		}
 		conn.Close()
-		// Wait until the server has seen the writer go.
-		for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(5 * time.Millisecond) {
-			app.mu.RLock()
-			e := app.writes[token]
-			gone := e == nil || !e.writing
-			app.mu.RUnlock()
-			if gone {
-				break
-			}
-			if time.Now().After(deadline) {
-				t.Fatal("the writer never left")
-			}
-		}
 	}
 
-	_, writeURL, _ := postLive(t, a, "returns", map[string]any{"embeds": []any{map[string]any{"kind": "terminal"}}})
+	_, writeURL, _ := postLive(t, a, "terminal", map[string]any{"embeds": []any{map[string]any{"kind": "terminal"}}})
 	disconnect(writeURL, "first ")
-	if status, _, _ := httpDo(t, http.MethodPut, writeURL, strings.NewReader("second\n"), ""); status != http.StatusNoContent {
-		t.Fatalf("returning writer: %d", status)
-	}
-	if output := embedsOf(t, a.notification(t, "message"))[0]["output"]; output != "first second\n" {
+	if output := embedsOf(t, a.notification(t, "message"))[0]["output"]; output != "first " {
 		t.Fatalf("output %q", output)
 	}
+	if status, _, _ := httpDo(t, http.MethodPut, writeURL, strings.NewReader("second\n"), ""); status != http.StatusNotFound {
+		t.Fatalf("write after the disconnect: %d", status)
+	}
 
-	_, writeURL, _ = postLive(t, a, "gone", map[string]any{"text": "> ", "embeds": []any{map[string]any{"kind": "append"}}})
+	_, writeURL, _ = postLive(t, a, "append", map[string]any{"text": "> ", "embeds": []any{map[string]any{"kind": "append"}}})
 	disconnect(writeURL, "only this")
 	if text := a.notification(t, "message")["body"].(map[string]any)["text"]; text != "> only this" {
 		t.Fatalf("text %q", text)
 	}
-	if status, _, _ := httpDo(t, http.MethodPut, writeURL, strings.NewReader("late"), ""); status != http.StatusNotFound {
-		t.Fatalf("write after the grace: %d", status)
+}
+
+// The kept text is converted with WHATWG's UTF-8 decode without BOM
+// (§4.8.3): one U+FFFD per maximal invalid subsequence, and for an
+// incomplete sequence at the end; a BOM is kept.
+func TestLiveTextDecodesAsWHATWG(t *testing.T) {
+	for _, c := range []struct{ in, want string }{
+		{"ok \u00e9", "ok \u00e9"},
+		{"a\xF1\x80\x80\xE1\x80\xC2b", "a\uFFFD\uFFFD\uFFFDb"},
+		{"\xC0\xAF", "\uFFFD\uFFFD"},
+		{"\xED\xA0\x80", "\uFFFD\uFFFD\uFFFD"},
+		{"\xE1\x80\xE2\xF0\x91\x92\xF1\xBF\x41", "\uFFFD\uFFFD\uFFFD\uFFFDA"},
+		{"end \xE2\x82", "end \uFFFD"},
+		{"\uFEFFbom", "\uFEFFbom"},
+	} {
+		live := newLiveText(true, 1<<10, 1<<20)
+		live.write([]byte(c.in))
+		if got := live.text(); got != c.want {
+			t.Errorf("%q: %q, want %q", c.in, got, c.want)
+		}
 	}
 }
 

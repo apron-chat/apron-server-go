@@ -54,7 +54,6 @@ const (
 	defaultUploadStartTimeout        = 5 * time.Minute
 	defaultLiveTextMaxBytes    int64 = 16 << 20
 	defaultLiveTextMaxDuration       = time.Hour
-	defaultLiveTextGrace             = 10 * time.Second
 	defaultTerminalKeepBytes         = 64 << 10
 	defaultAppendMaxBytes            = 64 << 10
 	defaultMaxListedMembers          = 1000
@@ -107,16 +106,14 @@ type Config struct {
 	// UploadStartTimeout is how long an unused write URL stays valid, that
 	// of a /embed-terminal or /embed-append command included.
 	UploadStartTimeout time.Duration
-	// Live text (§4.8.3) ends when its writer has sent LiveTextMaxBytes or
-	// after LiveTextMaxDuration, and LiveTextGrace after its writer
-	// disconnects without ending the body, unless the writer PUTs again to
-	// continue it. A terminal keeps its last TerminalKeepBytes (§4.8.6); an
+	// Live text (§4.8.3) ends when its writer has sent LiveTextMaxBytes,
+	// after LiveTextMaxDuration, or when its writer disconnects, keeping what
+	// arrived. A terminal keeps its last TerminalKeepBytes (§4.8.6); an
 	// append keeps its first AppendMaxBytes (§4.8.5), at most ReadLimit
 	// with its message's opening text, so that the finished body.text fits
 	// in a request.
 	LiveTextMaxBytes    int64
 	LiveTextMaxDuration time.Duration
-	LiveTextGrace       time.Duration
 	TerminalKeepBytes   int
 	AppendMaxBytes      int
 	// Store keeps the server's state across restarts; nil keeps it in memory
@@ -201,7 +198,6 @@ func DefaultConfig() Config {
 		UploadStartTimeout:    defaultUploadStartTimeout,
 		LiveTextMaxBytes:      defaultLiveTextMaxBytes,
 		LiveTextMaxDuration:   defaultLiveTextMaxDuration,
-		LiveTextGrace:         defaultLiveTextGrace,
 		TerminalKeepBytes:     defaultTerminalKeepBytes,
 		AppendMaxBytes:        defaultAppendMaxBytes,
 		MaxListedMembers:      defaultMaxListedMembers,
@@ -258,8 +254,6 @@ func (c Config) withDefaults() Config {
 	if c.LiveTextMaxDuration <= 0 {
 		c.LiveTextMaxDuration = defaults.LiveTextMaxDuration
 	}
-	// A negative grace is none: live text ends when its writer disconnects.
-	c.LiveTextGrace = max(0, c.LiveTextGrace)
 	if c.TerminalKeepBytes <= 0 {
 		c.TerminalKeepBytes = defaults.TerminalKeepBytes
 	}

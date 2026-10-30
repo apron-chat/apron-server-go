@@ -54,10 +54,8 @@ type embedState struct {
 	title          string
 	// alt is the sender's og.image.alt, kept in the server's og.
 	alt string
-	// timer expires an unused write URL, then bounds live text's duration;
-	// grace ends live text whose writer disconnected and did not return.
+	// timer expires an unused write URL, then bounds live text's duration.
 	timer    *time.Timer
-	grace    *time.Timer
 	started  bool
 	finished bool
 	removed  bool
@@ -266,9 +264,6 @@ func (s *Server) removeEmbedLocked(id string) {
 	e.removed = true
 	if e.timer != nil {
 		e.timer.Stop()
-	}
-	if e.grace != nil {
-		e.grace.Stop()
 	}
 	e.endLive()
 	if e.upload != nil {
