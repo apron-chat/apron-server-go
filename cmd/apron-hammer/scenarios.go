@@ -559,13 +559,13 @@ func runEdits(h *hammer, st *stats) {
 const uploadBytes = 64 << 10
 
 func runEmbeds(h *hammer, st *stats) {
-	streamers := max(1, h.clients/4)
-	messages := make([]chan []byte, streamers)
+	writers := max(1, h.clients/4)
+	messages := make([]chan []byte, writers)
 	peers := connect(h, h.clients, "sharer", func(i int) dialOptions {
-		if i >= streamers {
+		if i >= writers {
 			return dialOptions{}
 		}
-		// Streamers learn their stream URL from the message broadcast.
+		// Writers learn their live text URL from the message broadcast.
 		ch := make(chan []byte, 1024)
 		messages[i] = ch
 		return dialOptions{notify: func(method string, frame []byte) {
@@ -586,9 +586,16 @@ func runEmbeds(h *hammer, st *stats) {
 	defer st.finish()
 	run(len(peers), func(i int) {
 		for ctx.Err() == nil && peers[i].alive() {
-			if i < streamers && messages[i] != nil {
-				_ = measure(ctx, st, "stream 2s", func() error { return stream(ctx, peers[i], messages[i]) })
-			} else {
+			switch {
+			case i < writers && messages[i] != nil && i%2 == 0:
+				// A terminal keeps its last part, so its writer may send
+				// more than it keeps.
+				_ = measure(ctx, st, "terminal 2s", func() error { return writeLive(ctx, peers[i], messages[i], "terminal", 1<<10) })
+			case i < writers && messages[i] != nil:
+				// An append keeps its first part, and its writer stays
+				// within it.
+				_ = measure(ctx, st, "append 2s", func() error { return writeLive(ctx, peers[i], messages[i], "append", 64) })
+			default:
 				_ = measure(ctx, st, "upload+get 64KiB", func() error { return upload(ctx, peers[i], payload) })
 			}
 		}
@@ -654,18 +661,19 @@ func upload(ctx context.Context, p *peer, payload []byte) error {
 	return nil
 }
 
-// stream writes 1 KiB chunks to a stream for two seconds while reading it
-// back from its stream URL.
-func stream(ctx context.Context, p *peer, messages chan []byte) error {
-	// Discard broadcasts that arrived since the last stream.
+// writeLive writes chunks of size bytes to new live text of kind
+// (terminal or append) for two seconds, while reading it back from its
+// url.
+func writeLive(ctx context.Context, p *peer, messages chan []byte, kind string, size int) error {
+	// Discard broadcasts that arrived since the last live text.
 	for len(messages) > 0 {
 		<-messages
 	}
-	written, err := postEmbed(ctx, p, "stream")
+	written, err := postEmbed(ctx, p, kind)
 	if err != nil {
 		return err
 	}
-	streamURL, err := awaitStreamURL(ctx, messages, written.MessageID)
+	liveURL, err := awaitLiveURL(ctx, messages, written.MessageID)
 	if err != nil {
 		return err
 	}
@@ -678,12 +686,12 @@ func stream(ctx context.Context, p *peer, messages chan []byte) error {
 		if err == nil {
 			response.Body.Close()
 			if response.StatusCode != http.StatusNoContent {
-				err = fmt.Errorf("stream PUT: %s", response.Status)
+				err = fmt.Errorf("%s PUT: %s", kind, response.Status)
 			}
 		}
 		posted <- err
 	}()
-	chunk := []byte(text(1 << 10))
+	chunk := []byte(text(size))
 	sent := 0
 	var readErr error
 	var got int64
@@ -692,7 +700,7 @@ func stream(ctx context.Context, p *peer, messages chan []byte) error {
 	var readTook time.Duration
 	go func() {
 		defer close(readDone)
-		request, _ := http.NewRequestWithContext(ctx, http.MethodGet, streamURL, nil)
+		request, _ := http.NewRequestWithContext(ctx, http.MethodGet, liveURL, nil)
 		response, err := httpClient.Do(request)
 		if err != nil {
 			readErr = err
@@ -700,7 +708,7 @@ func stream(ctx context.Context, p *peer, messages chan []byte) error {
 		}
 		defer response.Body.Close()
 		if response.StatusCode != http.StatusOK {
-			readErr = fmt.Errorf("stream GET: %s", response.Status)
+			readErr = fmt.Errorf("%s GET: %s", kind, response.Status)
 			return
 		}
 		got, readErr = io.Copy(io.Discard, response.Body)
@@ -722,12 +730,12 @@ func stream(ctx context.Context, p *peer, messages chan []byte) error {
 		return readErr
 	}
 	if got == 0 {
-		return fmt.Errorf("stream reader got nothing of %d bytes; its response ended after %s", sent, readTook.Round(time.Millisecond))
+		return fmt.Errorf("%s reader got nothing of %d bytes; its response ended after %s", kind, sent, readTook.Round(time.Millisecond))
 	}
 	return nil
 }
 
-func awaitStreamURL(ctx context.Context, messages chan []byte, messageID string) (string, error) {
+func awaitLiveURL(ctx context.Context, messages chan []byte, messageID string) (string, error) {
 	timeout := time.After(5 * time.Second)
 	for {
 		select {
@@ -742,11 +750,11 @@ func awaitStreamURL(ctx context.Context, messages chan []byte, messageID string)
 					} `json:"body"`
 				} `json:"params"`
 			}
-			if json.Unmarshal(frame, &f) == nil && f.Params.MessageID == messageID && len(f.Params.Body.Embeds) == 1 {
+			if json.Unmarshal(frame, &f) == nil && f.Params.MessageID == messageID && len(f.Params.Body.Embeds) == 1 && f.Params.Body.Embeds[0].URL != "" {
 				return f.Params.Body.Embeds[0].URL, nil
 			}
 		case <-timeout:
-			return "", errors.New("no broadcast carried the stream URL")
+			return "", errors.New("no broadcast carried the live text URL")
 		case <-ctx.Done():
 			return "", ctx.Err()
 		}
