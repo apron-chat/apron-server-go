@@ -4,8 +4,9 @@
 open chat protocol over WebSockets.**
 
 `aprond` is a single Go binary that implements every capability of Apron
-protocol v9: rooms, threads, and private rooms, full history, edits and
-replies, reactions and custom emoji, file uploads and live streams,
+protocol v10: rooms, threads, and private rooms, full history, edits and
+replies, reactions and custom emoji, file uploads, live terminal output and
+text streamed into messages,
 commands, presence status and mutes, Web Push and relay push notifications, roles, and passkey
 and email sign-in. It keeps its state in SQLite, can serve a web client from the same
 port, and can fetch its own TLS certificates.

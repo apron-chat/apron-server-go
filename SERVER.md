@@ -1,7 +1,7 @@
 # aprond
 
-`cmd/aprond` serves the reference Apron backend: it implements protocol v9
-as of apron [b8f2b26](https://github.com/shazow/apron/blob/b8f2b263a25f63deca549c6cd4740b41306ce7eb/PROTOCOL.md),
+`cmd/aprond` serves the reference Apron backend: it implements protocol v10
+as of apron [f97f59e](https://github.com/shazow/apron/blob/f97f59e7d254ea970030caa31a6826471dad4eac/PROTOCOL.md),
 the commit `testdata/apron` pins
 ([PROTOCOL.md](https://github.com/shazow/apron/blob/main/PROTOCOL.md)), every capability, private rooms,
 roles, passkey and email sign-in, and liveness ping, but not the designs
@@ -28,12 +28,13 @@ Defaults:
 - HTTP and WebSocket listener: `127.0.0.1:8080` (`--addr`)
 - WebSocket endpoint: `/ws`; health endpoint: `/healthz`
 - embed endpoints: `/write/<token>`, `/files/<embed_id>/<secret>`,
-  `/streams/<embed_id>/<secret>`; custom emoji catalog:
+  `/live/<embed_id>/<secret>`; custom emoji catalog:
   `/emoji/catalog-<hash>.json`
 - WebSocket origins: `localhost`, `127.0.0.1`, and `::1` during development
-- `server` frame: `apron: 9`, `agent: "apron-go/9"`, and
+- `server` frame: `apron: 10`, `agent: "apron-go/10"`, and
   `capabilities`: `history`, `edit`, `rooms`, `reactions`, `activity`,
-  `embed:upload`, `embed:stream`, `command`, `status`, `ext`, `ext:emoji`,
+  `embed:upload`, `embed:append`, `embed:terminal`, `command`, `status`,
+  `ext`, `ext:emoji`,
   with `server.ext.emoji.catalog_url` (see [Custom emoji](#custom-emoji);
   not on a connection whose URLs would be plain `http:` on a host other than
   a loopback one), and, while `--max-private-rooms` bounds private rooms,
@@ -73,7 +74,7 @@ Flags (`aprond --help` lists them all):
   cross-site protections. `--addr` changes the listener address;
   `--addr :8080` listens on every interface.
 - `--public-url https://chat.example` sets the base of write, file, and
-  stream URLs. Without it they use the host each WebSocket request arrived
+  live text URLs. Without it they use the host each WebSocket request arrived
   on (or `https://` and the first `--tls.domain`), which suits local
   development but lets a client choose the host in URLs others see; set it
   in any deployment. Behind a reverse proxy that terminates TLS, set it to
@@ -86,7 +87,8 @@ Flags (`aprond --help` lists them all):
   caps concurrent TCP connections on the listener, HTTP included; further
   connections wait to be accepted.
 - `--messages-per-minute <n>` limits each user's new messages, `room_set`
-  requests, and `/avatar` and `/emoji add` commands together: a burst of `n`, refilled evenly
+  requests, and `/avatar`, `/emoji add`, `/embed-terminal`, and
+  `/embed-append` commands together: a burst of `n`, refilled evenly
   over a minute. The excess gets `retry_after` with `data.retry_after` in
   seconds. Edits, reactions, and activity are not counted.
 - `--max-listed-members <n>` (1000) bounds the `members` of one room in
@@ -153,6 +155,16 @@ Flags (`aprond --help` lists them all):
   count toward `--upload.max-storage-mb`, and nothing is removed to make
   room for one: past the storage bound `/emoji add` is refused (see
   [Custom emoji](#custom-emoji)).
+- `--live.max-minutes <n>` (60) and `--live.max-mb <n>` (16) end live text
+  (`terminal` and `append` embeds) that has run that long, or whose writer
+  has sent that much. `--live.terminal-keep-kb <n>` (64) is how much of a
+  terminal's output is kept, its last part, and `--live.append-max-kb <n>`
+  (64) how much text an append adds to its message, its first part; it is
+  at most 256, what a request may carry, and the server refuses to start
+  otherwise. `--live.grace-seconds <n>` (10) is how long live text waits
+  for a writer that disconnected before its body ended to `PUT` again and
+  continue it; `0` ends the text at once. See
+  [Embeds, uploads, and live text](#embeds-uploads-and-live-text).
 - `--push.disable` removes push. Stored registrations are kept but not
   loaded, and apply again once push is enabled. `--push.allow-insecure` is for tests only:
   it accepts `http` push endpoints and ones on internal addresses, so any
@@ -214,7 +226,7 @@ catalog, the title, description, and avatar set with `/server`, the VAPID key,
 and the
 `log_id`, guest, account, and embed counters, so no `log_id` or `user_id`
 is reused. What does not: connections and their `idle`, request
-deduplication, email proposals, live streams, the unread counts kept per
+deduplication, email proposals, live text that had not ended, the unread counts kept per
 room, which are counted again when needed, and the count each push
 endpoint last accepted, so the first badge push after a restart is sent
 even when the count is unchanged. Guests exist only while connected, so at start every guest
@@ -572,24 +584,26 @@ room, where earlier snapshots stay. If the message has reactions, a
 `reactions` record carrying every non-empty set is then logged in the
 destination room, before the result.
 
-## Embeds, uploads, and streams
+## Embeds, uploads, and live text
 
 Every embed gets a server-assigned `embed_id` (`embed_<n>`). A save keeps an
 embed by sending it back with its `embed_id`; its `kind` and the fields the
-server owns (an upload's `url` and `og`, a stream's `url` or `text`) are
-restored from the server's records, while other fields come from the save.
-An embed sent without `embed_id` is new, one left out is removed and its
-hosted content deleted, and an unknown `embed_id` is `invalid_params`. `og`
-sent by clients is dropped: the server describes only media it hosts.
+server owns (an upload's `url` and `og`, live text's `url`, a finished
+terminal's `output`) are restored from the server's records, while other
+fields come from the save. An embed sent without `embed_id` is new, one
+left out is removed and its hosted content deleted, and an unknown
+`embed_id` is `invalid_params`. `og` sent by clients is dropped: the server
+describes only media it hosts.
 
-New `upload` and `stream` embeds get a one-time write URL, listed in the
-`message` result as `embeds: [{embed_id, kind, write_url}]`, which follows the
-pending snapshot's broadcast. The sender PUTs the content there (§4.8.3);
-other methods are `405`. A write URL expires after five minutes unused,
-and a write that never starts or fails is finished by publishing the message
-without the embed. A write to a URL that is unknown, used, or expired, or
-whose embed was removed, is answered `404` at once and its connection
-closed, without waiting for its body to end.
+New `upload`, `terminal`, and `append` embeds get a one-time write URL,
+listed in the `message` result as `embeds: [{embed_id, kind, write_url}]`,
+which follows the pending snapshot's broadcast. The sender PUTs the content
+there (§4.8.3); other methods are `405`. A write URL expires after five
+minutes unused, and a write that never starts or fails is finished by
+publishing the message without the embed. A write to a URL that is unknown,
+used, or expired, or whose embed was removed, is answered `404` at once and
+its connection closed, without waiting for its body to end. The server
+publishes the snapshot that finishes a write before it answers the `PUT`.
 
 - **Uploads** (at most 20 MiB each, and 20 MiB for one message's uploads
   together; a message has at most 32 embeds, `denied` past that). While pending the embed has no `url`. When
@@ -601,13 +615,45 @@ closed, without waiting for its body to end.
   plain text are shown inline, and markup, script, stylesheet, and
   WebAssembly types are never served as such. An avatar must decode as the
   image type it declares.
-- **Streams**: the broadcast embed carries a live `url`. Readers `GET` it for
-  the kept text followed by more as it arrives; a reader that falls behind the
-  kept window continues from it. The server keeps the trailing 64 KiB. The
-  stream ends when the write body ends, after one hour, or at 16 MiB (the
-  writer gets `413`); the server then publishes the kept text as `text` in
-  place of `url`, and both URLs stop working. Saving the message without the
-  embed ends the stream (the writer gets `410`).
+- **Live text** (`terminal` and `append`,
+  [PROTOCOL.md §4.8.3](https://github.com/shazow/apron/blob/main/PROTOCOL.md#483-writes)):
+  the broadcast embed carries its `url`, `/live/<embed_id>/<secret>`, from
+  the start, before the write does. Readers `GET` it for the kept text from
+  its start, followed by more as it arrives, until the text ends; it is
+  served as `text/plain; charset=utf-8` with `X-Content-Type-Options:
+  nosniff`, `Content-Security-Policy: sandbox`, and `Cache-Control:
+  no-store`. The writer sends a streaming `PUT` body, such as `curl -T -`
+  from a pipe, and one writer at a time (another is `409`). The text ends
+  when the body ends (the writer gets `204`), after one hour, or once the
+  writer has sent 16 MiB or an append is full (`413`); see the `--live.*`
+  flags. A writer whose connection drops before its body ends may `PUT`
+  to the same write URL again within 10 seconds and continue the text;
+  after that the text ends with what it has. Saving the message without
+  the embed ends the text early, and the save is the snapshot (the writer
+  gets `410`). Live text that had not ended when the server stopped fails
+  at the next start, as other unfinished writes do: its message is
+  republished without the embed.
+- **Terminals**
+  ([PROTOCOL.md §4.8.6](https://github.com/shazow/apron/blob/main/PROTOCOL.md#486-embedterminal)):
+  the server keeps the last 64 KiB of the output, cut with §4.8.6's
+  `keep_last`: from the first byte below 0x20 in it, or else from the
+  first byte outside 0x80–0xBF. A new reader, and one that falls behind
+  what is kept, reads from there. When the text ends, the server publishes
+  a snapshot whose embed carries the kept text (invalid UTF-8 replaced with
+  U+FFFD) as `output`, in place of `url`. The `url` then serves the
+  `output`, also after a restart.
+- **Appends**
+  ([PROTOCOL.md §4.8.5](https://github.com/shazow/apron/blob/main/PROTOCOL.md#485-embedappend)):
+  a message has at most one `append` embed (`invalid_params` otherwise,
+  in a save too). The server keeps the first 64 KiB, and less after a long
+  opening text, so that `body.text` stays within the 256 KiB a request may
+  carry; at the limit it keeps the text up to a whole character. When the
+  text ends, other than by a save, the server publishes a snapshot that
+  adds the kept text (invalid UTF-8 replaced with U+FFFD) to the end of
+  `body.text` and removes the embed, whose `url` then stops working. The
+  appended text does not change `body.mentions`. The push of a new
+  message with an `append` embed waits for the text to end, so that it
+  carries the whole text (see [Push](#push)).
 - **Avatars** ([PROTOCOL.md §4.8.6](https://github.com/shazow/apron/blob/main/PROTOCOL.md#486-avatars)): the `/avatar` command with one `upload`
   embed returns a write URL. A PNG, JPEG, GIF, or WebP of at most 2 MiB
   becomes the sender's `avatar`, followed by a `user` notification; replacing
@@ -728,6 +774,58 @@ replies arrive before its result. Commands:
   `{"embeds": [{embed_id, kind, write_url}]}`; see Avatars above.
 - `/emoji add :name:` and `/emoji remove :name:` add and remove custom
   emoji; see [Custom emoji](#custom-emoji).
+- `/embed-terminal [title]` and `/embed-append [markdown]` prepare live
+  text that posts a new message when its writer starts, for programs and
+  scripts that cannot send a `message` themselves; anyone may use them.
+  Each takes no embeds (`invalid_params`), counts toward
+  `--messages-per-minute` as a new message, and returns
+  `{"embeds": [{embed_id, kind, write_url}]}`, with `kind` `terminal` or
+  `append`, after a `~private` notice in the command's room that shows the
+  write URL and how to use it, with the limits that apply. Nothing is
+  posted yet. When a `PUT` to the write URL arrives, before any of its body,
+  the server posts the message, an ordinary new one: from the command's
+  sender, in the command's room, with the command's `reply_to`, if any (a
+  reply that would quote a message fewer people can see is `denied`, as
+  for `message`), and without mentions. For `/embed-terminal` its body is
+  `{"text": "", "embeds": [{embed_id, kind: "terminal", title?, url}]}`,
+  `title` being the first line of the rest of the command, at most 200
+  characters; for `/embed-append` it is `{"text": <the rest of the
+  command>, "format": "markdown", "embeds": [{embed_id, kind: "append",
+  url}]}`. From then on it is live text, as above. If no `PUT` arrives
+  within five minutes, the write URL stops working (`404`) and nothing is
+  posted; a `PUT` after the sender has left, or lost sight of the room, is
+  `410` and posts nothing. The terminal notice reads, with the limits and
+  the URL filled in:
+
+  ````
+  Stream a terminal into this room within 5 minutes (80×40; it keeps the last 64 KiB, for up to 1 hour):
+
+  ```sh
+  script -qfc 'stty cols 80 rows 40; YOUR_COMMAND' /dev/null | curl -sT - 'WRITE_URL'
+  ```
+
+  Or stream a tmux session, until you `exit` its shell:
+
+  ```sh
+  tmux new -d -s apron -x 80 -y 40 \; set -w window-size manual \; pipe-pane -o "curl -sT - 'WRITE_URL'" && tmux attach -t apron
+  ```
+
+  The message appears when the stream starts. Anyone with this URL can write to it, so keep it to yourself.
+  ````
+
+  and the append notice:
+
+  ````
+  Stream text into this room within 5 minutes; it continues your message as Markdown (up to 64 KiB, for up to 1 hour):
+
+  ```sh
+  YOUR_COMMAND | curl -sT - 'WRITE_URL'
+  ```
+
+  The message appears when the stream starts. Anyone with this URL can write to it, so keep it to yourself.
+  ````
+
+  A `terminal` or `append` embed in any other command is `invalid_params`.
 - `/server` is for users with the `admin` role (`denied` otherwise, and
   not listed in their `/help`), following PROTOCOL.md §4.1's suggested
   convention. Alone, it sends a `~private` notice with the server frame's
@@ -982,6 +1080,10 @@ by scope:
   thread of, so the members of a private room are woken for its threads
   whether or not they joined the thread.
 
+A new message with an `append` embed is selected when its text ends
+([Embeds, uploads, and live text](#embeds-uploads-and-live-text)), or a
+save removes the embed, as a new message with its snapshot then, so that
+the push carries the whole text; one deleted before then is not pushed.
 An edit selects only the users it adds to `body.mentions` (scope
 `mentions`). Deletions, moves, reactions, and commands select no one, and
 nobody is selected by their own message. A selected user is woken only
