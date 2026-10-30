@@ -73,6 +73,7 @@ func (s *Server) startWriterLocked(e *embedState) (int, string) {
 	e.timer = time.AfterFunc(s.config.LiveTextMaxDuration, func() {
 		s.mu.Lock()
 		defer s.unlock()
+		e.timedOut = true
 		e.live.end()
 		if !e.writing {
 			s.finishLiveLocked(e)
@@ -221,6 +222,12 @@ func (s *Server) writeLive(w http.ResponseWriter, r *http.Request, e *embedState
 		http.Error(w, fmt.Sprintf("This live text is limited to %s; it ended", formatBytes(live.limit())), http.StatusRequestEntityTooLarge)
 		return
 	}
+	if e.timedOut {
+		// The writer may still be sending: a reply before the close tells it why.
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		fmt.Fprintf(w, "The text reached its %s limit; what arrived is posted.\n", formatDuration(s.config.LiveTextMaxDuration))
+		return
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -292,8 +299,10 @@ func (s *Server) handleLive(w http.ResponseWriter, r *http.Request) {
 	header.Set("Content-Type", "text/plain; charset=utf-8")
 	header.Set("X-Content-Type-Options", "nosniff")
 	header.Set("Content-Security-Policy", "sandbox; default-src 'none'")
-	// no-transform: a proxy that compresses it holds the stream back until it ends.
+	// no-transform: a proxy that compresses it holds the stream back until it
+	// ends (§4.8.3). X-Accel-Buffering asks nginx not to buffer it either.
 	header.Set("Cache-Control", "no-store, no-transform")
+	header.Set("X-Accel-Buffering", "no")
 	if finished {
 		_, _ = io.WriteString(w, output)
 		return
@@ -601,11 +610,13 @@ func (s *Server) liveNotice(e *embedState) string {
 			"```sh\nscript -qfc 'stty cols 80 rows 40; YOUR_COMMAND' /dev/null | curl -sT - '%s'\n```\n\n"+
 			"Or stream a tmux session, until you `exit` its shell:\n\n"+
 			"```sh\ntmux new -d -s apron -x 80 -y 40 \\; set -w window-size manual \\; pipe-pane -o \"curl -sT - '%s'\" && tmux attach -t apron\n```\n\n"+
-			"The message appears when the stream starts. Anyone with this URL can write to it, so keep it to yourself.",
+			"The message appears when the stream starts. At a limit the stream ends, and so does the command feeding it. "+
+			"Anyone with this URL can write to it, so keep it to yourself.",
 			within, formatBytes(int64(s.config.TerminalKeepBytes)), duration, url, url)
 	}
 	return fmt.Sprintf("Stream text into this room within %s; it continues your message as Markdown (up to %s, for up to %s):\n\n"+
 		"```sh\nYOUR_COMMAND | curl -sT - '%s'\n```\n\n"+
-		"The message appears when the stream starts. Anyone with this URL can write to it, so keep it to yourself.",
+		"The message appears when the stream starts. At a limit the stream ends, and so does the command feeding it. "+
+		"Anyone with this URL can write to it, so keep it to yourself.",
 		within, formatBytes(e.live.limit()), duration, url)
 }

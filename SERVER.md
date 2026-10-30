@@ -621,8 +621,10 @@ publishes the snapshot that finishes a write before it answers the `PUT`.
   its start, followed by more as it arrives, until the text ends; it is
   served as `text/plain; charset=utf-8` with `X-Content-Type-Options:
   nosniff`, `Content-Security-Policy: sandbox`, and `Cache-Control:
-  no-store, no-transform` (a proxy in front that compressed it would hold
-  the stream back until it ends). The writer sends a streaming `PUT` body, such as `curl -T -`
+  no-store, no-transform` and `X-Accel-Buffering: no` (a proxy in front
+  that compressed or buffered it would hold the stream back until it ends;
+  nginx honors the second, and other proxies need their response buffering
+  turned off for `/live/`). The writer sends a streaming `PUT` body, such as `curl -T -`
   from a pipe, and one writer at a time (another is `409`). The text ends
   when the body ends (the writer gets `204`), after one hour, or once the
   writer has sent 16 MiB or an append is full (`413`); see the `--live.*`
@@ -811,7 +813,7 @@ replies arrive before its result. Commands:
   tmux new -d -s apron -x 80 -y 40 \; set -w window-size manual \; pipe-pane -o "curl -sT - 'WRITE_URL'" && tmux attach -t apron
   ```
 
-  The message appears when the stream starts. Anyone with this URL can write to it, so keep it to yourself.
+  The message appears when the stream starts. At a limit the stream ends, and so does the command feeding it. Anyone with this URL can write to it, so keep it to yourself.
   ````
 
   and the append notice:
@@ -823,7 +825,7 @@ replies arrive before its result. Commands:
   YOUR_COMMAND | curl -sT - 'WRITE_URL'
   ```
 
-  The message appears when the stream starts. Anyone with this URL can write to it, so keep it to yourself.
+  The message appears when the stream starts. At a limit the stream ends, and so does the command feeding it. Anyone with this URL can write to it, so keep it to yourself.
   ````
 
   A `terminal` or `append` embed in any other command is `invalid_params`.

@@ -55,8 +55,10 @@ type embedState struct {
 	// alt is the sender's og.image.alt, kept in the server's og.
 	alt string
 	// timer expires an unused write URL, then bounds live text's duration.
-	timer    *time.Timer
-	started  bool
+	timer   *time.Timer
+	started bool
+	// timedOut is set when live text ends at LiveTextMaxDuration.
+	timedOut bool
 	finished bool
 	removed  bool
 	// writing is set while a writer sends live text.

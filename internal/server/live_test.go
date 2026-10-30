@@ -521,7 +521,8 @@ func TestLiveTextEndsAtItsDurationLimit(t *testing.T) {
 	_, writeURL, _ := postLive(t, a, "terminal", map[string]any{"embeds": []any{map[string]any{"kind": "terminal"}}})
 	pipe, writerDone := startLiveWrite(t, app, writeURL, "still going")
 	defer pipe.Close()
-	if status := <-writerDone; status != http.StatusNoContent {
+	// The writer, still sending, is told why the text ended.
+	if status := <-writerDone; status != http.StatusOK {
 		t.Fatalf("writer status %d", status)
 	}
 	if output := embedsOf(t, a.notification(t, "message"))[0]["output"]; output != "still going" {
