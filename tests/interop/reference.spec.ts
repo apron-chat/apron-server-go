@@ -34,7 +34,7 @@ function png(width: number, height: number): Buffer {
 	return Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), chunk('IHDR', header), chunk('IDAT', deflateSync(rows)), chunk('IEND', Buffer.alloc(0))]);
 }
 
-/** A guest speaking the protocol directly, for what the web client doesn't author (streams, raw embeds). */
+/** A guest speaking the protocol directly, for what the web client doesn't author (live text, raw embeds). */
 async function rawGuest(): Promise<{ request: (method: string, params: Record<string, unknown>) => Promise<Record<string, unknown>>; close: () => void }> {
 	const socket = new WebSocket(PROXIED_WS);
 	const waiting = new Map<string, (frame: Record<string, unknown>) => void>();
@@ -98,40 +98,57 @@ test.describe('reference features against the Go server', () => {
 		}
 	});
 
-	test('streams live text into a message, then keeps the finished text', async ({ page }) => {
+	/** Starts a streaming PUT to a write URL; push writes text, and finish ends the body. */
+	function streamTo(writeUrl: string) {
+		let push!: (chunk: string) => void;
+		let finish!: () => void;
+		const body = new ReadableStream<Uint8Array>({
+			start(controller) {
+				push = (chunk) => controller.enqueue(new TextEncoder().encode(chunk));
+				finish = () => controller.close();
+			}
+		});
+		const writing = fetch(writeUrl, { method: 'PUT', body, duplex: 'half' } as RequestInit & { duplex: 'half' });
+		return { push, finish, writing };
+	}
+
+	// Live text (§4.8.3). A client without embed:append still shows the finished message, whose
+	// body has the text.
+	test('appends live text to a message, which ends up in its body', async ({ page }) => {
 		await openChat(page);
-		const token = `stream-${Date.now().toString(36)}`;
+		const token = `append-${Date.now().toString(36)}`;
 		const bot = await rawGuest();
 		try {
-			const result = await bot.request('message', { room_id: 'general', body: { text: `${token} build`, embeds: [{ kind: 'stream', format: 'terminal' }] } });
+			const result = await bot.request('message', { room_id: 'general', body: { text: `${token} plan:`, format: 'markdown', embeds: [{ kind: 'append' }] } });
 			const writeUrl = (result.embeds as Array<{ write_url: string }>)[0].write_url;
-			let push!: (chunk: string) => void;
-			let finish!: () => void;
-			const body = new ReadableStream<Uint8Array>({
-				start(controller) {
-					push = (chunk) => controller.enqueue(new TextEncoder().encode(chunk));
-					finish = () => controller.close();
-				}
-			});
-			const writing = fetch(writeUrl, { method: 'PUT', body, duplex: 'half' } as RequestInit & { duplex: 'half' });
-			const stream = embedOf(page, `${token} build`).getByTestId('stream-embed');
-			await expect(stream).toBeVisible();
-			push('$ make deploy\n');
-			await expect(stream.locator('pre')).toContainText('$ make deploy');
-			await expect(stream.locator('.ap-embed-livebadge')).toHaveText('Live');
-			push('pushing image… ok\n');
-			await expect(stream.locator('pre')).toContainText('pushing image… ok');
-			// Terminal output shows colors without their escapes, and a carriage return overwrites the line.
-			push('\u001b[32mupload  40%');
-			await expect(stream.locator('pre .ap-term-fg2')).toHaveText('upload  40%');
-			push('\rupload 100%\u001b[0m\n');
-			await expect(stream.locator('pre .ap-term-fg2')).toHaveText('upload 100%');
-			finish();
-			expect((await writing).status).toBe(204);
-			// The finishing snapshot carries the kept text in place of the url.
-			await expect(stream.locator('.ap-embed-streamhead')).toContainText('Finished');
-			await expect(stream.locator('pre')).toHaveText('$ make deploy\npushing image… ok\nupload 100%\n');
-			await expect(stream.locator('pre .ap-term-fg2')).toHaveText('upload 100%');
+			const stream = streamTo(writeUrl);
+			await waitForMessage(page, `${token} plan:`);
+			stream.push(' roll back,');
+			stream.push(' then **renew** the cert.');
+			stream.finish();
+			expect((await stream.writing).status).toBe(204);
+			await waitForMessage(page, `${token} plan: roll back, then renew the cert.`);
+			await expect(messageByText(page, `${token} plan:`).locator('strong')).toHaveText('renew');
+		} finally {
+			bot.close();
+		}
+	});
+
+	// The terminal's rendering is apron-web's (an 80×40 terminal); this checks the server's side of
+	// the flow through the browser's origin.
+	test('streams a terminal into a message, then keeps its output', async ({ page }) => {
+		await openChat(page);
+		const token = `terminal-${Date.now().toString(36)}`;
+		const bot = await rawGuest();
+		try {
+			const result = await bot.request('message', { room_id: 'general', body: { text: `${token} build`, embeds: [{ kind: 'terminal', title: 'make deploy' }] } });
+			const writeUrl = (result.embeds as Array<{ write_url: string }>)[0].write_url;
+			const stream = streamTo(writeUrl);
+			await waitForMessage(page, `${token} build`);
+			stream.push('$ make deploy\r\n\u001b[32mupload  40%');
+			stream.push('\rupload 100%\u001b[0m\r\n');
+			stream.finish();
+			expect((await stream.writing).status).toBe(204);
 		} finally {
 			bot.close();
 		}
