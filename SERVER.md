@@ -791,7 +791,8 @@ replies arrive before its result. Commands:
   `title` being the first line of the rest of the command, at most 200
   characters; for `/embed-append` it is `{"text": <the rest of the
   command>, "format": "markdown", "embeds": [{embed_id, kind: "append",
-  url}]}`. From then on it is live text, as above. If no `PUT` arrives
+  url}]}`, with a paragraph break (`"\n\n"`) after the rest of the command
+  when there is one, so the streamed text starts a paragraph. From then on it is live text, as above. If no `PUT` arrives
   within five minutes, the write URL stops working (`404`) and nothing is
   posted; a `PUT` after the sender has left, or lost sight of the room, is
   `410` and posts nothing. The terminal notice reads, with the limits and

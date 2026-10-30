@@ -566,8 +566,12 @@ func (s *Server) embedTerminalCommand(c *client, r *roomState, body map[string]a
 }
 
 // embedAppendCommand prepares an append embed whose message starts with the
-// rest of the line, as Markdown: see liveCommand.
+// rest of the line, as Markdown: see liveCommand. A paragraph break follows
+// opening text, so that the streamed text starts a paragraph of its own.
 func (s *Server) embedAppendCommand(c *client, r *roomState, body map[string]any, args, replyTo string) (map[string]any, *rpcError) {
+	if args != "" {
+		args += "\n\n"
+	}
 	return s.liveCommand(c, r, body, kindAppend, args, replyTo)
 }
 

@@ -375,12 +375,12 @@ func TestEmbedAppendCommandPostsItsOpeningText(t *testing.T) {
 	var posted map[string]any
 	for _, client := range clients {
 		posted = client.notification(t, "message")
-		want := map[string]any{"text": "Here is **the plan**:", "format": "markdown", "embeds": []any{map[string]any{"embed_id": write["embed_id"], "kind": "append", "url": embedsOf(t, posted)[0]["url"]}}}
+		want := map[string]any{"text": "Here is **the plan**:\n\n", "format": "markdown", "embeds": []any{map[string]any{"embed_id": write["embed_id"], "kind": "append", "url": embedsOf(t, posted)[0]["url"]}}}
 		if !reflect.DeepEqual(posted["body"], any(want)) || posted["room_id"] != ops || posted["reply_to"] != nil {
 			t.Fatalf("posted: %#v", posted)
 		}
 	}
-	_, _ = pipe.Write([]byte("\n\n1. Roll back.\n"))
+	_, _ = pipe.Write([]byte("1. Roll back.\n"))
 	_, _ = pipe.Write([]byte("2. Renew the cert.\n"))
 	_ = pipe.Close()
 	if status := <-writerDone; status != http.StatusNoContent {
