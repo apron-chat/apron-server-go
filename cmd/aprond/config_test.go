@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	flags "github.com/jessevdk/go-flags"
 
@@ -213,5 +214,30 @@ func TestEmailSenders(t *testing.T) {
 		if _, err := serverConfig(*options); err == nil {
 			t.Errorf("accepted %v", args)
 		}
+	}
+}
+
+func TestLiveTextSettings(t *testing.T) {
+	options, _ := parse(t)
+	config, err := serverConfig(*options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.LiveTextMaxDuration != time.Hour || config.LiveTextMaxBytes != 16<<20 || config.LiveTextGrace != 10*time.Second ||
+		config.TerminalKeepBytes != 64<<10 || config.AppendMaxBytes != 64<<10 {
+		t.Fatalf("defaults: %v %d %v %d %d", config.LiveTextMaxDuration, config.LiveTextMaxBytes, config.LiveTextGrace, config.TerminalKeepBytes, config.AppendMaxBytes)
+	}
+	options, _ = parse(t, "--live.max-minutes", "2", "--live.max-mb", "1", "--live.grace-seconds", "0", "--live.terminal-keep-kb", "8", "--live.append-max-kb", "256")
+	if config, err = serverConfig(*options); err != nil {
+		t.Fatal(err)
+	}
+	if config.LiveTextMaxDuration != 2*time.Minute || config.LiveTextMaxBytes != 1<<20 || config.LiveTextGrace != 0 ||
+		config.TerminalKeepBytes != 8<<10 || config.AppendMaxBytes != 256<<10 {
+		t.Fatalf("set: %v %d %v %d %d", config.LiveTextMaxDuration, config.LiveTextMaxBytes, config.LiveTextGrace, config.TerminalKeepBytes, config.AppendMaxBytes)
+	}
+	// An append is part of a message's text, which a request carries.
+	options, _ = parse(t, "--live.append-max-kb", "257")
+	if _, err := serverConfig(*options); err == nil {
+		t.Fatal("accepted an append larger than a request")
 	}
 }
