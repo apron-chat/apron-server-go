@@ -7,7 +7,8 @@ thread creation and moves, safe rendering of untrusted markup, and phone viewpor
 The desktop suite also reloads a browser while offline, restores connectivity,
 verifies history replay without duplicates, and sends another message.
 `reference.spec.ts` covers what the Go reference server adds: uploads hosted
-with `og` previews, live `terminal` and `append` text written over HTTP, `iframe`/`html`/unknown
+with `og` previews, live text written over HTTP (a `terminal` drawn with xterm.js,
+and `append` text growing the message's body while it says Writing…), `iframe`/`html`/unknown
 embeds, avatar uploads through the `/avatar` command and renames shown on
 earlier messages, commands run from the composer with their `~private` replies
 and errors shown only to you, leaving and rejoining rooms and threads through

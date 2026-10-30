@@ -1,5 +1,5 @@
 import { deflateSync } from 'node:zlib';
-import { expect, test, type Page } from '@playwright/test';
+import { expect, test, type Locator, type Page } from '@playwright/test';
 import { SERVER_AVATAR, SERVER_DESCRIPTION, SERVER_TITLE } from './server-look';
 import { composer, joinListedRoom, messageAction, messageByText, openChat, openThread, reactionChip, reactTo, roomAction, sendMessage, setDisplayName, startThread, userIdOf, waitForMessage } from './test-helpers';
 
@@ -112,8 +112,9 @@ test.describe('reference features against the Go server', () => {
 		return { push, finish, writing };
 	}
 
-	// Live text (§4.8.3). A client without embed:append still shows the finished message, whose
-	// body has the text.
+	// Live text (§4.8.3): apron-web continues the body with an append embed's text as it arrives
+	// (§4.8.5), with "Writing…" under it until the stream ends, then shows the finished message,
+	// whose body has the text.
 	test('appends live text to a message, which ends up in its body', async ({ page }) => {
 		await openChat(page);
 		const token = `append-${Date.now().toString(36)}`;
@@ -122,20 +123,32 @@ test.describe('reference features against the Go server', () => {
 			const result = await bot.request('message', { room_id: 'general', body: { text: `${token} plan:`, format: 'markdown', embeds: [{ kind: 'append' }] } });
 			const writeUrl = (result.embeds as Array<{ write_url: string }>)[0].write_url;
 			const stream = streamTo(writeUrl);
-			await waitForMessage(page, `${token} plan:`);
+			const message = await waitForMessage(page, `${token} plan:`);
+			await expect(message.getByTestId('message-writing')).toHaveText('Writing…');
 			stream.push(' roll back,');
+			await expect(message.locator('.ap-msg-text')).toContainText(`${token} plan: roll back,`);
+			await expect(message.getByTestId('message-writing')).toBeVisible();
 			stream.push(' then **renew** the cert.');
+			await expect(message.locator('.ap-msg-text strong')).toHaveText('renew');
+			await expect(message.getByTestId('message-writing')).toBeVisible();
+			// The text continues the body: no card.
+			await expect(message.locator('.ap-msg-embeds')).toHaveCount(0);
 			stream.finish();
 			expect((await stream.writing).status).toBe(204);
-			await waitForMessage(page, `${token} plan: roll back, then renew the cert.`);
-			await expect(messageByText(page, `${token} plan:`).locator('strong')).toHaveText('renew');
+			// The finished message has the text in its body, and nothing is still writing.
+			await expect(message.getByTestId('message-writing')).toHaveCount(0);
+			await expect(message.locator('.ap-msg-text')).toHaveText(`${token} plan: roll back, then renew the cert.`);
+			await expect(message.locator('.ap-msg-text strong')).toHaveText('renew');
 		} finally {
 			bot.close();
 		}
 	});
 
-	// The terminal's rendering is apron-web's (an 80×40 terminal); this checks the server's side of
-	// the flow through the browser's origin.
+	/** What a terminal embed's screen shows, row by row, as xterm.js draws it. */
+	const terminalRows = (terminal: Locator) => terminal.locator('.xterm-rows > div').allInnerTexts();
+
+	// apron-web draws a terminal embed (§4.8.6) with xterm.js, reading the server's live url while
+	// it is live and the snapshot's output once finished.
 	test('streams a terminal into a message, then keeps its output', async ({ page }) => {
 		await openChat(page);
 		const token = `terminal-${Date.now().toString(36)}`;
@@ -144,11 +157,22 @@ test.describe('reference features against the Go server', () => {
 			const result = await bot.request('message', { room_id: 'general', body: { text: `${token} build`, embeds: [{ kind: 'terminal', title: 'make deploy' }] } });
 			const writeUrl = (result.embeds as Array<{ write_url: string }>)[0].write_url;
 			const stream = streamTo(writeUrl);
-			await waitForMessage(page, `${token} build`);
+			const terminal = (await waitForMessage(page, `${token} build`)).getByTestId('terminal-embed');
+			await expect(terminal.locator('.ap-embed-termtitle')).toHaveText('make deploy');
+			await expect(terminal.locator('.ap-embed-livebadge')).toHaveText('Live');
 			stream.push('$ make deploy\r\n\u001b[32mupload  40%');
+			await expect(terminal.locator('.ap-embed-termscreen .xterm-rows')).toContainText('$ make deploy');
+			await expect.poll(async () => (await terminalRows(terminal)).slice(0, 2).map((row) => row.trimEnd())).toEqual(['$ make deploy', 'upload  40%']);
+			// A carriage return redraws the line in place, as a progress bar does.
 			stream.push('\rupload 100%\u001b[0m\r\n');
+			await expect.poll(async () => (await terminalRows(terminal))[1]?.trimEnd()).toBe('upload 100%');
+			await expect(terminal.locator('.ap-embed-livebadge')).toHaveText('Live');
 			stream.finish();
 			expect((await stream.writing).status).toBe(204);
+			// The finishing snapshot carries the output, which it shows from a fresh terminal.
+			await expect(terminal.locator('.ap-embed-livebadge')).toHaveCount(0);
+			await expect(terminal.locator('.ap-embed-detail')).toHaveText('Finished');
+			await expect.poll(async () => (await terminalRows(terminal)).slice(0, 2).map((row) => row.trimEnd())).toEqual(['$ make deploy', 'upload 100%']);
 		} finally {
 			bot.close();
 		}

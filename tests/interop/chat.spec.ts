@@ -497,7 +497,7 @@ test.describe('chat protocol interoperability', () => {
 
 			await (await messageAction(stableMessageA, 'Edit message')).click();
 			const editor = stableMessageA.getByRole('textbox', { name: 'Edit message', exact: true });
-			await expect(editor).toHaveValue(replacement);
+			await expect(editor).toHaveText(replacement);
 			await editor.fill('unsaved draft to discard');
 			// While it is edited the message's toolbar steps aside for the editor's own Cancel and Save, so the
 			// deletion goes over A's own connection, as another of A's clients would send it (§4.4); the
@@ -813,14 +813,18 @@ test.describe('chat protocol interoperability', () => {
 			await expect(field).toHaveText(`Handing this to @${handle} `);
 			await expect(picker).toHaveCount(0);
 
-			// A finished `@name` or `@user_id` collapses into the same chip; unknown handles stay text.
+			// A finished `@user_id` collapses into the same chip wherever it is; a `@name` only as it is typed, so one
+			// put in all at once (as pasted) stays text, as do unknown handles and a name ending the draft.
 			await field.fill(`Handing this to @${handle} and @${id} and @nobody-here`);
-			await expect(field.locator('.ap-mention')).toHaveCount(2);
-			await expect(field.locator(`.ap-mention[data-user-id="${id}"]`)).toHaveCount(2);
+			await expect(field.locator('.ap-mention')).toHaveCount(1);
+			await expect(field.locator(`.ap-mention[data-user-id="${id}"]`)).toHaveCount(1);
 			await expect(field).toHaveText(`Handing this to @${handle} and @${handle} and @nobody-here`);
 			await field.fill(`cc @${handle}`);
 			await expect(field.locator('.ap-mention')).toHaveCount(0);
-			await field.fill(`Handing this to @${handle}, cc @${id}`);
+			// Typed, the name collapses once punctuation ends it; the `@user_id` ending the draft waits for send.
+			await field.fill('Handing this to ');
+			await field.pressSequentially(`@${handle}, cc @${id}`);
+			await expect(field).toHaveText(`Handing this to @${handle}, cc @${id}`);
 			await expect(field.locator('.ap-mention')).toHaveCount(1);
 			await pageA.getByRole('button', { name: 'Send message', exact: true }).click();
 			await expect(field).toHaveText('');
