@@ -576,12 +576,14 @@ func Open(config Config) (*Server, error) {
 // (§3.5.1, §4.3) and that new guests join.
 const defaultRoomID = "general"
 
-// Handler returns the HTTP handler serving /ws, /healthz, the write, file,
-// live text, and emoji catalog endpoints, and StaticDir.
+// Handler returns the HTTP handler serving /ws, /healthz, the passkey related
+// origins, the write, file, live text, and emoji catalog endpoints, and
+// StaticDir.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ws", s.handleWebSocket)
 	mux.HandleFunc("/healthz", s.handleHealth)
+	mux.HandleFunc("/.well-known/webauthn", s.handleRelatedOrigins)
 	mux.HandleFunc(writePath, s.handleWrite)
 	mux.HandleFunc(filePath, s.handleFile)
 	mux.HandleFunc(livePath, s.handleLive)

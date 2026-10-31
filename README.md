@@ -41,6 +41,10 @@ aprond --static-dir .apron-web/build \
   --role admin=you@example.com
 ```
 
+To let a client on another domain, such as `https://web.apron.chat`, use
+passkeys too, add its origin with `--origin` and `--webauthn.origin`; see
+[Passkeys](SERVER.md#passkeys).
+
 Email sign-in is off unless `--email.enable` is set. To try it locally, run
 `go run ./cmd/aprond --email.enable --email.sender log`, which writes codes to
 the server log instead of sending them.

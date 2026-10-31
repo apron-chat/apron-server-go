@@ -26,7 +26,8 @@ go run ./cmd/aprond
 Defaults:
 
 - HTTP and WebSocket listener: `127.0.0.1:8080` (`--addr`)
-- WebSocket endpoint: `/ws`; health endpoint: `/healthz`
+- WebSocket endpoint: `/ws`; health endpoint: `/healthz`; passkey related
+  origins: `/.well-known/webauthn`
 - embed endpoints: `/write/<token>`, `/files/<embed_id>/<secret>`,
   `/live/<embed_id>/<secret>`; custom emoji catalog:
   `/emoji/catalog-<hash>.json`
@@ -138,7 +139,9 @@ Flags (`aprond --help` lists them all):
   `--public-url`; without either, emails carry only the code).
 - `--webauthn.rp-id <domain>` (`localhost`) and `--webauthn.origin <origin>`
   (repeat for more; `http://localhost:5173` and `http://localhost:8080`)
-  configure passkeys; `--webauthn.rp-id ''` disables them.
+  configure passkeys; `--webauthn.rp-id ''` disables them. The origins are
+  also served at `/.well-known/webauthn`, so a frontend on another domain
+  can use passkeys; see [Passkeys](#passkeys).
 - `--upload.dir <directory>` holds uploaded files, by default
   `aprond/uploads` in the user data directory. At start the server removes
   files named `*.upload` there that the store does not refer to, and nothing
@@ -1233,10 +1236,37 @@ go run ./cmd/aprond --static-dir .apron-web/build \
 ```
 
 `--webauthn.rp-id ''` disables passkeys. `--webauthn.origin`, repeated, lists
-exact origins, including ports. The RP ID must be a domain valid for the
-frontend origin. Changing the RP ID creates a different credential scope.
+exact origins, including ports. The RP ID is the server's host or a domain
+it is under; clients refuse any other
+([PROTOCOL.md §4.10](https://github.com/shazow/apron/blob/main/PROTOCOL.md#410-webauthn-authentication)).
+Changing the RP ID creates a different credential scope.
 `--allow-any-origin` does not relax WebAuthn origin validation. The default
 `127.0.0.1` chat URL still supports guest chat; use `localhost` for passkeys.
+
+A frontend whose host is the RP ID or under it works directly. A frontend
+elsewhere, such as the shared client at `https://web.apron.chat`, works once
+listed with `--webauthn.origin`: aprond serves every configured origin as
+`{"origins": [...]}` at `/.well-known/webauthn`, and a browser on that
+frontend fetches `https://<rp-id>/.well-known/webauthn` and lets the page use
+the RP ID only if its origin is listed
+([related origins](https://www.w3.org/TR/webauthn-3/#sctn-related-origins)).
+Browsers read that file only at the RP ID's host, so if the RP ID is a parent
+domain (`shazow.net` for a server at `apron.shazow.net`), or aprond is not
+reached at the RP ID's host, serve the same JSON there yourself as
+`application/json`. Browsers without related origins support refuse such a
+ceremony; users there sign in another way, such as with email or a device
+token from `/invite-device`. Passkeys already made with the same RP ID work
+from the new frontend. For a server at `apron.shazow.net` that also takes
+passkeys from the shared client:
+
+```sh
+aprond --static-dir .apron-web/build \
+  --tls.domain apron.shazow.net \
+  --origin https://apron.shazow.net --origin https://web.apron.chat \
+  --webauthn.rp-id apron.shazow.net \
+  --webauthn.origin https://apron.shazow.net \
+  --webauthn.origin https://web.apron.chat
+```
 
 The implementation uses [go-webauthn](https://github.com/go-webauthn/webauthn)
 for registration and signature verification. Challenges are random, expire after
