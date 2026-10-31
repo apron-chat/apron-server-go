@@ -1,7 +1,7 @@
 import { deflateSync } from 'node:zlib';
 import { expect, test, type Locator, type Page } from '@playwright/test';
 import { SERVER_AVATAR, SERVER_DESCRIPTION, SERVER_TITLE } from './server-look';
-import { composer, joinListedRoom, messageAction, messageByText, openChat, openThread, reactionChip, reactTo, roomAction, sendMessage, setDisplayName, startThread, userIdOf, waitForMessage } from './test-helpers';
+import { closePreferences, composer, joinListedRoom, messageAction, messageByText, openChat, openConnectScreen, openProfile, openThread, profileNamed, reactionChip, reactTo, roomAction, sendMessage, setDisplayName, startThread, userIdOf, waitForMessage } from './test-helpers';
 
 /** The dev server proxies the Go server, so URLs the server mints use this host and load same-origin. */
 const PROXIED_WS = 'ws://127.0.0.1:5173/ws';
@@ -217,19 +217,17 @@ test.describe('reference features against the Go server', () => {
 			await sendMessage(pageA, `${token} before`);
 			const earlier = await waitForMessage(pageB, `${token} before`);
 
-			await pageA.getByRole('button', { name: /^Your profile on/ }).click();
-			const dialog = pageA.getByRole('dialog', { name: 'Edit profile', exact: true });
+			const dialog = await openProfile(pageA);
 			await dialog.getByTestId('avatar-input').setInputFiles({ name: 'me.png', mimeType: 'image/png', buffer: png(16, 16) });
 			// The server sets the avatar and sends `user`; it shows on the earlier message too.
 			await expect(earlier.locator('.ap-msg-gutter img.ap-avatar')).toBeVisible();
 			await expect(dialog.getByTestId('remove-avatar')).toBeVisible();
-			await dialog.getByRole('button', { name: 'Cancel', exact: true }).click();
+			await closePreferences(pageA);
 
 			await setDisplayName(pageA, `${token}-renamed`);
 			await expect(earlier.locator('.ap-msg-sender')).toHaveText(`${token}-renamed`);
 
-			await pageA.getByRole('button', { name: /^Your profile on/ }).click();
-			await dialog.getByTestId('remove-avatar').click();
+			await (await openProfile(pageA)).getByTestId('remove-avatar').click();
 			await expect(earlier.locator('.ap-msg-gutter img.ap-avatar')).toHaveCount(0);
 			await expect(earlier.locator('.ap-msg-gutter span.ap-avatar')).toBeVisible();
 		} finally {
@@ -270,7 +268,7 @@ test.describe('reference features against the Go server', () => {
 		const handle = `nick-${Date.now().toString(36)}`;
 		await field.fill(`/nick ${handle}`);
 		await run.click();
-		await expect(page.getByRole('button', { name: new RegExp(`^Your profile on .*: ${handle}[,.]`) })).toBeVisible();
+		await expect(profileNamed(page, handle)).toBeVisible();
 		const id = await userIdOf(page);
 		// The earlier message renders with the latest name; notices above it began its group. Its sender's name
 		// opens the profile of this session's user_id: the message came from that user, and the rename reached it.
@@ -360,10 +358,8 @@ test.describe('reference features against the Go server', () => {
 		await expect(head.locator('.ap-shell-sidehead-host')).toHaveText(new URL(page.url()).host);
 		await expect(head.locator('img.ap-shell-sidehead-avatar')).toHaveAttribute('src', SERVER_AVATAR);
 
-		// The connect screen, for the server you're on: its title and its description (--description).
-		await page.getByRole('button', { name: /^Your profile on/ }).click();
-		await page.getByRole('dialog', { name: 'Edit profile', exact: true }).getByRole('button', { name: 'Connect to a server…', exact: true }).click();
-		const card = page.getByRole('form', { name: 'Sign in' });
+		// The connect screen, from the server pane, for the server you're on: its title and its description (--description).
+		const card = await openConnectScreen(page);
 		await expect(card.getByTestId('connect-server')).toContainText(SERVER_TITLE);
 		await expect(card).toContainText(SERVER_DESCRIPTION);
 	});

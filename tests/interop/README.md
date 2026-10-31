@@ -87,7 +87,16 @@ whatever is granted. `npx playwright install chromium` installs both builds;
 with `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH`, point it at full Chromium.
 
 The status test sets a status through a control named for do not disturb in
-the profile editor or Preferences, shown directly or behind one named Status.
+Preferences' Profile, shown directly or behind one named Status.
+
+Your profile is the first section of Preferences, which the profile bar's one
+button (named `Open preferences. Your profile on …`) opens: the handle, avatar,
+`user_id`, Sign in for a guest (which opens the connect screen) and Sign out.
+Notifications, with its switch and Pause, is a press away in its navigation.
+The open section is in the page's address, so the helpers in `test-helpers.ts`
+close Preferences with its close button and wait for the address to drop it.
+The connect screen for another server is the server pane's Connect to another
+server…, which the rooms list's head opens.
 
 `seen.spec.ts` checks `seen` (§4.5.2), when a user was last shown offline, as
 the web client shows it in another browser: an offline member's row in the

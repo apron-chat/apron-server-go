@@ -14,7 +14,7 @@
  * (`seenFromListing`), whose `room_list` carries it.
  */
 import { expect, test, type Browser, type BrowserContext, type Locator, type Page } from '@playwright/test';
-import { openChat, signUpWithPasskey, userIdOf } from './test-helpers';
+import { closePreferences, openChat, openProfile, signUpWithPasskey, userIdOf } from './test-helpers';
 
 const ORIGIN = 'http://localhost:5173';
 /** How long the server may take to see a closed tab and tell others. */
@@ -95,17 +95,15 @@ async function seenFromListing(browser: Browser, userId: string): Promise<number
 }
 
 /**
- * Chooses a status in Preferences' Status menu, which the web client sets with `me` (§4.5), and waits until
+ * Chooses a status in the Status menu of Preferences' Profile, which the web client sets with `me` (§4.5), and waits until
  * the server has kept it: the row's hint then says how others see you.
  */
 async function chooseStatus(page: Page, choice: RegExp, hint: string): Promise<void> {
-	await page.getByRole('button', { name: /^Open preferences/ }).click();
-	const prefs = page.getByRole('dialog', { name: 'Preferences' });
+	const prefs = await openProfile(page);
 	await prefs.getByRole('button', { name: /^Status: / }).click();
 	await page.getByRole('menuitemradio', { name: choice }).click();
 	await expect(prefs.getByTestId('status-hint')).toHaveText(hint);
-	await page.keyboard.press('Escape');
-	await expect(prefs).toHaveCount(0);
+	await closePreferences(page);
 }
 
 test('an account that leaves, comes back, and goes invisible shows Last seen only while offline', async ({ page, browser }) => {

@@ -10,7 +10,7 @@ import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { expect, test, type BrowserContext, type Page, type WebSocketRoute } from '@playwright/test';
 import { TEST_VAPID_PRIVATE_KEY as VAPID_PRIVATE, TEST_VAPID_SUBJECT as VAPID_SUBJECT } from './push-test-vapid';
-import { addAuthenticator, openChat, signUpWithPasskey, userIdOf } from './test-helpers';
+import { addAuthenticator, closePreferences, openChat, openPreferences, openProfile, preferencesDialog, signUpWithPasskey, userIdOf } from './test-helpers';
 
 const PROXIED_WS = 'ws://127.0.0.1:5173/ws';
 const ORIGIN = 'http://localhost:5173';
@@ -149,9 +149,8 @@ async function tapSocket(page: Page): Promise<Tap> {
 
 // ---------- Passkey account ----------
 async function signInWithPasskey(page: Page): Promise<void> {
-	// Signing out leaves the profile editor open.
-	if (!(await page.getByRole('dialog', { name: 'Edit profile' }).count())) await page.getByRole('button', { name: /^Your profile on/ }).click();
-	await page.getByRole('dialog', { name: 'Edit profile' }).getByRole('button', { name: 'Sign in with a passkey', exact: true }).click();
+	// Signing out leaves Preferences open at Profile, whose Sign in opens the connect screen.
+	await (await openProfile(page)).getByRole('button', { name: 'Sign in', exact: true }).click();
 	const card = page.getByRole('form', { name: 'Sign in' });
 	await card.getByRole('button', { name: 'Sign in with passkey', exact: true }).click();
 	await expect(card).toHaveCount(0);
@@ -282,8 +281,7 @@ test('web push: register, wake rules, VAPID + aes128gcm delivery, service worker
 	await sw.evaluate(pushStub(endpoint, p256dh, auth), { endpoint, p256dh, auth });
 
 	// --- Turn on push in Preferences ---
-	await page.getByRole('button', { name: /^Open preferences/ }).click();
-	const prefs = page.getByRole('dialog', { name: 'Preferences' });
+	const prefs = await openPreferences(page, 'Notifications');
 	const pushSwitch = prefs.getByRole('switch', { name: 'Notifications', exact: true });
 	await expect(prefs.getByRole('heading', { name: 'Preferences' })).toBeVisible();
 	await expect(pushSwitch).toHaveAttribute('aria-checked', 'false');
@@ -308,7 +306,7 @@ test('web push: register, wake rules, VAPID + aes128gcm delivery, service worker
 	const pushId = register.params.push_id as string;
 	// Opaque (§4.9): it names neither the server nor the account.
 	expect(pushId).not.toContain(user1);
-	await page.keyboard.press('Escape');
+	await closePreferences(page);
 
 	// --- Idle (real client path: no input for five minutes, on the page's clock) ---
 	evidence('idle reports', await goIdle(page, tap));
@@ -408,7 +406,7 @@ test('web push: register, wake rules, VAPID + aes128gcm delivery, service worker
 	expect(privatePush.post.headers.urgency).toBe('high');
 
 	// --- Unscoped mute through the UI pause menu ---
-	await page.getByRole('button', { name: /^Open preferences/ }).click();
+	await openPreferences(page, 'Notifications');
 	await prefs.getByRole('button', { name: /^Pause/ }).click();
 	await page.getByRole('menuitem', { name: /Until I resume/ }).or(page.getByRole('option', { name: /Until I resume/ })).first().click();
 	await expect.poll(() => findSent(tap, 'status').find((frame) => frame.params?.mute === true)).toBeTruthy();
@@ -416,18 +414,18 @@ test('web push: register, wake rules, VAPID + aes128gcm delivery, service worker
 	await expect.poll(() => tap.received.find((frame) => frame.method === 'status' && frame.params?.mute === true && !('room_id' in frame.params))).toBeTruthy();
 	evidence('mute frame sent', findSent(tap, 'status').find((frame) => frame.params?.mute === true));
 	evidence('mute echo', tap.received.filter((frame) => frame.method === 'status'));
-	await page.keyboard.press('Escape');
+	await closePreferences(page);
 	// Using the menu was input, which ended idle: idle again, so only the mute holds the pushes back.
 	await goIdle(page, tap);
 	before = capture.posts.length;
 	await user2.request('message', { room_id: 'general', body: { text: `muted mention @${user1}`, mentions: [user1] } });
 	await user2.request('message', { room_id: 'general', body: { text: 'muted reply' }, reply_to: { message_id: ownId } });
 	await expectNoPost(capture.posts, 'mention+reply while unscoped mute (webpush gets no badge either)', before, 4_000);
-	await page.getByRole('button', { name: /^Open preferences/ }).click();
+	await openPreferences(page, 'Notifications');
 	await prefs.getByRole('button', { name: 'Resume', exact: true }).click();
 	await expect.poll(() => findSent(tap, 'status').find((frame) => frame.params?.mute === 0 || frame.params?.mute === false)).toBeTruthy();
 	await expect.poll(() => tap.received.find((frame) => frame.method === 'status' && frame.params?.mute === false && !('room_id' in frame.params))).toBeTruthy();
-	await page.keyboard.press('Escape');
+	await closePreferences(page);
 	await goIdle(page, tap);
 
 	// --- Room mute via raw status: it silences mentions and replies alike (§4.5) ---
@@ -477,8 +475,7 @@ test('web push: register, wake rules, VAPID + aes128gcm delivery, service worker
 	expect(await enabledIds()).toContain(pushId);
 
 	// --- Sign out: unregister, push off for this account here, and this device stops showing it ---
-	await page2.getByRole('button', { name: /^Your profile on/ }).click();
-	await page2.getByRole('dialog', { name: 'Edit profile' }).getByRole('button', { name: 'Sign out', exact: true }).click();
+	await (await openProfile(page2)).getByRole('button', { name: 'Sign out', exact: true }).click();
 	await expect.poll(() => findSent(tap2, 'push_unregister').length).toBeGreaterThanOrEqual(1);
 	const unregister = findSent(tap2, 'push_unregister')[0];
 	evidence('push_unregister', { frame: unregister, answer: resultOf(tap2, unregister.id) ?? 'connection replaced before answer' });
@@ -516,13 +513,13 @@ test('web push: register, wake rules, VAPID + aes128gcm delivery, service worker
 	const afterSignIn = tap2.sent.slice(sentBefore).filter((frame) => frame.method === 'push_register' || frame.method === 'push_unregister');
 	evidence('push frames after signing in again', afterSignIn);
 	expect(afterSignIn.every((frame) => frame.method === 'push_unregister' && frame.params.url === endpoint)).toBe(true);
-	// The one Notifications switch stays on for this device's open page; it says push is off, and offers it.
-	await page2.getByRole('button', { name: /^Open preferences/ }).click();
-	const prefs2 = page2.getByRole('dialog', { name: 'Preferences' });
+	// The one Notifications switch stays on for this device's open page; it says it alerts only while Apron is open
+	// (push is off), and offers push.
+	const prefs2 = await openPreferences(page2, 'Notifications');
 	await expect(prefs2.getByRole('switch', { name: 'Notifications', exact: true })).toHaveAttribute('aria-checked', 'true');
-	await expect(prefs2.locator('#ap-pref-notifications-note')).toHaveText('On · alerts while Apron is open. Not yet when it’s closed.');
+	await expect(prefs2.locator('#ap-pref-notifications-note')).toHaveText('On while Apron is open.');
 	await expect(prefs2.getByRole('button', { name: 'Alert when it’s closed, too' })).toBeVisible();
-	await page2.keyboard.press('Escape');
+	await closePreferences(page2);
 	evidence('total posts', capture.posts.length);
 	user2.close();
 	capture.close();
@@ -530,43 +527,36 @@ test('web push: register, wake rules, VAPID + aes128gcm delivery, service worker
 
 /**
  * The web client's way to set a status with `me` (§4.5): a control named for do not disturb in
- * the profile editor or Preferences, shown directly (a radio, menu item, or option) or behind a
- * control named Status (a menu button or a select). Choosing picks the status whose label
- * matches and closes the dialog again.
+ * Preferences' Profile, where the profile bar's button opens it, shown directly (a radio, menu item,
+ * or option) or behind a control named Status (a menu button or a select). Choosing picks the
+ * status whose label matches and closes Preferences again.
  */
 async function statusChooser(page: Page): Promise<(label: RegExp) => Promise<void>> {
 	const DND = /do not disturb/i;
-	const surfaces = [
-		{ open: () => page.getByRole('button', { name: /^Your profile on/ }).click(), dialog: page.getByRole('dialog', { name: 'Edit profile' }) },
-		{ open: () => page.getByRole('button', { name: /^Open preferences/ }).click(), dialog: page.getByRole('dialog', { name: 'Preferences' }) }
-	];
+	const dialog = preferencesDialog(page);
 	const choices = (scope: ReturnType<Page['locator']>, name: RegExp) =>
 		scope.getByRole('radio', { name }).or(scope.getByRole('menuitemradio', { name })).or(scope.getByRole('menuitem', { name })).or(scope.getByRole('option', { name }));
-	for (const surface of surfaces) {
-		await surface.open();
-		await expect(surface.dialog).toBeVisible();
-		const direct = await choices(surface.dialog, DND).count();
-		const opener = surface.dialog.getByRole('button', { name: /status/i }).or(surface.dialog.getByRole('combobox', { name: /status/i }));
-		const behind = await opener.count();
-		await page.keyboard.press('Escape');
-		if (!direct && !behind) continue;
-		return async (label: RegExp) => {
-			if (!(await surface.dialog.isVisible())) await surface.open();
-			if (!(await choices(surface.dialog, label).count())) {
-				const control = opener.first();
-				if ((await control.getAttribute('role')) === 'combobox' || (await control.evaluate((element) => element.tagName)) === 'SELECT') {
-					const options = await control.locator('option').allTextContents();
-					await control.selectOption({ label: options.find((text) => label.test(text))! });
-				} else {
-					await control.click();
-				}
+	const opener = dialog.getByRole('button', { name: /status/i }).or(dialog.getByRole('combobox', { name: /status/i }));
+	await openProfile(page);
+	const direct = await choices(dialog, DND).count();
+	const behind = await opener.count();
+	await closePreferences(page);
+	if (!direct && !behind) throw new Error('No control in Preferences sets a status');
+	return async (label: RegExp) => {
+		if (!(await dialog.isVisible())) await openProfile(page);
+		if (!(await choices(dialog, label).count())) {
+			const control = opener.first();
+			if ((await control.getAttribute('role')) === 'combobox' || (await control.evaluate((element) => element.tagName)) === 'SELECT') {
+				const options = await control.locator('option').allTextContents();
+				await control.selectOption({ label: options.find((text) => label.test(text))! });
+			} else {
+				await control.click();
 			}
-			const choice = choices(page.locator('body'), label).first();
-			if (await choice.count()) await choice.click();
-			if (await surface.dialog.isVisible()) await page.keyboard.press('Escape');
-		};
-	}
-	throw new Error('No control in the profile editor or Preferences sets a status');
+		}
+		const choice = choices(page.locator('body'), label).first();
+		if (await choice.count()) await choice.click();
+		if (await dialog.isVisible()) await closePreferences(page);
+	};
 }
 
 test('status: set with me, derived online, idle, offline as other clients see it; mutes stay private and reach every connection', async ({ page, context, browser }) => {
@@ -631,12 +621,11 @@ test('status: set with me, derived online, idle, offline as other clients see it
 
 	// A mute changes nothing others see. The server sends it back to user1's connections as
 	// `status`, and again after the next auth, which the client applies as its own setting.
-	await page.getByRole('button', { name: /^Open preferences/ }).click();
-	const prefs = page.getByRole('dialog', { name: 'Preferences' });
+	const prefs = await openPreferences(page, 'Notifications');
 	await prefs.getByRole('button', { name: /^Pause/ }).click();
 	await page.getByRole('menuitem', { name: /For 1 hour/ }).or(page.getByRole('option', { name: /For 1 hour/ })).first().click();
 	await expect.poll(() => tap.received.find((frame) => frame.method === 'status' && typeof frame.params?.mute === 'number')).toBeTruthy();
-	await page.keyboard.press('Escape');
+	await closePreferences(page);
 	await injectStatus(tap, { room_id: 'general', mute: true });
 	await expect.poll(() => tap.received.find((frame) => frame.method === 'status' && frame.params?.room_id === 'general' && frame.params?.mute === true)).toBeTruthy();
 	await new Promise((resolve) => setTimeout(resolve, 1_500));
@@ -649,10 +638,10 @@ test('status: set with me, derived online, idle, offline as other clients see it
 		.toEqual([{ mute: expect.any(Number) }, { room_id: 'general', mute: true }]);
 	evidence('mutes after auth', tap.received.slice(receivedBefore).filter((frame) => frame.method === 'status'));
 	await expect(page.getByRole('button', { name: /^Open preferences\. Notifications paused/ })).toBeVisible({ timeout: 10_000 });
-	await page.getByRole('button', { name: /^Open preferences/ }).click();
+	await openPreferences(page, 'Notifications');
 	await prefs.getByRole('button', { name: 'Resume', exact: true }).click();
 	await expect.poll(() => tap.received.slice(receivedBefore).find((frame) => frame.method === 'status' && frame.params?.mute === false && !('room_id' in frame.params))).toBeTruthy();
-	await page.keyboard.press('Escape');
+	await closePreferences(page);
 	await injectStatus(tap, { room_id: 'general', mute: false });
 	await expect.poll(() => tap.received.slice(receivedBefore).find((frame) => frame.method === 'status' && frame.params?.room_id === 'general' && frame.params?.mute === false)).toBeTruthy();
 

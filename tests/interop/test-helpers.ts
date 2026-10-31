@@ -73,21 +73,82 @@ export async function deleteMessage(page: Page, message: Locator): Promise<void>
 	await (await moreAction(message, 'Delete message')).click();
 }
 
-/** Sets the handle the server knows you by, through the profile editor. */
-export async function setDisplayName(page: Page, name: string): Promise<void> {
-	await page.getByRole('button', { name: /^Your profile on/ }).click();
-	const dialog = page.getByRole('dialog', { name: 'Edit profile', exact: true });
-	await dialog.getByTestId('display-name-input').fill(name);
-	await dialog.getByRole('button', { name: 'Save', exact: true }).click();
-	await expect(page.getByRole('button', { name: new RegExp(`^Your profile on .*: ${name}[,.]`) })).toBeVisible();
+/**
+ * The profile bar's one button, which opens Preferences at its Profile section. Its name says whose profile it is
+ * (`Open preferences. Your profile on <server>: <name>`, then `, <status>` when one is set).
+ */
+export function preferencesButton(page: Page): Locator {
+	return page.getByRole('button', { name: /^Open preferences/ });
 }
 
-/** The `user_id` the server assigned this page, as the profile editor shows it. */
+/** The Preferences dialog: your profile (its first section), notifications, appearance, media and history. */
+export function preferencesDialog(page: Page): Locator {
+	return page.getByRole('dialog', { name: 'Preferences' });
+}
+
+/**
+ * Opens Preferences from the profile bar, which opens it at Profile, and then the section named, a press away in its
+ * navigation. Returns the dialog.
+ */
+export async function openPreferences(page: Page, section: string = 'Profile'): Promise<Locator> {
+	const dialog = preferencesDialog(page);
+	if (!(await dialog.count())) await preferencesButton(page).click();
+	await expect(dialog).toBeVisible();
+	const tab = dialog.getByRole('navigation', { name: 'Preference sections' }).getByRole('button', { name: section, exact: true });
+	if ((await tab.getAttribute('aria-current')) !== 'page') await tab.click();
+	await expect(tab).toHaveAttribute('aria-current', 'page');
+	return dialog;
+}
+
+/** Your profile, Preferences' first section: the handle, avatar, bio, how you sign in and Sign out. Returns the dialog. */
+export async function openProfile(page: Page): Promise<Locator> {
+	const dialog = await openPreferences(page);
+	await expect(dialog.getByTestId('display-name-input')).toBeVisible();
+	return dialog;
+}
+
+/**
+ * Closes Preferences with its close button. The open section is in the page's address, which closing takes back
+ * out: wait for that, so a Preferences opened next isn't closed again by it.
+ */
+export async function closePreferences(page: Page): Promise<void> {
+	const dialog = preferencesDialog(page);
+	await dialog.getByRole('button', { name: 'Close preferences', exact: true }).click();
+	await expect(dialog).toHaveCount(0);
+	await expect(page).not.toHaveURL(/[#&]preferences=/);
+}
+
+/** The connect screen for another server, from the server pane that the rooms list's head opens. */
+export async function openConnectScreen(page: Page): Promise<Locator> {
+	await page.getByRole('button', { name: /^Server: / }).click();
+	await page.getByTestId('server-pane').getByRole('button', { name: 'Connect to another server…', exact: true }).click();
+	const card = page.getByRole('form', { name: 'Sign in' });
+	await expect(card).toBeVisible();
+	return card;
+}
+
+const escapeRegExp = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+/** The profile bar's button once the server knows you by `name`. */
+export function profileNamed(page: Page, name: string): Locator {
+	return page.getByRole('button', { name: new RegExp(`^Open preferences\\..* Your profile on .*: ${escapeRegExp(name)}(,|$)`) });
+}
+
+/** Sets the handle the server knows you by, through Preferences' Profile. */
+export async function setDisplayName(page: Page, name: string): Promise<void> {
+	const dialog = await openProfile(page);
+	await dialog.getByTestId('display-name-input').fill(name);
+	await dialog.getByRole('button', { name: 'Save', exact: true }).click();
+	await expect(dialog.getByText('Saved.', { exact: true })).toBeVisible();
+	await closePreferences(page);
+	await expect(profileNamed(page, name)).toBeVisible();
+}
+
+/** The `user_id` the server assigned this page, as Preferences' Profile shows it. */
 export async function userIdOf(page: Page): Promise<string> {
-	await page.getByRole('button', { name: /^Your profile on/ }).click();
-	const dialog = page.getByRole('dialog', { name: 'Edit profile', exact: true });
+	const dialog = await openProfile(page);
 	const id = (await dialog.locator('.ap-profedit-hint code').first().textContent())?.trim() ?? '';
-	await dialog.getByRole('button', { name: 'Cancel', exact: true }).click();
+	await closePreferences(page);
 	expect(id).toMatch(/\S/);
 	return id;
 }
@@ -108,14 +169,13 @@ export async function addAuthenticator(page: Page, context: BrowserContext, cred
 }
 
 /**
- * Makes the page's guest an account with a new passkey, through the profile editor's sign-in: it keeps its
- * `user_id`, and its session resumes with a bearer token after a disconnect or a reload (a guest's ends with its
- * connection).
+ * Makes the page's guest an account with a new passkey, through Profile's Sign in, which opens the connect screen at
+ * a passkey: it keeps its `user_id`, and its session resumes with a bearer token after a disconnect or a reload (a
+ * guest's ends with its connection).
  */
 export async function signUpWithPasskey(page: Page, context: BrowserContext): Promise<{ credentials: () => Promise<any[]> }> {
 	const authenticator = await addAuthenticator(page, context);
-	await page.getByRole('button', { name: /^Your profile on/ }).click();
-	await page.getByRole('dialog', { name: 'Edit profile' }).getByRole('button', { name: 'Sign in with a passkey', exact: true }).click();
+	await (await openProfile(page)).getByRole('button', { name: 'Sign in', exact: true }).click();
 	const card = page.getByRole('form', { name: 'Sign in' });
 	await card.getByRole('radiogroup', { name: 'Passkey', exact: true }).getByRole('radio', { name: /^Create account/ }).click();
 	await card.getByRole('button', { name: 'Create account with passkey', exact: true }).click();

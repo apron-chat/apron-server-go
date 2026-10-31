@@ -1,25 +1,21 @@
 import { expect, test, type Page, type WebSocketRoute } from '@playwright/test';
-import { editMessage, openChat, sendMessage, waitForMessage } from './test-helpers';
+import { closePreferences, editMessage, openChat, openConnectScreen, openProfile, preferencesButton, preferencesDialog, sendMessage, waitForMessage } from './test-helpers';
 
 test.use({ baseURL: 'http://localhost:5173' });
 
-const profileButton = (page: Page) => page.getByRole('button', { name: /^Your profile on/ });
-const profileDialog = (page: Page) => page.getByRole('dialog', { name: 'Edit profile' });
 const connectCard = (page: Page) => page.getByRole('form', { name: 'Sign in' });
 
-/** The user_id the profile editor shows, leaving the editor as it found it. */
+/** The user_id Preferences' Profile shows, leaving Preferences as it found it. */
 async function identityOf(page: Page): Promise<string> {
-	const wasOpen = await profileDialog(page).count() > 0;
-	if (!wasOpen) await profileButton(page).click();
-	const identity = await profileDialog(page).locator('code').textContent();
-	if (!wasOpen) await profileButton(page).click();
+	const wasOpen = await preferencesDialog(page).count() > 0;
+	const identity = await (await openProfile(page)).locator('.ap-profedit-hint code').textContent();
+	if (!wasOpen) await closePreferences(page);
 	return identity!;
 }
 
-/** Signing in lives on the connect screen; the profile's button opens it with Passkey chosen. */
+/** Signing in lives on the connect screen; Profile's Sign in opens it with Passkey chosen. */
 async function openPasskeySignIn(page: Page): Promise<void> {
-	if (!(await profileDialog(page).count())) await profileButton(page).click();
-	await profileDialog(page).getByRole('button', { name: 'Sign in with a passkey', exact: true }).click();
+	await (await openProfile(page)).getByRole('button', { name: 'Sign in', exact: true }).click();
 	await expect(connectCard(page)).toBeVisible();
 	await expect(connectCard(page).getByRole('radio', { name: 'Passkey', exact: true })).toHaveAttribute('aria-checked', 'true');
 }
@@ -48,11 +44,11 @@ async function loginWithPasskey(page: Page): Promise<void> {
 }
 
 async function signOut(page: Page): Promise<void> {
-	if (!(await profileDialog(page).count())) await profileButton(page).click();
-	await profileDialog(page).getByRole('button', { name: 'Sign out', exact: true }).click();
+	const profile = await openProfile(page);
+	await profile.getByRole('button', { name: 'Sign out', exact: true }).click();
 	await expect(page.getByTestId('connection-status')).toHaveText('Connected');
-	await expect(profileDialog(page).getByRole('button', { name: 'Sign in with a passkey', exact: true })).toBeVisible();
-	await profileButton(page).click();
+	await expect(profile.getByRole('button', { name: 'Sign in', exact: true })).toBeVisible();
+	await closePreferences(page);
 }
 
 test('passkeys preserve identity and edit ownership through sign-out, login, and reconnect', async ({ page, context }) => {
@@ -146,15 +142,15 @@ test('a handle typed in the profile names the new account and its passkey', asyn
 	} });
 	await openChat(page);
 	const handle = `handle-${Date.now()}`;
-	await profileButton(page).click();
-	await profileDialog(page).getByTestId('display-name-input').fill(handle);
-	await profileDialog(page).getByRole('button', { name: 'Sign in with a passkey', exact: true }).click();
+	const profile = await openProfile(page);
+	await profile.getByTestId('display-name-input').fill(handle);
+	await profile.getByRole('button', { name: 'Sign in', exact: true }).click();
 	// A new account takes a name; signing in restores one, so only Create account asks.
 	await chooseCreateAccount(page);
 	await expect(connectCard(page).getByTestId('connect-name-input')).toHaveValue(handle);
 	await createAccount(page).click();
 	await expect(connectCard(page)).toHaveCount(0);
-	await expect(profileButton(page)).toContainText(handle);
+	await expect(preferencesButton(page)).toContainText(handle);
 	// The register begin carries the handle (§3.2 name): the passkey is saved under it, not the guest's user_id.
 	const { credentials } = await cdp.send('WebAuthn.getCredentials', { authenticatorId });
 	expect(credentials).toHaveLength(1);
@@ -175,9 +171,8 @@ test('cancelling an active passkey prompt leaves sign-in and server changes usab
 	await createAccount(page).click();
 	await expect(card.getByRole('button', { name: 'Signing in…', exact: true })).toBeVisible();
 	await card.getByRole('button', { name: 'Cancel', exact: true }).click();
-	// The connect screen as it is, from the profile's Connect to a server… button.
-	await profileButton(page).click();
-	await profileDialog(page).getByRole('button', { name: 'Connect to a server…', exact: true }).click();
+	// The connect screen as it is, from the server pane's Connect to another server… button.
+	await openConnectScreen(page);
 	await page.getByTestId('server-url-input').fill('ws://localhost:8080/ws');
 	await card.getByRole('button', { name: 'Connect', exact: true }).click();
 	await expect(page.getByTestId('connection-status')).toHaveText('Connected');
