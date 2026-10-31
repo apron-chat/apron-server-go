@@ -842,13 +842,14 @@ func TestTerminalGrowsLiveThenKeepsItsOutput(t *testing.T) {
 	}
 	_, _ = pipe.Write([]byte("world,\r\n\x1b[1mlong\x1b[0m\n"))
 	_ = pipe.Close()
-	// The second write overflows the 16 kept bytes before the reader catches
-	// up, so the reader continues from the kept text: the last 16 bytes,
-	// from their first control character (§4.8.6).
-	const kept = "\r\n\x1b[1mlong\x1b[0m\n"
-	if rest, _ := io.ReadAll(reader.Body); string(rest) != kept {
+	// The reader goes on from where it was: what it missed is still held,
+	// though past the 16 bytes kept.
+	if rest, _ := io.ReadAll(reader.Body); string(rest) != "world,\r\n\x1b[1mlong\x1b[0m\n" {
 		t.Fatalf("reader got %q then %q", first, rest)
 	}
+	// The output keeps the last 16 bytes, from their first control
+	// character (§4.8.6).
+	const kept = "\r\n\x1b[1mlong\x1b[0m\n"
 	if status := <-writerDone; status != http.StatusNoContent {
 		t.Fatalf("writer status %d", status)
 	}

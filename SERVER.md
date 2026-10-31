@@ -631,34 +631,38 @@ publishes the snapshot that finishes a write before it answers the `PUT`.
   from a pipe, and one writer at a time (another is `409`). The text ends
   when the body ends (the writer gets `204`), after one hour, or once the
   writer has sent 16 MiB or an append is full (`413`); see the `--live.*`
-  flags. A writer whose connection drops before its body ends may `PUT`
-  to the same write URL again within 10 seconds and continue the text;
-  after that the text ends with what it has. Saving the message without
-  the embed ends the text early, and the save is the snapshot (the writer
-  gets `410`). Live text that had not ended when the server stopped fails
-  at the next start, as other unfinished writes do: its message is
-  republished without the embed.
+  flags. A writer whose connection drops before its body ends ends the
+  text at once (there is no grace period), and the text keeps what
+  arrived. The writer cannot continue it: another `PUT` to the write URL
+  is `409`, or `404` once the text has ended. Saving the
+  message without the embed ends the text early, and the save is the
+  snapshot (the writer gets `410`). Live text that had not ended when the
+  server stopped fails at the next start, as other unfinished writes do:
+  its message is republished without the embed.
 - **Terminals**
   ([PROTOCOL.md §4.8.6](https://github.com/shazow/apron/blob/main/PROTOCOL.md#486-embedterminal)):
   the server keeps the last 64 KiB of the output, cut with §4.8.6's
   `keep_last`: from the first byte below 0x20 in it, or else from the
-  first byte outside 0x80–0xBF. A new reader, and one that falls behind
-  what is kept, reads from there. When the text ends, the server publishes
-  a snapshot whose embed carries the kept text (invalid UTF-8 replaced with
-  U+FFFD) as `output`, in place of `url`. The `url` then serves the
-  `output`, also after a restart.
+  first byte outside 0x80–0xBF. A new reader reads from there. A reader
+  that falls so far behind that output it has not read is gone (the
+  server holds at most twice what it keeps) fails, so that it reconnects
+  and reads from there afresh, rather than skip what it missed. When the
+  text ends, the server publishes a snapshot whose embed carries the kept
+  text (invalid UTF-8 replaced with U+FFFD) as `output`, in place of
+  `url`. The `url` then serves the `output`, also after a restart.
 - **Appends**
   ([PROTOCOL.md §4.8.5](https://github.com/shazow/apron/blob/main/PROTOCOL.md#485-embedappend)):
   a message has at most one `append` embed (`invalid_params` otherwise,
   in a save too). The server keeps the first 64 KiB, and less after a long
-  opening text, so that `body.text` stays within the 256 KiB a request may
-  carry; at the limit it keeps the text up to a whole character. When the
-  text ends, other than by a save, the server publishes a snapshot that
-  adds the kept text (invalid UTF-8 replaced with U+FFFD) to the end of
-  `body.text` and removes the embed, whose `url` then stops working. The
-  appended text does not change `body.mentions`. The push of a new
-  message with an `append` embed waits for the text to end, so that it
-  carries the whole text (see [Push](#push)).
+  opening text, or a save that lengthened `body.text` meanwhile, so that
+  `body.text` stays within the 256 KiB a request may carry; at the limit
+  it keeps the text up to a whole character. When the text ends, other
+  than by a save, the server publishes a snapshot that adds the kept text
+  (invalid UTF-8 replaced with U+FFFD) to the end of `body.text` and
+  removes the embed, whose `url` then stops working. The appended text
+  does not change `body.mentions`. The push of a new message with an
+  `append` embed waits for the text to end, so that it carries the whole
+  text (see [Push](#push)).
 - **Avatars** ([PROTOCOL.md §4.8.6](https://github.com/shazow/apron/blob/main/PROTOCOL.md#486-avatars)): the `/avatar` command with one `upload`
   embed returns a write URL. A PNG, JPEG, GIF, or WebP of at most 2 MiB
   becomes the sender's `avatar`, followed by a `user` notification; replacing

@@ -74,7 +74,7 @@ func (s *Server) startWriterLocked(e *embedState) (int, string) {
 		s.mu.Lock()
 		defer s.unlock()
 		e.timedOut = true
-		e.live.end()
+		e.endLive()
 		if !e.writing {
 			s.finishLiveLocked(e)
 		}
@@ -234,7 +234,8 @@ func (s *Server) writeLive(w http.ResponseWriter, r *http.Request, e *embedState
 // finishLiveLocked ends live text exactly once and publishes the snapshot
 // its kind defines (§4.8.3): a terminal's embed carries the kept output in
 // place of its url (§4.8.6), and an append's kept text is added to
-// body.text and the embed removed (§4.8.5).
+// body.text and the embed removed (§4.8.5). The embed lets go of its live
+// text, which only readers still reading it hold on to.
 func (s *Server) finishLiveLocked(e *embedState) {
 	if e.finished || e.removed {
 		return
@@ -245,26 +246,31 @@ func (s *Server) finishLiveLocked(e *embedState) {
 	delete(s.writes, e.token)
 	s.touchEmbed(e.id)
 	m := s.messages[e.messageID]
+	text := e.live.text()
+	e.live = nil
 	if e.kind == kindTerminal {
-		output := e.live.text()
-		e.owned = map[string]any{"output": output}
+		e.owned = map[string]any{"output": text}
 		if m != nil {
 			s.republishLocked(m, func(body map[string]any) bool {
 				return replaceEmbed(body, e.id, func(embed map[string]any) {
 					delete(embed, "url")
-					embed["output"] = output
+					embed["output"] = text
 				})
 			})
 		}
 		return
 	}
-	text := e.live.text()
 	if m != nil {
 		s.republishLocked(m, func(body map[string]any) bool {
 			if !replaceEmbed(body, e.id, nil) {
 				return false
 			}
+			// A save may have lengthened body.text since the text started:
+			// the text keeps its first part that fits in a request (ReadLimit).
 			current, _ := body["text"].(string)
+			if room := max(0, int(s.config.ReadLimit)-len(current)); len(text) > room {
+				text = string(wholeRunes([]byte(text[:room])))
+			}
 			body["text"] = current + text
 			return true
 		})
@@ -276,7 +282,9 @@ func (s *Server) finishLiveLocked(e *embedState) {
 }
 
 // handleLive serves live text (§4.8.3): the kept text from its start, then
-// more as it arrives, until the text ends. A finished terminal's url serves
+// more as it arrives, until the text ends. A reader that falls behind what
+// a terminal keeps fails, so that it reconnects and reads the kept text
+// afresh, rather than skip what it missed. A finished terminal's url serves
 // its output.
 func (s *Server) handleLive(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Access-Control-Allow-Origin", "*")
@@ -310,7 +318,12 @@ func (s *Server) handleLive(w http.ResponseWriter, r *http.Request) {
 	controller := http.NewResponseController(w)
 	position := int64(-1)
 	for {
-		chunk, next, changed, ended := live.read(position)
+		chunk, next, changed, ended, behind := live.read(position)
+		if behind {
+			// Close the connection without ending the response, which
+			// would read as the end of the text.
+			panic(http.ErrAbortHandler)
+		}
 		if len(chunk) > 0 {
 			if _, err := w.Write(chunk); err != nil {
 				return
@@ -444,19 +457,21 @@ func (b *liveText) keptStartLocked() int64 {
 
 // read returns the bytes from position on, the next position, a channel
 // closed on the next change, and whether the text has ended with nothing
-// more to read. A new reader (position -1), and one that fell behind what
-// a terminal keeps, read from the start of the kept text.
-func (b *liveText) read(position int64) ([]byte, int64, chan struct{}, bool) {
+// more to read. A new reader (position -1) reads from the start of the kept
+// text. For one that fell behind what a terminal holds, so that bytes it
+// has not read are gone, read reports behind instead.
+func (b *liveText) read(position int64) (chunk []byte, next int64, changed chan struct{}, ended, behind bool) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	tail, _ := b.tailLocked()
-	if position < b.start+int64(tail) {
+	if position < 0 {
 		position = b.keptStartLocked()
+	} else if position < b.start {
+		return nil, position, nil, false, true
 	}
 	end := b.start + int64(len(b.data))
 	position = min(position, end)
-	chunk := append([]byte(nil), b.data[position-b.start:]...)
-	return chunk, end, b.changed, b.ended
+	chunk = append([]byte(nil), b.data[position-b.start:]...)
+	return chunk, end, b.changed, b.ended, false
 }
 
 // text is the kept text, converted with WHATWG's UTF-8 decode without BOM

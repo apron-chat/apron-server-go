@@ -77,7 +77,9 @@ type embedState struct {
 	upload      *list.Element
 	seq         int64
 	contentType string
-	live        *liveText
+	// live holds a terminal's or an append's text until it finishes; a
+	// finished terminal serves its output from owned. Restored embeds have none.
+	live *liveText
 }
 
 // image reports whether the embed is an avatar, the server's included, or

@@ -6,6 +6,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -89,13 +90,29 @@ func TestTerminalBufferServesKeepLast(t *testing.T) {
 		b.write([]byte(chunk))
 		all = append(all, chunk...)
 		want := keepLast(all, 8)
-		got, _, _, _ := b.read(-1)
+		got, _, _, _, _ := b.read(-1)
 		if !bytes.Equal(got, want) {
 			t.Fatalf("after %q a new reader got %q, want %q", chunk, got, want)
 		}
 		if text := b.text(); text != strings.ToValidUTF8(string(want), "\uFFFD") {
 			t.Fatalf("after %q the output is %q, want %q", chunk, text, want)
 		}
+	}
+}
+
+// A reader goes on from where it is while the terminal still holds the
+// bytes after it, and is told when it fell behind them.
+func TestTerminalBufferTellsAReaderThatFellBehind(t *testing.T) {
+	b := newLiveText(true, 8, 1<<20)
+	b.write([]byte("12345678"))
+	_, next, _, _, _ := b.read(-1)
+	b.write([]byte("abcdefgh"))
+	if got, _, _, _, behind := b.read(next); string(got) != "abcdefgh" || behind {
+		t.Fatalf("a reader still within the text got %q, behind %v", got, behind)
+	}
+	b.write([]byte("ij"))
+	if got, _, _, _, behind := b.read(next); got != nil || !behind {
+		t.Fatalf("a reader past what the terminal holds got %q, behind %v", got, behind)
 	}
 }
 
@@ -110,7 +127,7 @@ func TestAppendBufferKeepsTheFirstPartUpToAWholeCharacter(t *testing.T) {
 	if text := b.text(); text != "abcd" {
 		t.Fatalf("kept %q", text)
 	}
-	got, _, _, ended := b.read(-1)
+	got, _, _, ended, _ := b.read(-1)
 	if string(got) != "abcd" || !ended {
 		t.Fatalf("reader got %q, ended %v", got, ended)
 	}
@@ -217,6 +234,27 @@ func TestAppendFitsInARequest(t *testing.T) {
 	}
 	if text := a.notification(t, "message")["body"].(map[string]any)["text"].(string); len(text) != 4<<10 {
 		t.Fatalf("text of %d bytes", len(text))
+	}
+}
+
+// An append that a save lengthened the body under still fits in a request:
+// it keeps its first part, up to a whole character (§4.8.5).
+func TestAppendFitsInARequestAfterASave(t *testing.T) {
+	config := DefaultConfig()
+	config.ReadLimit = 4 << 10
+	config.AppendMaxBytes = 64 << 10
+	app, httpServer := newTestServer(t, config)
+	a := dialTestClient(t, httpServer)
+	result, writeURL, live := postLive(t, a, "append", map[string]any{"text": "> ", "embeds": []any{map[string]any{"kind": "append"}}})
+	pipe, writerDone := startLiveWrite(t, app, writeURL, strings.Repeat("é", 1<<10))
+	edited := strings.Repeat("e", 3<<10+1)
+	save(t, a, "edit", map[string]any{"message_id": result["message_id"], "body": map[string]any{"text": edited, "embeds": []any{live}}})
+	_ = pipe.Close()
+	if status := <-writerDone; status != http.StatusNoContent {
+		t.Fatalf("writer status %d", status)
+	}
+	if text := a.notification(t, "message")["body"].(map[string]any)["text"].(string); text != edited+strings.Repeat("é", 511) {
+		t.Fatalf("text of %d bytes, want %d", len(text), len(edited)+1022)
 	}
 }
 
@@ -470,6 +508,94 @@ func TestLiveTextEndsWhenItsWriterDisconnects(t *testing.T) {
 	disconnect(writeURL, "only this")
 	if text := a.notification(t, "message")["body"].(map[string]any)["text"]; text != "> only this" {
 		t.Fatalf("text %q", text)
+	}
+}
+
+// stallingWriter is a reader's connection whose first write waits for
+// resume, as a slow reader's does while the writer goes on.
+type stallingWriter struct {
+	header  http.Header
+	got     []byte
+	stalled chan struct{}
+	resume  chan struct{}
+}
+
+func (w *stallingWriter) Header() http.Header { return w.header }
+func (w *stallingWriter) WriteHeader(int)     {}
+func (w *stallingWriter) Write(p []byte) (int, error) {
+	if w.got == nil {
+		close(w.stalled)
+		<-w.resume
+	}
+	w.got = append(w.got, p...)
+	return len(p), nil
+}
+
+// A reader that falls behind what a terminal keeps fails, rather than skip
+// what it missed, so that it reconnects and reads the kept text afresh
+// (§4.8.5).
+func TestALiveReaderThatFallsBehindFails(t *testing.T) {
+	config := DefaultConfig()
+	config.TerminalKeepBytes = 8
+	app, httpServer := newTestServer(t, config)
+	a := dialTestClient(t, httpServer)
+	_, writeURL, terminal := postLive(t, a, "terminal", map[string]any{"embeds": []any{map[string]any{"kind": "terminal"}}})
+	pipe, writerDone := startLiveWrite(t, app, writeURL, "12345678")
+	app.mu.RLock()
+	live := app.embeds[terminal["embed_id"].(string)].live
+	app.mu.RUnlock()
+	waitFor := func(what string, done func(b *liveText) bool) {
+		t.Helper()
+		for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(5 * time.Millisecond) {
+			live.mu.Lock()
+			ok := done(live)
+			live.mu.Unlock()
+			if ok {
+				return
+			}
+			if time.Now().After(deadline) {
+				t.Fatal(what)
+			}
+		}
+	}
+	waitFor("the text never arrived", func(b *liveText) bool { return b.total == 8 })
+	w := &stallingWriter{header: make(http.Header), stalled: make(chan struct{}), resume: make(chan struct{})}
+	failed := make(chan any, 1)
+	go func() {
+		defer func() { failed <- recover() }()
+		app.handleLive(w, httptest.NewRequest(http.MethodGet, terminal["url"].(string), nil))
+	}()
+	<-w.stalled
+	_, _ = pipe.Write([]byte("abcdefghij"))
+	waitFor("the terminal never let go of what the reader missed", func(b *liveText) bool { return b.start > 8 })
+	close(w.resume)
+	_ = pipe.Close()
+	if status := <-writerDone; status != http.StatusNoContent {
+		t.Fatalf("writer status %d", status)
+	}
+	if recovered := <-failed; recovered != http.ErrAbortHandler || string(w.got) != "12345678" {
+		t.Fatalf("a reader that fell behind got %q, then %v", w.got, recovered)
+	}
+}
+
+// A finished terminal lets go of its live text: its url serves the output
+// from its snapshot.
+func TestAFinishedTerminalLetsGoOfItsLiveText(t *testing.T) {
+	app, httpServer := newTestServer(t, DefaultConfig())
+	a := dialTestClient(t, httpServer)
+	_, writeURL, terminal := postLive(t, a, "terminal", map[string]any{"embeds": []any{map[string]any{"kind": "terminal"}}})
+	if status, _, _ := httpDo(t, http.MethodPut, writeURL, strings.NewReader("done\n"), ""); status != http.StatusNoContent {
+		t.Fatalf("terminal write: %d", status)
+	}
+	a.notification(t, "message")
+	app.mu.RLock()
+	live := app.embeds[terminal["embed_id"].(string)].live
+	app.mu.RUnlock()
+	if live != nil {
+		t.Fatalf("a finished terminal holds its live text: %q", live.data)
+	}
+	if status, _, got := httpDo(t, http.MethodGet, terminal["url"].(string), nil, ""); status != http.StatusOK || string(got) != "done\n" {
+		t.Fatalf("finished terminal URL: %d %q", status, got)
 	}
 }
 
