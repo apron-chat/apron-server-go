@@ -50,12 +50,13 @@ const (
 	uploadReadTimeout = 15 * time.Minute
 	// maxHistoryReplyBytes bounds the records in one history page; a page
 	// always holds at least one record.
-	maxHistoryReplyBytes            = 4 << 20
-	defaultUploadStartTimeout       = 5 * time.Minute
-	defaultStreamKeepBytes          = 64 << 10
-	defaultStreamMaxBytes     int64 = 16 << 20
-	defaultStreamMaxDuration        = time.Hour
-	defaultMaxListedMembers         = 1000
+	maxHistoryReplyBytes             = 4 << 20
+	defaultUploadStartTimeout        = 5 * time.Minute
+	defaultLiveTextMaxBytes    int64 = 16 << 20
+	defaultLiveTextMaxDuration       = time.Hour
+	defaultTerminalKeepBytes         = 64 << 10
+	defaultAppendMaxBytes            = 64 << 10
+	defaultMaxListedMembers          = 1000
 	// retryAfterSeconds is the delay suggested by connection-level
 	// retry_after errors (capacity and shutdown).
 	retryAfterSeconds = 30
@@ -81,7 +82,7 @@ type Config struct {
 	WriteTimeout    time.Duration
 
 	// PublicURL is the external base URL (scheme and host, such as
-	// https://chat.example) of write, file, and stream URLs. Empty derives it
+	// https://chat.example) of write, file, and live text URLs. Empty derives it
 	// from each WebSocket request's Host header.
 	PublicURL string
 	// MaxUploadBytes bounds one upload; MaxAvatarBytes bounds a /avatar upload.
@@ -102,13 +103,19 @@ type Config struct {
 	// removed on Shutdown. At start, files named *.upload in UploadDir that
 	// no stored embed holds are removed.
 	UploadDir string
-	// UploadStartTimeout is how long an unused write URL stays valid.
+	// UploadStartTimeout is how long an unused write URL stays valid, that
+	// of a /embed-terminal or /embed-append command included.
 	UploadStartTimeout time.Duration
-	// StreamKeepBytes is the trailing text a stream keeps; StreamMaxBytes and
-	// StreamMaxDuration end a stream.
-	StreamKeepBytes   int
-	StreamMaxBytes    int64
-	StreamMaxDuration time.Duration
+	// Live text (§4.8.3) ends when its writer has sent LiveTextMaxBytes,
+	// after LiveTextMaxDuration, or when its writer disconnects, keeping what
+	// arrived. A terminal keeps its last TerminalKeepBytes (§4.8.6); an
+	// append keeps its first AppendMaxBytes (§4.8.5), at most ReadLimit
+	// with its message's opening text, so that the finished body.text fits
+	// in a request.
+	LiveTextMaxBytes    int64
+	LiveTextMaxDuration time.Duration
+	TerminalKeepBytes   int
+	AppendMaxBytes      int
 	// Store keeps the server's state across restarts; nil keeps it in memory
 	// for this Server only. The server closes it on Shutdown.
 	Store store.Store
@@ -189,9 +196,10 @@ func DefaultConfig() Config {
 		MaxEmojiBytes:         defaultMaxEmojiBytes,
 		MaxEmojiStorageBytes:  defaultMaxEmojiStorage,
 		UploadStartTimeout:    defaultUploadStartTimeout,
-		StreamKeepBytes:       defaultStreamKeepBytes,
-		StreamMaxBytes:        defaultStreamMaxBytes,
-		StreamMaxDuration:     defaultStreamMaxDuration,
+		LiveTextMaxBytes:      defaultLiveTextMaxBytes,
+		LiveTextMaxDuration:   defaultLiveTextMaxDuration,
+		TerminalKeepBytes:     defaultTerminalKeepBytes,
+		AppendMaxBytes:        defaultAppendMaxBytes,
 		MaxListedMembers:      defaultMaxListedMembers,
 	}
 }
@@ -240,15 +248,21 @@ func (c Config) withDefaults() Config {
 	if c.UploadStartTimeout <= 0 {
 		c.UploadStartTimeout = defaults.UploadStartTimeout
 	}
-	if c.StreamKeepBytes <= 0 {
-		c.StreamKeepBytes = defaults.StreamKeepBytes
+	if c.LiveTextMaxBytes <= 0 {
+		c.LiveTextMaxBytes = defaults.LiveTextMaxBytes
 	}
-	if c.StreamMaxBytes <= 0 {
-		c.StreamMaxBytes = defaults.StreamMaxBytes
+	if c.LiveTextMaxDuration <= 0 {
+		c.LiveTextMaxDuration = defaults.LiveTextMaxDuration
 	}
-	if c.StreamMaxDuration <= 0 {
-		c.StreamMaxDuration = defaults.StreamMaxDuration
+	if c.TerminalKeepBytes <= 0 {
+		c.TerminalKeepBytes = defaults.TerminalKeepBytes
 	}
+	if c.AppendMaxBytes <= 0 {
+		c.AppendMaxBytes = defaults.AppendMaxBytes
+	}
+	// The finished text is the body.text of a message, which fits in a
+	// request.
+	c.AppendMaxBytes = min(c.AppendMaxBytes, int(c.ReadLimit))
 	c.PublicURL = strings.TrimRight(c.PublicURL, "/")
 	return c
 }
@@ -365,7 +379,7 @@ type client struct {
 	// user is the connection's identity, nil before authentication. Guarded
 	// by server.mu.
 	user *userState
-	// baseURL prefixes the write, file, and stream URLs this connection mints.
+	// baseURL prefixes the write, file, and live text URLs this connection mints.
 	baseURL  string
 	origin   string
 	ceremony *passkeyCeremony
@@ -562,15 +576,15 @@ func Open(config Config) (*Server, error) {
 // (§3.5.1, §4.3) and that new guests join.
 const defaultRoomID = "general"
 
-// Handler returns the HTTP handler serving /ws, /healthz, the upload, file,
-// stream, and emoji catalog endpoints, and StaticDir.
+// Handler returns the HTTP handler serving /ws, /healthz, the write, file,
+// live text, and emoji catalog endpoints, and StaticDir.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ws", s.handleWebSocket)
 	mux.HandleFunc("/healthz", s.handleHealth)
 	mux.HandleFunc(writePath, s.handleWrite)
 	mux.HandleFunc(filePath, s.handleFile)
-	mux.HandleFunc(streamPath, s.handleStream)
+	mux.HandleFunc(livePath, s.handleLive)
 	mux.HandleFunc(emojiPath, s.handleEmoji)
 	if s.config.StaticDir != "" {
 		root := filepath.Clean(s.config.StaticDir)
@@ -624,7 +638,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 }
 
 // Shutdown tells active WebSockets to retry later, closes them, ends live
-// streams, and waits for the connection handlers to finish.
+// text, and waits for the connection handlers to finish.
 func (s *Server) Shutdown(ctx context.Context) error {
 	s.mu.Lock()
 	if !s.closed {
@@ -634,7 +648,7 @@ func (s *Server) Shutdown(ctx context.Context) error {
 			c.closeWithError(&rpcError{Code: codeRetryAfter, Message: "Server is shutting down; reconnect shortly", Data: map[string]any{"retry_after": 5}})
 		}
 		for _, e := range s.embeds {
-			e.endStream()
+			e.endLive()
 		}
 		// Pending badge pushes would only be dropped once they fire, and
 		// the ends of timed mutes and coalesced statuses would find the
@@ -809,9 +823,9 @@ func (s *Server) serverParams(baseURL string) map[string]any {
 	// guest makes the guest an account, and email and guest start one.
 	signup := slices.DeleteFunc(slices.Clone(authSchemes), func(scheme string) bool { return scheme == "token" })
 	params := map[string]any{
-		"apron":        9,
-		"agent":        "apron-go/9",
-		"capabilities": []string{"history", "edit", "rooms", "reactions", "activity", "embed:upload", "embed:stream", "command", "status", "ext"},
+		"apron":        10,
+		"agent":        "apron-go/10",
+		"capabilities": []string{"history", "edit", "rooms", "reactions", "activity", "embed:upload", "embed:append", "embed:terminal", "command", "status", "ext"},
 		"auth":         authSchemes,
 		"ping":         max(1, int(s.config.PingInterval/time.Second)),
 		// The optional statuses accepted with `me` (§4.5); online and ""

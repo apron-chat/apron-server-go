@@ -711,13 +711,13 @@ func TestUploadsAreHostedWithOpenGraph(t *testing.T) {
 	// A save keeps an embed by embed_id; the server restores what it owns.
 	messageID := result["message_id"].(string)
 	kept := []any{
-		map[string]any{"embed_id": embedID, "kind": "stream", "title": "renamed.png", "url": "https://forged.example/y"},
+		map[string]any{"embed_id": embedID, "kind": "terminal", "title": "renamed.png", "url": "https://forged.example/y", "output": "forged"},
 		embeds[1],
 	}
 	_, edited := save(t, a, "keep", map[string]any{"message_id": messageID, "body": map[string]any{"text": "edited", "embeds": kept}})
 	b.notification(t, "message")
 	restored := embedsOf(t, edited)[0]
-	if restored["kind"] != "upload" || restored["url"] != fileURL || !reflect.DeepEqual(restored["og"], any(wantOG)) || restored["title"] != "renamed.png" {
+	if restored["kind"] != "upload" || restored["url"] != fileURL || !reflect.DeepEqual(restored["og"], any(wantOG)) || restored["title"] != "renamed.png" || restored["output"] != nil {
 		t.Fatalf("restored embed: %#v", restored)
 	}
 	a.expectError(t, "message", "unknown", map[string]any{"message_id": messageID, "room_id": "general", "body": map[string]any{"embeds": []any{map[string]any{"embed_id": "embed_999", "kind": "upload"}}}}, codeInvalidParams)
@@ -778,17 +778,17 @@ func TestFailedAndExpiredWritesDropTheEmbed(t *testing.T) {
 	_, httpServer := newTestServer(t, config)
 	a := dialTestClient(t, httpServer)
 	result := postEmbeds(t, a, "two", map[string]any{"room_id": "general", "body": map[string]any{
-		"embeds": []any{map[string]any{"kind": "upload"}, map[string]any{"kind": "stream"}},
+		"embeds": []any{map[string]any{"kind": "upload"}, map[string]any{"kind": "terminal"}},
 	}})
 	written := result["embeds"].([]any)
 	large := written[0].(map[string]any)["write_url"].(string)
 	if status, _, _ := httpDo(t, http.MethodPut, large, strings.NewReader("too large"), "text/plain"); status != http.StatusRequestEntityTooLarge {
 		t.Fatalf("oversized upload: %d", status)
 	}
-	if left := embedsOf(t, a.notification(t, "message")); len(left) != 1 || left[0]["kind"] != "stream" {
+	if left := embedsOf(t, a.notification(t, "message")); len(left) != 1 || left[0]["kind"] != "terminal" {
 		t.Fatalf("after failed upload: %#v", left)
 	}
-	// The stream's write URL is never used, so it expires.
+	// The terminal's write URL is never used, so it expires.
 	if expired := a.notification(t, "message"); len(embedsOf(t, expired)) != 0 {
 		t.Fatalf("after expiry: %#v", expired)
 	}
@@ -797,27 +797,30 @@ func TestFailedAndExpiredWritesDropTheEmbed(t *testing.T) {
 	}
 }
 
-func TestStreamsGrowLiveThenKeepTheirText(t *testing.T) {
+func TestTerminalGrowsLiveThenKeepsItsOutput(t *testing.T) {
 	config := DefaultConfig()
-	config.StreamKeepBytes = 16
-	config.StreamMaxBytes = 64
+	config.TerminalKeepBytes = 16
+	config.LiveTextMaxBytes = 64
 	_, httpServer := newTestServer(t, config)
 	a := dialTestClient(t, httpServer)
-	result := postEmbeds(t, a, "stream", map[string]any{"room_id": "general", "body": map[string]any{
-		"embeds": []any{map[string]any{"kind": "stream", "format": "terminal", "text": "forged"}},
+	result := postEmbeds(t, a, "terminal", map[string]any{"room_id": "general", "body": map[string]any{
+		"embeds": []any{map[string]any{"kind": "terminal", "title": "make", "output": "forged", "url": "https://forged.example/t"}},
 	}})
 	writeURL := result["embeds"].([]any)[0].(map[string]any)["write_url"].(string)
 	live := embedsOf(t, result["snapshot"].(map[string]any))[0]
-	streamURL, _ := live["url"].(string)
-	if !strings.HasPrefix(streamURL, httpServer.URL+streamPath) || live["format"] != "terminal" || live["text"] != nil {
+	liveURL, _ := live["url"].(string)
+	if !strings.HasPrefix(liveURL, httpServer.URL+livePath) || live["title"] != "make" || live["output"] != nil {
 		t.Fatalf("live embed: %#v", live)
 	}
 
-	reader, err := http.Get(streamURL)
+	reader, err := http.Get(liveURL)
 	if err != nil || reader.StatusCode != http.StatusOK {
-		t.Fatalf("stream reader: %v %v", reader, err)
+		t.Fatalf("live reader: %v %v", reader, err)
 	}
 	defer reader.Body.Close()
+	if reader.Header.Get("Content-Type") != "text/plain; charset=utf-8" || reader.Header.Get("X-Content-Type-Options") != "nosniff" {
+		t.Fatalf("live text headers: %#v", reader.Header)
+	}
 	body, pipe := io.Pipe()
 	writerDone := make(chan int, 1)
 	go func() {
@@ -837,43 +840,47 @@ func TestStreamsGrowLiveThenKeepTheirText(t *testing.T) {
 	if _, err := io.ReadFull(reader.Body, first); err != nil || string(first) != "hello " {
 		t.Fatalf("live read %q: %v", first, err)
 	}
-	_, _ = pipe.Write([]byte("world, this is a long line\n"))
+	_, _ = pipe.Write([]byte("world,\r\n\x1b[1mlong\x1b[0m\n"))
 	_ = pipe.Close()
 	// The second write overflows the 16 kept bytes before the reader catches
-	// up, so the reader continues from the kept text.
-	rest, _ := io.ReadAll(reader.Body)
-	if string(rest) != " is a long line\n" {
+	// up, so the reader continues from the kept text: the last 16 bytes,
+	// from their first control character (§4.8.6).
+	const kept = "\r\n\x1b[1mlong\x1b[0m\n"
+	if rest, _ := io.ReadAll(reader.Body); string(rest) != kept {
 		t.Fatalf("reader got %q then %q", first, rest)
 	}
 	if status := <-writerDone; status != http.StatusNoContent {
 		t.Fatalf("writer status %d", status)
 	}
-	finished := embedsOf(t, a.notification(t, "message"))[0]
-	if finished["text"] != " is a long line\n" || finished["url"] != nil || finished["format"] != "terminal" {
-		t.Fatalf("finished embed: %#v", finished)
+	finished := a.notification(t, "message")
+	embed := embedsOf(t, finished)[0]
+	if embed["output"] != kept || embed["url"] != nil || embed["title"] != "make" || finished["prev_log_id"] == nil {
+		t.Fatalf("finished embed: %#v", embed)
 	}
-	if status, _, _ := httpDo(t, http.MethodGet, streamURL, nil, ""); status != http.StatusNotFound {
-		t.Fatalf("finished stream URL: %d", status)
+	// After the end, the url serves the output.
+	if status, header, got := httpDo(t, http.MethodGet, liveURL, nil, ""); status != http.StatusOK || string(got) != kept || header.Get("X-Content-Type-Options") != "nosniff" {
+		t.Fatalf("finished live URL: %d %q", status, got)
 	}
 
-	// At the size limit the stream ends and keeps its trailing text.
-	result = postEmbeds(t, a, "limited", map[string]any{"room_id": "general", "body": map[string]any{"embeds": []any{map[string]any{"kind": "stream"}}}})
+	// At the size limit the text ends and keeps its last part: from the
+	// first control character in the last 16 bytes.
+	result = postEmbeds(t, a, "limited", map[string]any{"room_id": "general", "body": map[string]any{"embeds": []any{map[string]any{"kind": "terminal"}}}})
 	writeURL = result["embeds"].([]any)[0].(map[string]any)["write_url"].(string)
-	if status, _, _ := httpDo(t, http.MethodPut, writeURL, strings.NewReader(strings.Repeat("x", 63)+"é"+strings.Repeat("y", 20)), ""); status != http.StatusRequestEntityTooLarge {
-		t.Fatalf("oversized stream: %d", status)
+	if status, _, _ := httpDo(t, http.MethodPut, writeURL, strings.NewReader(strings.Repeat("x", 50)+"\r\n"+strings.Repeat("y", 30)), ""); status != http.StatusRequestEntityTooLarge {
+		t.Fatalf("oversized terminal: %d", status)
 	}
-	if text := embedsOf(t, a.notification(t, "message"))[0]["text"]; text != strings.Repeat("x", 15)+"\uFFFD" {
-		t.Fatalf("limited text %q", text)
+	if output := embedsOf(t, a.notification(t, "message"))[0]["output"]; output != "\r\n"+strings.Repeat("y", 12) {
+		t.Fatalf("limited output %q", output)
 	}
 }
 
-// A finished stream write leaves its keep-alive connection usable: a live
-// stream read next on the same connection follows the stream.
-func TestStreamWriteConnectionCanReadAStream(t *testing.T) {
+// A finished live text write leaves its keep-alive connection usable: a live
+// read next on the same connection follows the text.
+func TestLiveWriteConnectionCanReadLiveText(t *testing.T) {
 	_, httpServer := newTestServer(t, DefaultConfig())
 	a := dialTestClient(t, httpServer)
-	result := postEmbeds(t, a, "streams", map[string]any{"room_id": "general", "body": map[string]any{
-		"embeds": []any{map[string]any{"kind": "stream"}, map[string]any{"kind": "stream"}},
+	result := postEmbeds(t, a, "terminals", map[string]any{"room_id": "general", "body": map[string]any{
+		"embeds": []any{map[string]any{"kind": "terminal"}, map[string]any{"kind": "terminal"}},
 	}})
 	written := result["embeds"].([]any)
 	live := embedsOf(t, result["snapshot"].(map[string]any))
@@ -882,27 +889,27 @@ func TestStreamWriteConnectionCanReadAStream(t *testing.T) {
 	request, _ := http.NewRequest(http.MethodPut, written[0].(map[string]any)["write_url"].(string), strings.NewReader("done"))
 	response, err := client.Do(request)
 	if err != nil || response.StatusCode != http.StatusNoContent {
-		t.Fatalf("first stream write: %v %v", response, err)
+		t.Fatalf("first live write: %v %v", response, err)
 	}
 	response.Body.Close()
 	reader, err := client.Get(live[1]["url"].(string))
 	if err != nil || reader.StatusCode != http.StatusOK {
-		t.Fatalf("stream reader: %v %v", reader, err)
+		t.Fatalf("live reader: %v %v", reader, err)
 	}
 	defer reader.Body.Close()
 	if status, _, _ := httpDo(t, http.MethodPut, written[1].(map[string]any)["write_url"].(string), strings.NewReader("second"), "text/plain"); status != http.StatusNoContent {
-		t.Fatalf("second stream write: %d", status)
+		t.Fatalf("second live write: %d", status)
 	}
 	if got, _ := io.ReadAll(reader.Body); string(got) != "second" {
 		t.Fatalf("reader on the write's connection got %q", got)
 	}
 }
 
-func TestSavingWithoutAStreamEndsIt(t *testing.T) {
-	app, httpServer := newTestServer(t, DefaultConfig())
-	a := dialTestClient(t, httpServer)
-	result := postEmbeds(t, a, "stream", map[string]any{"room_id": "general", "body": map[string]any{"embeds": []any{map[string]any{"kind": "stream"}}}})
-	writeURL := result["embeds"].([]any)[0].(map[string]any)["write_url"].(string)
+// startLiveWrite starts a streaming PUT to writeURL with first as its first
+// bytes, waits until the server has taken the write, and returns the body's
+// writer and a channel that receives the response status.
+func startLiveWrite(t *testing.T, app *Server, writeURL, first string) (*io.PipeWriter, chan int) {
+	t.Helper()
 	body, pipe := io.Pipe()
 	writerDone := make(chan int, 1)
 	go func() {
@@ -915,27 +922,47 @@ func TestSavingWithoutAStreamEndsIt(t *testing.T) {
 		response.Body.Close()
 		writerDone <- response.StatusCode
 	}()
-	_, _ = pipe.Write([]byte("partial"))
-	// The save must find the write started; one that arrives after it is
-	// refused instead (TestRefusedWriteDoesNotWaitForItsBody).
+	_, _ = pipe.Write([]byte(first))
 	token := writeURL[strings.LastIndex(writeURL, "/")+1:]
 	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(5 * time.Millisecond) {
 		app.mu.RLock()
-		_, waiting := app.writes[token]
+		e := app.writes[token]
+		writing := e != nil && e.writing
 		app.mu.RUnlock()
-		if !waiting {
-			break
+		if writing {
+			return pipe, writerDone
 		}
 		if time.Now().After(deadline) {
-			t.Fatal("the stream write never started")
+			t.Fatal("the live write never started")
 		}
 	}
-	save(t, a, "stop", map[string]any{"message_id": result["message_id"], "body": map[string]any{"text": "never mind"}})
-	if status := <-writerDone; status != http.StatusGone {
-		t.Fatalf("writer status %d", status)
+}
+
+// With edit, a save that removes live text's embed ends it early (§4.8.3):
+// the save is the snapshot, and an append's text is not added to it.
+func TestSavingWithoutLiveTextEndsIt(t *testing.T) {
+	for _, kind := range []string{"terminal", "append"} {
+		t.Run(kind, func(t *testing.T) {
+			app, httpServer := newTestServer(t, DefaultConfig())
+			a := dialTestClient(t, httpServer)
+			result := postEmbeds(t, a, kind, map[string]any{"room_id": "general", "body": map[string]any{"text": "start ", "embeds": []any{map[string]any{"kind": kind}}}})
+			writeURL := result["embeds"].([]any)[0].(map[string]any)["write_url"].(string)
+			liveURL := embedsOf(t, result["snapshot"].(map[string]any))[0]["url"].(string)
+			pipe, writerDone := startLiveWrite(t, app, writeURL, "partial")
+			_, saved := save(t, a, "stop", map[string]any{"message_id": result["message_id"], "body": map[string]any{"text": "never mind"}})
+			if body := saved["body"].(map[string]any); body["text"] != "never mind" || body["embeds"] != nil {
+				t.Fatalf("save: %#v", saved)
+			}
+			if status := <-writerDone; status != http.StatusGone {
+				t.Fatalf("writer status %d", status)
+			}
+			_ = pipe.Close()
+			a.expectQuiet(t)
+			if status, _, _ := httpDo(t, http.MethodGet, liveURL, nil, ""); status != http.StatusNotFound {
+				t.Fatalf("removed live URL: %d", status)
+			}
+		})
 	}
-	_ = pipe.Close()
-	a.expectQuiet(t)
 }
 
 // Writes use PUT (§4.8.3); another method leaves the write URL unused.
@@ -957,7 +984,7 @@ func TestWritesArePUT(t *testing.T) {
 func TestRefusedWriteDoesNotWaitForItsBody(t *testing.T) {
 	_, httpServer := newTestServer(t, DefaultConfig())
 	a := dialTestClient(t, httpServer)
-	result := postEmbeds(t, a, "stream", map[string]any{"room_id": "general", "body": map[string]any{"embeds": []any{map[string]any{"kind": "stream"}}}})
+	result := postEmbeds(t, a, "terminal", map[string]any{"room_id": "general", "body": map[string]any{"embeds": []any{map[string]any{"kind": "terminal"}}}})
 	writeURL := result["embeds"].([]any)[0].(map[string]any)["write_url"].(string)
 	save(t, a, "stop", map[string]any{"message_id": result["message_id"], "body": map[string]any{"text": "never mind"}})
 	body, pipe := io.Pipe()
@@ -980,7 +1007,7 @@ func TestAvatarCommand(t *testing.T) {
 	_, httpServer := newTestServer(t, DefaultConfig())
 	clients := dialGroup(t, httpServer, 2)
 	a, b := clients[0], clients[1]
-	for i, embeds := range []any{nil, []any{}, []any{map[string]any{"kind": "stream"}}, []any{map[string]any{"kind": "upload"}, map[string]any{"kind": "upload"}}} {
+	for i, embeds := range []any{nil, []any{}, []any{map[string]any{"kind": "terminal"}}, []any{map[string]any{"kind": "upload"}, map[string]any{"kind": "upload"}}} {
 		body := map[string]any{"text": "/avatar"}
 		if embeds != nil {
 			body["embeds"] = embeds
@@ -1065,7 +1092,8 @@ func TestCommands(t *testing.T) {
 		}
 		return body["text"].(string)
 	}
-	if text := help(a, ops); !strings.Contains(text, "`/help`") || !strings.Contains(text, "`/avatar`") || !strings.Contains(text, "`/kick @user [reason]`") {
+	if text := help(a, ops); !strings.Contains(text, "`/help`") || !strings.Contains(text, "`/avatar`") || !strings.Contains(text, "`/kick @user [reason]`") ||
+		!strings.Contains(text, "`/embed-terminal [title]`") || !strings.Contains(text, "`/embed-append [markdown]`") {
 		t.Fatalf("creator's help: %q", text)
 	}
 	if text := help(b, ""); strings.Contains(text, "/kick") || !strings.Contains(text, "/avatar") {

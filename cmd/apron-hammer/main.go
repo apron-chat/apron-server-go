@@ -62,7 +62,7 @@ var scenarios = []scenario{
 	{"history", "seed a room, then page its history concurrently", []string{"history", "rooms"}, runHistory},
 	{"threads", "create many threads, then list them, sign in with a pipelined room_list, and join and leave concurrently", []string{"rooms"}, runThreads},
 	{"edits", "post, edit, react, and delete in a loop", []string{"edit", "reactions"}, runEdits},
-	{"embeds", "upload files and run live streams with readers", []string{"embed:upload", "embed:stream"}, runEmbeds},
+	{"embeds", "upload files, and write live terminal and append text with readers", []string{"embed:upload", "embed:terminal", "embed:append"}, runEmbeds},
 	{"ext", "save messages through the ext merge's edge cases, pipelined saves of different keys included", []string{"edit", "ext"}, runExt},
 	{"signin", "sign guests in and check that nothing about the new identity precedes the auth result", nil, runSignIn},
 }

@@ -20,7 +20,7 @@ Restart the server between runs you want to compare. A scenario that needs a
 capability the server's `server` frame does not list is skipped: `activity`
 needs `activity`, `history` needs `history` and `rooms`, `threads` needs
 `rooms`, `edits` needs `edit` and `reactions`, `embeds` needs
-`embed:upload` and `embed:stream`, and `ext` needs `edit` and `ext`.
+`embed:upload`, `embed:terminal`, and `embed:append`, and `ext` needs `edit` and `ext`.
 
 | Scenario   | Load |
 |------------|------|
@@ -31,7 +31,7 @@ needs `activity`, `history` needs `history` and `rooms`, `threads` needs
 | `history`  | seed a room with 20,000 messages, then page it with `limit` 100 and 1000 |
 | `threads`  | create 1,000 threads with `room_set`, then concurrently `room_list` them (`filter: "not_joined"`) and the joined rooms with `members: true`, or sign in with `room_list` (`filter: "joined"`, `members: true`) pipelined behind `auth`, then `room_join` and `room_leave` a thread; a listing without `users` is accepted |
 | `edits`    | post, edit three times, react, clear, and delete, in a loop |
-| `embeds`   | 64 KiB uploads read back from their file URLs, and two-second live streams read while they are written |
+| `embeds`   | 64 KiB uploads read back from their file URLs, and two-second live `terminal` (1 KiB chunks) and `append` (64-byte chunks) text read while it is written |
 | `ext`      | saves messages through the `ext` merge's edge cases and checks each snapshot: empty values dropped, an integer beyond 2^53 kept exactly, two saves of different keys sent back to back both kept, `"ext": {}` and a save without `ext` changing nothing, `null` kept, and no `ext` on a tombstone |
 | `signin`   | signs guests in over and over and checks that only the `server` frame and transient notices arrive before the `auth` result |
 
