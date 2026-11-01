@@ -167,6 +167,10 @@ Flags (`aprond --help` lists them all):
   otherwise. A writer that disconnects before its body ends ends the text,
   which keeps what arrived; it cannot continue it. See
   [Embeds, uploads, and live text](#embeds-uploads-and-live-text).
+- `--live.terminal-viewer <url>` (`https://terminal.apron.chat/`) is a page
+  that shows a terminal's live text: a browser that opens a terminal's `url`
+  goes there (see [Terminals](#embeds-uploads-and-live-text)). An empty
+  value (`--live.terminal-viewer=`) serves browsers the plain text.
 - `--push.disable` removes push. Stored registrations are kept but not
   loaded, and apply again once push is enabled. `--push.allow-insecure` is for tests only:
   it accepts `http` push endpoints and ones on internal addresses, so any
@@ -590,8 +594,8 @@ destination room, before the result.
 
 Every embed gets a server-assigned `embed_id` (`embed_<n>`). A save keeps an
 embed by sending it back with its `embed_id`; its `kind` and the fields the
-server owns (an upload's `url` and `og`, live text's `url`, a finished
-terminal's `output`) are restored from the server's records, while other
+server owns (an upload's `url` and `og`, live text's `url`, a terminal's
+`og`, a finished terminal's `output`) are restored from the server's records, while other
 fields come from the save. An embed sent without `embed_id` is new, one
 left out is removed and its hosted content deleted, and an unknown
 `embed_id` is `invalid_params`. `og` sent by clients is dropped: the server
@@ -651,6 +655,15 @@ publishes the snapshot that finishes a write before it answers the `PUT`.
   text ends, the server publishes a snapshot whose embed carries the kept
   text (invalid UTF-8 replaced with U+FFFD) as `output`, in place of
   `url`. The `url` then serves the `output`, also after a restart.
+  A terminal's `og` describes it, for clients that don't render terminal
+  embeds and show its card, which opens `url`: its `title` is the embed's
+  (`Terminal` without one), and its `description` follows it: "A terminal,
+  waiting for its program's output.", "Live terminal output. Open it to
+  watch.", then "Terminal output.". A request for a terminal's `url` with
+  `Sec-Fetch-Mode: navigate`, a browser opening it as a page, is redirected
+  (`302`) to `--live.terminal-viewer`, with `stream=<url>` and
+  `title=<title>` in the fragment, which never reaches the viewer's host;
+  other requests (`Vary: Sec-Fetch-Mode`) get the text.
 - **Appends**
   ([PROTOCOL.md §4.8.5](https://github.com/shazow/apron/blob/main/PROTOCOL.md#485-embedappend)):
   a message has at most one `append` embed (`invalid_params` otherwise,
@@ -808,7 +821,7 @@ replies arrive before its result. Commands:
   sender, in the command's room, with the command's `reply_to`, if any (a
   reply that would quote a message fewer people can see is `denied`, as
   for `message`), and without mentions. For `/embed-terminal` its body is
-  `{"text": "", "embeds": [{embed_id, kind: "terminal", title?, url}]}`,
+  `{"text": "", "embeds": [{embed_id, kind: "terminal", title?, url, og}]}`,
   `title` being the first line of the rest of the command, at most 200
   characters; for `/embed-append` it is `{"text": <the rest of the
   command>, "format": "markdown", "embeds": [{embed_id, kind: "append",

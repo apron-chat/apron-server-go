@@ -183,6 +183,8 @@ func (s *Server) resolveEmbedsLocked(c *client, messageID string, current map[st
 			if liveKind(kind) {
 				text, _ := body["text"].(string)
 				s.startLiveLocked(e, text)
+				// A terminal's og, which says what it is (§4.8.6).
+				maps.Copy(embed, cloneObject(e.owned))
 			}
 			written = append(written, map[string]any{"embed_id": id, "kind": kind, "write_url": e.writeURL()})
 		}

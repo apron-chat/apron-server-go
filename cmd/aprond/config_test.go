@@ -241,3 +241,26 @@ func TestLiveTextSettings(t *testing.T) {
 		t.Fatal("accepted an append larger than a request")
 	}
 }
+
+func TestTerminalViewerSetting(t *testing.T) {
+	for _, c := range []struct {
+		args []string
+		want string
+	}{
+		{nil, "https://terminal.apron.chat/"},
+		{[]string{"--live.terminal-viewer", "https://terminal.example/view"}, "https://terminal.example/view"},
+		{[]string{"--live.terminal-viewer", ""}, ""},
+	} {
+		options, _ := parse(t, c.args...)
+		config, err := serverConfig(*options)
+		if err != nil || config.TerminalViewerURL != c.want {
+			t.Errorf("%v: %q, %v", c.args, config.TerminalViewerURL, err)
+		}
+	}
+	for _, viewer := range []string{"terminal.apron.chat", "javascript:alert(1)", "https://terminal.example/#stream=", "https://user@terminal.example/"} {
+		options, _ := parse(t, "--live.terminal-viewer", viewer)
+		if _, err := serverConfig(*options); err == nil {
+			t.Errorf("accepted --live.terminal-viewer %q", viewer)
+		}
+	}
+}

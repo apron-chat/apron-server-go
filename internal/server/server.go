@@ -55,8 +55,11 @@ const (
 	defaultLiveTextMaxBytes    int64 = 16 << 20
 	defaultLiveTextMaxDuration       = time.Hour
 	defaultTerminalKeepBytes         = 64 << 10
-	defaultAppendMaxBytes            = 64 << 10
-	defaultMaxListedMembers          = 1000
+	// DefaultTerminalViewerURL is where a browser that opens a terminal's url
+	// is sent: Apron's stand-alone terminal viewer.
+	DefaultTerminalViewerURL = "https://terminal.apron.chat/"
+	defaultAppendMaxBytes    = 64 << 10
+	defaultMaxListedMembers  = 1000
 	// retryAfterSeconds is the delay suggested by connection-level
 	// retry_after errors (capacity and shutdown).
 	retryAfterSeconds = 30
@@ -116,6 +119,12 @@ type Config struct {
 	LiveTextMaxDuration time.Duration
 	TerminalKeepBytes   int
 	AppendMaxBytes      int
+	// TerminalViewerURL is a page that shows a terminal's live text, such as
+	// https://terminal.apron.chat: a browser that opens a terminal's url as
+	// a page is sent there, with the url and title in the fragment, which
+	// never reaches the viewer's host (§4.8.5). Empty serves the text as
+	// plain text to browsers too.
+	TerminalViewerURL string
 	// Store keeps the server's state across restarts; nil keeps it in memory
 	// for this Server only. The server closes it on Shutdown.
 	Store store.Store
@@ -199,6 +208,7 @@ func DefaultConfig() Config {
 		LiveTextMaxBytes:      defaultLiveTextMaxBytes,
 		LiveTextMaxDuration:   defaultLiveTextMaxDuration,
 		TerminalKeepBytes:     defaultTerminalKeepBytes,
+		TerminalViewerURL:     DefaultTerminalViewerURL,
 		AppendMaxBytes:        defaultAppendMaxBytes,
 		MaxListedMembers:      defaultMaxListedMembers,
 	}
