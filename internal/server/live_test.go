@@ -13,6 +13,8 @@ import (
 	"testing"
 	"time"
 
+	"golang.org/x/text/encoding/unicode"
+
 	"github.com/apron-chat/apron-server-go/internal/store"
 )
 
@@ -133,6 +135,164 @@ func TestAppendBufferKeepsTheFirstPartUpToAWholeCharacter(t *testing.T) {
 	}
 }
 
+// editAppend is §4.8.5's edits, for reference: the whole text decoded,
+// then each backspace removes the code point before it and each form feed
+// all the text before it.
+func editAppend(raw []byte) string {
+	decoded, _ := unicode.UTF8.NewDecoder().Bytes(raw)
+	var kept []rune
+	for _, r := range string(decoded) {
+		switch r {
+		case '\b':
+			kept = kept[:max(0, len(kept)-1)]
+		case '\f':
+			kept = kept[:0]
+		default:
+			kept = append(kept, r)
+		}
+	}
+	return string(kept)
+}
+
+// An append applies backspaces and form feeds as the text arrives, after
+// decoding, however the writer splits it (§4.8.5).
+func TestAppendBufferAppliesEdits(t *testing.T) {
+	for _, c := range []struct{ in, want string }{
+		{"hel\b\bello", "hello"},
+		{"caf\u00e9\be", "cafe"},
+		{"\U0001F600\b!", "!"},
+		{"draft\fHello", "Hello"},
+		{"\b\bstart", "start"},
+		{"one\ftwo\fthree", "three"},
+		{"ab\xff\bc", "abc"},
+		{"ab\xE2\x82\bc", "abc"},
+		{"end \xE2\x82", "end \uFFFD"},
+		{"no edits\r\n\x1b[0m", "no edits\r\n\x1b[0m"},
+	} {
+		if want := editAppend([]byte(c.in)); want != c.want {
+			t.Fatalf("%q: the reference edits it to %q, not %q", c.in, want, c.want)
+		}
+		for split := 0; split <= len(c.in); split++ {
+			b := newLiveText(false, 1<<10, 1<<20)
+			b.write([]byte(c.in[:split]))
+			b.write([]byte(c.in[split:]))
+			b.end()
+			if got := b.text(); got != c.want {
+				t.Errorf("%q split at %d: %q, want %q", c.in, split, got, c.want)
+			}
+			if got, _, _, _, _ := b.read(-1); string(got) != c.want {
+				t.Errorf("%q split at %d: a new reader got %q, want %q", c.in, split, got, c.want)
+			}
+			// A reader from the start gets the decoded text with its edits.
+			got, _, _, _, _ := b.read(0)
+			if decoded, _ := unicode.UTF8.NewDecoder().Bytes([]byte(c.in)); string(got) != string(decoded) {
+				t.Errorf("%q split at %d: a reader from the start got %q", c.in, split, got)
+			}
+		}
+	}
+}
+
+// An append decodes invalid UTF-8 as a browser's TextDecoder('utf-8') does
+// (WHATWG), independently of x/text: these outputs are TextDecoder's.
+func TestAppendDecodesInvalidUTF8AsBrowsersDo(t *testing.T) {
+	for _, c := range []struct{ in, decoded, want string }{
+		{"a\xE2\x82A\b", "a\uFFFDA\b", "a\uFFFD"},
+		{"a\xF0\x80\x80\b", "a\uFFFD\uFFFD\uFFFD\b", "a\uFFFD\uFFFD"},
+		{"a\xED\xA0\x80\b", "a\uFFFD\uFFFD\uFFFD\b", "a\uFFFD\uFFFD"},
+		{"a\xC0\xAF\b", "a\uFFFD\uFFFD\b", "a\uFFFD"},
+		{"a\xFF\b", "a\uFFFD\b", "a"},
+		{"a\x80\x80\b", "a\uFFFD\uFFFD\b", "a\uFFFD"},
+		{"a\xF0\x9F\x9A\bb", "a\uFFFD\bb", "ab"},
+		{"a\xF0\x9F\x9A", "a\uFFFD", "a\uFFFD"},
+	} {
+		if got := editAppend([]byte(c.in)); got != c.want {
+			t.Errorf("%q: the reference edits it to %q, want %q", c.in, got, c.want)
+		}
+		for split := 0; split <= len(c.in); split++ {
+			b := newLiveText(false, 1<<10, 1<<20)
+			b.write([]byte(c.in[:split]))
+			b.write([]byte(c.in[split:]))
+			b.end()
+			if got := b.text(); got != c.want {
+				t.Errorf("%q split at %d: %q, want %q", c.in, split, got, c.want)
+			}
+			if got, _, _, _, _ := b.read(0); string(got) != c.decoded {
+				t.Errorf("%q split at %d: a reader from the start got %q, want %q", c.in, split, got, c.decoded)
+			}
+		}
+	}
+}
+
+// An append whose kept text is full ends cleanly when its writer ends
+// partway through a character: the U+FFFD for it does not fit, and the
+// writer stayed within the limit.
+func TestAppendFullWithAnIncompleteCharacterEndsCleanly(t *testing.T) {
+	b := newLiveText(false, 5, 1<<20)
+	if !b.write([]byte("vwxyz\xE2\x82")) {
+		t.Fatal("ended early")
+	}
+	b.end()
+	if b.limited() || b.text() != "vwxyz" {
+		t.Fatalf("kept %q, limited %v", b.text(), b.limited())
+	}
+
+	config := DefaultConfig()
+	config.AppendMaxBytes = 5
+	_, httpServer := newTestServer(t, config)
+	a := dialTestClient(t, httpServer)
+	_, writeURL, _ := postLive(t, a, "full", map[string]any{"text": "> ", "embeds": []any{map[string]any{"kind": "append"}}})
+	if status, _, got := httpDo(t, http.MethodPut, writeURL, strings.NewReader("vwxyz\xE2\x82"), ""); status != http.StatusNoContent {
+		t.Fatalf("append write: %d %q", status, got)
+	}
+	if got := a.notification(t, "message")["body"].(map[string]any)["text"]; got != "> vwxyz" {
+		t.Fatalf("finished text %q", got)
+	}
+}
+
+// A new reader of an append gets its edited text so far, then what follows;
+// one already reading gets the edits to apply. The start of a character
+// that has not all arrived waits for the rest.
+func TestAppendBufferServesEditedTextToANewReader(t *testing.T) {
+	b := newLiveText(false, 1<<10, 1<<20)
+	b.write([]byte("secret draft\fcaf\xc3"))
+	early, next, _, _, _ := b.read(-1)
+	if string(early) != "caf" {
+		t.Fatalf("a new reader got %q", early)
+	}
+	b.write([]byte("\xa9\b\be!"))
+	late, _, _, _, _ := b.read(-1)
+	more, _, _, _, _ := b.read(next)
+	if string(late) != "cae!" || string(more) != "\u00e9\b\be!" {
+		t.Fatalf("a new reader got %q, the reader before it %q", late, more)
+	}
+}
+
+// An append's size limit counts its edited text, while its writer may send
+// up to maxBytes; readers that fall behind the edits it holds fail.
+func TestAppendBufferLimitsItsEditedText(t *testing.T) {
+	b := newLiveText(false, 4, 1<<20)
+	_, start, _, _, _ := b.read(-1)
+	for range 4 << 10 {
+		if !b.write([]byte("abcd\f")) {
+			t.Fatal("ended while the edited text fit")
+		}
+	}
+	if b.text() != "" || b.total != 20<<10 {
+		t.Fatalf("kept %q of %d bytes", b.text(), b.total)
+	}
+	if _, _, _, _, behind := b.read(start); !behind {
+		t.Fatal("a reader from the start is not behind")
+	}
+	if b.write([]byte("wxyz!")) || !b.limited() || b.limit() != 4 || b.text() != "wxyz" {
+		t.Fatalf("kept %q, limited %v to %d", b.text(), b.limited(), b.limit())
+	}
+
+	b = newLiveText(false, 4, 8)
+	if b.write([]byte("ab\b\b\bcd\xc3\xa9")) || !b.limited() || b.limit() != 8 || b.text() != "cd" {
+		t.Fatalf("kept %q, limited %v to %d", b.text(), b.limited(), b.limit())
+	}
+}
+
 // postLive posts live text embeds and returns the result, the first's write
 // URL, and its embed in the pending snapshot.
 func postLive(t *testing.T, c *testClient, id string, body map[string]any) (map[string]any, string, map[string]any) {
@@ -211,7 +371,7 @@ func TestAppendKeepsItsFirstPart(t *testing.T) {
 	}
 	// Invalid UTF-8 becomes replacement characters, within the limit.
 	_, writeURL, _ = postLive(t, a, "invalid", map[string]any{"embeds": []any{map[string]any{"kind": "append"}}})
-	if status, _, _ := httpDo(t, http.MethodPut, writeURL, strings.NewReader("ab\xffcdef"), ""); status != http.StatusNoContent {
+	if status, _, _ := httpDo(t, http.MethodPut, writeURL, strings.NewReader("ab\xffcdef"), ""); status != http.StatusRequestEntityTooLarge {
 		t.Fatalf("invalid append: %d", status)
 	}
 	if text := a.notification(t, "message")["body"].(map[string]any)["text"]; text != "ab\uFFFDcd" {
@@ -255,6 +415,132 @@ func TestAppendFitsInARequestAfterASave(t *testing.T) {
 	}
 	if text := a.notification(t, "message")["body"].(map[string]any)["text"].(string); text != edited+strings.Repeat("é", 511) {
 		t.Fatalf("text of %d bytes, want %d", len(text), len(edited)+1022)
+	}
+}
+
+// Backspace and form feed revise an append's text before it moves into
+// body.text, never reaching the opening text (§4.8.5). A reader that is
+// reading gets the edits to apply.
+func TestAppendEditsReviseTheText(t *testing.T) {
+	_, httpServer := newTestServer(t, DefaultConfig())
+	clients := dialGroup(t, httpServer, 2)
+	a, b := clients[0], clients[1]
+	_, writeURL, live := postLive(t, a, "append", map[string]any{
+		"text": "Here is the plan:\n\n", "format": "markdown", "embeds": []any{map[string]any{"kind": "append"}},
+	})
+	b.notification(t, "message")
+	reader, err := http.Get(live["url"].(string))
+	if err != nil || reader.StatusCode != http.StatusOK {
+		t.Fatalf("live reader: %v %v", reader, err)
+	}
+	defer reader.Body.Close()
+	text := "draft\fHello wrold\b\b\b\borld, caf\u00e9\be"
+	if status, _, _ := httpDo(t, http.MethodPut, writeURL, strings.NewReader(text), ""); status != http.StatusNoContent {
+		t.Fatalf("append write: %d", status)
+	}
+	if got, _ := io.ReadAll(reader.Body); string(got) != text {
+		t.Fatalf("reader got %q", got)
+	}
+	for _, client := range clients {
+		if got := client.notification(t, "message")["body"].(map[string]any)["text"]; got != "Here is the plan:\n\nHello world, cafe" {
+			t.Fatalf("finished text %q", got)
+		}
+	}
+
+	_, writeURL, _ = postLive(t, a, "opening", map[string]any{"text": "> ", "embeds": []any{map[string]any{"kind": "append"}}})
+	b.notification(t, "message")
+	if status, _, _ := httpDo(t, http.MethodPut, writeURL, strings.NewReader("\b\b\bok"), ""); status != http.StatusNoContent {
+		t.Fatalf("append write: %d", status)
+	}
+	if got := a.notification(t, "message")["body"].(map[string]any)["text"]; got != "> ok" {
+		t.Fatalf("finished text %q", got)
+	}
+}
+
+// waitForLiveText waits until live text's kept text is want.
+func waitForLiveText(t *testing.T, app *Server, embedID, want string) {
+	t.Helper()
+	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(5 * time.Millisecond) {
+		app.mu.RLock()
+		e := app.embeds[embedID]
+		arrived := e != nil && e.live != nil && e.live.text() == want
+		app.mu.RUnlock()
+		if arrived {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the text never became %q", want)
+		}
+	}
+}
+
+// A reader that connects to an append later gets its edited text so far,
+// not the drafts it erased, then what follows (§4.8.5).
+func TestALateAppendReaderGetsTheEditedText(t *testing.T) {
+	app, httpServer := newTestServer(t, DefaultConfig())
+	a := dialTestClient(t, httpServer)
+	_, writeURL, live := postLive(t, a, "append", map[string]any{"text": "> ", "embeds": []any{map[string]any{"kind": "append"}}})
+	pipe, writerDone := startLiveWrite(t, app, writeURL, "secret draft\fThe pk\bl")
+	waitForLiveText(t, app, live["embed_id"].(string), "The pl")
+	reader, err := http.Get(live["url"].(string))
+	if err != nil || reader.StatusCode != http.StatusOK {
+		t.Fatalf("live reader: %v %v", reader, err)
+	}
+	defer reader.Body.Close()
+	first := make([]byte, len("The pl"))
+	if _, err := io.ReadFull(reader.Body, first); err != nil || string(first) != "The pl" {
+		t.Fatalf("a late reader got %q, %v", first, err)
+	}
+	_, _ = pipe.Write([]byte("an\b\bans.\n"))
+	_ = pipe.Close()
+	if rest, _ := io.ReadAll(reader.Body); string(rest) != "an\b\bans.\n" {
+		t.Fatalf("then %q", rest)
+	}
+	if status := <-writerDone; status != http.StatusNoContent {
+		t.Fatalf("writer status %d", status)
+	}
+	if got := a.notification(t, "message")["body"].(map[string]any)["text"]; got != "> The plans.\n" {
+		t.Fatalf("finished text %q", got)
+	}
+}
+
+// An append's size limit counts its text after the edits (§4.8.5).
+func TestAppendLimitCountsTheEditedText(t *testing.T) {
+	config := DefaultConfig()
+	config.AppendMaxBytes = 5
+	_, httpServer := newTestServer(t, config)
+	a := dialTestClient(t, httpServer)
+	_, writeURL, _ := postLive(t, a, "fits", map[string]any{"text": "> ", "embeds": []any{map[string]any{"kind": "append"}}})
+	if status, _, _ := httpDo(t, http.MethodPut, writeURL, strings.NewReader("abcd\b\b\b\bvwxyz"), ""); status != http.StatusNoContent {
+		t.Fatalf("append write: %d", status)
+	}
+	if got := a.notification(t, "message")["body"].(map[string]any)["text"]; got != "> vwxyz" {
+		t.Fatalf("finished text %q", got)
+	}
+	_, writeURL, _ = postLive(t, a, "full", map[string]any{"text": "> ", "embeds": []any{map[string]any{"kind": "append"}}})
+	if status, _, got := httpDo(t, http.MethodPut, writeURL, strings.NewReader("vwxyz\b!?"), ""); status != http.StatusRequestEntityTooLarge || !strings.Contains(string(got), "5 bytes") {
+		t.Fatalf("full append: %d %q", status, got)
+	}
+	if got := a.notification(t, "message")["body"].(map[string]any)["text"]; got != "> vwxy!" {
+		t.Fatalf("finished text %q", got)
+	}
+}
+
+// A terminal keeps backspace and form feed as terminal control functions
+// (§4.8.6): only an append's text is edited.
+func TestTerminalKeepsBackspaceAndFormFeed(t *testing.T) {
+	_, httpServer := newTestServer(t, DefaultConfig())
+	a := dialTestClient(t, httpServer)
+	_, writeURL, terminal := postLive(t, a, "terminal", map[string]any{"embeds": []any{map[string]any{"kind": "terminal"}}})
+	output := "ab\bc\fd\r\n"
+	if status, _, _ := httpDo(t, http.MethodPut, writeURL, strings.NewReader(output), ""); status != http.StatusNoContent {
+		t.Fatalf("terminal write: %d", status)
+	}
+	if got := embedsOf(t, a.notification(t, "message"))[0]["output"]; got != output {
+		t.Fatalf("output %q", got)
+	}
+	if status, _, got := httpDo(t, http.MethodGet, terminal["url"].(string), nil, ""); status != http.StatusOK || string(got) != output {
+		t.Fatalf("finished terminal URL: %d %q", status, got)
 	}
 }
 
@@ -394,7 +680,7 @@ func TestEmbedAppendCommandPostsItsOpeningText(t *testing.T) {
 	write, writeURL, notice := liveCommand(t, a, "append", map[string]any{
 		"room_id": ops, "body": map[string]any{"text": "/embed-append Here is **the plan**:", "mentions": []any{"guest_2"}},
 	})
-	if write["kind"] != "append" || !strings.Contains(notice, "YOUR_COMMAND | curl -sT - '"+writeURL+"'") || !strings.Contains(notice, "64 KiB") {
+	if write["kind"] != "append" || !strings.Contains(notice, "YOUR_COMMAND | curl -sT - '"+writeURL+"'") || !strings.Contains(notice, "64 KiB") || !strings.Contains(notice, "a form feed (`\\f`)") {
 		t.Fatalf("write %#v, notice %s", write, notice)
 	}
 	a.expectQuiet(t)
