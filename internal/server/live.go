@@ -35,7 +35,7 @@ func (e *embedState) liveURL() string {
 	return e.baseURL + livePath + e.id + "/" + e.secret
 }
 
-// A terminal's og (§4.8.6) says what it is, for a client that doesn't render
+// A terminal's og (§4.8.1) says what it is, for a client that doesn't render
 // terminal embeds and shows it as the card that og describes, which opens
 // its url. It follows the terminal: waiting for its writer, live, finished.
 const (

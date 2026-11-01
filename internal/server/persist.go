@@ -622,7 +622,7 @@ func (s *Server) restoreLocked() (map[string]bool, error) {
 			contentType: stored.ContentType, seq: stored.Seq,
 		}
 		if e.kind == kindTerminal && e.finished && e.owned != nil && e.owned["og"] == nil {
-			// Finished before terminals had an og (§4.8.6).
+			// Finished before terminals had an og (§4.8.1).
 			e.owned["og"] = e.terminalOG()
 		}
 		if stored.File != "" {
