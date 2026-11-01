@@ -124,10 +124,11 @@ test.describe('reference features against the Go server', () => {
 			const writeUrl = (result.embeds as Array<{ write_url: string }>)[0].write_url;
 			const stream = streamTo(writeUrl);
 			const message = await waitForMessage(page, `${token} plan:`);
-			await expect(message.getByTestId('message-writing')).toHaveText('Writing…');
+			// The embed waits for its writer, without url, until the write starts (§4.8.5): fetch sends the PUT with
+			// its first chunk.
 			stream.push(' roll back,');
 			await expect(message.locator('.ap-msg-text')).toContainText(`${token} plan: roll back,`);
-			await expect(message.getByTestId('message-writing')).toBeVisible();
+			await expect(message.getByTestId('message-writing')).toHaveText('Writing…');
 			stream.push(' then **renew** the cert.');
 			await expect(message.locator('.ap-msg-text strong')).toHaveText('renew');
 			await expect(message.getByTestId('message-writing')).toBeVisible();
@@ -159,8 +160,10 @@ test.describe('reference features against the Go server', () => {
 			const stream = streamTo(writeUrl);
 			const terminal = (await waitForMessage(page, `${token} build`)).getByTestId('terminal-embed');
 			await expect(terminal.locator('.ap-embed-termtitle')).toHaveText('make deploy');
-			await expect(terminal.locator('.ap-embed-livebadge')).toHaveText('Live');
+			// The embed waits for its writer, without url, until the write starts (§4.8.5): fetch sends the PUT with
+			// its first chunk.
 			stream.push('$ make deploy\r\n\u001b[32mupload  40%');
+			await expect(terminal.locator('.ap-embed-livebadge')).toHaveText('Live');
 			await expect(terminal.locator('.ap-embed-termscreen .xterm-rows')).toContainText('$ make deploy');
 			await expect.poll(async () => (await terminalRows(terminal)).slice(0, 2).map((row) => row.trimEnd())).toEqual(['$ make deploy', 'upload  40%']);
 			// A carriage return redraws the line in place, as a progress bar does.
