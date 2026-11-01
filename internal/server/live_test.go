@@ -192,6 +192,63 @@ func TestAppendBufferAppliesEdits(t *testing.T) {
 	}
 }
 
+// An append decodes invalid UTF-8 as a browser's TextDecoder('utf-8') does
+// (WHATWG), independently of x/text: these outputs are TextDecoder's.
+func TestAppendDecodesInvalidUTF8AsBrowsersDo(t *testing.T) {
+	for _, c := range []struct{ in, decoded, want string }{
+		{"a\xE2\x82A\b", "a\uFFFDA\b", "a\uFFFD"},
+		{"a\xF0\x80\x80\b", "a\uFFFD\uFFFD\uFFFD\b", "a\uFFFD\uFFFD"},
+		{"a\xED\xA0\x80\b", "a\uFFFD\uFFFD\uFFFD\b", "a\uFFFD\uFFFD"},
+		{"a\xC0\xAF\b", "a\uFFFD\uFFFD\b", "a\uFFFD"},
+		{"a\xFF\b", "a\uFFFD\b", "a"},
+		{"a\x80\x80\b", "a\uFFFD\uFFFD\b", "a\uFFFD"},
+		{"a\xF0\x9F\x9A\bb", "a\uFFFD\bb", "ab"},
+		{"a\xF0\x9F\x9A", "a\uFFFD", "a\uFFFD"},
+	} {
+		if got := editAppend([]byte(c.in)); got != c.want {
+			t.Errorf("%q: the reference edits it to %q, want %q", c.in, got, c.want)
+		}
+		for split := 0; split <= len(c.in); split++ {
+			b := newLiveText(false, 1<<10, 1<<20)
+			b.write([]byte(c.in[:split]))
+			b.write([]byte(c.in[split:]))
+			b.end()
+			if got := b.text(); got != c.want {
+				t.Errorf("%q split at %d: %q, want %q", c.in, split, got, c.want)
+			}
+			if got, _, _, _, _ := b.read(0); string(got) != c.decoded {
+				t.Errorf("%q split at %d: a reader from the start got %q, want %q", c.in, split, got, c.decoded)
+			}
+		}
+	}
+}
+
+// An append whose kept text is full ends cleanly when its writer ends
+// partway through a character: the U+FFFD for it does not fit, and the
+// writer stayed within the limit.
+func TestAppendFullWithAnIncompleteCharacterEndsCleanly(t *testing.T) {
+	b := newLiveText(false, 5, 1<<20)
+	if !b.write([]byte("vwxyz\xE2\x82")) {
+		t.Fatal("ended early")
+	}
+	b.end()
+	if b.limited() || b.text() != "vwxyz" {
+		t.Fatalf("kept %q, limited %v", b.text(), b.limited())
+	}
+
+	config := DefaultConfig()
+	config.AppendMaxBytes = 5
+	_, httpServer := newTestServer(t, config)
+	a := dialTestClient(t, httpServer)
+	_, writeURL, _ := postLive(t, a, "full", map[string]any{"text": "> ", "embeds": []any{map[string]any{"kind": "append"}}})
+	if status, _, got := httpDo(t, http.MethodPut, writeURL, strings.NewReader("vwxyz\xE2\x82"), ""); status != http.StatusNoContent {
+		t.Fatalf("append write: %d %q", status, got)
+	}
+	if got := a.notification(t, "message")["body"].(map[string]any)["text"]; got != "> vwxyz" {
+		t.Fatalf("finished text %q", got)
+	}
+}
+
 // A new reader of an append gets its edited text so far, then what follows;
 // one already reading gets the edits to apply. The start of a character
 // that has not all arrived waits for the rest.

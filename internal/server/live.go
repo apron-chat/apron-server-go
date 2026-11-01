@@ -473,13 +473,18 @@ func (b *liveText) end() {
 }
 
 // endLocked ends the text. An append that ends partway through a character
-// it has room for ends with U+FFFD for it, as a reader's decoder shows it.
+// ends with U+FFFD for it, as a reader's decoder shows it, if the kept text
+// has room for it. Without room it ends without it: the writer stayed
+// within the limit, so the text is not limited.
 func (b *liveText) endLocked() {
 	if b.ended {
 		return
 	}
 	if !b.terminal && !b.atLimit && len(b.pending) > 0 {
-		b.appendLocked(b.decodeLocked(nil, true))
+		// The rest is U+FFFD alone, with no edits to apply.
+		if rest := b.decodeLocked(nil, true); len(b.kept)+len(rest) <= b.keep {
+			b.appendLocked(rest)
+		}
 	}
 	b.ended = true
 	close(b.finished)

@@ -655,13 +655,19 @@ publishes the snapshot that finishes a write before it answers the `PUT`.
   a message has at most one `append` embed (`invalid_params` otherwise,
   in a save too). The server decodes the text as it arrives (invalid
   UTF-8 replaced with U+FFFD) and applies its edits, never to
-  `body.text`: a backspace (U+0008) removes the character before it, and
+  `body.text`: a backspace (U+0008) removes the code point before it, and
   a form feed (U+000C) all the text before it. A new reader gets the
   edited text so far, then the decoded text that follows, edits included.
+  A reader that falls more than about `max(keep, 4 KiB)` behind, `keep`
+  being how much text the append keeps (below), is dropped (the server
+  holds at most twice that of the decoded text), so that it reconnects and
+  gets the edited text afresh, as a terminal's reader does.
   The server keeps the first 64 KiB of edited text, and less after a long
   opening text, or a save that lengthened `body.text` meanwhile, so that
   `body.text` stays within the 256 KiB a request may carry; at the limit
-  it keeps the text up to a whole character. When the text ends, other
+  it keeps the text up to a whole character. Text that ends partway
+  through a character ends with U+FFFD for it if that fits, and otherwise
+  without it, still a clean end (`204`). When the text ends, other
   than by a save, the server publishes a snapshot that adds the kept text
   to the end of `body.text` and removes the embed, whose `url` then stops
   working. The appended text
