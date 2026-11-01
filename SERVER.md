@@ -653,13 +653,18 @@ publishes the snapshot that finishes a write before it answers the `PUT`.
 - **Appends**
   ([PROTOCOL.md §4.8.5](https://github.com/shazow/apron/blob/main/PROTOCOL.md#485-embedappend)):
   a message has at most one `append` embed (`invalid_params` otherwise,
-  in a save too). The server keeps the first 64 KiB, and less after a long
+  in a save too). The server decodes the text as it arrives (invalid
+  UTF-8 replaced with U+FFFD) and applies its edits, never to
+  `body.text`: a backspace (U+0008) removes the character before it, and
+  a form feed (U+000C) all the text before it. A new reader gets the
+  edited text so far, then the decoded text that follows, edits included.
+  The server keeps the first 64 KiB of edited text, and less after a long
   opening text, or a save that lengthened `body.text` meanwhile, so that
   `body.text` stays within the 256 KiB a request may carry; at the limit
   it keeps the text up to a whole character. When the text ends, other
   than by a save, the server publishes a snapshot that adds the kept text
-  (invalid UTF-8 replaced with U+FFFD) to the end of `body.text` and
-  removes the embed, whose `url` then stops working. The appended text
+  to the end of `body.text` and removes the embed, whose `url` then stops
+  working. The appended text
   does not change `body.mentions`. The push of a new message with an
   `append` embed waits for the text to end, so that it carries the whole
   text (see [Push](#push)).
@@ -832,7 +837,7 @@ replies arrive before its result. Commands:
   YOUR_COMMAND | curl -sT - 'WRITE_URL'
   ```
 
-  The message appears when the stream starts. At a limit the stream ends, and so does the command feeding it. Anyone with this URL can write to it, so keep it to yourself.
+  A backspace (`\b`) removes the character before it, and a form feed (`\f`) all the text before it. The message appears when the stream starts. At a limit the stream ends, and so does the command feeding it. Anyone with this URL can write to it, so keep it to yourself.
   ````
 
   A `terminal` or `append` embed in any other command is `invalid_params`.

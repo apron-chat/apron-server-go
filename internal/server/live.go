@@ -44,15 +44,15 @@ type pendingPost struct {
 }
 
 // startLiveLocked gives a new terminal or append embed its live text and
-// url. An append keeps at most AppendMaxBytes, and less after a long
-// opening text, so that the finished body.text stays within the frames
-// the server reads (ReadLimit).
+// url. An append keeps at most AppendMaxBytes of edited text, and less
+// after a long opening text, so that the finished body.text stays within
+// the frames the server reads (ReadLimit).
 func (s *Server) startLiveLocked(e *embedState, opening string) {
 	if e.kind == kindTerminal {
 		e.live = newLiveText(true, s.config.TerminalKeepBytes, s.config.LiveTextMaxBytes)
 	} else {
 		keep := max(0, min(s.config.AppendMaxBytes, int(s.config.ReadLimit)-len(opening)))
-		e.live = newLiveText(false, keep, int64(keep))
+		e.live = newLiveText(false, keep, s.config.LiveTextMaxBytes)
 	}
 	e.owned = map[string]any{"url": e.liveURL()}
 }
@@ -282,10 +282,12 @@ func (s *Server) finishLiveLocked(e *embedState) {
 }
 
 // handleLive serves live text (§4.8.3): the kept text from its start, then
-// more as it arrives, until the text ends. A reader that falls behind what
-// a terminal keeps fails, so that it reconnects and reads the kept text
-// afresh, rather than skip what it missed. A finished terminal's url serves
-// its output.
+// more as it arrives, until the text ends. An append's reader gets its
+// edited text so far, then the decoded text that follows with its edits,
+// which clients apply (§4.8.5). A reader that falls behind what the live
+// text holds fails, so that it reconnects and reads the kept text afresh,
+// rather than skip what it missed. A finished terminal's url serves its
+// output.
 func (s *Server) handleLive(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	if r.Method != http.MethodGet {
@@ -343,35 +345,42 @@ func (s *Server) handleLive(w http.ResponseWriter, r *http.Request) {
 }
 
 // liveText holds live text as it arrives and wakes its readers as it grows.
-// A terminal keeps its last keep bytes, cut by keepLast; an append keeps its
-// first keep bytes, up to a whole character. Past maxBytes in all, the text
-// ends.
+// A terminal keeps its last keep bytes, cut by keepLast. An append keeps
+// its first keep bytes of edited text, up to a whole character (§4.8.5).
+// Past maxBytes from its writer, the text ends.
 type liveText struct {
 	mu       sync.Mutex
 	terminal bool
 	keep     int
 	maxBytes int64
-	// data holds the bytes from absolute offset start on: for a terminal
-	// at least its last keep bytes, and at most twice that.
-	data    []byte
-	start   int64
-	total   int64
+	// data holds what readers read, from absolute offset start on, and at
+	// most twice what it holds after a trim. A terminal's is the bytes as
+	// they arrived, at least its last keep bytes. An append's is its text
+	// as decoded, with backspaces and form feeds: readers that are reading
+	// it apply them, while a new reader starts after it, with kept.
+	data  []byte
+	start int64
+	// total counts the bytes the writer sent.
+	total int64
+	// An append's kept text: decoded, with its edits applied. pending holds
+	// the start of a character the writer has not finished sending.
+	kept    []byte
+	pending []byte
 	changed chan struct{}
 	ended   bool
 	atLimit bool
+	// reached is the size limit the text reached.
+	reached int64
 	// finished closes when the text ends, for its writer.
 	finished chan struct{}
 }
 
 func newLiveText(terminal bool, keep int, maxBytes int64) *liveText {
-	if !terminal {
-		maxBytes = int64(keep)
-	}
 	return &liveText{terminal: terminal, keep: keep, maxBytes: maxBytes, changed: make(chan struct{}), finished: make(chan struct{})}
 }
 
 // write adds to the text and reports whether it still accepts more. Past
-// the size limit it keeps what fits and ends.
+// a size limit it keeps what fits and ends.
 func (b *liveText) write(p []byte) bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -380,17 +389,22 @@ func (b *liveText) write(p []byte) bool {
 	}
 	if room := b.maxBytes - b.total; int64(len(p)) > room {
 		p = p[:room]
-		b.atLimit = true
+		b.limitLocked(b.maxBytes)
 	}
-	b.data = append(b.data, p...)
 	b.total += int64(len(p))
-	if b.terminal && len(b.data) > 2*b.keep {
-		excess := len(b.data) - b.keep
+	if b.terminal {
+		b.data = append(b.data, p...)
+	} else {
+		b.appendLocked(b.decodeLocked(p, false))
+	}
+	hold := b.keep
+	if !b.terminal {
+		hold = max(hold, minLiveHold)
+	}
+	if len(b.data) > 2*hold {
+		excess := len(b.data) - hold
 		b.data = append([]byte(nil), b.data[excess:]...)
 		b.start += int64(excess)
-	}
-	if !b.terminal && b.atLimit {
-		b.data = wholeRunes(b.data)
 	}
 	b.signalLocked()
 	if b.atLimit {
@@ -399,18 +413,77 @@ func (b *liveText) write(p []byte) bool {
 	return !b.ended
 }
 
+// minLiveHold is the least that data holds after a trim, for an append that
+// keeps little or nothing, whose edits still reach its readers.
+const minLiveHold = 4 << 10
+
+func (b *liveText) limitLocked(limit int64) {
+	if !b.atLimit {
+		b.atLimit = true
+		b.reached = limit
+	}
+}
+
+// decodeLocked converts p, after what is pending, with WHATWG's UTF-8 decode
+// without BOM (§4.8.3): each invalid sequence becomes one U+FFFD, as a
+// browser's TextDecoder shows it. Until atEOF, it holds back the start of
+// a character that p ends partway through; at the end that becomes U+FFFD.
+func (b *liveText) decodeLocked(p []byte, atEOF bool) []byte {
+	src := append(b.pending, p...)
+	// Each byte decodes to at most three, those of U+FFFD. x/text's UTF8
+	// keeps a BOM, and fails only for want of more of src (ErrShortSrc).
+	dst := make([]byte, 3*len(src))
+	nDst, nSrc, _ := unicode.UTF8.NewDecoder().Transform(dst, src, atEOF)
+	b.pending = append([]byte(nil), src[nSrc:]...)
+	return dst[:nDst]
+}
+
+// appendLocked adds decoded text to an append (§4.8.5). A backspace
+// (U+0008) removes the character before it, and a form feed (U+000C) all
+// the text before it, from the kept text only, never from the message's
+// opening body.text. The first character that the kept text has no room
+// for fills it, and the text ends without it.
+func (b *liveText) appendLocked(decoded []byte) {
+	n := 0
+	for n < len(decoded) {
+		r, size := utf8.DecodeRune(decoded[n:])
+		switch r {
+		case '\b':
+			_, last := utf8.DecodeLastRune(b.kept)
+			b.kept = b.kept[:len(b.kept)-last]
+		case '\f':
+			b.kept = b.kept[:0]
+		default:
+			if len(b.kept)+size > b.keep {
+				b.limitLocked(int64(b.keep))
+				b.data = append(b.data, decoded[:n]...)
+				return
+			}
+			b.kept = append(b.kept, decoded[n:n+size]...)
+		}
+		n += size
+	}
+	b.data = append(b.data, decoded...)
+}
+
 func (b *liveText) end() {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.endLocked()
 }
 
+// endLocked ends the text. An append that ends partway through a character
+// it has room for ends with U+FFFD for it, as a reader's decoder shows it.
 func (b *liveText) endLocked() {
-	if !b.ended {
-		b.ended = true
-		close(b.finished)
-		b.signalLocked()
+	if b.ended {
+		return
 	}
+	if !b.terminal && !b.atLimit && len(b.pending) > 0 {
+		b.appendLocked(b.decodeLocked(nil, true))
+	}
+	b.ended = true
+	close(b.finished)
+	b.signalLocked()
 }
 
 func (b *liveText) signalLocked() {
@@ -430,10 +503,12 @@ func (b *liveText) limited() bool {
 	return b.atLimit
 }
 
-// limit is the size limit the writer reached: what a terminal's writer may
-// send, or what an append keeps.
+// limit is the size limit the text reached: what its writer may send, or
+// what an append keeps.
 func (b *liveText) limit() int64 {
-	return b.maxBytes
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.reached
 }
 
 // tailLocked returns the offset in data of the last keep bytes a terminal
@@ -457,37 +532,40 @@ func (b *liveText) keptStartLocked() int64 {
 
 // read returns the bytes from position on, the next position, a channel
 // closed on the next change, and whether the text has ended with nothing
-// more to read. A new reader (position -1) reads from the start of the kept
-// text. For one that fell behind what a terminal holds, so that bytes it
-// has not read are gone, read reports behind instead.
+// more to read. A new reader (position -1) reads the kept text: a
+// terminal's from its start, and an append's edited text so far. For one
+// that fell behind what the text holds, so that bytes it has not read are
+// gone, read reports behind instead.
 func (b *liveText) read(position int64) (chunk []byte, next int64, changed chan struct{}, ended, behind bool) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	end := b.start + int64(len(b.data))
+	if position < 0 && !b.terminal {
+		return append([]byte(nil), b.kept...), end, b.changed, b.ended, false
+	}
 	if position < 0 {
 		position = b.keptStartLocked()
 	} else if position < b.start {
 		return nil, position, nil, false, true
 	}
-	end := b.start + int64(len(b.data))
 	position = min(position, end)
 	chunk = append([]byte(nil), b.data[position-b.start:]...)
 	return chunk, end, b.changed, b.ended, false
 }
 
-// text is the kept text, converted with WHATWG's UTF-8 decode without BOM
-// (§4.8.3): each invalid sequence, and an incomplete one at the end, becomes
-// one U+FFFD, as a browser's TextDecoder shows it.
+// text is the kept text. A terminal's is converted with WHATWG's UTF-8
+// decode without BOM (§4.8.3): each invalid sequence, and an incomplete one
+// at the end, becomes one U+FFFD, as a browser's TextDecoder shows it. An
+// append's was converted the same way as it arrived, and edited.
 func (b *liveText) text() string {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if !b.terminal {
+		return string(b.kept)
+	}
 	kept := b.data[b.keptStartLocked()-b.start:]
 	decoded, _ := unicode.UTF8.NewDecoder().Bytes(kept) // x/text's UTF8 never fails, and keeps a BOM
-	text := string(decoded)
-	if !b.terminal && len(text) > b.keep {
-		// Replacement characters can be longer than the bytes they replace.
-		text = string(wholeRunes([]byte(text[:b.keep])))
-	}
-	return text
+	return string(decoded)
 }
 
 // keepLast is the last part of output of at most limit bytes that a
@@ -631,7 +709,8 @@ func (s *Server) liveNotice(e *embedState) string {
 	}
 	return fmt.Sprintf("Stream text into this room within %s; it continues your message as Markdown (up to %s, for up to %s):\n\n"+
 		"```sh\nYOUR_COMMAND | curl -sT - '%s'\n```\n\n"+
+		"A backspace (`\\b`) removes the character before it, and a form feed (`\\f`) all the text before it. "+
 		"The message appears when the stream starts. At a limit the stream ends, and so does the command feeding it. "+
 		"Anyone with this URL can write to it, so keep it to yourself.",
-		within, formatBytes(e.live.limit()), duration, url)
+		within, formatBytes(int64(e.live.keep)), duration, url)
 }

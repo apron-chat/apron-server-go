@@ -109,9 +109,9 @@ type Config struct {
 	// Live text (§4.8.3) ends when its writer has sent LiveTextMaxBytes,
 	// after LiveTextMaxDuration, or when its writer disconnects, keeping what
 	// arrived. A terminal keeps its last TerminalKeepBytes (§4.8.6); an
-	// append keeps its first AppendMaxBytes (§4.8.5), at most ReadLimit
-	// with its message's opening text, so that the finished body.text fits
-	// in a request.
+	// append keeps its first AppendMaxBytes of edited text (§4.8.5), at
+	// most ReadLimit with its message's opening text, so that the finished
+	// body.text fits in a request.
 	LiveTextMaxBytes    int64
 	LiveTextMaxDuration time.Duration
 	TerminalKeepBytes   int
