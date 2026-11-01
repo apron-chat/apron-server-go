@@ -657,16 +657,13 @@ publishes the snapshot that finishes a write before it answers the `PUT`.
   `url`. The `url` then serves the `output`, also after a restart.
   A terminal's `og` describes it, for clients that don't render terminal
   embeds and show its card, which opens `url`: its `title` is the embed's,
-  following a rename (`Terminal` without one; at most 200 characters), and
-  its `description` follows it: "A terminal,
-  waiting for its program's output.", "Live terminal output. Open it to
-  watch.", then "Terminal output.". A request for a terminal's `url` with
-  `Sec-Fetch-Mode: navigate`, a browser opening it as a page, is redirected
-  (`302`) to `--live.terminal-viewer`, with `stream=<url>` and
-  `title=<title>` in the fragment, which never reaches the viewer's host;
-  other requests (`Vary: Sec-Fetch-Mode`) get the text. So does a browser
-  when `url` is `http` and the viewer `https`, since the viewer reads only
-  `https`.
+  following a rename (`Terminal` without one), and its `description` is
+  "Terminal output. Open it to watch.". A request for a terminal's `url`
+  with `Sec-Fetch-Mode: navigate`, a browser opening it as a page, is
+  redirected (`302`) to `--live.terminal-viewer`, with `stream=<url>` in the
+  fragment, which never reaches the viewer's host; other requests
+  (`Vary: Sec-Fetch-Mode`) get the text. So does a browser when `url` is
+  `http` and the viewer `https`, since the viewer reads only `https`.
 - **Appends**
   ([PROTOCOL.md §4.8.5](https://github.com/shazow/apron/blob/main/PROTOCOL.md#485-embedappend)):
   a message has at most one `append` embed (`invalid_params` otherwise,

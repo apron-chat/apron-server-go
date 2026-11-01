@@ -621,10 +621,6 @@ func (s *Server) restoreLocked() (map[string]bool, error) {
 			finished: stored.Finished, started: stored.Finished, owned: stored.Owned, size: stored.Size,
 			contentType: stored.ContentType, seq: stored.Seq,
 		}
-		if e.kind == kindTerminal && e.finished && e.owned != nil && e.owned["og"] == nil {
-			// Finished before terminals had an og (§4.8.1).
-			e.owned["og"] = e.terminalOG()
-		}
 		if stored.File != "" {
 			e.path = filepath.Join(s.uploadDir, stored.File)
 			files[e.path] = true

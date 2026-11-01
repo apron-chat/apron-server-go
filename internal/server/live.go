@@ -35,50 +35,18 @@ func (e *embedState) liveURL() string {
 	return e.baseURL + livePath + e.id + "/" + e.secret
 }
 
-// A terminal's og (§4.8.1) says what it is, for a client that doesn't render
-// terminal embeds and shows it as the card that og describes, which opens
-// its url. It follows the terminal: waiting for its writer, live, finished.
-const (
-	terminalWaiting  = "A terminal, waiting for its program's output."
-	terminalLive     = "Live terminal output. Open it to watch."
-	terminalFinished = "Terminal output."
-)
+// terminalDescription is a terminal's og description (§4.8.1), for a
+// client that doesn't render terminal embeds and shows the card that og
+// describes, which opens its url.
+const terminalDescription = "Terminal output. Open it to watch."
 
-// terminalOG is a terminal embed's og, titled as the embed is and
-// described by where its text is.
+// terminalOG is a terminal embed's og, titled as the embed is.
 func (e *embedState) terminalOG() map[string]any {
 	title := e.title
 	if title == "" {
 		title = "Terminal"
 	}
-	description := terminalWaiting
-	if e.finished {
-		description = terminalFinished
-	} else if e.started {
-		description = terminalLive
-	}
-	return map[string]any{"title": title, "description": description}
-}
-
-// boundTitle cuts a terminal's title to maxLiveTitleRunes, for its og and
-// the viewer's link.
-func boundTitle(title string) string {
-	if runes := []rune(title); len(runes) > maxLiveTitleRunes {
-		return string(runes[:maxLiveTitleRunes])
-	}
-	return title
-}
-
-// viewerLink is where a browser that opens a terminal's url as a page goes
-// (§4.8.5): viewer, with the url and the title in its fragment, which a
-// browser never sends to the viewer's host.
-func viewerLink(viewer, liveURL, title string) string {
-	values := url.Values{"stream": {liveURL}}
-	if title != "" {
-		values.Set("title", title)
-	}
-	base, _, _ := strings.Cut(viewer, "#")
-	return base + "#" + values.Encode()
+	return map[string]any{"title": title, "description": terminalDescription}
 }
 
 // pendingPost is the message a /embed-terminal or /embed-append command
@@ -116,7 +84,6 @@ func (s *Server) startWriterLocked(e *embedState) (int, string) {
 	if e.started {
 		return http.StatusConflict, "This live text already has a writer"
 	}
-	e.started = true
 	e.owned = map[string]any{"url": e.liveURL()}
 	if e.kind == kindTerminal {
 		e.owned["og"] = e.terminalOG()
@@ -132,6 +99,7 @@ func (s *Server) startWriterLocked(e *embedState) (int, string) {
 			return replaceEmbed(body, e.id, func(embed map[string]any) { maps.Copy(embed, cloneObject(e.owned)) })
 		})
 	}
+	e.started = true
 	e.timer.Stop()
 	e.timer = time.AfterFunc(s.config.LiveTextMaxDuration, func() {
 		s.mu.Lock()
@@ -371,7 +339,7 @@ func (s *Server) handleLive(w http.ResponseWriter, r *http.Request) {
 	live := e.live
 	output, _ := e.owned["output"].(string)
 	finished := e.finished
-	liveURL, title := e.liveURL(), e.title
+	liveURL := e.liveURL()
 	terminal := e.kind == kindTerminal
 	s.mu.RUnlock()
 	header := w.Header()
@@ -382,7 +350,8 @@ func (s *Server) handleLive(w http.ResponseWriter, r *http.Request) {
 		// Readers that fetch it are served the text; a browser opening it as a page, the viewer.
 		header.Set("Vary", "Sec-Fetch-Mode")
 		if r.Header.Get("Sec-Fetch-Mode") == "navigate" {
-			header.Set("Location", viewerLink(viewer, liveURL, title))
+			// The url goes in the fragment, which a browser never sends to the viewer's host (§4.8.5).
+			header.Set("Location", viewer+"#"+url.Values{"stream": {liveURL}}.Encode())
 			header.Set("Cache-Control", "no-store")
 			w.WriteHeader(http.StatusFound)
 			return
@@ -723,15 +692,18 @@ func formatDuration(d time.Duration) string {
 	return unit(int64((d+time.Second-1)/time.Second), "second")
 }
 
-// maxLiveTitleRunes bounds a terminal's title in its og and the viewer's
-// link, and the title /embed-terminal takes.
+// maxLiveTitleRunes bounds the title /embed-terminal takes.
 const maxLiveTitleRunes = 200
 
 // embedTerminalCommand prepares a terminal embed titled by the rest of the
 // line, if any: see liveCommand.
 func (s *Server) embedTerminalCommand(c *client, r *roomState, body map[string]any, args, replyTo string) (map[string]any, *rpcError) {
 	title, _, _ := strings.Cut(args, "\n")
-	return s.liveCommand(c, r, body, kindTerminal, boundTitle(strings.TrimSpace(title)), replyTo)
+	title = strings.TrimSpace(title)
+	if runes := []rune(title); len(runes) > maxLiveTitleRunes {
+		title = string(runes[:maxLiveTitleRunes])
+	}
+	return s.liveCommand(c, r, body, kindTerminal, title, replyTo)
 }
 
 // embedAppendCommand prepares an append embed whose message starts with the
