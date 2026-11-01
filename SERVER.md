@@ -169,7 +169,7 @@ Flags (`aprond --help` lists them all):
   [Embeds, uploads, and live text](#embeds-uploads-and-live-text).
 - `--live.terminal-viewer <url>` (`https://terminal.apron.chat/`) is a page
   that shows a terminal's live text: a browser that opens a terminal's `url`
-  goes there (see [Terminals](#embeds-uploads-and-live-text)). An empty
+  goes there (see [Embeds, uploads, and live text](#embeds-uploads-and-live-text)). An empty
   value (`--live.terminal-viewer=`) serves browsers the plain text.
 - `--push.disable` removes push. Stored registrations are kept but not
   loaded, and apply again once push is enabled. `--push.allow-insecure` is for tests only:
@@ -656,14 +656,17 @@ publishes the snapshot that finishes a write before it answers the `PUT`.
   text (invalid UTF-8 replaced with U+FFFD) as `output`, in place of
   `url`. The `url` then serves the `output`, also after a restart.
   A terminal's `og` describes it, for clients that don't render terminal
-  embeds and show its card, which opens `url`: its `title` is the embed's
-  (`Terminal` without one), and its `description` follows it: "A terminal,
+  embeds and show its card, which opens `url`: its `title` is the embed's,
+  following a rename (`Terminal` without one; at most 200 characters), and
+  its `description` follows it: "A terminal,
   waiting for its program's output.", "Live terminal output. Open it to
   watch.", then "Terminal output.". A request for a terminal's `url` with
   `Sec-Fetch-Mode: navigate`, a browser opening it as a page, is redirected
   (`302`) to `--live.terminal-viewer`, with `stream=<url>` and
   `title=<title>` in the fragment, which never reaches the viewer's host;
-  other requests (`Vary: Sec-Fetch-Mode`) get the text.
+  other requests (`Vary: Sec-Fetch-Mode`) get the text. So does a browser
+  when `url` is `http` and the viewer `https`, since the viewer reads only
+  `https`.
 - **Appends**
   ([PROTOCOL.md §4.8.5](https://github.com/shazow/apron/blob/main/PROTOCOL.md#485-embedappend)):
   a message has at most one `append` embed (`invalid_params` otherwise,

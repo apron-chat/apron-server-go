@@ -44,13 +44,29 @@ const (
 	terminalFinished = "Terminal output."
 )
 
-// terminalOG is a terminal embed's og, titled as the embed is.
-func (e *embedState) terminalOG(description string) map[string]any {
+// terminalOG is a terminal embed's og, titled as the embed is and
+// described by where its text is.
+func (e *embedState) terminalOG() map[string]any {
 	title := e.title
 	if title == "" {
 		title = "Terminal"
 	}
+	description := terminalWaiting
+	if e.finished {
+		description = terminalFinished
+	} else if e.started {
+		description = terminalLive
+	}
 	return map[string]any{"title": title, "description": description}
+}
+
+// boundTitle cuts a terminal's title to maxLiveTitleRunes, for its og and
+// the viewer's link.
+func boundTitle(title string) string {
+	if runes := []rune(title); len(runes) > maxLiveTitleRunes {
+		return string(runes[:maxLiveTitleRunes])
+	}
+	return title
 }
 
 // viewerLink is where a browser that opens a terminal's url as a page goes
@@ -88,7 +104,7 @@ func (s *Server) startLiveLocked(e *embedState, opening string) {
 	}
 	e.owned = map[string]any{}
 	if e.kind == kindTerminal {
-		e.owned["og"] = e.terminalOG(terminalWaiting)
+		e.owned["og"] = e.terminalOG()
 	}
 }
 
@@ -100,9 +116,10 @@ func (s *Server) startWriterLocked(e *embedState) (int, string) {
 	if e.started {
 		return http.StatusConflict, "This live text already has a writer"
 	}
+	e.started = true
 	e.owned = map[string]any{"url": e.liveURL()}
 	if e.kind == kindTerminal {
-		e.owned["og"] = e.terminalOG(terminalLive)
+		e.owned["og"] = e.terminalOG()
 	}
 	if e.post != nil {
 		if !s.postPendingLocked(e) {
@@ -115,7 +132,6 @@ func (s *Server) startWriterLocked(e *embedState) (int, string) {
 			return replaceEmbed(body, e.id, func(embed map[string]any) { maps.Copy(embed, cloneObject(e.owned)) })
 		})
 	}
-	e.started = true
 	e.timer.Stop()
 	e.timer = time.AfterFunc(s.config.LiveTextMaxDuration, func() {
 		s.mu.Lock()
@@ -299,7 +315,7 @@ func (s *Server) finishLiveLocked(e *embedState) {
 	text := e.live.text()
 	e.live = nil
 	if e.kind == kindTerminal {
-		e.owned = map[string]any{"output": text, "og": e.terminalOG(terminalFinished)}
+		e.owned = map[string]any{"output": text, "og": e.terminalOG()}
 		if m != nil {
 			s.republishLocked(m, func(body map[string]any) bool {
 				return replaceEmbed(body, e.id, func(embed map[string]any) {
@@ -359,7 +375,10 @@ func (s *Server) handleLive(w http.ResponseWriter, r *http.Request) {
 	terminal := e.kind == kindTerminal
 	s.mu.RUnlock()
 	header := w.Header()
-	if viewer := s.config.TerminalViewerURL; viewer != "" && terminal {
+	// The viewer reads only https, so an http url (one with no TLS in
+	// front) is served as text, unless the viewer is http too.
+	viewer := s.config.TerminalViewerURL
+	if viewer != "" && terminal && (strings.HasPrefix(liveURL, "https:") || strings.HasPrefix(viewer, "http:")) {
 		// Readers that fetch it are served the text; a browser opening it as a page, the viewer.
 		header.Set("Vary", "Sec-Fetch-Mode")
 		if r.Header.Get("Sec-Fetch-Mode") == "navigate" {
@@ -704,18 +723,15 @@ func formatDuration(d time.Duration) string {
 	return unit(int64((d+time.Second-1)/time.Second), "second")
 }
 
-// maxLiveTitleRunes bounds the title /embed-terminal takes.
+// maxLiveTitleRunes bounds a terminal's title in its og and the viewer's
+// link, and the title /embed-terminal takes.
 const maxLiveTitleRunes = 200
 
 // embedTerminalCommand prepares a terminal embed titled by the rest of the
 // line, if any: see liveCommand.
 func (s *Server) embedTerminalCommand(c *client, r *roomState, body map[string]any, args, replyTo string) (map[string]any, *rpcError) {
 	title, _, _ := strings.Cut(args, "\n")
-	title = strings.TrimSpace(title)
-	if runes := []rune(title); len(runes) > maxLiveTitleRunes {
-		title = string(runes[:maxLiveTitleRunes])
-	}
-	return s.liveCommand(c, r, body, kindTerminal, title, replyTo)
+	return s.liveCommand(c, r, body, kindTerminal, boundTitle(strings.TrimSpace(title)), replyTo)
 }
 
 // embedAppendCommand prepares an append embed whose message starts with the

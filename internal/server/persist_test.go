@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -364,4 +365,42 @@ func (s *Server) dumpLocked() []store.Entry {
 	all.vapid = s.vapidStored
 	meta := s.metaLocked()
 	return append(s.entriesLocked(all), store.Entry{Kind: entryMeta, ID: "counters", Value: encodeJSON(meta)})
+}
+
+// A terminal that finished before terminals had an og gets one on restore
+// (§4.8.6), and a finished terminal keeps its renamed og across a restart.
+func TestTerminalOGAfterRestart(t *testing.T) {
+	app, httpServer, _ := startWithStore(t, store.NewMemory(), t.TempDir())
+	a := dialTestClient(t, httpServer)
+	var ids []string
+	for _, title := range []string{"old", "renamed"} {
+		result := postEmbeds(t, a, "terminal-"+title, map[string]any{"room_id": "general", "body": map[string]any{"embeds": []any{map[string]any{"kind": "terminal", "title": "first"}}}})
+		writeURL := result["embeds"].([]any)[0].(map[string]any)["write_url"].(string)
+		if status, _, _ := httpDo(t, http.MethodPut, writeURL, strings.NewReader("done"), ""); status != http.StatusNoContent {
+			t.Fatalf("write: %d", status)
+		}
+		startedSnapshot(t, a)
+		embed := embedsOf(t, a.notification(t, "message"))[0]
+		ids = append(ids, embed["embed_id"].(string))
+		save(t, a, "rename-"+title, map[string]any{"message_id": result["message_id"], "body": map[string]any{
+			"embeds": []any{map[string]any{"embed_id": embed["embed_id"], "kind": "terminal", "title": title}},
+		}})
+	}
+	app.mu.Lock()
+	delete(app.embeds[ids[0]].owned, "og")
+	restartedStore := store.NewMemory()
+	if err := restartedStore.Apply(app.dumpLocked()); err != nil {
+		t.Fatal(err)
+	}
+	app.mu.Unlock()
+
+	restored, _, _ := startWithStore(t, restartedStore, t.TempDir())
+	restored.mu.RLock()
+	defer restored.mu.RUnlock()
+	for i, title := range []string{"old", "renamed"} {
+		og, _ := restored.embeds[ids[i]].owned["og"].(map[string]any)
+		if og["title"] != title || og["description"] != terminalFinished {
+			t.Errorf("%s og after restart: %#v", ids[i], og)
+		}
+	}
 }

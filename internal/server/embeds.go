@@ -162,6 +162,15 @@ func (s *Server) resolveEmbedsLocked(c *client, messageID string, current map[st
 			if e := s.embeds[id]; e != nil {
 				delete(embed, "url")
 				delete(embed, "output")
+				if e.kind == kindTerminal && e.owned != nil {
+					// A renamed terminal's og and viewer link follow its title.
+					saved, _ := embed["title"].(string)
+					if title := boundTitle(saved); title != e.title {
+						e.title = title
+						e.owned["og"] = e.terminalOG()
+						s.touchEmbed(id)
+					}
+				}
 				maps.Copy(embed, cloneObject(e.owned))
 			}
 			embeds = append(embeds, embed)
@@ -180,6 +189,9 @@ func (s *Server) resolveEmbedsLocked(c *client, messageID string, current map[st
 			e := s.newWriteLocked(c, id, kind, messageID)
 			e.alt = alt
 			e.title, _ = embed["title"].(string)
+			if kind == kindTerminal {
+				e.title = boundTitle(e.title)
+			}
 			if liveKind(kind) {
 				text, _ := body["text"].(string)
 				s.startLiveLocked(e, text)

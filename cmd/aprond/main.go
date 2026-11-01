@@ -188,10 +188,10 @@ func serverConfig(options Options) (server.Config, error) {
 	config.LiveTextMaxBytes = options.Live.MaxMB << 20
 	config.TerminalKeepBytes = options.Live.TerminalKeepKB << 10
 	config.AppendMaxBytes = options.Live.AppendMaxKB << 10
-	config.TerminalViewerURL = options.Live.TerminalViewer
+	config.TerminalViewerURL = strings.TrimSpace(options.Live.TerminalViewer)
 	if viewer := config.TerminalViewerURL; viewer != "" {
 		parsed, err := url.Parse(viewer)
-		if err != nil || parsed.Host == "" || (parsed.Scheme != "https" && parsed.Scheme != "http") || parsed.Fragment != "" || parsed.User != nil {
+		if err != nil || parsed.Host == "" || (parsed.Scheme != "https" && parsed.Scheme != "http") || strings.Contains(viewer, "#") || parsed.User != nil {
 			return config, fmt.Errorf("invalid --live.terminal-viewer %q: use an http or https URL without a fragment, or empty to turn it off", viewer)
 		}
 	}
