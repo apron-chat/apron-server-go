@@ -183,7 +183,6 @@ func (s *Server) resolveEmbedsLocked(c *client, messageID string, current map[st
 			if liveKind(kind) {
 				text, _ := body["text"].(string)
 				s.startLiveLocked(e, text)
-				embed["url"] = e.liveURL()
 			}
 			written = append(written, map[string]any{"embed_id": id, "kind": kind, "write_url": e.writeURL()})
 		}

@@ -244,6 +244,7 @@ func TestAppendFullWithAnIncompleteCharacterEndsCleanly(t *testing.T) {
 	if status, _, got := httpDo(t, http.MethodPut, writeURL, strings.NewReader("vwxyz\xE2\x82"), ""); status != http.StatusNoContent {
 		t.Fatalf("append write: %d %q", status, got)
 	}
+	startedSnapshot(t, a)
 	if got := a.notification(t, "message")["body"].(map[string]any)["text"]; got != "> vwxyz" {
 		t.Fatalf("finished text %q", got)
 	}
@@ -308,8 +309,35 @@ func postLive(t *testing.T, c *testClient, id string, body map[string]any) (map[
 	return result, writeURL, live
 }
 
+// liveURLOf is live text's url, which the server publishes only once its
+// write starts (§4.8.5): a test that reads before then asks the server.
+func liveURLOf(t *testing.T, app *Server, embedID any) string {
+	t.Helper()
+	app.mu.RLock()
+	defer app.mu.RUnlock()
+	e := app.embeds[embedID.(string)]
+	if e == nil || !liveKind(e.kind) {
+		t.Fatalf("no live text %v", embedID)
+	}
+	return e.liveURL()
+}
+
+// startedSnapshot reads the snapshot that adds live text's url when its
+// write starts (§4.8.5).
+func startedSnapshot(t *testing.T, c *testClient) map[string]any {
+	t.Helper()
+	snapshot := c.notification(t, "message")
+	for _, embed := range embedsOf(t, snapshot) {
+		if liveKind(embed["kind"]) && embed["url"] != nil {
+			return snapshot
+		}
+	}
+	t.Fatalf("not the snapshot that starts live text: %#v", snapshot)
+	return nil
+}
+
 func TestAppendGrowsTheBodyThenMovesIntoIt(t *testing.T) {
-	_, httpServer := newTestServer(t, DefaultConfig())
+	app, httpServer := newTestServer(t, DefaultConfig())
 	clients := dialGroup(t, httpServer, 2)
 	a, b := clients[0], clients[1]
 	result, writeURL, live := postLive(t, a, "append", map[string]any{
@@ -317,10 +345,11 @@ func TestAppendGrowsTheBodyThenMovesIntoIt(t *testing.T) {
 		"embeds": []any{map[string]any{"kind": "append", "url": "https://forged.example/a"}},
 	})
 	pending := b.notification(t, "message")
-	liveURL, _ := live["url"].(string)
-	if !strings.HasPrefix(liveURL, httpServer.URL+livePath) || !reflect.DeepEqual(embedsOf(t, pending)[0], live) {
+	// Until its write starts the embed has no url, the forged one dropped.
+	if _, has := live["url"]; has || !reflect.DeepEqual(embedsOf(t, pending)[0], live) {
 		t.Fatalf("live embed: %#v, broadcast %#v", live, pending)
 	}
+	liveURL := liveURLOf(t, app, live["embed_id"])
 	reader, err := http.Get(liveURL)
 	if err != nil || reader.StatusCode != http.StatusOK {
 		t.Fatalf("live reader: %v %v", reader, err)
@@ -336,12 +365,17 @@ func TestAppendGrowsTheBodyThenMovesIntoIt(t *testing.T) {
 	if got, _ := io.ReadAll(reader.Body); string(got) != text {
 		t.Fatalf("reader got %q", got)
 	}
-	// The finished snapshot has the text in the body, and no embed. The
-	// appended text does not change mentions.
+	// The write's start publishes the url. The finished snapshot has the
+	// text in the body, and no embed. The appended text does not change
+	// mentions.
 	for _, client := range clients {
+		started := startedSnapshot(t, client)
+		if embedsOf(t, started)[0]["url"] != liveURL || started["prev_log_id"] != pending["log_id"] {
+			t.Fatalf("started snapshot: %#v", started)
+		}
 		finished := client.notification(t, "message")
 		want := map[string]any{"text": "Here is the plan:\n\n" + text, "format": "markdown", "mentions": []any{"guest_2"}}
-		if !reflect.DeepEqual(finished["body"], any(want)) || finished["message_id"] != result["message_id"] || finished["prev_log_id"] != pending["log_id"] {
+		if !reflect.DeepEqual(finished["body"], any(want)) || finished["message_id"] != result["message_id"] || finished["prev_log_id"] != started["log_id"] {
 			t.Fatalf("finished snapshot: %#v", finished)
 		}
 	}
@@ -366,6 +400,7 @@ func TestAppendKeepsItsFirstPart(t *testing.T) {
 	if status, _, got := httpDo(t, http.MethodPut, writeURL, strings.NewReader("abcdefé and more"), ""); status != http.StatusRequestEntityTooLarge || !strings.Contains(string(got), "7 bytes") {
 		t.Fatalf("oversized append: %d %q", status, got)
 	}
+	startedSnapshot(t, a)
 	if text := a.notification(t, "message")["body"].(map[string]any)["text"]; text != "> abcdef" {
 		t.Fatalf("limited text %q", text)
 	}
@@ -374,6 +409,7 @@ func TestAppendKeepsItsFirstPart(t *testing.T) {
 	if status, _, _ := httpDo(t, http.MethodPut, writeURL, strings.NewReader("ab\xffcdef"), ""); status != http.StatusRequestEntityTooLarge {
 		t.Fatalf("invalid append: %d", status)
 	}
+	startedSnapshot(t, a)
 	if text := a.notification(t, "message")["body"].(map[string]any)["text"]; text != "ab\uFFFDcd" {
 		t.Fatalf("invalid text kept as %q", text)
 	}
@@ -392,6 +428,7 @@ func TestAppendFitsInARequest(t *testing.T) {
 	if status, _, _ := httpDo(t, http.MethodPut, writeURL, strings.NewReader(strings.Repeat("x", 4<<10)), ""); status != http.StatusRequestEntityTooLarge {
 		t.Fatalf("oversized append: %d", status)
 	}
+	startedSnapshot(t, a)
 	if text := a.notification(t, "message")["body"].(map[string]any)["text"].(string); len(text) != 4<<10 {
 		t.Fatalf("text of %d bytes", len(text))
 	}
@@ -407,6 +444,7 @@ func TestAppendFitsInARequestAfterASave(t *testing.T) {
 	a := dialTestClient(t, httpServer)
 	result, writeURL, live := postLive(t, a, "append", map[string]any{"text": "> ", "embeds": []any{map[string]any{"kind": "append"}}})
 	pipe, writerDone := startLiveWrite(t, app, writeURL, strings.Repeat("é", 1<<10))
+	startedSnapshot(t, a)
 	edited := strings.Repeat("e", 3<<10+1)
 	save(t, a, "edit", map[string]any{"message_id": result["message_id"], "body": map[string]any{"text": edited, "embeds": []any{live}}})
 	_ = pipe.Close()
@@ -422,14 +460,14 @@ func TestAppendFitsInARequestAfterASave(t *testing.T) {
 // body.text, never reaching the opening text (§4.8.5). A reader that is
 // reading gets the edits to apply.
 func TestAppendEditsReviseTheText(t *testing.T) {
-	_, httpServer := newTestServer(t, DefaultConfig())
+	app, httpServer := newTestServer(t, DefaultConfig())
 	clients := dialGroup(t, httpServer, 2)
 	a, b := clients[0], clients[1]
 	_, writeURL, live := postLive(t, a, "append", map[string]any{
 		"text": "Here is the plan:\n\n", "format": "markdown", "embeds": []any{map[string]any{"kind": "append"}},
 	})
 	b.notification(t, "message")
-	reader, err := http.Get(live["url"].(string))
+	reader, err := http.Get(liveURLOf(t, app, live["embed_id"]))
 	if err != nil || reader.StatusCode != http.StatusOK {
 		t.Fatalf("live reader: %v %v", reader, err)
 	}
@@ -442,6 +480,7 @@ func TestAppendEditsReviseTheText(t *testing.T) {
 		t.Fatalf("reader got %q", got)
 	}
 	for _, client := range clients {
+		startedSnapshot(t, client)
 		if got := client.notification(t, "message")["body"].(map[string]any)["text"]; got != "Here is the plan:\n\nHello world, cafe" {
 			t.Fatalf("finished text %q", got)
 		}
@@ -452,6 +491,7 @@ func TestAppendEditsReviseTheText(t *testing.T) {
 	if status, _, _ := httpDo(t, http.MethodPut, writeURL, strings.NewReader("\b\b\bok"), ""); status != http.StatusNoContent {
 		t.Fatalf("append write: %d", status)
 	}
+	startedSnapshot(t, a)
 	if got := a.notification(t, "message")["body"].(map[string]any)["text"]; got != "> ok" {
 		t.Fatalf("finished text %q", got)
 	}
@@ -482,7 +522,7 @@ func TestALateAppendReaderGetsTheEditedText(t *testing.T) {
 	_, writeURL, live := postLive(t, a, "append", map[string]any{"text": "> ", "embeds": []any{map[string]any{"kind": "append"}}})
 	pipe, writerDone := startLiveWrite(t, app, writeURL, "secret draft\fThe pk\bl")
 	waitForLiveText(t, app, live["embed_id"].(string), "The pl")
-	reader, err := http.Get(live["url"].(string))
+	reader, err := http.Get(embedsOf(t, startedSnapshot(t, a))[0]["url"].(string))
 	if err != nil || reader.StatusCode != http.StatusOK {
 		t.Fatalf("live reader: %v %v", reader, err)
 	}
@@ -514,6 +554,7 @@ func TestAppendLimitCountsTheEditedText(t *testing.T) {
 	if status, _, _ := httpDo(t, http.MethodPut, writeURL, strings.NewReader("abcd\b\b\b\bvwxyz"), ""); status != http.StatusNoContent {
 		t.Fatalf("append write: %d", status)
 	}
+	startedSnapshot(t, a)
 	if got := a.notification(t, "message")["body"].(map[string]any)["text"]; got != "> vwxyz" {
 		t.Fatalf("finished text %q", got)
 	}
@@ -521,6 +562,7 @@ func TestAppendLimitCountsTheEditedText(t *testing.T) {
 	if status, _, got := httpDo(t, http.MethodPut, writeURL, strings.NewReader("vwxyz\b!?"), ""); status != http.StatusRequestEntityTooLarge || !strings.Contains(string(got), "5 bytes") {
 		t.Fatalf("full append: %d %q", status, got)
 	}
+	startedSnapshot(t, a)
 	if got := a.notification(t, "message")["body"].(map[string]any)["text"]; got != "> vwxy!" {
 		t.Fatalf("finished text %q", got)
 	}
@@ -531,15 +573,16 @@ func TestAppendLimitCountsTheEditedText(t *testing.T) {
 func TestTerminalKeepsBackspaceAndFormFeed(t *testing.T) {
 	_, httpServer := newTestServer(t, DefaultConfig())
 	a := dialTestClient(t, httpServer)
-	_, writeURL, terminal := postLive(t, a, "terminal", map[string]any{"embeds": []any{map[string]any{"kind": "terminal"}}})
+	_, writeURL, _ := postLive(t, a, "terminal", map[string]any{"embeds": []any{map[string]any{"kind": "terminal"}}})
 	output := "ab\bc\fd\r\n"
 	if status, _, _ := httpDo(t, http.MethodPut, writeURL, strings.NewReader(output), ""); status != http.StatusNoContent {
 		t.Fatalf("terminal write: %d", status)
 	}
+	liveURL := embedsOf(t, startedSnapshot(t, a))[0]["url"].(string)
 	if got := embedsOf(t, a.notification(t, "message"))[0]["output"]; got != output {
 		t.Fatalf("output %q", got)
 	}
-	if status, _, got := httpDo(t, http.MethodGet, terminal["url"].(string), nil, ""); status != http.StatusOK || string(got) != output {
+	if status, _, got := httpDo(t, http.MethodGet, liveURL, nil, ""); status != http.StatusOK || string(got) != output {
 		t.Fatalf("finished terminal URL: %d %q", status, got)
 	}
 }
@@ -783,6 +826,7 @@ func TestLiveTextEndsWhenItsWriterDisconnects(t *testing.T) {
 
 	_, writeURL, _ := postLive(t, a, "terminal", map[string]any{"embeds": []any{map[string]any{"kind": "terminal"}}})
 	disconnect(writeURL, "first ")
+	startedSnapshot(t, a)
 	if output := embedsOf(t, a.notification(t, "message"))[0]["output"]; output != "first " {
 		t.Fatalf("output %q", output)
 	}
@@ -792,6 +836,7 @@ func TestLiveTextEndsWhenItsWriterDisconnects(t *testing.T) {
 
 	_, writeURL, _ = postLive(t, a, "append", map[string]any{"text": "> ", "embeds": []any{map[string]any{"kind": "append"}}})
 	disconnect(writeURL, "only this")
+	startedSnapshot(t, a)
 	if text := a.notification(t, "message")["body"].(map[string]any)["text"]; text != "> only this" {
 		t.Fatalf("text %q", text)
 	}
@@ -849,7 +894,7 @@ func TestALiveReaderThatFallsBehindFails(t *testing.T) {
 	failed := make(chan any, 1)
 	go func() {
 		defer func() { failed <- recover() }()
-		app.handleLive(w, httptest.NewRequest(http.MethodGet, terminal["url"].(string), nil))
+		app.handleLive(w, httptest.NewRequest(http.MethodGet, liveURLOf(t, app, terminal["embed_id"]), nil))
 	}()
 	<-w.stalled
 	_, _ = pipe.Write([]byte("abcdefghij"))
@@ -873,6 +918,7 @@ func TestAFinishedTerminalLetsGoOfItsLiveText(t *testing.T) {
 	if status, _, _ := httpDo(t, http.MethodPut, writeURL, strings.NewReader("done\n"), ""); status != http.StatusNoContent {
 		t.Fatalf("terminal write: %d", status)
 	}
+	liveURL := embedsOf(t, startedSnapshot(t, a))[0]["url"].(string)
 	a.notification(t, "message")
 	app.mu.RLock()
 	live := app.embeds[terminal["embed_id"].(string)].live
@@ -880,7 +926,7 @@ func TestAFinishedTerminalLetsGoOfItsLiveText(t *testing.T) {
 	if live != nil {
 		t.Fatalf("a finished terminal holds its live text: %q", live.data)
 	}
-	if status, _, got := httpDo(t, http.MethodGet, terminal["url"].(string), nil, ""); status != http.StatusOK || string(got) != "done\n" {
+	if status, _, got := httpDo(t, http.MethodGet, liveURL, nil, ""); status != http.StatusOK || string(got) != "done\n" {
 		t.Fatalf("finished terminal URL: %d %q", status, got)
 	}
 }
@@ -919,6 +965,7 @@ func TestLiveTextHasOneWriter(t *testing.T) {
 	if status := <-writerDone; status != http.StatusNoContent {
 		t.Fatalf("writer status %d", status)
 	}
+	startedSnapshot(t, a)
 	if output := embedsOf(t, a.notification(t, "message"))[0]["output"]; output != "one" {
 		t.Fatalf("output %q", output)
 	}
@@ -937,6 +984,7 @@ func TestLiveTextEndsAtItsDurationLimit(t *testing.T) {
 	if status := <-writerDone; status != http.StatusOK {
 		t.Fatalf("writer status %d", status)
 	}
+	startedSnapshot(t, a)
 	if output := embedsOf(t, a.notification(t, "message"))[0]["output"]; output != "still going" {
 		t.Fatalf("output %q", output)
 	}
@@ -998,10 +1046,11 @@ func TestLiveTextAcrossARestart(t *testing.T) {
 	}
 	_, httpServer, stop := startWithStore(t, open(), uploads)
 	a := dialTestClient(t, httpServer)
-	_, writeURL, terminal := postLive(t, a, "terminal", map[string]any{"embeds": []any{map[string]any{"kind": "terminal"}}})
+	_, writeURL, _ := postLive(t, a, "terminal", map[string]any{"embeds": []any{map[string]any{"kind": "terminal"}}})
 	if status, _, _ := httpDo(t, http.MethodPut, writeURL, strings.NewReader("done\n"), ""); status != http.StatusNoContent {
 		t.Fatalf("terminal write: %d", status)
 	}
+	terminalURL := embedsOf(t, startedSnapshot(t, a))[0]["url"].(string)
 	a.notification(t, "message")
 	postLive(t, a, "append", map[string]any{"text": "> ", "embeds": []any{map[string]any{"kind": "append"}}})
 	stop()
@@ -1025,7 +1074,7 @@ func TestLiveTextAcrossARestart(t *testing.T) {
 	if appended := latest[order[1]]; appended["body"].(map[string]any)["text"] != "> " || len(embedsOf(t, appended)) != 0 {
 		t.Fatalf("append after a restart: %#v", appended)
 	}
-	liveURL := httpServer.URL + terminal["url"].(string)[strings.Index(terminal["url"].(string), livePath):]
+	liveURL := httpServer.URL + terminalURL[strings.Index(terminalURL, livePath):]
 	if status, _, got := httpDo(t, http.MethodGet, liveURL, nil, ""); status != http.StatusOK || string(got) != "done\n" {
 		t.Fatalf("finished terminal URL: %d %q", status, got)
 	}
