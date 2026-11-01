@@ -619,8 +619,9 @@ publishes the snapshot that finishes a write before it answers the `PUT`.
   image type it declares.
 - **Live text** (`terminal` and `append`,
   [PROTOCOL.md §4.8.3](https://github.com/shazow/apron/blob/main/PROTOCOL.md#483-writes)):
-  the broadcast embed carries its `url`, `/live/<embed_id>/<secret>`, from
-  the start, before the write does. Readers `GET` it for the kept text from
+  the embed has no `url` until its write starts; then a snapshot adds it,
+  `/live/<embed_id>/<secret>` (a command's message is posted then, with
+  it). Readers `GET` it for the kept text from
   its start, followed by more as it arrives, until the text ends; it is
   served as `text/plain; charset=utf-8` with `X-Content-Type-Options:
   nosniff`, `Content-Security-Policy: sandbox`, and `Cache-Control:

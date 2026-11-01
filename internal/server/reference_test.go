@@ -801,16 +801,21 @@ func TestTerminalGrowsLiveThenKeepsItsOutput(t *testing.T) {
 	config := DefaultConfig()
 	config.TerminalKeepBytes = 16
 	config.LiveTextMaxBytes = 64
-	_, httpServer := newTestServer(t, config)
+	app, httpServer := newTestServer(t, config)
 	a := dialTestClient(t, httpServer)
 	result := postEmbeds(t, a, "terminal", map[string]any{"room_id": "general", "body": map[string]any{
 		"embeds": []any{map[string]any{"kind": "terminal", "title": "make", "output": "forged", "url": "https://forged.example/t"}},
 	}})
 	writeURL := result["embeds"].([]any)[0].(map[string]any)["write_url"].(string)
+	// Until its write starts the embed has no url (§4.8.5); a reader that
+	// connects early waits for the write.
 	live := embedsOf(t, result["snapshot"].(map[string]any))[0]
-	liveURL, _ := live["url"].(string)
-	if !strings.HasPrefix(liveURL, httpServer.URL+livePath) || live["title"] != "make" || live["output"] != nil {
+	if live["url"] != nil || live["title"] != "make" || live["output"] != nil {
 		t.Fatalf("live embed: %#v", live)
+	}
+	liveURL := liveURLOf(t, app, live["embed_id"])
+	if !strings.HasPrefix(liveURL, httpServer.URL+livePath) {
+		t.Fatalf("live url %q", liveURL)
 	}
 
 	reader, err := http.Get(liveURL)
@@ -853,6 +858,9 @@ func TestTerminalGrowsLiveThenKeepsItsOutput(t *testing.T) {
 	if status := <-writerDone; status != http.StatusNoContent {
 		t.Fatalf("writer status %d", status)
 	}
+	if started := embedsOf(t, startedSnapshot(t, a))[0]; started["url"] != liveURL || started["title"] != "make" {
+		t.Fatalf("started embed: %#v", started)
+	}
 	finished := a.notification(t, "message")
 	embed := embedsOf(t, finished)[0]
 	if embed["output"] != kept || embed["url"] != nil || embed["title"] != "make" || finished["prev_log_id"] == nil {
@@ -870,6 +878,7 @@ func TestTerminalGrowsLiveThenKeepsItsOutput(t *testing.T) {
 	if status, _, _ := httpDo(t, http.MethodPut, writeURL, strings.NewReader(strings.Repeat("x", 50)+"\r\n"+strings.Repeat("y", 30)), ""); status != http.StatusRequestEntityTooLarge {
 		t.Fatalf("oversized terminal: %d", status)
 	}
+	startedSnapshot(t, a)
 	if output := embedsOf(t, a.notification(t, "message"))[0]["output"]; output != "\r\n"+strings.Repeat("y", 12) {
 		t.Fatalf("limited output %q", output)
 	}
@@ -878,7 +887,7 @@ func TestTerminalGrowsLiveThenKeepsItsOutput(t *testing.T) {
 // A finished live text write leaves its keep-alive connection usable: a live
 // read next on the same connection follows the text.
 func TestLiveWriteConnectionCanReadLiveText(t *testing.T) {
-	_, httpServer := newTestServer(t, DefaultConfig())
+	app, httpServer := newTestServer(t, DefaultConfig())
 	a := dialTestClient(t, httpServer)
 	result := postEmbeds(t, a, "terminals", map[string]any{"room_id": "general", "body": map[string]any{
 		"embeds": []any{map[string]any{"kind": "terminal"}, map[string]any{"kind": "terminal"}},
@@ -893,7 +902,7 @@ func TestLiveWriteConnectionCanReadLiveText(t *testing.T) {
 		t.Fatalf("first live write: %v %v", response, err)
 	}
 	response.Body.Close()
-	reader, err := client.Get(live[1]["url"].(string))
+	reader, err := client.Get(liveURLOf(t, app, live[1]["embed_id"]))
 	if err != nil || reader.StatusCode != http.StatusOK {
 		t.Fatalf("live reader: %v %v", reader, err)
 	}
@@ -949,8 +958,8 @@ func TestSavingWithoutLiveTextEndsIt(t *testing.T) {
 			a := dialTestClient(t, httpServer)
 			result := postEmbeds(t, a, kind, map[string]any{"room_id": "general", "body": map[string]any{"text": "start ", "embeds": []any{map[string]any{"kind": kind}}}})
 			writeURL := result["embeds"].([]any)[0].(map[string]any)["write_url"].(string)
-			liveURL := embedsOf(t, result["snapshot"].(map[string]any))[0]["url"].(string)
 			pipe, writerDone := startLiveWrite(t, app, writeURL, "partial")
+			liveURL := embedsOf(t, startedSnapshot(t, a))[0]["url"].(string)
 			_, saved := save(t, a, "stop", map[string]any{"message_id": result["message_id"], "body": map[string]any{"text": "never mind"}})
 			if body := saved["body"].(map[string]any); body["text"] != "never mind" || body["embeds"] != nil {
 				t.Fatalf("save: %#v", saved)

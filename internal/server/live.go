@@ -43,8 +43,8 @@ type pendingPost struct {
 	text    string
 }
 
-// startLiveLocked gives a new terminal or append embed its live text and
-// url. An append keeps at most AppendMaxBytes of edited text, and less
+// startLiveLocked gives a new terminal or append embed its live text. Its
+// url waits for the write to start (startWriterLocked). An append keeps at most AppendMaxBytes of edited text, and less
 // after a long opening text, so that the finished body.text stays within
 // the frames the server reads (ReadLimit).
 func (s *Server) startLiveLocked(e *embedState, opening string) {
@@ -54,19 +54,28 @@ func (s *Server) startLiveLocked(e *embedState, opening string) {
 		keep := max(0, min(s.config.AppendMaxBytes, int(s.config.ReadLimit)-len(opening)))
 		e.live = newLiveText(false, keep, s.config.LiveTextMaxBytes)
 	}
-	e.owned = map[string]any{"url": e.liveURL()}
+	e.owned = map[string]any{}
 }
 
-// startWriterLocked admits live text's one writer, which posts a command's
-// pending message and starts the duration limit. It returns the refusal's
-// status and message, if any.
+// startWriterLocked admits live text's one writer and starts the duration
+// limit. The embed gets its url now (§4.8.5): a command's pending message is
+// posted with it, and a message's is republished with it. It returns the
+// refusal's status and message, if any.
 func (s *Server) startWriterLocked(e *embedState) (int, string) {
 	if e.started {
 		return http.StatusConflict, "This live text already has a writer"
 	}
-	if e.post != nil && !s.postPendingLocked(e) {
-		s.removeEmbedLocked(e.id)
-		return http.StatusGone, "The room or the message this was to reply to is no longer available"
+	e.owned = map[string]any{"url": e.liveURL()}
+	if e.post != nil {
+		if !s.postPendingLocked(e) {
+			s.removeEmbedLocked(e.id)
+			return http.StatusGone, "The room or the message this was to reply to is no longer available"
+		}
+	} else if m := s.messages[e.messageID]; m != nil {
+		s.touchEmbed(e.id)
+		s.republishLocked(m, func(body map[string]any) bool {
+			return replaceEmbed(body, e.id, func(embed map[string]any) { embed["url"] = e.liveURL() })
+		})
 	}
 	e.started = true
 	e.timer.Stop()
