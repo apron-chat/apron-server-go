@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -671,7 +672,8 @@ func TestEmbedTerminalCommandPostsWhenTheWriteStarts(t *testing.T) {
 		embeds := embedsOf(t, posted)
 		liveURL, _ = embeds[0]["url"].(string)
 		messageID, _ = posted["message_id"].(string)
-		want := map[string]any{"text": "", "embeds": []any{map[string]any{"embed_id": write["embed_id"], "kind": "terminal", "title": "make test", "url": liveURL}}}
+		og := map[string]any{"title": "make test", "description": terminalDescription}
+		want := map[string]any{"text": "", "embeds": []any{map[string]any{"embed_id": write["embed_id"], "kind": "terminal", "title": "make test", "url": liveURL, "og": og}}}
 		if !reflect.DeepEqual(posted["body"], any(want)) || posted["from"].(map[string]any)["user_id"] != "guest_1" ||
 			posted["room_id"] != "general" || !reflect.DeepEqual(posted["reply_to"], any(map[string]any{"message_id": replied})) || posted["log_id"] != messageID {
 			t.Fatalf("posted: %#v", posted)
@@ -701,7 +703,8 @@ func TestEmbedTerminalCommandPostsWhenTheWriteStarts(t *testing.T) {
 	}
 	for _, client := range clients {
 		finished := client.notification(t, "message")
-		want := []any{map[string]any{"embed_id": write["embed_id"], "kind": "terminal", "title": "make test", "output": "\x1b[32mok\x1b[0m 12 tests\r\n"}}
+		og := map[string]any{"title": "make test", "description": terminalDescription}
+		want := []any{map[string]any{"embed_id": write["embed_id"], "kind": "terminal", "title": "make test", "output": "\x1b[32mok\x1b[0m 12 tests\r\n", "og": og}}
 		if finished["message_id"] != messageID || !reflect.DeepEqual(finished["body"].(map[string]any)["embeds"], any(want)) {
 			t.Fatalf("finished: %#v", finished)
 		}
@@ -1077,5 +1080,132 @@ func TestLiveTextAcrossARestart(t *testing.T) {
 	liveURL := httpServer.URL + terminalURL[strings.Index(terminalURL, livePath):]
 	if status, _, got := httpDo(t, http.MethodGet, liveURL, nil, ""); status != http.StatusOK || string(got) != "done\n" {
 		t.Fatalf("finished terminal URL: %d %q", status, got)
+	}
+}
+
+// navigate opens url as a browser opens a page, without following a
+// redirect, and returns the status and the headers. It doesn't read the
+// body, which for live text goes on until the write ends.
+func navigate(t *testing.T, target string) (int, http.Header) {
+	t.Helper()
+	request, err := http.NewRequest(http.MethodGet, target, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Sec-Fetch-Mode", "navigate")
+	client := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	response, err := client.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	return response.StatusCode, response.Header
+}
+
+// A terminal embed carries an og that says what it is (§4.8.1), following a
+// rename, so a client that doesn't render terminals shows a card for it; and
+// a browser that opens its url goes to the terminal viewer, with the url in
+// the fragment (§4.8.5).
+func TestTerminalCardAndViewer(t *testing.T) {
+	// The test server is http, so the viewer is too: an https viewer
+	// doesn't take an http url (TestTerminalViewerNotForHTTPOrAppends).
+	const viewer = "http://terminal.test/view"
+	config := DefaultConfig()
+	config.TerminalViewerURL = viewer
+	app, httpServer := newTestServer(t, config)
+	a := dialTestClient(t, httpServer)
+	result := postEmbeds(t, a, "terminal", map[string]any{"room_id": "general", "body": map[string]any{
+		"embeds": []any{map[string]any{"kind": "terminal", "title": "make test", "og": map[string]any{"title": "forged"}}},
+	}})
+	waiting := embedsOf(t, result["snapshot"].(map[string]any))[0]
+	if og, _ := waiting["og"].(map[string]any); og["title"] != "make test" || og["description"] != terminalDescription || len(og) != 2 {
+		t.Fatalf("waiting og: %#v", waiting["og"])
+	}
+	liveURL := liveURLOf(t, app, waiting["embed_id"])
+
+	body, pipe := io.Pipe()
+	writerDone := make(chan struct{})
+	go func() {
+		defer close(writerDone)
+		request, _ := http.NewRequest(http.MethodPut, result["embeds"].([]any)[0].(map[string]any)["write_url"].(string), body)
+		if response, err := http.DefaultClient.Do(request); err == nil {
+			response.Body.Close()
+		}
+	}()
+	_, _ = pipe.Write([]byte("\x1b[32mok\x1b[0m\r\n"))
+	live := embedsOf(t, startedSnapshot(t, a))[0]
+	if og, _ := live["og"].(map[string]any); live["url"] != liveURL || og["title"] != "make test" || og["description"] != terminalDescription {
+		t.Fatalf("live embed: %#v", live)
+	}
+
+	// A save that sends the embed back with another og keeps the server's,
+	// and a rename retitles it, the viewer's link too.
+	const title = "renamed"
+	_, saved := save(t, a, "edit", map[string]any{"message_id": result["message_id"], "body": map[string]any{
+		"text": "edited", "embeds": []any{map[string]any{"embed_id": live["embed_id"], "kind": "terminal", "title": title, "og": map[string]any{"title": "forged"}}},
+	}})
+	if og, _ := embedsOf(t, saved)[0]["og"].(map[string]any); og["title"] != title || og["description"] != terminalDescription {
+		t.Fatalf("saved og: %#v", og)
+	}
+
+	// A browser goes to the viewer, with the url in the fragment; a reader that fetches gets the text.
+	status, header := navigate(t, liveURL)
+	location, err := url.Parse(header.Get("Location"))
+	if status != http.StatusFound || err != nil || header.Get("Vary") != "Sec-Fetch-Mode" || location.Scheme+"://"+location.Host+location.Path != viewer || location.RawQuery != "" {
+		t.Fatalf("navigation: %d %#v", status, header)
+	}
+	if fragment, err := url.ParseQuery(location.EscapedFragment()); err != nil || fragment.Get("stream") != liveURL || len(fragment) != 1 {
+		t.Fatalf("viewer fragment %q: %v", location.EscapedFragment(), err)
+	}
+	reader, err := http.Get(liveURL)
+	if err != nil || reader.StatusCode != http.StatusOK || reader.Header.Get("Content-Type") != "text/plain; charset=utf-8" || reader.Header.Get("Vary") != "Sec-Fetch-Mode" {
+		t.Fatalf("reader: %v %v", reader, err)
+	}
+	reader.Body.Close()
+
+	_ = pipe.Close()
+	<-writerDone
+	finished := embedsOf(t, a.notification(t, "message"))[0]
+	if og, _ := finished["og"].(map[string]any); finished["url"] != nil || finished["output"] != "\x1b[32mok\x1b[0m\r\n" || og["description"] != terminalDescription || og["title"] != title {
+		t.Fatalf("finished embed: %#v", finished)
+	}
+}
+
+// A browser that opens a url the viewer can't show gets the text: any
+// terminal's without a viewer, an http terminal's with an https viewer, and
+// an append's. An append carries no og.
+func TestTerminalViewerNotForHTTPOrAppends(t *testing.T) {
+	for _, c := range []struct{ viewer, kind string }{
+		{"", "terminal"},
+		{DefaultTerminalViewerURL, "terminal"},
+		{"http://terminal.test/", "append"},
+	} {
+		config := DefaultConfig()
+		config.TerminalViewerURL = c.viewer
+		app, httpServer := newTestServer(t, config)
+		a := dialTestClient(t, httpServer)
+		result := postEmbeds(t, a, c.kind, map[string]any{"room_id": "general", "body": map[string]any{"embeds": []any{map[string]any{"kind": c.kind}}}})
+		embed := embedsOf(t, result["snapshot"].(map[string]any))[0]
+		if (c.kind == "append") != (embed["og"] == nil) {
+			t.Fatalf("%s og: %#v", c.kind, embed["og"])
+		}
+		liveURL := liveURLOf(t, app, embed["embed_id"])
+		body, pipe := io.Pipe()
+		writerDone := make(chan struct{})
+		go func() {
+			defer close(writerDone)
+			request, _ := http.NewRequest(http.MethodPut, result["embeds"].([]any)[0].(map[string]any)["write_url"].(string), body)
+			if response, err := http.DefaultClient.Do(request); err == nil {
+				response.Body.Close()
+			}
+		}()
+		_, _ = pipe.Write([]byte("text"))
+		startedSnapshot(t, a)
+		status, header := navigate(t, liveURL)
+		_ = pipe.Close()
+		<-writerDone
+		if status != http.StatusOK || header.Get("Content-Type") != "text/plain; charset=utf-8" || header.Get("Location") != "" {
+			t.Fatalf("%+v: %d %#v", c, status, header)
+		}
 	}
 }

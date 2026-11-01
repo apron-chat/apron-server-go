@@ -3,7 +3,9 @@ package server
 import (
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -33,6 +35,20 @@ func (e *embedState) liveURL() string {
 	return e.baseURL + livePath + e.id + "/" + e.secret
 }
 
+// terminalDescription is a terminal's og description (§4.8.1), for a
+// client that doesn't render terminal embeds and shows the card that og
+// describes, which opens its url.
+const terminalDescription = "Terminal output. Open it to watch."
+
+// terminalOG is a terminal embed's og, titled as the embed is.
+func (e *embedState) terminalOG() map[string]any {
+	title := e.title
+	if title == "" {
+		title = "Terminal"
+	}
+	return map[string]any{"title": title, "description": terminalDescription}
+}
+
 // pendingPost is the message a /embed-terminal or /embed-append command
 // posts once its write starts: from user, in roomID, replying to replyTo
 // if set, with text as an append's opening body.text.
@@ -55,6 +71,9 @@ func (s *Server) startLiveLocked(e *embedState, opening string) {
 		e.live = newLiveText(false, keep, s.config.LiveTextMaxBytes)
 	}
 	e.owned = map[string]any{}
+	if e.kind == kindTerminal {
+		e.owned["og"] = e.terminalOG()
+	}
 }
 
 // startWriterLocked admits live text's one writer and starts the duration
@@ -66,6 +85,9 @@ func (s *Server) startWriterLocked(e *embedState) (int, string) {
 		return http.StatusConflict, "This live text already has a writer"
 	}
 	e.owned = map[string]any{"url": e.liveURL()}
+	if e.kind == kindTerminal {
+		e.owned["og"] = e.terminalOG()
+	}
 	if e.post != nil {
 		if !s.postPendingLocked(e) {
 			s.removeEmbedLocked(e.id)
@@ -74,7 +96,7 @@ func (s *Server) startWriterLocked(e *embedState) (int, string) {
 	} else if m := s.messages[e.messageID]; m != nil {
 		s.touchEmbed(e.id)
 		s.republishLocked(m, func(body map[string]any) bool {
-			return replaceEmbed(body, e.id, func(embed map[string]any) { embed["url"] = e.liveURL() })
+			return replaceEmbed(body, e.id, func(embed map[string]any) { maps.Copy(embed, cloneObject(e.owned)) })
 		})
 	}
 	e.started = true
@@ -107,7 +129,8 @@ func (s *Server) postPendingLocked(e *embedState) bool {
 	if r == nil {
 		return false
 	}
-	embed := map[string]any{"embed_id": e.id, "kind": e.kind, "url": e.liveURL()}
+	embed := map[string]any{"embed_id": e.id, "kind": e.kind}
+	maps.Copy(embed, cloneObject(e.owned))
 	body := map[string]any{"text": "", "embeds": []any{embed}}
 	if e.kind == kindTerminal {
 		if e.title != "" {
@@ -260,12 +283,12 @@ func (s *Server) finishLiveLocked(e *embedState) {
 	text := e.live.text()
 	e.live = nil
 	if e.kind == kindTerminal {
-		e.owned = map[string]any{"output": text}
+		e.owned = map[string]any{"output": text, "og": e.terminalOG()}
 		if m != nil {
 			s.republishLocked(m, func(body map[string]any) bool {
 				return replaceEmbed(body, e.id, func(embed map[string]any) {
 					delete(embed, "url")
-					embed["output"] = text
+					maps.Copy(embed, cloneObject(e.owned))
 				})
 			})
 		}
@@ -298,7 +321,8 @@ func (s *Server) finishLiveLocked(e *embedState) {
 // which clients apply (§4.8.5). A reader that falls behind what the live
 // text holds fails, so that it reconnects and reads the kept text afresh,
 // rather than skip what it missed. A finished terminal's url serves its
-// output.
+// output. A browser that opens a terminal's url as a page goes to the
+// terminal viewer, if the server has one (TerminalViewerURL).
 func (s *Server) handleLive(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	if r.Method != http.MethodGet {
@@ -315,8 +339,24 @@ func (s *Server) handleLive(w http.ResponseWriter, r *http.Request) {
 	live := e.live
 	output, _ := e.owned["output"].(string)
 	finished := e.finished
+	liveURL := e.liveURL()
+	terminal := e.kind == kindTerminal
 	s.mu.RUnlock()
 	header := w.Header()
+	// The viewer reads only https, so an http url (one with no TLS in
+	// front) is served as text, unless the viewer is http too.
+	viewer := s.config.TerminalViewerURL
+	if viewer != "" && terminal && (strings.HasPrefix(liveURL, "https:") || strings.HasPrefix(viewer, "http:")) {
+		// Readers that fetch it are served the text; a browser opening it as a page, the viewer.
+		header.Set("Vary", "Sec-Fetch-Mode")
+		if r.Header.Get("Sec-Fetch-Mode") == "navigate" {
+			// The url goes in the fragment, which a browser never sends to the viewer's host (§4.8.5).
+			header.Set("Location", viewer+"#"+url.Values{"stream": {liveURL}}.Encode())
+			header.Set("Cache-Control", "no-store")
+			w.WriteHeader(http.StatusFound)
+			return
+		}
+	}
 	header.Set("Content-Type", "text/plain; charset=utf-8")
 	header.Set("X-Content-Type-Options", "nosniff")
 	header.Set("Content-Security-Policy", "sandbox; default-src 'none'")

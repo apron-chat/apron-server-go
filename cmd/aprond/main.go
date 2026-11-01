@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/pprof"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -67,10 +68,11 @@ type Options struct {
 	} `group:"Uploads" namespace:"upload"`
 
 	Live struct {
-		MaxMinutes     int64 `long:"max-minutes" default:"60" description:"Longest a live text (a terminal or append embed) runs, in minutes, before it ends"`
-		MaxMB          int64 `long:"max-mb" default:"16" description:"Most a live text's writer may send, in MiB, before the text ends"`
-		TerminalKeepKB int   `long:"terminal-keep-kb" default:"64" description:"How much of a terminal's output is kept, in KiB: its last part"`
-		AppendMaxKB    int   `long:"append-max-kb" default:"64" description:"How much text an append embed adds to its message, in KiB: its first part (at most 256, what a request may carry)"`
+		MaxMinutes     int64  `long:"max-minutes" default:"60" description:"Longest a live text (a terminal or append embed) runs, in minutes, before it ends"`
+		MaxMB          int64  `long:"max-mb" default:"16" description:"Most a live text's writer may send, in MiB, before the text ends"`
+		TerminalKeepKB int    `long:"terminal-keep-kb" default:"64" description:"How much of a terminal's output is kept, in KiB: its last part"`
+		AppendMaxKB    int    `long:"append-max-kb" default:"64" description:"How much text an append embed adds to its message, in KiB: its first part (at most 256, what a request may carry)"`
+		TerminalViewer string `long:"terminal-viewer" default:"https://terminal.apron.chat/" description:"A page that shows a terminal's live text, where a browser that opens a terminal's url goes (empty serves browsers the plain text)"`
 	} `group:"Live text" namespace:"live"`
 
 	Emoji struct {
@@ -186,6 +188,13 @@ func serverConfig(options Options) (server.Config, error) {
 	config.LiveTextMaxBytes = options.Live.MaxMB << 20
 	config.TerminalKeepBytes = options.Live.TerminalKeepKB << 10
 	config.AppendMaxBytes = options.Live.AppendMaxKB << 10
+	config.TerminalViewerURL = strings.TrimSpace(options.Live.TerminalViewer)
+	if viewer := config.TerminalViewerURL; viewer != "" {
+		parsed, err := url.Parse(viewer)
+		if err != nil || parsed.Host == "" || (parsed.Scheme != "https" && parsed.Scheme != "http") || strings.Contains(viewer, "#") || parsed.User != nil {
+			return config, fmt.Errorf("invalid --live.terminal-viewer %q: use an http or https URL without a fragment, or empty to turn it off", viewer)
+		}
+	}
 	if int64(config.AppendMaxBytes) > config.ReadLimit {
 		return config, fmt.Errorf("--live.append-max-kb %d is more than a message's text can be: at most %d", options.Live.AppendMaxKB, config.ReadLimit>>10)
 	}

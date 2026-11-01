@@ -162,6 +162,14 @@ func (s *Server) resolveEmbedsLocked(c *client, messageID string, current map[st
 			if e := s.embeds[id]; e != nil {
 				delete(embed, "url")
 				delete(embed, "output")
+				if e.kind == kindTerminal && e.owned != nil {
+					// A renamed terminal's og follows its title.
+					if title, _ := embed["title"].(string); title != e.title {
+						e.title = title
+						e.owned["og"] = e.terminalOG()
+						s.touchEmbed(id)
+					}
+				}
 				maps.Copy(embed, cloneObject(e.owned))
 			}
 			embeds = append(embeds, embed)
@@ -183,6 +191,8 @@ func (s *Server) resolveEmbedsLocked(c *client, messageID string, current map[st
 			if liveKind(kind) {
 				text, _ := body["text"].(string)
 				s.startLiveLocked(e, text)
+				// A terminal's og, which says what it is (§4.8.1).
+				maps.Copy(embed, cloneObject(e.owned))
 			}
 			written = append(written, map[string]any{"embed_id": id, "kind": kind, "write_url": e.writeURL()})
 		}
