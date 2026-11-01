@@ -172,7 +172,7 @@ const serverUsage = "Usage: /server to show the server's title, description, and
 // may use it. A change sends every connection a new server frame: at once
 // for the title, the description, and a cleared avatar, and when the
 // upload's write finishes for a new avatar.
-func (s *Server) serverCommand(c *client, r *roomState, body map[string]any, args string) (map[string]any, *rpcError) {
+func (s *Server) serverCommand(c *client, r *roomState, body map[string]any, args, _ string) (map[string]any, *rpcError) {
 	if !c.user.hasRole("admin") {
 		return nil, &rpcError{Code: codeDenied, Message: "Only an admin can see and change the server's title, description, and avatar"}
 	}

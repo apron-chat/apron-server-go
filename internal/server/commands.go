@@ -20,8 +20,10 @@ type serverCommand struct {
 	// available reports whether the sender may use the command in r.
 	available func(u *userState, r *roomState) bool
 	// run executes the command, sending the frames it causes, and returns
-	// its result, which the caller sends after them (§1).
-	run func(s *Server, c *client, r *roomState, body map[string]any, args string) (map[string]any, *rpcError)
+	// its result, which the caller sends after them (§1). args is the
+	// command line after the command's name, and replyTo the command's
+	// reply_to, if any.
+	run func(s *Server, c *client, r *roomState, body map[string]any, args, replyTo string) (map[string]any, *rpcError)
 }
 
 // serverCommands lists the commands in the order /help shows them. It is
@@ -37,6 +39,14 @@ func init() {
 		{
 			name: "avatar", usage: "/avatar", help: "with one image attached: set your avatar",
 			run: (*Server).avatarCommand,
+		},
+		{
+			name: "embed-terminal", usage: "/embed-terminal [title]", help: "get a URL to stream a program's output into this room, shown as an 80×40 terminal",
+			run: (*Server).embedTerminalCommand,
+		},
+		{
+			name: "embed-append", usage: "/embed-append [markdown]", help: "get a URL to stream text into this room, as a message that starts with [markdown] and grows as the text arrives",
+			run: (*Server).embedAppendCommand,
 		},
 		{
 			name: "invite-device", usage: "/invite-device <name>", help: fmt.Sprintf("get a token that signs in as you on another device, named <name>; at most %d names, and a name again replaces its token", maxDeviceTokens),
@@ -64,9 +74,11 @@ func init() {
 // message and is never logged, broadcast, or saved: body.text is the command
 // line, and mentions, reply_to, and embeds are arguments that notify no one.
 // Without room_id it runs in the default room. The result is {} or, for new
-// upload embeds, their write URLs; replies arrive as scoped system notices
-// (Appendix A.1) and effects as the frames they cause, all before the
-// result (§1).
+// upload, terminal, or append embeds, their write URLs; replies arrive as
+// scoped system notices (Appendix A.1) and effects as the frames they cause,
+// all before the result (§1). Only /embed-terminal and /embed-append make
+// live text, and they make their own embed: a terminal or append embed in a
+// command is invalid_params.
 func (s *Server) command(c *client, req request) (any, bool, *rpcError) {
 	for _, name := range []string{"message_id", "deleted"} {
 		if _, has := req.params[name]; has {
@@ -101,6 +113,11 @@ func (s *Server) command(c *client, req request) (any, bool, *rpcError) {
 	}
 	word, args, _ := strings.Cut(line[1:], " ")
 	name := strings.ToLower(word)
+	for i, value := range asList(body["embeds"]) {
+		if kind := value.(map[string]any)["kind"]; liveKind(kind) {
+			return nil, false, invalidParams("body.embeds[%d]: a command takes no %s embed; use /embed-%s", i, kind, kind)
+		}
+	}
 
 	s.mu.Lock()
 	defer s.unlock()
@@ -113,7 +130,7 @@ func (s *Server) command(c *client, req request) (any, bool, *rpcError) {
 	}
 	for _, command := range serverCommands {
 		if command.name == name {
-			result, err := command.run(s, c, r, body, strings.TrimSpace(args))
+			result, err := command.run(s, c, r, body, strings.TrimSpace(args), replyID)
 			if err != nil {
 				return nil, false, err
 			}
@@ -153,7 +170,7 @@ func (s *Server) postRoomNoticeLocked(r *roomState, text string) {
 
 // helpCommand replies with a ~private notice listing the commands available
 // to the sender in the room.
-func (s *Server) helpCommand(c *client, r *roomState, _ map[string]any, _ string) (map[string]any, *rpcError) {
+func (s *Server) helpCommand(c *client, r *roomState, _ map[string]any, _, _ string) (map[string]any, *rpcError) {
 	var lines []string
 	for _, command := range serverCommands {
 		if command.available == nil || command.available(c.user, r) {
@@ -167,7 +184,7 @@ func (s *Server) helpCommand(c *client, r *roomState, _ map[string]any, _ string
 // avatarCommand takes exactly one upload embed, whose file becomes the
 // sender's avatar when its write finishes (§4.8.6). The result carries the
 // write URL.
-func (s *Server) avatarCommand(c *client, _ *roomState, body map[string]any, _ string) (map[string]any, *rpcError) {
+func (s *Server) avatarCommand(c *client, _ *roomState, body map[string]any, _, _ string) (map[string]any, *rpcError) {
 	embeds := asList(body["embeds"])
 	if len(embeds) != 1 || embeds[0].(map[string]any)["kind"] != "upload" {
 		return nil, invalidParams("/avatar takes exactly one upload embed: attach an image")
@@ -190,7 +207,7 @@ const maxKickReasonRunes = 200
 // (§4.2.2), the target room_update left, and the remaining members a ~room
 // notice with the reason. Only the room's creator and admins or moderators
 // may kick.
-func (s *Server) kickCommand(c *client, r *roomState, body map[string]any, args string) (map[string]any, *rpcError) {
+func (s *Server) kickCommand(c *client, r *roomState, body map[string]any, args, _ string) (map[string]any, *rpcError) {
 	u := c.user
 	targets := mentions(body)
 	if len(targets) != 1 {

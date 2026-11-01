@@ -63,7 +63,7 @@ Open `http://localhost:5173`. The development server proxies `/ws` to
 To use the Cloudflare demo backend locally, run it from
 [apron-chat/apron-server-cloudflare](https://github.com/apron-chat/apron-server-cloudflare)
 with `npx wrangler dev --port 8080` instead of `make dev-server`. The Go
-server speaks protocol v9; the worker speaks the protocol within the demo's
+server speaks protocol v10; the worker speaks the protocol within the demo's
 budgets and policies (only threads under `general` can be
 created, guests only read until they sign in with a passkey, and guests'
 memberships are not logged, so its `room_list` ignores `latest_log_id`). A
@@ -88,6 +88,22 @@ Adding an address while signed in as a guest keeps the guest's identity, as
 adding a passkey does; see [SERVER.md](SERVER.md#email-sign-in). `--welcome` sets the text
 the sign-in screen shows, and `--role admin=<user_id or email>` grants a
 role, shown as a badge, that may remove people from any room.
+
+To try live text, send `/embed-terminal make test` or `/embed-append Here is
+the plan:` from the composer (or as a `command` request). Nothing is posted
+yet: the reply, shown only to you, has a write URL and a command line to
+paste into a shell, such as
+
+```sh
+script -qfc 'stty cols 80 rows 40; make test' /dev/null | curl -sT - '<write URL>'
+(echo; for i in 1 2 3; do echo "$i. step $i"; sleep 1; done) | curl -sT - '<write URL>'
+```
+
+The message appears when `curl` connects, grows as the text arrives, and is
+finished when the pipe ends: a terminal keeps its output, and an append's
+text joins the message's body. See
+[SERVER.md](SERVER.md#embeds-uploads-and-live-text) for the limits and the
+`--live.*` flags.
 
 ## Threads
 
@@ -196,7 +212,7 @@ first), independent of its parent room. Empty threads remain available;
 deleting or moving the message they were started from does not remove them.
 Private rooms and private threads are visible only to their members, who add
 others with `room_join` and a `user_id`. With the Go server the client also sends attachments and
-voice clips, shows live streams, sets avatars, marks where you stopped reading,
+voice clips, shows live terminal output and appended text, sets avatars, marks where you stopped reading,
 and browses, joins, and leaves rooms; see
 [apron-web's README](https://github.com/apron-chat/apron-web#readme). The interop suite's
 `reference.spec.ts` exercises these against the Go server.

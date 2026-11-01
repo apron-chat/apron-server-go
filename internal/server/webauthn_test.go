@@ -8,7 +8,10 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json/v2"
+	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"reflect"
 	"testing"
 	"time"
@@ -244,6 +247,84 @@ func TestPasskeyRegistrationLoginAndSession(t *testing.T) {
 	}
 	app.mu.Unlock()
 	passkeyDenied(t, passkeyCall(t, reconnected, "expired", "token", "", map[string]any{"token": registered["token"]}))
+}
+
+// relatedPasskeyOrigin is a frontend outside the RP ID's domain, which
+// browsers allow through the related origins document.
+const relatedPasskeyOrigin = "https://web.apron.chat"
+
+func relatedOriginsTestServer(t *testing.T, staticDir string) (*Server, *httptest.Server) {
+	t.Helper()
+	config := DefaultConfig()
+	config.AllowAnyOrigin = true
+	config.StaticDir = staticDir
+	w, err := webauthn.New(&webauthn.Config{RPID: "localhost", RPDisplayName: "Apron", RPOrigins: []string{testPasskeyOrigin, relatedPasskeyOrigin}})
+	if err != nil {
+		t.Fatalf("an origin outside the RP ID was refused: %v", err)
+	}
+	config.WebAuthn = w
+	return newTestServer(t, config)
+}
+
+func TestRelatedOriginsDocument(t *testing.T) {
+	// A static directory cannot shadow the document.
+	dir := t.TempDir()
+	path := filepath.Join(dir, ".well-known", "webauthn")
+	_ = os.MkdirAll(filepath.Dir(path), 0o755)
+	if err := os.WriteFile(path, []byte(`{"origins":["https://evil.example"]}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, httpServer := relatedOriginsTestServer(t, dir)
+	url := httpServer.URL + "/.well-known/webauthn"
+	status, header, body := httpDo(t, http.MethodGet, url, nil, "")
+	if status != http.StatusOK || header.Get("Content-Type") != "application/json" || header.Get("Cache-Control") == "" {
+		t.Fatalf("GET: %d %v %s", status, header, body)
+	}
+	var document struct {
+		Origins []string `json:"origins"`
+	}
+	if err := json.Unmarshal(body, &document); err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{testPasskeyOrigin, relatedPasskeyOrigin}; !reflect.DeepEqual(document.Origins, want) {
+		t.Fatalf("origins = %v, want %v", document.Origins, want)
+	}
+	if status, _, body := httpDo(t, http.MethodHead, url, nil, ""); status != http.StatusOK || len(body) != 0 {
+		t.Fatalf("HEAD: %d %q", status, body)
+	}
+	if status, header, _ := httpDo(t, http.MethodPost, url, nil, ""); status != http.StatusMethodNotAllowed || header.Get("Allow") != "GET, HEAD" {
+		t.Fatalf("POST: %d %v", status, header)
+	}
+
+	// Without passkeys there is nothing to declare.
+	config := DefaultConfig()
+	config.StaticDir = dir
+	_, plain := newTestServer(t, config)
+	if status, _, body := httpDo(t, http.MethodGet, plain.URL+"/.well-known/webauthn", nil, ""); status != http.StatusNotFound {
+		t.Fatalf("GET without passkeys: %d %s", status, body)
+	}
+}
+
+// go-webauthn checks a ceremony's origin only against the configured list,
+// so a related origin outside the RP ID's domain registers and signs in, and
+// a passkey made on one frontend works from the other.
+func TestPasskeyFromRelatedOrigin(t *testing.T) {
+	_, httpServer := relatedOriginsTestServer(t, "")
+	owner, _ := dialOrigin(t, httpServer, testPasskeyOrigin)
+	a := newTestAuthenticator(t)
+	identity := registerTestPasskey(t, owner, a)["you"].(map[string]any)["user_id"]
+	related, _ := dialOrigin(t, httpServer, relatedPasskeyOrigin)
+	options := passkeyResult(t, passkeyCall(t, related, "begin", "login", "begin", nil))
+	finish := map[string]any{"credential": a.assertion(t, options, relatedPasskeyOrigin, "localhost", 0x05)}
+	if result := passkeyResult(t, passkeyCall(t, related, "finish", "login", "finish", finish)); result["you"].(map[string]any)["user_id"] != identity {
+		t.Fatal("login from the related origin changed identity")
+	}
+
+	b := newTestAuthenticator(t)
+	fresh, _ := dialOrigin(t, httpServer, relatedPasskeyOrigin)
+	guestAuth(t, fresh)
+	options = passkeyResult(t, passkeyCall(t, fresh, "register-start", "register", "begin", nil))
+	passkeyResult(t, passkeyCall(t, fresh, "register-end", "register", "finish", map[string]any{"credential": b.registration(t, options, relatedPasskeyOrigin)}))
 }
 
 func TestRegistrationTakesRequestedName(t *testing.T) {

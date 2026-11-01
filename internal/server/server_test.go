@@ -52,10 +52,10 @@ func TestServerFrame(t *testing.T) {
 	_, httpServer := newTestServer(t, DefaultConfig())
 	_, frame := dialRaw(t, httpServer)
 	params := frame["params"].(map[string]any)
-	if params["apron"] != float64(9) || params["agent"] != "apron-go/9" || params["ping"] != float64(30) {
+	if params["apron"] != float64(10) || params["agent"] != "apron-go/10" || params["ping"] != float64(30) {
 		t.Fatalf("version, agent, and ping: %#v", params)
 	}
-	if !reflect.DeepEqual(params["capabilities"], []any{"history", "edit", "rooms", "reactions", "activity", "embed:upload", "embed:stream", "command", "status", "ext", "ext:emoji"}) {
+	if !reflect.DeepEqual(params["capabilities"], []any{"history", "edit", "rooms", "reactions", "activity", "embed:upload", "embed:append", "embed:terminal", "command", "status", "ext", "ext:emoji"}) {
 		t.Fatalf("capabilities: %#v", params["capabilities"])
 	}
 	// With capability status, server.status lists the optional statuses

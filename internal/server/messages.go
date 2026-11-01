@@ -32,6 +32,9 @@ type messageState struct {
 	// cached is what push counting reads of the current snapshot, decoded
 	// once; nil until read, and after a new snapshot.
 	cached *messageInfo
+	// pushHeld is set while the push of a new message waits for its live
+	// append text to end (§4.8.5).
+	pushHeld bool
 }
 
 // messageInfo is what unread counts (§4.9) read of a message's current
@@ -185,7 +188,8 @@ func (s *Server) saveMessage(c *client, req request) (any, bool, *rpcError) {
 	if !replacing {
 		messageID = formatID(logID)
 	}
-	// Embeds are resolved last: a new upload or stream embed reserves a write.
+	// Embeds are resolved last: a new upload, terminal, or append embed
+	// reserves a write.
 	var written []any
 	if body != nil {
 		var embeds []any
@@ -241,7 +245,17 @@ func (s *Server) saveMessage(c *client, req request) (any, bool, *rpcError) {
 		// The author's own message moves their read position (§4.9).
 		s.unreadChangedLocked(u, destination.id)
 	}
-	s.wakeLocked(current, snapshot, previous)
+	switch {
+	case !replacing:
+		s.wakeNewLocked(current, snapshot)
+	case current.pushHeld:
+		// A save that ends the live append text sends the held push.
+		if deleted || !hasLiveAppend(snapshot) {
+			s.releasePushLocked(current)
+		}
+	default:
+		s.wakeLocked(current, snapshot, previous)
+	}
 	result := map[string]any{"message_id": messageID}
 	if len(written) > 0 {
 		result["embeds"] = written
@@ -288,7 +302,7 @@ func (s *Server) commitSnapshotLocked(m *messageState, snapshot map[string]any, 
 }
 
 // republishLocked publishes a server-made snapshot of a message, such as a
-// finished upload or stream (§4.8.3): edit rewrites a copy of the
+// finished upload or live text (§4.8.3): edit rewrites a copy of the
 // current body, and nothing is published when it reports no change.
 func (s *Server) republishLocked(m *messageState, edit func(body map[string]any) bool) {
 	snapshot := m.snapshot()

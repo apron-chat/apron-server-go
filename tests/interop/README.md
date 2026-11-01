@@ -7,16 +7,17 @@ thread creation and moves, safe rendering of untrusted markup, and phone viewpor
 The desktop suite also reloads a browser while offline, restores connectivity,
 verifies history replay without duplicates, and sends another message.
 `reference.spec.ts` covers what the Go reference server adds: uploads hosted
-with `og` previews, live streams written over HTTP, `iframe`/`html`/unknown
+with `og` previews, live text written over HTTP (a `terminal` drawn with xterm.js,
+and `append` text growing the message's body while it says Writing…), `iframe`/`html`/unknown
 embeds, avatar uploads through the `/avatar` command and renames shown on
 earlier messages, commands run from the composer with their `~private` replies
 and errors shown only to you, leaving and rejoining rooms and threads through
 `room_list`, the New divider from read cursors, `@user_id` and room
 mentions, the server's title, avatar, and host in the sidebar head and its
 description on the connect screen, and ❤ and ❤️ from two users counted as
-one reaction. It creates streams, raw embeds, and the bare ❤ with a small protocol client
+one reaction. It creates live text, raw embeds, and the bare ❤ with a small protocol client
 connected through the Vite proxy, so the URLs the server mints load
-same-origin. Rooms follow protocol v9: a new guest has joined only `general`,
+same-origin. Rooms follow protocol v10: a new guest has joined only `general`,
 and a thread's members are those who joined it, so a second browser opens
 another's thread from its card, which reads it without joining it
 (`openThread` in `test-helpers.ts`); only joining, or replying, makes it live.
@@ -86,7 +87,16 @@ whatever is granted. `npx playwright install chromium` installs both builds;
 with `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH`, point it at full Chromium.
 
 The status test sets a status through a control named for do not disturb in
-the profile editor or Preferences, shown directly or behind one named Status.
+Preferences' Profile, shown directly or behind one named Status.
+
+Your profile is the first section of Preferences, which the profile bar's one
+button (named `Open preferences. Your profile on …`) opens: the handle, avatar,
+`user_id`, Sign in for a guest (which opens the connect screen) and Sign out.
+Notifications, with its switch and Pause, is a press away in its navigation.
+The open section is in the page's address, so the helpers in `test-helpers.ts`
+close Preferences with its close button and wait for the address to drop it.
+The connect screen for another server is the server pane's Connect to another
+server…, which the rooms list's head opens.
 
 `seen.spec.ts` checks `seen` (§4.5.2), when a user was last shown offline, as
 the web client shows it in another browser: an offline member's row in the

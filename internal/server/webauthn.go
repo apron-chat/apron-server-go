@@ -8,6 +8,7 @@ import (
 	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"errors"
+	"net/http"
 	"strings"
 	"time"
 
@@ -66,6 +67,29 @@ type session struct {
 	user    *userState
 	origin  string
 	expires time.Time
+}
+
+// handleRelatedOrigins serves the WebAuthn related origins document
+// (https://www.w3.org/TR/webauthn-3/#sctn-related-origins) listing every
+// configured frontend origin, so a browser on a frontend outside the RP ID's
+// domain may use it. Browsers fetch it only from the RP ID's host.
+func (s *Server) handleRelatedOrigins(w http.ResponseWriter, r *http.Request) {
+	if s.config.WebAuthn == nil {
+		http.NotFound(w, r)
+		return
+	}
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		w.Header().Set("Allow", "GET, HEAD")
+		http.Error(w, "Read with GET", http.StatusMethodNotAllowed)
+		return
+	}
+	body, _ := json.Marshal(map[string][]string{"origins": s.config.WebAuthn.Config.RPOrigins})
+	header := w.Header()
+	header.Set("Access-Control-Allow-Origin", "*")
+	header.Set("Content-Type", "application/json")
+	header.Set("X-Content-Type-Options", "nosniff")
+	header.Set("Cache-Control", "public, max-age=300")
+	_, _ = w.Write(body)
 }
 
 // authenticatePasskey runs under s.mu, with passkeys configured. One outstanding challenge is retained per

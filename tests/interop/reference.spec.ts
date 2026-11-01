@@ -1,7 +1,7 @@
 import { deflateSync } from 'node:zlib';
-import { expect, test, type Page } from '@playwright/test';
+import { expect, test, type Locator, type Page } from '@playwright/test';
 import { SERVER_AVATAR, SERVER_DESCRIPTION, SERVER_TITLE } from './server-look';
-import { composer, joinListedRoom, messageAction, messageByText, openChat, openThread, reactionChip, reactTo, roomAction, sendMessage, setDisplayName, startThread, userIdOf, waitForMessage } from './test-helpers';
+import { closePreferences, composer, joinListedRoom, messageAction, messageByText, openChat, openConnectScreen, openProfile, openThread, profileNamed, reactionChip, reactTo, roomAction, sendMessage, setDisplayName, startThread, userIdOf, waitForMessage } from './test-helpers';
 
 /** The dev server proxies the Go server, so URLs the server mints use this host and load same-origin. */
 const PROXIED_WS = 'ws://127.0.0.1:5173/ws';
@@ -34,7 +34,7 @@ function png(width: number, height: number): Buffer {
 	return Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), chunk('IHDR', header), chunk('IDAT', deflateSync(rows)), chunk('IEND', Buffer.alloc(0))]);
 }
 
-/** A guest speaking the protocol directly, for what the web client doesn't author (streams, raw embeds). */
+/** A guest speaking the protocol directly, for what the web client doesn't author (live text, raw embeds). */
 async function rawGuest(): Promise<{ request: (method: string, params: Record<string, unknown>) => Promise<Record<string, unknown>>; close: () => void }> {
 	const socket = new WebSocket(PROXIED_WS);
 	const waiting = new Map<string, (frame: Record<string, unknown>) => void>();
@@ -98,40 +98,81 @@ test.describe('reference features against the Go server', () => {
 		}
 	});
 
-	test('streams live text into a message, then keeps the finished text', async ({ page }) => {
+	/** Starts a streaming PUT to a write URL; push writes text, and finish ends the body. */
+	function streamTo(writeUrl: string) {
+		let push!: (chunk: string) => void;
+		let finish!: () => void;
+		const body = new ReadableStream<Uint8Array>({
+			start(controller) {
+				push = (chunk) => controller.enqueue(new TextEncoder().encode(chunk));
+				finish = () => controller.close();
+			}
+		});
+		const writing = fetch(writeUrl, { method: 'PUT', body, duplex: 'half' } as RequestInit & { duplex: 'half' });
+		return { push, finish, writing };
+	}
+
+	// Live text (§4.8.3): apron-web continues the body with an append embed's text as it arrives
+	// (§4.8.5), with "Writing…" under it until the stream ends, then shows the finished message,
+	// whose body has the text.
+	test('appends live text to a message, which ends up in its body', async ({ page }) => {
 		await openChat(page);
-		const token = `stream-${Date.now().toString(36)}`;
+		const token = `append-${Date.now().toString(36)}`;
 		const bot = await rawGuest();
 		try {
-			const result = await bot.request('message', { room_id: 'general', body: { text: `${token} build`, embeds: [{ kind: 'stream', format: 'terminal' }] } });
+			const result = await bot.request('message', { room_id: 'general', body: { text: `${token} plan:`, format: 'markdown', embeds: [{ kind: 'append' }] } });
 			const writeUrl = (result.embeds as Array<{ write_url: string }>)[0].write_url;
-			let push!: (chunk: string) => void;
-			let finish!: () => void;
-			const body = new ReadableStream<Uint8Array>({
-				start(controller) {
-					push = (chunk) => controller.enqueue(new TextEncoder().encode(chunk));
-					finish = () => controller.close();
-				}
-			});
-			const writing = fetch(writeUrl, { method: 'PUT', body, duplex: 'half' } as RequestInit & { duplex: 'half' });
-			const stream = embedOf(page, `${token} build`).getByTestId('stream-embed');
-			await expect(stream).toBeVisible();
-			push('$ make deploy\n');
-			await expect(stream.locator('pre')).toContainText('$ make deploy');
-			await expect(stream.locator('.ap-embed-livebadge')).toHaveText('Live');
-			push('pushing image… ok\n');
-			await expect(stream.locator('pre')).toContainText('pushing image… ok');
-			// Terminal output shows colors without their escapes, and a carriage return overwrites the line.
-			push('\u001b[32mupload  40%');
-			await expect(stream.locator('pre .ap-term-fg2')).toHaveText('upload  40%');
-			push('\rupload 100%\u001b[0m\n');
-			await expect(stream.locator('pre .ap-term-fg2')).toHaveText('upload 100%');
-			finish();
-			expect((await writing).status).toBe(204);
-			// The finishing snapshot carries the kept text in place of the url.
-			await expect(stream.locator('.ap-embed-streamhead')).toContainText('Finished');
-			await expect(stream.locator('pre')).toHaveText('$ make deploy\npushing image… ok\nupload 100%\n');
-			await expect(stream.locator('pre .ap-term-fg2')).toHaveText('upload 100%');
+			const stream = streamTo(writeUrl);
+			const message = await waitForMessage(page, `${token} plan:`);
+			await expect(message.getByTestId('message-writing')).toHaveText('Writing…');
+			stream.push(' roll back,');
+			await expect(message.locator('.ap-msg-text')).toContainText(`${token} plan: roll back,`);
+			await expect(message.getByTestId('message-writing')).toBeVisible();
+			stream.push(' then **renew** the cert.');
+			await expect(message.locator('.ap-msg-text strong')).toHaveText('renew');
+			await expect(message.getByTestId('message-writing')).toBeVisible();
+			// The text continues the body: no card.
+			await expect(message.locator('.ap-msg-embeds')).toHaveCount(0);
+			stream.finish();
+			expect((await stream.writing).status).toBe(204);
+			// The finished message has the text in its body, and nothing is still writing.
+			await expect(message.getByTestId('message-writing')).toHaveCount(0);
+			await expect(message.locator('.ap-msg-text')).toHaveText(`${token} plan: roll back, then renew the cert.`);
+			await expect(message.locator('.ap-msg-text strong')).toHaveText('renew');
+		} finally {
+			bot.close();
+		}
+	});
+
+	/** What a terminal embed's screen shows, row by row, as xterm.js draws it. */
+	const terminalRows = (terminal: Locator) => terminal.locator('.xterm-rows > div').allInnerTexts();
+
+	// apron-web draws a terminal embed (§4.8.6) with xterm.js, reading the server's live url while
+	// it is live and the snapshot's output once finished.
+	test('streams a terminal into a message, then keeps its output', async ({ page }) => {
+		await openChat(page);
+		const token = `terminal-${Date.now().toString(36)}`;
+		const bot = await rawGuest();
+		try {
+			const result = await bot.request('message', { room_id: 'general', body: { text: `${token} build`, embeds: [{ kind: 'terminal', title: 'make deploy' }] } });
+			const writeUrl = (result.embeds as Array<{ write_url: string }>)[0].write_url;
+			const stream = streamTo(writeUrl);
+			const terminal = (await waitForMessage(page, `${token} build`)).getByTestId('terminal-embed');
+			await expect(terminal.locator('.ap-embed-termtitle')).toHaveText('make deploy');
+			await expect(terminal.locator('.ap-embed-livebadge')).toHaveText('Live');
+			stream.push('$ make deploy\r\n\u001b[32mupload  40%');
+			await expect(terminal.locator('.ap-embed-termscreen .xterm-rows')).toContainText('$ make deploy');
+			await expect.poll(async () => (await terminalRows(terminal)).slice(0, 2).map((row) => row.trimEnd())).toEqual(['$ make deploy', 'upload  40%']);
+			// A carriage return redraws the line in place, as a progress bar does.
+			stream.push('\rupload 100%\u001b[0m\r\n');
+			await expect.poll(async () => (await terminalRows(terminal))[1]?.trimEnd()).toBe('upload 100%');
+			await expect(terminal.locator('.ap-embed-livebadge')).toHaveText('Live');
+			stream.finish();
+			expect((await stream.writing).status).toBe(204);
+			// The finishing snapshot carries the output, which it shows from a fresh terminal.
+			await expect(terminal.locator('.ap-embed-livebadge')).toHaveCount(0);
+			await expect(terminal.locator('.ap-embed-detail')).toHaveText('Finished');
+			await expect.poll(async () => (await terminalRows(terminal)).slice(0, 2).map((row) => row.trimEnd())).toEqual(['$ make deploy', 'upload 100%']);
 		} finally {
 			bot.close();
 		}
@@ -176,19 +217,17 @@ test.describe('reference features against the Go server', () => {
 			await sendMessage(pageA, `${token} before`);
 			const earlier = await waitForMessage(pageB, `${token} before`);
 
-			await pageA.getByRole('button', { name: /^Your profile on/ }).click();
-			const dialog = pageA.getByRole('dialog', { name: 'Edit profile', exact: true });
+			const dialog = await openProfile(pageA);
 			await dialog.getByTestId('avatar-input').setInputFiles({ name: 'me.png', mimeType: 'image/png', buffer: png(16, 16) });
 			// The server sets the avatar and sends `user`; it shows on the earlier message too.
 			await expect(earlier.locator('.ap-msg-gutter img.ap-avatar')).toBeVisible();
 			await expect(dialog.getByTestId('remove-avatar')).toBeVisible();
-			await dialog.getByRole('button', { name: 'Cancel', exact: true }).click();
+			await closePreferences(pageA);
 
 			await setDisplayName(pageA, `${token}-renamed`);
 			await expect(earlier.locator('.ap-msg-sender')).toHaveText(`${token}-renamed`);
 
-			await pageA.getByRole('button', { name: /^Your profile on/ }).click();
-			await dialog.getByTestId('remove-avatar').click();
+			await (await openProfile(pageA)).getByTestId('remove-avatar').click();
 			await expect(earlier.locator('.ap-msg-gutter img.ap-avatar')).toHaveCount(0);
 			await expect(earlier.locator('.ap-msg-gutter span.ap-avatar')).toBeVisible();
 		} finally {
@@ -229,7 +268,7 @@ test.describe('reference features against the Go server', () => {
 		const handle = `nick-${Date.now().toString(36)}`;
 		await field.fill(`/nick ${handle}`);
 		await run.click();
-		await expect(page.getByRole('button', { name: new RegExp(`^Your profile on .*: ${handle}[,.]`) })).toBeVisible();
+		await expect(profileNamed(page, handle)).toBeVisible();
 		const id = await userIdOf(page);
 		// The earlier message renders with the latest name; notices above it began its group. Its sender's name
 		// opens the profile of this session's user_id: the message came from that user, and the rename reached it.
@@ -319,10 +358,8 @@ test.describe('reference features against the Go server', () => {
 		await expect(head.locator('.ap-shell-sidehead-host')).toHaveText(new URL(page.url()).host);
 		await expect(head.locator('img.ap-shell-sidehead-avatar')).toHaveAttribute('src', SERVER_AVATAR);
 
-		// The connect screen, for the server you're on: its title and its description (--description).
-		await page.getByRole('button', { name: /^Your profile on/ }).click();
-		await page.getByRole('dialog', { name: 'Edit profile', exact: true }).getByRole('button', { name: 'Connect to a server…', exact: true }).click();
-		const card = page.getByRole('form', { name: 'Sign in' });
+		// The connect screen, from the server pane, for the server you're on: its title and its description (--description).
+		const card = await openConnectScreen(page);
 		await expect(card.getByTestId('connect-server')).toContainText(SERVER_TITLE);
 		await expect(card).toContainText(SERVER_DESCRIPTION);
 	});

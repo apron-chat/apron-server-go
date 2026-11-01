@@ -39,7 +39,7 @@ type Options struct {
 	StaticDir              string   `long:"static-dir" description:"Directory containing the built frontend"`
 	Origins                []string `long:"origin" description:"Allowed WebSocket origin pattern; repeat for more (default: localhost, 127.0.0.1, and ::1)"`
 	AllowAnyOrigin         bool     `long:"allow-any-origin" description:"Disable WebSocket origin checks"`
-	PublicURL              string   `long:"public-url" description:"External base URL of upload, file, and stream links, such as https://chat.example (default: each request's host, or https://<tls.domain>)"`
+	PublicURL              string   `long:"public-url" description:"External base URL of write, file, and live text links, such as https://chat.example (default: each request's host, or https://<tls.domain>)"`
 	MaxConnections         int      `long:"max-connections" description:"Maximum concurrent WebSockets; 0 is unlimited"`
 	MaxListenerConnections int      `long:"max-listener-connections" description:"Maximum concurrent TCP connections on the listener, HTTP included; 0 is unlimited"`
 	MessagesPerMinute      int      `long:"messages-per-minute" description:"Burst of new messages, room_set requests, and /avatar and /emoji add commands per user, refilled over a minute; 0 is unlimited"`
@@ -65,6 +65,13 @@ type Options struct {
 		MaxMessageMB int64  `long:"max-message-mb" default:"20" description:"Maximum total size of one message's uploads, in MiB"`
 		MaxStorageMB int64  `long:"max-storage-mb" default:"1000" description:"Total size of hosted uploads but custom emoji, in MiB, beyond which the oldest are removed from their messages"`
 	} `group:"Uploads" namespace:"upload"`
+
+	Live struct {
+		MaxMinutes     int64 `long:"max-minutes" default:"60" description:"Longest a live text (a terminal or append embed) runs, in minutes, before it ends"`
+		MaxMB          int64 `long:"max-mb" default:"16" description:"Most a live text's writer may send, in MiB, before the text ends"`
+		TerminalKeepKB int   `long:"terminal-keep-kb" default:"64" description:"How much of a terminal's output is kept, in KiB: its last part"`
+		AppendMaxKB    int   `long:"append-max-kb" default:"64" description:"How much text an append embed adds to its message, in KiB: its first part (at most 256, what a request may carry)"`
+	} `group:"Live text" namespace:"live"`
 
 	Emoji struct {
 		MaxKB        int64 `long:"max-kb" default:"256" description:"Maximum size of one custom emoji image, in KiB"`
@@ -175,6 +182,13 @@ func serverConfig(options Options) (server.Config, error) {
 	config.MaxUploadBytes = options.Upload.MaxMB << 20
 	config.MaxMessageUploadBytes = options.Upload.MaxMessageMB << 20
 	config.MaxUploadStorageBytes = options.Upload.MaxStorageMB << 20
+	config.LiveTextMaxDuration = time.Duration(options.Live.MaxMinutes) * time.Minute
+	config.LiveTextMaxBytes = options.Live.MaxMB << 20
+	config.TerminalKeepBytes = options.Live.TerminalKeepKB << 10
+	config.AppendMaxBytes = options.Live.AppendMaxKB << 10
+	if int64(config.AppendMaxBytes) > config.ReadLimit {
+		return config, fmt.Errorf("--live.append-max-kb %d is more than a message's text can be: at most %d", options.Live.AppendMaxKB, config.ReadLimit>>10)
+	}
 	config.MaxEmojiBytes = options.Emoji.MaxKB << 10
 	config.MaxEmojiStorageBytes = options.Emoji.MaxStorageMB << 20
 	if len(options.Origins) > 0 {
@@ -246,7 +260,7 @@ func run(logger *slog.Logger, options Options) error {
 		return &http.Server{
 			Handler:           handler,
 			ReadHeaderTimeout: 5 * time.Second,
-			// Idle keep-alive connections close; WebSockets and streams are
+			// Idle keep-alive connections close; WebSockets and live text are
 			// hijacked or long-lived requests, which it does not affect.
 			IdleTimeout: 2 * time.Minute,
 		}
