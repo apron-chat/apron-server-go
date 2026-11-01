@@ -940,7 +940,8 @@ func startLiveWrite(t *testing.T, app *Server, writeURL, first string) (*io.Pipe
 }
 
 // With edit, a save that removes live text's embed ends it early (§4.8.3):
-// the save is the snapshot, and an append's text is not added to it.
+// the save is the snapshot, an append's text is not added to it, and the
+// writer's PUT succeeds.
 func TestSavingWithoutLiveTextEndsIt(t *testing.T) {
 	for _, kind := range []string{"terminal", "append"} {
 		t.Run(kind, func(t *testing.T) {
@@ -954,7 +955,7 @@ func TestSavingWithoutLiveTextEndsIt(t *testing.T) {
 			if body := saved["body"].(map[string]any); body["text"] != "never mind" || body["embeds"] != nil {
 				t.Fatalf("save: %#v", saved)
 			}
-			if status := <-writerDone; status != http.StatusGone {
+			if status := <-writerDone; status != http.StatusNoContent {
 				t.Fatalf("writer status %d", status)
 			}
 			_ = pipe.Close()

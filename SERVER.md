@@ -636,7 +636,7 @@ publishes the snapshot that finishes a write before it answers the `PUT`.
   arrived. The writer cannot continue it: another `PUT` to the write URL
   is `409`, or `404` once the text has ended. Saving the
   message without the embed ends the text early, and the save is the
-  snapshot (the writer gets `410`). Live text that had not ended when the
+  snapshot (the writer gets `204`, as the text it sent was taken). Live text that had not ended when the
   server stopped fails at the next start, as other unfinished writes do:
   its message is republished without the embed.
 - **Terminals**

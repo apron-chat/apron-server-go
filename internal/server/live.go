@@ -214,7 +214,9 @@ func (s *Server) writeLive(w http.ResponseWriter, r *http.Request, e *embedState
 	defer s.unlock()
 	e.writing = false
 	if e.removed {
-		http.Error(w, "The live text was removed from its message", http.StatusGone)
+		// A save without the embed ended the text: the writer's text was taken,
+		// up to the save, so it succeeded (§4.8.3).
+		w.WriteHeader(http.StatusNoContent)
 		return
 	}
 	s.finishLiveLocked(e)
