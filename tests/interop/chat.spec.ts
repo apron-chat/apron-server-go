@@ -264,8 +264,11 @@ test.describe('chat protocol interoperability', () => {
 		await expect.poll(dayOpacity, { timeout: 3000 }).toBe(0);
 		await page.setViewportSize({ width: 900, height: 1800 });
 		await expect(jump).toHaveCount(0);
+		// Tall enough to show the latest, the pane is at the bottom and stays there: shrunk again, it follows the latest
+		// rather than offering a jump.
 		await page.setViewportSize({ width: 900, height: 700 });
-		await expect(jump).toBeVisible();
+		await expect(page.getByText(`${token}-reply`).last()).toBeInViewport();
+		await expect(jump).toHaveCount(0);
 		await page.getByRole('button', { name: 'Back to room', exact: true }).click();
 		await expect(jump).toHaveCount(0);
 	});
