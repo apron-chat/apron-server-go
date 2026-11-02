@@ -1,4 +1,4 @@
-.PHONY: install dev-web dev-server check test test-go test-wire test-interop test-perf build build-web serve run
+.PHONY: install dev-web dev-server check test test-go test-wire test-conformance test-interop test-perf build build-web serve run
 
 # The web client lives in apron-chat/apron-web, pinned as a submodule. The
 # browser tests, dev-web, and run use it; check out another commit in it to
@@ -42,6 +42,17 @@ test-interop:
 
 test-wire: $(FIXTURES)
 	npm --prefix tests/interop run test:wire
+
+# The protocol's conformance checks (testdata/apron/tests/conformance), slow ones included, against aprond with an
+# in-memory store and no posting limit, in a Python environment of their own under build/.
+CONFORM_PORT := 8781
+test-conformance: $(FIXTURES)
+	go build -o build/aprond ./cmd/aprond
+	test -x build/conform/bin/python || python3 -m venv build/conform
+	build/conform/bin/pip install -q "websockets>=14,<17" "jsonschema>=4.18"
+	./build/aprond --store=memory --addr=127.0.0.1:$(CONFORM_PORT) --messages-per-minute=0 & pid=$$!; \
+		trap 'kill $$pid' EXIT; \
+		build/conform/bin/python testdata/apron/tests/conformance/conform.py ws://127.0.0.1:$(CONFORM_PORT)/ws --slow
 
 # aprond serves this build itself (serve, run, test-perf), so it connects to
 # its own origin's /ws and loads media from it: the web client's

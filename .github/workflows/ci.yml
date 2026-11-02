@@ -41,6 +41,9 @@ jobs:
           cache-dependency-path: go.sum
       - run: make install
       - run: make check test build
+      # The protocol's conformance checks, slow ones included (a reader that falls behind must get every record or
+      # lose its connection).
+      - run: make test-conformance
       # Both Chromium builds: the headless shell for most tests, and full
       # Chromium (channel: 'chromium') for push.spec.ts, as the shell denies
       # notifications.
