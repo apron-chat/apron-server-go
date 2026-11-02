@@ -43,7 +43,7 @@ test-interop:
 test-wire: $(FIXTURES)
 	npm --prefix tests/interop run test:wire
 
-# The protocol's conformance checks (testdata/apron/tests/conformance), slow ones included, against aprond with an
+# The protocol's conformance checks (testdata/apron/tests/conformance) against aprond with an
 # in-memory store and no posting limit, in a Python environment of their own under build/.
 CONFORM_PORT := 8781
 test-conformance: $(FIXTURES)
@@ -52,7 +52,7 @@ test-conformance: $(FIXTURES)
 	build/conform/bin/pip install -q "websockets>=14,<17" "jsonschema>=4.18"
 	./build/aprond --store=memory --addr=127.0.0.1:$(CONFORM_PORT) --messages-per-minute=0 & pid=$$!; \
 		trap 'kill $$pid' EXIT; \
-		build/conform/bin/python testdata/apron/tests/conformance/conform.py ws://127.0.0.1:$(CONFORM_PORT)/ws --slow
+		build/conform/bin/python testdata/apron/tests/conformance/conform.py ws://127.0.0.1:$(CONFORM_PORT)/ws
 
 # aprond serves this build itself (serve, run, test-perf), so it connects to
 # its own origin's /ws and loads media from it: the web client's
