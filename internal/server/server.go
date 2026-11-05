@@ -461,9 +461,11 @@ type Server struct {
 	// size. Custom emoji have their own bound, MaxEmojiStorageBytes.
 	uploads     *list.List
 	uploadBytes int64
-	// uploadsArriving is what the uploads whose bodies are arriving reserve
-	// (handleWrite), which MaxUploadStorageBytes also bounds.
-	uploadsArriving int64
+	// uploadsArriving counts the bytes written by uploads whose bodies are
+	// arriving, or not yet recorded (arrivingWriter), which
+	// MaxUploadStorageBytes also bounds. It is atomic, as bodies arrive
+	// without s.mu.
+	uploadsArriving atomic.Int64
 	// uploadDir holds upload content; tempUploadDir is removed on Shutdown.
 	uploadDir     string
 	tempUploadDir bool

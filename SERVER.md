@@ -615,11 +615,12 @@ publishing the message without the embed. A write to a URL that is unknown,
 used, or expired, or whose embed was removed, is answered `404` at once and
 its connection closed, without waiting for its body to end. The server
 publishes the snapshot that finishes a write before it answers the `PUT`.
-While an upload's body arrives it reserves its size limit of the hosted
-storage (`--upload.max-storage-mb`): a write that would reserve more than
-that, beside the others arriving, is answered `503` with `Retry-After`, and
-its URL stays unused, to try again. A finished upload is synced to disk
-before it is recorded.
+The bytes of upload bodies still arriving are bounded too, by the hosted
+storage (`--upload.max-storage-mb`), which counts only finished uploads:
+a write whose body would take them past it fails with `507` and
+`Retry-After`. Only bytes that arrived count, so a slow writer holds no
+more than it sent. A finished upload's file is synced before it is
+recorded, and a failure to write it is `500`.
 
 - **Uploads** (at most 20 MiB each, and 20 MiB for one message's uploads
   together; a message has at most 32 embeds, `denied` past that). While pending the embed has no `url`. When

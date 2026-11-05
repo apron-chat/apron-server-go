@@ -18,6 +18,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	_ "golang.org/x/image/webp" // Registered for image.DecodeConfig.
@@ -387,34 +388,11 @@ func (s *Server) handleWrite(w http.ResponseWriter, r *http.Request) {
 		s.writeLive(w, r, e)
 		return
 	}
-	// Bodies arriving at once are bounded by the hosted storage, which only
-	// a finished upload counts: each reserves its limit until it ends. A
-	// refused write keeps its URL, to try again.
-	reserve := e.uploadReserve(s.config)
-	if s.uploadsArriving > 0 && s.uploadsArriving+reserve > s.config.MaxUploadStorageBytes {
-		s.unlock()
-		w.Header().Set("Retry-After", strconv.Itoa(retryAfterSeconds))
-		refuseWrite(w, "Too many uploads are arriving at once; try again shortly", http.StatusServiceUnavailable)
-		return
-	}
-	s.uploadsArriving += reserve
 	e.started = true
 	delete(s.writes, token)
 	e.timer.Stop()
 	s.unlock()
-	s.writeUpload(w, r, e, reserve)
-}
-
-// uploadReserve is the most an upload's body may hold: what it reserves of
-// the hosted storage while it arrives.
-func (e *embedState) uploadReserve(config Config) int64 {
-	switch {
-	case e.avatarFor != nil, e.serverAvatarBy != "":
-		return config.MaxAvatarBytes
-	case e.emojiKey != "":
-		return config.MaxEmojiBytes
-	}
-	return config.MaxUploadBytes
+	s.writeUpload(w, r, e)
 }
 
 // refuseWrite answers a write without reading its body, and closes the
@@ -427,7 +405,7 @@ func refuseWrite(w http.ResponseWriter, message string, status int) {
 	http.Error(w, message, status)
 }
 
-func (s *Server) writeUpload(w http.ResponseWriter, r *http.Request, e *embedState, reserve int64) {
+func (s *Server) writeUpload(w http.ResponseWriter, r *http.Request, e *embedState) {
 	limit := s.config.MaxUploadBytes
 	tooLargeMessage := ""
 	s.mu.RLock()
@@ -448,6 +426,9 @@ func (s *Server) writeUpload(w http.ResponseWriter, r *http.Request, e *embedSta
 	}
 	_ = http.NewResponseController(w).SetReadDeadline(time.Now().Add(uploadReadTimeout))
 	file, size, err := s.receiveUpload(w, r, limit)
+	// What arrived counts as arriving until the upload is recorded, and so
+	// counted in uploadBytes, or its file removed.
+	defer s.uploadsArriving.Add(-size)
 	var head []byte
 	if file != nil {
 		head = make([]byte, 512)
@@ -466,9 +447,12 @@ func (s *Server) writeUpload(w http.ResponseWriter, r *http.Request, e *embedSta
 	if file != nil {
 		// A finished upload is on disk before the store records it, so a
 		// crash cannot leave a stored embed pointing at a short file.
-		if syncErr := file.Sync(); err == nil && syncErr != nil {
-			slog.Error("cannot store upload", "error", syncErr)
-			err = errUploadStore
+		// One that failed is removed instead.
+		if err == nil {
+			if syncErr := file.Sync(); syncErr != nil {
+				slog.Error("cannot store upload", "error", syncErr)
+				err = errUploadStore
+			}
 		}
 		if closeErr := file.Close(); err == nil && closeErr != nil {
 			slog.Error("cannot store upload", "error", closeErr)
@@ -477,7 +461,6 @@ func (s *Server) writeUpload(w http.ResponseWriter, r *http.Request, e *embedSta
 	}
 	s.mu.Lock()
 	defer s.unlock()
-	s.uploadsArriving -= reserve
 	fail := func(status int, message string) {
 		if file != nil {
 			_ = os.Remove(file.Name())
@@ -497,6 +480,10 @@ func (s *Server) writeUpload(w http.ResponseWriter, r *http.Request, e *embedSta
 		return
 	case errors.Is(err, errNotAvatar):
 		fail(http.StatusUnsupportedMediaType, "Avatars and emoji must be PNG, JPEG, GIF, or WebP images")
+		return
+	case errors.Is(err, errUploadsArriving):
+		w.Header().Set("Retry-After", strconv.Itoa(retryAfterSeconds))
+		fail(http.StatusInsufficientStorage, "The server is receiving too many uploads at once; try again shortly")
 		return
 	case errors.Is(err, errUploadStore):
 		fail(http.StatusInternalServerError, "The server could not store the upload")
@@ -567,9 +554,41 @@ var errNotAvatar = errors.New("not an avatar image")
 // than the writer's.
 var errUploadStore = errors.New("cannot store the upload")
 
+// errUploadsArriving refuses the part of an upload's body that would take
+// the bodies arriving at once past MaxUploadStorageBytes.
+var errUploadsArriving = errors.New("too many uploads arriving")
+
+// arrivingWriter writes an upload's body to its file, counting each byte
+// written in arriving until the upload ends (writeUpload), and refuses what
+// would take that count past limit. The hosted storage counts only finished
+// uploads, so this bounds what is on disk while bodies arrive: the bytes
+// that arrived, never a reservation for what may, so that bodies sent a byte
+// at a time cannot hold the storage from everyone else.
+type arrivingWriter struct {
+	file     *os.File
+	arriving *atomic.Int64
+	limit    int64
+}
+
+func (w arrivingWriter) Write(p []byte) (int, error) {
+	if w.arriving.Add(int64(len(p))) > w.limit {
+		w.arriving.Add(-int64(len(p)))
+		return 0, errUploadsArriving
+	}
+	n, err := w.file.Write(p)
+	w.arriving.Add(int64(n - len(p)))
+	if err != nil {
+		// Writing the file is the server's failure, such as a full disk.
+		slog.Error("cannot store upload", "error", err)
+		return n, errUploadStore
+	}
+	return n, nil
+}
+
 // receiveUpload copies a request body of at most limit bytes into a new file
-// in the upload directory. On error the file, if any, is still returned so
-// the caller can remove it.
+// in the upload directory, and returns the bytes written, which it counts in
+// uploadsArriving. On error the file, if any, is still returned so the
+// caller can remove it.
 func (s *Server) receiveUpload(w http.ResponseWriter, r *http.Request, limit int64) (*os.File, int64, error) {
 	if limit <= 0 {
 		return nil, 0, &http.MaxBytesError{Limit: limit}
@@ -579,7 +598,10 @@ func (s *Server) receiveUpload(w http.ResponseWriter, r *http.Request, limit int
 		slog.Error("cannot store upload", "error", err)
 		return nil, 0, errUploadStore
 	}
-	size, err := io.Copy(file, http.MaxBytesReader(w, r.Body, limit))
+	// Every byte written is counted in uploadsArriving, so size is what
+	// writeUpload releases.
+	written := arrivingWriter{file: file, arriving: &s.uploadsArriving, limit: s.config.MaxUploadStorageBytes}
+	size, err := io.Copy(written, http.MaxBytesReader(w, r.Body, limit))
 	return file, size, err
 }
 

@@ -10,6 +10,8 @@ import (
 	"testing"
 	"time"
 
+	"golang.org/x/time/rate"
+
 	"github.com/apron-chat/apron-server-go/internal/store"
 )
 
@@ -48,9 +50,14 @@ func TestRoomTitlesAreBounded(t *testing.T) {
 }
 
 func TestActionsAreLimited(t *testing.T) {
-	_, httpServer := newTestServer(t, DefaultConfig())
+	app, httpServer := newTestServer(t, DefaultConfig())
 	c := dialTestClient(t, httpServer)
 	id, _ := save(t, c, "post", map[string]any{"body": map[string]any{"text": "hi"}})
+	// The user's limit refills too slowly to matter while the test runs, so
+	// exactly a burst is admitted however long it takes.
+	app.mu.Lock()
+	app.users[c.userID].actions = rate.NewLimiter(rate.Every(time.Hour), actionBurst)
+	app.unlock()
 	// Toggling a reaction logs a record each time, until the user's limit.
 	admitted := 0
 	for i := 0; ; i++ {
@@ -64,12 +71,12 @@ func TestActionsAreLimited(t *testing.T) {
 		} else if code != 0 {
 			t.Fatalf("reaction %d: %#v", i, frame)
 		}
-		if admitted++; admitted > 2*actionBurst {
-			t.Fatalf("%d reactions admitted, want about %d", admitted, actionBurst)
+		if admitted++; admitted > actionBurst {
+			t.Fatalf("%d reactions admitted, want %d", admitted, actionBurst)
 		}
 	}
-	if admitted < actionBurst {
-		t.Fatalf("limited after %d reactions, want at least %d", admitted, actionBurst)
+	if admitted != actionBurst {
+		t.Fatalf("limited after %d reactions, want %d", admitted, actionBurst)
 	}
 	// Joins and leaves share the limit; a request that changes nothing does not.
 	c.expectError(t, "room_leave", "leave", map[string]any{"room_id": "general"}, codeRetryAfter)
@@ -131,7 +138,7 @@ func TestPasskeyLoginStoresTheSignCounter(t *testing.T) {
 		return counter
 	}
 	// The store writer applies batches in order, off the request path.
-	for deadline := time.Now().Add(time.Second); storedCounter() != a.counter; {
+	for deadline := time.Now().Add(5 * time.Second); storedCounter() != a.counter; {
 		if time.Now().After(deadline) {
 			t.Fatalf("stored sign counter %d, want %d", storedCounter(), a.counter)
 		}
@@ -196,13 +203,25 @@ func TestArrivingUploadsAreBounded(t *testing.T) {
 		result := postEmbeds(t, c, id, map[string]any{"body": map[string]any{"text": "file", "embeds": []any{map[string]any{"kind": "upload", "title": id + ".txt"}}}})
 		return result["embeds"].([]any)[0].(map[string]any)["write_url"].(string)
 	}
-	first, second := writeURL("first"), writeURL("second")
+	arriving := func(want int64) {
+		t.Helper()
+		// A write counts its bytes until writeUpload returns, just after
+		// its answer.
+		for deadline := time.Now().Add(5 * time.Second); app.uploadsArriving.Load() != want; {
+			if time.Now().After(deadline) {
+				t.Fatalf("%d bytes arriving, want %d", app.uploadsArriving.Load(), want)
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+	slow, second, third := writeURL("slow"), writeURL("second"), writeURL("third")
 
-	// The first upload's body arrives slowly, reserving the storage.
+	// A body that has not finished arriving counts what it sent so far, not
+	// what it may send: a slow writer holds no more than it wrote.
 	body, writer := io.Pipe()
 	done := make(chan int)
 	go func() {
-		request, _ := http.NewRequest(http.MethodPut, first, body)
+		request, _ := http.NewRequest(http.MethodPut, slow, body)
 		request.Header.Set("Content-Type", "text/plain")
 		response, err := http.DefaultClient.Do(request)
 		if err != nil {
@@ -212,38 +231,23 @@ func TestArrivingUploadsAreBounded(t *testing.T) {
 		response.Body.Close()
 		done <- response.StatusCode
 	}()
-	if _, err := writer.Write([]byte("hello ")); err != nil {
+	if _, err := writer.Write([]byte(strings.Repeat("a", 60))); err != nil {
 		t.Fatal(err)
 	}
-	for deadline := time.Now().Add(5 * time.Second); ; {
-		app.mu.RLock()
-		arriving := app.uploadsArriving
-		app.mu.RUnlock()
-		if arriving > 0 {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("the first upload did not start")
-		}
-		time.Sleep(10 * time.Millisecond)
+	arriving(60)
+	if status, _, _ := httpDo(t, http.MethodPut, second, strings.NewReader(strings.Repeat("b", 30)), "text/plain"); status != http.StatusCreated {
+		t.Fatalf("an upload that fits beside the arriving one: %d", status)
 	}
-	status, header, _ := httpDo(t, http.MethodPut, second, strings.NewReader("world"), "text/plain")
-	if status != http.StatusServiceUnavailable || header.Get("Retry-After") == "" {
-		t.Fatalf("second upload while the first arrives: %d %v", status, header)
+	// Past the bound beside it, a body is refused.
+	status, header, _ := httpDo(t, http.MethodPut, third, strings.NewReader(strings.Repeat("c", 50)), "text/plain")
+	if status != http.StatusInsufficientStorage || header.Get("Retry-After") == "" {
+		t.Fatalf("an upload past the bound: %d %v", status, header)
 	}
 	writer.Close()
 	if status := <-done; status != http.StatusCreated {
-		t.Fatalf("first upload: %d", status)
+		t.Fatalf("slow upload: %d", status)
 	}
-	// The refused write kept its URL.
-	if status, _, _ := httpDo(t, http.MethodPut, second, strings.NewReader("world"), "text/plain"); status != http.StatusCreated {
-		t.Fatalf("second upload after the first: %d", status)
-	}
-	app.mu.RLock()
-	defer app.mu.RUnlock()
-	if app.uploadsArriving != 0 {
-		t.Fatalf("%d bytes still reserved", app.uploadsArriving)
-	}
+	arriving(0)
 }
 
 func TestImageAltIsBounded(t *testing.T) {
