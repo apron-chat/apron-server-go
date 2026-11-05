@@ -248,12 +248,20 @@ export async function roomAction(page: Page, testId: 'edit-room' | 'leave-room')
 
 /**
  * Joins a room you haven't, from the sidebar's listing of them (`room_list` with `not_joined`), opening that section
- * first when it is folded: apron-web shows it open, but it folds and older versions start it folded.
+ * first when it is folded: apron-web shows it open, but it folds and older versions start it folded. Picking the row
+ * opens the room to read without joining it, and the header's Join joins it (older versions joined on the pick, and
+ * show no Join).
  */
 export async function joinListedRoom(page: Page, roomId: string): Promise<void> {
 	const section = page.getByTestId('browse-rooms');
 	if ((await section.getAttribute('aria-expanded')) !== 'true') await section.click();
-	await page.getByTestId('room-directory').locator(`[data-join="${roomId}"]`).click();
+	const row = page.getByTestId('room-directory').locator(`[data-join="${roomId}"]`);
+	await row.click();
+	const joined = page.getByTestId('room-list').locator(`button[data-room="${roomId}"]`);
+	const join = page.getByTestId('join-room');
+	await expect(joined.or(join).first()).toBeVisible();
+	if (await join.count()) await join.click();
+	await expect(joined).toBeVisible();
 }
 
 export async function openThread(page: Page, threadId: string, options: { join?: boolean } = {}): Promise<void> {

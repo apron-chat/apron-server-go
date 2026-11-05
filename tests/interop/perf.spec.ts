@@ -1,6 +1,6 @@
 import { readFileSync, writeFileSync } from 'node:fs';
 import { expect, test, type CDPSession, type Page } from '@playwright/test';
-import { joinListedRoom, openChat } from './test-helpers';
+import { composer, openChat } from './test-helpers';
 
 /**
  * Journey: switching between two rooms and back. Starts on the click on a
@@ -132,8 +132,11 @@ function ratchet(name: string, value: number): void {
 test('switching rooms back and forth', async ({ page }) => {
 	const { perfRoom, first, last } = await seed();
 	await openChat(page);
-	// A new guest has joined only General: join the Perf room from those listed, which opens it.
-	await joinListedRoom(page, perfRoom);
+	// A new guest has joined only General: join the Perf room with /join, which opens it joined. (Picking it under Other
+	// Rooms opens it to read first, on a page of its newest 50 changes, which leaves the oldest of the page this waits
+	// for unloaded: the switch is measured on a room joined straight away, as the ceilings were.)
+	await composer(page).fill(`/join ${perfRoom}`);
+	await composer(page).press('Enter');
 	await expect(page.locator(`[data-testid="room-list"] button[data-room="${perfRoom}"]`)).toBeVisible();
 	await expect(page.locator(`article[data-message-id="${last[perfRoom]}"]`)).toBeAttached();
 	await page.locator('[data-testid="room-list"] button[data-room="general"]').click();
