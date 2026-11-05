@@ -547,9 +547,15 @@ func TestReadCursors(t *testing.T) {
 	thread, _ := saveRoom(t, b, "thread", map[string]any{"parent_room_id": "general"})
 	roomUpdated(t, a, "updated")
 	roomUpdated(t, c, "updated")
+	// A cursor names a message in its room (§4.6): one naming a message
+	// elsewhere changes nothing.
 	b.write(t, map[string]any{"method": "activity", "params": map[string]any{"room_id": thread, "read_message_id": second}})
+	b.expectQuiet(t)
+	threadFirst, _ := save(t, b, "thread-one", map[string]any{"room_id": thread, "body": map[string]any{"text": "one"}})
+	threadSecond, _ := save(t, b, "thread-two", map[string]any{"room_id": thread, "body": map[string]any{"text": "two"}})
+	b.write(t, map[string]any{"method": "activity", "params": map[string]any{"room_id": thread, "read_message_id": threadSecond}})
 	b.notification(t, "activity")
-	a.write(t, map[string]any{"method": "activity", "params": map[string]any{"room_id": thread, "read_message_id": first}})
+	a.write(t, map[string]any{"method": "activity", "params": map[string]any{"room_id": thread, "read_message_id": threadFirst}})
 	a.notification(t, "activity")
 	b.notification(t, "activity")
 	a.write(t, map[string]any{"method": "room_list", "id": "threads", "params": map[string]any{"parent_room_id": "general"}})

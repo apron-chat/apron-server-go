@@ -9,6 +9,7 @@ import (
 	"encoding/json/v2"
 	"errors"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
@@ -18,6 +19,10 @@ import (
 
 const passkeyLifetime = 2 * time.Minute
 const sessionLifetime = 30 * 24 * time.Hour
+
+// maxSessionsPerUser bounds the sessions kept for one account: far more
+// devices and browsers than one person signs in from.
+const maxSessionsPerUser = 100
 
 type passkeyUser struct {
 	// handle and credentials are persisted with the user (persist.go).
@@ -312,6 +317,9 @@ func (s *Server) finishPasskeyCeremony(c *client, req request, action string, w 
 				user.credentials[i] = *credential
 			}
 		}
+		// The login advanced the credential's signature counter, which
+		// detects a cloned authenticator only if it survives a restart.
+		s.touchUser(user.user.id)
 	}
 	// A registration adds the passkey to the signed-in connection's
 	// account, and a login as the user the connection is signed in as
@@ -337,7 +345,33 @@ func (s *Server) signInLocked(c *client, req request, user *userState, now time.
 	c.token = sha256.Sum256([]byte(token))
 	s.sessions[c.token] = session{user: user, origin: c.origin, expires: now.Add(sessionLifetime)}
 	s.touchSession(c.token)
+	s.capSessionsLocked(user, c.token)
 	return s.switchUserLocked(c, req, user, map[string]any{"token": token}, signIn, joinDefault), nil
+}
+
+// capSessionsLocked forgets user's sessions beyond maxSessionsPerUser, but
+// never keep, the one just made: the others that expire soonest, which were
+// used least recently, go first. Every sign-in adds a session, so an account
+// signing in again and again in a loop cannot grow the sessions, and the
+// store, without bound.
+func (s *Server) capSessionsLocked(user *userState, keep [32]byte) {
+	var keys [][32]byte
+	for key, session := range s.sessions {
+		if session.user == user && key != keep {
+			keys = append(keys, key)
+		}
+	}
+	excess := len(keys) - (maxSessionsPerUser - 1)
+	if excess <= 0 {
+		return
+	}
+	slices.SortFunc(keys, func(a, b [32]byte) int {
+		return s.sessions[a].expires.Compare(s.sessions[b].expires)
+	})
+	for _, key := range keys[:excess] {
+		delete(s.sessions, key)
+		s.touchSession(key)
+	}
 }
 
 // pruneSessionsLocked forgets expired sessions.

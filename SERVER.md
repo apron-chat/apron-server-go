@@ -91,7 +91,12 @@ Flags (`aprond --help` lists them all):
   requests, and `/avatar`, `/emoji add`, `/embed-terminal`, and
   `/embed-append` commands together: a burst of `n`, refilled evenly
   over a minute. The excess gets `retry_after` with `data.retry_after` in
-  seconds. Edits, reactions, and activity are not counted.
+  seconds. Edits, reactions, and activity are not counted. Whatever the
+  flag, each user may also make a burst of 120 other changes that others
+  receive, refilled two a second: reaction sets that change, joins and
+  leaves that change a membership, `me` requests that change a name,
+  avatar, or `ext`, and `typing`. Past it a request is `retry_after`, and
+  `typing` is dropped.
 - `--max-listed-members <n>` (1000) bounds the `members` of one room in
   `room_list` and `room_update` `joined`, and so the statuses sent after a
   sign-in ([Status](#status)), `0` for no bound; see
@@ -532,8 +537,8 @@ account's join to `general`, and a guest's leaves when it is retired.
   `{"room_id": ...}` after the `room_update`. Any authenticated user may
   create top-level rooms or threads (nested threads are allowed) and edit
   any room they can see, such as a bot keeping a thread's `description`
-  current. `description` is a string of at most 16 KiB (a longer one is
-  `too_large`), CommonMark by convention; the server never parses it. A thread saved without a title is
+  current. `title` is a string of at most 1 KiB and `description` one of
+  at most 16 KiB (longer ones are `too_large`), CommonMark by convention; the server never parses it. A thread saved without a title is
   titled from the first line of its description, or `Thread`.
 - Posting does not require joining a room one can see: a poster who has not
   joined gets the result but not the broadcast.
@@ -610,12 +615,19 @@ publishing the message without the embed. A write to a URL that is unknown,
 used, or expired, or whose embed was removed, is answered `404` at once and
 its connection closed, without waiting for its body to end. The server
 publishes the snapshot that finishes a write before it answers the `PUT`.
+The bytes of upload bodies still arriving are bounded too, by the hosted
+storage (`--upload.max-storage-mb`), which counts only finished uploads:
+a write whose body would take them past it fails with `507` and
+`Retry-After`. Only bytes that arrived count, so a slow writer holds no
+more than it sent. A finished upload's file is synced before it is
+recorded, and a failure to write it is `500`.
 
 - **Uploads** (at most 20 MiB each, and 20 MiB for one message's uploads
   together; a message has at most 32 embeds, `denied` past that). While pending the embed has no `url`. When
   the write finishes the server publishes a snapshot with `url` set to the
   hosted file and, for images and playable media, `og`: `image` (PNG, JPEG,
-  GIF, and WebP with `width` and `height`; the sender's `og.image.alt` is kept),
+  GIF, and WebP with `width` and `height`; the sender's `og.image.alt` is kept,
+  cut to 1 KiB),
   `video`, or `audio`, plus `title`. Files are served sandboxed
   (`Content-Security-Policy: sandbox`, `nosniff`); only images, media, and
   plain text are shown inline, and markup, script, stylesheet, and
@@ -924,7 +936,7 @@ replies arrive before its result. Commands:
 
 `activity` relays `typing` (seconds; `0` stops) and `read_message_id` in a
 room (`general` without `room_id`) to the room's members. A read cursor must
-name an existing message and only moves forward; the server keeps each
+name an existing message in that room and only moves forward; the server keeps each
 user's latest cursor per room and sends it after `room_list` lists the room.
 A frame that changes nothing, or is invalid, relays nothing. Typing and
 read cursors go to every connection of the room's members.
@@ -1031,7 +1043,9 @@ the valid fields beside an invalid one included:
   `false` or a non-negative whole number of seconds (`true` included), `mute`
   that is not `true`, `false`, or a positive whole number
   of seconds (`0` is not `false`), a `room_id` without `mute`, or a `mute`
-  with a `room_id` that names a room the user cannot see;
+  with a `room_id` that names a room the user cannot see, unless it is
+  `false` and clears a mute the user has there, such as of a private room
+  they left;
 - `denied` for a mute of another room once the user has 1,000 room mutes;
 - `retry_after` beyond the user's limit: a burst of 20 `status` requests,
   `idle` and mutes alike, across all of the user's connections, refilled one
@@ -1217,7 +1231,8 @@ handle the frame as a notification (§1.1). This server does both:
   before sign-in or after: it is neither executed nor answered. This
   includes guest `auth`, `me`, `message`, `room_set`, and `status`.
 
-Request `id`s must be strings (§1). They deduplicate per user, across all
+Request `id`s must be strings (§1) of at most 256 bytes; a longer one is
+`too_large`. They deduplicate per user, across all
 of that user's connections: a retry is not executed or broadcast again, and
 its result reflects the current state (§1.2): a retried `me` answers with
 the current profile, a retried `message` or `command` lists only the write
@@ -1231,7 +1246,7 @@ runs again. Unknown requests return `unsupported`.
 Error codes follow §1.1: an ID that does not exist or that the user cannot
 see is `invalid_params`, and so is a request that depends on a name this
 server does not know, such as an auth scheme or a push kind (§1). A value
-refused for its size is `too_large`: a merged `ext`, a room `description`,
+refused for its size is `too_large`: a request `id`, a merged `ext`, a room `title` or `description`,
 an avatar `data:` URL, an emoji, or a push `url` or `token`. `denied` is
 for a well-formed request that the user or the server does not allow, such
 as an edit of another user's message, or one past a count limit the server
@@ -1315,7 +1330,9 @@ token and answers with the same token rather than a replacement, since
 several tabs may share it; clients that keep the latest token keep it.
 Sign-out drops the local token and reconnects. Already authenticated
 connections and disconnected clients retain their server-side token until it
-expires. An expired token requires another passkey or email sign-in.
+expires. An expired token requires another passkey or email sign-in. An
+account keeps at most 100 tokens: a sign-in past that forgets the ones
+that would expire soonest, those used least recently.
 
 Passkey users, their credentials, and unexpired tokens are kept in the store,
 so they survive a restart with the default SQLite store; with `--store memory`

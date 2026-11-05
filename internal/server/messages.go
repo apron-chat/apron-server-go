@@ -353,6 +353,31 @@ func (s *Server) admitPostLocked(u *userState) *rpcError {
 	return nil
 }
 
+const (
+	// Each user may make actionBurst changes at once that are logged or
+	// sent to others but are not posts: reaction sets, joins and leaves,
+	// profile edits, and typing. They refill one every actionRefill.
+	actionBurst  = 120
+	actionRefill = 500 * time.Millisecond
+)
+
+// admitActionLocked applies the user's limit on such changes, across all of
+// their connections, so that toggling a reaction or a membership in a loop
+// cannot grow every room's log and broadcast to its members without end.
+// Beyond it the request is retry_after and changes nothing.
+func admitActionLocked(u *userState) *rpcError {
+	if u.actions == nil {
+		u.actions = rate.NewLimiter(rate.Every(actionRefill), actionBurst)
+	}
+	now := time.Now()
+	reservation := u.actions.ReserveN(now, 1)
+	if delay := reservation.DelayFrom(now); delay > 0 {
+		reservation.CancelAt(now)
+		return retryAfter("Too many changes; slow down", delay)
+	}
+	return nil
+}
+
 // reactionElements returns every non-empty reaction set, ordered by user ID.
 func (m *messageState) reactionElements() []any {
 	users := make([]string, 0, len(m.reactions))
@@ -498,6 +523,9 @@ func (s *Server) react(c *client, req request) (any, bool, *rpcError) {
 		}
 	}
 	if !sameEmojiSet(m.reactions[u.id].emojis, emojis) {
+		if err := admitActionLocked(u); err != nil {
+			return nil, false, err
+		}
 		s.touchMessage(m)
 		from := u.from()
 		if len(emojis) == 0 {

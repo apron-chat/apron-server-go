@@ -59,6 +59,9 @@ type userState struct {
 	// posts limits the user's new messages, room_set requests, and /avatar
 	// commands to MessagesPerMinute; nil when unlimited.
 	posts *rate.Limiter
+	// actions limits the user's other changes that others receive
+	// (admitActionLocked).
+	actions *rate.Limiter
 
 	// chosen is the chosen status, set with `me` (§4.5.1), and mute and
 	// roomMutes their mutes; muteTimer ends a timed mute, and
@@ -630,6 +633,13 @@ func (s *Server) updateProfile(c *client, req request) (any, bool, *rpcError) {
 	// cannot make the server announce it to every sharer without end.
 	if hasStatus && status != u.chosen {
 		if err := admitStatusLocked(u); err != nil {
+			return nil, false, err
+		}
+	}
+	// A change of name, avatar, or ext goes to everyone who shares a room
+	// with the user.
+	if (hasName && normalizeName(name) != u.name) || (hasAvatar && avatar != u.avatar) || (hasExt && !jsonEqual(ext, u.ext)) {
+		if err := admitActionLocked(u); err != nil {
 			return nil, false, err
 		}
 	}
