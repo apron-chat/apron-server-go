@@ -192,7 +192,12 @@ func (s *Server) status(c *client, req request) (any, bool, *rpcError) {
 	s.mu.Lock()
 	defer s.unlock()
 	u := c.user
-	if update.hasMute && update.scoped && s.visibleRoomLocked(u, update.roomID) == nil {
+	// A room mute the user has stays clearable after the room is no longer
+	// visible to them, such as a private room they left, so it does not keep
+	// counting toward maxRoomMutes, or come back if they are added again.
+	_, hasRoomMute := u.roomMutes[update.roomID]
+	clearing := hasRoomMute && update.muteSeconds == 0 && !update.muteForever
+	if update.hasMute && update.scoped && !clearing && s.visibleRoomLocked(u, update.roomID) == nil {
 		return nil, false, invalidParams("Unknown room %q", update.roomID)
 	}
 	if now := time.Now(); update.hasMute && update.scoped && update.mute(now).active(now) {
@@ -228,7 +233,8 @@ func admitStatusLocked(u *userState) *rpcError {
 }
 
 // applyStatusLocked applies an update for user u from connection c, then
-// announces what changed. A scoped mute's room is visible to u.
+// announces what changed. A scoped mute's room is visible to u, unless
+// the update clears a mute u has.
 func (s *Server) applyStatusLocked(c *client, u *userState, update statusUpdate) {
 	if update.idle != nil && c.idle != *update.idle {
 		c.idle = *update.idle
@@ -246,15 +252,15 @@ func (s *Server) applyStatusLocked(c *client, u *userState, update statusUpdate)
 		u.send(muteFrame("", mute, now))
 		return
 	}
-	r := s.visibleRoomLocked(u, update.roomID)
+	id := update.roomID
 	if mute.active(now) {
-		u.roomMutes[r.id] = mute
+		u.roomMutes[id] = mute
 	} else {
-		delete(u.roomMutes, r.id)
+		delete(u.roomMutes, id)
 	}
 	s.touchUser(u.id)
-	s.scheduleRoomMuteLocked(u, r.id)
-	u.send(muteFrame(r.id, mute, now))
+	s.scheduleRoomMuteLocked(u, id)
+	u.send(muteFrame(id, mute, now))
 	// What counts toward unread changes with a room's mute, in the room and
 	// its threads, at any depth (unread.go), so every count is taken again,
 	// as when the mute runs out.

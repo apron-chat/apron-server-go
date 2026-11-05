@@ -480,6 +480,12 @@ func sortedPushes(u *userState) []*pushRegistration {
 // registration. A badge push replaces one still waiting for the same
 // registration.
 func (s *Server) deliverPushLocked(p *pushRegistration, unread int, payload []byte, urgency string, badge bool) {
+	// Once the server is shutting down, Shutdown may already be waiting for
+	// the deliveries in progress: none is added, as live text that Shutdown
+	// ends could otherwise release a held push.
+	if s.closed {
+		return
+	}
 	if u := s.users[p.userID]; u == nil || u.pushesTodayLocked(time.Now()) >= maxPushesPerUserDay {
 		return
 	}
@@ -723,6 +729,10 @@ func newPushDeliverer(allowInternal bool) *pushDeliverer {
 		// serve many pushes over one HTTP/2 connection.
 		ForceAttemptHTTP2:   true,
 		MaxIdleConnsPerHost: maxPushPerHost,
+		// A Transport literal keeps idle connections forever and without a
+		// total bound; push hosts are chosen by clients, so both are set.
+		MaxIdleConns:    maxConcurrentPushPOST * 2,
+		IdleConnTimeout: 90 * time.Second,
 	}
 	return &pushDeliverer{
 		client: &http.Client{

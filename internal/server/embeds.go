@@ -16,6 +16,7 @@ import (
 	"mime"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -214,11 +215,19 @@ func ogImageAlt(og any) string {
 	if og, ok := og.(map[string]any); ok {
 		if image, ok := og["image"].(map[string]any); ok {
 			alt, _ := image["alt"].(string)
+			if len(alt) > maxAltBytes {
+				// Alt text describes an image in a sentence or two; the
+				// server keeps it, and the emoji catalog serves it to all.
+				alt = string(wholeRunes([]byte(alt[:maxAltBytes])))
+			}
 			return alt
 		}
 	}
 	return ""
 }
+
+// maxAltBytes bounds the alt text the server keeps for an upload's image.
+const maxAltBytes = 1 << 10
 
 // newWriteLocked registers a hosted embed awaiting its write. An unused write
 // URL expires, and the embed is dropped.
@@ -378,11 +387,34 @@ func (s *Server) handleWrite(w http.ResponseWriter, r *http.Request) {
 		s.writeLive(w, r, e)
 		return
 	}
+	// Bodies arriving at once are bounded by the hosted storage, which only
+	// a finished upload counts: each reserves its limit until it ends. A
+	// refused write keeps its URL, to try again.
+	reserve := e.uploadReserve(s.config)
+	if s.uploadsArriving > 0 && s.uploadsArriving+reserve > s.config.MaxUploadStorageBytes {
+		s.unlock()
+		w.Header().Set("Retry-After", strconv.Itoa(retryAfterSeconds))
+		refuseWrite(w, "Too many uploads are arriving at once; try again shortly", http.StatusServiceUnavailable)
+		return
+	}
+	s.uploadsArriving += reserve
 	e.started = true
 	delete(s.writes, token)
 	e.timer.Stop()
 	s.unlock()
-	s.writeUpload(w, r, e)
+	s.writeUpload(w, r, e, reserve)
+}
+
+// uploadReserve is the most an upload's body may hold: what it reserves of
+// the hosted storage while it arrives.
+func (e *embedState) uploadReserve(config Config) int64 {
+	switch {
+	case e.avatarFor != nil, e.serverAvatarBy != "":
+		return config.MaxAvatarBytes
+	case e.emojiKey != "":
+		return config.MaxEmojiBytes
+	}
+	return config.MaxUploadBytes
 }
 
 // refuseWrite answers a write without reading its body, and closes the
@@ -395,7 +427,7 @@ func refuseWrite(w http.ResponseWriter, message string, status int) {
 	http.Error(w, message, status)
 }
 
-func (s *Server) writeUpload(w http.ResponseWriter, r *http.Request, e *embedState) {
+func (s *Server) writeUpload(w http.ResponseWriter, r *http.Request, e *embedState, reserve int64) {
 	limit := s.config.MaxUploadBytes
 	tooLargeMessage := ""
 	s.mu.RLock()
@@ -432,10 +464,20 @@ func (s *Server) writeUpload(w http.ResponseWriter, r *http.Request, e *embedSta
 		og = describeUpload(e, file)
 	}
 	if file != nil {
-		file.Close()
+		// A finished upload is on disk before the store records it, so a
+		// crash cannot leave a stored embed pointing at a short file.
+		if syncErr := file.Sync(); err == nil && syncErr != nil {
+			slog.Error("cannot store upload", "error", syncErr)
+			err = errUploadStore
+		}
+		if closeErr := file.Close(); err == nil && closeErr != nil {
+			slog.Error("cannot store upload", "error", closeErr)
+			err = errUploadStore
+		}
 	}
 	s.mu.Lock()
 	defer s.unlock()
+	s.uploadsArriving -= reserve
 	fail := func(status int, message string) {
 		if file != nil {
 			_ = os.Remove(file.Name())
@@ -455,6 +497,9 @@ func (s *Server) writeUpload(w http.ResponseWriter, r *http.Request, e *embedSta
 		return
 	case errors.Is(err, errNotAvatar):
 		fail(http.StatusUnsupportedMediaType, "Avatars and emoji must be PNG, JPEG, GIF, or WebP images")
+		return
+	case errors.Is(err, errUploadStore):
+		fail(http.StatusInternalServerError, "The server could not store the upload")
 		return
 	case err != nil:
 		fail(http.StatusBadRequest, "The upload did not finish")
@@ -518,6 +563,10 @@ func (s *Server) writeUpload(w http.ResponseWriter, r *http.Request, e *embedSta
 
 var errNotAvatar = errors.New("not an avatar image")
 
+// errUploadStore is the server's failure to keep an upload's file, rather
+// than the writer's.
+var errUploadStore = errors.New("cannot store the upload")
+
 // receiveUpload copies a request body of at most limit bytes into a new file
 // in the upload directory. On error the file, if any, is still returned so
 // the caller can remove it.
@@ -528,7 +577,7 @@ func (s *Server) receiveUpload(w http.ResponseWriter, r *http.Request, limit int
 	file, err := os.CreateTemp(s.uploadDir, "*"+uploadSuffix)
 	if err != nil {
 		slog.Error("cannot store upload", "error", err)
-		return nil, 0, err
+		return nil, 0, errUploadStore
 	}
 	size, err := io.Copy(file, http.MaxBytesReader(w, r.Body, limit))
 	return file, size, err

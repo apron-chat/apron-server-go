@@ -490,6 +490,9 @@ func (s *Server) setRoom(c *client, req request) (any, bool, *rpcError) {
 	if err != nil {
 		return nil, false, err
 	}
+	if len(title) > maxTitleBytes {
+		return nil, false, &rpcError{Code: codeTooLarge, Message: fmt.Sprintf("title is at most %d bytes", maxTitleBytes)}
+	}
 	if len(description) > maxDescriptionBytes {
 		return nil, false, &rpcError{Code: codeTooLarge, Message: fmt.Sprintf("description is at most %d bytes", maxDescriptionBytes)}
 	}
@@ -588,8 +591,10 @@ func (s *Server) setRoom(c *client, req request) (any, bool, *rpcError) {
 const (
 	maxThreadTitleRunes = 60
 	defaultThreadTitle  = "Thread"
-	// maxDescriptionBytes bounds a room's description, and maxRoomExtBytes
-	// its merged ext, which every room record carries.
+	// maxTitleBytes bounds a room's title, maxDescriptionBytes its
+	// description, and maxRoomExtBytes its merged ext, which every room
+	// record carries.
+	maxTitleBytes       = 1 << 10
 	maxDescriptionBytes = 16 << 10
 	maxRoomExtBytes     = 16 << 10
 )
@@ -806,6 +811,11 @@ func (s *Server) joinRoom(c *client, req request) (any, bool, *rpcError) {
 			return nil, false, &rpcError{Code: codeDenied, Message: fmt.Sprintf("%s is in as many private rooms as anyone may be, so cannot be added to another", targetID)}
 		}
 	}
+	if r.members[target.id] == nil {
+		if err := admitActionLocked(u); err != nil {
+			return nil, false, err
+		}
+	}
 	if !s.joinLocked(target, r) && target == u {
 		c.enqueue(s.joinedUpdateLocked(r, nil))
 	}
@@ -840,6 +850,11 @@ func (s *Server) leaveRoom(c *client, req request) (any, bool, *rpcError) {
 		}
 		if target = s.users[targetID]; target == nil {
 			return nil, false, invalidParams("Unknown user %q", targetID)
+		}
+	}
+	if r.members[target.id] != nil {
+		if err := admitActionLocked(u); err != nil {
+			return nil, false, err
 		}
 	}
 	s.leaveLocked(target, r)
@@ -1100,9 +1115,10 @@ func parseLimit(params map[string]jsontext.Value, defaultLimit int) (int, *rpcEr
 
 // activity applies a connection's activity (§4.6). typing and a read cursor
 // in a room are relayed to the room's members; a read cursor must name a
-// message and only advances, and the server keeps the latest per user and
-// sends it after the room is listed. A frame whose fields change nothing
-// relays nothing.
+// message in the room and only advances, and the server keeps the latest per
+// user and sends it after the room is listed. A frame whose fields change
+// nothing relays nothing, and typing past the user's limit on actions
+// (admitActionLocked) is dropped.
 func (s *Server) activity(c *client, req request) (any, bool, *rpcError) {
 	roomID, err := parseString(req.params, "room_id", false)
 	if err != nil {
@@ -1131,8 +1147,11 @@ func (s *Server) activity(c *client, req request) (any, bool, *rpcError) {
 	if inRoom && r == nil {
 		return nil, false, invalidParams("Unknown room %q", roomID)
 	}
-	if hasRead && s.visibleMessageLocked(c.user, readID) == nil {
-		return nil, false, invalidParams("Unknown read_message_id %q", readID)
+	// A cursor reads the room up to a message in it (§4.6): one naming a
+	// message elsewhere would be relayed to the room's members as a receipt,
+	// and its log_id would stand for the room's read position.
+	if m := s.visibleMessageLocked(c.user, readID); hasRead && (m == nil || m.roomID != roomID) {
+		return nil, false, invalidParams("Unknown read_message_id %q in room %q", readID, roomID)
 	}
 	// The relays this request causes are queued before processFrame sends
 	// its result (§1).
@@ -1141,6 +1160,11 @@ func (s *Server) activity(c *client, req request) (any, bool, *rpcError) {
 		return result, false, nil
 	}
 	u := c.user
+	if typing != nil && admitActionLocked(u) != nil {
+		// Typing beyond the user's limit is dropped: a notification has no
+		// reply to carry retry_after.
+		typing = nil
+	}
 	params := map[string]any{"room_id": roomID, "from": u.from()}
 	read := false
 	if hasRead {

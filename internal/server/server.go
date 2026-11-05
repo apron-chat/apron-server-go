@@ -63,6 +63,9 @@ const (
 	// retryAfterSeconds is the delay suggested by connection-level
 	// retry_after errors (capacity and shutdown).
 	retryAfterSeconds = 30
+	// maxRequestIDBytes bounds a request id, which deduplication keeps
+	// (§1.2) for the latest maxDedupEntries requests of each user.
+	maxRequestIDBytes = 256
 )
 
 // Config controls the HTTP and WebSocket behavior of a Server.
@@ -458,6 +461,9 @@ type Server struct {
 	// size. Custom emoji have their own bound, MaxEmojiStorageBytes.
 	uploads     *list.List
 	uploadBytes int64
+	// uploadsArriving is what the uploads whose bodies are arriving reserve
+	// (handleWrite), which MaxUploadStorageBytes also bounds.
+	uploadsArriving int64
 	// uploadDir holds upload content; tempUploadDir is removed on Shutdown.
 	uploadDir     string
 	tempUploadDir bool
@@ -1113,6 +1119,13 @@ func (s *Server) processFrame(c *client, payload []byte) {
 	// even one running on another connection, and replies with its outcome,
 	// brought up to date with the current state.
 	var entry *dedupEntry
+	if req.hasID && len(req.id) > maxRequestIDBytes {
+		// Request ids are any string (§2.4), but each is kept for
+		// deduplication, so their size is bounded.
+		s.unlock()
+		c.sendError(req, &rpcError{Code: codeTooLarge, Message: fmt.Sprintf("A request id is at most %d bytes", maxRequestIDBytes)})
+		return
+	}
 	if req.hasID {
 		fingerprint := sha256.Sum256([]byte(requestFingerprint(req)))
 		if prior := user.dedup.get(req.id); prior != nil {
