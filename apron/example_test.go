@@ -69,7 +69,7 @@ func (Shout) Init(h *apron.Host) error {
 	return nil
 }
 
-// An extension goes in Config.Extensions, or to aprond.Main.
+// An extension goes in Config.Extensions, or to aproncmd.Main.
 func Example_extension() {
 	config := apron.DefaultConfig()
 	config.Extensions = []apron.Extension{Shout{}}

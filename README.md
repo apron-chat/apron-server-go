@@ -56,7 +56,7 @@ to start a config file.
 
 The server is also a Go library. Package `apron` serves the protocol, and
 extensions add commands, request methods, bots, message filters, sign-in,
-and HTTP routes to it without a fork. `aprond.Main` runs it with every
+and HTTP routes to it without a fork. `aproncmd.Main` runs it with every
 flag of `aprond`:
 
 ```go
@@ -66,7 +66,7 @@ import (
 	"context"
 
 	"github.com/apron-chat/apron-server-go/apron"
-	"github.com/apron-chat/apron-server-go/aprond"
+	"github.com/apron-chat/apron-server-go/aproncmd"
 )
 
 type Hello struct{}
@@ -84,7 +84,7 @@ func (Hello) Init(h *apron.Host) error {
 	return nil
 }
 
-func main() { aprond.Main(Hello{}) }
+func main() { aproncmd.Main(Hello{}) }
 ```
 
 [`examples`](examples) has complete servers: GitHub single sign-on,

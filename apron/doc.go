@@ -11,10 +11,10 @@
 //     flags, opens no listener, and handles no signals.
 //   - [github.com/apron-chat/apron-server-go/store] keeps a server's state
 //     across restarts, in SQLite or in memory ([Config].Store).
-//   - [github.com/apron-chat/apron-server-go/aprond] is the aprond command as
+//   - [github.com/apron-chat/apron-server-go/aproncmd] is the aprond command as
 //     a library: flags, a config file, TLS, email delivery, and signals around
 //     this package. Its Main runs a server with extensions added.
-//   - cmd/aprond is the aprond binary, which calls aprond.Main.
+//   - cmd/aprond is the aprond binary, which calls aproncmd.Main.
 //
 // # Serving
 //

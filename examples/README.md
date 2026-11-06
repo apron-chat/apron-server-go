@@ -1,7 +1,7 @@
 # Example servers
 
 Each directory is an Apron server of its own: a `main` package that runs
-[`aprond.Main`](../aprond) with an extension built on package
+[`aproncmd.Main`](../aproncmd) with an extension built on package
 [`apron`](../apron), and a test that runs it. They take every `aprond` flag,
 plus their own, named after the extension (`--sso.org`), which a config
 file sets in a table of that name (`[sso]`). Run one with

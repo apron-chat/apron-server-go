@@ -1,4 +1,4 @@
-package aprond
+package aproncmd
 
 import (
 	"context"

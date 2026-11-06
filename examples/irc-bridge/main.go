@@ -20,10 +20,10 @@ import (
 	"time"
 
 	"github.com/apron-chat/apron-server-go/apron"
-	"github.com/apron-chat/apron-server-go/aprond"
+	"github.com/apron-chat/apron-server-go/aproncmd"
 )
 
-func main() { aprond.Main(&Bridge{}) }
+func main() { aproncmd.Main(&Bridge{}) }
 
 // Bridge relays between a room and an IRC channel.
 type Bridge struct {

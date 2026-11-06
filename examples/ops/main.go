@@ -27,10 +27,10 @@ import (
 	"time"
 
 	"github.com/apron-chat/apron-server-go/apron"
-	"github.com/apron-chat/apron-server-go/aprond"
+	"github.com/apron-chat/apron-server-go/aproncmd"
 )
 
-func main() { aprond.Main(&Ops{}) }
+func main() { aproncmd.Main(&Ops{}) }
 
 // Ops posts webhooks and runs deploys.
 type Ops struct {

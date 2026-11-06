@@ -25,10 +25,10 @@ import (
 	"unicode"
 
 	"github.com/apron-chat/apron-server-go/apron"
-	"github.com/apron-chat/apron-server-go/aprond"
+	"github.com/apron-chat/apron-server-go/aproncmd"
 )
 
-func main() { aprond.Main(&Search{}) }
+func main() { aproncmd.Main(&Search{}) }
 
 // Search is an in-memory inverted index of the messages' current text.
 type Search struct {

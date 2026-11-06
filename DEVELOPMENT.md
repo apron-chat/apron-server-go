@@ -9,7 +9,7 @@ forgets it on restart); see [SERVER.md](SERVER.md#storage).
 - The repository root is the Go module and the reference server, implementing
   every capability in [PROTOCOL.md](https://github.com/shazow/apron/blob/main/PROTOCOL.md);
   `apron` is the server as a Go package, with its extension API; `store`
-  its storage backends; `aprond` the command as a library, which
+  its storage backends; `aproncmd` the command as a library, which
   `cmd/aprond` runs; and `examples` servers built with extensions, each
   with a test that uses `internal/wstest`. See [SERVER.md](SERVER.md).
 - [apron-chat/apron-web](https://github.com/apron-chat/apron-web): the

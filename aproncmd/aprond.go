@@ -1,4 +1,4 @@
-package aprond
+package aproncmd
 
 import (
 	"context"
@@ -128,7 +128,7 @@ type Configurable interface {
 // command line and the config file, serves until SIGINT or SIGTERM, and
 // exits. A server of your own is a main package that calls it:
 //
-//	func main() { aprond.Main(weather.New()) }
+//	func main() { aproncmd.Main(weather.New()) }
 func Main(extensions ...apron.Extension) {
 	var options Options
 	options.Store = "sqlite:" + filepath.Join(userDataDir(), "aprond.db")

@@ -1,11 +1,11 @@
-package aprond_test
+package aproncmd_test
 
 import (
 	"context"
 	"time"
 
 	"github.com/apron-chat/apron-server-go/apron"
-	"github.com/apron-chat/apron-server-go/aprond"
+	"github.com/apron-chat/apron-server-go/aproncmd"
 )
 
 // Uptime is an extension with a setting of its own.
@@ -18,7 +18,7 @@ type Uptime struct {
 
 func (*Uptime) Name() string { return "uptime" }
 
-// Flags makes Uptime an aprond.Configurable: aprond reads --uptime.precision,
+// Flags makes Uptime an aproncmd.Configurable: aprond reads --uptime.precision,
 // or precision in the config file's [uptime] table.
 func (u *Uptime) Flags() any { return &u.Settings }
 
@@ -37,5 +37,5 @@ func (u *Uptime) Init(h *apron.Host) error {
 // A server of your own is aprond with extensions: this is all of its main
 // function.
 func ExampleMain() {
-	aprond.Main(&Uptime{})
+	aproncmd.Main(&Uptime{})
 }

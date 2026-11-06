@@ -19,10 +19,10 @@ import (
 	"time"
 
 	"github.com/apron-chat/apron-server-go/apron"
-	"github.com/apron-chat/apron-server-go/aprond"
+	"github.com/apron-chat/apron-server-go/aproncmd"
 )
 
-func main() { aprond.Main(&Assistant{}) }
+func main() { aproncmd.Main(&Assistant{}) }
 
 // Assistant is a bot that answers mentions.
 type Assistant struct {

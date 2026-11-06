@@ -17,10 +17,10 @@ import (
 	"time"
 
 	"github.com/apron-chat/apron-server-go/apron"
-	"github.com/apron-chat/apron-server-go/aprond"
+	"github.com/apron-chat/apron-server-go/aproncmd"
 )
 
-func main() { aprond.Main(&Moderation{}) }
+func main() { aproncmd.Main(&Moderation{}) }
 
 // Moderation filters messages and keeps each room's slow mode.
 type Moderation struct {

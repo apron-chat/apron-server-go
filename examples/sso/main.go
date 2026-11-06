@@ -26,10 +26,10 @@ import (
 	"time"
 
 	"github.com/apron-chat/apron-server-go/apron"
-	"github.com/apron-chat/apron-server-go/aprond"
+	"github.com/apron-chat/apron-server-go/aproncmd"
 )
 
-func main() { aprond.Main(&SSO{}) }
+func main() { aproncmd.Main(&SSO{}) }
 
 // SSO signs people in with GitHub.
 type SSO struct {

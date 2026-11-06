@@ -1497,7 +1497,7 @@ are not implemented: a token here always resumes one account.
 
 ## Extensions
 
-Package `apron` is the server as a library, and `aprond.Main` runs it with
+Package `apron` is the server as a library, and `aproncmd.Main` runs it with
 extensions of your own (`apron.Extension`), as the servers in
 [`examples`](examples) do. What extensions add follows the protocol as the
 rest of the server does:
