@@ -124,7 +124,7 @@ type statusUpdate struct {
 // false, or a positive whole number of seconds, a longer one shortened to
 // maxMuteSeconds. room_id scopes only the mute, so room_id without mute is
 // invalid_params: idle is about the connection either way.
-func parseStatus(params map[string]jsontext.Value) (statusUpdate, *rpcError) {
+func parseStatus(params map[string]jsontext.Value) (statusUpdate, *Error) {
 	var update statusUpdate
 	if _, has := params["room_id"]; has {
 		roomID, err := parseString(params, "room_id", true)
@@ -184,7 +184,7 @@ func (update statusUpdate) mute(now time.Time) muteState {
 // processFrame ignores. On an error nothing changes: invalid params, a mute
 // of a room the user cannot see, a mute of another room beyond
 // maxRoomMutes, or more requests than the user's limit (admitStatusLocked).
-func (s *Server) status(c *client, req request) (any, bool, *rpcError) {
+func (s *Server) status(c *client, req request) (any, bool, *Error) {
 	update, err := parseStatus(req.params)
 	if err != nil {
 		return nil, false, err
@@ -202,7 +202,7 @@ func (s *Server) status(c *client, req request) (any, bool, *rpcError) {
 	}
 	if now := time.Now(); update.hasMute && update.scoped && update.mute(now).active(now) {
 		if _, muted := u.roomMutes[update.roomID]; !muted && len(u.roomMutes) >= maxRoomMutes {
-			return nil, false, &rpcError{Code: codeDenied, Message: fmt.Sprintf("At most %d rooms can be muted; unmute one first", maxRoomMutes)}
+			return nil, false, &Error{Code: CodeDenied, Message: fmt.Sprintf("At most %d rooms can be muted; unmute one first", maxRoomMutes)}
 		}
 	}
 	if err := admitStatusLocked(u); err != nil {
@@ -219,7 +219,7 @@ func (s *Server) status(c *client, req request) (any, bool, *rpcError) {
 // connections. Beyond it the request is retry_after and changes nothing, so
 // a client flipping idle or its mutes in a loop cannot make the server
 // announce, store, and recount for it without end.
-func admitStatusLocked(u *userState) *rpcError {
+func admitStatusLocked(u *userState) *Error {
 	if u.statusRequests == nil {
 		u.statusRequests = rate.NewLimiter(rate.Every(statusRequestRefill), statusRequestBurst)
 	}

@@ -178,12 +178,12 @@ func TestCustomEmoji(t *testing.T) {
 	react(t, b, "party", id, ":party:", "👍")
 	a.notification(t, "reactions")
 	admin.notification(t, "reactions")
-	b.expectError(t, "reactions", "unknown", map[string]any{"message_id": id, "emojis": []any{":nope:"}}, codeInvalidParams)
+	b.expectError(t, "reactions", "unknown", map[string]any{"message_id": id, "emojis": []any{":nope:"}}, CodeInvalidParams)
 
 	// Only who added a key, or an admin, replaces its image; only an admin
 	// removes it.
-	b.expectError(t, "command", "steal", map[string]any{"body": map[string]any{"text": "/emoji add :party:", "embeds": []any{map[string]any{"kind": "upload"}}}}, codeDenied)
-	b.expectError(t, "command", "remove", map[string]any{"body": map[string]any{"text": "/emoji remove :party:"}}, codeDenied)
+	b.expectError(t, "command", "steal", map[string]any{"body": map[string]any{"text": "/emoji add :party:", "embeds": []any{map[string]any{"kind": "upload"}}}}, CodeDenied)
+	b.expectError(t, "command", "remove", map[string]any{"body": map[string]any{"text": "/emoji remove :party:"}}, CodeDenied)
 	if status := addEmoji(t, a, ":party:", testPNG(t), "image/png"); status != http.StatusCreated {
 		t.Fatalf("emoji replacement: %d", status)
 	}
@@ -203,9 +203,9 @@ func TestCustomEmoji(t *testing.T) {
 		t.Fatalf("a text emoji: %d", status)
 	}
 	for i, text := range []string{"/emoji", "/emoji add party", "/emoji add :a b:", "/emoji drop :party:", "/emoji add :" + strings.Repeat("x", maxEmojiBytes) + ":"} {
-		b.expectError(t, "command", fmt.Sprint("shape-", i), map[string]any{"body": map[string]any{"text": text, "embeds": []any{map[string]any{"kind": "upload"}}}}, codeInvalidParams)
+		b.expectError(t, "command", fmt.Sprint("shape-", i), map[string]any{"body": map[string]any{"text": text, "embeds": []any{map[string]any{"kind": "upload"}}}}, CodeInvalidParams)
 	}
-	b.expectError(t, "command", "no-image", map[string]any{"body": map[string]any{"text": "/emoji add :new:"}}, codeInvalidParams)
+	b.expectError(t, "command", "no-image", map[string]any{"body": map[string]any{"text": "/emoji add :new:"}}, CodeInvalidParams)
 	for _, c := range everyone {
 		c.expectQuiet(t)
 	}
@@ -225,10 +225,10 @@ func TestCustomEmoji(t *testing.T) {
 	if status, _, _ := httpDo(t, http.MethodGet, image, nil, ""); status != http.StatusNotFound {
 		t.Fatalf("the removed image: %d", status)
 	}
-	admin.expectError(t, "command", "again", map[string]any{"body": map[string]any{"text": "/emoji remove :party:"}}, codeInvalidParams)
+	admin.expectError(t, "command", "again", map[string]any{"body": map[string]any{"text": "/emoji remove :party:"}}, CodeInvalidParams)
 
 	// A set may keep a removed key, but not take it up.
-	a.expectError(t, "reactions", "late", map[string]any{"message_id": id, "emojis": []any{":party:"}}, codeInvalidParams)
+	a.expectError(t, "reactions", "late", map[string]any{"message_id": id, "emojis": []any{":party:"}}, CodeInvalidParams)
 	kept := react(t, b, "kept", id, ":party:")
 	if emojis := kept["reactions"].([]any)[0].(map[string]any)["emojis"]; !reflect.DeepEqual(emojis, []any{":party:"}) {
 		t.Fatalf("kept set: %#v", kept)
@@ -297,7 +297,7 @@ func TestCustomEmojiHaveTheirOwnLimits(t *testing.T) {
 
 	// The quota is full: a new key is denied, while a replacement fits in
 	// the room its old image leaves.
-	a.expectError(t, "command", "full", map[string]any{"body": map[string]any{"text": "/emoji add :c:", "embeds": []any{map[string]any{"kind": "upload"}}}}, codeDenied)
+	a.expectError(t, "command", "full", map[string]any{"body": map[string]any{"text": "/emoji add :c:", "embeds": []any{map[string]any{"kind": "upload"}}}}, CodeDenied)
 	if status := addEmoji(t, a, ":a:", image, "image/png"); status != http.StatusCreated {
 		t.Fatalf("replacing an emoji in a full quota: %d", status)
 	}
@@ -385,7 +385,7 @@ func TestCustomEmojiWriteRechecksOwnership(t *testing.T) {
 		t.Fatalf("upload files after the dropped write: %d", files)
 	}
 	// :x: is still the admin's: b may not replace it.
-	b.expectError(t, "command", "replace", map[string]any{"body": map[string]any{"text": "/emoji add :x:", "embeds": []any{map[string]any{"kind": "upload"}}}}, codeDenied)
+	b.expectError(t, "command", "replace", map[string]any{"body": map[string]any{"text": "/emoji add :x:", "embeds": []any{map[string]any{"kind": "upload"}}}}, CodeDenied)
 
 	// An admin's stale write still replaces another user's key.
 	adminWrite := emojiWriteURL(t, admin, ":y:")
@@ -465,7 +465,7 @@ func TestCustomEmojiAddNeedsAUsableURL(t *testing.T) {
 	app, httpServer := newTestServer(t, DefaultConfig())
 	proxied, _ := dialHost(t, httpServer, "chat.example")
 	guestAuth(t, proxied)
-	proxied.expectError(t, "command", "emoji", map[string]any{"body": map[string]any{"text": "/emoji add :party:", "embeds": []any{map[string]any{"kind": "upload"}}}}, codeDenied)
+	proxied.expectError(t, "command", "emoji", map[string]any{"body": map[string]any{"text": "/emoji add :party:", "embeds": []any{map[string]any{"kind": "upload"}}}}, CodeDenied)
 	proxied.drain(t)
 
 	// A loopback connection may.

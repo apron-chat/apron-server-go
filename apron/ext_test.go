@@ -65,13 +65,13 @@ func TestMessageSavesMergeExt(t *testing.T) {
 	// too_large together, and the refused save changes nothing.
 	half := strings.Repeat("x", maxMessageExtBytes/2)
 	save(t, a, "first-half", map[string]any{"message_id": id, "body": map[string]any{"text": "x"}, "ext": map[string]any{"a": half}})
-	a.expectError(t, "message", "second-half", map[string]any{"message_id": id, "room_id": "general", "body": map[string]any{"text": "x"}, "ext": map[string]any{"b": half}}, codeTooLarge)
+	a.expectError(t, "message", "second-half", map[string]any{"message_id": id, "room_id": "general", "body": map[string]any{"text": "x"}, "ext": map[string]any{"b": half}}, CodeTooLarge)
 	_, kept := save(t, a, "after", map[string]any{"message_id": id, "body": map[string]any{"text": "x"}})
 	if ext := kept["ext"].(map[string]any); len(ext) != 1 || ext["a"] != half {
 		t.Fatalf("a refused save changed ext: %v keys", len(ext))
 	}
-	a.expectError(t, "message", "new-too-large", map[string]any{"room_id": "general", "body": map[string]any{"text": "x"}, "ext": map[string]any{"a": half, "b": half}}, codeTooLarge)
-	a.expectError(t, "message", "bad-ext", map[string]any{"room_id": "general", "body": map[string]any{"text": "x"}, "ext": []any{}}, codeInvalidParams)
+	a.expectError(t, "message", "new-too-large", map[string]any{"room_id": "general", "body": map[string]any{"text": "x"}, "ext": map[string]any{"a": half, "b": half}}, CodeTooLarge)
+	a.expectError(t, "message", "bad-ext", map[string]any{"room_id": "general", "body": map[string]any{"text": "x"}, "ext": []any{}}, CodeInvalidParams)
 	a.expectQuiet(t)
 
 	// A tombstone carries no ext, and a save of a tombstone merges into an
@@ -157,7 +157,7 @@ func TestRoomSetMergesExt(t *testing.T) {
 	}
 	half := strings.Repeat("x", maxRoomExtBytes/2)
 	saveRoom(t, a, "half", map[string]any{"room_id": roomID, "ext": map[string]any{"a": half}})
-	a.expectError(t, "room_set", "over", map[string]any{"room_id": roomID, "ext": map[string]any{"b": half}}, codeTooLarge)
+	a.expectError(t, "room_set", "over", map[string]any{"room_id": roomID, "ext": map[string]any{"b": half}}, CodeTooLarge)
 	a.expectQuiet(t)
 }
 
@@ -168,7 +168,7 @@ func TestProfileExtLimitAppliesToTheMergedExt(t *testing.T) {
 	a := dialTestClient(t, httpServer)
 	half := strings.Repeat("x", maxProfileExtBytes/2)
 	a.result(t, "me", "a", map[string]any{"ext": map[string]any{"a": half, "big": jsontext.Value(bigNumber)}})
-	a.expectError(t, "me", "b", map[string]any{"name": "Ada", "ext": map[string]any{"b": half}}, codeTooLarge)
+	a.expectError(t, "me", "b", map[string]any{"name": "Ada", "ext": map[string]any{"b": half}}, CodeTooLarge)
 	you := a.result(t, "me", "same", map[string]any{})["you"].(map[string]any)
 	if ext := you["ext"].(map[string]any); len(ext) != 2 || you["name"] != nil {
 		t.Fatalf("a refused me changed the profile: %#v", you)

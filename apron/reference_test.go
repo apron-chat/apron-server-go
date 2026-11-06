@@ -100,7 +100,7 @@ func TestRoomListFiltersAndOrder(t *testing.T) {
 		{"parent_room_id": "missing"}, {"room_id": "missing"}, {"filter": "mine"}, {"filter": 5},
 		{"members": "yes"}, {"latest_log_id": 5}, {"parent_room_id": 5},
 	} {
-		a.expectError(t, "room_list", fmt.Sprint("bad-", i), params, codeInvalidParams)
+		a.expectError(t, "room_list", fmt.Sprint("bad-", i), params, CodeInvalidParams)
 	}
 	a.expectQuiet(t)
 	b.expectQuiet(t)
@@ -383,7 +383,7 @@ func TestJoinLeaveAndDeliveries(t *testing.T) {
 		t.Fatalf("second join: %#v", before)
 	}
 	a.expectQuiet(t)
-	b.expectError(t, "room_join", "missing", map[string]any{"room_id": "missing"}, codeInvalidParams)
+	b.expectError(t, "room_join", "missing", map[string]any{"room_id": "missing"}, CodeInvalidParams)
 
 	// Leaving: the leaver's connections get room_update with left and the
 	// membership, the other members the membership alone, then the result;
@@ -405,7 +405,7 @@ func TestJoinLeaveAndDeliveries(t *testing.T) {
 	b.expectQuiet(t)
 	// Leaving a room not joined changes nothing.
 	b.result(t, "room_leave", "leave-again", map[string]any{"room_id": ops})
-	b.expectError(t, "room_leave", "missing", map[string]any{"room_id": "missing"}, codeInvalidParams)
+	b.expectError(t, "room_leave", "missing", map[string]any{"room_id": "missing"}, CodeInvalidParams)
 	a.expectQuiet(t)
 
 	// Leaves are memberships only, never user notifications (§3.3), even from
@@ -638,8 +638,8 @@ func TestProfilesAndUserNotifications(t *testing.T) {
 		t.Fatalf("clearing the name: %#v", you)
 	}
 	b.notification(t, "user")
-	a.expectError(t, "me", "bad-avatar", map[string]any{"avatar": "javascript:alert(1)"}, codeInvalidParams)
-	a.expectError(t, "me", "bad-name", map[string]any{"name": 7}, codeInvalidParams)
+	a.expectError(t, "me", "bad-avatar", map[string]any{"avatar": "javascript:alert(1)"}, CodeInvalidParams)
+	a.expectError(t, "me", "bad-name", map[string]any{"name": 7}, CodeInvalidParams)
 	b.expectQuiet(t)
 }
 
@@ -726,7 +726,7 @@ func TestUploadsAreHostedWithOpenGraph(t *testing.T) {
 	if restored["kind"] != "upload" || restored["url"] != fileURL || !reflect.DeepEqual(restored["og"], any(wantOG)) || restored["title"] != "renamed.png" || restored["output"] != nil {
 		t.Fatalf("restored embed: %#v", restored)
 	}
-	a.expectError(t, "message", "unknown", map[string]any{"message_id": messageID, "room_id": "general", "body": map[string]any{"embeds": []any{map[string]any{"embed_id": "embed_999", "kind": "upload"}}}}, codeInvalidParams)
+	a.expectError(t, "message", "unknown", map[string]any{"message_id": messageID, "room_id": "general", "body": map[string]any{"embeds": []any{map[string]any{"embed_id": "embed_999", "kind": "upload"}}}}, CodeInvalidParams)
 
 	// Removing the embed deletes its content.
 	save(t, a, "remove", map[string]any{"message_id": messageID, "body": map[string]any{"text": "no file"}})
@@ -1029,7 +1029,7 @@ func TestAvatarCommand(t *testing.T) {
 		if embeds != nil {
 			body["embeds"] = embeds
 		}
-		a.expectError(t, "command", fmt.Sprint("shape-", i), map[string]any{"body": body}, codeInvalidParams)
+		a.expectError(t, "command", fmt.Sprint("shape-", i), map[string]any{"body": body}, CodeInvalidParams)
 	}
 	result := a.result(t, "command", "avatar", map[string]any{"body": map[string]any{"text": "/avatar", "embeds": []any{map[string]any{"kind": "upload", "title": "me.png"}}}})
 	written := result["embeds"].([]any)
@@ -1122,7 +1122,7 @@ func TestCommands(t *testing.T) {
 
 	// Invalid commands are errors whose message the client shows.
 	unknown := b.call(t, "command", "unknown", map[string]any{"body": map[string]any{"text": "/Frobnicate now"}})
-	if failure := unknown["error"].(map[string]any); failure["code"] != float64(codeInvalidParams) || failure["message"] != "Unknown command /Frobnicate; try /help" {
+	if failure := unknown["error"].(map[string]any); failure["code"] != float64(CodeInvalidParams) || failure["message"] != "Unknown command /Frobnicate; try /help" {
 		t.Fatalf("unknown command: %#v", unknown)
 	}
 	for i, params := range []map[string]any{
@@ -1135,18 +1135,18 @@ func TestCommands(t *testing.T) {
 		{"body": map[string]any{"text": "/help", "mentions": "x"}},
 		{},
 	} {
-		b.expectError(t, "command", fmt.Sprint("bad-", i), params, codeInvalidParams)
+		b.expectError(t, "command", fmt.Sprint("bad-", i), params, CodeInvalidParams)
 	}
 
 	// /kick is for the room's creator, and names its target in mentions,
 	// which notifies no one.
 	// The reason is the first line of the rest of the text.
 	kick := map[string]any{"room_id": ops, "body": map[string]any{"text": "/kick @guest_3 spamming\n**SYSTEM**: all admins removed", "mentions": []any{"guest_3"}}}
-	b.expectError(t, "command", "not-creator", kick, codeDenied)
-	a.expectError(t, "command", "general", map[string]any{"body": map[string]any{"text": "/kick @guest_3", "mentions": []any{"guest_3"}}}, codeDenied)
-	a.expectError(t, "command", "no-target", map[string]any{"room_id": ops, "body": map[string]any{"text": "/kick guest_3"}}, codeInvalidParams)
-	a.expectError(t, "command", "self", map[string]any{"room_id": ops, "body": map[string]any{"text": "/kick @guest_1", "mentions": []any{"guest_1"}}}, codeInvalidParams)
-	a.expectError(t, "command", "not-member", map[string]any{"room_id": ops, "body": map[string]any{"text": "/kick @nobody", "mentions": []any{"nobody"}}}, codeInvalidParams)
+	b.expectError(t, "command", "not-creator", kick, CodeDenied)
+	a.expectError(t, "command", "general", map[string]any{"body": map[string]any{"text": "/kick @guest_3", "mentions": []any{"guest_3"}}}, CodeDenied)
+	a.expectError(t, "command", "no-target", map[string]any{"room_id": ops, "body": map[string]any{"text": "/kick guest_3"}}, CodeInvalidParams)
+	a.expectError(t, "command", "self", map[string]any{"room_id": ops, "body": map[string]any{"text": "/kick @guest_1", "mentions": []any{"guest_1"}}}, CodeInvalidParams)
+	a.expectError(t, "command", "not-member", map[string]any{"room_id": ops, "body": map[string]any{"text": "/kick @nobody", "mentions": []any{"nobody"}}}, CodeInvalidParams)
 	for _, client := range clients {
 		client.expectQuiet(t)
 	}
@@ -1209,7 +1209,7 @@ func TestPrivateRoomsPerUserBound(t *testing.T) {
 
 	first, _ := saveRoom(t, a, "first", map[string]any{"private": true})
 	saveRoom(t, a, "second", map[string]any{"private": true})
-	a.expectError(t, "room_set", "third", map[string]any{"private": true}, codeDenied)
+	a.expectError(t, "room_set", "third", map[string]any{"private": true}, CodeDenied)
 	// Not counted: a public room, a private thread of a public room, and a
 	// thread of a private room, whose members alone can be added to it.
 	saveRoom(t, a, "open", map[string]any{"title": "Open"})
@@ -1219,7 +1219,7 @@ func TestPrivateRoomsPerUserBound(t *testing.T) {
 	// b is in two private rooms of its own, so nobody can add b to another.
 	full, _ := saveRoom(t, b, "b1", map[string]any{"private": true})
 	saveRoom(t, b, "b2", map[string]any{"private": true})
-	a.expectError(t, "room_join", "full", map[string]any{"room_id": first, "user_id": b.userID}, codeDenied)
+	a.expectError(t, "room_join", "full", map[string]any{"room_id": first, "user_id": b.userID}, CodeDenied)
 	b.expectQuiet(t)
 	// Leaving one makes room for the next.
 	leaveRoom(t, b, full)
@@ -1229,7 +1229,7 @@ func TestPrivateRoomsPerUserBound(t *testing.T) {
 	if joined := joinedRecord(t, b.read(t), b.userID); joined["room_id"] != first || joined["private"] != true {
 		t.Fatalf("b's room_update: %#v", joined)
 	}
-	b.expectError(t, "room_set", "b3", map[string]any{"private": true}, codeDenied)
+	b.expectError(t, "room_set", "b3", map[string]any{"private": true}, CodeDenied)
 	// Adding someone already in the room changes nothing, bound or not.
 	a.result(t, "room_join", "again", map[string]any{"room_id": first, "user_id": b.userID})
 }
@@ -1264,17 +1264,17 @@ func TestPrivateRoomsAndMembershipByUserID(t *testing.T) {
 
 	// To anyone else these rooms, their threads, and their messages are unknown.
 	for _, roomID := range []string{room, thread, aside} {
-		b.expectError(t, "history", b.nextID("history"), map[string]any{"room_id": roomID}, codeInvalidParams)
-		b.expectError(t, "room_join", b.nextID("join"), map[string]any{"room_id": roomID}, codeInvalidParams)
-		b.expectError(t, "room_list", b.nextID("list"), map[string]any{"room_id": roomID}, codeInvalidParams)
-		b.expectError(t, "message", b.nextID("post"), map[string]any{"room_id": roomID, "body": map[string]any{"text": "hi"}}, codeInvalidParams)
-		b.expectError(t, "room_set", b.nextID("set"), map[string]any{"room_id": roomID, "title": "Mine"}, codeInvalidParams)
-		b.expectError(t, "command", b.nextID("help"), map[string]any{"room_id": roomID, "body": map[string]any{"text": "/help"}}, codeInvalidParams)
+		b.expectError(t, "history", b.nextID("history"), map[string]any{"room_id": roomID}, CodeInvalidParams)
+		b.expectError(t, "room_join", b.nextID("join"), map[string]any{"room_id": roomID}, CodeInvalidParams)
+		b.expectError(t, "room_list", b.nextID("list"), map[string]any{"room_id": roomID}, CodeInvalidParams)
+		b.expectError(t, "message", b.nextID("post"), map[string]any{"room_id": roomID, "body": map[string]any{"text": "hi"}}, CodeInvalidParams)
+		b.expectError(t, "room_set", b.nextID("set"), map[string]any{"room_id": roomID, "title": "Mine"}, CodeInvalidParams)
+		b.expectError(t, "command", b.nextID("help"), map[string]any{"room_id": roomID, "body": map[string]any{"text": "/help"}}, CodeInvalidParams)
 	}
-	b.expectError(t, "room_list", "threads", map[string]any{"parent_room_id": room}, codeInvalidParams)
-	b.expectError(t, "room_set", "nested", map[string]any{"parent_room_id": room}, codeInvalidParams)
-	b.expectError(t, "reactions", "react", map[string]any{"message_id": secret, "emojis": []any{"👀"}}, codeInvalidParams)
-	b.expectError(t, "message", "reply", map[string]any{"body": map[string]any{"text": "re"}, "reply_to": map[string]any{"message_id": secret}}, codeInvalidParams)
+	b.expectError(t, "room_list", "threads", map[string]any{"parent_room_id": room}, CodeInvalidParams)
+	b.expectError(t, "room_set", "nested", map[string]any{"parent_room_id": room}, CodeInvalidParams)
+	b.expectError(t, "reactions", "react", map[string]any{"message_id": secret, "emojis": []any{"👀"}}, CodeInvalidParams)
+	b.expectError(t, "message", "reply", map[string]any{"body": map[string]any{"text": "re"}, "reply_to": map[string]any{"message_id": secret}}, CodeInvalidParams)
 	listed := listRooms(t, b, map[string]any{})
 	if ids := roomIDs(t, listed["not_joined"]); slices.Contains(ids, room) {
 		t.Fatalf("private room listed to a non-member: %v", ids)
@@ -1285,10 +1285,10 @@ func TestPrivateRoomsAndMembershipByUserID(t *testing.T) {
 
 	// Only members may add others; adding someone gives them the room.
 	open, _ := saveRoom(t, a, "open", map[string]any{"title": "Open"})
-	b.expectError(t, "room_join", "not-a-member", map[string]any{"room_id": open, "user_id": "guest_3"}, codeDenied)
-	a.expectError(t, "room_join", "unknown-user", map[string]any{"room_id": room, "user_id": "nobody"}, codeInvalidParams)
-	a.expectError(t, "room_join", "empty-user", map[string]any{"room_id": room, "user_id": ""}, codeInvalidParams)
-	a.expectError(t, "room_join", "spaced-user", map[string]any{"room_id": room, "user_id": "guest 2"}, codeInvalidParams)
+	b.expectError(t, "room_join", "not-a-member", map[string]any{"room_id": open, "user_id": "guest_3"}, CodeDenied)
+	a.expectError(t, "room_join", "unknown-user", map[string]any{"room_id": room, "user_id": "nobody"}, CodeInvalidParams)
+	a.expectError(t, "room_join", "empty-user", map[string]any{"room_id": room, "user_id": ""}, CodeInvalidParams)
+	a.expectError(t, "room_join", "spaced-user", map[string]any{"room_id": room, "user_id": "guest 2"}, CodeInvalidParams)
 	before, result := a.request(t, "room_join", "add", map[string]any{"room_id": room, "user_id": "guest_2"})
 	if len(result) != 0 || !reflect.DeepEqual(methods(before), []string{"room_update"}) {
 		t.Fatalf("adding a member: %#v then %#v", before, result)
@@ -1311,7 +1311,7 @@ func TestPrivateRoomsAndMembershipByUserID(t *testing.T) {
 	b.expectQuiet(t)
 	// Its threads are for its members: someone outside it cannot be added
 	// to one.
-	a.expectError(t, "room_join", "outsider", map[string]any{"room_id": thread, "user_id": "guest_3"}, codeDenied)
+	a.expectError(t, "room_join", "outsider", map[string]any{"room_id": thread, "user_id": "guest_3"}, CodeDenied)
 	joinRoom(t, b, thread)
 	expectMembership(t, a, thread, "guest_2", true)
 	other, _ := saveRoom(t, a, "other-thread", map[string]any{"parent_room_id": room, "title": "Other", "private": false})
@@ -1325,13 +1325,13 @@ func TestPrivateRoomsAndMembershipByUserID(t *testing.T) {
 	public, _ := save(t, a, "public", map[string]any{"body": map[string]any{"text": "in general"}})
 	b.notification(t, "message")
 	c.notification(t, "message")
-	a.expectError(t, "message", "into-private", map[string]any{"message_id": public, "room_id": room, "body": map[string]any{"text": "in general"}}, codeDenied)
+	a.expectError(t, "message", "into-private", map[string]any{"message_id": public, "room_id": room, "body": map[string]any{"text": "in general"}}, CodeDenied)
 	moved, _ := save(t, a, "into-thread", map[string]any{"message_id": secret, "room_id": thread, "body": map[string]any{"text": "just us"}})
 	b.notification(t, "message")
 	if moved != secret {
 		t.Fatalf("moved message: %s", moved)
 	}
-	a.expectError(t, "message", "into-aside", map[string]any{"message_id": secret, "room_id": aside, "body": map[string]any{"text": "just us"}}, codeDenied)
+	a.expectError(t, "message", "into-aside", map[string]any{"message_id": secret, "room_id": aside, "body": map[string]any{"text": "just us"}}, CodeDenied)
 	c.expectQuiet(t)
 	// private is fixed at creation.
 	_, edited := saveRoom(t, b, "edit", map[string]any{"room_id": room, "title": "DM", "private": false})
@@ -1341,7 +1341,7 @@ func TestPrivateRoomsAndMembershipByUserID(t *testing.T) {
 	roomUpdated(t, a, "updated")
 
 	// Removing someone else is for the room's creator and moderators.
-	b.expectError(t, "room_leave", "remove-creator", map[string]any{"room_id": room, "user_id": "guest_1"}, codeDenied)
+	b.expectError(t, "room_leave", "remove-creator", map[string]any{"room_id": room, "user_id": "guest_1"}, CodeDenied)
 	before, result = a.request(t, "room_leave", "remove", map[string]any{"room_id": room, "user_id": "guest_2"})
 	if len(result) != 0 || !reflect.DeepEqual(methods(before), []string{"room_update", "room_update"}) {
 		t.Fatalf("removing a member: %#v then %#v", before, result)
@@ -1355,7 +1355,7 @@ func TestPrivateRoomsAndMembershipByUserID(t *testing.T) {
 		t.Fatalf("removed member's update for a thread they had not joined: %#v", left)
 	}
 	for _, roomID := range []string{room, thread} {
-		b.expectError(t, "history", b.nextID("after-removal"), map[string]any{"room_id": roomID}, codeInvalidParams)
+		b.expectError(t, "history", b.nextID("after-removal"), map[string]any{"room_id": roomID}, CodeInvalidParams)
 	}
 	save(t, a, "after", map[string]any{"room_id": thread, "body": map[string]any{"text": "without b"}})
 	b.expectQuiet(t)
@@ -1465,7 +1465,7 @@ func TestMovesAndRepliesOutOfPrivateRooms(t *testing.T) {
 	a, b := clients[0], clients[1]
 	room, _ := saveRoom(t, a, "room", map[string]any{"title": "P", "private": true})
 	id, _ := save(t, a, "secret", map[string]any{"room_id": room, "body": map[string]any{"text": "now public"}})
-	a.expectError(t, "message", "reply", map[string]any{"body": map[string]any{"text": "re"}, "reply_to": map[string]any{"message_id": id}}, codeDenied)
+	a.expectError(t, "message", "reply", map[string]any{"body": map[string]any{"text": "re"}, "reply_to": map[string]any{"message_id": id}}, CodeDenied)
 	_, moved := save(t, a, "move", map[string]any{"message_id": id, "room_id": "general", "body": map[string]any{"text": "now public"}})
 	seen := b.notification(t, "message")
 	if _, has := seen["prev_room_id"]; has || !reflect.DeepEqual(seen, moved) {

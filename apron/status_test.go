@@ -185,7 +185,7 @@ func TestStatusValuesAndDerivation(t *testing.T) {
 	}
 	// room_id scopes only mute, so room_id without mute is invalid_params
 	// and changes nothing (§4.5).
-	b.statusError(t, map[string]any{"room_id": "general", "idle": 300}, codeInvalidParams)
+	b.statusError(t, map[string]any{"room_id": "general", "idle": 300}, CodeInvalidParams)
 	a.expectQuiet(t)
 	b.status(t, map[string]any{"idle": 300})
 	expectStatus(t, a, b.userID, "idle")
@@ -245,7 +245,7 @@ func TestStatusValuesAndDerivation(t *testing.T) {
 	a.expectQuiet(t)
 	b.expectQuiet(t)
 	// Not a string, it is invalid.
-	b.expectError(t, "me", "bad", map[string]any{"status": true}, codeInvalidParams)
+	b.expectError(t, "me", "bad", map[string]any{"status": true}, CodeInvalidParams)
 
 	// online again derives the status from the connections, idle here.
 	if got := setStatus(t, b, "online"); got != "online" {
@@ -440,7 +440,7 @@ func TestMuteEchoToAllConnections(t *testing.T) {
 		// idle is false or seconds since attention stopped (§4.5.3).
 		{"mute": true, "idle": true}, {"mute": true, "idle": -1}, {"mute": true, "idle": 1.5}, {"mute": true, "idle": nil},
 	} {
-		second.statusError(t, params, codeInvalidParams)
+		second.statusError(t, params, CodeInvalidParams)
 	}
 	first.expectQuiet(t)
 	second.expectQuiet(t)
@@ -521,9 +521,9 @@ func TestAfterAuthMutesAndStatuses(t *testing.T) {
 	watching(c)
 	c.write(t, map[string]any{"method": "status", "params": map[string]any{"mute": false}})
 	c.write(t, map[string]any{"method": "status", "params": map[string]any{"idle": 300}})
-	c.statusError(t, map[string]any{"mute": false}, codeDenied)
-	c.statusError(t, map[string]any{"idle": 300}, codeDenied)
-	c.statusError(t, map[string]any{"room_id": "missing", "mute": true}, codeDenied)
+	c.statusError(t, map[string]any{"mute": false}, CodeDenied)
+	c.statusError(t, map[string]any{"idle": 300}, CodeDenied)
+	c.statusError(t, map[string]any{"room_id": "missing", "mute": true}, CodeDenied)
 	before, _ := c.request(t, "auth", "resume", map[string]any{"scheme": "token", "token": registered["token"]})
 	if len(before) != 0 {
 		t.Fatalf("frames before the auth result: %#v", before)
@@ -679,11 +679,11 @@ func TestRoomIDScopesOnlyMute(t *testing.T) {
 	a.drain(t)
 
 	// A mute of a room the user cannot see changes nothing.
-	b.statusError(t, map[string]any{"room_id": "missing", "idle": 300, "mute": true}, codeInvalidParams)
+	b.statusError(t, map[string]any{"room_id": "missing", "idle": 300, "mute": true}, CodeInvalidParams)
 	a.expectQuiet(t)
 	// Without a mute, room_id is invalid_params (§4.5), and the idle beside
 	// it does not apply either.
-	b.statusError(t, map[string]any{"room_id": "missing", "idle": 300}, codeInvalidParams)
+	b.statusError(t, map[string]any{"room_id": "missing", "idle": 300}, CodeInvalidParams)
 	a.expectQuiet(t)
 	if frames := b.status(t, map[string]any{"idle": 300}); len(frames) != 0 {
 		t.Fatalf("frames after an idle: %#v", frames)
@@ -736,8 +736,8 @@ func TestStatusIsARequest(t *testing.T) {
 		raw(frame)
 	}
 	b.expectQuiet(t)
-	b.statusError(t, map[string]any{"idle": 300}, codeDenied)
-	b.statusError(t, map[string]any{"mute": true}, codeDenied)
+	b.statusError(t, map[string]any{"idle": 300}, CodeDenied)
+	b.statusError(t, map[string]any{"mute": true}, CodeDenied)
 
 	guestAuth(t, b)
 	expectMembership(t, a, "general", b.userID, true)
@@ -771,14 +771,14 @@ func TestStatusIsARequest(t *testing.T) {
 	}
 	// A bad id or params are answered like those of any request.
 	raw(`{"method":"status","id":5,"params":{"idle":false}}`)
-	if reply := b.read(t); reply["id"] != nil || reply["error"].(map[string]any)["code"] != float64(codeInvalidRequest) {
+	if reply := b.read(t); reply["id"] != nil || reply["error"].(map[string]any)["code"] != float64(CodeInvalidRequest) {
 		t.Fatalf("bad id on status: %#v", reply)
 	}
 	raw(`{"method":"status","id":"bad-params","params":[]}`)
-	if reply := b.read(t); reply["id"] != "bad-params" || reply["error"].(map[string]any)["code"] != float64(codeInvalidParams) {
+	if reply := b.read(t); reply["id"] != "bad-params" || reply["error"].(map[string]any)["code"] != float64(CodeInvalidParams) {
 		t.Fatalf("bad params on status: %#v", reply)
 	}
-	b.statusError(t, map[string]any{"idle": "no"}, codeInvalidParams)
+	b.statusError(t, map[string]any{"idle": "no"}, CodeInvalidParams)
 	a.expectQuiet(t)
 	b.status(t, map[string]any{"idle": false})
 	expectStatus(t, a, b.userID, "online")
@@ -803,7 +803,7 @@ func TestStatusRateLimit(t *testing.T) {
 	for range statusRequestBurst + 2 {
 		frame := b.read(t)
 		if failure, ok := frame["error"].(map[string]any); ok {
-			if failure["code"] != float64(codeRetryAfter) {
+			if failure["code"] != float64(CodeRetryAfter) {
 				t.Fatalf("status beyond the burst: %#v", frame)
 			}
 			limited++
@@ -823,7 +823,7 @@ func TestStatusRateLimit(t *testing.T) {
 	for _, params := range []map[string]any{
 		{"idle": false}, {"mute": false}, {"room_id": "general", "mute": true},
 	} {
-		failure := b.statusError(t, params, codeRetryAfter)
+		failure := b.statusError(t, params, CodeRetryAfter)
 		if wait, _ := failure["data"].(map[string]any)["retry_after"].(float64); wait < 1 {
 			t.Fatalf("retry_after of %#v: %#v", params, failure)
 		}
@@ -983,7 +983,7 @@ func TestMeStatusChangesAreLimited(t *testing.T) {
 	}
 	expectProfileStatus(t, a, b.userID, "dnd")
 	frame := b.call(t, "me", statusID(), map[string]any{"status": "online", "name": "Bea"})
-	if failure, ok := frame["error"].(map[string]any); !ok || failure["code"] != float64(codeRetryAfter) {
+	if failure, ok := frame["error"].(map[string]any); !ok || failure["code"] != float64(CodeRetryAfter) {
 		t.Fatalf("me beyond the limit: %#v", frame)
 	}
 	if got := setStatus(t, b, "dnd"); got != "dnd" {
@@ -1011,7 +1011,7 @@ func TestRoomMutesAreBounded(t *testing.T) {
 		u.roomMutes[fmt.Sprintf("gone-%d", i)] = muteState{forever: true}
 	}
 	app.unlock()
-	c.statusError(t, map[string]any{"room_id": "general", "mute": 60}, codeDenied)
+	c.statusError(t, map[string]any{"room_id": "general", "mute": 60}, CodeDenied)
 	expectEcho(t, c, map[string]any{"room_id": room, "mute": 60}, room, float64(60))
 	expectEcho(t, c, map[string]any{"room_id": "general", "mute": false}, "general", false)
 	expectEcho(t, c, map[string]any{"room_id": room, "mute": false}, room, false)

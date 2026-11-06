@@ -155,7 +155,7 @@ func TestInviteDeviceSignsInFromAnyOrigin(t *testing.T) {
 
 	stranger, _ := dialOrigin(t, httpServer, otherOrigin)
 	forged := stranger.call(t, "auth", "forged", map[string]any{"scheme": "token", "token": "apron_device_" + strings.Repeat("A", 43)})
-	expectFailure(t, forged["error"].(map[string]any), codeDenied, invalidDeviceToken)
+	expectFailure(t, forged["error"].(map[string]any), CodeDenied, invalidDeviceToken)
 }
 
 func TestInviteDeviceLinkUsesThePublicURL(t *testing.T) {
@@ -178,10 +178,10 @@ func TestInviteDeviceNames(t *testing.T) {
 	_, httpServer := passkeyTestServer(t)
 	ada, adaID := passkeyAccount(t, httpServer)
 	for _, args := range []string{"", "phone tablet"} {
-		expectFailure(t, commandError(t, ada, "/invite-device "+args), codeInvalidParams, "Usage: /invite-device <name>")
+		expectFailure(t, commandError(t, ada, "/invite-device "+args), CodeInvalidParams, "Usage: /invite-device <name>")
 	}
 	for _, name := range []string{"-phone", ".phone", "_phone", "ph/one", "phöne", strings.Repeat("a", 33)} {
-		expectFailure(t, commandError(t, ada, "/invite-device "+name), codeInvalidParams, "A device name is 1 to 32 letters, digits, _, . or -, starting with a letter or digit")
+		expectFailure(t, commandError(t, ada, "/invite-device "+name), CodeInvalidParams, "A device name is 1 to 32 letters, digits, _, . or -, starting with a letter or digit")
 	}
 	inviteDevice(t, ada, adaID, strings.Repeat("a", 32), false, wsURL(httpServer))
 	inviteDevice(t, ada, adaID, "9", false, wsURL(httpServer))
@@ -194,10 +194,10 @@ func TestInviteDeviceHoldsThreeNames(t *testing.T) {
 	for _, name := range []string{"phone", "tablet", "laptop"} {
 		inviteDevice(t, ada, adaID, name, false, link)
 	}
-	expectFailure(t, commandError(t, ada, "/invite-device watch"), codeDenied,
+	expectFailure(t, commandError(t, ada, "/invite-device watch"), CodeDenied,
 		"You have 3 device tokens (`phone`, `tablet`, `laptop`); run /invite-device with one of those names to replace its token")
 	inviteDevice(t, ada, adaID, "tablet", true, link)
-	expectFailure(t, commandError(t, ada, "/invite-device watch"), codeDenied,
+	expectFailure(t, commandError(t, ada, "/invite-device watch"), CodeDenied,
 		"You have 3 device tokens (`phone`, `laptop`, `tablet`); run /invite-device with one of those names to replace its token")
 }
 
@@ -215,14 +215,14 @@ func TestInviteDeviceReplacesTheNamesToken(t *testing.T) {
 	other.result(t, "push_register", "tablet-push", map[string]any{"kind": "relay", "url": "https://push.example/tablet"})
 
 	current := inviteDevice(t, ada, adaID, "phone", true, link)
-	expectClosedWithError(t, phone, codeDenied, "Device token replaced; sign in with the new one")
+	expectClosedWithError(t, phone, CodeDenied, "Device token replaced; sign in with the new one")
 	ada.expectQuiet(t)
 	other.expectQuiet(t)
 	if urls := pushURLs(app, adaID); !slices.Equal(urls, []string{"https://push.example/ada", "https://push.example/tablet"}) {
 		t.Fatalf("push registrations after a replacement: %q", urls)
 	}
 	again, _ := dialRaw(t, httpServer)
-	expectFailure(t, again.call(t, "auth", "old", map[string]any{"scheme": "token", "token": old})["error"].(map[string]any), codeDenied, invalidDeviceToken)
+	expectFailure(t, again.call(t, "auth", "old", map[string]any{"scheme": "token", "token": old})["error"].(map[string]any), CodeDenied, invalidDeviceToken)
 
 	// The asking connection stays open when it signed in with the token it
 	// replaces, and counts as signed in with the new one, so the next
@@ -231,7 +231,7 @@ func TestInviteDeviceReplacesTheNamesToken(t *testing.T) {
 	inviteDevice(t, phone, adaID, "phone", true, link)
 	phone.expectQuiet(t)
 	inviteDevice(t, ada, adaID, "phone", true, link)
-	expectClosedWithError(t, phone, codeDenied, "Device token replaced; sign in with the new one")
+	expectClosedWithError(t, phone, CodeDenied, "Device token replaced; sign in with the new one")
 	other.expectQuiet(t)
 }
 
@@ -252,13 +252,13 @@ func TestInviteDeviceClosesADeviceThatGotASessionToken(t *testing.T) {
 	phone.drain(t)
 
 	inviteDevice(t, ada, adaID, "phone", true, link)
-	expectClosedWithError(t, phone, codeDenied, "Device token replaced; sign in with the new one")
+	expectClosedWithError(t, phone, CodeDenied, "Device token replaced; sign in with the new one")
 }
 
 func TestInviteDeviceDeniesGuests(t *testing.T) {
 	_, httpServer := passkeyTestServer(t)
 	guest := dialTestClient(t, httpServer)
-	expectFailure(t, commandError(t, guest, "/invite-device phone"), codeDenied, "Sign in with a passkey or email to use /invite-device")
+	expectFailure(t, commandError(t, guest, "/invite-device phone"), CodeDenied, "Sign in with a passkey or email to use /invite-device")
 	if text := privateReply(t, guest, "/help"); strings.Contains(text, "invite-device") {
 		t.Fatalf("a guest's /help: %q", text)
 	}
@@ -311,9 +311,9 @@ func TestDeviceTokensSurviveRestart(t *testing.T) {
 				}
 			}
 			stale, _ := dialRaw(t, httpServer)
-			stale.expectError(t, "auth", "replaced", map[string]any{"scheme": "token", "token": replaced}, codeDenied)
+			stale.expectError(t, "auth", "replaced", map[string]any{"scheme": "token", "token": replaced}, CodeDenied)
 			device, _ := deviceSignIn(t, httpServer, "", tablet)
-			expectFailure(t, commandError(t, device, "/invite-device watch"), codeDenied,
+			expectFailure(t, commandError(t, device, "/invite-device watch"), CodeDenied,
 				"You have 3 device tokens (`phone`, `tablet`, `laptop`); run /invite-device with one of those names to replace its token")
 			inviteDevice(t, device, adaID, "phone", true, wsURL(httpServer))
 			if urls := pushURLs(app, adaID); !slices.Equal(urls, []string{"https://push.example/tablet", "https://push.example/untagged"}) {

@@ -172,9 +172,9 @@ const serverUsage = "Usage: /server to show the server's title, description, and
 // may use it. A change sends every connection a new server frame: at once
 // for the title, the description, and a cleared avatar, and when the
 // upload's write finishes for a new avatar.
-func (s *Server) serverCommand(c *client, r *roomState, body map[string]any, args, _ string) (map[string]any, *rpcError) {
+func (s *Server) serverCommand(c *client, r *roomState, body map[string]any, args, _ string) (map[string]any, *Error) {
 	if !c.user.hasRole("admin") {
-		return nil, &rpcError{Code: codeDenied, Message: "Only an admin can see and change the server's title, description, and avatar"}
+		return nil, &Error{Code: CodeDenied, Message: "Only an admin can see and change the server's title, description, and avatar"}
 	}
 	field, value := args, ""
 	if i := strings.IndexFunc(args, unicode.IsSpace); i >= 0 {
@@ -188,7 +188,7 @@ func (s *Server) serverCommand(c *client, r *roomState, body map[string]any, arg
 	var done string
 	switch field {
 	case "":
-		c.enqueue(privateNotice(r, s.profileNoticeLocked()))
+		c.enqueue(privateNotice(r.id, s.profileNoticeLocked()))
 		return map[string]any{}, nil
 	case "title":
 		title, err := serverTitle(value)
@@ -220,7 +220,7 @@ func (s *Server) serverCommand(c *client, r *roomState, body map[string]any, arg
 			return nil, invalidParams("/server avatar takes exactly one upload embed: attach an image")
 		}
 		if !clientsLoad(c.baseURL) {
-			return nil, &rpcError{Code: codeDenied, Message: serverAvatarNeedHTTPS}
+			return nil, &Error{Code: CodeDenied, Message: serverAvatarNeedHTTPS}
 		}
 		s.embedNumber++
 		e := s.newWriteLocked(c, fmt.Sprintf("embed_%d", s.embedNumber), "upload", "")
@@ -231,7 +231,7 @@ func (s *Server) serverCommand(c *client, r *roomState, body map[string]any, arg
 	default:
 		return nil, invalidParams(serverUsage)
 	}
-	c.enqueue(privateNotice(r, done+"\n\n"+s.profileNoticeLocked()))
+	c.enqueue(privateNotice(r.id, done+"\n\n"+s.profileNoticeLocked()))
 	return map[string]any{}, nil
 }
 
@@ -255,7 +255,7 @@ func (s *Server) setProfileTextLocked(field string, target *string, value string
 // serverTitle validates a title as a display name (§3.3): one line,
 // prepared with the PRECIS Nickname profile, at most maxNameRunes. Empty
 // clears it.
-func serverTitle(value string) (string, *rpcError) {
+func serverTitle(value string) (string, *Error) {
 	if value == "" {
 		return "", nil
 	}
@@ -267,7 +267,7 @@ func serverTitle(value string) (string, *rpcError) {
 		return "", invalidParams("%q cannot be a title; use visible letters, digits, or symbols", value)
 	}
 	if utf8.RuneCountInString(title) > maxNameRunes {
-		return "", &rpcError{Code: codeTooLarge, Message: fmt.Sprintf("A title is at most %d characters", maxNameRunes)}
+		return "", &Error{Code: CodeTooLarge, Message: fmt.Sprintf("A title is at most %d characters", maxNameRunes)}
 	}
 	return title, nil
 }
@@ -275,13 +275,13 @@ func serverTitle(value string) (string, *rpcError) {
 // serverDescription validates a description: CommonMark of at most
 // maxServerDescriptionBytes, without control characters other than line
 // breaks. Empty clears it.
-func serverDescription(value string) (string, *rpcError) {
+func serverDescription(value string) (string, *Error) {
 	value = strings.ReplaceAll(value, "\r\n", "\n")
 	if strings.ContainsFunc(value, func(r rune) bool { return r != '\n' && unicode.IsControl(r) }) {
 		return "", invalidParams("A description holds no control characters other than line breaks")
 	}
 	if len(value) > maxServerDescriptionBytes {
-		return "", &rpcError{Code: codeTooLarge, Message: fmt.Sprintf("A description is at most %d bytes", maxServerDescriptionBytes)}
+		return "", &Error{Code: CodeTooLarge, Message: fmt.Sprintf("A description is at most %d bytes", maxServerDescriptionBytes)}
 	}
 	return value, nil
 }

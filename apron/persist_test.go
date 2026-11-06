@@ -192,7 +192,7 @@ func TestStateSurvivesRestart(t *testing.T) {
 				t.Fatalf("guest ID %s reissued", next.userID)
 			}
 			// A private room stays private.
-			next.expectError(t, "history", "private", map[string]any{"room_id": ops}, codeInvalidParams)
+			next.expectError(t, "history", "private", map[string]any{"room_id": ops}, CodeInvalidParams)
 			// A new message's log_id follows every restored record.
 			resumed.drain(t)
 			id, _ := save(t, resumed, "after", map[string]any{"body": map[string]any{"text": "after"}})
@@ -327,7 +327,7 @@ func TestRolesAndWelcome(t *testing.T) {
 	room, _ := saveRoom(t, guest, "room", map[string]any{"title": "Mine"})
 	ada.result(t, "room_leave", "remove", map[string]any{"room_id": room, "user_id": guest.userID})
 	expectLeft(t, guest, room, guest.userID)
-	guest.expectError(t, "room_leave", "remove-admin", map[string]any{"room_id": "general", "user_id": adaID}, codeDenied)
+	guest.expectError(t, "room_leave", "remove-admin", map[string]any{"room_id": "general", "user_id": adaID}, CodeDenied)
 }
 
 // dumpLocked renders the whole state as the entries a store holding it

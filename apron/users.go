@@ -39,10 +39,22 @@ type userState struct {
 	// email is the account's sign-in address (§4.11), lowercased; empty for
 	// guests and passkey users without one.
 	email string
-	// roles are the server roles (§3.3) Config.Roles grants the account,
-	// sorted; guests have none. They are derived from the configuration, not
-	// stored.
+	// roles are the server roles (§3.3) the account holds, sorted; guests
+	// have none. They are derived from Config.Roles, granted, and bot
+	// (grantRolesLocked), and not stored themselves.
 	roles []string
+	// granted are the roles the account's latest external sign-in granted
+	// it (§4.11.5).
+	granted []string
+	// created is when the user was made; zero for users stored before it
+	// was kept.
+	created time.Time
+	// bot marks an account an Extension signs in with Host.Session, which
+	// holds the "bot" role (§3.3.4).
+	bot bool
+	// external is the identity of an account external sign-in made
+	// (§4.11.5), as its provider names it; empty for others.
+	external string
 	// avatarEmbed is the hosted /avatar upload behind avatar, if any.
 	avatarEmbed *embedState
 
@@ -112,6 +124,7 @@ func newUserState(id, name string) *userState {
 		status:    statusOffline,
 		pushes:    make(map[string]*pushRegistration),
 		pings:     make(map[string]int64),
+		created:   time.Now(),
 	}
 }
 
@@ -130,11 +143,11 @@ func (u *userState) from() map[string]any {
 	return u.fromValue
 }
 
-// account reports whether the user signed in with a credential, a passkey
-// or an email address, so it persists across connections and restarts,
-// rather than being a guest.
+// account reports whether the user signed in with a credential (a passkey,
+// an email address, or an external identity) or is an Extension's bot, so
+// it persists across connections and restarts, rather than being a guest.
 func (u *userState) account() bool {
-	return u.passkey != nil || u.email != ""
+	return u.passkey != nil || u.email != "" || u.bot || u.external != ""
 }
 
 // hasRole reports whether the user holds a server role.
@@ -168,7 +181,7 @@ type dedupEntry struct {
 	fingerprint [32]byte
 	done        chan struct{}
 	result      any
-	err         *rpcError
+	err         *Error
 }
 
 // dedupCache keeps the most recent request IDs of one user. Guarded by s.mu.
@@ -311,7 +324,7 @@ func (s *Server) roomNamedLocked(id string) bool {
 	return s.rooms[id] != nil || strings.EqualFold(id, defaultRoomID)
 }
 
-func (s *Server) authenticate(c *client, req request) (any, *rpcError) {
+func (s *Server) authenticate(c *client, req request) (any, *Error) {
 	s.mu.Lock()
 	defer s.unlock()
 	scheme, err := parseString(req.params, "scheme", true)
@@ -323,21 +336,24 @@ func (s *Server) authenticate(c *client, req request) (any, *rpcError) {
 	switch scheme {
 	case "webauthn":
 		if s.config.WebAuthn == nil {
-			return nil, &rpcError{Code: codeUnsupported, Message: "Passkeys are disabled"}
+			return nil, &Error{Code: CodeUnsupported, Message: "Passkeys are disabled"}
 		}
 	case "email":
 		if s.config.EmailSender == nil {
-			return nil, &rpcError{Code: codeUnsupported, Message: "Email sign-in is disabled"}
+			return nil, &Error{Code: CodeUnsupported, Message: "Email sign-in is disabled"}
 		}
 	case "external":
-		// This server has no sign-in page (§4.11.5). One would propose
-		// here, and approve with approveLocked, which takes either scheme.
-		return nil, &rpcError{Code: codeUnsupported, Message: "External sign-in is not offered"}
+		if s.external == nil {
+			return nil, &Error{Code: CodeUnsupported, Message: "External sign-in is not offered"}
+		}
 	case "token":
-		if s.config.WebAuthn == nil && s.config.EmailSender == nil {
-			return nil, &rpcError{Code: codeUnsupported, Message: "This server has no sign-in sessions; use guest"}
+		if s.config.WebAuthn == nil && s.config.EmailSender == nil && s.external == nil {
+			return nil, &Error{Code: CodeUnsupported, Message: "This server has no sign-in sessions; use guest"}
 		}
 	case "guest":
+		if s.config.DisableGuests {
+			return nil, &Error{Code: CodeUnsupported, Message: "This server has no guests; sign in with an account"}
+		}
 	default:
 		// A request that depends on a name the server does not know is
 		// invalid_params (§1).
@@ -363,6 +379,8 @@ func (s *Server) authenticate(c *client, req request) (any, *rpcError) {
 		return s.authenticateEmail(c, req)
 	case "token":
 		return s.authenticateToken(c, req)
+	case "external":
+		return s.authenticateExternal(c, req)
 	}
 	name, err := parseString(req.params, "name", false)
 	if err != nil {
@@ -586,7 +604,7 @@ func withCleared(profile map[string]any, cleared extObject) map[string]any {
 // user's limit on status changes (admitStatusLocked), beyond which the
 // request is retry_after and changes nothing. roles are not settable, and
 // like other unknown fields are ignored.
-func (s *Server) updateProfile(c *client, req request) (any, bool, *rpcError) {
+func (s *Server) updateProfile(c *client, req request) (any, bool, *Error) {
 	name, err := parseString(req.params, "name", false)
 	if err != nil {
 		return nil, false, err
@@ -612,7 +630,7 @@ func (s *Server) updateProfile(c *client, req request) (any, bool, *rpcError) {
 	u := c.user
 	if hasAvatar && avatar != "" && avatar != u.avatar && !validAvatar(avatar) {
 		if strings.HasPrefix(avatar, "data:") && len(avatar) > maxAvatarDataURLBytes {
-			return nil, false, &rpcError{Code: codeTooLarge, Message: fmt.Sprintf("An avatar data: URL is at most %d bytes; upload larger images with /avatar", maxAvatarDataURLBytes)}
+			return nil, false, &Error{Code: CodeTooLarge, Message: fmt.Sprintf("An avatar data: URL is at most %d bytes; upload larger images with /avatar", maxAvatarDataURLBytes)}
 		}
 		return nil, false, invalidParams("avatar must be an https: URL or a data:image URL of at most %d bytes; upload larger images with /avatar", maxAvatarDataURLBytes)
 	}
@@ -625,7 +643,7 @@ func (s *Server) updateProfile(c *client, req request) (any, bool, *rpcError) {
 	if hasExt {
 		ext = mergeExt(u.ext, extWrite)
 		if encodedSize(ext) > maxProfileExtBytes {
-			return nil, false, &rpcError{Code: codeTooLarge, Message: fmt.Sprintf("Your profile's ext would be over %d bytes", maxProfileExtBytes)}
+			return nil, false, &Error{Code: CodeTooLarge, Message: fmt.Sprintf("Your profile's ext would be over %d bytes", maxProfileExtBytes)}
 		}
 	}
 	// A status change counts against the user's limit on status changes,
@@ -695,7 +713,12 @@ func (s *Server) grantRolesLocked(u *userState) bool {
 				roles = append(roles, strings.ToLower(role))
 			}
 		}
+		roles = append(roles, u.granted...)
+		if u.bot {
+			roles = append(roles, "bot")
+		}
 		slices.Sort(roles)
+		roles = slices.Compact(roles)
 	}
 	if slices.Equal(roles, u.roles) {
 		return false

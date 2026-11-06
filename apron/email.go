@@ -147,6 +147,16 @@ type emailProposal struct {
 	// name and userID are what the proposing connection requested for a
 	// new account.
 	name, userID string
+
+	// An external proposal (§4.11.5) has no address. Its page names it at
+	// externalPath until the provider completes it with identity, which
+	// makes its code and link token; returnURL, on returnOrigin, is where
+	// the page sends the link, and server the WebSocket URL the link names.
+	external                bool
+	page                    string
+	identity                *Identity
+	returnURL, returnOrigin string
+	server                  string
 }
 
 // emailAddress is what the server keeps about one address, in memory only:
@@ -281,6 +291,9 @@ func evict(lru *list.List, scan int, forget func(value any) bool) bool {
 // dropProposalLocked forgets a proposal: its connection's, and its link.
 func (s *Server) dropProposalLocked(p *emailProposal) {
 	p.dropped = true
+	if p.page != "" && s.external != nil && s.external.pages[p.page] == p {
+		delete(s.external.pages, p.page)
+	}
 	if p.handle != "" && s.email.links[p.handle] == p {
 		delete(s.email.links, p.handle)
 	}
@@ -382,7 +395,7 @@ func webSocketURL(base string) string {
 // without token proposes, by email; one with token approves a proposal
 // (§4.11.3), which takes either scheme the server offers, or token
 // (authenticateToken).
-func (s *Server) authenticateEmail(c *client, req request) (any, *rpcError) {
+func (s *Server) authenticateEmail(c *client, req request) (any, *Error) {
 	if _, has := req.params["token"]; has {
 		return s.approveLocked(c, req)
 	}
@@ -391,7 +404,7 @@ func (s *Server) authenticateEmail(c *client, req request) (any, *rpcError) {
 
 // parseRequested parses the name and user_id that a proposal or an
 // approval may request for a new account.
-func parseRequested(req request) (name, requested string, err *rpcError) {
+func parseRequested(req request) (name, requested string, err *Error) {
 	if name, err = parseString(req.params, "name", false); err != nil {
 		return "", "", err
 	}
@@ -415,7 +428,7 @@ func parseRequested(req request) (name, requested string, err *rpcError) {
 // propose a few; and at most maxConcurrentEmailSends deliveries run at once.
 // Beyond any of these the request is retry_after, whether or not the
 // address has an account.
-func (s *Server) proposeEmailLocked(c *client, req request) (any, *rpcError) {
+func (s *Server) proposeEmailLocked(c *client, req request) (any, *Error) {
 	name, requested, err := parseRequested(req)
 	if err != nil {
 		return nil, err
@@ -425,7 +438,7 @@ func (s *Server) proposeEmailLocked(c *client, req request) (any, *rpcError) {
 		return nil, err
 	}
 	if len(state) > maxStateBytes {
-		return nil, &rpcError{Code: codeTooLarge, Message: fmt.Sprintf("state is at most %d bytes", maxStateBytes)}
+		return nil, &Error{Code: CodeTooLarge, Message: fmt.Sprintf("state is at most %d bytes", maxStateBytes)}
 	}
 	raw, err := parseString(req.params, "email", true)
 	if err != nil {
@@ -489,7 +502,7 @@ func (s *Server) proposeEmailLocked(c *client, req request) (any, *rpcError) {
 	number, randErr := rand.Int(rand.Reader, big.NewInt(1_000_000))
 	if randErr != nil {
 		<-s.email.slots
-		return nil, &rpcError{Code: codeInternalError, Message: "Unable to create a code"}
+		return nil, &Error{Code: CodeInternalError, Message: "Unable to create a code"}
 	}
 	budget.sends.AllowN(now, 1)
 	c.emailSends.AllowN(now, 1)
@@ -553,7 +566,7 @@ func (s *Server) newLinkHandleLocked() string {
 // the address to that account and returns {}. A token presented on a
 // connection that may not approve it is denied, and its proposal stays for
 // one that may.
-func (s *Server) approveLocked(c *client, req request) (any, *rpcError) {
+func (s *Server) approveLocked(c *client, req request) (any, *Error) {
 	token, err := parseString(req.params, "token", true)
 	if err != nil {
 		return nil, err
@@ -565,7 +578,10 @@ func (s *Server) approveLocked(c *client, req request) (any, *rpcError) {
 	now := time.Now()
 	p := s.proposalLocked(c, token, now)
 	if p == nil {
-		return nil, &rpcError{Code: codeDenied, Message: "The code is invalid or expired; ask for a new one"}
+		return nil, &Error{Code: CodeDenied, Message: "The code is invalid or expired; ask for a new one"}
+	}
+	if p.external {
+		return s.approveExternalLocked(c, req, p, name, requested, now)
 	}
 
 	if p.add {
@@ -574,14 +590,14 @@ func (s *Server) approveLocked(c *client, req request) (any, *rpcError) {
 		// other person's account.
 		account := c.user
 		if account == nil || account.id != p.accountID {
-			return nil, &rpcError{Code: codeDenied, Message: "Open this link where the account that asked for it is signed in"}
+			return nil, &Error{Code: CodeDenied, Message: "Open this link where the account that asked for it is signed in"}
 		}
 		s.dropProposalLocked(p)
 		switch {
 		case s.emails[p.email] != nil:
-			return nil, &rpcError{Code: codeDenied, Message: "This address belongs to an account"}
+			return nil, &Error{Code: CodeDenied, Message: "This address belongs to an account"}
 		case account.email != "":
-			return nil, &rpcError{Code: codeDenied, Message: "This account has an email address already"}
+			return nil, &Error{Code: CodeDenied, Message: "This account has an email address already"}
 		}
 		account.email = p.email
 		s.emails[p.email] = account
@@ -598,7 +614,7 @@ func (s *Server) approveLocked(c *client, req request) (any, *rpcError) {
 	// A sign-in authenticates a connection that is not signed in; the
 	// proposal stays for one that is not.
 	if c.user != nil {
-		return nil, &rpcError{Code: codeDenied, Message: "Sign-in codes work on a connection that is not signed in"}
+		return nil, &Error{Code: CodeDenied, Message: "Sign-in codes work on a connection that is not signed in"}
 	}
 	own := c.proposal == p
 	s.dropProposalLocked(p)
@@ -648,7 +664,7 @@ func (s *Server) proposalLocked(c *client, token string, now time.Time) *emailPr
 		s.dropProposalLocked(own)
 		c.proposal, own = nil, nil
 	}
-	if own != nil && subtle.ConstantTimeCompare([]byte(token), []byte(own.code)) == 1 {
+	if own != nil && own.code != "" && subtle.ConstantTimeCompare([]byte(token), []byte(own.code)) == 1 {
 		return own
 	}
 	target := own
@@ -686,9 +702,14 @@ func (s *Server) assignAccountIDLocked(requested string) string {
 	}
 }
 
+// RetryAfter is a CodeRetryAfter error suggesting wait, in whole seconds.
+func RetryAfter(message string, wait time.Duration) *Error {
+	return retryAfter(message, wait)
+}
+
 // retryAfter is a retry_after error suggesting wait, in whole seconds.
-func retryAfter(message string, wait time.Duration) *rpcError {
-	return &rpcError{Code: codeRetryAfter, Message: message, Data: map[string]any{"retry_after": seconds(wait)}}
+func retryAfter(message string, wait time.Duration) *Error {
+	return &Error{Code: CodeRetryAfter, Message: message, Data: map[string]any{"retry_after": seconds(wait)}}
 }
 
 // seconds rounds a wait up to whole seconds, at least one.

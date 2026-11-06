@@ -101,15 +101,15 @@ func TestMessagesAreLimitedToMaxEmbeds(t *testing.T) {
 		embeds[i] = map[string]any{"kind": "upload"}
 	}
 	// A count limit the server sets is denied (§1.1).
-	a.expectError(t, "message", "many", map[string]any{"room_id": "general", "body": map[string]any{"embeds": embeds}}, codeDenied)
+	a.expectError(t, "message", "many", map[string]any{"room_id": "general", "body": map[string]any{"embeds": embeds}}, CodeDenied)
 	mentions := make([]any, maxMentions+1)
 	for i := range mentions {
 		mentions[i] = fmt.Sprint("user", i)
 	}
-	a.expectError(t, "message", "mentions", map[string]any{"room_id": "general", "body": map[string]any{"text": "hi", "mentions": mentions}}, codeDenied)
-	a.expectError(t, "command", "command-mentions", map[string]any{"room_id": "general", "body": map[string]any{"text": "/help", "mentions": mentions}}, codeDenied)
+	a.expectError(t, "message", "mentions", map[string]any{"room_id": "general", "body": map[string]any{"text": "hi", "mentions": mentions}}, CodeDenied)
+	a.expectError(t, "command", "command-mentions", map[string]any{"room_id": "general", "body": map[string]any{"text": "/help", "mentions": mentions}}, CodeDenied)
 	// A malformed value stays invalid_params.
-	a.expectError(t, "message", "bad-mentions", map[string]any{"room_id": "general", "body": map[string]any{"text": "hi", "mentions": []any{""}}}, codeInvalidParams)
+	a.expectError(t, "message", "bad-mentions", map[string]any{"room_id": "general", "body": map[string]any{"text": "hi", "mentions": []any{""}}}, CodeInvalidParams)
 	a.expectQuiet(t)
 }
 
@@ -120,11 +120,11 @@ func TestRoomSetCountsTowardMessagesPerMinute(t *testing.T) {
 	a := dialTestClient(t, httpServer)
 	saveRoom(t, a, "create", map[string]any{"title": "Ops"})
 	frame := a.call(t, "room_set", "again", map[string]any{"title": "More"})
-	if failure, _ := frame["error"].(map[string]any); failure == nil || failure["code"] != float64(codeRetryAfter) {
+	if failure, _ := frame["error"].(map[string]any); failure == nil || failure["code"] != float64(CodeRetryAfter) {
 		t.Fatalf("second room_set: %#v", frame)
 	}
 	frame = a.call(t, "message", "post", map[string]any{"room_id": "general", "body": map[string]any{"text": "hi"}})
-	if failure, _ := frame["error"].(map[string]any); failure == nil || failure["code"] != float64(codeRetryAfter) {
+	if failure, _ := frame["error"].(map[string]any); failure == nil || failure["code"] != float64(CodeRetryAfter) {
 		t.Fatalf("message after room_set: %#v", frame)
 	}
 }
@@ -167,8 +167,8 @@ func TestProfileAndPushSizeLimits(t *testing.T) {
 	_, httpServer := newTestServer(t, config)
 	a := dialTestClient(t, httpServer)
 	// A value rejected for its size is too_large (§1.1).
-	a.expectError(t, "me", "ext", map[string]any{"ext": map[string]any{"x": strings.Repeat("y", maxProfileExtBytes)}}, codeTooLarge)
-	a.expectError(t, "push_register", "url", map[string]any{"kind": "relay", "url": "http://relay.example/" + strings.Repeat("p", maxPushURLBytes)}, codeTooLarge)
+	a.expectError(t, "me", "ext", map[string]any{"ext": map[string]any{"x": strings.Repeat("y", maxProfileExtBytes)}}, CodeTooLarge)
+	a.expectError(t, "push_register", "url", map[string]any{"kind": "relay", "url": "http://relay.example/" + strings.Repeat("p", maxPushURLBytes)}, CodeTooLarge)
 }
 
 func TestConnectionAndRateLimits(t *testing.T) {
@@ -181,7 +181,7 @@ func TestConnectionAndRateLimits(t *testing.T) {
 	// Over capacity: the server frame, then an error without id, then close.
 	b, _ := dialRaw(t, httpServer)
 	failure := b.read(t)
-	if _, has := failure["id"]; has || failure["error"].(map[string]any)["code"] != float64(codeRetryAfter) ||
+	if _, has := failure["id"]; has || failure["error"].(map[string]any)["code"] != float64(CodeRetryAfter) ||
 		failure["error"].(map[string]any)["data"].(map[string]any)["retry_after"] != float64(retryAfterSeconds) {
 		t.Fatalf("capacity error: %#v", failure)
 	}
@@ -190,7 +190,7 @@ func TestConnectionAndRateLimits(t *testing.T) {
 	save(t, a, "two", map[string]any{"body": map[string]any{"text": "2"}})
 	frame := a.call(t, "message", "three", map[string]any{"room_id": "general", "body": map[string]any{"text": "3"}})
 	limited := frame["error"].(map[string]any)
-	if limited["code"] != float64(codeRetryAfter) || limited["data"].(map[string]any)["retry_after"].(float64) < 1 {
+	if limited["code"] != float64(CodeRetryAfter) || limited["data"].(map[string]any)["retry_after"].(float64) < 1 {
 		t.Fatalf("rate limit: %#v", frame)
 	}
 }

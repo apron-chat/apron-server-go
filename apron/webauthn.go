@@ -100,7 +100,7 @@ func (s *Server) handleRelatedOrigins(w http.ResponseWriter, r *http.Request) {
 // authenticatePasskey runs under s.mu, with passkeys configured. One outstanding challenge is retained per
 // connection; finishing consumes it even on failure. Auth responses are never
 // deduplicated, so replay cannot resurrect a consumed challenge.
-func (s *Server) authenticatePasskey(c *client, req request) (any, *rpcError) {
+func (s *Server) authenticatePasskey(c *client, req request) (any, *Error) {
 	w := s.config.WebAuthn
 	action, rpcErr := parseString(req.params, "action", true)
 	if rpcErr != nil {
@@ -110,7 +110,7 @@ func (s *Server) authenticatePasskey(c *client, req request) (any, *rpcError) {
 		return nil, invalidParams("action must be a non-empty string")
 	}
 	if !protocol.IsOriginInHaystack(c.origin, w.Config.RPOrigins) {
-		return nil, &rpcError{Code: codeDenied, Message: "Frontend origin is not configured for passkeys"}
+		return nil, &Error{Code: CodeDenied, Message: "Frontend origin is not configured for passkeys"}
 	}
 	now := time.Now()
 	s.pruneSessionsLocked(now)
@@ -136,7 +136,7 @@ func (s *Server) authenticatePasskey(c *client, req request) (any, *rpcError) {
 	}
 }
 
-func (s *Server) beginPasskey(c *client, req request, action string, w *webauthn.WebAuthn, now time.Time) (any, *rpcError) {
+func (s *Server) beginPasskey(c *client, req request, action string, w *webauthn.WebAuthn, now time.Time) (any, *Error) {
 	// Starting any new ceremony replaces the previous pending one. The
 	// replacement happens before policy and library errors so a stale pending
 	// challenge can never be resumed after a new begin was attempted.
@@ -153,7 +153,7 @@ func (s *Server) beginPasskey(c *client, req request, action string, w *webauthn
 	identityID := ""
 	if action == "register" {
 		if c.user == nil {
-			return nil, &rpcError{Code: codeDenied, Message: "Sign in as a guest before adding a passkey"}
+			return nil, &Error{Code: CodeDenied, Message: "Sign in as a guest before adding a passkey"}
 		}
 		identityID = c.user.id
 		user = c.user.passkey
@@ -170,7 +170,7 @@ func (s *Server) beginPasskey(c *client, req request, action string, w *webauthn
 			name = normalizeName(requested)
 		}
 		if len(user.credentials) >= 10 {
-			return nil, &rpcError{Code: codeDenied, Message: "This identity already has ten passkeys"}
+			return nil, &Error{Code: CodeDenied, Message: "This identity already has ten passkeys"}
 		}
 		exclusions := make([]protocol.CredentialDescriptor, 0, len(user.credentials))
 		for _, credential := range user.credentials {
@@ -188,12 +188,12 @@ func (s *Server) beginPasskey(c *client, req request, action string, w *webauthn
 				UserVerification: protocol.VerificationRequired,
 			}), webauthn.WithExclusions(exclusions))
 		if err != nil {
-			return nil, &rpcError{Code: codeDenied, Message: "Unable to begin passkey registration"}
+			return nil, &Error{Code: CodeDenied, Message: "Unable to begin passkey registration"}
 		}
 	} else {
 		assertion, data, err = w.BeginDiscoverableLogin(webauthn.WithLoginOrigin(c.origin), webauthn.WithUserVerification(protocol.VerificationRequired))
 		if err != nil {
-			return nil, &rpcError{Code: codeDenied, Message: "Unable to begin passkey sign-in"}
+			return nil, &Error{Code: CodeDenied, Message: "Unable to begin passkey sign-in"}
 		}
 	}
 
@@ -224,7 +224,7 @@ func (s *Server) beginPasskey(c *client, req request, action string, w *webauthn
 	return result, nil
 }
 
-func (s *Server) finishPasskeyCeremony(c *client, req request, action string, w *webauthn.WebAuthn, now time.Time) (any, *rpcError) {
+func (s *Server) finishPasskeyCeremony(c *client, req request, action string, w *webauthn.WebAuthn, now time.Time) (any, *Error) {
 	challengeID, rpcErr := parseString(req.params, "challenge_id", true)
 	if rpcErr != nil {
 		return nil, rpcErr
@@ -238,14 +238,14 @@ func (s *Server) finishPasskeyCeremony(c *client, req request, action string, w 
 	// carrying the current ID consumes it before parsing or verifying the proof,
 	// including malformed proofs and policy failures.
 	if ceremony == nil || ceremony.challengeID != challengeID {
-		return nil, &rpcError{Code: codeDenied, Message: "Passkey challenge is missing or expired; try again"}
+		return nil, &Error{Code: CodeDenied, Message: "Passkey challenge is missing or expired; try again"}
 	}
 	c.ceremony = nil
 	if ceremony.action != action || ceremony.rpID != w.Config.RPID || ceremony.origin != c.origin || !now.Before(ceremony.expires) {
-		return nil, &rpcError{Code: codeDenied, Message: "Passkey challenge is missing or expired; try again"}
+		return nil, &Error{Code: CodeDenied, Message: "Passkey challenge is missing or expired; try again"}
 	}
 	if ceremony.action == "register" && (c.user == nil || c.user.id != ceremony.identityID || ceremony.user == nil) {
-		return nil, &rpcError{Code: codeDenied, Message: "Identity changed; try again"}
+		return nil, &Error{Code: CodeDenied, Message: "Identity changed; try again"}
 	}
 	raw, rpcErr := parsePasskeyCredential(req.params, ceremony.action)
 	if rpcErr != nil {
@@ -256,17 +256,17 @@ func (s *Server) finishPasskeyCeremony(c *client, req request, action string, w 
 	if ceremony.action == "register" {
 		parsed, err := protocol.ParseCredentialCreationResponseBytes(raw)
 		if err != nil {
-			return nil, &rpcError{Code: codeDenied, Message: "Passkey verification failed"}
+			return nil, &Error{Code: CodeDenied, Message: "Passkey verification failed"}
 		}
 		credential, err = w.CreateCredential(ceremony.user, *ceremony.data, parsed)
 		if err != nil {
-			return nil, &rpcError{Code: codeDenied, Message: "Passkey verification failed"}
+			return nil, &Error{Code: CodeDenied, Message: "Passkey verification failed"}
 		}
 		if credential == nil {
-			return nil, &rpcError{Code: codeDenied, Message: "Passkey verification failed"}
+			return nil, &Error{Code: CodeDenied, Message: "Passkey verification failed"}
 		}
 		if s.credentials[string(credential.ID)] != nil {
-			return nil, &rpcError{Code: codeDenied, Message: "Passkey is already registered"}
+			return nil, &Error{Code: CodeDenied, Message: "Passkey is already registered"}
 		}
 		user = c.user.passkey
 		if user == nil {
@@ -274,7 +274,7 @@ func (s *Server) finishPasskeyCeremony(c *client, req request, action string, w 
 			user.user = c.user
 		}
 		if !bytes.Equal(user.handle, ceremony.user.handle) || len(user.credentials) >= 10 {
-			return nil, &rpcError{Code: codeDenied, Message: "Registration changed; try again"}
+			return nil, &Error{Code: CodeDenied, Message: "Registration changed; try again"}
 		}
 		user.credentials = append(user.credentials, *credential)
 		c.user.passkey = user
@@ -294,7 +294,7 @@ func (s *Server) finishPasskeyCeremony(c *client, req request, action string, w 
 	} else {
 		parsed, err := protocol.ParseCredentialRequestResponseBytes(raw)
 		if err != nil {
-			return nil, &rpcError{Code: codeDenied, Message: "Passkey verification failed"}
+			return nil, &Error{Code: CodeDenied, Message: "Passkey verification failed"}
 		}
 		verified, credentialResult, err := w.ValidatePasskeyLogin(func(id, handle []byte) (webauthn.User, error) {
 			u := s.credentials[string(id)]
@@ -304,12 +304,12 @@ func (s *Server) finishPasskeyCeremony(c *client, req request, action string, w 
 			return u, nil
 		}, *ceremony.data, parsed)
 		if err != nil || credentialResult == nil || credentialResult.Authenticator.CloneWarning {
-			return nil, &rpcError{Code: codeDenied, Message: "Passkey verification failed"}
+			return nil, &Error{Code: CodeDenied, Message: "Passkey verification failed"}
 		}
 		var ok bool
 		user, ok = verified.(*passkeyUser)
 		if !ok || user == nil {
-			return nil, &rpcError{Code: codeDenied, Message: "Passkey verification failed"}
+			return nil, &Error{Code: CodeDenied, Message: "Passkey verification failed"}
 		}
 		credential = credentialResult
 		for i := range user.credentials {
@@ -334,12 +334,12 @@ func (s *Server) finishPasskeyCeremony(c *client, req request, action string, w 
 // user it was not signed in as, rather than adding a passkey to it or
 // authenticating it again as the same user, which alone sends what follows
 // a sign-in (§4.5). joinDefault joins a new account to the default room.
-func (s *Server) signInLocked(c *client, req request, user *userState, now time.Time, signIn, joinDefault bool) (any, *rpcError) {
+func (s *Server) signInLocked(c *client, req request, user *userState, now time.Time, signIn, joinDefault bool) (any, *Error) {
 	delete(s.sessions, c.token)
 	s.touchSession(c.token)
 	secret := make([]byte, 32)
 	if _, err := rand.Read(secret); err != nil {
-		return nil, &rpcError{Code: codeInternalError, Message: "Unable to create a sign-in session"}
+		return nil, &Error{Code: CodeInternalError, Message: "Unable to create a sign-in session"}
 	}
 	token := base64.RawURLEncoding.EncodeToString(secret)
 	c.token = sha256.Sum256([]byte(token))
@@ -389,7 +389,7 @@ func (s *Server) pruneSessionsLocked(now time.Time) {
 // (devices.go). Keeping this outside the WebAuthn action
 // space preserves §4.10's register/login action grammar while retaining the
 // example server's bearer token policy.
-func (s *Server) authenticateToken(c *client, req request) (any, *rpcError) {
+func (s *Server) authenticateToken(c *client, req request) (any, *Error) {
 	now := time.Now()
 	c.ceremony = nil
 	token, err := parseString(req.params, "token", true)
@@ -408,10 +408,10 @@ func (s *Server) authenticateToken(c *client, req request) (any, *rpcError) {
 	if !ok || session.origin != c.origin || !now.Before(session.expires) {
 		// A temporary token approves its proposal with this scheme too, as
 		// a client presents the token of a link that isn't its own (§4.11.2).
-		if s.config.EmailSender != nil && s.mayApproveLocked(c, token) {
+		if (s.config.EmailSender != nil || s.external != nil) && s.mayApproveLocked(c, token) {
 			return s.approveLocked(c, req)
 		}
-		return nil, &rpcError{Code: codeDenied, Message: "Session expired; sign in again"}
+		return nil, &Error{Code: CodeDenied, Message: "Session expired; sign in again"}
 	}
 	// Each successful resume renews the session for a full lifetime, so an
 	// active user is never forced back through a ceremony. The token itself is
@@ -429,7 +429,7 @@ func (s *Server) authenticateToken(c *client, req request) (any, *rpcError) {
 // parsePasskeyCredential performs only wire-shape validation. A syntactically
 // shaped credential with invalid base64, authenticator data, origin, RP, UV,
 // or signature remains a failed proof and is reported as denied by the caller.
-func parsePasskeyCredential(params map[string]jsontext.Value, action string) ([]byte, *rpcError) {
+func parsePasskeyCredential(params map[string]jsontext.Value, action string) ([]byte, *Error) {
 	raw, ok := params["credential"]
 	if !ok {
 		return nil, invalidParams("Missing credential")

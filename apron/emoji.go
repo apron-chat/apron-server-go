@@ -317,7 +317,7 @@ func (s *Server) handleEmoji(w http.ResponseWriter, r *http.Request) {
 // upload's write finishes, which checks the catalog again
 // (refuseEmojiLocked). A connection not offered ext:emoji, whose image
 // URLs clients would refuse, may not add one.
-func (s *Server) emojiCommand(c *client, _ *roomState, body map[string]any, args, _ string) (map[string]any, *rpcError) {
+func (s *Server) emojiCommand(c *client, _ *roomState, body map[string]any, args, _ string) (map[string]any, *Error) {
 	u := c.user
 	action, key, _ := strings.Cut(args, " ")
 	key = strings.TrimSpace(key)
@@ -334,16 +334,16 @@ func (s *Server) emojiCommand(c *client, _ *roomState, body map[string]any, args
 		if s.emojiExt(c.baseURL) == nil {
 			// This connection is not offered ext:emoji: the image's URL
 			// would be one clients refuse.
-			return nil, &rpcError{Code: codeDenied, Message: emojiNeedHTTPS}
+			return nil, &Error{Code: CodeDenied, Message: emojiNeedHTTPS}
 		}
 		if existing != nil && !s.mayReplaceEmojiLocked(existing, u.id) {
-			return nil, &rpcError{Code: codeDenied, Message: fmt.Sprintf("%s is taken; only who added it or an admin can replace it", key)}
+			return nil, &Error{Code: CodeDenied, Message: fmt.Sprintf("%s is taken; only who added it or an admin can replace it", key)}
 		}
 		if existing == nil && len(s.emoji) >= maxCustomEmoji {
-			return nil, &rpcError{Code: codeDenied, Message: fmt.Sprintf("This server has %d custom emoji, the most it keeps", maxCustomEmoji)}
+			return nil, &Error{Code: CodeDenied, Message: fmt.Sprintf("This server has %d custom emoji, the most it keeps", maxCustomEmoji)}
 		}
 		if s.emojiRoomLocked(key) <= 0 {
-			return nil, &rpcError{Code: codeDenied, Message: s.emojiFullMessage()}
+			return nil, &Error{Code: CodeDenied, Message: s.emojiFullMessage()}
 		}
 		if err := s.admitPostLocked(u); err != nil {
 			return nil, err
@@ -357,7 +357,7 @@ func (s *Server) emojiCommand(c *client, _ *roomState, body map[string]any, args
 		}, nil
 	case "remove":
 		if !u.hasRole("admin") {
-			return nil, &rpcError{Code: codeDenied, Message: "Only an admin can remove custom emoji"}
+			return nil, &Error{Code: CodeDenied, Message: "Only an admin can remove custom emoji"}
 		}
 		if existing == nil {
 			return nil, invalidParams("There is no custom emoji %s", key)

@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/go-webauthn/webauthn/webauthn"
@@ -41,6 +42,7 @@ import (
 //	embed    embed_id
 //	push     user_id, a space, and url (url alone before registrations
 //	         belonged to their user)
+//	ext/<n>  a key        a value Extension <n> keeps (Host.Store)
 const (
 	entryMeta    = "meta"
 	entryUsedID  = "used_id"
@@ -70,6 +72,7 @@ type dirtySet struct {
 	devices  map[[32]byte]bool
 	embeds   map[string]bool
 	pushes   map[string]bool
+	ext      map[extKey]bool
 	usedIDs  []string
 	vapid    bool
 	emoji    bool
@@ -86,8 +89,13 @@ func newDirtySet() dirtySet {
 		devices:  make(map[[32]byte]bool),
 		embeds:   make(map[string]bool),
 		pushes:   make(map[string]bool),
+		ext:      make(map[extKey]bool),
 	}
 }
+
+// extKey names one value an extension keeps: its entry kind, ext/<name>,
+// and its key.
+type extKey struct{ kind, id string }
 
 func (s *Server) touchRecord(r *logRecord)     { s.dirty.records[r] = true }
 func (s *Server) touchRoom(r *roomState)       { s.dirty.rooms[r.id] = true }
@@ -181,6 +189,15 @@ type storedUser struct {
 	Mute      *storedMute           `json:"mute,omitzero"`
 	RoomMutes map[string]storedMute `json:"room_mutes,omitzero"`
 	Pings     map[string]int64      `json:"pings,omitzero"`
+	// Created is when the user was made, in Unix milliseconds; absent for
+	// users stored before it was kept. Bot marks an account an Extension
+	// signs in (Host.Session), External the identity of an account made by
+	// external sign-in (§4.11.5), and Granted the roles that sign-in
+	// granted it.
+	Created  int64    `json:"created,omitzero"`
+	Bot      bool     `json:"bot,omitzero"`
+	External string   `json:"external,omitzero"`
+	Granted  []string `json:"granted,omitzero"`
 }
 
 type storedMute struct {
@@ -319,6 +336,13 @@ func (s *Server) entriesLocked(d dirtySet) []store.Entry {
 			del(entryEmbed, id)
 		}
 	}
+	for key := range d.ext {
+		if value, ok := s.extData[key.kind][key.id]; ok {
+			batch = append(batch, store.Entry{Kind: key.kind, ID: key.id, Value: value})
+		} else {
+			del(key.kind, key.id)
+		}
+	}
 	for key := range d.pushes {
 		if p := s.pushes[key]; p != nil {
 			stored := storedPush{
@@ -386,7 +410,13 @@ func storedMessageOf(m *messageState) storedMessage {
 }
 
 func storedUserOf(u *userState) storedUser {
-	stored := storedUser{Name: u.name, Avatar: u.avatar, Ext: u.ext, LeftAt: u.leftAt, Email: u.email, Pings: u.pings, Seen: u.seen, Shown: u.status != statusOffline}
+	stored := storedUser{
+		Name: u.name, Avatar: u.avatar, Ext: u.ext, LeftAt: u.leftAt, Email: u.email, Pings: u.pings, Seen: u.seen, Shown: u.status != statusOffline,
+		Bot: u.bot, External: u.external, Granted: u.granted,
+	}
+	if !u.created.IsZero() {
+		stored.Created = u.created.UnixMilli()
+	}
 	if status := u.chosen; status != statusOnline {
 		stored.Status = &status
 	}
@@ -480,6 +510,11 @@ func (s *Server) restoreLocked() (map[string]bool, error) {
 		s.lastID, s.guestNumber, s.accountNumber = s.storedMeta.LastID, s.storedMeta.GuestNumber, s.storedMeta.AccountNumber
 		s.embedNumber, s.uploadSeq = s.storedMeta.EmbedNumber, s.storedMeta.UploadSeq
 	}
+	for kind, values := range entries {
+		if strings.HasPrefix(kind, extEntryPrefix) {
+			s.extData[kind] = values
+		}
+	}
 	if err := s.restoreVAPIDLocked(entries[entryMeta]["vapid"]); err != nil {
 		return nil, err
 	}
@@ -528,6 +563,7 @@ func (s *Server) restoreLocked() (map[string]bool, error) {
 	}
 	for _, logID := range slices.Sorted(maps.Keys(records)) {
 		record := records[logID]
+		s.records = append(s.records, record)
 		for _, roomID := range record.rooms {
 			if r := s.rooms[roomID]; r != nil {
 				r.log = append(r.log, record)
@@ -565,6 +601,15 @@ func (s *Server) restoreLocked() (map[string]bool, error) {
 		storedUsers[id] = stored
 		u := newUserState(id, stored.Name)
 		u.avatar, u.ext = stored.Avatar, stored.Ext
+		u.created = time.Time{}
+		if stored.Created != 0 {
+			u.created = time.UnixMilli(stored.Created)
+		}
+		u.bot, u.granted = stored.Bot, stored.Granted
+		if stored.External != "" {
+			u.external = stored.External
+			s.identities[stored.External] = u
+		}
 		if stored.Email != "" {
 			u.email = stored.Email
 			s.emails[stored.Email] = u

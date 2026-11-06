@@ -593,12 +593,12 @@ func TestAMessageHasAtMostOneAppend(t *testing.T) {
 	a := dialTestClient(t, httpServer)
 	a.expectError(t, "message", "two", map[string]any{"room_id": "general", "body": map[string]any{
 		"embeds": []any{map[string]any{"kind": "append"}, map[string]any{"kind": "append"}},
-	}}, codeInvalidParams)
+	}}, CodeInvalidParams)
 	result, _, live := postLive(t, a, "one", map[string]any{"embeds": []any{map[string]any{"kind": "append"}, map[string]any{"kind": "terminal"}}})
 	// A save may keep the one append, but not add another.
 	a.expectError(t, "message", "another", map[string]any{"room_id": "general", "message_id": result["message_id"], "body": map[string]any{
 		"embeds": []any{live, map[string]any{"kind": "append"}},
-	}}, codeInvalidParams)
+	}}, CodeInvalidParams)
 	_, saved := save(t, a, "keep", map[string]any{"message_id": result["message_id"], "body": map[string]any{"text": "edited", "embeds": []any{live}}})
 	if kept := embedsOf(t, saved); len(kept) != 1 || kept[0]["url"] != live["url"] {
 		t.Fatalf("kept: %#v", kept)
@@ -612,10 +612,10 @@ func TestLiveEmbedsInOtherCommandsAreInvalid(t *testing.T) {
 	a := dialTestClient(t, httpServer)
 	for i, text := range []string{"/avatar", "/help", "/emoji add :x:", "/embed-terminal", "/embed-append hi"} {
 		for _, kind := range []string{"terminal", "append"} {
-			a.expectError(t, "command", fmt.Sprint(kind, i), map[string]any{"body": map[string]any{"text": text, "embeds": []any{map[string]any{"kind": kind}}}}, codeInvalidParams)
+			a.expectError(t, "command", fmt.Sprint(kind, i), map[string]any{"body": map[string]any{"text": text, "embeds": []any{map[string]any{"kind": kind}}}}, CodeInvalidParams)
 		}
 	}
-	a.expectError(t, "command", "upload", map[string]any{"body": map[string]any{"text": "/embed-terminal", "embeds": []any{map[string]any{"kind": "upload"}}}}, codeInvalidParams)
+	a.expectError(t, "command", "upload", map[string]any{"body": map[string]any{"text": "/embed-terminal", "embeds": []any{map[string]any{"kind": "upload"}}}}, CodeInvalidParams)
 	a.expectQuiet(t)
 }
 

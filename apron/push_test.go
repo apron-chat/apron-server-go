@@ -286,10 +286,10 @@ func TestPushRegistration(t *testing.T) {
 		{"kind": "relay", "url": endpoint, "wake": []any{"mentions", 5}},
 		{"kind": "relay", "url": endpoint, "wake": nil},
 	} {
-		a.expectError(t, "push_register", "bad-"+formatID(int64(i)), params, codeInvalidParams)
+		a.expectError(t, "push_register", "bad-"+formatID(int64(i)), params, CodeInvalidParams)
 	}
 	// A url rejected for its size is too_large (§1.1).
-	a.expectError(t, "push_register", "long-url", map[string]any{"kind": "relay", "url": "https://relay.example/" + strings.Repeat("a", maxPushURLBytes)}, codeTooLarge)
+	a.expectError(t, "push_register", "long-url", map[string]any{"kind": "relay", "url": "https://relay.example/" + strings.Repeat("a", maxPushURLBytes)}, CodeTooLarge)
 	registration := func(u string) *pushRegistration {
 		app.mu.RLock()
 		defer app.mu.RUnlock()
@@ -319,14 +319,14 @@ func TestPushRegistration(t *testing.T) {
 	if spellings != 1 {
 		t.Fatalf("registrations of one endpoint under two spellings: %d", spellings)
 	}
-	a.expectError(t, "push_register", "long", map[string]any{"kind": "relay", "url": "https://push.example.net/" + strings.Repeat("a", maxPushURLBytes-len("https://push.example.net/")+1)}, codeTooLarge)
+	a.expectError(t, "push_register", "long", map[string]any{"kind": "relay", "url": "https://push.example.net/" + strings.Repeat("a", maxPushURLBytes-len("https://push.example.net/")+1)}, CodeTooLarge)
 	// Unregistering removes only the caller's; an unknown url succeeds.
 	a.result(t, "push_unregister", "unregister", map[string]any{"url": "https://PUSH.example.net/s/abc"})
 	a.result(t, "push_unregister", "unknown", map[string]any{"url": "https://push.example.net/never"})
 	if registration(a.userID) != nil || registration(b.userID) == nil {
 		t.Fatal("unregister removed the wrong registration")
 	}
-	a.expectError(t, "push_unregister", "no-url", map[string]any{}, codeInvalidParams)
+	a.expectError(t, "push_unregister", "no-url", map[string]any{}, CodeInvalidParams)
 
 	// A user holds at most ten; another replaces the least recently
 	// registered, and registering a url again renews it.

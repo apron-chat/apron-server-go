@@ -33,7 +33,7 @@ func TestShutdownClosesConnections(t *testing.T) {
 	// The connection is told to retry later (an error without id), then
 	// closed.
 	failure := active.read(t)
-	if failure["id"] != nil || failure["error"].(map[string]any)["code"] != float64(codeRetryAfter) {
+	if failure["id"] != nil || failure["error"].(map[string]any)["code"] != float64(CodeRetryAfter) {
 		t.Fatalf("shutdown frame = %#v", failure)
 	}
 	if _, _, err := active.ws.Read(ctx); err == nil {
@@ -132,15 +132,15 @@ func TestServerFrame(t *testing.T) {
 		t.Fatal("push advertised while disabled")
 	}
 	guestAuth(t, c)
-	c.expectError(t, "push_register", "p", map[string]any{"kind": "relay", "url": "https://relay.example/p"}, codeUnsupported)
+	c.expectError(t, "push_register", "p", map[string]any{"kind": "relay", "url": "https://relay.example/p"}, CodeUnsupported)
 }
 
 func TestGuestAuth(t *testing.T) {
 	_, httpServer := newTestServer(t, DefaultConfig())
 	c, _ := dialRaw(t, httpServer)
-	c.expectError(t, "message", "early", map[string]any{"room_id": "general", "body": map[string]any{}}, codeDenied)
+	c.expectError(t, "message", "early", map[string]any{"room_id": "general", "body": map[string]any{}}, CodeDenied)
 	// An unknown scheme is a name the server does not know (§1).
-	c.expectError(t, "auth", "bad-scheme", map[string]any{"scheme": "password"}, codeInvalidParams)
+	c.expectError(t, "auth", "bad-scheme", map[string]any{"scheme": "password"}, CodeInvalidParams)
 	// A request method without an id is ignored, guest auth included.
 	c.write(t, map[string]any{"method": "auth", "params": map[string]any{"scheme": "guest"}})
 	c.expectQuiet(t)
@@ -225,9 +225,9 @@ func TestAuthHonorsRequestedUserIDs(t *testing.T) {
 	// scheme it does not offer is unsupported first.
 	c, _ := dialRaw(t, httpServer)
 	for i, requested := range []any{5, nil, "", "bad id", "tab\tid", "line\n", "nbsp\u00a0id", "bell\u0007"} {
-		c.expectError(t, "auth", fmt.Sprint("bad", i), map[string]any{"scheme": "guest", "user_id": requested}, codeInvalidParams)
+		c.expectError(t, "auth", fmt.Sprint("bad", i), map[string]any{"scheme": "guest", "user_id": requested}, CodeInvalidParams)
 	}
-	c.expectError(t, "auth", "bad-token", map[string]any{"scheme": "token", "token": "x", "user_id": "a b"}, codeUnsupported)
+	c.expectError(t, "auth", "bad-token", map[string]any{"scheme": "token", "token": "x", "user_id": "a b"}, CodeUnsupported)
 	if got := auth("after", map[string]any{}); got != "guest_101" {
 		t.Fatalf("counter after invalid requests: %q", got)
 	}
@@ -354,7 +354,7 @@ func TestAuthIsABarrier(t *testing.T) {
 			t.Fatalf("auth %d: %#v", i, failed)
 		}
 		for _, id := range []string{"list", "history"} {
-			if denied := c.read(t); denied["id"] != id || denied["error"].(map[string]any)["code"] != float64(codeDenied) {
+			if denied := c.read(t); denied["id"] != id || denied["error"].(map[string]any)["code"] != float64(CodeDenied) {
 				t.Fatalf("auth %d: %s behind a failed auth: %#v", i, id, denied)
 			}
 		}
@@ -365,7 +365,7 @@ func TestUnimplementedAndUnknownMethodsAreUnsupported(t *testing.T) {
 	_, httpServer := newTestServer(t, DefaultConfig())
 	c := dialTestClient(t, httpServer)
 	for _, method := range []string{"frobnicate", "room_teleport"} {
-		c.expectError(t, method, method, map[string]any{"room_id": "general"}, codeUnsupported)
+		c.expectError(t, method, method, map[string]any{"room_id": "general"}, CodeUnsupported)
 	}
 	c.expectQuiet(t)
 }
@@ -440,7 +440,7 @@ func TestMessageSnapshotsReplaceEditableState(t *testing.T) {
 			t.Fatalf("history entry %d = %#v, want %#v", i, entries[i], expected)
 		}
 	}
-	observer.expectError(t, "message", "forged", map[string]any{"room_id": "general", "message_id": id, "body": map[string]any{"text": "forged"}}, codeDenied)
+	observer.expectError(t, "message", "forged", map[string]any{"room_id": "general", "message_id": id, "body": map[string]any{"text": "forged"}}, CodeDenied)
 }
 
 func TestLogIDsFormOneSequenceAcrossRoomsAndKinds(t *testing.T) {
@@ -496,7 +496,7 @@ func TestRepliesMayCrossRooms(t *testing.T) {
 			params["room_id"] = "general"
 		}
 		params["body"] = body
-		c.expectError(t, "message", fmt.Sprint("bad-reply-", i), params, codeInvalidParams)
+		c.expectError(t, "message", fmt.Sprint("bad-reply-", i), params, CodeInvalidParams)
 	}
 	after := historyPage(t, c, "general", map[string]any{})
 	if before["last_log_id"] != after["last_log_id"] {
@@ -598,10 +598,10 @@ func TestRoomSetCreatesAndEditsRoomsAndThreads(t *testing.T) {
 		{"ext": []any{}},
 		{"ext": nil},
 	} {
-		c.expectError(t, "room_set", fmt.Sprint("bad-room-", i), params, codeInvalidParams)
+		c.expectError(t, "room_set", fmt.Sprint("bad-room-", i), params, CodeInvalidParams)
 	}
 	// A value rejected for its size is too_large (§1.1).
-	c.expectError(t, "room_set", "long-description", map[string]any{"description": strings.Repeat("x", maxDescriptionBytes+1)}, codeTooLarge)
+	c.expectError(t, "room_set", "long-description", map[string]any{"description": strings.Repeat("x", maxDescriptionBytes+1)}, CodeTooLarge)
 	c.expectQuiet(t)
 	observer.expectQuiet(t)
 
@@ -665,8 +665,8 @@ func TestMoveAppearsInBothRoomsAndCarriesReactions(t *testing.T) {
 	react(t, reactor, "react-b-again", id, "🚀")
 	author.notification(t, "reactions")
 
-	reactor.expectError(t, "message", "not-owner", map[string]any{"message_id": id, "room_id": thread, "body": body}, codeDenied)
-	author.expectError(t, "message", "missing-room", map[string]any{"message_id": id, "room_id": "missing", "body": body}, codeInvalidParams)
+	reactor.expectError(t, "message", "not-owner", map[string]any{"message_id": id, "room_id": thread, "body": body}, CodeDenied)
+	author.expectError(t, "message", "missing-room", map[string]any{"message_id": id, "room_id": "missing", "body": body}, CodeInvalidParams)
 
 	// The move snapshot and the reactions record it carries both precede the
 	// result (§1).
@@ -762,7 +762,7 @@ func TestReactions(t *testing.T) {
 	// Request deduplication returns the original result without rebroadcasting.
 	c.result(t, "reactions", "set", map[string]any{"message_id": id, "emojis": []any{"👍", "🎉", "👍"}})
 	c.expectQuiet(t)
-	c.expectError(t, "reactions", "set", map[string]any{"message_id": id, "emojis": []any{"👎"}}, codeInvalidParams)
+	c.expectError(t, "reactions", "set", map[string]any{"message_id": id, "emojis": []any{"👎"}}, CodeInvalidParams)
 
 	cleared := react(t, c, "clear", id)
 	if sets := cleared["reactions"].([]any); len(sets) != 1 || len(sets[0].(map[string]any)["emojis"].([]any)) != 0 {
@@ -784,12 +784,12 @@ func TestReactions(t *testing.T) {
 		{"message_id": id, "emojis": []any{""}},
 		{"emojis": []any{"👍"}},
 	} {
-		c.expectError(t, "reactions", fmt.Sprint("bad-", i), params, codeInvalidParams)
+		c.expectError(t, "reactions", fmt.Sprint("bad-", i), params, CodeInvalidParams)
 	}
 	// A count limit the server sets is denied, and an emoji over its size is
 	// too_large (§1.1).
-	c.expectError(t, "reactions", "too-many", map[string]any{"message_id": id, "emojis": tooMany}, codeDenied)
-	c.expectError(t, "reactions", "too-long", map[string]any{"message_id": id, "emojis": []any{strings.Repeat("x", maxEmojiBytes+1)}}, codeTooLarge)
+	c.expectError(t, "reactions", "too-many", map[string]any{"message_id": id, "emojis": tooMany}, CodeDenied)
+	c.expectError(t, "reactions", "too-long", map[string]any{"message_id": id, "emojis": []any{strings.Repeat("x", maxEmojiBytes+1)}}, CodeTooLarge)
 	c.expectQuiet(t)
 
 	page := historyPage(t, c, "general", map[string]any{})
@@ -892,7 +892,7 @@ func TestHistoryPaginatesAcrossRecordKinds(t *testing.T) {
 		{"room_id": "missing"}, {"room_id": "general", "limit": 0}, {"room_id": "general", "after": 5},
 		{"room_id": "general", "before": "-1"},
 	} {
-		c.expectError(t, "history", fmt.Sprint("bad-", i), params, codeInvalidParams)
+		c.expectError(t, "history", fmt.Sprint("bad-", i), params, CodeInvalidParams)
 	}
 }
 
@@ -966,7 +966,7 @@ func TestInvalidSavesLeaveStateUnchanged(t *testing.T) {
 		if _, ok := params["room_id"]; !ok {
 			params["room_id"] = "general"
 		}
-		c.expectError(t, "message", fmt.Sprint("bad-", i), params, codeInvalidParams)
+		c.expectError(t, "message", fmt.Sprint("bad-", i), params, CodeInvalidParams)
 	}
 	c.expectQuiet(t)
 	page := historyPage(t, c, "general", map[string]any{})
@@ -1018,8 +1018,8 @@ func TestRequestDeduplication(t *testing.T) {
 	}
 	c.expectQuiet(t)
 	params["body"] = map[string]any{"text": "conflicting retry"}
-	c.expectError(t, "message", "edit", params, codeInvalidParams)
-	c.expectError(t, "history", "edit", map[string]any{"room_id": thread}, codeInvalidParams)
+	c.expectError(t, "message", "edit", params, CodeInvalidParams)
+	c.expectError(t, "history", "edit", map[string]any{"room_id": thread}, CodeInvalidParams)
 	page := historyPage(t, c, thread, map[string]any{})
 	if len(records(t, page, "messages")) != 1 || page["last_log_id"] != move["log_id"] {
 		t.Fatalf("retry appended log entries: %#v", page)
@@ -1178,11 +1178,11 @@ func TestNotificationOnlyWithIDNeverAnswered(t *testing.T) {
 	check()
 	// Other methods still reply to a bad id or bad params.
 	raw(`{"method":"room_list","id":5}`)
-	if reply := c.read(t); reply["error"].(map[string]any)["code"] != float64(codeInvalidRequest) {
+	if reply := c.read(t); reply["error"].(map[string]any)["code"] != float64(CodeInvalidRequest) {
 		t.Fatalf("bad id on a request: %#v", reply)
 	}
 	raw(`{"method":"room_list","id":"r1","params":[]}`)
-	if reply := c.read(t); reply["id"] != "r1" || reply["error"].(map[string]any)["code"] != float64(codeInvalidParams) {
+	if reply := c.read(t); reply["id"] != "r1" || reply["error"].(map[string]any)["code"] != float64(CodeInvalidParams) {
 		t.Fatalf("bad params on a request: %#v", reply)
 	}
 }

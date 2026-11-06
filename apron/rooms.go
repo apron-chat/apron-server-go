@@ -464,10 +464,10 @@ func (s *Server) announceRoomLocked(r *roomState, editor *userState) {
 // other members as room_update updated, without joining them. An edit goes
 // as updated to the room's members, to the parent's members for a thread
 // that is not private, and to the editor.
-func (s *Server) setRoom(c *client, req request) (any, bool, *rpcError) {
+func (s *Server) setRoom(c *client, req request) (any, bool, *Error) {
 	_, updating := req.params["room_id"]
 	var roomID, parentID string
-	var err *rpcError
+	var err *Error
 	if updating {
 		roomID, err = parseString(req.params, "room_id", true)
 		if err != nil {
@@ -491,10 +491,10 @@ func (s *Server) setRoom(c *client, req request) (any, bool, *rpcError) {
 		return nil, false, err
 	}
 	if len(title) > maxTitleBytes {
-		return nil, false, &rpcError{Code: codeTooLarge, Message: fmt.Sprintf("title is at most %d bytes", maxTitleBytes)}
+		return nil, false, &Error{Code: CodeTooLarge, Message: fmt.Sprintf("title is at most %d bytes", maxTitleBytes)}
 	}
 	if len(description) > maxDescriptionBytes {
-		return nil, false, &rpcError{Code: codeTooLarge, Message: fmt.Sprintf("description is at most %d bytes", maxDescriptionBytes)}
+		return nil, false, &Error{Code: CodeTooLarge, Message: fmt.Sprintf("description is at most %d bytes", maxDescriptionBytes)}
 	}
 	extWrite, _, err := parseExt(req.params, "ext")
 	if err != nil {
@@ -522,13 +522,13 @@ func (s *Server) setRoom(c *client, req request) (any, bool, *rpcError) {
 			return nil, false, invalidParams("Unknown parent room %q", parentID)
 		}
 	} else if private && s.privateRoomsFullLocked(u) {
-		return nil, false, &rpcError{Code: codeDenied, Message: fmt.Sprintf("You are in %d private rooms, the most at once; leave one to start another", s.config.MaxPrivateRooms)}
+		return nil, false, &Error{Code: CodeDenied, Message: fmt.Sprintf("You are in %d private rooms, the most at once; leave one to start another", s.config.MaxPrivateRooms)}
 	}
 	// ext merges into the room's (§4.12), and the limit applies to the
 	// result; other client fields are replaced (§4.2.4).
 	ext := mergeExt(keptExt, extWrite)
 	if encodedSize(ext) > maxRoomExtBytes {
-		return nil, false, &rpcError{Code: codeTooLarge, Message: fmt.Sprintf("The room's ext would be over %d bytes", maxRoomExtBytes)}
+		return nil, false, &Error{Code: CodeTooLarge, Message: fmt.Sprintf("The room's ext would be over %d bytes", maxRoomExtBytes)}
 	}
 	if err := s.admitPostLocked(u); err != nil {
 		return nil, false, err
@@ -630,7 +630,7 @@ func threadTitle(description string) string {
 //
 // The result is followed by the read cursors kept for the listed rooms
 // (§4.6).
-func (s *Server) listRooms(c *client, req request) (any, bool, *rpcError) {
+func (s *Server) listRooms(c *client, req request) (any, bool, *Error) {
 	filter, err := parseString(req.params, "filter", false)
 	if err != nil {
 		return nil, false, err
@@ -782,7 +782,7 @@ func profiles(users map[string]*userState) []any {
 // With the user_id of another user, a member of the room adds that user,
 // which is how people are brought into a private room; adding a member
 // changes nothing.
-func (s *Server) joinRoom(c *client, req request) (any, bool, *rpcError) {
+func (s *Server) joinRoom(c *client, req request) (any, bool, *Error) {
 	roomID, targetID, hasTarget, err := parseMembershipParams(req.params)
 	if err != nil {
 		return nil, false, err
@@ -797,7 +797,7 @@ func (s *Server) joinRoom(c *client, req request) (any, bool, *rpcError) {
 	target := u
 	if hasTarget && targetID != u.id {
 		if r.members[u.id] == nil {
-			return nil, false, &rpcError{Code: codeDenied, Message: fmt.Sprintf("Join %s before adding others to it", r.title())}
+			return nil, false, &Error{Code: CodeDenied, Message: fmt.Sprintf("Join %s before adding others to it", r.title())}
 		}
 		if target = s.users[targetID]; target == nil {
 			return nil, false, invalidParams("Unknown user %q", targetID)
@@ -805,10 +805,10 @@ func (s *Server) joinRoom(c *client, req request) (any, bool, *rpcError) {
 		// Adding someone to a thread of a private room takes adding them to
 		// that room first.
 		if r.parent != nil && !r.parent.visibleTo(target) {
-			return nil, false, &rpcError{Code: codeDenied, Message: fmt.Sprintf("Add %s to the private room %s is in first", targetID, r.title())}
+			return nil, false, &Error{Code: CodeDenied, Message: fmt.Sprintf("Add %s to the private room %s is in first", targetID, r.title())}
 		}
 		if r.private && r.parent == nil && r.members[target.id] == nil && s.privateRoomsFullLocked(target) {
-			return nil, false, &rpcError{Code: codeDenied, Message: fmt.Sprintf("%s is in as many private rooms as anyone may be, so cannot be added to another", targetID)}
+			return nil, false, &Error{Code: CodeDenied, Message: fmt.Sprintf("%s is in as many private rooms as anyone may be, so cannot be added to another", targetID)}
 		}
 	}
 	if r.members[target.id] == nil {
@@ -831,7 +831,7 @@ func (s *Server) joinRoom(c *client, req request) (any, bool, *rpcError) {
 //
 // With the user_id of another user, it removes that user, which the room's
 // creator and users with the admin or moderator role may do.
-func (s *Server) leaveRoom(c *client, req request) (any, bool, *rpcError) {
+func (s *Server) leaveRoom(c *client, req request) (any, bool, *Error) {
 	roomID, targetID, hasTarget, err := parseMembershipParams(req.params)
 	if err != nil {
 		return nil, false, err
@@ -846,7 +846,7 @@ func (s *Server) leaveRoom(c *client, req request) (any, bool, *rpcError) {
 	target := u
 	if hasTarget && targetID != u.id {
 		if !r.mayRemove(u) {
-			return nil, false, &rpcError{Code: codeDenied, Message: fmt.Sprintf("Only the creator of %s or a moderator can remove people from it", r.title())}
+			return nil, false, &Error{Code: CodeDenied, Message: fmt.Sprintf("Only the creator of %s or a moderator can remove people from it", r.title())}
 		}
 		if target = s.users[targetID]; target == nil {
 			return nil, false, invalidParams("Unknown user %q", targetID)
@@ -865,7 +865,7 @@ func (s *Server) leaveRoom(c *client, req request) (any, bool, *rpcError) {
 
 // parseMembershipParams reads room_join and room_leave params: room_id and
 // an optional user_id (§4.2.2).
-func parseMembershipParams(params map[string]jsontext.Value) (roomID, userID string, hasUser bool, err *rpcError) {
+func parseMembershipParams(params map[string]jsontext.Value) (roomID, userID string, hasUser bool, err *Error) {
 	if roomID, err = parseString(params, "room_id", true); err != nil {
 		return "", "", false, err
 	}
@@ -892,7 +892,7 @@ func parseMembershipParams(params map[string]jsontext.Value) (roomID, userID str
 // prev_room_id, so a window bounded to one log_id (after == before) in the
 // room a snapshot names walks prev_log_id back through a message's edits
 // (§4.3.1). Across rooms, it comes once.
-func (s *Server) history(c *client, req request) (any, bool, *rpcError) {
+func (s *Server) history(c *client, req request) (any, bool, *Error) {
 	roomID, err := parseString(req.params, "room_id", false)
 	if err != nil {
 		return nil, false, err
@@ -1085,7 +1085,7 @@ func compareLogID(record *logRecord, id int64) int {
 	return cmp.Compare(record.id, id)
 }
 
-func parseBound(params map[string]jsontext.Value, name string) (int64, bool, *rpcError) {
+func parseBound(params map[string]jsontext.Value, name string) (int64, bool, *Error) {
 	raw, ok := params[name]
 	if !ok {
 		return 0, false, nil
@@ -1101,7 +1101,7 @@ func parseBound(params map[string]jsontext.Value, name string) (int64, bool, *rp
 	return number, true, nil
 }
 
-func parseLimit(params map[string]jsontext.Value, defaultLimit int) (int, *rpcError) {
+func parseLimit(params map[string]jsontext.Value, defaultLimit int) (int, *Error) {
 	raw, ok := params["limit"]
 	if !ok {
 		return defaultLimit, nil
@@ -1119,7 +1119,7 @@ func parseLimit(params map[string]jsontext.Value, defaultLimit int) (int, *rpcEr
 // user and sends it after the room is listed. A frame whose fields change
 // nothing relays nothing, and typing past the user's limit on actions
 // (admitActionLocked) is dropped.
-func (s *Server) activity(c *client, req request) (any, bool, *rpcError) {
+func (s *Server) activity(c *client, req request) (any, bool, *Error) {
 	roomID, err := parseString(req.params, "room_id", false)
 	if err != nil {
 		return nil, false, err

@@ -115,7 +115,7 @@ func (e *embedState) fileURL() string {
 // embed gets a write URL, listed in written. Senders' og is dropped: the
 // server only describes media it hosts. A message has at most one append
 // embed (§4.8.5).
-func (s *Server) resolveEmbedsLocked(c *client, messageID string, current map[string]any, body map[string]any) ([]any, []any, *rpcError) {
+func (s *Server) resolveEmbedsLocked(c *client, messageID string, current map[string]any, body map[string]any) ([]any, []any, *Error) {
 	submitted, _ := body["embeds"].([]any)
 	previous := make(map[string]map[string]any)
 	if current != nil {

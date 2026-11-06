@@ -192,7 +192,7 @@ func (s *Server) removePushLocked(p *pushRegistration) {
 // a url again replaces the caller's registration of it and renews it; other
 // users' registrations of the same url are their own. A user holds at most
 // maxPushesPerUser: another replaces the one least recently registered.
-func (s *Server) registerPush(c *client, req request) (any, bool, *rpcError) {
+func (s *Server) registerPush(c *client, req request) (any, bool, *Error) {
 	kind, err := parseString(req.params, "kind", true)
 	if err != nil {
 		return nil, false, err
@@ -213,7 +213,7 @@ func (s *Server) registerPush(c *client, req request) (any, bool, *rpcError) {
 		return nil, false, invalidParams("%s", problem)
 	}
 	if len(endpoint) > maxPushURLBytes || len(token) > maxPushTokenLen {
-		return nil, false, &rpcError{Code: codeTooLarge, Message: fmt.Sprintf("url is at most %d bytes and token at most %d", maxPushURLBytes, maxPushTokenLen)}
+		return nil, false, &Error{Code: CodeTooLarge, Message: fmt.Sprintf("url is at most %d bytes and token at most %d", maxPushURLBytes, maxPushTokenLen)}
 	}
 	pushID, err := parseString(req.params, "push_id", false)
 	if err != nil {
@@ -264,7 +264,7 @@ func (s *Server) registerPush(c *client, req request) (any, bool, *rpcError) {
 }
 
 // parseKeysParam reads a registration's optional keys (§4.9).
-func parseKeysParam(params map[string]jsontext.Value) (*pushKeys, *rpcError) {
+func parseKeysParam(params map[string]jsontext.Value) (*pushKeys, *Error) {
 	if _, has := params["keys"]; !has {
 		return nil, nil
 	}
@@ -289,7 +289,7 @@ func parseKeysParam(params map[string]jsontext.Value) (*pushKeys, *rpcError) {
 
 // unregisterPush removes the caller's registration of a url; an unknown url
 // is already unregistered (§4.9).
-func (s *Server) unregisterPush(c *client, req request) (any, bool, *rpcError) {
+func (s *Server) unregisterPush(c *client, req request) (any, bool, *Error) {
 	endpoint, err := parseString(req.params, "url", true)
 	if err != nil {
 		return nil, false, err

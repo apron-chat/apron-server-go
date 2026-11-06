@@ -38,15 +38,15 @@ func TestRequestIDsAreBounded(t *testing.T) {
 	_, httpServer := newTestServer(t, DefaultConfig())
 	c := dialTestClient(t, httpServer)
 	long := strings.Repeat("x", maxRequestIDBytes+1)
-	c.expectError(t, "me", long, map[string]any{}, codeTooLarge)
+	c.expectError(t, "me", long, map[string]any{}, CodeTooLarge)
 	c.result(t, "me", long[:maxRequestIDBytes], map[string]any{})
 }
 
 func TestRoomTitlesAreBounded(t *testing.T) {
 	_, httpServer := newTestServer(t, DefaultConfig())
 	c := dialTestClient(t, httpServer)
-	c.expectError(t, "room_set", "long", map[string]any{"room_id": "general", "title": strings.Repeat("x", maxTitleBytes+1)}, codeTooLarge)
-	c.expectError(t, "room_set", "new", map[string]any{"title": strings.Repeat("x", maxTitleBytes+1)}, codeTooLarge)
+	c.expectError(t, "room_set", "long", map[string]any{"room_id": "general", "title": strings.Repeat("x", maxTitleBytes+1)}, CodeTooLarge)
+	c.expectError(t, "room_set", "new", map[string]any{"title": strings.Repeat("x", maxTitleBytes+1)}, CodeTooLarge)
 }
 
 func TestActionsAreLimited(t *testing.T) {
@@ -66,7 +66,7 @@ func TestActionsAreLimited(t *testing.T) {
 			emojis = []any{}
 		}
 		frame := reply(t, c, "reactions", fmt.Sprintf("r%d", i), map[string]any{"message_id": id, "emojis": emojis})
-		if code := errorCode(frame); code == codeRetryAfter {
+		if code := errorCode(frame); code == CodeRetryAfter {
 			break
 		} else if code != 0 {
 			t.Fatalf("reaction %d: %#v", i, frame)
@@ -79,7 +79,7 @@ func TestActionsAreLimited(t *testing.T) {
 		t.Fatalf("limited after %d reactions, want %d", admitted, actionBurst)
 	}
 	// Joins and leaves share the limit; a request that changes nothing does not.
-	c.expectError(t, "room_leave", "leave", map[string]any{"room_id": "general"}, codeRetryAfter)
+	c.expectError(t, "room_leave", "leave", map[string]any{"room_id": "general"}, CodeRetryAfter)
 	created := reply(t, c, "room_set", "room", map[string]any{"title": "Other"})
 	room := created["result"].(map[string]any)["room_id"].(string)
 	if frame := reply(t, c, "room_join", "again", map[string]any{"room_id": room}); errorCode(frame) != 0 {
@@ -98,11 +98,11 @@ func TestRoomMutesClearOnceHidden(t *testing.T) {
 	leaveRoom(t, c, room)
 	// Muting a room the user cannot see stays unknown, but the mute it has
 	// can be cleared.
-	c.expectError(t, "status", "again", map[string]any{"room_id": room, "mute": true}, codeInvalidParams)
+	c.expectError(t, "status", "again", map[string]any{"room_id": room, "mute": true}, CodeInvalidParams)
 	if frame := reply(t, c, "status", "unmute", map[string]any{"room_id": room, "mute": false}); errorCode(frame) != 0 {
 		t.Fatalf("unmute: %#v", frame)
 	}
-	c.expectError(t, "status", "twice", map[string]any{"room_id": room, "mute": false}, codeInvalidParams)
+	c.expectError(t, "status", "twice", map[string]any{"room_id": room, "mute": false}, CodeInvalidParams)
 }
 
 func TestPasskeyLoginStoresTheSignCounter(t *testing.T) {

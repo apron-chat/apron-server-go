@@ -90,7 +90,7 @@ func passkeyPublicKey(t *testing.T, result map[string]any) map[string]any {
 func passkeyDenied(t *testing.T, frame map[string]any) {
 	t.Helper()
 	err, ok := frame["error"].(map[string]any)
-	if !ok || err["code"] != float64(codeDenied) {
+	if !ok || err["code"] != float64(CodeDenied) {
 		t.Fatalf("expected denial: %#v", frame)
 	}
 }
@@ -492,7 +492,7 @@ func TestPasskeyRejectsInvalidRegistration(t *testing.T) {
 	for _, malformed := range []any{nil, "invalid", []any{}, map[string]any{}} {
 		passkeyResult(t, passkeyCall(t, c, "begin", "register", "begin", nil))
 		failure := passkeyCall(t, c, "malformed", "register", "finish", map[string]any{"credential": malformed})
-		if failure["error"].(map[string]any)["code"] != float64(codeInvalidParams) {
+		if failure["error"].(map[string]any)["code"] != float64(CodeInvalidParams) {
 			t.Fatalf("malformed credential: %#v", failure)
 		}
 	}
@@ -515,7 +515,7 @@ func TestPasskeyBeginIsNoBarrierPass(t *testing.T) {
 	c.write(t, map[string]any{"method": "auth", "id": "begin", "params": map[string]any{"scheme": "webauthn", "action": "login", "step": "begin"}})
 	c.write(t, map[string]any{"method": "room_list", "id": "list", "params": map[string]any{"filter": "joined"}})
 	options := passkeyResult(t, c.read(t))
-	if denied := c.read(t); denied["id"] != "list" || denied["error"].(map[string]any)["code"] != float64(codeDenied) {
+	if denied := c.read(t); denied["id"] != "list" || denied["error"].(map[string]any)["code"] != float64(CodeDenied) {
 		t.Fatalf("room_list behind begin: %#v", denied)
 	}
 	c.write(t, map[string]any{"method": "auth", "id": "finish", "params": map[string]any{
@@ -563,7 +563,7 @@ func TestPasskeyMalformedFields(t *testing.T) {
 	} {
 		c.write(t, map[string]any{"method": "auth", "id": id, "params": params})
 		frame := c.read(t)
-		if frame["error"].(map[string]any)["code"] != float64(codeInvalidParams) {
+		if frame["error"].(map[string]any)["code"] != float64(CodeInvalidParams) {
 			t.Fatalf("%s: %#v", id, frame)
 		}
 	}
@@ -587,13 +587,13 @@ func TestPasskeyMalformedFields(t *testing.T) {
 		"scheme": "webauthn", "action": "register", "step": "finish", "credential": proof,
 	}})
 	missing := c.read(t)
-	if missing["error"].(map[string]any)["code"] != float64(codeInvalidParams) {
+	if missing["error"].(map[string]any)["code"] != float64(CodeInvalidParams) {
 		t.Fatalf("missing challenge_id: %#v", missing)
 	}
 	// A matching malformed credential is invalid_params and consumes the
 	// challenge, so its later retry is a denied missing challenge.
 	failure := passkeyCall(t, c, "malformed", "register", "finish", map[string]any{"credential": map[string]any{}})
-	if failure["error"].(map[string]any)["code"] != float64(codeInvalidParams) {
+	if failure["error"].(map[string]any)["code"] != float64(CodeInvalidParams) {
 		t.Fatalf("malformed credential: %#v", failure)
 	}
 	passkeyDenied(t, passkeyCall(t, c, "retry", "register", "finish", map[string]any{"credential": proof}))
@@ -642,6 +642,6 @@ func TestSignInReplacesGuestAndDeduplicatesPerUser(t *testing.T) {
 	if again := switcher.result(t, "message", "same", params); again["message_id"] != id {
 		t.Fatalf("duplicate result: %#v", again)
 	}
-	switcher.expectError(t, "message", "same", map[string]any{"room_id": "general", "body": map[string]any{"text": "different"}}, codeInvalidParams)
+	switcher.expectError(t, "message", "same", map[string]any{"room_id": "general", "body": map[string]any{"text": "different"}}, CodeInvalidParams)
 	observer.expectQuiet(t)
 }

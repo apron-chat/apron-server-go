@@ -11,27 +11,52 @@ import (
 	"unicode"
 )
 
+// Error codes (PROTOCOL.md §1.1). Extensions return them in an *Error to
+// refuse a request, a command, or a message.
 const (
-	codeParseError     = -32700
-	codeInvalidRequest = -32600
-	codeUnsupported    = -32601
-	codeInvalidParams  = -32602
-	codeInternalError  = -32603
-	codeDenied         = -32001
-	codeRetryAfter     = -32002
-	codeTooLarge       = -32003
+	CodeParseError     = -32700
+	CodeInvalidRequest = -32600
+	// CodeUnsupported is a method or scheme the server does not offer.
+	CodeUnsupported = -32601
+	// CodeInvalidParams is a request that names something that does not
+	// exist, or whose params are malformed.
+	CodeInvalidParams = -32602
+	CodeInternalError = -32603
+	// CodeDenied is a request the sender may not make.
+	CodeDenied = -32001
+	// CodeRetryAfter is a request refused for now; Data carries
+	// retry_after, in seconds (see RetryAfter).
+	CodeRetryAfter = -32002
+	// CodeTooLarge is a request over a size limit.
+	CodeTooLarge = -32003
 )
 
-type rpcError struct {
+// Error is a protocol error reply (PROTOCOL.md §1.1). Message is shown to
+// people, so it says what to do in a sentence.
+type Error struct {
 	Code    int    `json:"code"`
 	Message string `json:"message"`
 	Data    any    `json:"data,omitzero"`
 }
 
+func (e *Error) Error() string {
+	return fmt.Sprintf("apron error %d: %s", e.Code, e.Message)
+}
+
+// Denied is a CodeDenied error with message.
+func Denied(message string) *Error {
+	return &Error{Code: CodeDenied, Message: message}
+}
+
+// InvalidParams is a CodeInvalidParams error with message.
+func InvalidParams(message string) *Error {
+	return &Error{Code: CodeInvalidParams, Message: message}
+}
+
 type rpcResponse struct {
-	ID     any       `json:"id,omitzero"`
-	Result any       `json:"result,omitzero"`
-	Error  *rpcError `json:"error,omitzero"`
+	ID     any    `json:"id,omitzero"`
+	Result any    `json:"result,omitzero"`
+	Error  *Error `json:"error,omitzero"`
 }
 
 type request struct {
@@ -41,14 +66,14 @@ type request struct {
 	hasID  bool
 }
 
-func parseRequest(payload []byte) (request, *rpcError) {
+func parseRequest(payload []byte) (request, *Error) {
 	if !jsontext.Value(payload).IsValid() {
-		return request{}, &rpcError{Code: codeParseError, Message: "Parse error"}
+		return request{}, &Error{Code: CodeParseError, Message: "Parse error"}
 	}
 
 	var object map[string]jsontext.Value
 	if err := json.Unmarshal(payload, &object); err != nil || object == nil {
-		return request{}, &rpcError{Code: codeInvalidRequest, Message: "Invalid request"}
+		return request{}, &Error{Code: CodeInvalidRequest, Message: "Invalid request"}
 	}
 
 	// method comes first: a server may ignore the id of a notification
@@ -64,11 +89,11 @@ func parseRequest(payload []byte) (request, *rpcError) {
 		req.hasID = true
 		if bytes.Equal(bytes.TrimSpace(rawID), []byte("null")) || json.Unmarshal(rawID, &req.id) != nil {
 			req.hasID = false
-			return req, &rpcError{Code: codeInvalidRequest, Message: "Request id must be a string"}
+			return req, &Error{Code: CodeInvalidRequest, Message: "Request id must be a string"}
 		}
 	}
 	if !methodOK {
-		return req, &rpcError{Code: codeInvalidRequest, Message: "Invalid request"}
+		return req, &Error{Code: CodeInvalidRequest, Message: "Invalid request"}
 	}
 
 	req.params = make(map[string]jsontext.Value)
@@ -110,15 +135,15 @@ func response(id string, result any) rpcResponse {
 
 // errorResponse builds an error reply. A nil id omits "id", as for errors not
 // tied to a request (PROTOCOL.md §1.1).
-func errorResponse(id any, e *rpcError) rpcResponse {
+func errorResponse(id any, e *Error) rpcResponse {
 	return rpcResponse{ID: id, Error: e}
 }
 
-func invalidParams(format string, args ...any) *rpcError {
-	return &rpcError{Code: codeInvalidParams, Message: fmt.Sprintf(format, args...)}
+func invalidParams(format string, args ...any) *Error {
+	return &Error{Code: CodeInvalidParams, Message: fmt.Sprintf(format, args...)}
 }
 
-func parseString(params map[string]jsontext.Value, name string, required bool) (string, *rpcError) {
+func parseString(params map[string]jsontext.Value, name string, required bool) (string, *Error) {
 	raw, ok := params[name]
 	if !ok {
 		if required {
@@ -139,7 +164,7 @@ func validID(id string) bool {
 	return id != "" && !strings.ContainsFunc(id, func(r rune) bool { return unicode.IsSpace(r) || unicode.IsControl(r) })
 }
 
-func parseBool(params map[string]jsontext.Value, name string, required bool) (bool, *rpcError) {
+func parseBool(params map[string]jsontext.Value, name string, required bool) (bool, *Error) {
 	raw, ok := params[name]
 	if !ok {
 		if required {
@@ -154,7 +179,7 @@ func parseBool(params map[string]jsontext.Value, name string, required bool) (bo
 	return value, nil
 }
 
-func parseObject(params map[string]jsontext.Value, name string, required bool) (map[string]any, *rpcError) {
+func parseObject(params map[string]jsontext.Value, name string, required bool) (map[string]any, *Error) {
 	raw, ok := params[name]
 	if !ok {
 		if required {
@@ -176,7 +201,7 @@ type extObject = map[string]jsontext.Value
 
 // parseExt reads an optional ext object of a write (§4.12). present reports
 // whether the request carried it.
-func parseExt(params map[string]jsontext.Value, name string) (ext extObject, present bool, err *rpcError) {
+func parseExt(params map[string]jsontext.Value, name string) (ext extObject, present bool, err *Error) {
 	raw, ok := params[name]
 	if !ok {
 		return nil, false, nil

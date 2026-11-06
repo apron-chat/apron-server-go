@@ -75,7 +75,7 @@ func (m *messageState) snapshot() map[string]any {
 // (§4.2.2): a poster who has not joined gets only the result. A new message
 // with no text and no embeds is neither logged nor broadcast, and its
 // result is {}.
-func (s *Server) saveMessage(c *client, req request) (any, bool, *rpcError) {
+func (s *Server) saveMessage(c *client, req request) (any, bool, *Error) {
 	roomID, err := parseString(req.params, "room_id", false)
 	if err != nil {
 		return nil, false, err
@@ -116,6 +116,24 @@ func (s *Server) saveMessage(c *client, req request) (any, bool, *rpcError) {
 	if err != nil {
 		return nil, false, err
 	}
+	// The extensions' filters see what is saved, outside s.mu, and may
+	// change it or refuse it (Host.FilterMessage).
+	s.mu.RLock()
+	filtering := len(s.filters) > 0
+	s.mu.RUnlock()
+	if filtering && !deleted {
+		draft := &Draft{RoomID: roomID, Body: body, Ext: extWrite}
+		if replacing {
+			draft.MessageID = messageID
+		}
+		if hasReply {
+			draft.ReplyTo = replyID
+		}
+		if err := s.filterMessage(c, draft); err != nil {
+			return nil, false, err
+		}
+		body, extWrite = draft.Body, draft.Ext
+	}
 
 	s.mu.Lock()
 	defer s.unlock()
@@ -132,14 +150,14 @@ func (s *Server) saveMessage(c *client, req request) (any, bool, *rpcError) {
 			return nil, false, invalidParams("Unknown message %q", messageID)
 		}
 		if current.owner != u.id {
-			return nil, false, &rpcError{Code: codeDenied, Message: "Only the author may edit, move, or delete this message"}
+			return nil, false, &Error{Code: CodeDenied, Message: "Only the author may edit, move, or delete this message"}
 		}
 		// A move snapshot is logged in both rooms and names both, so a
 		// message may not move to a room that some who see its room cannot
 		// see, such as a private room: the move would show them its room_id
 		// and the message.
 		if source := s.rooms[current.roomID]; source != destination && source.revealsTo(destination) {
-			return nil, false, &rpcError{Code: codeDenied, Message: "A message cannot move to a room that fewer people can see"}
+			return nil, false, &Error{Code: CodeDenied, Message: "A message cannot move to a room that fewer people can see"}
 		}
 		from = current.from
 	}
@@ -151,7 +169,7 @@ func (s *Server) saveMessage(c *client, req request) (any, bool, *rpcError) {
 		// A reply names its target's message_id to everyone who sees the
 		// reply, so it may not name a message some of them cannot see.
 		if destination.revealsTo(s.rooms[target.roomID]) {
-			return nil, false, &rpcError{Code: codeDenied, Message: "A reply cannot quote a message that fewer people can see"}
+			return nil, false, &Error{Code: CodeDenied, Message: "A reply cannot quote a message that fewer people can see"}
 		}
 	}
 	var previous map[string]any
@@ -170,7 +188,7 @@ func (s *Server) saveMessage(c *client, req request) (any, bool, *rpcError) {
 		}
 		ext = mergeExt(kept, extWrite)
 		if encodedSize(ext) > maxMessageExtBytes {
-			return nil, false, &rpcError{Code: codeTooLarge, Message: fmt.Sprintf("The message's ext would be over %d bytes", maxMessageExtBytes)}
+			return nil, false, &Error{Code: CodeTooLarge, Message: fmt.Sprintf("The message's ext would be over %d bytes", maxMessageExtBytes)}
 		}
 	}
 	if !replacing {
@@ -335,7 +353,7 @@ func tombstone(snapshot map[string]any) {
 // admitPostLocked applies MessagesPerMinute to new messages, room_set,
 // /avatar, and /emoji add: each user may send a burst of
 // MessagesPerMinute, refilled evenly over a minute.
-func (s *Server) admitPostLocked(u *userState) *rpcError {
+func (s *Server) admitPostLocked(u *userState) *Error {
 	limit := s.config.MessagesPerMinute
 	if limit <= 0 {
 		return nil
@@ -348,7 +366,7 @@ func (s *Server) admitPostLocked(u *userState) *rpcError {
 	if delay := reservation.DelayFrom(now); delay > 0 {
 		reservation.CancelAt(now)
 		wait := int64((delay + time.Second - 1) / time.Second)
-		return &rpcError{Code: codeRetryAfter, Message: "Too many messages; slow down", Data: map[string]any{"retry_after": wait}}
+		return &Error{Code: CodeRetryAfter, Message: "Too many messages; slow down", Data: map[string]any{"retry_after": wait}}
 	}
 	return nil
 }
@@ -365,7 +383,7 @@ const (
 // their connections, so that toggling a reaction or a membership in a loop
 // cannot grow every room's log and broadcast to its members without end.
 // Beyond it the request is retry_after and changes nothing.
-func admitActionLocked(u *userState) *rpcError {
+func admitActionLocked(u *userState) *Error {
 	if u.actions == nil {
 		u.actions = rate.NewLimiter(rate.Every(actionRefill), actionBurst)
 	}
@@ -407,7 +425,7 @@ func validMessageID(id string) bool {
 
 // parseMessageRef reads a message reference (reply_to). Clients
 // send bare references; any other keys, such as an echoed snapshot, are ignored.
-func parseMessageRef(params map[string]jsontext.Value, name string) (string, bool, *rpcError) {
+func parseMessageRef(params map[string]jsontext.Value, name string) (string, bool, *Error) {
 	raw, present := params[name]
 	if !present {
 		return "", false, nil
@@ -442,7 +460,7 @@ func mentions(body map[string]any) []string {
 	return ids
 }
 
-func validateBody(body map[string]any) *rpcError {
+func validateBody(body map[string]any) *Error {
 	if raw, ok := body["text"]; ok {
 		if _, ok := raw.(string); !ok {
 			return invalidParams("body.text must be a string")
@@ -461,7 +479,7 @@ func validateBody(body map[string]any) *rpcError {
 		}
 		if len(mentions) > maxMentions {
 			// A count limit the server sets is denied (§1.1).
-			return &rpcError{Code: codeDenied, Message: fmt.Sprintf("A message mentions at most %d users", maxMentions)}
+			return &Error{Code: CodeDenied, Message: fmt.Sprintf("A message mentions at most %d users", maxMentions)}
 		}
 		for _, value := range mentions {
 			if id, ok := value.(string); !ok || !validID(id) {
@@ -475,7 +493,7 @@ func validateBody(body map[string]any) *rpcError {
 			return invalidParams("body.embeds must be an array")
 		}
 		if len(embeds) > maxEmbedsPerMessage {
-			return &rpcError{Code: codeDenied, Message: fmt.Sprintf("A message holds at most %d embeds", maxEmbedsPerMessage)}
+			return &Error{Code: CodeDenied, Message: fmt.Sprintf("A message holds at most %d embeds", maxEmbedsPerMessage)}
 		}
 		for i, value := range embeds {
 			embed, ok := value.(map[string]any)
@@ -498,7 +516,7 @@ const (
 // react replaces the caller's complete reaction set on one message
 // (§4.7). Entries are kept fully qualified, and duplicates collapse; an
 // unchanged set logs nothing. The broadcast precedes the result (§1).
-func (s *Server) react(c *client, req request) (any, bool, *rpcError) {
+func (s *Server) react(c *client, req request) (any, bool, *Error) {
 	messageID, err := parseString(req.params, "message_id", true)
 	if err != nil {
 		return nil, false, err
@@ -555,7 +573,7 @@ func (s *Server) commitReactionsLocked(m *messageState, elements []any) {
 	s.deliverLocked(rawNotification("reactions", record.raw), r)
 }
 
-func parseEmojis(params map[string]jsontext.Value) ([]string, *rpcError) {
+func parseEmojis(params map[string]jsontext.Value) ([]string, *Error) {
 	raw, ok := params["emojis"]
 	if !ok {
 		return nil, invalidParams("Missing emojis")
@@ -576,7 +594,7 @@ func parseEmojis(params map[string]jsontext.Value) ([]string, *rpcError) {
 			return nil, invalidParams("emojis must be non-empty strings")
 		}
 		if len(emoji) > maxEmojiBytes {
-			return nil, &rpcError{Code: codeTooLarge, Message: fmt.Sprintf("An emoji is at most %d bytes", maxEmojiBytes)}
+			return nil, &Error{Code: CodeTooLarge, Message: fmt.Sprintf("An emoji is at most %d bytes", maxEmojiBytes)}
 		}
 		if !slices.Contains(emojis, emoji) {
 			emojis = append(emojis, emoji)
@@ -584,7 +602,7 @@ func parseEmojis(params map[string]jsontext.Value) ([]string, *rpcError) {
 	}
 	if len(emojis) > maxDistinctEmoji {
 		// A count limit the server sets is denied (§1.1).
-		return nil, &rpcError{Code: codeDenied, Message: fmt.Sprintf("At most %d distinct emoji per message", maxDistinctEmoji)}
+		return nil, &Error{Code: CodeDenied, Message: fmt.Sprintf("At most %d distinct emoji per message", maxDistinctEmoji)}
 	}
 	return emojis, nil
 }

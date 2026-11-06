@@ -75,10 +75,10 @@ func (s *Server) devicesOfLocked(u *userState) ([][32]byte, []deviceToken) {
 // with it close and its push registrations go. A passkey or session token
 // someone got while signed in with the old token stays. The token goes to
 // this connection only, in a ~private notice before the result (§1).
-func (s *Server) inviteDeviceCommand(c *client, r *roomState, _ map[string]any, args, _ string) (map[string]any, *rpcError) {
+func (s *Server) inviteDeviceCommand(c *client, r *roomState, _ map[string]any, args, _ string) (map[string]any, *Error) {
 	u := c.user
 	if !u.account() {
-		return nil, &rpcError{Code: codeDenied, Message: "Sign in with a passkey or email to use /invite-device"}
+		return nil, &Error{Code: CodeDenied, Message: "Sign in with a passkey or email to use /invite-device"}
 	}
 	words := strings.Fields(args)
 	if len(words) != 1 {
@@ -95,11 +95,11 @@ func (s *Server) inviteDeviceCommand(c *client, r *roomState, _ map[string]any, 
 		for i, d := range devices {
 			names[i] = "`" + d.name + "`"
 		}
-		return nil, &rpcError{Code: codeDenied, Message: fmt.Sprintf("You have %d device tokens (%s); run /invite-device with one of those names to replace its token", maxDeviceTokens, strings.Join(names, ", "))}
+		return nil, &Error{Code: CodeDenied, Message: fmt.Sprintf("You have %d device tokens (%s); run /invite-device with one of those names to replace its token", maxDeviceTokens, strings.Join(names, ", "))}
 	}
 	secret := make([]byte, 32)
 	if _, err := rand.Read(secret); err != nil {
-		return nil, &rpcError{Code: codeInternalError, Message: "Unable to create a device token"}
+		return nil, &Error{Code: CodeInternalError, Message: "Unable to create a device token"}
 	}
 	token := deviceTokenPrefix + base64.RawURLEncoding.EncodeToString(secret)
 	key := sha256.Sum256([]byte(token))
@@ -118,7 +118,7 @@ func (s *Server) inviteDeviceCommand(c *client, r *roomState, _ map[string]any, 
 		lines = append(lines, fmt.Sprintf("Or open this link on **%s**, which signs you in there with any Apron app: <%s>", name, apronLink(server, token)))
 	}
 	lines = append(lines, fmt.Sprintf("To sign in, authenticate with the token scheme: `{\"method\": \"auth\", \"params\": {\"scheme\": \"token\", \"token\": \"%s\"}}`", token))
-	c.enqueue(privateNotice(r, strings.Join(lines, "\n\n")))
+	c.enqueue(privateNotice(r.id, strings.Join(lines, "\n\n")))
 	return map[string]any{}, nil
 }
 
@@ -135,7 +135,7 @@ func (s *Server) revokeDeviceLocked(c *client, old, replacement [32]byte) {
 	}
 	for peer := range c.user.clients {
 		if peer != c && peer.device == old {
-			peer.closeWithError(&rpcError{Code: codeDenied, Message: "Device token replaced; sign in with the new one"})
+			peer.closeWithError(&Error{Code: CodeDenied, Message: "Device token replaced; sign in with the new one"})
 		}
 	}
 	for _, registration := range c.user.pushes {
@@ -148,11 +148,11 @@ func (s *Server) revokeDeviceLocked(c *client, old, replacement [32]byte) {
 // authenticateDeviceLocked signs the connection in with a device token,
 // from any origin or none. The result carries no session token: the device
 // keeps its own.
-func (s *Server) authenticateDeviceLocked(c *client, req request, token string) (any, *rpcError) {
+func (s *Server) authenticateDeviceLocked(c *client, req request, token string) (any, *Error) {
 	key := sha256.Sum256([]byte(token))
 	device, ok := s.devices[key]
 	if !ok {
-		return nil, &rpcError{Code: codeDenied, Message: "This device token is not valid; get a new one with /invite-device on a signed-in device"}
+		return nil, &Error{Code: CodeDenied, Message: "This device token is not valid; get a new one with /invite-device on a signed-in device"}
 	}
 	c.device = key
 	return s.switchUserLocked(c, req, device.user, nil, c.user != device.user, false), nil

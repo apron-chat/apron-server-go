@@ -165,7 +165,7 @@ func TestEmailSignIn(t *testing.T) {
 	if reply := proposer.read(t); reply["id"] != "propose" || len(reply["result"].(map[string]any)) != 0 {
 		t.Fatalf("proposal reply: %#v", reply)
 	}
-	if reply := proposer.read(t); reply["id"] != "list" || reply["error"].(map[string]any)["code"] != float64(codeDenied) {
+	if reply := proposer.read(t); reply["id"] != "list" || reply["error"].(map[string]any)["code"] != float64(CodeDenied) {
 		t.Fatalf("request behind a proposal: %#v", reply)
 	}
 	message := mailbox.receive(t)
@@ -184,19 +184,19 @@ func TestEmailSignIn(t *testing.T) {
 		t.Fatalf("text: %q", message.Text())
 	}
 	// Another proposal for the address so soon is retry_after.
-	proposer.expectError(t, "auth", "again", map[string]any{"scheme": "email", "email": "ada@example.com"}, codeRetryAfter)
-	proposer.expectError(t, "auth", "invalid", map[string]any{"scheme": "email", "email": "Ada <ada@example.com>"}, codeInvalidParams)
-	proposer.expectError(t, "auth", "missing", map[string]any{"scheme": "email"}, codeInvalidParams)
+	proposer.expectError(t, "auth", "again", map[string]any{"scheme": "email", "email": "ada@example.com"}, CodeRetryAfter)
+	proposer.expectError(t, "auth", "invalid", map[string]any{"scheme": "email", "email": "Ada <ada@example.com>"}, CodeInvalidParams)
+	proposer.expectError(t, "auth", "missing", map[string]any{"scheme": "email"}, CodeInvalidParams)
 	// state is a string of at most 256 bytes.
-	proposer.expectError(t, "auth", "long-state", map[string]any{"scheme": "email", "email": "bob@example.com", "state": strings.Repeat("s", maxStateBytes+1)}, codeTooLarge)
-	proposer.expectError(t, "auth", "state-type", map[string]any{"scheme": "email", "email": "bob@example.com", "state": 7}, codeInvalidParams)
+	proposer.expectError(t, "auth", "long-state", map[string]any{"scheme": "email", "email": "bob@example.com", "state": strings.Repeat("s", maxStateBytes+1)}, CodeTooLarge)
+	proposer.expectError(t, "auth", "state-type", map[string]any{"scheme": "email", "email": "bob@example.com", "state": 7}, CodeInvalidParams)
 
 	// The code works only on the proposing connection; the link token on
 	// any connection not signed in, which it signs in: a new account, which
 	// joins general, after the result (§3.2).
 	reader, _ := dialRaw(t, httpServer)
-	reader.expectError(t, "auth", "code-elsewhere", map[string]any{"scheme": "email", "token": message.Code}, codeDenied)
-	reader.expectError(t, "auth", "wrong", map[string]any{"scheme": "email", "token": "wrong"}, codeDenied)
+	reader.expectError(t, "auth", "code-elsewhere", map[string]any{"scheme": "email", "token": message.Code}, CodeDenied)
+	reader.expectError(t, "auth", "wrong", map[string]any{"scheme": "email", "token": "wrong"}, CodeDenied)
 	before, result := signInByEmail(t, reader, link, map[string]any{"name": "Ada", "user_id": "ada"})
 	if you := result["you"].(map[string]any); you["user_id"] != "ada" || you["name"] != "Ada" {
 		t.Fatalf("new account: %#v", result)
@@ -207,8 +207,8 @@ func TestEmailSignIn(t *testing.T) {
 	expectJoinedDefault(t, reader, "ada")
 	// The proposal is consumed: neither token works again.
 	third, _ := dialRaw(t, httpServer)
-	third.expectError(t, "auth", "reuse", map[string]any{"scheme": "email", "token": link}, codeDenied)
-	proposer.expectError(t, "auth", "code-after", map[string]any{"scheme": "email", "token": message.Code}, codeDenied)
+	third.expectError(t, "auth", "reuse", map[string]any{"scheme": "email", "token": link}, CodeDenied)
+	proposer.expectError(t, "auth", "code-after", map[string]any{"scheme": "email", "token": message.Code}, CodeDenied)
 	// The bearer token resumes the account on later connections.
 	resumed := third.result(t, "auth", "resume", map[string]any{"scheme": "token", "token": result["token"]})
 	if resumed["you"].(map[string]any)["user_id"] != "ada" || resumed["token"] != result["token"] {
@@ -293,14 +293,14 @@ func TestEmailAdditions(t *testing.T) {
 	attacker, _ := dialRaw(t, httpServer)
 	propose(t, attacker, "mallory@evil.example")
 	link := linkToken(t, mailbox.receive(t))
-	victim.expectError(t, "auth", "link", map[string]any{"scheme": "email", "token": link}, codeDenied)
+	victim.expectError(t, "auth", "link", map[string]any{"scheme": "email", "token": link}, CodeDenied)
 	later, _ := dialRaw(t, httpServer)
 	_, result := signInByEmail(t, later, link, nil)
 	if result["you"].(map[string]any)["user_id"] == victim.userID {
 		t.Fatalf("the attacker became the victim: %#v", result)
 	}
 	expectJoinedDefault(t, later, result["you"].(map[string]any)["user_id"].(string))
-	later.expectError(t, "history", "diary", map[string]any{"room_id": diary}, codeInvalidParams)
+	later.expectError(t, "history", "diary", map[string]any{"room_id": diary}, CodeInvalidParams)
 	victim.drain(t)
 
 	// Nor can an account take another account's address: nothing is sent,
@@ -308,7 +308,7 @@ func TestEmailAdditions(t *testing.T) {
 	ageSends(app, "mallory@evil.example", time.Hour)
 	propose(t, victim, "mallory@evil.example")
 	approveOwned := pendingCode(t, app, victim.userID)
-	victim.expectError(t, "auth", "owned", map[string]any{"scheme": "email", "token": approveOwned}, codeDenied)
+	victim.expectError(t, "auth", "owned", map[string]any{"scheme": "email", "token": approveOwned}, CodeDenied)
 
 	// The victim proposes adding their own address.
 	propose(t, victim, "victim@example.com")
@@ -323,10 +323,10 @@ func TestEmailAdditions(t *testing.T) {
 	other, _ := dialRaw(t, httpServer)
 	propose(t, other, "victim@example.com")
 	mailbox.receive(t)
-	other.expectError(t, "auth", "elsewhere", map[string]any{"scheme": "email", "token": message.Code}, codeDenied)
-	other.expectError(t, "auth", "link-not-signed-in", map[string]any{"scheme": "email", "token": linkToken(t, message)}, codeDenied)
+	other.expectError(t, "auth", "elsewhere", map[string]any{"scheme": "email", "token": message.Code}, CodeDenied)
+	other.expectError(t, "auth", "link-not-signed-in", map[string]any{"scheme": "email", "token": linkToken(t, message)}, CodeDenied)
 	stranger := dialTestClient(t, httpServer)
-	stranger.expectError(t, "auth", "link-other-account", map[string]any{"scheme": "email", "token": linkToken(t, message)}, codeDenied)
+	stranger.expectError(t, "auth", "link-other-account", map[string]any{"scheme": "email", "token": linkToken(t, message)}, CodeDenied)
 	victim.drain(t)
 	// Approving adds the address to the guest, which becomes an account
 	// keeping its messages, with the roles its address was granted: {} and
@@ -341,7 +341,7 @@ func TestEmailAdditions(t *testing.T) {
 	save(t, victim, "edit", map[string]any{"message_id": secret, "room_id": diary, "body": map[string]any{"text": "still mine"}})
 	// An account holds one address.
 	propose(t, victim, "second@example.com")
-	victim.expectError(t, "auth", "second", map[string]any{"scheme": "email", "token": pendingCode(t, app, victim.userID)}, codeDenied)
+	victim.expectError(t, "auth", "second", map[string]any{"scheme": "email", "token": pendingCode(t, app, victim.userID)}, CodeDenied)
 
 	// A passkey registration on the signed-in account adds the passkey to
 	// it (§4.10), and signs in to it later.
@@ -411,7 +411,7 @@ func TestEmailProposalsEndWithTheirIdentity(t *testing.T) {
 	if resumed["you"].(map[string]any)["user_id"] != other.userID {
 		t.Fatalf("switching accounts: %#v", resumed)
 	}
-	c.expectError(t, "auth", "after-switch", map[string]any{"scheme": "email", "token": code}, codeDenied)
+	c.expectError(t, "auth", "after-switch", map[string]any{"scheme": "email", "token": code}, CodeDenied)
 	app.mu.RLock()
 	added := app.emails["first@example.com"]
 	app.mu.RUnlock()
@@ -425,7 +425,7 @@ func TestEmailProposalsEndWithTheirIdentity(t *testing.T) {
 	link := linkToken(t, mailbox.receive(t))
 	guestAuth(t, fresh)
 	reader, _ := dialRaw(t, httpServer)
-	reader.expectError(t, "auth", "stale-link", map[string]any{"scheme": "email", "token": link}, codeDenied)
+	reader.expectError(t, "auth", "stale-link", map[string]any{"scheme": "email", "token": link}, CodeDenied)
 }
 
 // A passkey account adds an address by its link on another connection
@@ -459,15 +459,15 @@ func TestEmailProposalsExpireAndAreInvalidated(t *testing.T) {
 	propose(t, c, "bob@example.com")
 	second := mailbox.receive(t)
 	if first.Code != second.Code {
-		c.expectError(t, "auth", "old", map[string]any{"scheme": "email", "token": first.Code}, codeDenied)
+		c.expectError(t, "auth", "old", map[string]any{"scheme": "email", "token": first.Code}, CodeDenied)
 	}
-	c.expectError(t, "auth", "old-link", map[string]any{"scheme": "email", "token": linkToken(t, first)}, codeDenied)
+	c.expectError(t, "auth", "old-link", map[string]any{"scheme": "email", "token": linkToken(t, first)}, CodeDenied)
 	// A few wrong tokens invalidate it.
 	for range maxEmailAttempts - 2 {
-		c.expectError(t, "auth", c.nextID("wrong"), map[string]any{"scheme": "email", "token": "wrong"}, codeDenied)
+		c.expectError(t, "auth", c.nextID("wrong"), map[string]any{"scheme": "email", "token": "wrong"}, CodeDenied)
 	}
-	c.expectError(t, "auth", "last-wrong", map[string]any{"scheme": "email", "token": "nope"}, codeDenied)
-	c.expectError(t, "auth", "invalidated", map[string]any{"scheme": "email", "token": second.Code}, codeDenied)
+	c.expectError(t, "auth", "last-wrong", map[string]any{"scheme": "email", "token": "nope"}, CodeDenied)
+	c.expectError(t, "auth", "invalidated", map[string]any{"scheme": "email", "token": second.Code}, CodeDenied)
 	// An expired proposal is denied.
 	propose(t, c, "carol@example.com")
 	expired := mailbox.receive(t)
@@ -478,38 +478,38 @@ func TestEmailProposalsExpireAndAreInvalidated(t *testing.T) {
 		}
 	}
 	app.mu.Unlock()
-	c.expectError(t, "auth", "expired", map[string]any{"scheme": "email", "token": expired.Code}, codeDenied)
+	c.expectError(t, "auth", "expired", map[string]any{"scheme": "email", "token": expired.Code}, CodeDenied)
 	// A connection may propose only a few times.
 	for i := range emailSendsPerConnection - 3 {
 		propose(t, c, fmt.Sprintf("user%d@example.com", i))
 		mailbox.receive(t)
 	}
-	c.expectError(t, "auth", "flood", map[string]any{"scheme": "email", "email": "flood@example.com"}, codeRetryAfter)
+	c.expectError(t, "auth", "flood", map[string]any{"scheme": "email", "email": "flood@example.com"}, CodeRetryAfter)
 	// A valid token is kept when the rest of the request is invalid.
 	other, _ := dialRaw(t, httpServer)
 	propose(t, other, "dave@example.com")
 	code := mailbox.receive(t).Code
-	other.expectError(t, "auth", "bad-name", map[string]any{"scheme": "email", "token": code, "name": 7}, codeInvalidParams)
+	other.expectError(t, "auth", "bad-name", map[string]any{"scheme": "email", "token": code, "name": 7}, CodeInvalidParams)
 	signInByEmail(t, other, code, nil)
 	// A sign-in code on a connection signed in is denied.
 	signedIn := dialTestClient(t, httpServer)
 	fresh, _ := dialRaw(t, httpServer)
 	propose(t, fresh, "erin@example.com")
-	signedIn.expectError(t, "auth", "signed-in", map[string]any{"scheme": "email", "token": linkToken(t, mailbox.receive(t))}, codeDenied)
+	signedIn.expectError(t, "auth", "signed-in", map[string]any{"scheme": "email", "token": linkToken(t, mailbox.receive(t))}, CodeDenied)
 	// Email sign-in is not offered without a sender, and external sign-in
 	// not at all, neither to propose nor to approve.
-	fresh.expectError(t, "auth", "external", map[string]any{"scheme": "external", "token": linkToken(t, second)}, codeUnsupported)
+	fresh.expectError(t, "auth", "external", map[string]any{"scheme": "external", "token": linkToken(t, second)}, CodeUnsupported)
 	_, plain := newTestServer(t, DefaultConfig())
 	guest, _ := dialRaw(t, plain)
-	guest.expectError(t, "auth", "email", map[string]any{"scheme": "email", "email": "ada@example.com"}, codeUnsupported)
-	guest.expectError(t, "auth", "token", map[string]any{"scheme": "token", "token": "x"}, codeUnsupported)
-	guest.expectError(t, "auth", "external", map[string]any{"scheme": "external", "return_url": "https://web.apron.chat/"}, codeUnsupported)
+	guest.expectError(t, "auth", "email", map[string]any{"scheme": "email", "email": "ada@example.com"}, CodeUnsupported)
+	guest.expectError(t, "auth", "token", map[string]any{"scheme": "token", "token": "x"}, CodeUnsupported)
+	guest.expectError(t, "auth", "external", map[string]any{"scheme": "external", "return_url": "https://web.apron.chat/"}, CodeUnsupported)
 	// A scheme not offered is unsupported before its user_id is read.
 	for _, scheme := range []string{"email", "token", "webauthn", "external"} {
-		guest.expectError(t, "auth", "bad-id-"+scheme, map[string]any{"scheme": scheme, "user_id": ""}, codeUnsupported)
+		guest.expectError(t, "auth", "bad-id-"+scheme, map[string]any{"scheme": scheme, "user_id": ""}, CodeUnsupported)
 	}
-	fresh.expectError(t, "auth", "bad-id-offered", map[string]any{"scheme": "email", "email": "frank@example.com", "user_id": ""}, codeInvalidParams)
-	fresh.expectError(t, "auth", "bad-id-token", map[string]any{"scheme": "token", "token": "x", "user_id": ""}, codeInvalidParams)
+	fresh.expectError(t, "auth", "bad-id-offered", map[string]any{"scheme": "email", "email": "frank@example.com", "user_id": ""}, CodeInvalidParams)
+	fresh.expectError(t, "auth", "bad-id-token", map[string]any{"scheme": "token", "token": "x", "user_id": ""}, CodeInvalidParams)
 }
 
 // A disconnect does not cancel a proposal: its link still signs in
@@ -544,7 +544,7 @@ func TestEmailProposalsOutliveTheirConnection(t *testing.T) {
 	}
 	app.mu.Unlock()
 	late := dialTestClient(t, httpServer)
-	late.expectError(t, "auth", "expired-link", map[string]any{"scheme": "email", "token": linkToken(t, bob)}, codeDenied)
+	late.expectError(t, "auth", "expired-link", map[string]any{"scheme": "email", "token": linkToken(t, bob)}, CodeDenied)
 }
 
 // A proposal kept after its connection closes keeps neither the closed
@@ -601,13 +601,13 @@ func TestEmailFailedAttemptsCountFromAnyConnection(t *testing.T) {
 	wrong := link[:linkHandleBytes] + strings.Repeat("A", len(link)-linkHandleBytes)
 	for i := range maxEmailAttempts - 1 {
 		guesser, _ := dialRaw(t, httpServer)
-		guesser.expectError(t, "auth", fmt.Sprintf("guess-%d", i), map[string]any{"scheme": "email", "token": wrong}, codeDenied)
+		guesser.expectError(t, "auth", fmt.Sprintf("guess-%d", i), map[string]any{"scheme": "email", "token": wrong}, CodeDenied)
 	}
 	// One more attempt, a wrong code on its own connection, cancels it.
-	c.expectError(t, "auth", "last", map[string]any{"scheme": "email", "token": "wrong"}, codeDenied)
+	c.expectError(t, "auth", "last", map[string]any{"scheme": "email", "token": "wrong"}, CodeDenied)
 	reader, _ := dialRaw(t, httpServer)
-	reader.expectError(t, "auth", "cancelled", map[string]any{"scheme": "email", "token": link}, codeDenied)
-	c.expectError(t, "auth", "cancelled-code", map[string]any{"scheme": "email", "token": message.Code}, codeDenied)
+	reader.expectError(t, "auth", "cancelled", map[string]any{"scheme": "email", "token": link}, CodeDenied)
+	c.expectError(t, "auth", "cancelled-code", map[string]any{"scheme": "email", "token": message.Code}, CodeDenied)
 }
 
 // Without a public URL, a link carries the WebSocket URL its proposal's
@@ -638,7 +638,7 @@ func TestEmailApprovesWithTheTokenScheme(t *testing.T) {
 	}
 	// Used up, under either scheme.
 	again, _ := dialRaw(t, httpServer)
-	again.expectError(t, "auth", "reuse", map[string]any{"scheme": "email", "token": link}, codeDenied)
+	again.expectError(t, "auth", "reuse", map[string]any{"scheme": "email", "token": link}, CodeDenied)
 
 	// A code on the proposing connection approves with scheme token as well.
 	second, _ := dialRaw(t, httpServer)
@@ -654,10 +654,10 @@ func TestEmailApprovesWithTheTokenScheme(t *testing.T) {
 	wrong := link[:linkHandleBytes] + strings.Repeat("A", len(link)-linkHandleBytes)
 	for i := range maxEmailAttempts {
 		guesser, _ := dialRaw(t, httpServer)
-		guesser.expectError(t, "auth", fmt.Sprintf("guess-%d", i), map[string]any{"scheme": "token", "token": wrong}, codeDenied)
+		guesser.expectError(t, "auth", fmt.Sprintf("guess-%d", i), map[string]any{"scheme": "token", "token": wrong}, CodeDenied)
 	}
 	late, _ := dialRaw(t, httpServer)
-	late.expectError(t, "auth", "cancelled", map[string]any{"scheme": "token", "token": link}, codeDenied)
+	late.expectError(t, "auth", "cancelled", map[string]any{"scheme": "token", "token": link}, CodeDenied)
 
 	// Any other token is no temporary token: its resume fails as before.
 	stranger, _ := dialRaw(t, httpServer)
@@ -677,13 +677,13 @@ func TestEmailSendLimits(t *testing.T) {
 		propose(t, dialFrom(t, httpServer, fmt.Sprintf("203.0.113.%d", i)), "carol@example.com")
 		ageSends(app, "carol@example.com", emailResendInterval)
 	}
-	dialFrom(t, httpServer, "203.0.113.100").expectError(t, "auth", "capped", map[string]any{"scheme": "email", "email": "carol@example.com"}, codeRetryAfter)
+	dialFrom(t, httpServer, "203.0.113.100").expectError(t, "auth", "capped", map[string]any{"scheme": "email", "email": "carol@example.com"}, CodeRetryAfter)
 	// One client proposes at most clientSendBurst times, across connections.
 	for i := range clientSendBurst {
 		propose(t, dialFrom(t, httpServer, "198.51.100.200"), fmt.Sprintf("c%d@example.com", i))
 	}
 	flooder := dialFrom(t, httpServer, "198.51.100.200")
-	flooder.expectError(t, "auth", "client-sends", map[string]any{"scheme": "email", "email": "d@example.com"}, codeRetryAfter)
+	flooder.expectError(t, "auth", "client-sends", map[string]any{"scheme": "email", "email": "d@example.com"}, CodeRetryAfter)
 	// Refused proposals are not tracked.
 	app.mu.Lock()
 	before := len(app.email.addresses)
@@ -705,7 +705,7 @@ func TestEmailSendLimits(t *testing.T) {
 		app.email.createAddress(fmt.Sprintf("filler%d@example.com", i), time.Now()).sends = []time.Time{time.Now()}
 	}
 	app.mu.Unlock()
-	dialFrom(t, httpServer, "192.0.2.50").expectError(t, "auth", "full", map[string]any{"scheme": "email", "email": "late@example.com"}, codeRetryAfter)
+	dialFrom(t, httpServer, "192.0.2.50").expectError(t, "auth", "full", map[string]any{"scheme": "email", "email": "late@example.com"}, CodeRetryAfter)
 	ageSends(app, "filler0@example.com", time.Hour)
 	propose(t, dialFrom(t, httpServer, "192.0.2.51"), "late@example.com")
 	app.mu.Lock()
@@ -739,7 +739,7 @@ func TestEmailDeliveriesAreBounded(t *testing.T) {
 	for i := range maxConcurrentEmailSends {
 		propose(t, dialFrom(t, httpServer, fmt.Sprintf("198.51.100.%d", i)), fmt.Sprintf("q%d@example.com", i))
 	}
-	dialFrom(t, httpServer, "192.0.2.1").expectError(t, "auth", "busy", map[string]any{"scheme": "email", "email": "busy@example.com"}, codeRetryAfter)
+	dialFrom(t, httpServer, "192.0.2.1").expectError(t, "auth", "busy", map[string]any{"scheme": "email", "email": "busy@example.com"}, CodeRetryAfter)
 }
 
 // Email accounts, their addresses, their tokens, and the roles granted to

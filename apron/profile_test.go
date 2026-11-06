@@ -104,7 +104,7 @@ func TestServerCommand(t *testing.T) {
 
 	// Only admins may use it, or see it in /help.
 	for i, text := range []string{"", "title Mine", "avatar"} {
-		guest.expectError(t, "command", fmt.Sprint("guest-", i), map[string]any{"body": map[string]any{"text": "/server " + text}}, codeDenied)
+		guest.expectError(t, "command", fmt.Sprint("guest-", i), map[string]any{"body": map[string]any{"text": "/server " + text}}, CodeDenied)
 	}
 	helpOf := func(c *testClient) string {
 		before, _ := c.request(t, "command", c.nextID("help"), map[string]any{"body": map[string]any{"text": "/help"}})
@@ -139,18 +139,18 @@ func TestServerCommand(t *testing.T) {
 		text string
 		code int
 	}{
-		{"title two\nlines", codeInvalidParams},
-		{"title ​​", codeInvalidParams},
-		{"title " + strings.Repeat("x", maxNameRunes+1), codeTooLarge},
-		{"description tab\there", codeInvalidParams},
-		{"description " + strings.Repeat("x", maxServerDescriptionBytes+1), codeTooLarge},
-		{"avatar https://example.com/a.png", codeInvalidParams},
-		{"colour red", codeInvalidParams},
+		{"title two\nlines", CodeInvalidParams},
+		{"title ​​", CodeInvalidParams},
+		{"title " + strings.Repeat("x", maxNameRunes+1), CodeTooLarge},
+		{"description tab\there", CodeInvalidParams},
+		{"description " + strings.Repeat("x", maxServerDescriptionBytes+1), CodeTooLarge},
+		{"avatar https://example.com/a.png", CodeInvalidParams},
+		{"colour red", CodeInvalidParams},
 	} {
 		admin.expectError(t, "command", fmt.Sprint("invalid-", i), map[string]any{"body": map[string]any{"text": "/server " + tc.text}}, tc.code)
 	}
-	admin.expectError(t, "command", "attached", map[string]any{"body": map[string]any{"text": "/server title Pic", "embeds": []any{map[string]any{"kind": "upload"}}}}, codeInvalidParams)
-	admin.expectError(t, "command", "two", map[string]any{"body": map[string]any{"text": "/server avatar", "embeds": []any{map[string]any{"kind": "upload"}, map[string]any{"kind": "upload"}}}}, codeInvalidParams)
+	admin.expectError(t, "command", "attached", map[string]any{"body": map[string]any{"text": "/server title Pic", "embeds": []any{map[string]any{"kind": "upload"}}}}, CodeInvalidParams)
+	admin.expectError(t, "command", "two", map[string]any{"body": map[string]any{"text": "/server avatar", "embeds": []any{map[string]any{"kind": "upload"}, map[string]any{"kind": "upload"}}}}, CodeInvalidParams)
 	before, _ = runServer(t, admin, "title The fine Server")
 	if len(before) != 1 || !strings.Contains(privateNoticeText(t, before[0]), "unchanged") {
 		t.Fatalf("an unchanged title: %#v", before)
@@ -320,7 +320,7 @@ func TestServerAvatarNeedsAUsableURL(t *testing.T) {
 	})
 	admin, _ := dialHost(t, httpServer, "chat.example")
 	signInAdmin(t, admin, mailbox)
-	admin.expectError(t, "command", "avatar", map[string]any{"body": map[string]any{"text": "/server avatar", "embeds": []any{map[string]any{"kind": "upload"}}}}, codeDenied)
+	admin.expectError(t, "command", "avatar", map[string]any{"body": map[string]any{"text": "/server avatar", "embeds": []any{map[string]any{"kind": "upload"}}}}, CodeDenied)
 	if params, _ := profileChange(t, admin, nil, "title Proxied"); params["title"] != "Proxied" {
 		t.Fatalf("title over plain HTTP: %#v", params)
 	}

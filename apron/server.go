@@ -9,6 +9,7 @@ import (
 	"encoding/json/v2"
 	"fmt"
 	"io/fs"
+	"log/slog"
 	"maps"
 	"net"
 	"net/http"
@@ -160,6 +161,15 @@ type Config struct {
 	// Welcome is server.welcome (§3.2): Markdown shown on the sign-in
 	// screen. Empty omits it.
 	Welcome string
+	// Extensions add features to the server (Extension), in order. Open
+	// calls their Init after restoring the state, and fails if one fails.
+	Extensions []Extension
+	// Logger receives the server's and the extensions' logs; nil uses
+	// slog.Default().
+	Logger *slog.Logger
+	// DisableGuests stops offering guest sign-in (§3.2), so only accounts
+	// sign in: by passkey, email, or an extension's external sign-in.
+	DisableGuests bool
 	// Title, Description, and Avatar show people which server this is
 	// (§3.1): a plain display name, CommonMark saying in a few words what
 	// the server is about, and a square icon URL that follows the rules
@@ -382,9 +392,31 @@ func formatID(id int64) string {
 	return strconv.FormatInt(id, 10)
 }
 
+// transport carries a connection's frames: a WebSocket, or an in-process
+// Session.
+type transport interface {
+	// write sends one frame.
+	write(ctx context.Context, payload []byte) error
+	// ping checks that the peer is still there.
+	ping(ctx context.Context) error
+	// close ends the transport without a handshake.
+	close()
+}
+
+// wsTransport is a WebSocket connection.
+type wsTransport struct{ ws *websocket.Conn }
+
+func (t wsTransport) write(ctx context.Context, payload []byte) error {
+	return t.ws.Write(ctx, websocket.MessageText, payload)
+}
+
+func (t wsTransport) ping(ctx context.Context) error { return t.ws.Ping(ctx) }
+
+func (t wsTransport) close() { _ = t.ws.CloseNow() }
+
 type client struct {
 	server *Server
-	ws     *websocket.Conn
+	conn   transport
 	out    chan outboundBatch
 	done   chan struct{}
 	stop   sync.Once
@@ -513,6 +545,37 @@ type Server struct {
 	// stopped ends the background sweep of expired push registrations.
 	stopped     chan struct{}
 	connections sync.WaitGroup
+
+	// commands are the core commands, then the extensions' (§4.1).
+	commands []serverCommand
+	// The extensions' state (extension.go): their hosts, the capabilities
+	// and ext they advertise, their HTTP routes, message filters, and kept
+	// values by entry kind and key. Registration takes s.mu.
+	hosts      []*Host
+	advertised map[string]any
+	routes     []route
+	filters    []extensionFilter
+	extData    map[string]map[string]jsontext.Value
+	// records lists every logged record in log_id order, for Event
+	// followers; recordsChanged is closed and replaced when one is added.
+	records        []*logRecord
+	recordsChanged chan struct{}
+	// extContext is canceled by Shutdown, which waits for extensionWork:
+	// Host.Go goroutines and event followers.
+	extContext    context.Context
+	extCancel     context.CancelFunc
+	extensionWork sync.WaitGroup
+	// external is the external sign-in provider (§4.11.5), if any, and
+	// identities the accounts it made, by identity.
+	external   *externalSignIn
+	identities map[string]*userState
+	logger     *slog.Logger
+	// seenBaseURL is the latest WebSocket connection's baseURL, for
+	// Sessions without Config.PublicURL.
+	seenBaseURL string
+	// handler serves Handler, built once the extensions have added their
+	// routes.
+	handler http.Handler
 }
 
 // Open starts a server with the state in config.Store, or an empty memory
@@ -549,7 +612,18 @@ func Open(config Config) (*Server, error) {
 		storeDone:   make(chan struct{}),
 		badgeDelay:  badgeDelay,
 		stopped:     make(chan struct{}),
+
+		commands:       coreCommands(),
+		advertised:     make(map[string]any),
+		extData:        make(map[string]map[string]jsontext.Value),
+		recordsChanged: make(chan struct{}),
+		identities:     make(map[string]*userState),
+		logger:         config.Logger,
 	}
+	if s.logger == nil {
+		s.logger = slog.Default()
+	}
+	s.extContext, s.extCancel = context.WithCancel(context.Background())
 	for _, holders := range config.Roles {
 		for _, holder := range holders {
 			s.grantedIDs[strings.ToLower(holder)] = true
@@ -587,6 +661,13 @@ func Open(config Config) (*Server, error) {
 	s.removeStaleUploads(files)
 	s.unlock()
 	go s.sweepPushes()
+	if err := s.initExtensions(config.Extensions); err != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_ = s.Shutdown(ctx)
+		return nil, err
+	}
+	s.handler = s.newHandler()
 	return s, nil
 }
 
@@ -595,9 +676,13 @@ func Open(config Config) (*Server, error) {
 const defaultRoomID = "general"
 
 // Handler returns the HTTP handler serving /ws, /healthz, the passkey related
-// origins, the write, file, live text, and emoji catalog endpoints, and
-// StaticDir.
+// origins, the write, file, live text, and emoji catalog endpoints, the
+// extensions' routes (Host.Handle), and StaticDir.
 func (s *Server) Handler() http.Handler {
+	return s.handler
+}
+
+func (s *Server) newHandler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ws", s.handleWebSocket)
 	mux.HandleFunc("/healthz", s.handleHealth)
@@ -606,6 +691,12 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc(filePath, s.handleFile)
 	mux.HandleFunc(livePath, s.handleLive)
 	mux.HandleFunc(emojiPath, s.handleEmoji)
+	if s.external != nil {
+		mux.HandleFunc(externalPath, s.handleExternal)
+	}
+	for _, route := range s.routes {
+		mux.Handle(route.pattern, route.handler)
+	}
 	if s.config.StaticDir != "" {
 		root := filepath.Clean(s.config.StaticDir)
 		mux.Handle("/", http.FileServer(staticFS{http.Dir(root)}))
@@ -643,7 +734,7 @@ func (f staticFS) Open(name string) (http.File, error) {
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	s.Handler().ServeHTTP(w, r)
+	s.handler.ServeHTTP(w, r)
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
@@ -664,8 +755,9 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	if !s.closed {
 		s.closed = true
 		close(s.stopped)
+		s.extCancel()
 		for c := range s.clients {
-			c.closeWithError(&rpcError{Code: codeRetryAfter, Message: "Server is shutting down; reconnect shortly", Data: map[string]any{"retry_after": 5}})
+			c.closeWithError(&Error{Code: CodeRetryAfter, Message: "Server is shutting down; reconnect shortly", Data: map[string]any{"retry_after": 5}})
 		}
 		for _, e := range s.embeds {
 			e.endLive()
@@ -688,6 +780,9 @@ func (s *Server) Shutdown(ctx context.Context) error {
 		s.badges.Wait()
 		s.push.wait()
 		s.mailing.Wait()
+		// Extensions may keep values as they stop, so the store closes
+		// after them.
+		s.extensionWork.Wait()
 		s.mu.Lock()
 		s.closeStoreLocked()
 		s.mu.Unlock()
@@ -726,7 +821,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 
 	c := &client{
 		server:    s,
-		ws:        ws,
+		conn:      wsTransport{ws},
 		out:       make(chan outboundBatch, s.config.OutgoingQueue),
 		done:      make(chan struct{}),
 		origin:    r.Header.Get("Origin"),
@@ -745,12 +840,13 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	if s.config.MaxConnections > 0 && len(s.clients) >= s.config.MaxConnections {
 		// An error about the connection as a whole omits id (§1.1).
 		c.enqueue(map[string]any{"method": "server", "params": s.serverParams(c.baseURL)})
-		c.closeWithError(&rpcError{Code: codeRetryAfter, Message: "Server at capacity; try again shortly", Data: map[string]any{"retry_after": retryAfterSeconds}})
+		c.closeWithError(&Error{Code: CodeRetryAfter, Message: "Server at capacity; try again shortly", Data: map[string]any{"retry_after": retryAfterSeconds}})
 		s.unlock()
 		<-c.done
 		return
 	}
 	s.clients[c] = struct{}{}
+	s.seenBaseURL = c.baseURL
 	// The server announcement is queued before the reader starts accepting auth.
 	c.enqueue(map[string]any{"method": "server", "params": s.serverParams(c.baseURL)})
 	s.unlock()
@@ -834,10 +930,15 @@ func (s *Server) serverParams(baseURL string) map[string]any {
 	if s.config.EmailSender != nil {
 		authSchemes = append(authSchemes, "email")
 	}
+	if s.external != nil {
+		authSchemes = append(authSchemes, "external")
+	}
 	if len(authSchemes) > 0 {
 		authSchemes = append(authSchemes, "token")
 	}
-	authSchemes = append(authSchemes, "guest")
+	if !s.config.DisableGuests {
+		authSchemes = append(authSchemes, "guest")
+	}
 	// signup (§3.2) lists the schemes that can create an account: every
 	// one but token, which only resumes one. A passkey registered by a
 	// guest makes the guest an account, and email and guest start one.
@@ -878,6 +979,14 @@ func (s *Server) serverParams(baseURL string) map[string]any {
 		params["capabilities"] = append(params["capabilities"].([]string), "ext:settings")
 		ext["settings"] = map[string]any{"private_rooms": s.config.MaxPrivateRooms}
 	}
+	// Each extension that advertises (Host.Advertise) adds its capability,
+	// ext:<name>, and its data under its name in ext (EXTENSIONS.md).
+	for _, name := range slices.Sorted(maps.Keys(s.advertised)) {
+		params["capabilities"] = append(params["capabilities"].([]string), "ext:"+name)
+		if value := s.advertised[name]; value != nil {
+			ext[name] = value
+		}
+	}
 	if len(ext) > 0 {
 		params["ext"] = ext
 	}
@@ -900,7 +1009,7 @@ func (c *client) writeLoop() {
 				default:
 				}
 				ctx, cancel := context.WithTimeout(context.Background(), c.server.config.WriteTimeout)
-				err := c.ws.Write(ctx, websocket.MessageText, payload)
+				err := c.conn.write(ctx, payload)
 				cancel()
 				if err != nil {
 					c.stopConnection()
@@ -936,7 +1045,7 @@ func (c *client) pingLoop() {
 				return
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), config.PingTimeout)
-			err := c.ws.Ping(ctx)
+			err := c.conn.ping(ctx)
 			cancel()
 			if err != nil {
 				c.stopConnection()
@@ -955,14 +1064,14 @@ func (c *client) pong() {
 func (c *client) stopConnection() {
 	c.stop.Do(func() {
 		close(c.done)
-		_ = c.ws.CloseNow()
+		c.conn.close()
 	})
 }
 
 // closeWithError sends an error about the connection as a whole, without id
 // (PROTOCOL.md §1.1), after the frames already queued, then closes the
 // connection.
-func (c *client) closeWithError(e *rpcError) {
+func (c *client) closeWithError(e *Error) {
 	payload := encodeJSON(errorResponse(nil, e))
 	if payload == nil || !c.closing.CompareAndSwap(false, true) {
 		return
@@ -1014,7 +1123,7 @@ func (c *client) sendResult(req request, result any) {
 	c.enqueue(response(req.id, result))
 }
 
-func (c *client) sendError(req request, err *rpcError) {
+func (c *client) sendError(req request, err *Error) {
 	c.enqueue(errorResponse(req.id, err))
 }
 
@@ -1023,7 +1132,7 @@ func (c *client) sendError(req request, err *rpcError) {
 // them while holding s.mu, so that a result reflects every notification sent
 // before it on the connection, and after the notifications the request
 // causes, which precede its result (§1).
-type operation func(s *Server, c *client, req request) (result any, replied bool, err *rpcError)
+type operation func(s *Server, c *client, req request) (result any, replied bool, err *Error)
 
 func (s *Server) operations() map[string]operation {
 	ops := map[string]operation{
@@ -1062,7 +1171,7 @@ func (s *Server) processFrame(c *client, payload []byte) {
 			}
 			return
 		}
-		if parseErr.Code == codeInvalidParams && !req.hasID {
+		if parseErr.Code == CodeInvalidParams && !req.hasID {
 			return
 		}
 		if req.hasID {
@@ -1105,7 +1214,7 @@ func (s *Server) processFrame(c *client, payload []byte) {
 	if user == nil {
 		s.unlock()
 		if req.hasID {
-			c.sendError(req, &rpcError{Code: codeDenied, Message: "Sign in before sending requests"})
+			c.sendError(req, &Error{Code: CodeDenied, Message: "Sign in before sending requests"})
 		}
 		return
 	}
@@ -1113,7 +1222,7 @@ func (s *Server) processFrame(c *client, payload []byte) {
 	if op == nil {
 		s.unlock()
 		if req.hasID {
-			c.sendError(req, &rpcError{Code: codeUnsupported, Message: "Unsupported method " + strconv.Quote(req.method)})
+			c.sendError(req, &Error{Code: CodeUnsupported, Message: "Unsupported method " + strconv.Quote(req.method)})
 		}
 		return
 	}
@@ -1125,7 +1234,7 @@ func (s *Server) processFrame(c *client, payload []byte) {
 		// Request ids are any string (§2.4), but each is kept for
 		// deduplication, so their size is bounded.
 		s.unlock()
-		c.sendError(req, &rpcError{Code: codeTooLarge, Message: fmt.Sprintf("A request id is at most %d bytes", maxRequestIDBytes)})
+		c.sendError(req, &Error{Code: CodeTooLarge, Message: fmt.Sprintf("A request id is at most %d bytes", maxRequestIDBytes)})
 		return
 	}
 	if req.hasID {
@@ -1215,6 +1324,14 @@ func (s *Server) nextIDLocked() int64 {
 
 // appendLocked adds a committed record to the log of each room it belongs to.
 func (s *Server) appendLocked(record *logRecord, rooms ...*roomState) {
+	// log_ids rise, so a record almost always goes last.
+	i := len(s.records)
+	if i > 0 && s.records[i-1].id > record.id {
+		i, _ = slices.BinarySearchFunc(s.records, record.id, compareLogID)
+	}
+	s.records = slices.Insert(s.records, i, record)
+	close(s.recordsChanged)
+	s.recordsChanged = make(chan struct{})
 	for _, r := range rooms {
 		r.log = append(r.log, record)
 		r.latestID = record.id
