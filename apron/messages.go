@@ -134,6 +134,9 @@ func (s *Server) saveMessage(c *client, req request) (any, bool, *Error) {
 
 	s.mu.Lock()
 	defer s.unlock()
+	if c.closing.Load() {
+		return nil, false, connectionClosing()
+	}
 	u := c.user
 	destination := s.visibleRoomLocked(u, roomID)
 	if destination == nil {

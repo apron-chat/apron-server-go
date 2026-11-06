@@ -689,6 +689,7 @@ func TestDisableGuests(t *testing.T) {
 	var host *Host
 	config := extensionConfig(testExtension{"view", func(r *Registrar) error { host = r.Host; return nil }})
 	config.DisableGuests = true
+	config.EmailSender = LogEmailSender{}
 	_, httpServer := newTestServer(t, config)
 	c, frame := dialRaw(t, httpServer)
 	if auth := asList(frame["params"].(map[string]any)["auth"]); slices.Contains(auth, any("guest")) {

@@ -136,6 +136,10 @@ func (s *Server) command(c *client, req request) (any, bool, *Error) {
 	}
 
 	s.mu.Lock()
+	if c.closing.Load() {
+		s.unlock()
+		return nil, false, connectionClosing()
+	}
 	var command *serverCommand
 	for i := range s.commands {
 		if s.commands[i].name == name {

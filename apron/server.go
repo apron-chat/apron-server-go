@@ -705,6 +705,9 @@ func Open(config Config) (*Server, error) {
 	if err == nil {
 		s.handler, err = s.buildHandler(s.routes)
 	}
+	if err == nil {
+		err = s.checkSignIn()
+	}
 	if err != nil {
 		// Shutdown stops what the extensions started, and closes the store.
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -1308,6 +1311,12 @@ func (s *Server) processFrame(c *client, payload []byte) {
 	}
 
 	s.mu.Lock()
+	// A connection being closed, as when its account is signed out, does
+	// nothing more: the frames it sent before are dropped.
+	if c.closing.Load() {
+		s.unlock()
+		return
+	}
 	user := c.user
 	if user == nil {
 		s.unlock()

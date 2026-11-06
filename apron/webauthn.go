@@ -247,6 +247,11 @@ func (s *Server) finishPasskeyCeremony(c *client, req request, action string, w 
 	if ceremony.action == "register" && (c.user == nil || c.user.id != ceremony.identityID || ceremony.user == nil) {
 		return nil, &Error{Code: CodeDenied, Message: "Identity changed; try again"}
 	}
+	if ceremony.action == "register" {
+		if err := s.admitLocked(c.user); err != nil {
+			return nil, err
+		}
+	}
 	raw, rpcErr := parsePasskeyCredential(req.params, ceremony.action)
 	if rpcErr != nil {
 		return nil, rpcErr
@@ -420,13 +425,14 @@ func (s *Server) authenticateToken(c *client, req request) (any, *Error) {
 	// active user is never forced back through a ceremony. The token itself is
 	// not rotated, since several tabs may share one persisted token: the
 	// result carries the presented token, which clients keep as the latest.
+	// A refused sign-in changes nothing (§3.2.2).
+	if err := s.admitLocked(session.user); err != nil {
+		return nil, err
+	}
 	session.expires = now.Add(sessionLifetime)
 	s.sessions[key] = session
 	s.touchSession(key)
 	c.token = key
-	if err := s.admitLocked(session.user); err != nil {
-		return nil, err
-	}
 	// Resuming the user the connection is signed in as is no sign-in
 	// (§4.5), and sends nothing after its result.
 	return s.switchUserLocked(c, req, session.user, map[string]any{"token": token}, c.user != session.user, false), nil

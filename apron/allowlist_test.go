@@ -5,6 +5,8 @@ import (
 	"slices"
 	"testing"
 	"time"
+
+	"github.com/apron-chat/apron-server-go/store"
 )
 
 func TestParsePrincipal(t *testing.T) {
@@ -13,6 +15,7 @@ func TestParsePrincipal(t *testing.T) {
 		"email:ada@example.com":     Email("ada@example.com"),
 		"external:github:583231":    ExternalID("github:583231"),
 		"user:ada":                  UserID("ada"),
+		"user:Ada":                  UserID("ada"),
 		"  email:bob@example.com  ": Email("bob@example.com"),
 	} {
 		if got, err := ParsePrincipal(text); err != nil || got != want {
@@ -103,5 +106,74 @@ func TestRestrictedSignIn(t *testing.T) {
 	case message := <-mailbox:
 		t.Fatalf("mailed an address for a new account by user_id: %#v", message)
 	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+func TestRestrictedSignInAtStart(t *testing.T) {
+	memory := store.NewMemory()
+	restricted := func(allow ...Principal) Config {
+		config := DefaultConfig()
+		config.Store = memory
+		config.EmailSender = LogEmailSender{}
+		config.Extensions = []Extension{testExtension{"private", func(r *Registrar) error {
+			return r.RestrictSignIn().Allow(allow...)
+		}}}
+		return config
+	}
+	app, err := Open(restricted(UserID("Ada")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	app.mu.Lock()
+	ada := newUserState("ada", "Ada")
+	ada.email = "ada@example.com"
+	app.users["ada"], app.emails["ada@example.com"] = ada, ada
+	app.touchUser("ada")
+	key := [32]byte{1}
+	app.sessions[key] = session{user: ada, expires: time.Now().Add(time.Hour)}
+	app.touchSession(key)
+	admitted := app.admittedLocked(ada)
+	app.unlock()
+	if !admitted {
+		t.Fatal("user:Ada does not admit ada")
+	}
+	if err := app.Shutdown(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	// Started again without Ada on the list, the server signs her out.
+	app, err = Open(restricted(Email("bob@example.com")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer app.Shutdown(context.Background())
+	app.mu.RLock()
+	_, kept := app.sessions[key]
+	app.mu.RUnlock()
+	if kept {
+		t.Fatal("a session of an account taken off the list survived the restart")
+	}
+}
+
+func TestSomeoneCanSignIn(t *testing.T) {
+	config := DefaultConfig()
+	config.DisableGuests = true
+	if app, err := Open(config); err == nil {
+		_ = app.Shutdown(context.Background())
+		t.Fatal("Open accepted a server nobody can sign in to")
+	}
+}
+
+func TestClosingConnectionsDoNothing(t *testing.T) {
+	app, err := Open(DefaultConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer app.Shutdown(context.Background())
+	c := &client{server: app, out: make(chan outboundBatch, 4), done: make(chan struct{}), user: newUserState("ada", "Ada")}
+	c.closing.Store(true)
+	app.processFrame(c, []byte(`{"method":"push_register","id":"p1","params":{"kind":"relay","url":"https://push.example/x","token":"t"}}`))
+	if len(c.out) != 0 || len(app.pushes) != 0 {
+		t.Fatalf("a closing connection's request ran: %d frames, %d pushes", len(c.out), len(app.pushes))
 	}
 }

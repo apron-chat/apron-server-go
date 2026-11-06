@@ -34,9 +34,10 @@ func Email(address string) Principal {
 // Identity.Subject, and the account with it.
 func ExternalID(subject string) Principal { return Principal{"external", subject} }
 
-// UserID names an existing account by its user_id. It never admits a new
-// account: anyone may request a user_id.
-func UserID(id string) Principal { return Principal{"user", id} }
+// UserID names an existing account by its user_id, ignoring case, as
+// user_ids are unique. It never admits a new account: anyone may request a
+// user_id.
+func UserID(id string) Principal { return Principal{"user", strings.ToLower(id)} }
 
 // String writes the principal as ParsePrincipal reads it: email:<address>,
 // external:<subject>, or user:<user_id>.
@@ -89,6 +90,11 @@ type allowlist struct {
 // connection signs in, its server frame then holds only what signing in
 // needs, and the full one follows the sign-in (§3.1). Bots are the
 // extensions' own, and not restricted.
+//
+// The list lives in memory: the extension fills it during Init, from its
+// settings or its Store, and keeps it as it changes. Once every extension's
+// Init has returned, the accounts the list does not admit are signed out,
+// as when an entry was taken off it while the server was down.
 func (r *Registrar) RestrictSignIn() *Allowlist {
 	r.register("restricted sign-in", func() error {
 		if r.s.allowlist != nil {
@@ -185,8 +191,34 @@ func (s *Server) admitsNewLocked(email, subject string) bool {
 	return false
 }
 
+// checkSignIn checks, once the extensions are started, that someone
+// can sign in, and signs out the accounts that a restricted sign-in does
+// not admit, as when an entry was taken off the list while the server was
+// down: the list is the one the extensions made during Init.
+func (s *Server) checkSignIn() error {
+	s.mu.Lock()
+	defer s.unlock()
+	if !s.guestsAllowedLocked() && s.config.WebAuthn == nil && s.config.EmailSender == nil && s.external == nil {
+		return errors.New("nobody can sign in: without guests, the server needs passkeys, email sign-in, or an extension's external sign-in")
+	}
+	if s.allowlist != nil {
+		for _, u := range s.users {
+			if u.account() && !s.admittedLocked(u) {
+				s.signOutLocked(u)
+			}
+		}
+	}
+	return nil
+}
+
 func notAdmitted() *Error {
 	return &Error{Code: CodeDenied, Message: "This account may not sign in to this server"}
+}
+
+// connectionClosing refuses a request on a connection that is being
+// closed, which its account may no longer use.
+func connectionClosing() *Error {
+	return &Error{Code: CodeDenied, Message: "This connection is closing"}
 }
 
 // signOutLocked signs an account out everywhere: its connections close,

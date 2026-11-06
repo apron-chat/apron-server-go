@@ -154,10 +154,11 @@ func (s *Server) authenticateDeviceLocked(c *client, req request, token string) 
 	if !ok {
 		return nil, &Error{Code: CodeDenied, Message: "This device token is not valid; get a new one with /invite-device on a signed-in device"}
 	}
-	c.device = key
+	// A refused sign-in changes nothing (§3.2.2).
 	if err := s.admitLocked(device.user); err != nil {
 		return nil, err
 	}
+	c.device = key
 	return s.switchUserLocked(c, req, device.user, nil, c.user != device.user, false), nil
 }
 

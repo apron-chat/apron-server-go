@@ -4,7 +4,8 @@
 // method succeeds only for an address or identity on the list, and
 // connections that are not signed in learn only how to sign in. Admins
 // manage the list from the chat with /allow, /disallow, and /allowed, and
-// taking someone off it signs them out everywhere.
+// taking someone off it signs them out everywhere, as does a restart
+// without their --private.allow entry.
 //
 // Run it with email sign-in, and yourself on the list and an admin:
 //
@@ -23,6 +24,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 
 	"github.com/apron-chat/apron-server-go/apron"
 	"github.com/apron-chat/apron-server-go/aproncmd"
@@ -39,6 +41,8 @@ type Private struct {
 	host      *apron.Host
 	allowlist *apron.Allowlist
 	flagged   map[apron.Principal]bool
+	// mu keeps each change to the list and its stored copy together.
+	mu sync.Mutex
 }
 
 func (*Private) Name() string { return "private" }
@@ -95,6 +99,8 @@ func (p *Private) allow(_ context.Context, call *apron.CommandCall) (map[string]
 	if err != nil {
 		return nil, apron.InvalidParams("Usage: /allow <address|user:id|external:subject>")
 	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	if err := p.host.Store().Put(allowedKeys+principal.String(), true); err != nil {
 		return nil, err
 	}
@@ -111,8 +117,10 @@ func (p *Private) disallow(_ context.Context, call *apron.CommandCall) (map[stri
 		return nil, apron.InvalidParams("Usage: /disallow <address|user:id|external:subject>")
 	}
 	if p.flagged[principal] {
-		return nil, apron.Denied(fmt.Sprintf("`%s` is allowed by --private.allow; remove it there", principal))
+		return nil, apron.Denied(fmt.Sprintf("`%s` is allowed by --private.allow; remove it there, and restart", principal))
 	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	if err := p.host.Store().Delete(allowedKeys + principal.String()); err != nil {
 		return nil, err
 	}

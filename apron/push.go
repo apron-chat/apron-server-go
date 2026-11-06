@@ -247,6 +247,9 @@ func (s *Server) registerPush(c *client, req request) (any, bool, *Error) {
 
 	s.mu.Lock()
 	defer s.unlock()
+	if c.closing.Load() {
+		return nil, false, connectionClosing()
+	}
 	u := c.user
 	now := time.Now()
 	s.expirePushesLocked(u, now)

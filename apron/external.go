@@ -343,6 +343,10 @@ func (s *Server) approveExternalLocked(c *client, req request, p *emailProposal,
 		s.grantRolesLocked(user)
 		return s.signInLocked(c, req, user, now, true, true)
 	}
+	// A refused sign-in changes nothing (§3.2.2).
+	if err := s.admitLocked(user); err != nil {
+		return nil, err
+	}
 	if !slices.Equal(user.granted, identity.Roles) {
 		user.granted = identity.Roles
 		s.touchUser(user.id)

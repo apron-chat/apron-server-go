@@ -327,6 +327,9 @@ func (s *Server) roomNamedLocked(id string) bool {
 func (s *Server) authenticate(c *client, req request) (any, *Error) {
 	s.mu.Lock()
 	defer s.unlock()
+	if c.closing.Load() {
+		return nil, connectionClosing()
+	}
 	scheme, err := parseString(req.params, "scheme", true)
 	if err != nil {
 		return nil, err

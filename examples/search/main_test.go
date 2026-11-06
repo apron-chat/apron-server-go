@@ -85,6 +85,7 @@ func TestSearch(t *testing.T) {
 func TestNoArchiveWithoutGuests(t *testing.T) {
 	config := apron.DefaultConfig()
 	config.DisableGuests = true
+	config.EmailSender = apron.LogEmailSender{}
 	_, server := wstest.Serve(t, config, &Search{})
 	response, err := http.Get(server.URL + "/search/archive/general")
 	if err != nil {
