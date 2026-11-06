@@ -4,11 +4,12 @@
 //
 //   - a search.query request (capability ext:search) and a /search command,
 //     which find only messages in rooms the person may see;
-//
 //   - /search/archive/, web pages of the public rooms' messages, which
 //     search engines can index.
 //
-//     go run ./examples/search
+// Run it with:
+//
+//	go run ./examples/search
 package main
 
 import (
