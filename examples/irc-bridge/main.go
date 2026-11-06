@@ -1,6 +1,6 @@
 // Command irc-bridge is an Apron server whose room is bridged to an IRC
-// channel, both ways: IRC lines are posted by an "irc" bot, with the nick
-// that sent each and its line in the message's ext (PROTOCOL.md §4.12), and
+// channel, both ways: IRC lines are posted by an "irc" bot, with the channel
+// and the nick that sent each in the message's ext (PROTOCOL.md §4.12), and
 // messages people post are sent to the channel. The bridge keeps the
 // log_id of the last message it relayed, so it relays what was posted while
 // it was down once it is back.
