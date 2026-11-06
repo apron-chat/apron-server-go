@@ -1,0 +1,305 @@
+package aproncmd
+
+import (
+	"bytes"
+	"os"
+	"path/filepath"
+	"reflect"
+	"strings"
+	"testing"
+	"time"
+
+	flags "github.com/jessevdk/go-flags"
+
+	"github.com/apron-chat/apron-server-go/apron"
+)
+
+func parse(t *testing.T, args ...string) (*Options, *flags.Parser) {
+	t.Helper()
+	var options Options
+	parser := flags.NewParser(&options, flags.Default&^flags.PrintErrors)
+	if _, err := parser.ParseArgs(args); err != nil {
+		t.Fatal(err)
+	}
+	return &options, parser
+}
+
+func writeConfig(t *testing.T, text string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "aprond.toml")
+	if err := os.WriteFile(path, []byte(text), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func TestConfigFileSetsOptionsTheCommandLineDoesNot(t *testing.T) {
+	path := writeConfig(t, `
+addr = "0.0.0.0:9000"
+public-url = "https://chat.example"
+messages-per-minute = 30
+
+[webauthn]
+rp-id = "chat.example"
+origin = ["https://chat.example"]
+
+[upload]
+max-mb = 5
+`)
+	options, parser := parse(t, "--addr", "127.0.0.1:9999", "--upload.max-mb", "7")
+	if err := loadConfig(parser, options, path); err != nil {
+		t.Fatal(err)
+	}
+	if options.Addr != "127.0.0.1:9999" || options.Upload.MaxMB != 7 {
+		t.Fatalf("command line overridden: addr %q, max-mb %d", options.Addr, options.Upload.MaxMB)
+	}
+	if options.PublicURL != "https://chat.example" || options.MessagesPerMinute != 30 || options.WebAuthn.RPID != "chat.example" {
+		t.Fatalf("file settings not applied: %+v", options)
+	}
+	if !reflect.DeepEqual(options.WebAuthn.Origins, []string{"https://chat.example"}) {
+		t.Fatalf("a list replaces its default: %v", options.WebAuthn.Origins)
+	}
+	if options.Upload.MaxMessageMB != 20 {
+		t.Fatalf("unset default changed: %d", options.Upload.MaxMessageMB)
+	}
+}
+
+func TestConfigFileRejectsUnknownSettings(t *testing.T) {
+	for _, text := range []string{`adress = ":80"`, "[upload]\nmax = 1", `config = "other.toml"`, `max-connections = "many"`} {
+		options, parser := parse(t)
+		if err := loadConfig(parser, options, writeConfig(t, text)); err == nil {
+			t.Errorf("accepted %q", text)
+		}
+	}
+}
+
+func TestPrintedConfigLoadsBack(t *testing.T) {
+	options, parser := parse(t, "--origin", "https://a.example", "--origin", "https://b.example", "--push.disable", "--tls.domain", "chat.example")
+	var printed bytes.Buffer
+	if err := printConfig(&printed, parser); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(printed.String(), "[upload]") || strings.Contains(printed.String(), "print-config") {
+		t.Fatalf("printed config:\n%s", printed.String())
+	}
+	loaded, fresh := parse(t)
+	if err := loadConfig(fresh, loaded, writeConfig(t, printed.String())); err != nil {
+		t.Fatalf("%v in:\n%s", err, printed.String())
+	}
+	if !reflect.DeepEqual(loaded, options) {
+		t.Fatalf("round trip:\n%+v\nwant\n%+v", loaded, options)
+	}
+}
+
+func TestTLSDomainIsThePublicURL(t *testing.T) {
+	options, _ := parse(t, "--tls.domain", "chat.example", "--webauthn.rp-id", "")
+	config, err := serverConfig(*options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.PublicURL != "https://chat.example" || config.WebAuthn != nil {
+		t.Fatalf("config: public URL %q, passkeys %v", config.PublicURL, config.WebAuthn != nil)
+	}
+}
+
+func TestVAPIDSettings(t *testing.T) {
+	options, _ := parse(t, "--push.vapid-private-key", "key", "--push.vapid-subject", "mailto:ops@chat.example")
+	config, err := serverConfig(*options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.VAPIDPrivateKey != "key" || config.VAPIDSubject != "mailto:ops@chat.example" {
+		t.Fatalf("VAPID settings: %q %q", config.VAPIDPrivateKey, config.VAPIDSubject)
+	}
+	for _, subject := range []string{"ops@chat.example", "http://chat.example"} {
+		options, _ := parse(t, "--push.vapid-subject", subject)
+		if _, err := serverConfig(*options); err == nil {
+			t.Errorf("VAPID subject %q accepted", subject)
+		}
+	}
+}
+
+func TestInsecurePushIsForTestsOnly(t *testing.T) {
+	options, _ := parse(t, "--push.allow-insecure")
+	if config, err := serverConfig(*options); err != nil || !config.AllowInsecurePush {
+		t.Fatalf("allow insecure %v, error %v", config.AllowInsecurePush, err)
+	}
+	// A public server refuses it, as it lets clients reach internal addresses.
+	for _, args := range [][]string{
+		{"--push.allow-insecure", "--public-url", "https://chat.example"},
+		{"--push.allow-insecure", "--tls.domain", "chat.example"},
+	} {
+		options, _ := parse(t, args...)
+		if _, err := serverConfig(*options); err == nil {
+			t.Errorf("accepted %v", args)
+		}
+	}
+}
+
+func TestWelcomeAndRoles(t *testing.T) {
+	options, _ := parse(t, "--welcome", "Sign in with **email**.", "--role", "admin=ada", "--role", "Moderator = bob", "--role", "admin=carol")
+	config, err := serverConfig(*options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.Welcome != "Sign in with **email**." {
+		t.Fatalf("welcome: %q", config.Welcome)
+	}
+	if want := map[string][]string{"admin": {"ada", "carol"}, "moderator": {"bob"}}; !reflect.DeepEqual(config.Roles, want) {
+		t.Fatalf("roles: %v", config.Roles)
+	}
+	for _, grant := range []string{"admin", "=ada", "admin="} {
+		options, _ := parse(t, "--role", grant)
+		if _, err := serverConfig(*options); err == nil {
+			t.Errorf("accepted --role %q", grant)
+		}
+	}
+}
+
+func TestServerIdentity(t *testing.T) {
+	options, _ := parse(t, "--title", " Example chat ", "--description", "Talk about *examples*.", "--avatar", "https://chat.example/icon.png")
+	config, err := serverConfig(*options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.Title != "Example chat" || config.Description != "Talk about *examples*." || config.Avatar != "https://chat.example/icon.png" {
+		t.Fatalf("title %q, description %q, avatar %q", config.Title, config.Description, config.Avatar)
+	}
+}
+
+func TestEmailSenders(t *testing.T) {
+	// Email sign-in is off unless --email.enable is set, whatever the sender.
+	for _, args := range [][]string{
+		nil,
+		{"--email.sender", "log"},
+		{"--email.sender", "smtp", "--email.smtp-addr", "smtp.example:587", "--email.from", "chat@example.com"},
+	} {
+		options, _ := parse(t, args...)
+		config, err := serverConfig(*options)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if config.EmailSender != nil {
+			t.Fatalf("email sender %T without --email.enable: %v", config.EmailSender, args)
+		}
+	}
+	options, _ := parse(t, "--email.enable", "--email.sender", "log")
+	if config, err := serverConfig(*options); err != nil || config.EmailSender != (apron.LogEmailSender{}) || config.EmailLinkURL != "" {
+		t.Fatalf("log sender %T, link %q, error %v", config.EmailSender, config.EmailLinkURL, err)
+	}
+	// The log sender is for development: a public server refuses it.
+	for _, args := range [][]string{
+		{"--email.enable", "--email.sender", "log", "--public-url", "https://chat.example"},
+		{"--email.enable", "--email.sender", "log", "--tls.domain", "chat.example"},
+	} {
+		options, _ := parse(t, args...)
+		if _, err := serverConfig(*options); err == nil {
+			t.Errorf("accepted %v", args)
+		}
+	}
+	// smtp is the default sender.
+	options, _ = parse(t, "--email.enable", "--email.smtp-addr", "smtp.example:587", "--email.from", "Apron <chat@example.com>", "--public-url", "https://chat.example/")
+	config, err := serverConfig(*options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sender, ok := config.EmailSender.(*smtpSender); !ok || sender.addr != "smtp.example:587" || sender.insecure || config.EmailLinkURL != "https://chat.example/" {
+		t.Fatalf("smtp sender %#v, link %q", config.EmailSender, config.EmailLinkURL)
+	}
+	for _, args := range [][]string{
+		{"--email.enable", "--email.from", "chat@example.com"},
+		{"--email.enable", "--email.smtp-addr", "smtp.example:587"},
+	} {
+		options, _ := parse(t, args...)
+		if _, err := serverConfig(*options); err == nil {
+			t.Errorf("accepted %v", args)
+		}
+	}
+}
+
+func TestLiveTextSettings(t *testing.T) {
+	options, _ := parse(t)
+	config, err := serverConfig(*options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.LiveTextMaxDuration != time.Hour || config.LiveTextMaxBytes != 16<<20 ||
+		config.TerminalKeepBytes != 64<<10 || config.AppendMaxBytes != 64<<10 {
+		t.Fatalf("defaults: %v %d %d %d", config.LiveTextMaxDuration, config.LiveTextMaxBytes, config.TerminalKeepBytes, config.AppendMaxBytes)
+	}
+	options, _ = parse(t, "--live.max-minutes", "2", "--live.max-mb", "1", "--live.terminal-keep-kb", "8", "--live.append-max-kb", "256")
+	if config, err = serverConfig(*options); err != nil {
+		t.Fatal(err)
+	}
+	if config.LiveTextMaxDuration != 2*time.Minute || config.LiveTextMaxBytes != 1<<20 ||
+		config.TerminalKeepBytes != 8<<10 || config.AppendMaxBytes != 256<<10 {
+		t.Fatalf("set: %v %d %d %d", config.LiveTextMaxDuration, config.LiveTextMaxBytes, config.TerminalKeepBytes, config.AppendMaxBytes)
+	}
+	// An append is part of a message's text, which a request carries.
+	options, _ = parse(t, "--live.append-max-kb", "257")
+	if _, err := serverConfig(*options); err == nil {
+		t.Fatal("accepted an append larger than a request")
+	}
+}
+
+func TestTerminalViewerSetting(t *testing.T) {
+	for _, c := range []struct {
+		args []string
+		want string
+	}{
+		{nil, "https://terminal.apron.chat/"},
+		{[]string{"--live.terminal-viewer", "https://terminal.example/view"}, "https://terminal.example/view"},
+		{[]string{"--live.terminal-viewer", ""}, ""},
+	} {
+		options, _ := parse(t, c.args...)
+		config, err := serverConfig(*options)
+		if err != nil || config.TerminalViewerURL != c.want {
+			t.Errorf("%v: %q, %v", c.args, config.TerminalViewerURL, err)
+		}
+	}
+	for _, viewer := range []string{"terminal.apron.chat", "javascript:alert(1)", "https://terminal.example/#stream=", "https://user@terminal.example/"} {
+		options, _ := parse(t, "--live.terminal-viewer", viewer)
+		if _, err := serverConfig(*options); err == nil {
+			t.Errorf("accepted --live.terminal-viewer %q", viewer)
+		}
+	}
+}
+
+// weatherExtension is a Configurable extension for the flag tests.
+type weatherExtension struct {
+	settings struct {
+		Key   string   `long:"key" description:"The weather service's key"`
+		Hosts []string `long:"host" default:"a.example" description:"Hosts to ask"`
+	}
+}
+
+func (*weatherExtension) Name() string                { return "weather" }
+func (*weatherExtension) Init(*apron.Registrar) error { return nil }
+func (w *weatherExtension) Flags() any                { return &w.settings }
+
+func TestExtensionFlags(t *testing.T) {
+	weather := &weatherExtension{}
+	var options Options
+	parser := flags.NewParser(&options, flags.Default&^flags.PrintErrors)
+	targets, err := addExtensionFlags(parser, []apron.Extension{weather})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := parser.ParseArgs([]string{"--weather.key", "k1"}); err != nil {
+		t.Fatal(err)
+	}
+	path := writeConfig(t, "[weather]\nkey = \"from-file\"\nhost = [\"b.example\", \"c.example\"]\n")
+	if err := loadConfig(parser, &options, path, targets...); err != nil {
+		t.Fatal(err)
+	}
+	if weather.settings.Key != "k1" || !reflect.DeepEqual(weather.settings.Hosts, []string{"b.example", "c.example"}) {
+		t.Fatalf("settings = %+v", weather.settings)
+	}
+	var printed bytes.Buffer
+	if err := printConfig(&printed, parser); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(printed.String(), "[weather]\n\n# The weather service's key\nkey = \"k1\"") {
+		t.Fatalf("printed config:\n%s", printed.String())
+	}
+}

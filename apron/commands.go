@@ -1,0 +1,308 @@
+package apron
+
+import (
+	"fmt"
+	"slices"
+	"strings"
+)
+
+// Scoped system identities (Appendix A.1). user_ids starting with `~` are
+// reserved for them (Appendix A.3): requestableUserID never matches one.
+const (
+	roomNoticeID    = "~room"
+	privateNoticeID = "~private"
+)
+
+// serverCommand is one command this server provides (§4.1).
+type serverCommand struct {
+	name  string
+	usage string
+	help  string
+	// available reports whether the sender may use the command in r.
+	available func(u *userState, r *roomState) bool
+	// run executes the command, sending the frames it causes, and returns
+	// its result, which the caller sends after them (§1). args is the
+	// command line after the command's name, and replyTo the command's
+	// reply_to, if any.
+	run func(s *Server, c *client, r *roomState, body map[string]any, args, replyTo string) (map[string]any, *Error)
+	// extension is a command an Extension added, which runs outside s.mu
+	// (runExtensionCommand); available and run are nil.
+	extension *extensionCommand
+}
+
+// coreCommands lists the server's own commands in the order /help shows
+// them. Open appends the extensions' commands to them, in s.commands.
+func coreCommands() []serverCommand {
+	return []serverCommand{
+		{
+			// command() runs /help itself (help.run).
+			name: "help", usage: "/help", help: "list the commands you can use here",
+		},
+		{
+			name: "avatar", usage: "/avatar", help: "with one image attached: set your avatar",
+			run: (*Server).avatarCommand,
+		},
+		{
+			name: "embed-terminal", usage: "/embed-terminal [title]", help: "get a URL to stream a program's output into this room, shown as an 80×40 terminal",
+			run: (*Server).embedTerminalCommand,
+		},
+		{
+			name: "embed-append", usage: "/embed-append [markdown]", help: "get a URL to stream text into this room, as a message that starts with [markdown] and grows as the text arrives",
+			run: (*Server).embedAppendCommand,
+		},
+		{
+			name: "invite-device", usage: "/invite-device <name>", help: fmt.Sprintf("get a token that signs in as you on another device, named <name>; at most %d names, and a name again replaces its token", maxDeviceTokens),
+			available: func(u *userState, _ *roomState) bool { return u.account() },
+			run:       (*Server).inviteDeviceCommand,
+		},
+		{
+			name: "emoji", usage: "/emoji add|remove :name:", help: "with one image attached, add a custom emoji or replace one you added; admins also remove them",
+			run: (*Server).emojiCommand,
+		},
+		{
+			name: "server", usage: "/server [title|description|avatar] [text]", help: "show the server's title, description, and avatar, or set one (the avatar with one image attached); without the text or image, clear it back to its flag's",
+			available: func(u *userState, _ *roomState) bool { return u.hasRole("admin") },
+			run:       (*Server).serverCommand,
+		},
+		{
+			name: "kick", usage: "/kick @user [reason]", help: "remove someone from this room (its creator or a moderator)",
+			available: func(u *userState, r *roomState) bool { return r.mayRemove(u) },
+			run:       (*Server).kickCommand,
+		},
+	}
+}
+
+// command runs a `command` request (§4.1). It takes the params of a new
+// message and is never logged, broadcast, or saved: body.text is the command
+// line, and mentions, reply_to, and embeds are arguments that notify no one.
+// Without room_id it runs in the default room. The result is {} or, for new
+// upload, terminal, or append embeds, their write URLs; replies arrive as
+// scoped system notices (Appendix A.1) and effects as the frames they cause,
+// all before the result (§1). Only /embed-terminal and /embed-append make
+// live text, and they make their own embed: a terminal or append embed in a
+// command is invalid_params.
+func (s *Server) command(c *client, req request) (any, bool, *Error) {
+	for _, name := range []string{"message_id", "deleted"} {
+		if _, has := req.params[name]; has {
+			return nil, false, invalidParams("A command has no %s; send it as a message instead", name)
+		}
+	}
+	roomID, err := parseString(req.params, "room_id", false)
+	if err != nil {
+		return nil, false, err
+	}
+	if _, has := req.params["room_id"]; !has {
+		roomID = defaultRoomID
+	}
+	replyID, hasReply, err := parseMessageRef(req.params, "reply_to")
+	if err != nil {
+		return nil, false, err
+	}
+	body, err := parseObject(req.params, "body", true)
+	if err != nil {
+		return nil, false, err
+	}
+	if err := validateBody(body); err != nil {
+		return nil, false, err
+	}
+	if _, _, err := parseExt(req.params, "ext"); err != nil {
+		return nil, false, err
+	}
+	text, _ := body["text"].(string)
+	line := strings.TrimSpace(text)
+	if !strings.HasPrefix(line, "/") {
+		return nil, false, invalidParams("A command starts with /; try /help")
+	}
+	word, args, _ := strings.Cut(line[1:], " ")
+	name := strings.ToLower(word)
+	for i, value := range asList(body["embeds"]) {
+		if kind := value.(map[string]any)["kind"]; liveKind(kind) {
+			return nil, false, invalidParams("body.embeds[%d]: a command takes no %s embed; use /embed-%s", i, kind, kind)
+		}
+	}
+
+	args = strings.TrimSpace(args)
+	// The opening text of /embed-append becomes its message's text, so the
+	// extensions' filters see it as they see messages.
+	if name == "embed-append" {
+		draft := &Draft{RoomID: roomID, Body: map[string]any{"text": args, "format": "markdown"}}
+		if hasReply {
+			draft.ReplyTo = replyID
+		}
+		if err := s.filterMessage(c, draft); err != nil {
+			return nil, false, err
+		}
+		args = draft.Text()
+	}
+
+	s.mu.Lock()
+	if c.closing.Load() {
+		s.unlock()
+		return nil, false, connectionClosing()
+	}
+	var command *serverCommand
+	for i := range s.commands {
+		if s.commands[i].name == name {
+			command = &s.commands[i]
+			break
+		}
+	}
+	r := s.visibleRoomLocked(c.user, roomID)
+	switch {
+	case r == nil:
+		s.unlock()
+		return nil, false, invalidParams("Unknown room %q", roomID)
+	case hasReply && s.visibleMessageLocked(c.user, replyID) == nil:
+		s.unlock()
+		return nil, false, invalidParams("reply_to must name an existing message")
+	case command == nil:
+		s.unlock()
+		return nil, false, invalidParams("Unknown command /%s; try /help", word)
+	case name == "help":
+		help := s.helpLocked(c.user, r)
+		s.unlock()
+		return help.run(c, req)
+	case command.extension != nil:
+		// An extension's command runs outside s.mu, with copies of what it
+		// is told.
+		call := &CommandCall{
+			User: userViewOf(c.user), Room: s.roomViewLocked(r), Args: args, ReplyTo: replyID,
+			Mentions: mentions(body), Body: cloneObject(body), client: c,
+		}
+		s.unlock()
+		return s.runExtensionCommand(c, req, command.extension, call)
+	}
+	defer s.unlock()
+	result, err := command.run(s, c, r, body, args, replyID)
+	if err != nil {
+		return nil, false, err
+	}
+	c.sendResult(req, result)
+	return result, true, nil
+}
+
+// privateNotice renders a notice for the one connection it is queued on:
+// unlogged, without message_id or log_id (Appendix A.1).
+func privateNotice(roomID, text string) map[string]any {
+	return map[string]any{"method": "message", "params": map[string]any{
+		"room_id": roomID,
+		"from":    map[string]any{"user_id": privateNoticeID, "name": "System message to you"},
+		"body":    map[string]any{"text": text, "format": "markdown"},
+	}}
+}
+
+// postRoomNoticeLocked logs and delivers a message from ~room to the room's
+// members (Appendix A.1). It mentions no one.
+func (s *Server) postRoomNoticeLocked(r *roomState, text string) {
+	logID := s.nextIDLocked()
+	messageID := formatID(logID)
+	from := map[string]any{"user_id": roomNoticeID, "name": r.title()}
+	m := &messageState{id: messageID, from: from, owner: roomNoticeID, reactions: make(map[string]reactionSet)}
+	s.messages[messageID] = m
+	s.commitSnapshotLocked(m, map[string]any{
+		"message_id": messageID,
+		"log_id":     messageID,
+		"room_id":    r.id,
+		"from":       from,
+		"body":       map[string]any{"text": text},
+	}, logID)
+}
+
+// help is a /help run: the commands to list, and the extensions' commands
+// to ask whether they are available, outside s.mu.
+type help struct {
+	commands []serverCommand
+	lines    []string
+	user     User
+	room     Room
+}
+
+// helpLocked lists the server's own commands available to u in r.
+func (s *Server) helpLocked(u *userState, r *roomState) help {
+	h := help{commands: s.commands, lines: make([]string, len(s.commands)), user: userViewOf(u), room: s.roomViewLocked(r)}
+	for i, command := range s.commands {
+		if command.extension == nil && (command.available == nil || command.available(u, r)) {
+			h.lines[i] = fmt.Sprintf("- `%s`: %s", command.usage, command.help)
+		}
+	}
+	return h
+}
+
+// run replies with a ~private notice listing the commands available to the
+// sender in the room, the extensions' among them, which their code says.
+func (h help) run(c *client, req request) (any, bool, *Error) {
+	for i, command := range h.commands {
+		if command.extension != nil && command.extension.available(h.user, h.room) {
+			h.lines[i] = fmt.Sprintf("- `%s`: %s", command.usage, command.help)
+		}
+	}
+	lines := slices.DeleteFunc(h.lines, func(line string) bool { return line == "" })
+	c.enqueue(privateNotice(h.room.ID, strings.Join(lines, "\n")))
+	result := map[string]any{}
+	c.sendResult(req, result)
+	return result, true, nil
+}
+
+// avatarCommand takes exactly one upload embed, whose file becomes the
+// sender's avatar when its write finishes (§4.8.6). The result carries the
+// write URL.
+func (s *Server) avatarCommand(c *client, _ *roomState, body map[string]any, _, _ string) (map[string]any, *Error) {
+	embeds := asList(body["embeds"])
+	if len(embeds) != 1 || embeds[0].(map[string]any)["kind"] != "upload" {
+		return nil, invalidParams("/avatar takes exactly one upload embed: attach an image")
+	}
+	if err := s.admitPostLocked(c.user); err != nil {
+		return nil, err
+	}
+	s.embedNumber++
+	e := s.newWriteLocked(c, fmt.Sprintf("embed_%d", s.embedNumber), "upload", "")
+	e.avatarFor = c.user
+	return map[string]any{
+		"embeds": []any{map[string]any{"embed_id": e.id, "kind": "upload", "write_url": e.baseURL + writePath + e.token}},
+	}, nil
+}
+
+const maxKickReasonRunes = 200
+
+// kickCommand removes the one mentioned user from the room: the room's
+// members, the target included, receive the logged leave membership
+// (§4.2.2), the target room_update left, and the remaining members a ~room
+// notice with the reason. Only the room's creator and admins or moderators
+// may kick.
+func (s *Server) kickCommand(c *client, r *roomState, body map[string]any, args, _ string) (map[string]any, *Error) {
+	u := c.user
+	targets := mentions(body)
+	if len(targets) != 1 {
+		return nil, invalidParams("Usage: /kick @user [reason], mentioning exactly one user")
+	}
+	if !r.mayRemove(u) {
+		return nil, &Error{Code: CodeDenied, Message: fmt.Sprintf("Only the creator of %s or a moderator can remove people from it", r.title())}
+	}
+	target := r.members[targets[0]]
+	if target == nil {
+		return nil, invalidParams("@%s is not in %s", targets[0], r.title())
+	}
+	if target == u {
+		return nil, invalidParams("You cannot remove yourself; leave the room instead")
+	}
+	// The first argument names the target as the user typed it. Only
+	// body.mentions says who it is (§3.5.5); a user_id has no whitespace
+	// (§2.4), so the typed mention ends with the first word at the latest.
+	reason := args
+	if first, rest, _ := strings.Cut(args, " "); strings.HasPrefix(first, "@") {
+		reason = strings.TrimSpace(rest)
+	}
+	// The reason is one plain line inside a system notice.
+	reason, _, _ = strings.Cut(reason, "\n")
+	reason = strings.TrimSpace(reason)
+	if runes := []rune(reason); len(runes) > maxKickReasonRunes {
+		reason = strings.TrimSpace(string(runes[:maxKickReasonRunes])) + "…"
+	}
+	s.leaveLocked(target, r)
+	text := fmt.Sprintf("@%s was removed by @%s", target.id, u.id)
+	if reason != "" {
+		text += ": " + reason
+	}
+	s.postRoomNoticeLocked(r, text)
+	return map[string]any{}, nil
+}

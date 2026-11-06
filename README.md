@@ -52,6 +52,47 @@ the server log instead of sending them.
 Run `aprond --help` for every flag, or `aprond --print-config > aprond.toml`
 to start a config file.
 
+## Your own server
+
+The server is also a Go library. Package `apron` serves the protocol, and
+extensions add commands, request methods, bots, message filters, sign-in,
+and HTTP routes to it without a fork. `aproncmd.Main` runs it with every
+flag of `aprond`:
+
+```go
+package main
+
+import (
+	"context"
+
+	"github.com/apron-chat/apron-server-go/apron"
+	"github.com/apron-chat/apron-server-go/aproncmd"
+)
+
+type Hello struct{}
+
+func (Hello) Name() string { return "hello" }
+
+func (Hello) Init(r *apron.Registrar) error {
+	r.Command(apron.Command{
+		Name: "hello", Help: "say hello",
+		Run: func(_ context.Context, call *apron.CommandCall) (map[string]any, error) {
+			call.Notice("Hello, " + call.User.Name + "!")
+			return nil, nil
+		},
+	})
+	return nil
+}
+
+func main() { aproncmd.Main(Hello{}) }
+```
+
+[`examples`](examples) has complete servers: GitHub single sign-on,
+moderation, an AI assistant, an ops room with deploys, an IRC bridge, and
+search with a public archive. See the
+[package documentation](https://pkg.go.dev/github.com/apron-chat/apron-server-go/apron)
+and [SERVER.md](SERVER.md#extensions).
+
 ## Documentation
 
 - [SERVER.md](SERVER.md): configuration, storage, and how the server behaves

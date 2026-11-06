@@ -1,0 +1,332 @@
+package apron
+
+import (
+	"bytes"
+	"encoding/json/jsontext"
+	"encoding/json/v2"
+	"fmt"
+	"maps"
+	"slices"
+	"strings"
+	"unicode"
+)
+
+// Error codes (PROTOCOL.md §1.1). Extensions return them in an *Error to
+// refuse a request, a command, or a message.
+const (
+	CodeParseError     = -32700
+	CodeInvalidRequest = -32600
+	// CodeUnsupported is a method or scheme the server does not offer.
+	CodeUnsupported = -32601
+	// CodeInvalidParams is a request that names something that does not
+	// exist, or whose params are malformed.
+	CodeInvalidParams = -32602
+	CodeInternalError = -32603
+	// CodeDenied is a request the sender may not make.
+	CodeDenied = -32001
+	// CodeRetryAfter is a request refused for now; Data carries
+	// retry_after, in seconds (see RetryAfter).
+	CodeRetryAfter = -32002
+	// CodeTooLarge is a request over a size limit.
+	CodeTooLarge = -32003
+)
+
+// Error is a protocol error reply (PROTOCOL.md §1.1). Message is shown to
+// people, so it says what to do in a sentence.
+type Error struct {
+	// Code is one of the Code constants.
+	Code int `json:"code"`
+	// Message is shown to people.
+	Message string `json:"message"`
+	// Data is details for clients, such as retry_after, or nil.
+	Data any `json:"data,omitzero"`
+}
+
+// Error formats the error with its code, for logs.
+func (e *Error) Error() string {
+	return fmt.Sprintf("apron error %d: %s", e.Code, e.Message)
+}
+
+// Denied is a CodeDenied error with message.
+func Denied(message string) *Error {
+	return &Error{Code: CodeDenied, Message: message}
+}
+
+// InvalidParams is a CodeInvalidParams error with message.
+func InvalidParams(message string) *Error {
+	return &Error{Code: CodeInvalidParams, Message: message}
+}
+
+type rpcResponse struct {
+	ID     any    `json:"id,omitzero"`
+	Result any    `json:"result,omitzero"`
+	Error  *Error `json:"error,omitzero"`
+}
+
+type request struct {
+	method string
+	params map[string]jsontext.Value
+	id     string
+	hasID  bool
+}
+
+func parseRequest(payload []byte) (request, *Error) {
+	if !jsontext.Value(payload).IsValid() {
+		return request{}, &Error{Code: CodeParseError, Message: "Parse error"}
+	}
+
+	var object map[string]jsontext.Value
+	if err := json.Unmarshal(payload, &object); err != nil || object == nil {
+		return request{}, &Error{Code: CodeInvalidRequest, Message: "Invalid request"}
+	}
+
+	// method comes first: a server may ignore the id of a notification
+	// method and handle the frame as a notification (§1.1), and this one
+	// does, whatever the id is.
+	var req request
+	rawMethod, hasMethod := object["method"]
+	methodOK := hasMethod && json.Unmarshal(rawMethod, &req.method) == nil && req.method != ""
+	if !methodOK {
+		req.method = ""
+	}
+	if rawID, ok := object["id"]; ok && !notificationOnly[req.method] {
+		req.hasID = true
+		if bytes.Equal(bytes.TrimSpace(rawID), []byte("null")) || json.Unmarshal(rawID, &req.id) != nil {
+			req.hasID = false
+			return req, &Error{Code: CodeInvalidRequest, Message: "Request id must be a string"}
+		}
+	}
+	if !methodOK {
+		return req, &Error{Code: CodeInvalidRequest, Message: "Invalid request"}
+	}
+
+	req.params = make(map[string]jsontext.Value)
+	if rawParams, ok := object["params"]; ok {
+		if bytes.Equal(bytes.TrimSpace(rawParams), []byte("null")) || json.Unmarshal(rawParams, &req.params) != nil || req.params == nil {
+			return req, invalidParams("Params must be an object")
+		}
+	}
+	return req, nil
+}
+
+// notificationOnly are the methods clients send only as notifications
+// (§1.1). A server may ignore the id of one and handle the frame as a
+// notification (§1.1), and this one does: nothing about it is answered.
+var notificationOnly = map[string]bool{"ping": true, "activity": true}
+
+func canonicalParams(params map[string]jsontext.Value) string {
+	if params == nil {
+		return "{}"
+	}
+	var value any
+	raw := encodeJSON(params)
+	if raw == nil || json.Unmarshal(raw, &value) != nil {
+		return string(raw)
+	}
+	if canonical := encodeJSON(value); canonical != nil {
+		return string(canonical)
+	}
+	return string(raw)
+}
+
+func requestFingerprint(req request) string {
+	return req.method + "\x00" + canonicalParams(req.params)
+}
+
+func response(id string, result any) rpcResponse {
+	return rpcResponse{ID: id, Result: result}
+}
+
+// errorResponse builds an error reply. A nil id omits "id", as for errors not
+// tied to a request (PROTOCOL.md §1.1).
+func errorResponse(id any, e *Error) rpcResponse {
+	return rpcResponse{ID: id, Error: e}
+}
+
+func invalidParams(format string, args ...any) *Error {
+	return &Error{Code: CodeInvalidParams, Message: fmt.Sprintf(format, args...)}
+}
+
+func parseString(params map[string]jsontext.Value, name string, required bool) (string, *Error) {
+	raw, ok := params[name]
+	if !ok {
+		if required {
+			return "", invalidParams("Missing %s", name)
+		}
+		return "", nil
+	}
+	var value string
+	if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) || json.Unmarshal(raw, &value) != nil {
+		return "", invalidParams("%s must be a string", name)
+	}
+	return value, nil
+}
+
+// validID reports whether id can be a room_id or user_id (§2.4): one that is
+// not empty and has no whitespace or control characters.
+func validID(id string) bool {
+	return id != "" && !strings.ContainsFunc(id, func(r rune) bool { return unicode.IsSpace(r) || unicode.IsControl(r) })
+}
+
+func parseBool(params map[string]jsontext.Value, name string, required bool) (bool, *Error) {
+	raw, ok := params[name]
+	if !ok {
+		if required {
+			return false, invalidParams("Missing %s", name)
+		}
+		return false, nil
+	}
+	var value bool
+	if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) || json.Unmarshal(raw, &value) != nil {
+		return false, invalidParams("%s must be a boolean", name)
+	}
+	return value, nil
+}
+
+func parseObject(params map[string]jsontext.Value, name string, required bool) (map[string]any, *Error) {
+	raw, ok := params[name]
+	if !ok {
+		if required {
+			return nil, invalidParams("Missing %s", name)
+		}
+		return nil, nil
+	}
+	var value map[string]any
+	if json.Unmarshal(raw, &value) != nil || value == nil {
+		return nil, invalidParams("%s must be an object", name)
+	}
+	return value, nil
+}
+
+// extObject is an ext object (§4.12) keyed by extension name, each value
+// kept as the JSON it arrived as, so a merge or a store keeps it byte for
+// byte, numbers beyond 2^53 included.
+type extObject = map[string]jsontext.Value
+
+// parseExt reads an optional ext object of a write (§4.12). present reports
+// whether the request carried it.
+func parseExt(params map[string]jsontext.Value, name string) (ext extObject, present bool, err *Error) {
+	raw, ok := params[name]
+	if !ok {
+		return nil, false, nil
+	}
+	if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) || json.Unmarshal(raw, &ext) != nil || ext == nil {
+		return nil, true, invalidParams("%s must be an object", name)
+	}
+	for key, value := range ext {
+		value = slices.Clone(value)
+		if value.Compact() != nil {
+			return nil, true, invalidParams("%s.%s is not valid JSON", name, key)
+		}
+		ext[key] = value
+	}
+	return ext, true, nil
+}
+
+// emptyJSON reports whether a compact JSON value is an empty value ("", [],
+// or {}), which clears what it is merged into (§3.3).
+func emptyJSON(value jsontext.Value) bool {
+	switch string(value) {
+	case `""`, `[]`, `{}`:
+		return true
+	}
+	return false
+}
+
+// mergeExt merges a write's ext into the kept one, one level deep (§4.12):
+// each key the write carries replaces the kept value, a key whose value is
+// empty is removed, and keys the write leaves out stay. null is an ordinary
+// value, and an empty write changes nothing. The result is a new object, or
+// nil when no key is left; kept is not modified.
+func mergeExt(kept, write extObject) extObject {
+	merged := make(extObject, len(kept)+len(write))
+	maps.Copy(merged, kept)
+	for key, value := range write {
+		if emptyJSON(value) {
+			delete(merged, key)
+		} else {
+			merged[key] = value
+		}
+	}
+	if len(merged) == 0 {
+		return nil
+	}
+	return merged
+}
+
+// clearedExt lists, as their empty values, the keys of a write's ext that
+// cleared a key that was kept, for a notification that carries the change
+// (§4.12).
+func clearedExt(kept, write extObject) extObject {
+	var cleared extObject
+	for key, value := range write {
+		if _, had := kept[key]; had && emptyJSON(value) {
+			if cleared == nil {
+				cleared = make(extObject)
+			}
+			cleared[key] = value
+		}
+	}
+	return cleared
+}
+
+// extOf returns the ext of an object decoded with decodeObject, or nil.
+func extOf(value any) extObject {
+	ext, _ := value.(extObject)
+	return ext
+}
+
+// decodeObject decodes a JSON object, keeping the values of a top-level
+// ext as raw JSON so that re-encoding the object keeps them exactly.
+func decodeObject(raw []byte) map[string]any {
+	var fields map[string]jsontext.Value
+	if json.Unmarshal(raw, &fields) != nil || fields == nil {
+		return nil
+	}
+	value := make(map[string]any, len(fields))
+	for key, field := range fields {
+		if key == "ext" {
+			var ext extObject
+			if json.Unmarshal(field, &ext) == nil && ext != nil {
+				value[key] = ext
+				continue
+			}
+		}
+		var decoded any
+		if json.Unmarshal(field, &decoded) == nil {
+			value[key] = decoded
+		}
+	}
+	return value
+}
+
+// encodedSize is the size of a value encoded as JSON.
+func encodedSize(value any) int {
+	return len(encodeJSON(value))
+}
+
+func cloneValue(value any) any {
+	switch value := value.(type) {
+	case map[string]any:
+		copyValue := make(map[string]any, len(value))
+		for key, child := range value {
+			copyValue[key] = cloneValue(child)
+		}
+		return copyValue
+	case []any:
+		copyValue := make([]any, len(value))
+		for i, child := range value {
+			copyValue[i] = cloneValue(child)
+		}
+		return copyValue
+	default:
+		return value
+	}
+}
+
+func cloneObject(value map[string]any) map[string]any {
+	if value == nil {
+		return nil
+	}
+	return cloneValue(value).(map[string]any)
+}
