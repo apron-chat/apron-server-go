@@ -106,9 +106,11 @@ func (m SignInEmail) Text() string {
 // LogEmailSender logs sign-in codes instead of sending them, for
 // development: whoever reads the server's log can sign in as any address.
 type LogEmailSender struct {
+	// Logger receives the codes; nil uses slog.Default().
 	Logger *slog.Logger
 }
 
+// SendSignInCode logs the code and link.
 func (l LogEmailSender) SendSignInCode(_ context.Context, m SignInEmail) error {
 	logger := l.Logger
 	if logger == nil {

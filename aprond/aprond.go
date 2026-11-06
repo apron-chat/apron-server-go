@@ -1,6 +1,3 @@
-// Package aprond is the aprond command as a library: Main parses aprond's
-// flags and config file and serves, with extensions of your own added to
-// the server (apron.Extension).
 package aprond
 
 import (

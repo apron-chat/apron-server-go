@@ -34,6 +34,7 @@ var eventKinds = map[recordKind]EventKind{
 // changes in its rooms, which extensions follow with OnEvent and
 // OnEventFrom.
 type Event struct {
+	// Kind says what the record is.
 	Kind EventKind
 	// LogID orders the events (§2.1): each is greater than the last.
 	LogID int64

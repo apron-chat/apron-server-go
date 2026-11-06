@@ -388,6 +388,7 @@ func (s *Server) filterMessage(c *client, d *Draft) *Error {
 
 // User is a user as extensions see it: a copy, which does not change.
 type User struct {
+	// ID is the user_id, and Name the display name.
 	ID   string
 	Name string
 	// Roles are the server roles the user holds (§3.3.4), sorted.
@@ -418,6 +419,7 @@ func userViewOf(u *userState) User {
 
 // Room is a room as extensions see it: a copy, which does not change.
 type Room struct {
+	// ID is the room_id, and Title the title clients show.
 	ID    string
 	Title string
 	// ParentID is the room a thread belongs to, if any.

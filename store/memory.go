@@ -12,10 +12,12 @@ type Memory struct {
 	entries map[string]map[string][]byte
 }
 
+// NewMemory returns an empty Memory.
 func NewMemory() *Memory {
 	return &Memory{entries: make(map[string]map[string][]byte)}
 }
 
+// Load implements Store.
 func (m *Memory) Load(visit func(Entry) error) error {
 	m.mu.Lock()
 	var all []Entry
@@ -33,6 +35,7 @@ func (m *Memory) Load(visit func(Entry) error) error {
 	return nil
 }
 
+// Apply implements Store.
 func (m *Memory) Apply(batch []Entry) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -49,4 +52,5 @@ func (m *Memory) Apply(batch []Entry) error {
 	return nil
 }
 
+// Close implements Store; the entries stay, for a server started again.
 func (m *Memory) Close() error { return nil }

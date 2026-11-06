@@ -34,11 +34,15 @@ const (
 // Error is a protocol error reply (PROTOCOL.md §1.1). Message is shown to
 // people, so it says what to do in a sentence.
 type Error struct {
-	Code    int    `json:"code"`
+	// Code is one of the Code constants.
+	Code int `json:"code"`
+	// Message is shown to people.
 	Message string `json:"message"`
-	Data    any    `json:"data,omitzero"`
+	// Data is details for clients, such as retry_after, or nil.
+	Data any `json:"data,omitzero"`
 }
 
+// Error formats the error with its code, for logs.
 func (e *Error) Error() string {
 	return fmt.Sprintf("apron error %d: %s", e.Code, e.Message)
 }

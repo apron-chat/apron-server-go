@@ -56,11 +56,8 @@ const (
 	defaultLiveTextMaxBytes    int64 = 16 << 20
 	defaultLiveTextMaxDuration       = time.Hour
 	defaultTerminalKeepBytes         = 64 << 10
-	// DefaultTerminalViewerURL is where a browser that opens a terminal's url
-	// is sent: Apron's stand-alone terminal viewer.
-	DefaultTerminalViewerURL = "https://terminal.apron.chat/"
-	defaultAppendMaxBytes    = 64 << 10
-	defaultMaxListedMembers  = 1000
+	defaultAppendMaxBytes            = 64 << 10
+	defaultMaxListedMembers          = 1000
 	// retryAfterSeconds is the delay suggested by connection-level
 	// retry_after errors (capacity and shutdown).
 	retryAfterSeconds = 30
@@ -69,7 +66,15 @@ const (
 	maxRequestIDBytes = 256
 )
 
-// Config controls the HTTP and WebSocket behavior of a Server.
+// DefaultTerminalViewerURL is where a browser that opens a terminal's url is
+// sent by default (Config.TerminalViewerURL): Apron's stand-alone terminal
+// viewer.
+const DefaultTerminalViewerURL = "https://terminal.apron.chat/"
+
+// Config configures a Server: who may connect and sign in, its limits, what
+// it tells clients about itself, where it keeps state, and its extensions.
+// Start from DefaultConfig. Open uses the default for any limit, size,
+// timeout, or interval left at zero.
 type Config struct {
 	// WebAuthn enables passkeys with an explicitly configured RP and frontend origins.
 	WebAuthn *webauthn.WebAuthn
@@ -80,13 +85,22 @@ type Config struct {
 	AllowAnyOrigin bool
 	// StaticDir serves a built frontend from the HTTP root when non-empty.
 	StaticDir string
+	// ReadLimit bounds one frame a client sends, in bytes.
 	ReadLimit int64
 
-	OutgoingQueue   int
+	// OutgoingQueue bounds the frames waiting to be written to one
+	// connection; a client that falls further behind is disconnected.
+	OutgoingQueue int
+	// HistoryPageSize is the records a history page holds when its request
+	// names no limit (§4.3).
 	HistoryPageSize int
-	PingInterval    time.Duration
-	PingTimeout     time.Duration
-	WriteTimeout    time.Duration
+	// PingInterval is how often the server pings each connection, and the
+	// interval it asks clients to ping at (§1). A connection that does not
+	// answer within PingTimeout, or a frame that takes longer than
+	// WriteTimeout to write, closes it.
+	PingInterval time.Duration
+	PingTimeout  time.Duration
+	WriteTimeout time.Duration
 
 	// PublicURL is the external base URL (scheme and host, such as
 	// https://chat.example) of write, file, and live text URLs. Empty derives it
@@ -203,6 +217,8 @@ type Config struct {
 	EmailLinkURL string
 }
 
+// DefaultConfig is the configuration aprond starts from: the local
+// development origins, and the default limits, sizes, and timeouts.
 func DefaultConfig() Config {
 	return Config{
 		OriginPatterns:        []string{"http://localhost:*", "http://127.0.0.1:*", "http://[[]::1]:*"},
@@ -465,6 +481,8 @@ type outboundBatch struct {
 	closeReason string
 }
 
+// Server is an Apron server, which Open starts. It serves the protocol
+// through Handler, and is safe for concurrent use.
 type Server struct {
 	config Config
 
@@ -583,7 +601,8 @@ type Server struct {
 }
 
 // Open starts a server with the state in config.Store, or an empty memory
-// store when it is nil.
+// store when it is nil, then runs each extension's Init in order. It fails
+// when the stored state cannot be read, or an extension fails to start.
 func Open(config Config) (*Server, error) {
 	config = config.withDefaults()
 	if config.Avatar != "" && !validAvatar(config.Avatar) {
@@ -737,6 +756,7 @@ func (f staticFS) Open(name string) (http.File, error) {
 	return file, nil
 }
 
+// ServeHTTP serves the Handler, so a Server is an http.Handler.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.handler.ServeHTTP(w, r)
 }

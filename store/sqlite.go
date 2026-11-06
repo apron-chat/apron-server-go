@@ -51,6 +51,7 @@ func OpenSQLite(path string) (*SQLite, error) {
 	return &SQLite{db: db}, nil
 }
 
+// Load implements Store.
 func (s *SQLite) Load(visit func(Entry) error) error {
 	rows, err := s.db.Query(`SELECT kind, id, value FROM entries`)
 	if err != nil {
@@ -69,6 +70,7 @@ func (s *SQLite) Load(visit func(Entry) error) error {
 	return rows.Err()
 }
 
+// Apply implements Store, in one transaction.
 func (s *SQLite) Apply(batch []Entry) error {
 	tx, err := s.db.Begin()
 	if err != nil {
@@ -99,6 +101,7 @@ func (s *SQLite) Apply(batch []Entry) error {
 	return tx.Commit()
 }
 
+// Close implements Store, closing the database.
 func (s *SQLite) Close() error {
 	return s.db.Close()
 }
