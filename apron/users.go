@@ -1,0 +1,705 @@
+package apron
+
+import (
+	"cmp"
+	"fmt"
+	"maps"
+	"regexp"
+	"slices"
+	"strings"
+	"time"
+	"unicode"
+	"unicode/utf8"
+
+	"golang.org/x/text/secure/precis"
+	"golang.org/x/time/rate"
+)
+
+const (
+	maxNameRunes = 64
+	// maxAvatarDataURLBytes bounds an avatar given inline as a data: URL;
+	// larger images go through a /avatar upload (§4.8.6).
+	maxAvatarDataURLBytes = 64 << 10
+	maxDedupEntries       = 1024
+	// maxProfileExtBytes bounds a profile's ext, which is sent to everyone
+	// who shares a room with the user.
+	maxProfileExtBytes = 16 << 10
+)
+
+// userState is everything the server keeps for one user_id across its
+// connections: the profile (§3.3), joined rooms (§4.2.2), request
+// deduplication (§1.2), and push registrations (§4.9). Guest users
+// are retired when their last connection closes; accounts (passkey users)
+// persist.
+type userState struct {
+	id     string
+	name   string
+	avatar string
+	ext    extObject
+	// email is the account's sign-in address (§4.11), lowercased; empty for
+	// guests and passkey users without one.
+	email string
+	// roles are the server roles (§3.3) Config.Roles grants the account,
+	// sorted; guests have none. They are derived from the configuration, not
+	// stored.
+	roles []string
+	// avatarEmbed is the hosted /avatar upload behind avatar, if any.
+	avatarEmbed *embedState
+
+	// fromValue caches from(); it is cleared when the name changes.
+	fromValue map[string]any
+
+	clients map[*client]struct{}
+	joined  map[string]*roomState
+	// leftAt maps each room the user left, and has not rejoined, to the
+	// log_id of the leave, for room_list's `left` (§4.2.1).
+	leftAt  map[string]int64
+	dedup   dedupCache
+	passkey *passkeyUser
+	// posts limits the user's new messages, room_set requests, and /avatar
+	// commands to MessagesPerMinute; nil when unlimited.
+	posts *rate.Limiter
+	// actions limits the user's other changes that others receive
+	// (admitActionLocked).
+	actions *rate.Limiter
+
+	// chosen is the chosen status, set with `me` (§4.5.1), and mute and
+	// roomMutes their mutes; muteTimer ends a timed mute, and
+	// roomMuteTimers each timed room mute. shown is the shown status as
+	// last noted (noteShownLocked), and offlineAt the Unix milliseconds
+	// when it last became offline. status is the shown status published to
+	// others (publishLocked), the one every object they are sent carries,
+	// and seen the Unix milliseconds when it last became offline, 0 if
+	// unknown (§4.5.2); statusLimit and statusTimer coalesce a flapping
+	// user's changes. statusRequests limits the user's `status` requests.
+	chosen         string
+	mute           muteState
+	roomMutes      map[string]muteState
+	muteTimer      *time.Timer
+	roomMuteTimers map[string]*time.Timer
+	shown          string
+	offlineAt      int64
+	seen           int64
+	status         string
+	statusLimit    *rate.Limiter
+	statusTimer    *time.Timer
+	statusRequests *rate.Limiter
+	// pushes are the user's push registrations by url (§4.9), and pings the
+	// rooms they have not joined where a message mentioned or replied to
+	// them, from the first such message, for unread counts. unread holds
+	// the counts known per room while the user has registrations, and
+	// badgeTimer a pending badge push (unread.go).
+	pushes     map[string]*pushRegistration
+	pings      map[string]int64
+	unread     map[string]int
+	badgeTimer *time.Timer
+	// pushDay is the UTC day pushesToday counts the pushes delivered to the
+	// user on, against maxPushesPerUserDay.
+	pushDay     string
+	pushesToday int
+}
+
+func newUserState(id, name string) *userState {
+	return &userState{
+		id:        id,
+		name:      name,
+		clients:   make(map[*client]struct{}),
+		joined:    make(map[string]*roomState),
+		leftAt:    make(map[string]int64),
+		roomMutes: make(map[string]muteState),
+		chosen:    statusOnline,
+		shown:     statusOffline,
+		status:    statusOffline,
+		pushes:    make(map[string]*pushRegistration),
+		pings:     make(map[string]int64),
+	}
+}
+
+// from is the recorded user object carried in logged records (a message's
+// or reaction's from, a membership's user): user_id and name. Avatars and
+// ext travel only in current objects (§3.3, §4.8.6). Every
+// record by the user shares the returned map until the name changes, so it
+// must not be modified.
+func (u *userState) from() map[string]any {
+	if u.fromValue == nil {
+		u.fromValue = map[string]any{"user_id": u.id}
+		if u.name != "" {
+			u.fromValue["name"] = u.name
+		}
+	}
+	return u.fromValue
+}
+
+// account reports whether the user signed in with a credential, a passkey
+// or an email address, so it persists across connections and restarts,
+// rather than being a guest.
+func (u *userState) account() bool {
+	return u.passkey != nil || u.email != ""
+}
+
+// hasRole reports whether the user holds a server role.
+func (u *userState) hasRole(role string) bool {
+	return slices.Contains(u.roles, role)
+}
+
+// profile is the complete current user object for user and users (§3.3),
+// with the published shown status, and seen when it is offline (§4.5.2);
+// you has the chosen status instead.
+func (u *userState) profile() map[string]any {
+	value := maps.Clone(u.from())
+	value["status"] = u.status
+	u.addSeen(value)
+	if u.avatar != "" {
+		value["avatar"] = u.avatar
+	}
+	// An account's roles are always sent, [] when it has none, so a role
+	// taken away clears the one a client kept (§3.3); guests hold none.
+	if len(u.roles) > 0 || u.account() {
+		value["roles"] = append([]string{}, u.roles...)
+	}
+	if len(u.ext) > 0 {
+		value["ext"] = maps.Clone(u.ext)
+	}
+	return value
+}
+
+type dedupEntry struct {
+	// fingerprint is a hash of the request's method and canonical params.
+	fingerprint [32]byte
+	done        chan struct{}
+	result      any
+	err         *rpcError
+}
+
+// dedupCache keeps the most recent request IDs of one user. Guarded by s.mu.
+type dedupCache struct {
+	entries map[string]*dedupEntry
+	order   []string
+}
+
+func (d *dedupCache) get(id string) *dedupEntry {
+	return d.entries[id]
+}
+
+func (d *dedupCache) put(id string, entry *dedupEntry) {
+	if d.entries == nil {
+		d.entries = make(map[string]*dedupEntry)
+	}
+	d.entries[id] = entry
+	d.order = append(d.order, id)
+	for len(d.order) > maxDedupEntries {
+		oldest := d.order[0]
+		d.order = d.order[1:]
+		if e := d.entries[oldest]; e != nil && isClosed(e.done) {
+			delete(d.entries, oldest)
+		}
+	}
+}
+
+func (d *dedupCache) remove(id string, entry *dedupEntry) {
+	if d.entries[id] == entry {
+		delete(d.entries, id)
+	}
+}
+
+func isClosed(done chan struct{}) bool {
+	select {
+	case <-done:
+		return true
+	default:
+		return false
+	}
+}
+
+// normalizeName prepares a requested display name with the PRECIS
+// Nickname profile (RFC 8266): it maps compatibility characters, folds
+// runs of spaces, and trims. Invisible characters, such as controls and
+// bidirectional overrides, are dropped first rather than refused, and a
+// name that still cannot be a nickname becomes empty. The result is capped
+// at maxNameRunes. The server may alter names (§3.3) and `you.name` is the
+// answer.
+func normalizeName(name string) string {
+	name = prepareName(name)
+	if utf8.RuneCountInString(name) > maxNameRunes {
+		name = strings.TrimSpace(string([]rune(name)[:maxNameRunes]))
+	}
+	return name
+}
+
+// prepareName is normalizeName without the cap.
+func prepareName(name string) string {
+	name = strings.Map(func(r rune) rune {
+		if unicode.In(r, unicode.Cc, unicode.Cf, unicode.Co, unicode.Cs) {
+			return -1
+		}
+		return r
+	}, name)
+	name, err := precis.Nickname.String(name)
+	if err != nil {
+		return ""
+	}
+	return name
+}
+
+var avatarDataURL = regexp.MustCompile(`^data:image/(png|jpeg|gif|webp);base64,[A-Za-z0-9+/]+={0,2}$`)
+
+// validAvatar accepts https: URLs and small image data: URLs (§4.8.6).
+func validAvatar(value string) bool {
+	if strings.HasPrefix(value, "data:") {
+		return len(value) <= maxAvatarDataURLBytes && avatarDataURL.MatchString(value)
+	}
+	return strings.HasPrefix(value, "https://") && len(value) <= 2048 && !strings.ContainsAny(value, " \t\r\n\"'<>")
+}
+
+// requestableUserID is the shape of a user_id a guest may request: the
+// suggested convention for user-chosen IDs (Appendix A.3), letters, digits,
+// _, ., and -, starting with a letter, so it never looks like a system
+// identity or a log_id-derived room_id, and ending with a letter, digit, or
+// _, so a mention of it ends where it does.
+var requestableUserID = regexp.MustCompile(`^[A-Za-z](?:[A-Za-z0-9_.-]{0,62}[A-Za-z0-9_])?$`)
+
+// guestIDPrefix starts every counter-assigned guest ID. The guest_
+// namespace, ignoring case, belongs to the counter: requests in it are never
+// honored, so guest numbers are taken only in sequence and the latest one
+// counts the guests the server has admitted.
+const guestIDPrefix = "guest_"
+
+// requestable reports whether a user may request id: it has the requestable
+// shape and lies outside the counters' guest_ and user_ namespaces.
+func requestable(id string) bool {
+	for _, prefix := range []string{guestIDPrefix, accountIDPrefix} {
+		if len(id) >= len(prefix) && strings.EqualFold(id[:len(prefix)], prefix) {
+			return false
+		}
+	}
+	return requestableUserID.MatchString(id)
+}
+
+// assignUserIDLocked honors a requested user_id when it is requestable and
+// was never assigned, ignoring case, nor names a room; otherwise it assigns
+// the next unused guest_<n> (§3.2). Each call that does not honor a request
+// takes exactly one counter value: with guest_ requests refused, only the
+// counter assigns guest_<n>, so the skip over taken IDs is a safeguard.
+func (s *Server) assignUserIDLocked(requested string) string {
+	if requestable(requested) && s.claimUserIDLocked(requested) {
+		return requested
+	}
+	for {
+		s.guestNumber++
+		if id := fmt.Sprintf("%s%d", guestIDPrefix, s.guestNumber); s.claimUserIDLocked(id) {
+			return id
+		}
+	}
+}
+
+// claimUserIDLocked marks id used and reports whether it was free: never
+// assigned, ignoring case, not a room's name, and not granted a role.
+func (s *Server) claimUserIDLocked(id string) bool {
+	key := strings.ToLower(id)
+	if s.usedIDs[key] || s.roomNamedLocked(id) || s.grantedIDs[key] {
+		return false
+	}
+	s.usedIDs[key] = true
+	s.touchUsedID(key)
+	return true
+}
+
+// roomNamedLocked reports whether id names a room, ignoring case, so a
+// user_id never passes for a room_id to a reader that folds case. Rooms
+// created by clients have numeric IDs; only the seeded room has letters.
+func (s *Server) roomNamedLocked(id string) bool {
+	return s.rooms[id] != nil || strings.EqualFold(id, defaultRoomID)
+}
+
+func (s *Server) authenticate(c *client, req request) (any, *rpcError) {
+	s.mu.Lock()
+	defer s.unlock()
+	scheme, err := parseString(req.params, "scheme", true)
+	if err != nil {
+		return nil, err
+	}
+	// A scheme this document defines but the server does not offer is
+	// unsupported (§3.2), whatever else the request holds.
+	switch scheme {
+	case "webauthn":
+		if s.config.WebAuthn == nil {
+			return nil, &rpcError{Code: codeUnsupported, Message: "Passkeys are disabled"}
+		}
+	case "email":
+		if s.config.EmailSender == nil {
+			return nil, &rpcError{Code: codeUnsupported, Message: "Email sign-in is disabled"}
+		}
+	case "external":
+		// This server has no sign-in page (§4.11.5). One would propose
+		// here, and approve with approveLocked, which takes either scheme.
+		return nil, &rpcError{Code: codeUnsupported, Message: "External sign-in is not offered"}
+	case "token":
+		if s.config.WebAuthn == nil && s.config.EmailSender == nil {
+			return nil, &rpcError{Code: codeUnsupported, Message: "This server has no sign-in sessions; use guest"}
+		}
+	case "guest":
+	default:
+		// A request that depends on a name the server does not know is
+		// invalid_params (§1).
+		return nil, invalidParams("Unknown authentication scheme %q", scheme)
+	}
+	// A user_id is never empty, nor contains whitespace or control
+	// characters (§2.4): requesting one that could be no user_id is
+	// invalid_params, with any scheme. One that could be, but that this
+	// server would not assign, is ignored where the scheme assigns one.
+	if _, has := req.params["user_id"]; has {
+		requested, err := parseString(req.params, "user_id", true)
+		if err != nil {
+			return nil, err
+		}
+		if !validID(requested) {
+			return nil, invalidParams("user_id must not be empty, or contain whitespace or control characters")
+		}
+	}
+	switch scheme {
+	case "webauthn":
+		return s.authenticatePasskey(c, req)
+	case "email":
+		return s.authenticateEmail(c, req)
+	case "token":
+		return s.authenticateToken(c, req)
+	}
+	name, err := parseString(req.params, "name", false)
+	if err != nil {
+		return nil, err
+	}
+	requested, err := parseString(req.params, "user_id", false)
+	if err != nil {
+		return nil, err
+	}
+	if c.user != nil {
+		// Guest auth on a signed-in connection answers with the identity it
+		// has. It signs the connection in as no other user, so it is no
+		// sign-in and sends nothing after its result (§4.5).
+		result := map[string]any{"you": c.user.you()}
+		c.sendResult(req, result)
+		return result, nil
+	}
+	user := newUserState(s.assignUserIDLocked(requested), normalizeName(name))
+	s.users[user.id] = user
+	s.touchUser(user.id)
+	// A new guest joins the default room, so their room list is not empty.
+	return s.switchUserLocked(c, req, user, nil, true, true), nil
+}
+
+// switchUserLocked replies with user as `you` and extra fields beside it
+// (§3.2, §3.3), then makes user the connection's identity. Every
+// notification a sign-in causes on its connection follows the result
+// (§3.2): the departure of the identity it leaves, the join of a new
+// identity to the default room when joinDefault is set, and then what
+// follows a sign-in (§4.5). A sign-in signs the connection in as a user it
+// was not signed in as: an auth that adds a passkey or address, or that
+// signs in again as the same user, is not one, and is sent nothing after
+// its result. No room_update is sent for rooms the identity had already
+// joined: the client lists them with room_list.
+func (s *Server) switchUserLocked(c *client, req request, user *userState, extra map[string]any, signIn, joinDefault bool) map[string]any {
+	result := map[string]any{"you": user.you()}
+	maps.Copy(result, extra)
+	c.sendResult(req, result)
+	s.attachLocked(c, user)
+	if joinDefault {
+		s.joinDefaultRoomLocked(user)
+	}
+	if signIn {
+		s.sendAfterAuthLocked(c)
+	}
+	return result
+}
+
+// attachLocked makes user the connection's identity and announces the
+// status others see of it and of the identity the connection leaves
+// (§4.5). A guest identity left without connections is retired, logging
+// its leaves, as when its last connection closes: a sign-in to an existing
+// account is announced as the guest's departure, never as a `user` change
+// with `old` (§3.3), and the account appears to others through its own
+// status, so an invisible one, or one without a status, shows nothing new.
+// A guest that becomes a new account does so in place, keeping its user_id
+// (a passkey registration or an email addition), so this server has no
+// user_id change to announce with `old`.
+func (s *Server) attachLocked(c *client, user *userState) {
+	previous := c.user
+	if previous == user {
+		return
+	}
+	if previous != nil {
+		delete(previous.clients, c)
+	}
+	// A pending email proposal was made by the previous identity: it is
+	// dropped, so the connection cannot approve it as the next one
+	// (§4.11.3).
+	if c.proposal != nil {
+		s.dropProposalLocked(c.proposal)
+		c.proposal = nil
+	}
+	c.user = user
+	user.clients[c] = struct{}{}
+	// The previous identity's departure goes first, then the user's own
+	// status.
+	switch {
+	case previous == nil:
+	case len(previous.clients) == 0 && !previous.account():
+		s.retireLocked(previous)
+	default:
+		s.announceStatusLocked(previous)
+	}
+	s.announceStatusLocked(user)
+}
+
+// detachLocked forgets a closed connection, retiring its guest identity.
+func (s *Server) detachLocked(c *client) {
+	user := c.user
+	if user == nil {
+		return
+	}
+	delete(user.clients, c)
+	c.user = nil
+	if len(user.clients) == 0 && !user.account() {
+		s.retireLocked(user)
+		return
+	}
+	s.announceStatusLocked(user)
+}
+
+// retireLocked removes a guest identity for good. It leaves every room it
+// joined, logging each leave as a membership for the remaining members
+// (§4.2.2). Its user_id is never reissued, so its records stay consistent
+// (§3.3).
+func (s *Server) retireLocked(u *userState) {
+	rooms := slices.SortedFunc(maps.Values(u.joined), func(a, b *roomState) int {
+		return cmp.Compare(a.createdID, b.createdID)
+	})
+	// Its registrations go first, so its leaves send it no badge pushes.
+	for _, registration := range u.pushes {
+		s.removePushLocked(registration)
+	}
+	for _, r := range rooms {
+		s.leaveLocked(u, r)
+		delete(r.reads, u.id)
+	}
+	s.stopTimersLocked(u)
+	s.setAvatarEmbedLocked(u, nil)
+	delete(s.users, u.id)
+	s.touchUser(u.id)
+}
+
+// stopTimersLocked stops u's timers: the ends of its timed mutes, its
+// coalesced status, and its pending badge pushes.
+func (s *Server) stopTimersLocked(u *userState) {
+	if u.muteTimer != nil {
+		u.muteTimer.Stop()
+		u.muteTimer = nil
+	}
+	if u.statusTimer != nil {
+		u.statusTimer.Stop()
+		u.statusTimer = nil
+	}
+	for id, timer := range u.roomMuteTimers {
+		timer.Stop()
+		delete(u.roomMuteTimers, id)
+	}
+	s.stopBadgeLocked(u)
+}
+
+// send queues a frame to every connection of the user.
+func (u *userState) send(frames ...any) {
+	for c := range u.clients {
+		c.enqueueBatch(frames...)
+	}
+}
+
+// sharersLocked lists the other users who share a joined room with u.
+func (s *Server) sharersLocked(u *userState) []*userState {
+	seen := make(map[string]*userState)
+	for _, r := range u.joined {
+		for id, member := range r.members {
+			if id != u.id {
+				seen[id] = member
+			}
+		}
+	}
+	ids := slices.Sorted(maps.Keys(seen))
+	users := make([]*userState, len(ids))
+	for i, id := range ids {
+		users[i] = seen[id]
+	}
+	return users
+}
+
+// notifyProfileLocked sends a `user` notification after a profile change:
+// `you` to the user's connections other than except, and `new` to everyone
+// who shares a room with them (§3.3). Each carries the complete profile, so
+// at least the fields that changed. removed lists fields the change
+// removed, and cleared the ext keys it removed, both announced as empty
+// values, since clients merge a notification into the object they keep.
+func (s *Server) notifyProfileLocked(u *userState, except *client, cleared extObject, removed ...string) {
+	// The profile goes to every sharer, so it publishes the shown status,
+	// one held back to coalesce included.
+	s.publishLocked(u)
+	profile := withCleared(withRemoved(u.profile(), removed), cleared)
+	you := notification("user", map[string]any{"you": withCleared(withRemoved(u.you(), removed), cleared)})
+	for c := range u.clients {
+		if c != except {
+			c.enqueue(you)
+		}
+	}
+	others := notification("user", map[string]any{"new": profile})
+	for _, other := range s.sharersLocked(u) {
+		other.send(others)
+	}
+}
+
+// withRemoved adds each removed field to a profile as its empty value.
+func withRemoved(profile map[string]any, removed []string) map[string]any {
+	for _, field := range removed {
+		profile[field] = ""
+	}
+	return profile
+}
+
+// withCleared adds each cleared ext key to a profile's ext as its empty
+// value (§4.12).
+func withCleared(profile map[string]any, cleared extObject) map[string]any {
+	if len(cleared) == 0 {
+		return profile
+	}
+	ext := maps.Clone(extOf(profile["ext"]))
+	if ext == nil {
+		ext = make(extObject, len(cleared))
+	}
+	maps.Copy(ext, cleared)
+	profile["ext"] = ext
+	return profile
+}
+
+// updateProfile applies a `me` request (§3.3): a given field replaces the
+// current value, an omitted one stays, and an empty value ("" or {}) removes
+// the field, which the result and notifications carry as that empty value.
+// Names are trimmed and capped; avatars must be https: URLs or small image
+// data: URLs, or the current avatar unchanged. status is the chosen status
+// (§4.5.1), "" for a value the server does not support, and is kept
+// across connections and restarts; a change to it counts against the
+// user's limit on status changes (admitStatusLocked), beyond which the
+// request is retry_after and changes nothing. roles are not settable, and
+// like other unknown fields are ignored.
+func (s *Server) updateProfile(c *client, req request) (any, bool, *rpcError) {
+	name, err := parseString(req.params, "name", false)
+	if err != nil {
+		return nil, false, err
+	}
+	avatar, err := parseString(req.params, "avatar", false)
+	if err != nil {
+		return nil, false, err
+	}
+	extWrite, hasExt, err := parseExt(req.params, "ext")
+	if err != nil {
+		return nil, false, err
+	}
+	status, err := parseString(req.params, "status", false)
+	if err != nil {
+		return nil, false, err
+	}
+	_, hasName := req.params["name"]
+	_, hasAvatar := req.params["avatar"]
+	_, hasStatus := req.params["status"]
+
+	s.mu.Lock()
+	defer s.unlock()
+	u := c.user
+	if hasAvatar && avatar != "" && avatar != u.avatar && !validAvatar(avatar) {
+		if strings.HasPrefix(avatar, "data:") && len(avatar) > maxAvatarDataURLBytes {
+			return nil, false, &rpcError{Code: codeTooLarge, Message: fmt.Sprintf("An avatar data: URL is at most %d bytes; upload larger images with /avatar", maxAvatarDataURLBytes)}
+		}
+		return nil, false, invalidParams("avatar must be an https: URL or a data:image URL of at most %d bytes; upload larger images with /avatar", maxAvatarDataURLBytes)
+	}
+	if hasStatus && !settableStatus(status) {
+		status = statusNone
+	}
+	// ext merges into the kept one (§4.12), and the limit applies to the
+	// result.
+	ext := u.ext
+	if hasExt {
+		ext = mergeExt(u.ext, extWrite)
+		if encodedSize(ext) > maxProfileExtBytes {
+			return nil, false, &rpcError{Code: codeTooLarge, Message: fmt.Sprintf("Your profile's ext would be over %d bytes", maxProfileExtBytes)}
+		}
+	}
+	// A status change counts against the user's limit on status changes,
+	// as a `status` request does (§4.5), so `me` flipping it in a loop
+	// cannot make the server announce it to every sharer without end.
+	if hasStatus && status != u.chosen {
+		if err := admitStatusLocked(u); err != nil {
+			return nil, false, err
+		}
+	}
+	// A change of name, avatar, or ext goes to everyone who shares a room
+	// with the user.
+	if (hasName && normalizeName(name) != u.name) || (hasAvatar && avatar != u.avatar) || (hasExt && !jsonEqual(ext, u.ext)) {
+		if err := admitActionLocked(u); err != nil {
+			return nil, false, err
+		}
+	}
+	before, beforeYou := u.profile(), u.you()
+	s.touchUser(u.id)
+	var removed []string
+	if hasName {
+		u.name = normalizeName(name)
+		u.fromValue = nil
+		if u.name == "" {
+			removed = append(removed, "name")
+		}
+	}
+	if hasAvatar && avatar != u.avatar {
+		s.setAvatarEmbedLocked(u, nil)
+		u.avatar = avatar
+	}
+	if hasAvatar && avatar == "" {
+		removed = append(removed, "avatar")
+	}
+	cleared := clearedExt(u.ext, extWrite)
+	u.ext = ext
+	if hasStatus {
+		// A change of the chosen status is sent at once, with the profile.
+		u.chosen = status
+		s.publishLocked(u)
+	}
+	result := map[string]any{"you": withRemoved(u.you(), removed)}
+	if !jsonEqual(before, u.profile()) || !jsonEqual(beforeYou, u.you()) {
+		s.notifyProfileLocked(u, c, cleared, removed...)
+	}
+	c.sendResult(req, result)
+	return result, true, nil
+}
+
+func jsonEqual(a, b any) bool {
+	left, right := encodeJSON(a), encodeJSON(b)
+	return left != nil && right != nil && string(left) == string(right)
+}
+
+// grantRolesLocked sets the roles Config.Roles grants an account, by its
+// user_id or email address, and reports whether they changed. Guests hold no
+// roles, so a granted user_id taken by a guest grants nothing until it is an
+// account; assignUserIDLocked never hands out a granted user_id that was
+// never used.
+func (s *Server) grantRolesLocked(u *userState) bool {
+	var roles []string
+	if u.account() {
+		for role, holders := range s.config.Roles {
+			if slices.ContainsFunc(holders, func(holder string) bool {
+				return strings.EqualFold(holder, u.id) || (u.email != "" && strings.EqualFold(holder, u.email))
+			}) {
+				roles = append(roles, strings.ToLower(role))
+			}
+		}
+		slices.Sort(roles)
+	}
+	if slices.Equal(roles, u.roles) {
+		return false
+	}
+	u.roles = roles
+	return true
+}

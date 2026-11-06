@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/apron-chat/apron-server-go/internal/server"
+	"github.com/apron-chat/apron-server-go/apron"
 )
 
 // smtpSender sends email sign-in codes through an SMTP relay. On port 465 it
@@ -51,7 +51,7 @@ func (s *smtpSender) messageDomain() string {
 }
 
 // message renders a sign-in email.
-func (s *smtpSender) message(m server.SignInEmail) []byte {
+func (s *smtpSender) message(m apron.SignInEmail) []byte {
 	var message strings.Builder
 	fmt.Fprintf(&message, "From: %s\r\n", s.from)
 	fmt.Fprintf(&message, "To: %s\r\n", m.To)
@@ -67,7 +67,7 @@ func (s *smtpSender) message(m server.SignInEmail) []byte {
 	return []byte(message.String())
 }
 
-func (s *smtpSender) SendSignInCode(ctx context.Context, m server.SignInEmail) error {
+func (s *smtpSender) SendSignInCode(ctx context.Context, m apron.SignInEmail) error {
 	var conn net.Conn
 	var err error
 	_, port, _ := net.SplitHostPort(s.addr)

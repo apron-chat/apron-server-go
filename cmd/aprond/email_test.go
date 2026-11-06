@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/apron-chat/apron-server-go/internal/server"
+	"github.com/apron-chat/apron-server-go/apron"
 )
 
 // fakeRelay is a minimal SMTP relay without STARTTLS that keeps the DATA it
@@ -74,7 +74,7 @@ func fakeRelay(t *testing.T, stall bool) (string, chan string) {
 
 func TestSMTPSenderRequiresSTARTTLS(t *testing.T) {
 	addr, received := fakeRelay(t, false)
-	message := server.SignInEmail{To: "ada@example.com", Code: "418092", Expires: time.Now().Add(10 * time.Minute)}
+	message := apron.SignInEmail{To: "ada@example.com", Code: "418092", Expires: time.Now().Add(10 * time.Minute)}
 	sender, err := newSMTPSender(addr, "Apron <chat@example.com>", "", "", false)
 	if err != nil {
 		t.Fatal(err)
@@ -100,7 +100,7 @@ func TestSMTPSenderStopsAtItsDeadline(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
 	start := time.Now()
-	if err := sender.SendSignInCode(ctx, server.SignInEmail{To: "ada@example.com", Code: "1"}); err == nil {
+	if err := sender.SendSignInCode(ctx, apron.SignInEmail{To: "ada@example.com", Code: "1"}); err == nil {
 		t.Fatal("a stalled relay did not fail")
 	}
 	if elapsed := time.Since(start); elapsed > 2*time.Second {

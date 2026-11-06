@@ -25,8 +25,8 @@ import (
 	"golang.org/x/net/netutil"
 	"golang.org/x/sync/errgroup"
 
-	"github.com/apron-chat/apron-server-go/internal/server"
-	"github.com/apron-chat/apron-server-go/internal/store"
+	"github.com/apron-chat/apron-server-go/apron"
+	"github.com/apron-chat/apron-server-go/store"
 )
 
 // Options are the command line flags, which a TOML file given with
@@ -142,8 +142,8 @@ func main() {
 
 // serverConfig turns options into the server's configuration.
 // The caller closes config.Store unless it hands it to a server.
-func serverConfig(options Options) (server.Config, error) {
-	config := server.DefaultConfig()
+func serverConfig(options Options) (apron.Config, error) {
+	config := apron.DefaultConfig()
 	config.StaticDir = options.StaticDir
 	config.AllowAnyOrigin = options.AllowAnyOrigin
 	config.PublicURL = options.PublicURL
@@ -210,7 +210,7 @@ func serverConfig(options Options) (server.Config, error) {
 		if options.PublicURL != "" || len(options.TLS.Domains) > 0 {
 			return config, errors.New("--email.sender log writes sign-in codes to the server log, so anyone who reads it can sign in as anyone; it is for development and refused with --public-url or --tls.domain: use --email.sender smtp")
 		}
-		config.EmailSender = server.LogEmailSender{}
+		config.EmailSender = apron.LogEmailSender{}
 	case options.Email.Sender == "smtp":
 		sender, err := newSMTPSender(options.Email.SMTPAddr, options.Email.From, options.Email.SMTPUser, options.Email.SMTPPassword, options.Email.SMTPInsecure)
 		if err != nil {
@@ -249,7 +249,7 @@ func run(logger *slog.Logger, options Options) error {
 	if err != nil {
 		return err
 	}
-	app, err := server.Open(config)
+	app, err := apron.Open(config)
 	if err != nil {
 		config.Store.Close()
 		return fmt.Errorf("restoring state from %s: %w", options.Store, err)

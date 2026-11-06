@@ -216,7 +216,7 @@ batches in order, outside the server's lock, so a slow disk delays
 persistence rather than requests. At start the server rebuilds its state
 from the store.
 
-The store holds opaque entries by kind and ID (`internal/store`), so a
+The store holds opaque entries by kind and ID (`store`), so a
 backend only keeps entries and applies batches:
 
 - `sqlite:<path>` ([modernc.org/sqlite](https://modernc.org/sqlite), pure

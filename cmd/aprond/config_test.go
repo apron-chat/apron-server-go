@@ -11,7 +11,7 @@ import (
 
 	flags "github.com/jessevdk/go-flags"
 
-	"github.com/apron-chat/apron-server-go/internal/server"
+	"github.com/apron-chat/apron-server-go/apron"
 )
 
 func parse(t *testing.T, args ...string) (*Options, *flags.Parser) {
@@ -184,7 +184,7 @@ func TestEmailSenders(t *testing.T) {
 		}
 	}
 	options, _ := parse(t, "--email.enable", "--email.sender", "log")
-	if config, err := serverConfig(*options); err != nil || config.EmailSender != (server.LogEmailSender{}) || config.EmailLinkURL != "" {
+	if config, err := serverConfig(*options); err != nil || config.EmailSender != (apron.LogEmailSender{}) || config.EmailLinkURL != "" {
 		t.Fatalf("log sender %T, link %q, error %v", config.EmailSender, config.EmailLinkURL, err)
 	}
 	// The log sender is for development: a public server refuses it.

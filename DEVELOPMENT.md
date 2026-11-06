@@ -8,8 +8,8 @@ forgets it on restart); see [SERVER.md](SERVER.md#storage).
 
 - The repository root is the Go module and the reference server, implementing
   every capability in [PROTOCOL.md](https://github.com/shazow/apron/blob/main/PROTOCOL.md);
-  `cmd/aprond` is the executable and `internal` contains implementation
-  packages. See [SERVER.md](SERVER.md).
+  `apron` is the server as a Go package, `store` its storage backends, and
+  `cmd/aprond` the executable. See [SERVER.md](SERVER.md).
 - [apron-chat/apron-web](https://github.com/apron-chat/apron-web): the
   SvelteKit and TypeScript web client, deployed at `https://web.apron.chat`.
   `.apron-web` is a submodule of it, pinned to the commit the browser tests,
