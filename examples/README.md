@@ -14,4 +14,5 @@ file sets in a table of that name (`[sso]`). Run one with
 | [`assistant`](assistant) | A bot that answers its mentions, streaming the reply from a command such as a local model: `Bot`, `OnEvent`, `Visible`, `History`, `StreamAppend`, `Go`. |
 | [`ops`](ops) | Signed GitHub webhooks posted to a room, and `/deploy` streaming a terminal for people with the `deployer` role: `Handle`, `Bot.Post`, `StreamTerminal`. |
 | [`irc-bridge`](irc-bridge) | A room bridged to an IRC channel both ways, relaying what it missed while down: `Follow`, `WithExt`. |
+| [`private`](private) | Only invited people may sign in, and nothing is visible to anyone else; admins manage the list with `/allow` and `/disallow`, which signs people out: `RestrictSignIn`, `Allowlist`, `ParsePrincipal`, `Store`. |
 | [`search`](search) | Full-text search as a request and a command, limited to rooms the person may see, and a web archive of public rooms: `Method`, `Advertise`, `OnEventFrom`, `Visible`, `Public`. |

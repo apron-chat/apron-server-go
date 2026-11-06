@@ -318,6 +318,9 @@ func (s *Server) approveExternalLocked(c *client, req request, p *emailProposal,
 	s.dropProposalLocked(p)
 	user := s.identities[identity.Subject]
 	if user == nil {
+		if !s.admitsNewLocked("", identity.Subject) {
+			return nil, notAdmitted()
+		}
 		if own {
 			if name == "" {
 				name = p.name

@@ -39,7 +39,9 @@
 //   - followers of the log ([Registrar.OnEvent], [Registrar.OnEventFrom],
 //     and [Registrar.Follow], which keeps its place across restarts), with
 //     [DecodeMessage] to read messages;
-//   - external sign-in, such as OAuth ([Registrar.ExternalSignIn]).
+//   - external sign-in, such as OAuth ([Registrar.ExternalSignIn]);
+//   - an allowlist of who may sign in, with no guests, which signs out
+//     whoever is taken off it ([Registrar.RestrictSignIn]).
 //
 // The Registrar's [Host] is the extension's handle on the server for as long
 // as it runs: its capability in the server frame ([Host.Advertise]), values

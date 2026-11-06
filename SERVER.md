@@ -1539,6 +1539,17 @@ rest of the server does:
   from that origin. A new identity makes an account, which takes the
   requested `user_id`, else the extension's suggestion, as email accounts
   do; each sign-in sets the roles the extension grants.
+- An extension may restrict sign-in to an allowlist of email addresses,
+  external identities, and existing accounts' `user_id`s. The server then
+  offers no guests, and checks the list wherever an account is made or
+  signs in, a session token's resume and a device token included; a code
+  is mailed only to an address that may sign in, and the result reads the
+  same either way. Before a connection signs in, its `server` frame holds
+  only what signing in needs (no description taken from a room, custom
+  emoji, or what extensions advertise), and the whole frame follows the
+  sign-in (§3.1). Taking an entry off the list closes the connections of
+  the accounts it let in, and forgets their session tokens, device tokens,
+  and push registrations. The same frame applies to `--disable-guests`.
 - Events are the log's records in `log_id` order, as clients receive them,
   every room's. A deletion's tombstone is an event; the records it redacts
   are not sent again. A room is public to an extension, such as for a web

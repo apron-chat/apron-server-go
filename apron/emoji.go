@@ -235,16 +235,21 @@ func (s *Server) removeEmojiLocked(key string) {
 func (s *Server) emojiChangedLocked() {
 	s.dirty.emoji = true
 	s.renderEmojiLocked()
-	frames := make(map[string]jsontext.Value)
+	type kind struct {
+		baseURL  string
+		revealed bool
+	}
+	frames := make(map[kind]jsontext.Value)
 	for c := range s.clients {
-		frame, seen := frames[c.baseURL]
+		key := kind{c.baseURL, s.revealedLocked(c)}
+		frame, seen := frames[key]
 		if !seen {
 			// A connection not offered ext:emoji has no catalog_url to
 			// change.
-			if s.emojiExt(c.baseURL) != nil {
-				frame = notification("server", s.serverParams(c.baseURL))
+			if key.revealed && s.emojiExt(c.baseURL) != nil {
+				frame = s.serverFrameLocked(c)
 			}
-			frames[c.baseURL] = frame
+			frames[key] = frame
 		}
 		if frame != nil {
 			c.enqueue(frame)

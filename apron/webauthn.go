@@ -335,6 +335,9 @@ func (s *Server) finishPasskeyCeremony(c *client, req request, action string, w 
 // authenticating it again as the same user, which alone sends what follows
 // a sign-in (§4.5). joinDefault joins a new account to the default room.
 func (s *Server) signInLocked(c *client, req request, user *userState, now time.Time, signIn, joinDefault bool) (any, *Error) {
+	if err := s.admitLocked(user); err != nil {
+		return nil, err
+	}
 	delete(s.sessions, c.token)
 	s.touchSession(c.token)
 	secret := make([]byte, 32)
@@ -421,6 +424,9 @@ func (s *Server) authenticateToken(c *client, req request) (any, *Error) {
 	s.sessions[key] = session
 	s.touchSession(key)
 	c.token = key
+	if err := s.admitLocked(session.user); err != nil {
+		return nil, err
+	}
 	// Resuming the user the connection is signed in as is no sign-in
 	// (§4.5), and sends nothing after its result.
 	return s.switchUserLocked(c, req, session.user, map[string]any{"token": token}, c.user != session.user, false), nil

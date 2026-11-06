@@ -351,7 +351,7 @@ func (s *Server) authenticate(c *client, req request) (any, *Error) {
 			return nil, &Error{Code: CodeUnsupported, Message: "This server has no sign-in sessions; use guest"}
 		}
 	case "guest":
-		if s.config.DisableGuests {
+		if !s.guestsAllowedLocked() {
 			return nil, &Error{Code: CodeUnsupported, Message: "This server has no guests; sign in with an account"}
 		}
 	default:
@@ -419,6 +419,11 @@ func (s *Server) switchUserLocked(c *client, req request, user *userState, extra
 	result := map[string]any{"you": user.you()}
 	maps.Copy(result, extra)
 	c.sendResult(req, result)
+	// A connection that got only what signing in needs gets the whole
+	// server frame now (§3.1).
+	if !s.revealedLocked(c) {
+		c.enqueue(notification("server", s.serverParams(c.baseURL, true)))
+	}
 	s.attachLocked(c, user)
 	if joinDefault {
 		s.joinDefaultRoomLocked(user)

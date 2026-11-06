@@ -477,6 +477,14 @@ func (s *Server) proposeEmailLocked(c *client, req request) (any, *Error) {
 	}
 	add := c.user != nil
 	deliver := !add || (s.emails[email] == nil && c.user.email == "")
+	// On a server whose sign-in is restricted, a code goes only to an
+	// address that may sign in: one that would be refused is never mailed,
+	// and the result reads the same.
+	if existing := s.emails[email]; !add && existing != nil {
+		deliver = s.admittedLocked(existing)
+	} else if !add {
+		deliver = s.admitsNewLocked(email, "")
+	}
 	linked := deliver && s.config.EmailLinkURL != ""
 	if linked && len(s.email.links) >= maxEmailLinks {
 		for _, p := range s.email.links {
@@ -622,6 +630,9 @@ func (s *Server) approveLocked(c *client, req request) (any, *Error) {
 	s.dropProposalLocked(p)
 	user := s.emails[p.email]
 	if user == nil {
+		if !s.admitsNewLocked(p.email, "") {
+			return nil, notAdmitted()
+		}
 		// A proposal's own name and user_id apply only on its connection: a
 		// link opened elsewhere is someone reading the email, whose account
 		// the proposer must not name.

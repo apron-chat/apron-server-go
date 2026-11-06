@@ -54,8 +54,8 @@ func (f Frame) Params() map[string]any {
 	return params
 }
 
-// Guest connects and signs in as a guest named name.
-func Guest(t *testing.T, server *httptest.Server, name string) *Client {
+// Dial connects without signing in, and returns the server frame.
+func Dial(t *testing.T, server *httptest.Server) (*Client, Frame) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -66,6 +66,13 @@ func Guest(t *testing.T, server *httptest.Server, name string) *Client {
 	ws.SetReadLimit(1 << 24)
 	t.Cleanup(func() { _ = ws.CloseNow() })
 	c := &Client{t: t, ws: ws}
+	return c, c.Read()
+}
+
+// Guest connects and signs in as a guest named name.
+func Guest(t *testing.T, server *httptest.Server, name string) *Client {
+	t.Helper()
+	c, _ := Dial(t, server)
 	result, err := c.Call("auth", map[string]any{"scheme": "guest", "name": name})
 	if err != nil {
 		t.Fatal(err)
@@ -132,6 +139,18 @@ func (c *Client) Command(roomID, line string) ([]string, error) {
 		}
 		if from, _ := frame.Params()["from"].(map[string]any); frame["method"] == "message" && from["user_id"] == "~private" {
 			notices = append(notices, frame.Params()["body"].(map[string]any)["text"].(string))
+		}
+	}
+}
+
+// Closed reports whether the server closes the connection within a few
+// seconds, reading what it sends until then.
+func (c *Client) Closed() bool {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	for {
+		if _, _, err := c.ws.Read(ctx); err != nil {
+			return ctx.Err() == nil
 		}
 	}
 }

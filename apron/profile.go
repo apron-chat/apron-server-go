@@ -92,12 +92,17 @@ func (s *Server) profileChangedLocked() {
 // announceServerLocked sends every connection, signed in or not, a new
 // server frame (§3.1).
 func (s *Server) announceServerLocked() {
-	frames := make(map[string]jsontext.Value)
+	type kind struct {
+		baseURL  string
+		revealed bool
+	}
+	frames := make(map[kind]jsontext.Value)
 	for c := range s.clients {
-		frame, seen := frames[c.baseURL]
+		key := kind{c.baseURL, s.revealedLocked(c)}
+		frame, seen := frames[key]
 		if !seen {
-			frame = notification("server", s.serverParams(c.baseURL))
-			frames[c.baseURL] = frame
+			frame = s.serverFrameLocked(c)
+			frames[key] = frame
 		}
 		c.enqueue(frame)
 	}

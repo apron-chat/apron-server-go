@@ -591,7 +591,10 @@ type Server struct {
 	// identities the accounts it made, by identity.
 	external   *externalSignIn
 	identities map[string]*userState
-	logger     *slog.Logger
+	// allowlist is who may sign in, once an extension restricts sign-in
+	// (allowlist.go); nil lets in anyone.
+	allowlist *allowlist
+	logger    *slog.Logger
 	// sessionCount counts the clients that are Sessions, which
 	// MaxConnections does not bound.
 	sessionCount int
@@ -889,7 +892,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 	if s.config.MaxConnections > 0 && len(s.clients)-s.sessionCount >= s.config.MaxConnections {
 		// An error about the connection as a whole omits id (§1.1).
-		c.enqueue(map[string]any{"method": "server", "params": s.serverParams(c.baseURL)})
+		c.enqueue(s.serverFrameLocked(c))
 		c.closeWithError(&Error{Code: CodeRetryAfter, Message: "Server at capacity; try again shortly", Data: map[string]any{"retry_after": retryAfterSeconds}})
 		s.unlock()
 		<-c.done
@@ -898,7 +901,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	s.clients[c] = struct{}{}
 	s.seenBaseURL = c.baseURL
 	// The server announcement is queued before the reader starts accepting auth.
-	c.enqueue(map[string]any{"method": "server", "params": s.serverParams(c.baseURL)})
+	c.enqueue(s.serverFrameLocked(c))
 	s.unlock()
 
 	defer func() {
@@ -998,9 +1001,23 @@ func (s *Server) baseURL(r *http.Request) string {
 	return (&url.URL{Scheme: scheme, Host: r.Host}).String()
 }
 
+// serverFrameLocked is the `server` frame (PROTOCOL.md §3.1) for c.
+func (s *Server) serverFrameLocked(c *client) jsontext.Value {
+	return notification("server", s.serverParams(c.baseURL, s.revealedLocked(c)))
+}
+
+// revealedLocked reports whether c gets the whole server frame: once it is
+// signed in, or before when anyone may sign in as a guest anyway. Before a
+// sign-in that only some may make, the frame holds what signing in needs:
+// not the default room's description, the custom emoji, or what extensions
+// advertise.
+func (s *Server) revealedLocked(c *client) bool {
+	return c.user != nil || s.guestsAllowedLocked()
+}
+
 // serverParams is the `server` frame (PROTOCOL.md §3.1) for a connection
-// whose URLs start with baseURL. Callers hold s.mu.
-func (s *Server) serverParams(baseURL string) map[string]any {
+// whose URLs start with baseURL, whole when revealed. Callers hold s.mu.
+func (s *Server) serverParams(baseURL string, revealed bool) map[string]any {
 	var authSchemes []string
 	if s.config.WebAuthn != nil {
 		authSchemes = append(authSchemes, "webauthn")
@@ -1014,7 +1031,7 @@ func (s *Server) serverParams(baseURL string) map[string]any {
 	if len(authSchemes) > 0 {
 		authSchemes = append(authSchemes, "token")
 	}
-	if !s.config.DisableGuests {
+	if s.guestsAllowedLocked() {
 		authSchemes = append(authSchemes, "guest")
 	}
 	// signup (§3.2) lists the schemes that can create an account: every
@@ -1032,7 +1049,7 @@ func (s *Server) serverParams(baseURL string) map[string]any {
 		"status": optionalStatuses,
 	}
 	ext := make(map[string]any)
-	if emoji := s.emojiExt(baseURL); emoji != nil {
+	if emoji := s.emojiExt(baseURL); emoji != nil && revealed {
 		params["capabilities"] = append(params["capabilities"].([]string), "ext:emoji")
 		ext["emoji"] = emoji
 	}
@@ -1047,7 +1064,7 @@ func (s *Server) serverParams(baseURL string) map[string]any {
 		params["welcome"] = s.config.Welcome
 	}
 	for _, field := range profileFields {
-		if value, _ := s.profileValueLocked(field); value != "" {
+		if value, source := s.profileValueLocked(field); value != "" && (revealed || source != fromRoom) {
 			params[field] = value
 		}
 	}
@@ -1060,6 +1077,9 @@ func (s *Server) serverParams(baseURL string) map[string]any {
 	// Each extension that advertises (Host.Advertise) adds its capability,
 	// ext:<name>, and its data under its name in ext (EXTENSIONS.md).
 	for _, name := range slices.Sorted(maps.Keys(s.advertised)) {
+		if !revealed {
+			break
+		}
 		params["capabilities"] = append(params["capabilities"].([]string), "ext:"+name)
 		if value := s.advertised[name]; len(value) > 0 {
 			ext[name] = value

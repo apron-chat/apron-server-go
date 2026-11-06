@@ -283,8 +283,8 @@ func (b *Bot) Connect(options SessionOptions) (*Session, error) {
 	go c.writeLoop()
 	s.clients[c] = struct{}{}
 	s.sessionCount++
-	c.enqueue(map[string]any{"method": "server", "params": s.serverParams(c.baseURL)})
 	s.attachLocked(c, u)
+	c.enqueue(s.serverFrameLocked(c))
 	s.sendAfterAuthLocked(c)
 	return session, nil
 }
