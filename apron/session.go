@@ -242,9 +242,14 @@ func (b *Session) Call(ctx context.Context, method string, params any) (jsontext
 // PostOption sets a field of a message a Session posts.
 type PostOption func(params map[string]any)
 
-// ReplyTo makes the message a reply to messageID (§3.5.4).
+// ReplyTo makes the message a reply to messageID (§3.5.4); "" leaves it no
+// reply.
 func ReplyTo(messageID string) PostOption {
-	return func(params map[string]any) { params["reply_to"] = messageID }
+	return func(params map[string]any) {
+		if messageID != "" {
+			params["reply_to"] = map[string]any{"message_id": messageID}
+		}
+	}
 }
 
 // Markdown renders the message's text as Markdown (§3.5.2).

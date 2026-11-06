@@ -243,8 +243,19 @@ func TestExtensionSessionEventsAndViews(t *testing.T) {
 		}
 	}
 
+	replyID, err := bot.Post(ctx, "general", "hi yourself", ReplyTo(guestID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := notificationParams(t, c.read(t), "message"); got["message_id"] != replyID {
+		t.Fatalf("guest got %#v, want the reply", got)
+	}
+	if reply := waitMessageEvent(t, events, replyID); reply.ReplyTo != guestID {
+		t.Fatalf("reply = %#v", reply)
+	}
+
 	history, err := bot.History(ctx, "general", HistoryOptions{Limit: 10})
-	if err != nil || len(history) != 2 || history[0].ID != id || history[1].Text != "hi helper" {
+	if err != nil || len(history) != 3 || history[0].ID != id || history[1].Text != "hi helper" || history[2].ReplyTo != guestID {
 		t.Fatalf("history = %#v, %v", history, err)
 	}
 
