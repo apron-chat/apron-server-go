@@ -1,4 +1,4 @@
-package main
+package aprond
 
 import (
 	"context"

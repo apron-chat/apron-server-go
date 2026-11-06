@@ -1,4 +1,4 @@
-package main
+package aprond
 
 import (
 	"bytes"
@@ -20,14 +20,24 @@ var commandOnly = map[string]bool{"config": true, "print-config": true}
 // command line. Top-level keys are flag names; each table is a flag group's
 // namespace, so [upload] max-mb = 20 sets --upload.max-mb.
 // A list in the file replaces the option's default rather than adding to it.
-func loadConfig(parser *flags.Parser, options any, path string) error {
+// Extensions' options (configTarget) are tables named after them.
+func loadConfig(parser *flags.Parser, options any, path string, extensions ...configTarget) error {
 	var values map[string]any
 	if _, err := toml.DecodeFile(path, &values); err != nil {
 		return err
 	}
 	fields := make(map[string]reflect.Value)
 	optionFields(reflect.ValueOf(options).Elem(), "", parser.NamespaceDelimiter, fields)
+	for _, extension := range extensions {
+		optionFields(reflect.ValueOf(extension.options).Elem(), extension.namespace+parser.NamespaceDelimiter, parser.NamespaceDelimiter, fields)
+	}
 	return applyConfig(parser, fields, "", values)
+}
+
+// configTarget is an extension's options, under its namespace.
+type configTarget struct {
+	namespace string
+	options   any
 }
 
 // optionFields maps each option's long name, with namespaces, to its field.

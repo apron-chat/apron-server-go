@@ -1,4 +1,4 @@
-package main
+package aprond
 
 import (
 	"bytes"
@@ -262,5 +262,44 @@ func TestTerminalViewerSetting(t *testing.T) {
 		if _, err := serverConfig(*options); err == nil {
 			t.Errorf("accepted --live.terminal-viewer %q", viewer)
 		}
+	}
+}
+
+// weatherExtension is a Configurable extension for the flag tests.
+type weatherExtension struct {
+	settings struct {
+		Key   string   `long:"key" description:"The weather service's key"`
+		Hosts []string `long:"host" default:"a.example" description:"Hosts to ask"`
+	}
+}
+
+func (*weatherExtension) Name() string           { return "weather" }
+func (*weatherExtension) Init(*apron.Host) error { return nil }
+func (w *weatherExtension) Flags() any           { return &w.settings }
+
+func TestExtensionFlags(t *testing.T) {
+	weather := &weatherExtension{}
+	var options Options
+	parser := flags.NewParser(&options, flags.Default&^flags.PrintErrors)
+	targets, err := addExtensionFlags(parser, []apron.Extension{weather})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := parser.ParseArgs([]string{"--weather.key", "k1"}); err != nil {
+		t.Fatal(err)
+	}
+	path := writeConfig(t, "[weather]\nkey = \"from-file\"\nhost = [\"b.example\", \"c.example\"]\n")
+	if err := loadConfig(parser, &options, path, targets...); err != nil {
+		t.Fatal(err)
+	}
+	if weather.settings.Key != "k1" || !reflect.DeepEqual(weather.settings.Hosts, []string{"b.example", "c.example"}) {
+		t.Fatalf("settings = %+v", weather.settings)
+	}
+	var printed bytes.Buffer
+	if err := printConfig(&printed, parser); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(printed.String(), "[weather]\n\n# The weather service's key\nkey = \"k1\"") {
+		t.Fatalf("printed config:\n%s", printed.String())
 	}
 }

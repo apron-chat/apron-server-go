@@ -1,0 +1,458 @@
+// Package aprond is the aprond command as a library: Main parses aprond's
+// flags and config file and serves, with extensions of your own added to
+// the server (apron.Extension).
+package aprond
+
+import (
+	"context"
+	"crypto/tls"
+	"errors"
+	"expvar"
+	"fmt"
+	"log/slog"
+	"net"
+	"net/http"
+	"net/http/pprof"
+	"net/url"
+	"os"
+	"os/signal"
+	"path/filepath"
+	"runtime"
+	"strings"
+	"syscall"
+	"time"
+
+	"github.com/go-webauthn/webauthn/webauthn"
+	flags "github.com/jessevdk/go-flags"
+	"golang.org/x/crypto/acme/autocert"
+	"golang.org/x/net/netutil"
+	"golang.org/x/sync/errgroup"
+
+	"github.com/apron-chat/apron-server-go/apron"
+	"github.com/apron-chat/apron-server-go/store"
+)
+
+// Options are the command line flags, which a TOML file given with
+// --config can also set. Each group's namespace is a flag prefix
+// (--upload.dir) and a TOML table ([upload] dir = ...).
+type Options struct {
+	Config      string `long:"config" description:"Load settings from a TOML file; flags given on the command line take precedence (use --print-config for an example)"`
+	PrintConfig bool   `long:"print-config" description:"Print the current settings as TOML and exit"`
+
+	Addr                   string   `long:"addr" default:"127.0.0.1:8080" description:"HTTP and WebSocket listen address; :8080 listens on every interface"`
+	StaticDir              string   `long:"static-dir" description:"Directory containing the built frontend"`
+	Origins                []string `long:"origin" description:"Allowed WebSocket origin pattern; repeat for more (default: localhost, 127.0.0.1, and ::1)"`
+	AllowAnyOrigin         bool     `long:"allow-any-origin" description:"Disable WebSocket origin checks"`
+	PublicURL              string   `long:"public-url" description:"External base URL of write, file, and live text links, such as https://chat.example (default: each request's host, or https://<tls.domain>)"`
+	MaxConnections         int      `long:"max-connections" description:"Maximum concurrent WebSockets; 0 is unlimited"`
+	MaxListenerConnections int      `long:"max-listener-connections" description:"Maximum concurrent TCP connections on the listener, HTTP included; 0 is unlimited"`
+	MessagesPerMinute      int      `long:"messages-per-minute" description:"Burst of new messages, room_set requests, and /avatar and /emoji add commands per user, refilled over a minute; 0 is unlimited"`
+	MaxListedMembers       int      `long:"max-listed-members" default:"1000" description:"Members listed per room in room_list and room_update; a larger room lists its most recently active ones and member_count. 0 is unlimited"`
+	MaxPrivateRooms        int      `long:"max-private-rooms" description:"Top-level private rooms one user may be in at once, created or added to, such as on a public deployment; 0 is unlimited"`
+	DebugAddr              string   `long:"debug-addr" description:"Listen address for unauthenticated pprof and expvar under /debug/, such as 127.0.0.1:6060; empty disables"`
+	Store                  string   `long:"store" description:"Where state is kept: sqlite:<path> for a SQLite database, or memory to keep nothing across restarts"`
+	ClientIPHeader         string   `long:"client-ip-header" description:"Request header a reverse proxy puts the client's address in, such as X-Forwarded-For (its last entry) or X-Real-IP, for per-client limits; set only behind a proxy that sets it"`
+	Welcome                string   `long:"welcome" description:"Markdown clients show on their sign-in screen (server.welcome), such as how this server's sign-in methods fit together"`
+	Title                  string   `long:"title" description:"Plain name clients show for this server (server.title), such as in a list of servers; an admin's /server title overrides it"`
+	Description            string   `long:"description" description:"CommonMark saying in a few words what this server is about (server.description; default: the general room's description, up to 500 bytes); an admin's /server description overrides it"`
+	Avatar                 string   `long:"avatar" description:"Square icon of this server, at least 256 pixels wide (server.avatar): an https: URL or a small data:image URL; an admin's /server avatar overrides it"`
+	Roles                  []string `long:"role" description:"Grant a role to an account as role=user_id or role=email, such as admin=ada; repeat for more. admin and moderator may remove others from rooms, and admin may replace and remove custom emoji and set the server's title, description, and avatar with /server"`
+
+	WebAuthn struct {
+		RPID    string   `long:"rp-id" default:"localhost" description:"Passkey relying party domain; empty disables passkeys"`
+		Origins []string `long:"origin" default:"http://localhost:5173" default:"http://localhost:8080" description:"Exact frontend origin for passkeys; repeat for more"`
+	} `group:"Passkeys" namespace:"webauthn"`
+
+	Upload struct {
+		Dir          string `long:"dir" description:"Directory holding uploaded files; upload files the store does not refer to are removed at start"`
+		MaxMB        int64  `long:"max-mb" default:"20" description:"Maximum size of one upload, in MiB"`
+		MaxMessageMB int64  `long:"max-message-mb" default:"20" description:"Maximum total size of one message's uploads, in MiB"`
+		MaxStorageMB int64  `long:"max-storage-mb" default:"1000" description:"Total size of hosted uploads but custom emoji, in MiB, beyond which the oldest are removed from their messages"`
+	} `group:"Uploads" namespace:"upload"`
+
+	Live struct {
+		MaxMinutes     int64  `long:"max-minutes" default:"60" description:"Longest a live text (a terminal or append embed) runs, in minutes, before it ends"`
+		MaxMB          int64  `long:"max-mb" default:"16" description:"Most a live text's writer may send, in MiB, before the text ends"`
+		TerminalKeepKB int    `long:"terminal-keep-kb" default:"64" description:"How much of a terminal's output is kept, in KiB: its last part"`
+		AppendMaxKB    int    `long:"append-max-kb" default:"64" description:"How much text an append embed adds to its message, in KiB: its first part (at most 256, what a request may carry)"`
+		TerminalViewer string `long:"terminal-viewer" default:"https://terminal.apron.chat/" description:"A page that shows a terminal's live text, where a browser that opens a terminal's url goes (empty serves browsers the plain text)"`
+	} `group:"Live text" namespace:"live"`
+
+	Emoji struct {
+		MaxKB        int64 `long:"max-kb" default:"256" description:"Maximum size of one custom emoji image, in KiB"`
+		MaxStorageMB int64 `long:"max-storage-mb" default:"250" description:"Total size of custom emoji images, in MiB; past it /emoji add is refused, and nothing is removed"`
+	} `group:"Custom emoji" namespace:"emoji"`
+
+	Email struct {
+		Enable       bool   `long:"enable" description:"Offer email sign-in (off by default)"`
+		Sender       string `long:"sender" default:"smtp" choice:"smtp" choice:"log" description:"How email sign-in codes are delivered, with --email.enable: smtp sends them, log writes them to the server log (development only; refused with --public-url or --tls.domain)"`
+		LinkURL      string `long:"link-url" description:"Page that sign-in links in emails open, such as https://chat.example/, with a sign-in token in its fragment (default: --public-url; empty sends codes without links)"`
+		From         string `long:"from" description:"Sender address of sign-in emails, for --email.sender smtp"`
+		SMTPAddr     string `long:"smtp-addr" description:"SMTP relay as host:port, for --email.sender smtp: STARTTLS is required (such as :587), or TLS from the start on port 465"`
+		SMTPUser     string `long:"smtp-user" description:"SMTP user name; empty sends without authentication"`
+		SMTPPassword string `long:"smtp-password" description:"SMTP password"`
+		SMTPInsecure bool   `long:"smtp-insecure" description:"Send through a relay that does not offer STARTTLS, in cleartext (a relay on the same host only)"`
+	} `group:"Email sign-in" namespace:"email"`
+
+	Push struct {
+		Disable         bool   `long:"disable" description:"Do not offer push registration"`
+		AllowInsecure   bool   `long:"allow-insecure" description:"Accept http push endpoints and ones on internal addresses, so any client can make the server POST into its network (tests only; refused with --public-url or --tls.domain)"`
+		VAPIDPrivateKey string `long:"vapid-private-key" description:"Web Push VAPID private key, the P-256 scalar in base64url as web-push tools print it (default: one generated at the first start and kept in the store)"`
+		VAPIDSubject    string `long:"vapid-subject" description:"Contact push services may use, a mailto: or https: URL, sent with Web Push (default: --public-url)"`
+	} `group:"Push" namespace:"push"`
+
+	TLS struct {
+		Domains  []string `long:"domain" description:"Serve HTTPS with Let's Encrypt certificates for this domain; repeat for more. Replaces --addr with --tls.addr"`
+		Addr     string   `long:"addr" default:":443" description:"HTTPS listen address when --tls.domain is set"`
+		HTTPAddr string   `long:"http-addr" default:":80" description:"HTTP listen address for ACME challenges and redirects to HTTPS when --tls.domain is set"`
+		CacheDir string   `long:"cache-dir" description:"Directory caching certificates (default: aprond/autocert in the user cache directory)"`
+		Email    string   `long:"email" description:"Contact email given to Let's Encrypt"`
+	} `group:"TLS" namespace:"tls"`
+}
+
+// Configurable is an Extension with settings of its own. Flags returns a
+// pointer to a struct of options tagged as github.com/jessevdk/go-flags
+// reads them ("long", "description", "default"), such as
+//
+//	type Settings struct {
+//		APIKey string `long:"api-key" description:"The weather service's key"`
+//	}
+//
+// Main parses them as flags named after the extension, --weather.api-key,
+// and from the config file's table of its name, [weather] api-key = "...",
+// before it starts the server, and so before the extension's Init.
+type Configurable interface {
+	apron.Extension
+	Flags() any
+}
+
+// Main runs aprond with extensions added to the server: it parses the
+// command line and the config file, serves until SIGINT or SIGTERM, and
+// exits. A server of your own is a main package that calls it:
+//
+//	func main() { aprond.Main(weather.New()) }
+func Main(extensions ...apron.Extension) {
+	var options Options
+	options.Store = "sqlite:" + filepath.Join(userDataDir(), "aprond.db")
+	options.Upload.Dir = filepath.Join(userDataDir(), "uploads")
+	options.TLS.CacheDir = userCacheDir("autocert")
+	parser := flags.NewParser(&options, flags.Default)
+	targets, err := addExtensionFlags(parser, extensions)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	if _, err := parser.Parse(); err != nil {
+		if flagErr, ok := err.(*flags.Error); ok && flagErr.Type == flags.ErrHelp {
+			os.Exit(0)
+		}
+		os.Exit(1)
+	}
+	if options.Config != "" {
+		if err := loadConfig(parser, &options, options.Config, targets...); err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to load %s: %s\n", options.Config, err)
+			os.Exit(1)
+		}
+	}
+	if options.PrintConfig {
+		if err := printConfig(os.Stdout, parser); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
+
+	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
+	if err := Run(logger, options, extensions...); err != nil {
+		logger.Error("server stopped", "error", err)
+		os.Exit(1)
+	}
+}
+
+// addExtensionFlags adds the options of each Configurable extension as a
+// group namespaced by its name.
+func addExtensionFlags(parser *flags.Parser, extensions []apron.Extension) ([]configTarget, error) {
+	var targets []configTarget
+	for _, extension := range extensions {
+		configurable, ok := extension.(Configurable)
+		if !ok {
+			continue
+		}
+		data := configurable.Flags()
+		group, err := parser.AddGroup(extension.Name()+" extension", "", data)
+		if err != nil {
+			return nil, fmt.Errorf("extension %s: %w", extension.Name(), err)
+		}
+		group.Namespace = extension.Name()
+		targets = append(targets, configTarget{namespace: extension.Name(), options: data})
+	}
+	return targets, nil
+}
+
+// serverConfig turns options into the server's configuration.
+// The caller closes config.Store unless it hands it to a server.
+func serverConfig(options Options) (apron.Config, error) {
+	config := apron.DefaultConfig()
+	config.StaticDir = options.StaticDir
+	config.AllowAnyOrigin = options.AllowAnyOrigin
+	config.PublicURL = options.PublicURL
+	if config.PublicURL == "" && len(options.TLS.Domains) > 0 {
+		config.PublicURL = "https://" + options.TLS.Domains[0]
+	}
+	config.MaxConnections = options.MaxConnections
+	config.MessagesPerMinute = options.MessagesPerMinute
+	config.MaxListedMembers = options.MaxListedMembers
+	config.MaxPrivateRooms = options.MaxPrivateRooms
+	config.Welcome = options.Welcome
+	config.Title = strings.TrimSpace(options.Title)
+	config.Description = strings.TrimSpace(options.Description)
+	config.Avatar = strings.TrimSpace(options.Avatar)
+	config.ClientIPHeader = options.ClientIPHeader
+	for _, grant := range options.Roles {
+		role, holder, ok := strings.Cut(grant, "=")
+		role, holder = strings.ToLower(strings.TrimSpace(role)), strings.TrimSpace(holder)
+		if !ok || role == "" || holder == "" {
+			return config, fmt.Errorf("invalid --role %q: use role=user_id, such as admin=ada", grant)
+		}
+		if config.Roles == nil {
+			config.Roles = make(map[string][]string)
+		}
+		config.Roles[role] = append(config.Roles[role], holder)
+	}
+	config.DisablePush = options.Push.Disable
+	if options.Push.AllowInsecure && (options.PublicURL != "" || len(options.TLS.Domains) > 0) {
+		return config, errors.New("--push.allow-insecure lets any client make the server POST to http and internal addresses; it is for tests and refused with --public-url or --tls.domain")
+	}
+	config.AllowInsecurePush = options.Push.AllowInsecure
+	config.VAPIDPrivateKey = options.Push.VAPIDPrivateKey
+	config.VAPIDSubject = options.Push.VAPIDSubject
+	if subject := config.VAPIDSubject; subject != "" && !strings.HasPrefix(subject, "mailto:") && !strings.HasPrefix(subject, "https://") {
+		return config, fmt.Errorf("invalid --push.vapid-subject %q: use a mailto: or https: URL", subject)
+	}
+	config.UploadDir = options.Upload.Dir
+	config.MaxUploadBytes = options.Upload.MaxMB << 20
+	config.MaxMessageUploadBytes = options.Upload.MaxMessageMB << 20
+	config.MaxUploadStorageBytes = options.Upload.MaxStorageMB << 20
+	config.LiveTextMaxDuration = time.Duration(options.Live.MaxMinutes) * time.Minute
+	config.LiveTextMaxBytes = options.Live.MaxMB << 20
+	config.TerminalKeepBytes = options.Live.TerminalKeepKB << 10
+	config.AppendMaxBytes = options.Live.AppendMaxKB << 10
+	config.TerminalViewerURL = strings.TrimSpace(options.Live.TerminalViewer)
+	if viewer := config.TerminalViewerURL; viewer != "" {
+		parsed, err := url.Parse(viewer)
+		if err != nil || parsed.Host == "" || (parsed.Scheme != "https" && parsed.Scheme != "http") || strings.Contains(viewer, "#") || parsed.User != nil {
+			return config, fmt.Errorf("invalid --live.terminal-viewer %q: use an http or https URL without a fragment, or empty to turn it off", viewer)
+		}
+	}
+	if int64(config.AppendMaxBytes) > config.ReadLimit {
+		return config, fmt.Errorf("--live.append-max-kb %d is more than a message's text can be: at most %d", options.Live.AppendMaxKB, config.ReadLimit>>10)
+	}
+	config.MaxEmojiBytes = options.Emoji.MaxKB << 10
+	config.MaxEmojiStorageBytes = options.Emoji.MaxStorageMB << 20
+	if len(options.Origins) > 0 {
+		config.OriginPatterns = options.Origins
+	}
+	switch {
+	case !options.Email.Enable:
+		// Email sign-in is a feature flag, off by default.
+	case options.Email.Sender == "log":
+		if options.PublicURL != "" || len(options.TLS.Domains) > 0 {
+			return config, errors.New("--email.sender log writes sign-in codes to the server log, so anyone who reads it can sign in as anyone; it is for development and refused with --public-url or --tls.domain: use --email.sender smtp")
+		}
+		config.EmailSender = apron.LogEmailSender{}
+	case options.Email.Sender == "smtp":
+		sender, err := newSMTPSender(options.Email.SMTPAddr, options.Email.From, options.Email.SMTPUser, options.Email.SMTPPassword, options.Email.SMTPInsecure)
+		if err != nil {
+			return config, err
+		}
+		config.EmailSender = sender
+	}
+	config.EmailLinkURL = options.Email.LinkURL
+	if config.EmailLinkURL == "" {
+		config.EmailLinkURL = config.PublicURL
+	}
+	if options.WebAuthn.RPID != "" {
+		var err error
+		config.WebAuthn, err = webauthn.New(&webauthn.Config{
+			RPID: options.WebAuthn.RPID, RPDisplayName: "Apron", RPOrigins: options.WebAuthn.Origins,
+		})
+		if err != nil {
+			return config, fmt.Errorf("invalid WebAuthn configuration: %w", err)
+		}
+	}
+	return config, nil
+}
+
+// Run serves with options and extensions until SIGINT or SIGTERM, or until
+// any listener fails, then shuts every server down.
+func Run(logger *slog.Logger, options Options, extensions ...apron.Extension) error {
+	config, err := serverConfig(options)
+	if err != nil {
+		return err
+	}
+	config.Logger = logger
+	config.Extensions = extensions
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	group, ctx := errgroup.WithContext(ctx)
+
+	config.Store, err = store.Open(options.Store)
+	if err != nil {
+		return err
+	}
+	app, err := apron.Open(config)
+	if err != nil {
+		config.Store.Close()
+		return fmt.Errorf("restoring state from %s: %w", options.Store, err)
+	}
+	var servers []*http.Server
+	serve := func(name string, srv *http.Server, listener net.Listener) {
+		servers = append(servers, srv)
+		group.Go(func() error {
+			logger.Info(name+" listening", "addr", listener.Addr().String())
+			if err := srv.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				return fmt.Errorf("%s: %w", name, err)
+			}
+			return nil
+		})
+	}
+	newServer := func(handler http.Handler) *http.Server {
+		return &http.Server{
+			Handler:           handler,
+			ReadHeaderTimeout: 5 * time.Second,
+			// Idle keep-alive connections close; WebSockets and live text are
+			// hijacked or long-lived requests, which it does not affect.
+			IdleTimeout: 2 * time.Minute,
+		}
+	}
+	listen := func(addr string) (net.Listener, error) {
+		listener, err := net.Listen("tcp", addr)
+		if err != nil {
+			// Listeners opened so far close with their servers.
+			for _, srv := range servers {
+				_ = srv.Close()
+			}
+			return nil, err
+		}
+		if options.MaxListenerConnections > 0 {
+			listener = netutil.LimitListener(listener, options.MaxListenerConnections)
+		}
+		return listener, nil
+	}
+
+	if len(options.TLS.Domains) > 0 {
+		manager := &autocert.Manager{
+			Prompt:     autocert.AcceptTOS,
+			HostPolicy: autocert.HostWhitelist(options.TLS.Domains...),
+			Cache:      autocert.DirCache(options.TLS.CacheDir),
+			Email:      options.TLS.Email,
+		}
+		listener, err := listen(options.TLS.Addr)
+		if err != nil {
+			return err
+		}
+		serve("apron server (https)", newServer(app.Handler()), tls.NewListener(listener, manager.TLSConfig()))
+		challenges, err := listen(options.TLS.HTTPAddr)
+		if err != nil {
+			return err
+		}
+		serve("ACME challenges and redirects (http)", newServer(manager.HTTPHandler(nil)), challenges)
+	} else {
+		listener, err := listen(options.Addr)
+		if err != nil {
+			return err
+		}
+		serve("apron server", newServer(app.Handler()), listener)
+	}
+	if options.DebugAddr != "" {
+		if !loopbackAddr(options.DebugAddr) {
+			logger.Warn("the debug listener is unauthenticated and not bound to loopback", "addr", options.DebugAddr)
+		}
+		listener, err := listen(options.DebugAddr)
+		if err != nil {
+			return err
+		}
+		serve("debug server", newServer(debugHandler()), listener)
+	}
+	logger.Info("serving", "store", options.Store, "static_dir", options.StaticDir, "upload_dir", options.Upload.Dir)
+	if !options.Push.Disable && config.VAPIDSubject == "" && !strings.HasPrefix(config.PublicURL, "https://") {
+		logger.Warn("webpush has no VAPID subject, which some push services refuse; set --push.vapid-subject or an https --public-url")
+	}
+	if options.Push.AllowInsecure {
+		logger.Warn("push accepts http and internal endpoints (--push.allow-insecure); never set it on a reachable server")
+	}
+	if options.Email.Enable && options.Email.Sender == "log" {
+		logger.Warn("email sign-in codes are written to this log, not sent; use --email.sender smtp in a deployment")
+	}
+
+	group.Go(func() error {
+		<-ctx.Done()
+		shutdown, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_ = app.Shutdown(shutdown)
+		for _, srv := range servers {
+			if err := srv.Shutdown(shutdown); err != nil {
+				logger.Error("graceful shutdown failed", "error", err)
+			}
+		}
+		return nil
+	})
+	return group.Wait()
+}
+
+// userDataDir is aprond in the user's data directory: $XDG_DATA_HOME,
+// usually ~/.local/share, on Linux and other Unix systems, and the
+// application data directory on macOS and Windows.
+func userDataDir() string {
+	switch runtime.GOOS {
+	case "darwin", "windows", "ios", "plan9":
+		if dir, err := os.UserConfigDir(); err == nil {
+			return filepath.Join(dir, "aprond")
+		}
+	default:
+		if dir := os.Getenv("XDG_DATA_HOME"); filepath.IsAbs(dir) {
+			return filepath.Join(dir, "aprond")
+		}
+		if home, err := os.UserHomeDir(); err == nil {
+			return filepath.Join(home, ".local", "share", "aprond")
+		}
+	}
+	return "aprond"
+}
+
+// userCacheDir is aprond/<name> in the user's cache directory
+// ($XDG_CACHE_HOME, usually ~/.cache, on Linux), or empty when there is
+// none.
+func userCacheDir(name string) string {
+	cache, err := os.UserCacheDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(cache, "aprond", name)
+}
+
+// loopbackAddr reports whether a listen address binds only loopback.
+func loopbackAddr(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return false
+	}
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+// debugHandler serves pprof and expvar on their own listener, so profiling
+// is never reachable through the public address.
+func debugHandler() http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/debug/pprof/", pprof.Index)
+	mux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
+	mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
+	mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
+	mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
+	mux.Handle("/debug/vars", expvar.Handler())
+	return mux
+}
