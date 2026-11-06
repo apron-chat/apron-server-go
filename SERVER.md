@@ -45,10 +45,12 @@ Defaults:
   `badge`; `server.status`: `dnd`, `invisible`; `server.ping`: 30 seconds
 - seeded default room: `general` (title `General`)
 - authentication (`server.auth`, in this order): WebAuthn passkeys, email
-  codes with `--email.enable` (off by default), bearer-token resume,
-  and `guest`; `server.signup` lists every one but `token`, which only
-  resumes an account: a guest who registers a passkey or adds an address
-  becomes an account, and an email sign-in with a new address creates one
+  codes with `--email.enable` (off by default), `external` while an
+  [extension](#extensions) offers it, bearer-token resume, and `guest`
+  unless `--disable-guests`; `server.signup` lists every one but `token`,
+  which only resumes an account: a guest who registers a passkey or adds an
+  address becomes an account, and an email or external sign-in with a new
+  address or identity creates one
 - passkey RP ID: `localhost`; frontend origins: `http://localhost:5173` and
   `http://localhost:8080`
 - no `server.welcome`, `title`, or `avatar`, `description` the `general`
@@ -228,13 +230,13 @@ What survives a restart: rooms and threads with their complete logs, message
 state and reactions, read cursors, accounts (passkey and email users) with
 their credentials, addresses, profiles, memberships, push registrations
 (with their keys, `push_id`, scopes, and when they were last registered),
-the status they choose with `me`, when they were last shown `offline`
+when they were made, the status they choose with `me`, when they were last shown `offline`
 (`seen`) and whether they are shown otherwise, so that after a crash those
 who were get a `seen` at the next start (see Status), and their mutes and
 room mutes, unexpired
 sessions, device tokens, finished uploads and their files, the custom emoji
 catalog, the title, description, and avatar set with `/server`, the VAPID key,
-and the
+the values extensions keep (kind `ext/<name>`), and the
 `log_id`, guest, account, and embed counters, so no `log_id` or `user_id`
 is reused. What does not: connections and their `idle`, request
 deduplication, email proposals, live text that had not ended, the unread counts kept per
@@ -325,8 +327,9 @@ number out of sequence or impersonating a counter-assigned guest. Every guest
 the latest guest number is roughly how many guests the server has admitted
 (the counter is kept in the store). No `user_id` is ever reissued.
 
-Accounts are users who signed in with a passkey or an email address; they
-keep their profile, rooms, and push registrations across connections and
+Accounts are users who signed in with a passkey, an email address, or an
+extension's external sign-in, and extensions' bots ([Extensions](#extensions));
+they keep their profile, rooms, and push registrations across connections and
 restarts. `--role` grants them roles, such as
 `--role admin=ada --role moderator=bob@example.com`, by `user_id` or email
 address. Roles are sent in current user objects (below), sorted, and are
@@ -1394,7 +1397,8 @@ identity changes (a guest `auth`, a token resume, an approval). Proposals
 are kept in memory only. Approval takes `email`, or `token` (§4.11.3): a
 `token` that resumes no session approves a proposal when the connection
 has one pending, or when its handle names one, and wrong tokens count the
-same way. This server offers no `external` sign-in, which is `unsupported`.
+same way. External sign-in uses the same proposals and tokens; it is
+`unsupported` unless an extension offers it ([Extensions](#extensions)).
 
 A link opens `--email.link-url` (or `--public-url`) with
 `#token=…&state=…&server=…` in its fragment: `state` when the proposal
@@ -1485,8 +1489,46 @@ aprond --public-url https://chat.example.com \
 The SMTP sender requires STARTTLS unless `--email.smtp-insecure` is set, for
 a relay on the same host, or speaks TLS from the start to a relay on port
 465, and bounds each delivery, connection included, to 30 seconds. Embedding applications provide any other delivery by
-implementing `server.EmailSender`.
+implementing `apron.EmailSender`.
 
 Invitation tokens that sign up several people
 ([PROTOCOL.md Appendix B](https://github.com/shazow/apron/blob/main/PROTOCOL.md#appendix-b--valid-scenarios-informative))
 are not implemented: a token here always resumes one account.
+
+## Extensions
+
+Package `apron` is the server as a library, and `aprond.Main` runs it with
+extensions of your own (`apron.Extension`), as the servers in
+[`examples`](examples) do. What extensions add follows the protocol as the
+rest of the server does:
+
+- An extension named `weather` may advertise capability `ext:weather`,
+  with its data in `server.ext.weather`, and add request methods named
+  `weather.<name>`, which only signed-in users may send; any other method
+  is still `unsupported`. Its flags are `--weather.<flag>`, and its config
+  file table `[weather]`. `emoji` and `settings` are the server's own.
+- Its commands follow the server's in `/help`, which lists one only where
+  the extension says the sender may use it; one it refuses is `denied`.
+  They run outside the server's lock, so their notices and effects precede
+  their result like the server's own.
+- Its message filters see each `message` a person or bot saves, except a
+  deletion, before the server checks the room, and may change its body and
+  `ext`, which are checked again, or refuse it with any error.
+- Its bots are accounts with role `bot` (§3.3.4), on connections in the
+  server's process that send requests as clients do, with the same checks
+  and limits. A bot's `user_id` follows the rules for requested ones, may
+  be one granted a role with `--role`, and is never a person's. The URLs a
+  bot's live text gets start with `--public-url`, or else with the address
+  of the latest WebSocket connection.
+- External sign-in (§4.11.5), when an extension offers it, returns a page at
+  `/external/<proposal>`, which the extension takes over to sign the person
+  in. When it names the identity it proved, the page shows a code to type,
+  or, for a proposal with `return_url`, a button that continues to the
+  client with the sign-in link. `return_url` must be on the connection's
+  origin or `--public-url`'s, and its link token works only on a connection
+  from that origin. A new identity makes an account, which takes the
+  requested `user_id`, else the extension's suggestion, as email accounts
+  do; each sign-in sets the roles the extension grants.
+- Events are the log's records in `log_id` order, as clients receive them.
+  A deletion's tombstone is an event; the records it redacts are not sent
+  again.

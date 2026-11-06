@@ -67,7 +67,7 @@ const sessionFrameQueue = 1024
 // another connection, which Close ends.
 func (h *Host) Session(ctx context.Context, userID string, options SessionOptions) (*Session, error) {
 	s := h.s
-	if !validID(userID) || strings.HasPrefix(userID, "~") || !requestableUserID.MatchString(userID) {
+	if !requestable(userID) {
 		return nil, fmt.Errorf("apron: %q is no user_id a bot can have", userID)
 	}
 	session := &Session{s: s, host: h, userID: userID, prefix: rand.Text()[:12] + "-", closed: make(chan struct{})}
@@ -80,16 +80,6 @@ func (h *Host) Session(ctx context.Context, userID string, options SessionOption
 	session.c = c
 	if options.OnFrame != nil {
 		session.frames = make(chan jsontext.Value, sessionFrameQueue)
-		go func() {
-			for {
-				select {
-				case frame := <-session.frames:
-					options.OnFrame(frame)
-				case <-session.closed:
-					return
-				}
-			}
-		}()
 	}
 
 	s.mu.Lock()
@@ -116,8 +106,21 @@ func (h *Host) Session(ctx context.Context, userID string, options SessionOption
 		s.grantRolesLocked(u)
 	}
 	c.baseURL = s.sessionBaseURLLocked()
+	if options.OnFrame != nil {
+		go func() {
+			for {
+				select {
+				case frame := <-session.frames:
+					options.OnFrame(frame)
+				case <-session.closed:
+					return
+				}
+			}
+		}()
+	}
 	go c.writeLoop()
 	s.clients[c] = struct{}{}
+	s.sessionCount++
 	c.enqueue(map[string]any{"method": "server", "params": s.serverParams(c.baseURL)})
 	s.attachLocked(c, u)
 	if made {
@@ -149,6 +152,7 @@ func (b *Session) Close() error {
 	s.mu.Lock()
 	if _, ok := s.clients[b.c]; ok {
 		delete(s.clients, b.c)
+		s.sessionCount--
 		s.detachLocked(b.c)
 	}
 	s.unlock()

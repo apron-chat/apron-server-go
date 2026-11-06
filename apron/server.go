@@ -144,7 +144,8 @@ type Config struct {
 	// VAPIDSubject is the contact push services may use, a mailto: or
 	// https: URL, sent in VAPID tokens. Empty uses PublicURL, if any.
 	VAPIDSubject string
-	// MaxConnections bounds concurrent WebSockets; 0 is unlimited.
+	// MaxConnections bounds concurrent WebSockets, not extensions' bots; 0
+	// is unlimited.
 	MaxConnections int
 	// MessagesPerMinute bounds each user's new messages; 0 is unlimited.
 	MessagesPerMinute int
@@ -570,6 +571,9 @@ type Server struct {
 	external   *externalSignIn
 	identities map[string]*userState
 	logger     *slog.Logger
+	// sessionCount counts the clients that are Sessions, which
+	// MaxConnections does not bound.
+	sessionCount int
 	// seenBaseURL is the latest WebSocket connection's baseURL, for
 	// Sessions without Config.PublicURL.
 	seenBaseURL string
@@ -837,7 +841,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		c.stopConnection()
 		return
 	}
-	if s.config.MaxConnections > 0 && len(s.clients) >= s.config.MaxConnections {
+	if s.config.MaxConnections > 0 && len(s.clients)-s.sessionCount >= s.config.MaxConnections {
 		// An error about the connection as a whole omits id (§1.1).
 		c.enqueue(map[string]any{"method": "server", "params": s.serverParams(c.baseURL)})
 		c.closeWithError(&Error{Code: CodeRetryAfter, Message: "Server at capacity; try again shortly", Data: map[string]any{"retry_after": retryAfterSeconds}})
