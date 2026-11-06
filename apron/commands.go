@@ -35,7 +35,7 @@ type serverCommand struct {
 func coreCommands() []serverCommand {
 	return []serverCommand{
 		{
-			// command() runs /help itself (helpCommand).
+			// command() runs /help itself (help.run).
 			name: "help", usage: "/help", help: "list the commands you can use here",
 		},
 		{
@@ -121,6 +121,20 @@ func (s *Server) command(c *client, req request) (any, bool, *Error) {
 		}
 	}
 
+	args = strings.TrimSpace(args)
+	// The opening text of /embed-append becomes its message's text, so the
+	// extensions' filters see it as they see messages.
+	if name == "embed-append" {
+		draft := &Draft{RoomID: roomID, Body: map[string]any{"text": args, "format": "markdown"}}
+		if hasReply {
+			draft.ReplyTo = replyID
+		}
+		if err := s.filterMessage(c, draft); err != nil {
+			return nil, false, err
+		}
+		args = draft.Text()
+	}
+
 	s.mu.Lock()
 	var command *serverCommand
 	for i := range s.commands {
@@ -130,25 +144,32 @@ func (s *Server) command(c *client, req request) (any, bool, *Error) {
 		}
 	}
 	r := s.visibleRoomLocked(c.user, roomID)
-	if r == nil {
+	switch {
+	case r == nil:
 		s.unlock()
 		return nil, false, invalidParams("Unknown room %q", roomID)
-	}
-	if hasReply && s.visibleMessageLocked(c.user, replyID) == nil {
+	case hasReply && s.visibleMessageLocked(c.user, replyID) == nil:
 		s.unlock()
 		return nil, false, invalidParams("reply_to must name an existing message")
-	}
-	switch {
 	case command == nil:
 		s.unlock()
 		return nil, false, invalidParams("Unknown command /%s; try /help", word)
 	case name == "help":
-		return s.helpCommand(c, req, r)
+		help := s.helpLocked(c.user, r)
+		s.unlock()
+		return help.run(c, req)
 	case command.extension != nil:
-		return s.runExtensionCommand(c, req, command.extension, r, body, strings.TrimSpace(args), replyID)
+		// An extension's command runs outside s.mu, with copies of what it
+		// is told.
+		call := &CommandCall{
+			User: userViewOf(c.user), Room: s.roomViewLocked(r), Args: args, ReplyTo: replyID,
+			Mentions: mentions(body), Body: cloneObject(body), client: c,
+		}
+		s.unlock()
+		return s.runExtensionCommand(c, req, command.extension, call)
 	}
 	defer s.unlock()
-	result, err := command.run(s, c, r, body, strings.TrimSpace(args), replyID)
+	result, err := command.run(s, c, r, body, args, replyID)
 	if err != nil {
 		return nil, false, err
 	}
@@ -183,32 +204,36 @@ func (s *Server) postRoomNoticeLocked(r *roomState, text string) {
 	}, logID)
 }
 
-// helpCommand replies with a ~private notice listing the commands available
-// to the sender in the room. It is called holding s.mu, which it releases
-// before it asks the extensions' commands whether they are available, as
-// their code never runs under s.mu.
-func (s *Server) helpCommand(c *client, req request, r *roomState) (any, bool, *Error) {
-	commands := s.commands
-	lines := make([]string, len(commands))
-	var asks []int
-	for i, command := range commands {
-		switch {
-		case command.extension != nil:
-			asks = append(asks, i)
-		case command.available == nil || command.available(c.user, r):
-			lines[i] = fmt.Sprintf("- `%s`: %s", command.usage, command.help)
+// help is a /help run: the commands to list, and the extensions' commands
+// to ask whether they are available, outside s.mu.
+type help struct {
+	commands []serverCommand
+	lines    []string
+	user     User
+	room     Room
+}
+
+// helpLocked lists the server's own commands available to u in r.
+func (s *Server) helpLocked(u *userState, r *roomState) help {
+	h := help{commands: s.commands, lines: make([]string, len(s.commands)), user: userViewOf(u), room: s.roomViewLocked(r)}
+	for i, command := range s.commands {
+		if command.extension == nil && (command.available == nil || command.available(u, r)) {
+			h.lines[i] = fmt.Sprintf("- `%s`: %s", command.usage, command.help)
 		}
 	}
-	user, room := userViewOf(c.user), s.roomViewLocked(r)
-	s.unlock()
-	for _, i := range asks {
-		command := commands[i]
-		if command.extension.available(user, room) {
-			lines[i] = fmt.Sprintf("- `%s`: %s", command.usage, command.help)
+	return h
+}
+
+// run replies with a ~private notice listing the commands available to the
+// sender in the room, the extensions' among them, which their code says.
+func (h help) run(c *client, req request) (any, bool, *Error) {
+	for i, command := range h.commands {
+		if command.extension != nil && command.extension.available(h.user, h.room) {
+			h.lines[i] = fmt.Sprintf("- `%s`: %s", command.usage, command.help)
 		}
 	}
-	lines = slices.DeleteFunc(lines, func(line string) bool { return line == "" })
-	c.enqueue(privateNotice(r.id, strings.Join(lines, "\n")))
+	lines := slices.DeleteFunc(h.lines, func(line string) bool { return line == "" })
+	c.enqueue(privateNotice(h.room.ID, strings.Join(lines, "\n")))
 	result := map[string]any{}
 	c.sendResult(req, result)
 	return result, true, nil

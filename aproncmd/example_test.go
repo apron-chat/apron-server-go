@@ -22,9 +22,9 @@ func (*Uptime) Name() string { return "uptime" }
 // or precision in the config file's [uptime] table.
 func (u *Uptime) Flags() any { return &u.Settings }
 
-func (u *Uptime) Init(h *apron.Host) error {
+func (u *Uptime) Init(r *apron.Registrar) error {
 	u.started = time.Now()
-	h.Command(apron.Command{
+	r.Command(apron.Command{
 		Name: "uptime", Help: "how long the server has run",
 		Run: func(_ context.Context, call *apron.CommandCall) (map[string]any, error) {
 			call.Notice("Up for " + time.Since(u.started).Round(u.Settings.Precision).String())

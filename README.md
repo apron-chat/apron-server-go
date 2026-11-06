@@ -73,8 +73,8 @@ type Hello struct{}
 
 func (Hello) Name() string { return "hello" }
 
-func (Hello) Init(h *apron.Host) error {
-	h.Command(apron.Command{
+func (Hello) Init(r *apron.Registrar) error {
+	r.Command(apron.Command{
 		Name: "hello", Help: "say hello",
 		Run: func(_ context.Context, call *apron.CommandCall) (map[string]any, error) {
 			call.Notice("Hello, " + call.User.Name + "!")

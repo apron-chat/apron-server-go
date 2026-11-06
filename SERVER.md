@@ -1510,16 +1510,26 @@ rest of the server does:
 - Its commands follow the server's in `/help`, which lists one only where
   the extension says the sender may use it; one it refuses is `denied`.
   They run outside the server's lock, so their notices and effects precede
-  their result like the server's own.
-- Its message filters see each `message` a person or bot saves, except a
-  deletion, before the server checks the room, and may change its body and
-  `ext`, which are checked again, or refuse it with any error.
-- Its bots are accounts with role `bot` (§3.3.4), on connections in the
-  server's process that send requests as clients do, with the same checks
-  and limits. A bot's `user_id` follows the rules for requested ones, may
-  be one granted a role with `--role`, and is never a person's. The URLs a
-  bot's live text gets start with `--public-url`, or else with the address
-  of the latest WebSocket connection.
+  their result like the server's own. A result, or a method's, that is not
+  JSON is an `internal_error`, as is any error but a protocol one.
+- A connection's frames are processed one at a time, in order, apart from
+  its reads: while an extension's command, method, or filter runs, the
+  connection keeps answering pings, and a connection that closes cancels
+  the request's context.
+- Its message filters see each `message` a person or bot saves to a room
+  they may see, except a deletion, and the opening text of `/embed-append`.
+  They may change the body, which is checked again, and the extension's own
+  key in `ext`, or refuse the message with any error. The server's checks
+  follow, so a message a filter passed may still be refused. Live text,
+  terminal titles, uploads, reactions, room titles, and profiles are not
+  filtered.
+- Its bots are accounts with role `bot` (§3.3.4) that one extension owns,
+  on connections in the server's process that send requests as clients do,
+  with the same checks and limits. A bot's `user_id` follows the rules for
+  requested ones, may be one granted a role with `--role`, and is never a
+  person's or another extension's. A bot's live text needs `--public-url`
+  for its address, except in development on a loopback host. Bot
+  connections do not count toward `--max-connections`.
 - External sign-in (§4.11.5), when an extension offers it, returns a page at
   `/external/<proposal>`, which the extension takes over to sign the person
   in. When it names the identity it proved, the page shows a code to type,
@@ -1529,6 +1539,7 @@ rest of the server does:
   from that origin. A new identity makes an account, which takes the
   requested `user_id`, else the extension's suggestion, as email accounts
   do; each sign-in sets the roles the extension grants.
-- Events are the log's records in `log_id` order, as clients receive them.
-  A deletion's tombstone is an event; the records it redacts are not sent
-  again.
+- Events are the log's records in `log_id` order, as clients receive them,
+  every room's. A deletion's tombstone is an event; the records it redacts
+  are not sent again. A room is public to an extension, such as for a web
+  page, when it is not private and guests may sign in.

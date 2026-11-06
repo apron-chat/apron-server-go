@@ -39,9 +39,9 @@ type Shout struct{}
 
 func (Shout) Name() string { return "shout" }
 
-func (Shout) Init(h *apron.Host) error {
+func (Shout) Init(r *apron.Registrar) error {
 	// /shout replies to the person who ran it.
-	h.Command(apron.Command{
+	r.Command(apron.Command{
 		Name: "shout", Usage: "/shout <text>", Help: "say it louder",
 		Run: func(_ context.Context, call *apron.CommandCall) (map[string]any, error) {
 			if call.Args == "" {
@@ -52,18 +52,18 @@ func (Shout) Init(h *apron.Host) error {
 		},
 	})
 	// Nobody may post in all capitals.
-	h.FilterMessage(func(_ context.Context, d *apron.Draft) error {
+	r.FilterMessage(func(_ context.Context, d *apron.Draft) error {
 		if text := d.Text(); len(text) > 8 && text == strings.ToUpper(text) {
 			return apron.Denied("Please don't shout; try /shout")
 		}
 		return nil
 	})
 	// A bot greets everyone in the default room once the server serves.
-	bot, err := h.Session(h.Context(), "herald", apron.SessionOptions{Name: "Herald"})
+	bot, err := r.Bot("herald", apron.BotOptions{Name: "Herald"})
 	if err != nil {
 		return err
 	}
-	h.Go(func(ctx context.Context) {
+	r.Go(func(ctx context.Context) {
 		bot.Post(ctx, "general", "The server is up.")
 	})
 	return nil

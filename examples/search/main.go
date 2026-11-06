@@ -41,38 +41,37 @@ type Search struct {
 
 func (*Search) Name() string { return "search" }
 
-func (s *Search) Init(h *apron.Host) error {
-	s.host = h
+func (s *Search) Init(r *apron.Registrar) error {
+	s.host = r.Host
 	s.messages = make(map[string]apron.Message)
 	s.postings = make(map[string]map[string]bool)
-	h.OnEventFrom(0, func(_ context.Context, e apron.Event) error {
+	r.OnEventFrom(0, func(_ context.Context, e apron.Event) error {
 		if m, ok := apron.DecodeMessage(e); ok {
 			s.index(m)
 		}
 		return nil
 	})
-	h.Advertise(map[string]any{"method": "search.query"})
-	h.Method("search.query", s.query)
-	h.Command(apron.Command{
+	r.Method("search.query", s.query)
+	r.Command(apron.Command{
 		Name: "search", Usage: "/search <words>", Help: "find messages with these words",
 		Run: func(_ context.Context, call *apron.CommandCall) (map[string]any, error) {
-			hits := s.search(call.User.ID, call.Args, "", 10)
+			hits := s.search(call.User, call.Args, "", 10)
 			if len(hits) == 0 {
 				call.Notice("Nothing found for " + call.Args)
 				return nil, nil
 			}
 			var b strings.Builder
 			for _, m := range hits {
-				room, _ := h.Room(m.RoomID)
+				room, _ := s.host.Room(m.RoomID)
 				fmt.Fprintf(&b, "- **%s** in %s: %s\n", cmp.Or(m.From.Name, m.From.UserID), room.Title, excerpt(m.Text))
 			}
 			call.Notice(b.String())
 			return nil, nil
 		},
 	})
-	h.Handle("GET /search/archive/", http.HandlerFunc(s.archiveIndex))
-	h.Handle("GET /search/archive/{room}", http.HandlerFunc(s.archiveRoom))
-	return nil
+	r.Handle("GET /search/archive/", http.HandlerFunc(s.archiveIndex))
+	r.Handle("GET /search/archive/{room}", http.HandlerFunc(s.archiveRoom))
+	return r.Advertise(map[string]any{"method": "search.query"})
 }
 
 // index replaces what the index holds for a message with its snapshot. A
@@ -110,9 +109,9 @@ func tokens(text string) []string {
 	return slices.DeleteFunc(slices.Compact(words), func(word string) bool { return len(word) < 2 })
 }
 
-// search returns the latest messages with every word of query that userID
-// may see, in roomID if it is set.
-func (s *Search) search(userID, query, roomID string, limit int) []apron.Message {
+// search returns the latest messages with every word of query that u may
+// see, in roomID if it is set.
+func (s *Search) search(u apron.User, query, roomID string, limit int) []apron.Message {
 	words := tokens(query)
 	if len(words) == 0 {
 		return nil
@@ -133,7 +132,7 @@ func (s *Search) search(userID, query, roomID string, limit int) []apron.Message
 	hits = slices.DeleteFunc(hits, func(m apron.Message) bool {
 		ok, seen := visible[m.RoomID]
 		if !seen {
-			ok = s.host.Visible(userID, m.RoomID)
+			ok = s.host.Visible(u, m.RoomID)
 			visible[m.RoomID] = ok
 		}
 		return !ok
@@ -157,7 +156,7 @@ func (s *Search) query(_ context.Context, call *apron.MethodCall) (any, error) {
 		params.Limit = 20
 	}
 	results := []any{}
-	for _, m := range s.search(call.User.ID, params.Q, params.RoomID, params.Limit) {
+	for _, m := range s.search(call.User, params.Q, params.RoomID, params.Limit) {
 		results = append(results, map[string]any{
 			"message_id": m.ID, "room_id": m.RoomID, "log_id": fmt.Sprint(m.LogID),
 			"from": map[string]any{"user_id": m.From.UserID, "name": m.From.Name}, "text": m.Text,
@@ -191,7 +190,7 @@ var pages = template.Must(template.New("").Funcs(template.FuncMap{
 
 // archiveIndex lists the public rooms.
 func (s *Search) archiveIndex(w http.ResponseWriter, _ *http.Request) {
-	rooms := slices.DeleteFunc(s.host.Rooms(), func(r apron.Room) bool { return !r.Public })
+	rooms := slices.DeleteFunc(s.host.Rooms(), func(r apron.Room) bool { return !s.host.Public(r.ID) })
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_ = pages.ExecuteTemplate(w, "index", rooms)
 }
@@ -200,7 +199,7 @@ func (s *Search) archiveIndex(w http.ResponseWriter, _ *http.Request) {
 // that is not public is not found, whoever asks.
 func (s *Search) archiveRoom(w http.ResponseWriter, r *http.Request) {
 	room, ok := s.host.Room(r.PathValue("room"))
-	if !ok || !room.Public {
+	if !ok || !s.host.Public(room.ID) {
 		http.NotFound(w, r)
 		return
 	}

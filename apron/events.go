@@ -3,6 +3,8 @@ package apron
 import (
 	"context"
 	"encoding/json/jsontext"
+	"errors"
+	"fmt"
 	"slices"
 	"strconv"
 	"time"
@@ -31,8 +33,8 @@ var eventKinds = map[recordKind]EventKind{
 }
 
 // Event is one logged record: the server's log is the stream of what
-// changes in its rooms, which extensions follow with OnEvent and
-// OnEventFrom.
+// changes in its rooms, which extensions follow with OnEvent, OnEventFrom,
+// and Follow.
 type Event struct {
 	// Kind says what the record is.
 	Kind EventKind
@@ -65,32 +67,77 @@ func (h *Host) LastLogID() int64 {
 // OnEvent calls fn with each record logged from now on, in order, on one
 // goroutine of its own. fn delays the events after it, not the server; a
 // slow fn falls behind and catches up. Events logged before a restart are
-// not sent again: an extension that must see every event uses
-// OnEventFrom.
-func (h *Host) OnEvent(fn func(ctx context.Context, e Event)) {
-	h.follow(h.LastLogID(), func(ctx context.Context, e Event) error {
+// not sent again: an extension that must see every event uses Follow.
+//
+// Events carry every room's records, private rooms' included: an extension
+// that shows them to people checks Host.Visible or Host.Public first.
+func (r *Registrar) OnEvent(fn func(ctx context.Context, e Event)) {
+	r.follow("OnEvent", r.LastLogID(), func(ctx context.Context, e Event) error {
 		fn(ctx, e)
 		return nil
-	})
+	}, nil)
 }
 
 // OnEventFrom calls fn with each record logged after the log_id after, in
 // order, then each one logged later, on one goroutine of its own: 0 sends
-// the whole log first. When fn returns an error, it is logged, and fn is
-// called with the same event again, after a delay that grows to a minute,
-// until it succeeds or the server shuts down. An extension that keeps the
-// LogID of the last event it handled (KV) and passes it here at the next
-// start sees every event at least once, as a bridge or a search index
-// needs.
-func (h *Host) OnEventFrom(after int64, fn func(ctx context.Context, e Event) error) {
-	h.follow(after, fn)
+// the whole log first, as an index kept in memory needs at each start. When
+// fn returns an error, it is logged, and fn is called with the same event
+// again, after a delay that grows to a minute, until it succeeds, returns
+// an error from SkipEvent, or the server shuts down.
+func (r *Registrar) OnEventFrom(after int64, fn func(ctx context.Context, e Event) error) {
+	r.follow("OnEventFrom", after, fn, nil)
 }
+
+// Follow calls fn with each record logged, in order, on one goroutine of
+// its own, and keeps the log_id of the last one it handled in the store, so
+// that it sees every event at least once across restarts, as a bridge
+// needs. It starts from the latest record the first time the extension
+// follows the log. Errors are retried as with OnEventFrom. An extension
+// follows the log at most once.
+func (r *Registrar) Follow(fn func(ctx context.Context, e Event) error) {
+	if r.following {
+		r.errs = append(r.errs, errors.New("an extension follows the log once"))
+		return
+	}
+	r.following = true
+	kv := r.Store()
+	var cursor int64
+	if found, err := kv.Get(followCursorKey, &cursor); err != nil || !found {
+		cursor = r.LastLogID()
+		if err := kv.put(followCursorKey, cursor); err != nil {
+			r.errs = append(r.errs, err)
+			return
+		}
+	}
+	r.follow("Follow", cursor, fn, func(e Event) error { return kv.put(followCursorKey, e.LogID) })
+}
+
+// followCursorKey keeps Follow's cursor in the extension's KV.
+const followCursorKey = reservedKeyPrefix + "follow"
+
+// SkipEvent wraps an error that handling an event can never get past, such
+// as a record the extension cannot use: OnEventFrom and Follow log it and
+// go on to the next event instead of retrying.
+func SkipEvent(err error) error { return skipEvent{err} }
+
+type skipEvent struct{ error }
+
+func (e skipEvent) Unwrap() error { return e.error }
 
 // eventBatch bounds the events a follower takes from the log at once.
 const eventBatch = 256
 
-func (h *Host) follow(after int64, deliver func(ctx context.Context, e Event) error) {
-	s := h.s
+// follow delivers the log after a log_id on a goroutine, retrying failures;
+// handled, if set, records each event handled.
+func (r *Registrar) follow(what string, after int64, deliver func(ctx context.Context, e Event) error, handled func(Event) error) {
+	if deliver == nil {
+		r.errs = append(r.errs, fmt.Errorf("%s needs a function", what))
+		return
+	}
+	if r.done.Load() {
+		panic(fmt.Sprintf("apron: extension %s called %s after Init", r.name, what))
+	}
+	h, s := r.Host, r.s
 	h.Go(func(ctx context.Context) {
 		cursor := after
 		for {
@@ -119,6 +166,10 @@ func (h *Host) follow(after int64, deliver func(ctx context.Context, e Event) er
 					if err == nil {
 						break
 					}
+					if _, skip := errors.AsType[skipEvent](err); skip {
+						h.logger.Warn("skipping an event", "log_id", e.LogID, "error", err)
+						break
+					}
 					h.logger.Error("handling an event failed; retrying", "log_id", e.LogID, "error", err, "retry_in", delay)
 					select {
 					case <-time.After(delay):
@@ -127,6 +178,11 @@ func (h *Host) follow(after int64, deliver func(ctx context.Context, e Event) er
 					}
 				}
 				cursor = e.LogID
+				if handled != nil {
+					if err := handled(e); err != nil {
+						return // the store is closed
+					}
+				}
 			}
 		}
 	})

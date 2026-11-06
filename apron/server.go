@@ -434,9 +434,13 @@ func (t wsTransport) close() { _ = t.ws.CloseNow() }
 type client struct {
 	server *Server
 	conn   transport
-	out    chan outboundBatch
-	done   chan struct{}
-	stop   sync.Once
+	// request is the context of the request being processed, which the
+	// extension code it runs gets: canceled when the connection closes. It
+	// is set by whoever processes the connection's frames, one at a time.
+	request context.Context
+	out     chan outboundBatch
+	done    chan struct{}
+	stop    sync.Once
 
 	// user is the connection's identity, nil before authentication. Guarded
 	// by server.mu.
@@ -567,11 +571,10 @@ type Server struct {
 
 	// commands are the core commands, then the extensions' (§4.1).
 	commands []serverCommand
-	// The extensions' state (extension.go): their hosts, the capabilities
-	// and ext they advertise, their HTTP routes, message filters, and kept
+	// The extensions' state (extension.go): the capabilities and ext they
+	// advertise, their HTTP routes, message filters, and kept
 	// values by entry kind and key. Registration takes s.mu.
-	hosts      []*Host
-	advertised map[string]any
+	advertised map[string]jsontext.Value
 	routes     []route
 	filters    []extensionFilter
 	extData    map[string]map[string]jsontext.Value
@@ -602,11 +605,21 @@ type Server struct {
 
 // Open starts a server with the state in config.Store, or an empty memory
 // store when it is nil, then runs each extension's Init in order. It fails
-// when the stored state cannot be read, or an extension fails to start.
+// when the configuration is invalid, the stored state cannot be read, or an
+// extension fails to start. The server owns config.Store: it closes it on
+// Shutdown, or when Open fails.
 func Open(config Config) (*Server, error) {
 	config = config.withDefaults()
+	fail := func(err error) (*Server, error) {
+		if config.Store != nil {
+			if closeErr := config.Store.Close(); closeErr != nil {
+				slog.Error("cannot close the store", "error", closeErr)
+			}
+		}
+		return nil, err
+	}
 	if config.Avatar != "" && !validAvatar(config.Avatar) {
-		return nil, fmt.Errorf("the server avatar must be an https: URL or a data:image URL of at most %d bytes", maxAvatarDataURLBytes)
+		return fail(fmt.Errorf("the server avatar must be an https: URL or a data:image URL of at most %d bytes", maxAvatarDataURLBytes))
 	}
 	if config.Store == nil {
 		config.Store = store.NewMemory()
@@ -637,7 +650,7 @@ func Open(config Config) (*Server, error) {
 		stopped:     make(chan struct{}),
 
 		commands:       coreCommands(),
-		advertised:     make(map[string]any),
+		advertised:     make(map[string]jsontext.Value),
 		extData:        make(map[string]map[string]jsontext.Value),
 		recordsChanged: make(chan struct{}),
 		identities:     make(map[string]*userState),
@@ -657,7 +670,7 @@ func Open(config Config) (*Server, error) {
 	if config.VAPIDPrivateKey != "" {
 		key, err := parseVAPIDKey(config.VAPIDPrivateKey)
 		if err != nil {
-			return nil, err
+			return fail(err)
 		}
 		s.vapid = key
 	}
@@ -673,7 +686,8 @@ func Open(config Config) (*Server, error) {
 		s.storeClosed = true
 		close(s.storeWrites)
 		s.mu.Unlock()
-		return nil, err
+		<-s.storeDone
+		return fail(fmt.Errorf("restoring the stored state: %w", err))
 	}
 	s.push.vapid = s.vapid
 	if s.rooms[defaultRoomID] == nil {
@@ -684,13 +698,17 @@ func Open(config Config) (*Server, error) {
 	s.removeStaleUploads(files)
 	s.unlock()
 	go s.sweepPushes()
-	if err := s.initExtensions(config.Extensions); err != nil {
+	err = s.initExtensions(config.Extensions)
+	if err == nil {
+		s.handler, err = s.buildHandler(s.routes)
+	}
+	if err != nil {
+		// Shutdown stops what the extensions started, and closes the store.
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		_ = s.Shutdown(ctx)
 		return nil, err
 	}
-	s.handler = s.newHandler()
 	return s, nil
 }
 
@@ -700,12 +718,21 @@ const defaultRoomID = "general"
 
 // Handler returns the HTTP handler serving /ws, /healthz, the passkey related
 // origins, the write, file, live text, and emoji catalog endpoints, the
-// extensions' routes (Host.Handle), and StaticDir.
+// extensions' routes (Registrar.Handle), and StaticDir.
 func (s *Server) Handler() http.Handler {
 	return s.handler
 }
 
-func (s *Server) newHandler() http.Handler {
+// buildHandler builds the server's routes with the extensions' routes,
+// reporting a pattern that conflicts with another as an error.
+func (s *Server) buildHandler(routes []route) (handler http.Handler, err error) {
+	var pattern string
+	defer func() {
+		// http.ServeMux panics on a conflict.
+		if recovered := recover(); recovered != nil {
+			handler, err = nil, fmt.Errorf("route %q: %v", pattern, recovered)
+		}
+	}()
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ws", s.handleWebSocket)
 	mux.HandleFunc("/healthz", s.handleHealth)
@@ -714,12 +741,7 @@ func (s *Server) newHandler() http.Handler {
 	mux.HandleFunc(filePath, s.handleFile)
 	mux.HandleFunc(livePath, s.handleLive)
 	mux.HandleFunc(emojiPath, s.handleEmoji)
-	if s.external != nil {
-		mux.HandleFunc(externalPath, s.handleExternal)
-	}
-	for _, route := range s.routes {
-		mux.Handle(route.pattern, route.handler)
-	}
+	mux.HandleFunc(externalPath, s.handleExternal)
 	if s.config.StaticDir != "" {
 		root := filepath.Clean(s.config.StaticDir)
 		mux.Handle("/", http.FileServer(staticFS{http.Dir(root)}))
@@ -728,7 +750,11 @@ func (s *Server) newHandler() http.Handler {
 			http.NotFound(w, r)
 		})
 	}
-	return mux
+	for _, route := range routes {
+		pattern = route.pattern
+		mux.Handle(route.pattern, route.handler)
+	}
+	return mux, nil
 }
 
 // staticFS serves a built frontend without directory listings or dotfiles.
@@ -883,7 +909,28 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		s.unlock()
 	}()
 
-	ctx := r.Context()
+	// Frames are processed in order, each to completion before the next,
+	// which makes auth a barrier (§3.2), by a worker of the connection's
+	// own: the reader goes on reading meanwhile, which keeps the WebSocket's
+	// pings answered while an extension's callback runs. The worker's
+	// requests get a context that the connection's end cancels.
+	ctx, cancel := context.WithCancel(r.Context())
+	frames := make(chan []byte, inboundQueue)
+	worked := make(chan struct{})
+	go func() {
+		defer close(worked)
+		c.request = ctx
+		for payload := range frames {
+			if ctx.Err() == nil {
+				s.processFrame(c, payload)
+			}
+		}
+	}()
+	defer func() {
+		cancel()
+		close(frames)
+		<-worked
+	}()
 	for {
 		messageType, payload, err := ws.Read(ctx)
 		if err != nil {
@@ -894,16 +941,23 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		c.lastFrame.Store(time.Now().UnixNano())
-		// The liveness ping has fixed bytes, answered without parsing (§1).
+		// The liveness ping has fixed bytes, answered without parsing or
+		// waiting for the frames before it (§1).
 		if bytes.Equal(payload, pingFrame) {
 			c.pong()
 			continue
 		}
-		// Frames are processed in order, each to completion before the next
-		// is read, which makes auth a barrier (§3.2).
-		s.processFrame(c, payload)
+		select {
+		case frames <- payload:
+		case <-c.done:
+			return
+		}
 	}
 }
+
+// inboundQueue bounds the frames read from a connection and waiting for its
+// worker; a client that sends more waits for them.
+const inboundQueue = 64
 
 // clientIP is the address of the client that opened a request: with
 // Config.ClientIPHeader, the last entry across every line of that header,
@@ -1007,7 +1061,7 @@ func (s *Server) serverParams(baseURL string) map[string]any {
 	// ext:<name>, and its data under its name in ext (EXTENSIONS.md).
 	for _, name := range slices.Sorted(maps.Keys(s.advertised)) {
 		params["capabilities"] = append(params["capabilities"].([]string), "ext:"+name)
-		if value := s.advertised[name]; value != nil {
+		if value := s.advertised[name]; len(value) > 0 {
 			ext[name] = value
 		}
 	}

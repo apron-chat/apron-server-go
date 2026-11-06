@@ -41,6 +41,7 @@ type SSO struct {
 		Admins       []string `long:"admin" description:"A GitHub login that gets the admin role; repeat for more"`
 	}
 	host   *apron.Host
+	signIn *apron.ExternalSignIn
 	client *http.Client
 	// github is where GitHub's sign-in pages and API are, which tests
 	// replace.
@@ -51,17 +52,17 @@ func (*SSO) Name() string       { return "sso" }
 func (s *SSO) Flags() any       { return &s.Settings }
 func (s *SSO) callback() string { return strings.TrimRight(s.Settings.BaseURL, "/") + "/sso/callback" }
 
-func (s *SSO) Init(h *apron.Host) error {
+func (s *SSO) Init(r *apron.Registrar) error {
 	if s.Settings.ClientID == "" || s.Settings.ClientSecret == "" || s.Settings.BaseURL == "" {
 		return errors.New("set --sso.client-id, --sso.client-secret, and --sso.base-url")
 	}
-	s.host = h
+	s.host = r.Host
 	s.client = &http.Client{Timeout: 15 * time.Second}
 	if s.github.web == "" {
 		s.github.web, s.github.api = "https://github.com", "https://api.github.com"
 	}
-	h.ExternalSignIn(s.start)
-	h.Handle("GET /sso/callback", http.HandlerFunc(s.finish))
+	s.signIn = r.ExternalSignIn(s.start)
+	r.Handle("GET /sso/callback", http.HandlerFunc(s.finish))
 	return nil
 }
 
@@ -90,7 +91,7 @@ func (s *SSO) finish(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Sign-in failed: "+err.Error(), http.StatusForbidden)
 		return
 	}
-	if err := s.host.CompleteExternal(w, r, proposal, identity); err != nil {
+	if err := s.signIn.Complete(w, r, proposal, identity); err != nil {
 		s.host.Logger().Info("sign-in not completed", "error", err)
 	}
 }
@@ -134,7 +135,7 @@ func (s *SSO) identify(ctx context.Context, code string) (apron.Identity, error)
 		identity.Name = user.Login
 	}
 	if slices.ContainsFunc(s.Settings.Admins, func(login string) bool { return strings.EqualFold(login, user.Login) }) {
-		identity.Roles = []string{"admin"}
+		identity.Roles = []string{apron.RoleAdmin}
 	}
 	return identity, nil
 }

@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/apron-chat/apron-server-go/apron"
 	"github.com/apron-chat/apron-server-go/internal/wstest"
@@ -24,29 +25,39 @@ func TestSearch(t *testing.T) {
 	if _, err := ada.Post(room["room_id"].(string), "the secret deploy plan"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ada.Post("general", "edit me"); err != nil {
+	edited, err := ada.Post("general", "edit me")
+	if err != nil {
 		t.Fatal(err)
 	}
 
-	count := func(c *wstest.Client, q string) int {
+	// The index follows the log on its own goroutine: wait for it.
+	expect := func(c *wstest.Client, q string, want int) {
 		t.Helper()
-		for range 50 { // the index follows the log on its own goroutine
+		var n int
+		for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); time.Sleep(5 * time.Millisecond) {
 			result, err := c.Call("search.query", map[string]any{"q": q})
 			if err != nil {
 				t.Fatal(err)
 			}
-			if n := len(result["results"].([]any)); n > 0 || q == "nothing" {
-				return n
+			if n = len(result["results"].([]any)); n == want {
+				return
 			}
 		}
-		return 0
+		t.Fatalf("%s finds %d for %q, want %d", c.UserID, n, q, want)
 	}
-	if n := count(ada, "deploy"); n != 2 {
-		t.Fatalf("ada finds %d, want 2", n)
+	expect(ada, "deploy", 2)
+	// Bob is not in the private room.
+	expect(bob, "deploy", 1)
+	// An edit replaces what is indexed, and a deletion removes it.
+	if _, err := ada.Call("message", map[string]any{"room_id": "general", "message_id": edited, "body": map[string]any{"text": "edited deploy"}}); err != nil {
+		t.Fatal(err)
 	}
-	if n := count(bob, "deploy"); n != 1 {
-		t.Fatalf("bob finds %d, want 1: not the private room's", n)
+	expect(bob, "deploy", 2)
+	expect(bob, "edit me", 0)
+	if _, err := ada.Call("message", map[string]any{"room_id": "general", "message_id": edited, "deleted": true}); err != nil {
+		t.Fatal(err)
 	}
+	expect(bob, "deploy", 1)
 	notices, err := bob.Command("general", "/search deploy failed")
 	if err != nil || len(notices) != 1 || !strings.Contains(notices[0], "The deploy failed again") {
 		t.Fatalf("/search = %q, %v", notices, err)
@@ -68,5 +79,19 @@ func TestSearch(t *testing.T) {
 	response.Body.Close()
 	if response.StatusCode != http.StatusNotFound {
 		t.Fatalf("private room archive = %d", response.StatusCode)
+	}
+}
+
+func TestNoArchiveWithoutGuests(t *testing.T) {
+	config := apron.DefaultConfig()
+	config.DisableGuests = true
+	_, server := wstest.Serve(t, config, &Search{})
+	response, err := http.Get(server.URL + "/search/archive/general")
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusNotFound {
+		t.Fatalf("archive on a server without guests = %d, want 404", response.StatusCode)
 	}
 }

@@ -41,7 +41,7 @@ type Ops struct {
 		Timeout       time.Duration `long:"timeout" default:"30m" description:"How long a deploy may run"`
 	}
 	host     *apron.Host
-	bot      *apron.Session
+	bot      *apron.Bot
 	services map[string][]string
 
 	mu        sync.Mutex
@@ -51,8 +51,19 @@ type Ops struct {
 func (*Ops) Name() string { return "ops" }
 func (o *Ops) Flags() any { return &o.Settings }
 
-func (o *Ops) Init(h *apron.Host) error {
-	o.host = h
+// RoleDeployer may run /deploy.
+const RoleDeployer = "deployer"
+
+func (o *Ops) Init(r *apron.Registrar) error {
+	o.host = r.Host
+	// Settings left at zero, as when the extension is used without
+	// aproncmd's flags, take the flags' defaults.
+	if o.Settings.Room == "" {
+		o.Settings.Room = "general"
+	}
+	if o.Settings.Timeout <= 0 {
+		o.Settings.Timeout = 30 * time.Minute
+	}
 	o.services = make(map[string][]string)
 	o.deploying = make(map[string]bool)
 	for _, service := range o.Settings.Services {
@@ -63,16 +74,16 @@ func (o *Ops) Init(h *apron.Host) error {
 		o.services[name] = strings.Fields(command)
 	}
 	var err error
-	if o.bot, err = h.Session(h.Context(), "ops", apron.SessionOptions{Name: "Ops"}); err != nil {
+	if o.bot, err = r.Bot("ops", apron.BotOptions{Name: "Ops"}); err != nil {
 		return err
 	}
-	if err := o.bot.Join(h.Context(), o.Settings.Room); err != nil {
+	if err := o.bot.Join(r.Context(), o.Settings.Room); err != nil {
 		return fmt.Errorf("joining %s: %w", o.Settings.Room, err)
 	}
-	h.Handle("POST /ops/github", http.HandlerFunc(o.webhook))
-	h.Command(apron.Command{
+	r.Handle("POST /ops/github", http.HandlerFunc(o.webhook))
+	r.Command(apron.Command{
 		Name: "deploy", Usage: "/deploy <service>", Help: "deploy a service and stream its output here",
-		Available: func(u apron.User, _ apron.Room) bool { return u.HasRole("deployer") || u.HasRole("admin") },
+		Available: func(u apron.User, _ apron.Room) bool { return u.HasRole(RoleDeployer) || u.HasRole(apron.RoleAdmin) },
 		Run:       o.deploy,
 	})
 	return nil
@@ -194,7 +205,7 @@ func (o *Ops) deploy(ctx context.Context, call *apron.CommandCall) (map[string]a
 		o.done(call.Args)
 		return nil, err
 	}
-	o.host.Go(func(ctx context.Context) {
+	started := o.host.Go(func(ctx context.Context) {
 		defer o.done(call.Args)
 		ctx, cancel := context.WithTimeout(ctx, o.Settings.Timeout)
 		defer cancel()
@@ -206,10 +217,14 @@ func (o *Ops) deploy(ctx context.Context, call *apron.CommandCall) (map[string]a
 		if err != nil {
 			outcome = fmt.Sprintf("❌ deploying %s failed: %s", call.Args, err)
 		}
-		if _, postErr := o.bot.Post(ctx, call.Room.ID, outcome, apron.ReplyTo(term.MessageID())); postErr != nil && !errors.Is(postErr, apron.ErrSessionClosed) {
+		if _, postErr := o.bot.Post(ctx, call.Room.ID, outcome, apron.ReplyTo(term.MessageID())); postErr != nil && !errors.Is(postErr, apron.ErrServerClosed) {
 			o.host.Logger().Error("posting a deploy's outcome", "error", postErr)
 		}
 	})
+	if !started {
+		o.done(call.Args)
+		return nil, apron.ErrServerClosed
+	}
 	call.Notice("Deploying " + call.Args + "…")
 	return nil, nil
 }

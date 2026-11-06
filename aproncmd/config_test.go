@@ -273,9 +273,9 @@ type weatherExtension struct {
 	}
 }
 
-func (*weatherExtension) Name() string           { return "weather" }
-func (*weatherExtension) Init(*apron.Host) error { return nil }
-func (w *weatherExtension) Flags() any           { return &w.settings }
+func (*weatherExtension) Name() string                { return "weather" }
+func (*weatherExtension) Init(*apron.Registrar) error { return nil }
+func (w *weatherExtension) Flags() any                { return &w.settings }
 
 func TestExtensionFlags(t *testing.T) {
 	weather := &weatherExtension{}

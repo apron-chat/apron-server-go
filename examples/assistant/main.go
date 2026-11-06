@@ -34,28 +34,42 @@ type Assistant struct {
 		Timeout time.Duration `long:"timeout" default:"2m" description:"How long one reply may take"`
 	}
 	host *apron.Host
-	bot  *apron.Session
+	bot  *apron.Bot
 }
 
 func (*Assistant) Name() string { return "assistant" }
 func (a *Assistant) Flags() any { return &a.Settings }
 
-func (a *Assistant) Init(h *apron.Host) error {
-	a.host = h
+func (a *Assistant) Init(r *apron.Registrar) error {
+	a.host = r.Host
+	// Settings left at zero, as when the extension is used without
+	// aproncmd's flags, take the flags' defaults.
+	if a.Settings.UserID == "" {
+		a.Settings.UserID = "assistant"
+	}
+	if a.Settings.Name == "" {
+		a.Settings.Name = "Assistant"
+	}
+	if a.Settings.Context <= 0 {
+		a.Settings.Context = 20
+	}
+	if a.Settings.Timeout <= 0 {
+		a.Settings.Timeout = 2 * time.Minute
+	}
 	var err error
-	a.bot, err = h.Session(h.Context(), a.Settings.UserID, apron.SessionOptions{Name: a.Settings.Name})
-	if err != nil {
+	if a.bot, err = r.Bot(a.Settings.UserID, apron.BotOptions{Name: a.Settings.Name}); err != nil {
 		return err
 	}
-	// The bot joins every public room, so that it sees its mentions there.
-	for _, room := range h.Rooms() {
-		if room.Public {
-			_ = a.bot.Join(h.Context(), room.ID)
+	// The bot joins every room that is not restricted, so that it sees its
+	// mentions there.
+	for _, room := range r.Rooms() {
+		if !room.Restricted {
+			_ = a.bot.Join(r.Context(), room.ID)
 		}
 	}
-	h.OnEvent(func(ctx context.Context, e apron.Event) {
+	r.OnEvent(func(ctx context.Context, e apron.Event) {
 		if e.Kind == apron.EventRoom {
-			if room, ok := h.Room(e.Rooms[0]); ok && room.Public {
+			if room, ok := a.host.Room(e.Rooms[0]); ok && !room.Restricted {
 				_ = a.bot.Join(ctx, room.ID)
 			}
 			return
@@ -64,9 +78,15 @@ func (a *Assistant) Init(h *apron.Host) error {
 		if !ok || !m.New() || m.Deleted || m.From.UserID == a.bot.UserID() || !m.MentionsUser(a.bot.UserID()) {
 			return
 		}
+		// A mention in a room the bot may not see, such as a private room
+		// it is not in, gets no answer: its conversation is not the bot's
+		// to read.
+		if bot, _ := a.host.User(a.bot.UserID()); !a.host.Visible(bot, m.RoomID) {
+			return
+		}
 		// Replies take a while: they run on their own, so that the bot
 		// keeps reading.
-		h.Go(func(ctx context.Context) { a.answer(ctx, m) })
+		a.host.Go(func(ctx context.Context) { a.answer(ctx, m) })
 	})
 	return nil
 }

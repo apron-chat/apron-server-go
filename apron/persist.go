@@ -190,12 +190,12 @@ type storedUser struct {
 	RoomMutes map[string]storedMute `json:"room_mutes,omitzero"`
 	Pings     map[string]int64      `json:"pings,omitzero"`
 	// Created is when the user was made, in Unix milliseconds; absent for
-	// users stored before it was kept. Bot marks an account an Extension
-	// signs in (Host.Session), External the identity of an account made by
-	// external sign-in (§4.11.5), and Granted the roles that sign-in
-	// granted it.
+	// users stored before it was kept. Bot names the Extension whose bot
+	// the account is (Registrar.Bot), External the identity of an account
+	// made by external sign-in (§4.11.5), and Granted the roles that
+	// sign-in granted it.
 	Created  int64    `json:"created,omitzero"`
-	Bot      bool     `json:"bot,omitzero"`
+	Bot      string   `json:"bot,omitzero"`
 	External string   `json:"external,omitzero"`
 	Granted  []string `json:"granted,omitzero"`
 }
@@ -412,7 +412,7 @@ func storedMessageOf(m *messageState) storedMessage {
 func storedUserOf(u *userState) storedUser {
 	stored := storedUser{
 		Name: u.name, Avatar: u.avatar, Ext: u.ext, LeftAt: u.leftAt, Email: u.email, Pings: u.pings, Seen: u.seen, Shown: u.status != statusOffline,
-		Bot: u.bot, External: u.external, Granted: u.granted,
+		Bot: u.botOf, External: u.external, Granted: u.granted,
 	}
 	if !u.created.IsZero() {
 		stored.Created = u.created.UnixMilli()
@@ -605,7 +605,7 @@ func (s *Server) restoreLocked() (map[string]bool, error) {
 		if stored.Created != 0 {
 			u.created = time.UnixMilli(stored.Created)
 		}
-		u.bot, u.granted = stored.Bot, stored.Granted
+		u.botOf, u.granted = stored.Bot, stored.Granted
 		if stored.External != "" {
 			u.external = stored.External
 			s.identities[stored.External] = u

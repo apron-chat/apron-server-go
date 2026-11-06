@@ -49,9 +49,9 @@ type userState struct {
 	// created is when the user was made; zero for users stored before it
 	// was kept.
 	created time.Time
-	// bot marks an account an Extension signs in with Host.Session, which
-	// holds the "bot" role (§3.3.4).
-	bot bool
+	// botOf names the Extension whose bot the account is (Registrar.Bot),
+	// which holds the "bot" role (§3.3.4).
+	botOf string
 	// external is the identity of an account external sign-in made
 	// (§4.11.5), as its provider names it; empty for others.
 	external string
@@ -147,7 +147,7 @@ func (u *userState) from() map[string]any {
 // an email address, or an external identity) or is an Extension's bot, so
 // it persists across connections and restarts, rather than being a guest.
 func (u *userState) account() bool {
-	return u.passkey != nil || u.email != "" || u.bot || u.external != ""
+	return u.passkey != nil || u.email != "" || u.botOf != "" || u.external != ""
 }
 
 // hasRole reports whether the user holds a server role.
@@ -714,7 +714,7 @@ func (s *Server) grantRolesLocked(u *userState) bool {
 			}
 		}
 		roles = append(roles, u.granted...)
-		if u.bot {
+		if u.botOf != "" {
 			roles = append(roles, "bot")
 		}
 		slices.Sort(roles)

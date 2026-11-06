@@ -299,10 +299,10 @@ func Run(logger *slog.Logger, options Options, extensions ...apron.Extension) er
 	if err != nil {
 		return err
 	}
+	// The server owns the store from here, and closes it when Open fails.
 	app, err := apron.Open(config)
 	if err != nil {
-		config.Store.Close()
-		return fmt.Errorf("restoring state from %s: %w", options.Store, err)
+		return fmt.Errorf("starting the server with %s: %w", options.Store, err)
 	}
 	var servers []*http.Server
 	serve := func(name string, srv *http.Server, listener net.Listener) {
@@ -327,10 +327,14 @@ func Run(logger *slog.Logger, options Options, extensions ...apron.Extension) er
 	listen := func(addr string) (net.Listener, error) {
 		listener, err := net.Listen("tcp", addr)
 		if err != nil {
-			// Listeners opened so far close with their servers.
+			// Listeners opened so far close with their servers, and the
+			// server stops what its extensions started.
 			for _, srv := range servers {
 				_ = srv.Close()
 			}
+			shutdown, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			_ = app.Shutdown(shutdown)
 			return nil, err
 		}
 		if options.MaxListenerConnections > 0 {

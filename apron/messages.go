@@ -117,12 +117,9 @@ func (s *Server) saveMessage(c *client, req request) (any, bool, *Error) {
 		return nil, false, err
 	}
 	// The extensions' filters see what is saved, outside s.mu, and may
-	// change it or refuse it (Host.FilterMessage).
-	s.mu.RLock()
-	filtering := len(s.filters) > 0
-	s.mu.RUnlock()
-	if filtering && !deleted {
-		draft := &Draft{RoomID: roomID, Body: body, Ext: extWrite}
+	// change it or refuse it (Registrar.FilterMessage).
+	if !deleted {
+		draft := &Draft{RoomID: roomID, Body: body, ext: extWrite}
 		if replacing {
 			draft.MessageID = messageID
 		}
@@ -132,7 +129,7 @@ func (s *Server) saveMessage(c *client, req request) (any, bool, *Error) {
 		if err := s.filterMessage(c, draft); err != nil {
 			return nil, false, err
 		}
-		body, extWrite = draft.Body, draft.Ext
+		body, extWrite = draft.Body, draft.ext
 	}
 
 	s.mu.Lock()

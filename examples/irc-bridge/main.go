@@ -1,7 +1,7 @@
 // Command irc-bridge is an Apron server whose room is bridged to an IRC
 // channel, both ways: IRC lines are posted by an "irc" bot, with the channel
-// and the nick that sent each in the message's ext (PROTOCOL.md §4.12), and
-// messages people post are sent to the channel. The bridge keeps the
+// and the nick that sent each in the message's ext under irc-bridge
+// (PROTOCOL.md §4.12), and messages people post are sent to the channel. The bridge keeps the
 // log_id of the last message it relayed, so it relays what was posted while
 // it was down once it is back.
 //
@@ -35,7 +35,7 @@ type Bridge struct {
 		Room      string `long:"room" default:"general" description:"The Apron room bridged to the channel"`
 	}
 	host  *apron.Host
-	relay *apron.Session
+	relay *apron.Bot
 
 	mu   sync.Mutex
 	conn *ircConn // nil while disconnected
@@ -44,35 +44,35 @@ type Bridge struct {
 func (*Bridge) Name() string { return "irc-bridge" }
 func (b *Bridge) Flags() any { return &b.Settings }
 
-// cursorKey keeps the log_id of the last event the bridge handled.
-const cursorKey = "cursor"
-
-func (b *Bridge) Init(h *apron.Host) error {
+func (b *Bridge) Init(r *apron.Registrar) error {
 	if b.Settings.Server == "" || !strings.HasPrefix(b.Settings.Channel, "#") {
 		return errors.New("set --irc-bridge.server and --irc-bridge.channel")
 	}
-	b.host = h
+	// Settings left at zero, as when the extension is used without
+	// aproncmd's flags, take the flags' defaults.
+	if b.Settings.Nick == "" {
+		b.Settings.Nick = "apron-bridge"
+	}
+	if b.Settings.Room == "" {
+		b.Settings.Room = "general"
+	}
+	b.host = r.Host
 	var err error
-	if b.relay, err = h.Session(h.Context(), "irc", apron.SessionOptions{Name: "IRC"}); err != nil {
+	if b.relay, err = r.Bot("irc", apron.BotOptions{Name: "IRC"}); err != nil {
 		return err
 	}
-	if err := b.relay.Join(h.Context(), b.Settings.Room); err != nil {
+	if err := b.relay.Join(r.Context(), b.Settings.Room); err != nil {
 		return err
 	}
-	// The first start relays nothing from before it.
-	var cursor int64
-	if found, err := h.Store().Get(cursorKey, &cursor); err != nil {
-		return err
-	} else if !found {
-		cursor = h.LastLogID()
-	}
-	h.OnEventFrom(cursor, b.outbound)
-	h.Go(b.connectLoop)
+	// Follow keeps the bridge's place in the log, so what was posted while
+	// the bridge was down is relayed once it is back.
+	r.Follow(b.outbound)
+	r.Go(b.connectLoop)
 	return nil
 }
 
 // outbound sends a message posted in the room to the channel. While the
-// bridge is disconnected it fails, and the event comes again later.
+// bridge is disconnected it fails, and Follow sends the event again later.
 func (b *Bridge) outbound(_ context.Context, e apron.Event) error {
 	m, ok := apron.DecodeMessage(e)
 	if ok && m.New() && !m.Deleted && m.RoomID == b.Settings.Room && m.From.UserID != b.relay.UserID() && !strings.HasPrefix(m.From.UserID, "~") {
@@ -94,7 +94,7 @@ func (b *Bridge) outbound(_ context.Context, e apron.Event) error {
 			}
 		}
 	}
-	return b.host.Store().Put(cursorKey, e.LogID)
+	return nil
 }
 
 // connectLoop keeps a connection to IRC, waiting longer after each failure.
@@ -161,7 +161,7 @@ func (b *Bridge) session(ctx context.Context) error {
 					text = "_" + strings.TrimSuffix(action, "\x01") + "_"
 				}
 				_, err := b.relay.Post(ctx, b.Settings.Room, "**"+from+":** "+text, apron.Markdown(),
-					apron.WithExt("irc", map[string]any{"channel": b.Settings.Channel, "nick": from}))
+					apron.WithExt(map[string]any{"channel": b.Settings.Channel, "nick": from}))
 				if err != nil {
 					b.host.Logger().Error("posting from IRC", "error", err)
 				}

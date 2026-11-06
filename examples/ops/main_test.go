@@ -54,11 +54,11 @@ func TestOps(t *testing.T) {
 }
 
 // lead is a test extension whose bot holds the deployer role.
-type lead struct{ session *apron.Session }
+type lead struct{ session *apron.Bot }
 
 func (*lead) Name() string { return "lead" }
-func (l *lead) Init(h *apron.Host) (err error) {
-	l.session, err = h.Session(h.Context(), "lead", apron.SessionOptions{})
+func (l *lead) Init(r *apron.Registrar) (err error) {
+	l.session, err = r.Bot("lead", apron.BotOptions{})
 	return err
 }
 
@@ -67,7 +67,7 @@ func TestDeploy(t *testing.T) {
 	o.Settings.Room, o.Settings.Timeout = "general", time.Minute
 	o.Settings.Services = []string{"api=echo deployed the api"}
 	config := apron.DefaultConfig()
-	config.Roles = map[string][]string{"deployer": {"lead"}}
+	config.Roles = map[string][]string{RoleDeployer: {"lead"}}
 	l := &lead{}
 	_, server := wstest.Serve(t, config, o, l)
 	ada := wstest.Guest(t, server, "Ada")

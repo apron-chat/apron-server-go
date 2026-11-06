@@ -25,26 +25,34 @@
 // # Extensions
 //
 // An [Extension] adds features to a server. Put it in [Config].Extensions,
-// and its Init registers what it adds with its [Host]:
+// and its Init registers what it adds with its [Registrar], which works only
+// during Init:
 //
-//   - commands ([Host.Command]) and request methods ([Host.Method]);
-//   - a capability and its data in the server frame ([Host.Advertise]);
-//   - HTTP routes ([Host.Handle]);
+//   - commands ([Registrar.Command]) and request methods
+//     ([Registrar.Method]);
+//   - HTTP routes ([Registrar.Handle]);
 //   - filters that change or refuse messages before they are saved
-//     ([Host.FilterMessage]);
-//   - bots, in-process connections that speak the protocol ([Host.Session]),
-//     which can stream live text ([Session.StreamAppend]);
-//   - followers of the log, from now or replayed from a point
-//     ([Host.OnEvent], [Host.OnEventFrom]), with [DecodeMessage] to read
-//     messages;
-//   - external sign-in, such as OAuth ([Host.ExternalSignIn]);
-//   - values kept in the store ([Host.Store]) and goroutines that run until
-//     Shutdown ([Host.Go]).
+//     ([Registrar.FilterMessage]);
+//   - bots ([Registrar.Bot]): accounts the extension speaks through, whose
+//     requests get the same checks as a client's, and which can stream live
+//     text ([Bot.StreamAppend]);
+//   - followers of the log ([Registrar.OnEvent], [Registrar.OnEventFrom],
+//     and [Registrar.Follow], which keeps its place across restarts), with
+//     [DecodeMessage] to read messages;
+//   - external sign-in, such as OAuth ([Registrar.ExternalSignIn]).
+//
+// The Registrar's [Host] is the extension's handle on the server for as long
+// as it runs: its capability in the server frame ([Host.Advertise]), values
+// kept in the store ([Host.Store]), goroutines that run until Shutdown
+// ([Host.Go]), and copies of users and rooms ([User], [Room]).
 //
 // Extension code never runs while the server holds its lock, so it may call
-// any Host or Session method. What it sees of users and rooms are copies
-// ([User], [Room]). [Host.Visible] tells whether someone may see a room, which
-// an extension that shows messages checks.
+// any Host, Bot, or Session method. Values it hands the server, such as
+// results, advertised data, and ext, are encoded when they are handed over,
+// so one that is not JSON is the extension's error and never reaches a
+// client. [Host.Visible] says whether a user may see a room, and
+// [Host.Public] whether anyone may: an extension that shows messages checks
+// them, so that it never shows a private room's.
 //
 // The examples directory of the module holds complete servers built with
 // extensions, each with a test.

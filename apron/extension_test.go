@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -18,11 +19,11 @@ import (
 // testExtension is an Extension made of a name and an Init function.
 type testExtension struct {
 	name string
-	init func(h *Host) error
+	init func(r *Registrar) error
 }
 
-func (e testExtension) Name() string       { return e.name }
-func (e testExtension) Init(h *Host) error { return e.init(h) }
+func (e testExtension) Name() string            { return e.name }
+func (e testExtension) Init(r *Registrar) error { return e.init(r) }
 
 func extensionConfig(extensions ...Extension) Config {
 	config := DefaultConfig()
@@ -56,26 +57,44 @@ func noticeText(t *testing.T, frame map[string]any) string {
 }
 
 func TestExtensionCommands(t *testing.T) {
-	_, httpServer := newTestServer(t, extensionConfig(testExtension{"demo", func(h *Host) error {
-		h.Command(Command{
+	_, httpServer := newTestServer(t, extensionConfig(testExtension{"demo", func(r *Registrar) error {
+		r.Command(Command{
 			Name: "echo", Usage: "/echo <text>", Help: "say it back",
-			Run: func(_ context.Context, call *CommandCall) (map[string]any, error) {
+			Run: func(ctx context.Context, call *CommandCall) (map[string]any, error) {
 				if call.Args == "" {
 					return nil, InvalidParams("Usage: /echo <text>")
+				}
+				if ctx.Err() != nil {
+					return nil, ctx.Err()
 				}
 				call.Notice(call.User.ID + " said " + call.Args + " in " + call.Room.ID)
 				return map[string]any{"echoed": call.Args}, nil
 			},
 		})
-		h.Command(Command{
+		r.Command(Command{
 			Name: "staff", Help: "for staff",
 			Available: func(u User, _ Room) bool { return u.HasRole("staff") },
 			Run:       func(context.Context, *CommandCall) (map[string]any, error) { return nil, nil },
 		})
-		h.Command(Command{
+		r.Command(Command{
 			Name: "fail",
 			Run: func(context.Context, *CommandCall) (map[string]any, error) {
 				return nil, errors.New("the database is down")
+			},
+		})
+		r.Command(Command{
+			// A typed nil *Error is no error to refuse with: it must not
+			// make a reply without a result or an error.
+			Name: "typed-nil",
+			Run: func(context.Context, *CommandCall) (map[string]any, error) {
+				var e *Error
+				return nil, e
+			},
+		})
+		r.Command(Command{
+			Name: "unencodable",
+			Run: func(context.Context, *CommandCall) (map[string]any, error) {
+				return map[string]any{"f": func() {}}, nil
 			},
 		})
 		return nil
@@ -98,29 +117,42 @@ func TestExtensionCommands(t *testing.T) {
 	if result := reply["result"].(map[string]any); result["echoed"] != "hello there" {
 		t.Fatalf("/echo result = %#v", reply)
 	}
-	for line, code := range map[string]int{"/echo": CodeInvalidParams, "/staff": CodeDenied, "/fail": CodeInternalError} {
-		_, reply = runCommand(t, c, line)
-		if failure, _ := reply["error"].(map[string]any); failure["code"] != float64(code) {
+	for line, code := range map[string]int{
+		"/echo": CodeInvalidParams, "/staff": CodeDenied, "/fail": CodeInternalError,
+		"/typed-nil": CodeInternalError, "/unencodable": CodeInternalError,
+	} {
+		if _, reply = runCommand(t, c, line); errorCode(reply) != code {
 			t.Fatalf("%s = %#v, want error %d", line, reply, code)
 		}
+	}
+	// The connection survives the replies above.
+	if _, reply = runCommand(t, c, "/echo still here"); reply["result"] == nil {
+		t.Fatalf("after the errors: %#v", reply)
 	}
 }
 
 func TestExtensionRegistrationErrors(t *testing.T) {
-	for name, init := range map[string]func(h *Host) error{
-		"core command": func(h *Host) error {
-			h.Command(Command{Name: "kick", Run: func(context.Context, *CommandCall) (map[string]any, error) { return nil, nil }})
+	run := func(context.Context, *CommandCall) (map[string]any, error) { return nil, nil }
+	for name, init := range map[string]func(r *Registrar) error{
+		"core command": func(r *Registrar) error { r.Command(Command{Name: "kick", Run: run}); return nil },
+		"foreign method": func(r *Registrar) error {
+			r.Method("message", func(context.Context, *MethodCall) (any, error) { return nil, nil })
 			return nil
 		},
-		"foreign method": func(h *Host) error { h.Method("message", nil); return nil },
-		"core route":     func(h *Host) error { h.Handle("/ws", http.NotFoundHandler()); return nil },
-		"two sign-ins":   func(h *Host) error { h.ExternalSignIn(nil); h.ExternalSignIn(nil); return nil },
-		"init fails":     func(*Host) error { return errors.New("no config") },
-		"command no Run": func(h *Host) error { h.Command(Command{Name: "x"}); return nil },
-		"bad command name": func(h *Host) error {
-			h.Command(Command{Name: "Bad Name", Run: func(context.Context, *CommandCall) (map[string]any, error) { return nil, nil }})
+		"nil method":       func(r *Registrar) error { r.Method("demo.x", nil); return nil },
+		"nil filter":       func(r *Registrar) error { r.FilterMessage(nil); return nil },
+		"core route":       func(r *Registrar) error { r.Handle("/ws", http.NotFoundHandler()); return nil },
+		"two sign-ins":     func(r *Registrar) error { r.ExternalSignIn(nil); return nil },
+		"init fails":       func(*Registrar) error { return errors.New("no config") },
+		"command no Run":   func(r *Registrar) error { r.Command(Command{Name: "x"}); return nil },
+		"bad command name": func(r *Registrar) error { r.Command(Command{Name: "Bad Name", Run: run}); return nil },
+		"follow twice": func(r *Registrar) error {
+			follow := func(context.Context, Event) error { return nil }
+			r.Follow(follow)
+			r.Follow(follow)
 			return nil
 		},
+		"bad advertise": func(r *Registrar) error { return r.Advertise(map[string]any{"f": func() {}}) },
 	} {
 		t.Run(name, func(t *testing.T) {
 			if app, err := Open(extensionConfig(testExtension{"demo", init})); err == nil {
@@ -130,27 +162,79 @@ func TestExtensionRegistrationErrors(t *testing.T) {
 		})
 	}
 	for _, name := range []string{"emoji", "Bad", ""} {
-		if app, err := Open(extensionConfig(testExtension{name, func(*Host) error { return nil }})); err == nil {
+		if app, err := Open(extensionConfig(testExtension{name, func(*Registrar) error { return nil }})); err == nil {
 			_ = app.Shutdown(context.Background())
 			t.Fatalf("Open with extension %q succeeded", name)
 		}
 	}
+
+	// A route that takes StaticDir's root fails Open rather than panicking.
+	config := extensionConfig(testExtension{"demo", func(r *Registrar) error {
+		r.Handle("/", http.NotFoundHandler())
+		return nil
+	}})
+	config.StaticDir = t.TempDir()
+	if app, err := Open(config); err == nil {
+		_ = app.Shutdown(context.Background())
+		t.Fatal("a route on / beside StaticDir was accepted")
+	}
+
+	// Registering after Init panics.
+	var kept *Registrar
+	app, err := Open(extensionConfig(testExtension{"demo", func(r *Registrar) error { kept = r; return nil }}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer app.Shutdown(context.Background())
+	defer func() {
+		if recover() == nil {
+			t.Fatal("registering after Init did not panic")
+		}
+	}()
+	kept.Command(Command{Name: "late", Run: run})
+}
+
+// closeCounter is a store that counts its closes.
+type closeCounter struct {
+	store.Store
+	closes atomic.Int32
+}
+
+func (c *closeCounter) Close() error {
+	c.closes.Add(1)
+	return c.Store.Close()
+}
+
+func TestOpenClosesTheStoreWhenItFails(t *testing.T) {
+	counted := &closeCounter{Store: store.NewMemory()}
+	config := extensionConfig(testExtension{"demo", func(*Registrar) error { return errors.New("broken") }})
+	config.Store = counted
+	if _, err := Open(config); err == nil {
+		t.Fatal("Open succeeded")
+	}
+	if n := counted.closes.Load(); n != 1 {
+		t.Fatalf("the store closed %d times, want once", n)
+	}
 }
 
 func TestExtensionMethodAdvertiseAndRoute(t *testing.T) {
-	_, httpServer := newTestServer(t, extensionConfig(testExtension{"calc", func(h *Host) error {
-		h.Advertise(map[string]any{"version": 1})
-		h.Method("calc.add", func(_ context.Context, call *MethodCall) (any, error) {
+	var host *Host
+	_, httpServer := newTestServer(t, extensionConfig(testExtension{"calc", func(r *Registrar) error {
+		host = r.Host
+		r.Method("calc.add", func(_ context.Context, call *MethodCall) (any, error) {
 			var params struct{ A, B int }
 			if err := call.Decode(&params); err != nil {
 				return nil, err
 			}
 			return map[string]any{"sum": params.A + params.B, "by": call.User.ID}, nil
 		})
-		h.Handle("GET /calc/hello", http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		r.Method("calc.broken", func(context.Context, *MethodCall) (any, error) {
+			return map[string]any{"ch": make(chan int)}, nil
+		})
+		r.Handle("GET /calc/hello", http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 			_, _ = io.WriteString(w, "hi")
 		}))
-		return nil
+		return r.Advertise(map[string]any{"version": 1})
 	}}))
 	c, frame := dialRaw(t, httpServer)
 	params := frame["params"].(map[string]any)
@@ -167,18 +251,42 @@ func TestExtensionMethodAdvertiseAndRoute(t *testing.T) {
 		t.Fatalf("calc.add = %#v", result)
 	}
 	c.expectError(t, "calc.add", "bad", map[string]any{"a": "two"}, CodeInvalidParams)
+	c.expectError(t, "calc.broken", "broken", nil, CodeInternalError)
 	if status, _, body := httpDo(t, http.MethodGet, httpServer.URL+"/calc/hello", nil, ""); status != http.StatusOK || string(body) != "hi" {
 		t.Fatalf("GET /calc/hello = %d %q", status, body)
+	}
+
+	// A value that is not JSON changes nothing; a new value reaches every
+	// connection.
+	if err := host.Advertise(map[string]any{"f": func() {}}); err == nil {
+		t.Fatal("an unencodable value was advertised")
+	}
+	if err := host.Advertise(map[string]any{"version": 2}); err != nil {
+		t.Fatal(err)
+	}
+	params = notificationParams(t, c.read(t), "server")
+	if ext := params["ext"].(map[string]any); ext["calc"].(map[string]any)["version"] != float64(2) {
+		t.Fatalf("new ext = %#v", ext)
 	}
 }
 
 func TestExtensionFilter(t *testing.T) {
-	_, httpServer := newTestServer(t, extensionConfig(testExtension{"clean", func(h *Host) error {
-		h.FilterMessage(func(_ context.Context, d *Draft) error {
-			if strings.Contains(d.Text(), "spam") {
+	var filtered atomic.Int32
+	_, httpServer := newTestServer(t, extensionConfig(testExtension{"clean", func(r *Registrar) error {
+		r.FilterMessage(func(_ context.Context, d *Draft) error {
+			filtered.Add(1)
+			switch {
+			case strings.Contains(d.Text(), "spam"):
 				return Denied("No spam, " + d.From.ID)
+			case strings.Contains(d.Text(), "break the body"):
+				d.Body["text"] = func() {}
+				return nil
+			case strings.Contains(d.Text(), "tag"):
+				if err := d.SetExt(map[string]any{"checked": true}); err != nil {
+					return err
+				}
 			}
-			d.Body["text"] = strings.ReplaceAll(d.Text(), "darn", "d**n")
+			d.SetText(strings.ReplaceAll(d.Text(), "darn", "d**n"))
 			return nil
 		})
 		return nil
@@ -189,38 +297,65 @@ func TestExtensionFilter(t *testing.T) {
 		t.Fatalf("filtered text = %q", text)
 	}
 	frame := c.call(t, "message", "m2", map[string]any{"room_id": "general", "body": map[string]any{"text": "buy spam"}})
-	if failure, _ := frame["error"].(map[string]any); failure["code"] != float64(CodeDenied) || failure["message"] != "No spam, "+c.userID {
+	if errorCode(frame) != CodeDenied || frame["error"].(map[string]any)["message"] != "No spam, "+c.userID {
 		t.Fatalf("spam = %#v", frame)
+	}
+	if frame := c.call(t, "message", "m3", map[string]any{"room_id": "general", "body": map[string]any{"text": "break the body"}}); errorCode(frame) != CodeInternalError {
+		t.Fatalf("broken body = %#v", frame)
+	}
+	_, snapshot = save(t, c, "m4", map[string]any{"body": map[string]any{"text": "tag me"}})
+	if ext := snapshot["ext"].(map[string]any); ext["clean"].(map[string]any)["checked"] != true {
+		t.Fatalf("ext = %#v", snapshot["ext"])
+	}
+
+	// The opening text of /embed-append is filtered as a message is.
+	_, reply := runCommand(t, c, "/embed-append buy spam")
+	if errorCode(reply) != CodeDenied {
+		t.Fatalf("/embed-append spam = %#v", reply)
+	}
+
+	// A message to a room its author may not see is refused by the server,
+	// unfiltered.
+	before := filtered.Load()
+	if frame := c.call(t, "message", "m5", map[string]any{"room_id": "nowhere", "body": map[string]any{"text": "hi"}}); errorCode(frame) != CodeInvalidParams {
+		t.Fatalf("unknown room = %#v", frame)
+	}
+	if filtered.Load() != before {
+		t.Fatal("a message to an unknown room was filtered")
 	}
 }
 
-func TestExtensionSessionEventsAndViews(t *testing.T) {
-	events := make(chan Event, 16)
-	frames := make(chan jsontext.Value, 64)
+func TestExtensionBotsEventsAndViews(t *testing.T) {
+	events := make(chan Event, 64)
+	frames := make(chan jsontext.Value, 256)
 	var host *Host
-	var bot *Session
-	_, httpServer := newTestServer(t, extensionConfig(testExtension{"helper", func(h *Host) error {
-		host = h
-		h.OnEvent(func(_ context.Context, e Event) { events <- e })
+	var bot *Bot
+	var watcher *Session
+	_, httpServer := newTestServer(t, extensionConfig(testExtension{"helper", func(r *Registrar) error {
+		host = r.Host
+		r.OnEvent(func(_ context.Context, e Event) { events <- e })
 		var err error
-		bot, err = h.Session(context.Background(), "helper", SessionOptions{Name: "Helper", OnFrame: func(frame jsontext.Value) { frames <- frame }})
+		if bot, err = r.Bot("helper", BotOptions{Name: "Helper"}); err != nil {
+			return err
+		}
+		watcher, err = bot.Connect(SessionOptions{OnFrame: func(frame jsontext.Value) { frames <- frame }})
 		return err
+	}}, testExtension{"other", func(r *Registrar) error {
+		// Another extension's bot id is never this one's.
+		if _, err := r.Bot("helper", BotOptions{}); err == nil {
+			return errors.New("took another extension's bot")
+		}
+		return nil
 	}}))
 	user, ok := host.User("helper")
-	if !ok || !user.Bot || !user.Account || !user.HasRole("bot") || user.Name != "Helper" || user.Created.IsZero() {
+	if !ok || !user.Bot || !user.Account || !user.HasRole(RoleBot) || user.Name != "Helper" || user.Created.IsZero() {
 		t.Fatalf("bot user = %#v", user)
-	}
-	if _, err := host.Session(context.Background(), "helper", SessionOptions{}); err != nil {
-		t.Fatalf("second session: %v", err)
 	}
 
 	c := dialTestClient(t, httpServer)
-	if _, err := host.Session(context.Background(), c.userID, SessionOptions{}); err == nil {
-		t.Fatal("a bot took a guest's user_id")
-	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	id, err := bot.Post(ctx, "general", "hello @"+c.userID, Mention(c.userID), Markdown(), WithExt("helper", map[string]any{"n": 1}))
+	id, err := bot.Post(ctx, "general", "hello @"+c.userID, Mention(c.userID), Markdown(), WithExt(map[string]any{"n": 1}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -233,8 +368,8 @@ func TestExtensionSessionEventsAndViews(t *testing.T) {
 		t.Fatalf("event message = %#v", m)
 	}
 
-	// The guest's message reaches the bot as a frame, and extensions as an
-	// event.
+	// The guest's message reaches the watching session as a frame, and
+	// extensions as an event.
 	guestID, _ := save(t, c, "m1", map[string]any{"body": map[string]any{"text": "hi helper"}})
 	waitMessageEvent(t, events, guestID)
 	for frame := range frames {
@@ -242,7 +377,6 @@ func TestExtensionSessionEventsAndViews(t *testing.T) {
 			break
 		}
 	}
-
 	replyID, err := bot.Post(ctx, "general", "hi yourself", ReplyTo(guestID))
 	if err != nil {
 		t.Fatal(err)
@@ -253,18 +387,18 @@ func TestExtensionSessionEventsAndViews(t *testing.T) {
 	if reply := waitMessageEvent(t, events, replyID); reply.ReplyTo != guestID {
 		t.Fatalf("reply = %#v", reply)
 	}
-
 	history, err := bot.History(ctx, "general", HistoryOptions{Limit: 10})
 	if err != nil || len(history) != 3 || history[0].ID != id || history[1].Text != "hi helper" || history[2].ReplyTo != guestID {
 		t.Fatalf("history = %#v, %v", history, err)
 	}
 
-	// A private room is visible to its members only.
+	// A private room is visible to its members only, and public to nobody.
 	roomID, _ := saveRoom(t, c, "r1", map[string]any{"title": "Secret", "private": true})
-	if host.Visible("helper", roomID) || !host.Visible(c.userID, roomID) || host.Visible("", roomID) || !host.Visible("", "general") {
-		t.Fatal("Visible disagrees with the private room")
+	guest, _ := host.User(c.userID)
+	if host.Visible(user, roomID) || !host.Visible(guest, roomID) || host.Public(roomID) || !host.Public("general") {
+		t.Fatal("Visible and Public disagree with the private room")
 	}
-	if room, _ := host.Room(roomID); !room.Private || room.Public || room.Title != "Secret" {
+	if room, _ := host.Room(roomID); !room.Restricted || room.Title != "Secret" {
 		t.Fatalf("room = %#v", room)
 	}
 	if _, err := bot.Post(ctx, roomID, "let me in"); err == nil {
@@ -273,11 +407,148 @@ func TestExtensionSessionEventsAndViews(t *testing.T) {
 	if err := host.RoomNotice("general", "maintenance soon"); err != nil {
 		t.Fatal(err)
 	}
-	if err := bot.Close(); err != nil {
+
+	// A closed session says why; the bot's own requests reconnect.
+	if err := watcher.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := bot.Post(ctx, "general", "gone"); !errors.Is(err, ErrSessionClosed) {
-		t.Fatalf("post after close: %v", err)
+	if _, err := watcher.Post(ctx, "general", "gone"); !errors.Is(err, ErrSessionClosed) || !errors.Is(watcher.Err(), ErrSessionClosed) {
+		t.Fatalf("post after close: %v, %v", err, watcher.Err())
+	}
+	session, _ := bot.conn()
+	_ = session.Close()
+	if _, err := bot.Post(ctx, "general", "back again"); err != nil {
+		t.Fatalf("the bot did not reconnect: %v", err)
+	}
+}
+
+func TestBotIDs(t *testing.T) {
+	memory := store.NewMemory()
+	config := DefaultConfig()
+	config.Store = memory
+	app, httpServer := newTestServer(t, config)
+	c, _ := dialRaw(t, httpServer)
+	c.result(t, "auth", "a1", map[string]any{"scheme": "guest", "user_id": "assistant"})
+	if err := app.Shutdown(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	// A user_id a guest ever had is never a bot's.
+	config = extensionConfig(testExtension{"assistant", func(r *Registrar) error {
+		_, err := r.Bot("assistant", BotOptions{})
+		return err
+	}})
+	config.Store = memory
+	if app, err := Open(config); err == nil {
+		_ = app.Shutdown(context.Background())
+		t.Fatal("a bot took a guest's user_id")
+	}
+}
+
+func TestSessionThatFallsBehindIsForgotten(t *testing.T) {
+	block := make(chan struct{})
+	var host *Host
+	var session *Session
+	app, httpServer := newTestServer(t, extensionConfig(testExtension{"slow", func(r *Registrar) error {
+		host = r.Host
+		bot, err := r.Bot("slow", BotOptions{})
+		if err != nil {
+			return err
+		}
+		session, err = bot.Connect(SessionOptions{OnFrame: func(jsontext.Value) { <-block }})
+		return err
+	}}))
+	defer close(block)
+	c := dialTestClient(t, httpServer)
+	for i := 0; i < sessionFrameQueue+16; i++ {
+		select {
+		case <-session.Done():
+		default:
+			c.write(t, map[string]any{"method": "message", "id": c.nextID("m"), "params": map[string]any{"room_id": "general", "body": map[string]any{"text": "flood"}}})
+			c.read(t)
+			c.read(t)
+			continue
+		}
+		break
+	}
+	select {
+	case <-session.Done():
+	case <-time.After(5 * time.Second):
+		t.Fatal("the session that fell behind was not closed")
+	}
+	if !errors.Is(session.Err(), ErrFellBehind) {
+		t.Fatalf("Err = %v", session.Err())
+	}
+	// Only the bot's own connection is left.
+	app.mu.RLock()
+	_, kept := app.clients[session.c]
+	sessions, connected := app.sessionCount, len(app.users["slow"].clients)
+	app.mu.RUnlock()
+	if kept || sessions != 1 || connected != 1 {
+		t.Fatalf("kept %v, sessions %d, bot connections %d after the session closed", kept, sessions, connected)
+	}
+	_ = host
+}
+
+func TestSessionRefusesReentrantCalls(t *testing.T) {
+	var bot *Bot
+	reentrant := make(chan error, 1)
+	_, _ = newTestServer(t, extensionConfig(testExtension{"loop", func(r *Registrar) error {
+		var err error
+		if bot, err = r.Bot("loop", BotOptions{}); err != nil {
+			return err
+		}
+		// The bot's own message runs this filter, which posts with the
+		// same session: that waits on itself, so it is refused.
+		r.FilterMessage(func(ctx context.Context, d *Draft) error {
+			if d.From.ID == "loop" && d.Text() == "first" {
+				_, err := bot.Post(ctx, "general", "second")
+				reentrant <- err
+			}
+			return nil
+		})
+		return nil
+	}}))
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if _, err := bot.Post(ctx, "general", "first"); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-reentrant; !errors.Is(err, ErrReentrant) {
+		t.Fatalf("re-entrant post = %v, want ErrReentrant", err)
+	}
+}
+
+func TestSlowCommandKeepsItsConnection(t *testing.T) {
+	config := extensionConfig(testExtension{"slow", func(r *Registrar) error {
+		r.Command(Command{Name: "slow", Run: func(ctx context.Context, call *CommandCall) (map[string]any, error) {
+			select {
+			case <-time.After(time.Second):
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+			return map[string]any{"done": true}, nil
+		}})
+		return nil
+	}})
+	config.PingInterval, config.PingTimeout = 100*time.Millisecond, 100*time.Millisecond
+	_, httpServer := newTestServer(t, config)
+	c := dialTestClient(t, httpServer)
+	id := c.nextID("command")
+	c.write(t, map[string]any{"method": "command", "id": id, "params": map[string]any{"body": map[string]any{"text": "/slow"}}})
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	for {
+		// Reading answers the server's pings while the command runs.
+		_, payload, err := c.ws.Read(ctx)
+		if err != nil {
+			t.Fatalf("the connection closed while the command ran: %v", err)
+		}
+		if strings.Contains(string(payload), `"id":"`+id+`"`) {
+			if !strings.Contains(string(payload), `"done":true`) {
+				t.Fatalf("reply = %s", payload)
+			}
+			return
+		}
 	}
 }
 
@@ -297,10 +568,10 @@ func waitMessageEvent(t *testing.T, events chan Event, messageID string) Message
 }
 
 func TestExtensionStreamAppend(t *testing.T) {
-	var bot *Session
-	_, httpServer := newTestServer(t, extensionConfig(testExtension{"streamer", func(h *Host) error {
+	var bot *Bot
+	app, httpServer := newTestServer(t, extensionConfig(testExtension{"streamer", func(r *Registrar) error {
 		var err error
-		bot, err = h.Session(context.Background(), "streamer", SessionOptions{})
+		bot, err = r.Bot("streamer", BotOptions{})
 		return err
 	}}))
 	c := dialTestClient(t, httpServer)
@@ -320,6 +591,9 @@ func TestExtensionStreamAppend(t *testing.T) {
 	if posted["message_id"] != w.MessageID() || len(embedsOf(t, posted)) != 1 {
 		t.Fatalf("posted = %#v", posted)
 	}
+	if embed := embedsOf(t, posted)[0]; !strings.HasPrefix(embed["url"].(string), httpServer.URL+livePath) {
+		t.Fatalf("live url = %v, want this server's", embed["url"])
+	}
 	if err := w.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -328,12 +602,25 @@ func TestExtensionStreamAppend(t *testing.T) {
 	if text, _ := body["text"].(string); !strings.HasPrefix(text, "**Answer:**") || !strings.HasSuffix(text, "hello world") || body["embeds"] != nil {
 		t.Fatalf("final = %#v", final)
 	}
+
+	// Without PublicURL, a live URL never takes the host a client from
+	// elsewhere named.
+	app.mu.Lock()
+	app.seenBaseURL = "http://evil.example"
+	app.unlock()
+	if _, err := bot.StreamAppend(ctx, "general", "x"); err == nil || !strings.Contains(err.Error(), "PublicURL") {
+		t.Fatalf("stream with a foreign host = %v", err)
+	}
 }
 
 func TestExtensionEventsReplayAndKV(t *testing.T) {
 	memory := store.NewMemory()
-	config := extensionConfig(testExtension{"keeper", func(h *Host) error {
-		return h.Store().Put("greeting", map[string]any{"text": "hi"})
+	config := extensionConfig(testExtension{"keeper", func(r *Registrar) error {
+		if err := r.Store().Put("apron:mine", 1); err == nil {
+			return errors.New("an extension took a key of the server's")
+		}
+		r.Follow(func(context.Context, Event) error { return nil })
+		return r.Store().Put("greeting", map[string]any{"text": "hi"})
 	}})
 	config.Store = memory
 	app, httpServer := newTestServer(t, config)
@@ -343,35 +630,64 @@ func TestExtensionEventsReplayAndKV(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	events := make(chan Event, 64)
+	replayed := make(chan Event, 64)
+	followed := make(chan Event, 64)
+	attempts := 0
 	var kept struct{ Text string }
 	var found bool
-	config = extensionConfig(testExtension{"keeper", func(h *Host) error {
+	config = extensionConfig(testExtension{"keeper", func(r *Registrar) error {
 		var err error
-		found, err = h.Store().Get("greeting", &kept)
-		if keys := h.Store().Keys("gree"); !slices.Equal(keys, []string{"greeting"}) {
-			t.Errorf("keys = %v", keys)
+		found, err = r.Store().Get("greeting", &kept)
+		if keys := r.Store().Keys(""); !slices.Equal(keys, []string{"greeting"}) {
+			t.Errorf("keys = %v, want the server's hidden", keys)
 		}
-		h.OnEventFrom(0, func(_ context.Context, e Event) error {
-			events <- e
+		r.OnEventFrom(0, func(_ context.Context, e Event) error {
+			replayed <- e
+			return nil
+		})
+		// Follow takes up after the last event handled before the
+		// restart; an event it can never handle is skipped.
+		r.Follow(func(_ context.Context, e Event) error {
+			if m, ok := DecodeMessage(e); ok && m.Text == "poison" {
+				attempts++
+				return SkipEvent(errors.New("cannot use it"))
+			}
+			followed <- e
 			return nil
 		})
 		return err
 	}})
 	config.Store = memory
-	newTestServer(t, config)
+	_, httpServer = newTestServer(t, config)
 	if !found || kept.Text != "hi" {
 		t.Fatalf("kept = %#v, %v", kept, found)
 	}
-	first := <-events
+	first := <-replayed
 	if first.Kind != EventRoom || !slices.Equal(first.Rooms, []string{"general"}) {
 		t.Fatalf("first event = %#v, want general's creation", first)
 	}
-	waitMessageEvent(t, events, id)
+	waitMessageEvent(t, replayed, id)
+	c = dialTestClient(t, httpServer)
+	save(t, c, "m2", map[string]any{"body": map[string]any{"text": "poison"}})
+	after, _ := save(t, c, "m3", map[string]any{"body": map[string]any{"text": "after"}})
+	for e := range followed {
+		if m, ok := DecodeMessage(e); ok {
+			if m.ID == id {
+				t.Fatal("Follow handled an event from before the restart again")
+			}
+			if m.ID == after {
+				break
+			}
+		}
+	}
+	if attempts != 1 {
+		t.Fatalf("the skipped event was tried %d times", attempts)
+	}
 }
 
 func TestDisableGuests(t *testing.T) {
-	config := DefaultConfig()
+	var host *Host
+	config := extensionConfig(testExtension{"view", func(r *Registrar) error { host = r.Host; return nil }})
 	config.DisableGuests = true
 	_, httpServer := newTestServer(t, config)
 	c, frame := dialRaw(t, httpServer)
@@ -379,17 +695,20 @@ func TestDisableGuests(t *testing.T) {
 		t.Fatalf("auth = %#v, want no guest", auth)
 	}
 	c.expectError(t, "auth", "a1", map[string]any{"scheme": "guest"}, CodeUnsupported)
+	if host.Public("general") {
+		t.Fatal("a room is public on a server without guests")
+	}
 }
 
 func TestExternalSignIn(t *testing.T) {
 	var host *Host
-	_, httpServer := newTestServer(t, extensionConfig(testExtension{"sso", func(h *Host) error {
-		host = h
-		h.ExternalSignIn(func(w http.ResponseWriter, r *http.Request, p ExternalProposal) {
-			http.Redirect(w, r, "/sso/callback?p="+p.ID, http.StatusFound)
+	_, httpServer := newTestServer(t, extensionConfig(testExtension{"sso", func(r *Registrar) error {
+		host = r.Host
+		signIn := r.ExternalSignIn(func(w http.ResponseWriter, req *http.Request, p ExternalProposal) {
+			http.Redirect(w, req, "/sso/callback?p="+p.ID, http.StatusFound)
 		})
-		h.Handle("/sso/callback", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			_ = h.CompleteExternal(w, r, r.URL.Query().Get("p"), Identity{Subject: "idp:1", Name: "Ada", UserID: "ada", Roles: []string{"Staff"}})
+		r.Handle("/sso/callback", http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+			_ = signIn.Complete(w, req, req.URL.Query().Get("p"), Identity{Subject: "idp:1", Name: "Ada", UserID: "ada", Roles: []string{"Staff"}})
 		}))
 		return nil
 	}}))
