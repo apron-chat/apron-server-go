@@ -538,7 +538,7 @@ func userViewOf(u *userState) User {
 	}
 	return User{
 		ID: u.id, Name: u.name, Roles: slices.Clone(u.roles), Account: u.account(), Bot: u.botOf != "",
-		Email: u.email, Created: u.created,
+		Email: u.identities["email"], Created: u.created,
 	}
 }
 

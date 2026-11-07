@@ -7,6 +7,9 @@ import (
 	"maps"
 	"slices"
 	"strings"
+
+	"github.com/apron-chat/apron-server-go/internal/auth/email"
+	"github.com/apron-chat/apron-server-go/internal/authn"
 )
 
 // A server whose sign-in an extension restricts (Registrar.RestrictSignIn)
@@ -63,7 +66,7 @@ func ParsePrincipal(text string) (Principal, error) {
 
 func (p Principal) check() error {
 	switch {
-	case p.kind == "email" && normalizeEmail(p.value) == "":
+	case p.kind == "email" && email.Normalize(p.value) == "":
 		return fmt.Errorf("apron: %q is not an email address", p.value)
 	case p.kind == "external" && p.value == "":
 		return errors.New("apron: an external identity is not empty")
@@ -166,7 +169,15 @@ func (s *Server) admittedLocked(u *userState) bool {
 		return false
 	}
 	allowed := s.allowlist.principals
-	return allowed[UserID(u.id)] || (u.email != "" && allowed[Email(u.email)]) || (u.external != "" && allowed[ExternalID(u.external)])
+	if allowed[UserID(u.id)] {
+		return true
+	}
+	for scheme, subject := range u.identities {
+		if allowed[Principal{scheme, subject}] {
+			return true
+		}
+	}
+	return false
 }
 
 // admitLocked refuses a sign-in to an account the list does not name.
@@ -177,18 +188,10 @@ func (s *Server) admitLocked(u *userState) *Error {
 	return notAdmitted()
 }
 
-// admitsNewLocked reports whether a new account may be made for an email
-// address or an external identity, whichever is set.
-func (s *Server) admitsNewLocked(email, subject string) bool {
-	switch {
-	case s.allowlist == nil:
-		return true
-	case email != "":
-		return s.allowlist.principals[Email(email)]
-	case subject != "":
-		return s.allowlist.principals[ExternalID(subject)]
-	}
-	return false
+// admitsNewLocked reports whether a new account may be made for an
+// identity: one the list names, such as an email address.
+func (s *Server) admitsNewLocked(id authn.Identity) bool {
+	return s.allowlist == nil || s.allowlist.principals[Principal{id.Scheme, id.Subject}]
 }
 
 // checkSignIn checks, once the extensions are started, that someone
@@ -198,7 +201,7 @@ func (s *Server) admitsNewLocked(email, subject string) bool {
 func (s *Server) checkSignIn() error {
 	s.mu.Lock()
 	defer s.unlock()
-	if !s.guestsAllowedLocked() && s.config.WebAuthn == nil && s.config.EmailSender == nil && s.external == nil {
+	if !s.guestsAllowedLocked() && len(s.schemes) == 0 {
 		return errors.New("nobody can sign in: without guests, the server needs passkeys, email sign-in, or an extension's external sign-in")
 	}
 	if s.allowlist != nil {

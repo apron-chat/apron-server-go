@@ -11,7 +11,11 @@ forgets it on restart); see [SERVER.md](SERVER.md#storage).
   `apron` is the server as a Go package, with its extension API; `store`
   its storage backends; `aproncmd` the command as a library, which
   `cmd/aprond` runs; and `examples` servers built with extensions, each
-  with a test that uses `internal/wstest`. See [SERVER.md](SERVER.md).
+  with a test that uses `internal/wstest`. Sign-in schemes live in
+  `internal/auth/{email,passkey,external}`, and depend only on
+  `internal/authn`, the boundary between them and the server: a scheme
+  proves an identity, and the server owns accounts, tokens, proposals, the
+  allowlist, and roles. See [SERVER.md](SERVER.md).
 - [apron-chat/apron-web](https://github.com/apron-chat/apron-web): the
   SvelteKit and TypeScript web client, deployed at `https://web.apron.chat`.
   `.apron-web` is a submodule of it, pinned to the commit the browser tests,

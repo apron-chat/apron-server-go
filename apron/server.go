@@ -26,8 +26,9 @@ import (
 
 	"github.com/coder/websocket"
 	"github.com/go-webauthn/webauthn/webauthn"
-	"golang.org/x/time/rate"
 
+	"github.com/apron-chat/apron-server-go/internal/auth/passkey"
+	"github.com/apron-chat/apron-server-go/internal/authn"
 	"github.com/apron-chat/apron-server-go/store"
 )
 
@@ -446,9 +447,12 @@ type client struct {
 	// by server.mu.
 	user *userState
 	// baseURL prefixes the write, file, and live text URLs this connection mints.
-	baseURL  string
-	origin   string
-	ceremony *passkeyCeremony
+	baseURL string
+	origin  string
+	// authStates are each sign-in scheme's state for the connection, such
+	// as a pending passkey ceremony or a proposal budget. Only the
+	// connection's own auth requests use them, one at a time.
+	authStates map[string]*authn.State
 	// token is the key of the session token the connection last signed in
 	// or resumed with, which a later sign-in forgets. device is the key of
 	// the /invite-device token it signed in with, zero for none; a later
@@ -456,13 +460,11 @@ type client struct {
 	// the connection.
 	token  [32]byte
 	device [32]byte
-	// emailSends limits the email proposals made on the connection,
-	// proposal is its latest one, which may have been dropped since, and
-	// clientKey names its client address for the limits of all its
-	// connections (email.go). Guarded by server.mu.
-	emailSends *rate.Limiter
-	proposal   *emailProposal
-	clientKey  string
+	// proposal is the connection's latest proposal (§4.11.1), which may
+	// have been dropped since, and clientKey names its client address for
+	// the limits of all its connections. Guarded by server.mu.
+	proposal  *proposal
+	clientKey string
 	// idle reports that nobody is attending the connection (§4.5): false
 	// until the connection says otherwise. Guarded by server.mu.
 	idle bool
@@ -544,15 +546,19 @@ type Server struct {
 	storedMeta  storedMeta
 	pushes      map[string]*pushRegistration
 	closed      bool
-	passkeys    map[string]*passkeyUser
-	credentials map[string]*passkeyUser
 	sessions    map[[32]byte]session
 	devices     map[[32]byte]deviceToken
-	// emails maps sign-in addresses to their accounts; email holds the
-	// outstanding codes and budgets, in memory only.
-	emails map[string]*userState
-	email  emailState
-	// mailing tracks email deliveries in progress, which Shutdown awaits.
+	// schemes are the sign-in schemes the server offers (auth.go), in the
+	// order the server frame lists them; accounts are the accounts by the
+	// identities that prove them; proposals are the outstanding proposals
+	// of sign-ins that finish out of band (§4.11), in memory only.
+	schemes   []authn.Scheme
+	accounts  map[authn.Identity]*userState
+	proposals proposals
+	// externalBy names the extension that offers external sign-in.
+	externalBy string
+	// mailing tracks the schemes' work in progress, such as email
+	// deliveries, which Shutdown awaits.
 	mailing sync.WaitGroup
 
 	ops  map[string]operation
@@ -587,10 +593,6 @@ type Server struct {
 	extContext    context.Context
 	extCancel     context.CancelFunc
 	extensionWork sync.WaitGroup
-	// external is the external sign-in provider (§4.11.5), if any, and
-	// identities the accounts it made, by identity.
-	external   *externalSignIn
-	identities map[string]*userState
 	// allowlist is who may sign in, once an extension restricts sign-in
 	// (allowlist.go); nil lets in anyone.
 	allowlist *allowlist
@@ -640,12 +642,10 @@ func Open(config Config) (*Server, error) {
 		uploads:     list.New(),
 		emoji:       make(map[string]*customEmoji),
 		pushes:      make(map[string]*pushRegistration),
-		passkeys:    make(map[string]*passkeyUser),
-		credentials: make(map[string]*passkeyUser),
 		sessions:    make(map[[32]byte]session),
 		devices:     make(map[[32]byte]deviceToken),
-		emails:      make(map[string]*userState),
-		email:       newEmailState(),
+		accounts:    make(map[authn.Identity]*userState),
+		proposals:   proposals{links: make(map[string]*proposal), pages: make(map[string]*proposal)},
 		dirty:       newDirtySet(),
 		storeWrites: make(chan []store.Entry, storeQueue),
 		storeDone:   make(chan struct{}),
@@ -656,7 +656,6 @@ func Open(config Config) (*Server, error) {
 		advertised:     make(map[string]jsontext.Value),
 		extData:        make(map[string]map[string]jsontext.Value),
 		recordsChanged: make(chan struct{}),
-		identities:     make(map[string]*userState),
 		logger:         config.Logger,
 	}
 	if s.logger == nil {
@@ -680,6 +679,14 @@ func Open(config Config) (*Server, error) {
 	s.push.subject = config.VAPIDSubject
 	if s.push.subject == "" && strings.HasPrefix(config.PublicURL, "https://") {
 		s.push.subject = config.PublicURL
+	}
+	// The sign-in schemes are made before the state is restored, which
+	// gives them what they keep with the accounts.
+	if config.WebAuthn != nil {
+		s.addSchemeLocked(passkey.New(config.WebAuthn))
+	}
+	if config.EmailSender != nil {
+		s.addSchemeLocked(emailScheme(config.EmailSender, config.EmailLinkURL))
 	}
 	s.openUploadDir()
 	go s.writeStore()
@@ -742,12 +749,15 @@ func (s *Server) buildHandler(routes []route) (handler http.Handler, err error) 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ws", s.handleWebSocket)
 	mux.HandleFunc("/healthz", s.handleHealth)
-	mux.HandleFunc("/.well-known/webauthn", s.handleRelatedOrigins)
 	mux.HandleFunc(writePath, s.handleWrite)
 	mux.HandleFunc(filePath, s.handleFile)
 	mux.HandleFunc(livePath, s.handleLive)
 	mux.HandleFunc(emojiPath, s.handleEmoji)
-	mux.HandleFunc(externalPath, s.handleExternal)
+	for _, scheme := range s.schemes {
+		if router, ok := scheme.(authn.Router); ok {
+			router.Routes(mux)
+		}
+	}
 	if s.config.StaticDir != "" {
 		root := filepath.Clean(s.config.StaticDir)
 		mux.Handle("/", http.FileServer(staticFS{http.Dir(root)}))
@@ -965,6 +975,19 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 // worker; a client that sends more waits for them.
 const inboundQueue = 64
 
+// clientKey identifies a connection's client for rate limits: its IP, or
+// the /64 of an IPv6 address, which one household or host usually has.
+func clientKey(ip string) string {
+	parsed := net.ParseIP(ip)
+	if parsed == nil {
+		return ip
+	}
+	if v4 := parsed.To4(); v4 != nil {
+		return v4.String()
+	}
+	return parsed.Mask(net.CIDRMask(64, 128)).String() + "/64"
+}
+
 // clientIP is the address of the client that opened a request: with
 // Config.ClientIPHeader, the last entry across every line of that header,
 // which the proxy in front added itself (a client can send earlier ones),
@@ -1022,14 +1045,8 @@ func (s *Server) revealedLocked(c *client) bool {
 // whose URLs start with baseURL, whole when revealed. Callers hold s.mu.
 func (s *Server) serverParams(baseURL string, revealed bool) map[string]any {
 	var authSchemes []string
-	if s.config.WebAuthn != nil {
-		authSchemes = append(authSchemes, "webauthn")
-	}
-	if s.config.EmailSender != nil {
-		authSchemes = append(authSchemes, "email")
-	}
-	if s.external != nil {
-		authSchemes = append(authSchemes, "external")
+	for _, scheme := range s.schemes {
+		authSchemes = append(authSchemes, scheme.Name())
 	}
 	if len(authSchemes) > 0 {
 		authSchemes = append(authSchemes, "token")

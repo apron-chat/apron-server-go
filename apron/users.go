@@ -2,6 +2,7 @@ package apron
 
 import (
 	"cmp"
+	"encoding/json/jsontext"
 	"fmt"
 	"maps"
 	"regexp"
@@ -36,9 +37,12 @@ type userState struct {
 	name   string
 	avatar string
 	ext    extObject
-	// email is the account's sign-in address (§4.11), lowercased; empty for
-	// guests and passkey users without one.
-	email string
+	// identities are what prove the account, by scheme (auth.go): its
+	// email address, its passkeys' user handle, its external sign-in. A
+	// guest has none. records are what each scheme keeps with the account,
+	// such as passkey credentials.
+	identities map[string]string
+	records    map[string]jsontext.Value
 	// roles are the server roles (§3.3) the account holds, sorted; guests
 	// have none. They are derived from Config.Roles, granted, and bot
 	// (grantRolesLocked), and not stored themselves.
@@ -52,9 +56,6 @@ type userState struct {
 	// botOf names the Extension whose bot the account is (Registrar.Bot),
 	// which holds the "bot" role (§3.3.4).
 	botOf string
-	// external is the identity of an account external sign-in made
-	// (§4.11.5), as its provider names it; empty for others.
-	external string
 	// avatarEmbed is the hosted /avatar upload behind avatar, if any.
 	avatarEmbed *embedState
 
@@ -65,9 +66,8 @@ type userState struct {
 	joined  map[string]*roomState
 	// leftAt maps each room the user left, and has not rejoined, to the
 	// log_id of the leave, for room_list's `left` (§4.2.1).
-	leftAt  map[string]int64
-	dedup   dedupCache
-	passkey *passkeyUser
+	leftAt map[string]int64
+	dedup  dedupCache
 	// posts limits the user's new messages, room_set requests, and /avatar
 	// commands to MessagesPerMinute; nil when unlimited.
 	posts *rate.Limiter
@@ -147,7 +147,7 @@ func (u *userState) from() map[string]any {
 // an email address, or an external identity) or is an Extension's bot, so
 // it persists across connections and restarts, rather than being a guest.
 func (u *userState) account() bool {
-	return u.passkey != nil || u.email != "" || u.botOf != "" || u.external != ""
+	return len(u.identities) > 0 || u.botOf != ""
 }
 
 // hasRole reports whether the user holds a server role.
@@ -322,90 +322,6 @@ func (s *Server) claimUserIDLocked(id string) bool {
 // created by clients have numeric IDs; only the seeded room has letters.
 func (s *Server) roomNamedLocked(id string) bool {
 	return s.rooms[id] != nil || strings.EqualFold(id, defaultRoomID)
-}
-
-func (s *Server) authenticate(c *client, req request) (any, *Error) {
-	s.mu.Lock()
-	defer s.unlock()
-	if c.closing.Load() {
-		return nil, connectionClosing()
-	}
-	scheme, err := parseString(req.params, "scheme", true)
-	if err != nil {
-		return nil, err
-	}
-	// A scheme this document defines but the server does not offer is
-	// unsupported (§3.2), whatever else the request holds.
-	switch scheme {
-	case "webauthn":
-		if s.config.WebAuthn == nil {
-			return nil, &Error{Code: CodeUnsupported, Message: "Passkeys are disabled"}
-		}
-	case "email":
-		if s.config.EmailSender == nil {
-			return nil, &Error{Code: CodeUnsupported, Message: "Email sign-in is disabled"}
-		}
-	case "external":
-		if s.external == nil {
-			return nil, &Error{Code: CodeUnsupported, Message: "External sign-in is not offered"}
-		}
-	case "token":
-		if s.config.WebAuthn == nil && s.config.EmailSender == nil && s.external == nil {
-			return nil, &Error{Code: CodeUnsupported, Message: "This server has no sign-in sessions; use guest"}
-		}
-	case "guest":
-		if !s.guestsAllowedLocked() {
-			return nil, &Error{Code: CodeUnsupported, Message: "This server has no guests; sign in with an account"}
-		}
-	default:
-		// A request that depends on a name the server does not know is
-		// invalid_params (§1).
-		return nil, invalidParams("Unknown authentication scheme %q", scheme)
-	}
-	// A user_id is never empty, nor contains whitespace or control
-	// characters (§2.4): requesting one that could be no user_id is
-	// invalid_params, with any scheme. One that could be, but that this
-	// server would not assign, is ignored where the scheme assigns one.
-	if _, has := req.params["user_id"]; has {
-		requested, err := parseString(req.params, "user_id", true)
-		if err != nil {
-			return nil, err
-		}
-		if !validID(requested) {
-			return nil, invalidParams("user_id must not be empty, or contain whitespace or control characters")
-		}
-	}
-	switch scheme {
-	case "webauthn":
-		return s.authenticatePasskey(c, req)
-	case "email":
-		return s.authenticateEmail(c, req)
-	case "token":
-		return s.authenticateToken(c, req)
-	case "external":
-		return s.authenticateExternal(c, req)
-	}
-	name, err := parseString(req.params, "name", false)
-	if err != nil {
-		return nil, err
-	}
-	requested, err := parseString(req.params, "user_id", false)
-	if err != nil {
-		return nil, err
-	}
-	if c.user != nil {
-		// Guest auth on a signed-in connection answers with the identity it
-		// has. It signs the connection in as no other user, so it is no
-		// sign-in and sends nothing after its result (§4.5).
-		result := map[string]any{"you": c.user.you()}
-		c.sendResult(req, result)
-		return result, nil
-	}
-	user := newUserState(s.assignUserIDLocked(requested), normalizeName(name))
-	s.users[user.id] = user
-	s.touchUser(user.id)
-	// A new guest joins the default room, so their room list is not empty.
-	return s.switchUserLocked(c, req, user, nil, true, true), nil
 }
 
 // switchUserLocked replies with user as `you` and extra fields beside it
@@ -707,7 +623,8 @@ func jsonEqual(a, b any) bool {
 }
 
 // grantRolesLocked sets the roles Config.Roles grants an account, by its
-// user_id or email address, and reports whether they changed. Guests hold no
+// user_id or one of its identities (an email address, or scheme:subject),
+// and the roles its sign-in granted, and reports whether they changed. Guests hold no
 // roles, so a granted user_id taken by a guest grants nothing until it is an
 // account; assignUserIDLocked never hands out a granted user_id that was
 // never used.
@@ -716,7 +633,17 @@ func (s *Server) grantRolesLocked(u *userState) bool {
 	if u.account() {
 		for role, holders := range s.config.Roles {
 			if slices.ContainsFunc(holders, func(holder string) bool {
-				return strings.EqualFold(holder, u.id) || (u.email != "" && strings.EqualFold(holder, u.email))
+				if strings.EqualFold(holder, u.id) {
+					return true
+				}
+				// An identity grants by its subject, such as an address,
+				// or as scheme:subject.
+				for scheme, subject := range u.identities {
+					if strings.EqualFold(holder, subject) || strings.EqualFold(holder, scheme+":"+subject) {
+						return true
+					}
+				}
+				return false
 			}) {
 				roles = append(roles, strings.ToLower(role))
 			}

@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/apron-chat/apron-server-go/internal/authn"
 	"github.com/apron-chat/apron-server-go/store"
 )
 
@@ -126,9 +127,8 @@ func TestRestrictedSignInAtStart(t *testing.T) {
 	}
 	app.mu.Lock()
 	ada := newUserState("ada", "Ada")
-	ada.email = "ada@example.com"
-	app.users["ada"], app.emails["ada@example.com"] = ada, ada
-	app.touchUser("ada")
+	app.users["ada"] = ada
+	app.setIdentityLocked(ada, authn.Identity{Scheme: "email", Subject: "ada@example.com"}, nil)
 	key := [32]byte{1}
 	app.sessions[key] = session{user: ada, expires: time.Now().Add(time.Hour)}
 	app.touchSession(key)

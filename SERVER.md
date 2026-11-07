@@ -330,9 +330,11 @@ the latest guest number is roughly how many guests the server has admitted
 Accounts are users who signed in with a passkey, an email address, or an
 extension's external sign-in, and extensions' bots ([Extensions](#extensions));
 they keep their profile, rooms, and push registrations across connections and
-restarts. `--role` grants them roles, such as
-`--role admin=ada --role moderator=bob@example.com`, by `user_id` or email
-address. Roles are sent in current user objects (below), sorted, and are
+restarts. An account has at most one identity of each scheme (an email
+address, its passkeys, an external sign-in), and an identity belongs to one
+account. `--role` grants them roles, such as
+`--role admin=ada --role moderator=bob@example.com`, by `user_id`, email
+address, or `scheme:subject`, such as `external:github:583231`. Roles are sent in current user objects (below), sorted, and are
 shown beside names; `admin` and `moderator` may also remove people from
 rooms, and `admin` may replace and remove any
 [custom emoji](#custom-emoji) and set the server's title, description, and
