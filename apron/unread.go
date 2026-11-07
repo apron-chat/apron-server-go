@@ -78,10 +78,13 @@ func (s *Server) countsLocked(u *userState, r *roomState, m *messageState, now t
 	}
 	info := m.info()
 	switch {
-	case info.deleted, u.roomMuted(r, now):
+	case info.deleted:
 		return false
 	case slices.Contains(info.mentions, u.id):
+		// A mention gets through a room mute.
 		return true
+	case u.roomMuted(r, now):
+		return false
 	case u.joined[r.id] != nil:
 		return true
 	}
