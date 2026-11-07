@@ -1082,9 +1082,9 @@ the valid fields beside an invalid one included:
 - `mute` is the user's: seconds (longer ones are shortened to a year),
   `true` until changed, or `false` for not muted, across
   connections and restarts. Without `room_id` it silences every push;
-  with `room_id` it silences that room and its threads, mentions too,
-  whether or not the user has joined it, and `false` removes the room's
-  mute. Both apply at once. A `dnd` status silences like the mute without
+  with `room_id` it silences that room and its threads but for mentions
+  of the user, as in other chat apps, whether or not the user has joined
+  it, and `false` removes the room's mute. Both apply at once. A `dnd` status silences like the mute without
   `room_id`.
 - Each mute that is set, changed, or cleared is sent to every connection
   of the user, the sender's included, as `status` `{mute}` or `{room_id,
@@ -1155,7 +1155,8 @@ An edit selects only the users it adds to `body.mentions` (scope
 nobody is selected by their own message. A selected user is woken only
 when no connection of theirs is attended ([Status](#status)). Their mute
 without `room_id`, a `dnd` status, and their mute of the room, or of a
-room it is a thread of, each silence every scope. Each live registration
+room it is a thread of, each silence every scope, but a room's mute lets
+`mentions` through. Each live registration
 whose scopes select the message gets the message payload, once, with
 `Urgency: normal` when only `joined` selected it and `high` otherwise.
 What a mute or `dnd` silences, and what no scope of a registration selects, reaches
@@ -1173,7 +1174,7 @@ to the longest prefix that fits, then `body` goes, `from` keeps only
 `unread` is the user's one unread count, the same in every registration's
 pushes: messages by others, not deleted, that arrived in a room after the
 user's read position there, in a room the user has not muted (their own
-mute of it or of a room it is a thread of, which leaves mentions out too),
+mute of it or of a room it is a thread of, unless they mention the user),
 and either mention the user, or are in a joined room, or, in a room they
 have not joined, reply to them. The mute without `room_id` and a `dnd`
 status silence pushes but not the count. In a joined room the

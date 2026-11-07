@@ -398,8 +398,9 @@ func (s *Server) checkPushURL(endpoint string) (string, string) {
 //
 // Each concerned user is woken only when no connection of theirs is
 // attended (§4.5). Their unscoped mute or a dnd status silences every
-// scope, and so does their mute of the room, or of a room it is a thread
-// of; what is silenced reaches them only as a badge push (badgeLocked).
+// scope; their mute of the room, or of a room it is a thread of, every
+// scope but mentions, as in other chat apps. What is silenced reaches them
+// only as a badge push (badgeLocked).
 // Each live registration whose wake scopes select the message gets the
 // payload with its push_id and the user's unread count, with the most
 // urgent Urgency of the scopes that select it.
@@ -445,10 +446,16 @@ func (s *Server) wakeLocked(m *messageState, snapshot, previous map[string]any) 
 	now := time.Now()
 	for _, id := range slices.Sorted(maps.Keys(reasons)) {
 		u := s.users[id]
-		if u == nil || len(u.pushes) == 0 || !r.visibleTo(u) || u.attended() || u.silenced(now) || u.roomMuted(r, now) {
+		if u == nil || len(u.pushes) == 0 || !r.visibleTo(u) || u.attended() || u.silenced(now) {
 			continue
 		}
 		why := reasons[id]
+		if u.roomMuted(r, now) {
+			// A mention gets through a room mute; nothing else does.
+			if why &= wakeMentions; why == 0 {
+				continue
+			}
+		}
 		s.expirePushesLocked(u, now)
 		unread := -1
 		for _, p := range sortedPushes(u) {

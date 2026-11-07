@@ -431,8 +431,8 @@ func checkMute(t *testing.T, frame map[string]any, roomID string, mute any) {
 	}
 }
 
-// Muted users, and those whose status is dnd, get no pushes; nor does a
-// muted room, mentions included (§4.9, §4.5).
+// Muted users, and those whose status is dnd, get no pushes; a muted room
+// wakes only for mentions, as in other chat apps (§4.9, §4.5).
 func TestPushRespectsMutes(t *testing.T) {
 	relay := newTestRelay(t)
 	app, httpServer := pushTestServer(t)
@@ -448,12 +448,15 @@ func TestPushRespectsMutes(t *testing.T) {
 	mention := map[string]any{"body": map[string]any{"text": "@guest_2", "mentions": []any{"guest_2"}}}
 	chatter := map[string]any{"body": map[string]any{"text": "chatter"}}
 
-	// A muted room wakes for nothing, mentions included.
+	// A muted room wakes only for mentions.
 	expectEcho(t, b, map[string]any{"room_id": "general", "mute": true}, "general", true)
 	post(maps.Clone(chatter))
-	post(maps.Clone(mention))
 	if got := relay.pushes(t, app, a); len(got) != 0 {
-		t.Fatalf("muted room woke %d", len(got))
+		t.Fatalf("muted room woke %d for chatter", len(got))
+	}
+	post(maps.Clone(mention))
+	if got := relay.pushes(t, app, a); len(got) != 1 {
+		t.Fatalf("muted room woke %d for a mention", len(got))
 	}
 	expectEcho(t, b, map[string]any{"room_id": "general", "mute": false}, "general", false)
 	post(maps.Clone(chatter))
@@ -486,16 +489,21 @@ func TestPushRespectsMutes(t *testing.T) {
 	}
 
 	// A room's mute covers its threads, and applies to a room the user has
-	// not joined, mentions and replies alike.
+	// not joined: replies are silenced there, mentions still wake.
 	thread, _ := saveRoom(t, a, "thread", map[string]any{"parent_room_id": "general", "title": "Thread"})
 	b.notification(t, "room_update")
 	joinRoom(t, b, thread)
 	expectMembership(t, a, thread, b.userID, true)
 	b.status(t, map[string]any{"room_id": "general", "mute": true})
-	save(t, a, "in-thread", map[string]any{"room_id": thread, "body": map[string]any{"text": "@guest_2", "mentions": []any{"guest_2"}}})
+	save(t, a, "in-thread-chatter", map[string]any{"room_id": thread, "body": map[string]any{"text": "chatter"}})
 	b.notification(t, "message")
 	if got := relay.pushes(t, app, a); len(got) != 0 {
-		t.Fatalf("thread of a muted room woke %d", len(got))
+		t.Fatalf("thread of a muted room woke %d for chatter", len(got))
+	}
+	save(t, a, "in-thread", map[string]any{"room_id": thread, "body": map[string]any{"text": "@guest_2", "mentions": []any{"guest_2"}}})
+	b.notification(t, "message")
+	if got := relay.pushes(t, app, a); len(got) != 1 {
+		t.Fatalf("thread of a muted room woke %d for a mention", len(got))
 	}
 	b.status(t, map[string]any{"room_id": "general", "mute": false})
 	ops, _ := saveRoom(t, a, "ops", map[string]any{"title": "Ops"})
@@ -508,9 +516,12 @@ func TestPushRespectsMutes(t *testing.T) {
 	a.notification(t, "message")
 	b.notification(t, "message")
 	save(t, a, "ops-reply", map[string]any{"room_id": ops, "body": map[string]any{"text": "re"}, "reply_to": map[string]any{"message_id": theirs}})
-	save(t, a, "ops-mention", map[string]any{"room_id": ops, "body": map[string]any{"text": "@guest_2", "mentions": []any{"guest_2"}}})
 	if got := relay.pushes(t, app, a); len(got) != 0 {
-		t.Fatalf("muted unjoined room woke %d", len(got))
+		t.Fatalf("muted unjoined room woke %d for a reply", len(got))
+	}
+	save(t, a, "ops-mention", map[string]any{"room_id": ops, "body": map[string]any{"text": "@guest_2", "mentions": []any{"guest_2"}}})
+	if got := relay.pushes(t, app, a); len(got) != 1 {
+		t.Fatalf("muted unjoined room woke %d for a mention", len(got))
 	}
 	b.status(t, map[string]any{"room_id": ops, "mute": false})
 	save(t, a, "ops-mention-again", map[string]any{"room_id": ops, "body": map[string]any{"text": "@guest_2", "mentions": []any{"guest_2"}}})
@@ -860,12 +871,15 @@ func TestPushUnreadAndBadge(t *testing.T) {
 	b.result(t, "me", "dnd", map[string]any{"status": "dnd"})
 	post(map[string]any{"body": map[string]any{"text": "@guest_2", "mentions": []any{"guest_2"}}})
 	expect(delivery{"/mentions", float64(2), "low", false}, delivery{"/phone", float64(2), "low", false})
-	// A room's mute leaves what it silences out of unread, mentions too.
+	// A room's mute leaves what it silences out of unread, but not mentions,
+	// which still wake.
 	b.result(t, "me", "online", map[string]any{"status": "online"})
 	b.status(t, map[string]any{"room_id": "general", "mute": true})
-	expect(delivery{"/mentions", float64(0), "low", false}, delivery{"/phone", float64(0), "low", false})
-	post(map[string]any{"body": map[string]any{"text": "@guest_2", "mentions": []any{"guest_2"}}})
 	expect()
+	post(map[string]any{"body": map[string]any{"text": "chatter"}})
+	expect()
+	post(map[string]any{"body": map[string]any{"text": "@guest_2", "mentions": []any{"guest_2"}}})
+	expect(delivery{"/mentions", float64(3), "high", true}, delivery{"/phone", float64(3), "low", false})
 }
 
 // Registrations, with their keys, push_id, and scopes, survive a restart,

@@ -399,7 +399,7 @@ func (u *userState) silenced(now time.Time) bool {
 }
 
 // roomMuted reports whether u's own mute of room r, or of a room r is a
-// thread of, is in effect: it silences r, mentions too (§4.5). The
+// thread of, is in effect: it silences r but for mentions of u (§4.5). The
 // unscoped mute applies besides.
 func (u *userState) roomMuted(r *roomState, now time.Time) bool {
 	for room := r; room != nil; room = room.parent {
