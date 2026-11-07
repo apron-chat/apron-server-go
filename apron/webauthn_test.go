@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/apron-chat/apron-server-go/internal/auth/passkey"
 	"github.com/coder/websocket"
 	"github.com/fxamacker/cbor/v2"
 	"github.com/go-webauthn/webauthn/webauthn"
@@ -468,8 +469,8 @@ func TestPasskeyRejectsInvalidProofs(t *testing.T) {
 	options := passkeyResult(t, passkeyCall(t, c, "expire", "login", "begin", nil))
 	app.mu.Lock()
 	for client := range app.clients {
-		if client.ceremony != nil {
-			client.ceremony.expires = time.Now().Add(-time.Second)
+		if state := client.authStates[passkey.Name]; state != nil {
+			passkey.Expire(state)
 		}
 	}
 	app.mu.Unlock()
@@ -498,7 +499,7 @@ func TestPasskeyRejectsInvalidRegistration(t *testing.T) {
 	}
 	app.mu.RLock()
 	defer app.mu.RUnlock()
-	if len(app.passkeys) != 0 || len(app.credentials) != 0 || len(app.sessions) != 0 {
+	if app.schemeLocked(passkey.Name).(*passkey.Scheme).Count() != 0 || len(app.accounts) != 0 || len(app.sessions) != 0 {
 		t.Fatal("failed registration retained an account, credential, or session")
 	}
 }

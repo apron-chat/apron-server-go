@@ -15,6 +15,8 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+
+	"github.com/apron-chat/apron-server-go/internal/auth/email"
 )
 
 // Extension adds features to a Server without forking it: commands, request
@@ -538,7 +540,7 @@ func userViewOf(u *userState) User {
 	}
 	return User{
 		ID: u.id, Name: u.name, Roles: slices.Clone(u.roles), Account: u.account(), Bot: u.botOf != "",
-		Email: u.email, Created: u.created,
+		Email: u.identities[email.Name], Created: u.created,
 	}
 }
 

@@ -131,7 +131,8 @@ Flags (`aprond --help` lists them all):
   back to the connection's own. Set it only behind a proxy that adds that
   header, since clients can send it too; without it, everyone behind the
   proxy shares one client's limits.
-- `--role <role>=<user_id or email>` (repeat for more) grants a role, which
+- `--role <role>=<holder>` (repeat for more), with a `user_id`, an email
+  address, or `scheme:subject`, grants a role, which
   is lowercased, to an account; see [Identity and profiles](#identity-and-profiles).
 - `--email.enable` turns on [email sign-in](#email-sign-in), which is off
   by default. `--email.sender` chooses how its codes are delivered: `smtp`
@@ -227,8 +228,9 @@ backend only keeps entries and applies batches:
 - `memory` keeps them in the process; a new server starts empty.
 
 What survives a restart: rooms and threads with their complete logs, message
-state and reactions, read cursors, accounts (passkey and email users) with
-their credentials, addresses, profiles, memberships, push registrations
+state and reactions, read cursors, accounts (passkey, email, and external
+sign-in users) with their identities, passkey credentials, and the roles
+their external sign-in granted, profiles, memberships, push registrations
 (with their keys, `push_id`, scopes, and when they were last registered),
 when they were made, the status they choose with `me`, when they were last shown `offline`
 (`seen`) and whether they are shown otherwise, so that after a crash those
@@ -246,6 +248,11 @@ even when the count is unchanged. Guests exist only while connected, so at start
 left in the store is retired as if its last connection had just closed,
 logging its leaves; a write that had not finished fails, and its message is
 republished without the embed.
+
+Accounts keep their identities by scheme. Older servers kept an email
+address, passkeys, and an external identity in fields of their own: those
+accounts are converted when they load, and every account is still stored with
+those fields too, so an older server can read what a newer one stored.
 
 ## Connections and liveness
 
@@ -330,9 +337,16 @@ the latest guest number is roughly how many guests the server has admitted
 Accounts are users who signed in with a passkey, an email address, or an
 extension's external sign-in, and extensions' bots ([Extensions](#extensions));
 they keep their profile, rooms, and push registrations across connections and
-restarts. `--role` grants them roles, such as
-`--role admin=ada --role moderator=bob@example.com`, by `user_id` or email
-address. Roles are sent in current user objects (below), sorted, and are
+restarts. An account has at most one identity of each scheme (an email
+address, its passkeys, an external sign-in), and an identity belongs to one
+account. `--role` grants them roles, such as
+`--role admin=ada --role moderator=bob@example.com`. A bare holder names the
+account with that `user_id`, ignoring case, and, when it is an email
+address, the account with that address; any other identity is named only as
+`scheme:subject`, exactly, such as `external:github:583231`, or as
+`email:<address>` or `user:<user_id>`. A holder that names nobody, or a kind
+the server does not know, stops the
+server from starting. Roles are sent in current user objects (below), sorted, and are
 shown beside names; `admin` and `moderator` may also remove people from
 rooms, and `admin` may replace and remove any
 [custom emoji](#custom-emoji) and set the server's title, description, and

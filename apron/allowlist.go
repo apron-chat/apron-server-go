@@ -7,6 +7,11 @@ import (
 	"maps"
 	"slices"
 	"strings"
+
+	"github.com/apron-chat/apron-server-go/internal/auth/email"
+	"github.com/apron-chat/apron-server-go/internal/auth/external"
+	"github.com/apron-chat/apron-server-go/internal/auth/passkey"
+	"github.com/apron-chat/apron-server-go/internal/authn"
 )
 
 // A server whose sign-in an extension restricts (Registrar.RestrictSignIn)
@@ -17,60 +22,108 @@ import (
 // and a device token. Taking an entry off the list signs its accounts out
 // everywhere.
 
-// Principal names who may sign in: an email address, an external sign-in's
-// identity, or an existing account's user_id.
+// Principal names an account, or who may make one: by an identity of a
+// scheme, such as an email address, or by an existing account's user_id.
+// The allowlist and Config.Roles name accounts by principals.
 type Principal struct {
+	// kind is a scheme's name, or principalUser.
 	kind  string
 	value string
 }
 
+// principalUser is the kind of a Principal that names a user_id.
+const principalUser = "user"
+
+// principalKinds are the kinds a Principal may have: the schemes the
+// server knows, and user_ids.
+var principalKinds = []string{email.Name, external.Name, passkey.Name, principalUser}
+
 // Email names whoever proves they hold an email address (§4.11.4), and the
 // account with that address.
 func Email(address string) Principal {
-	return Principal{"email", strings.ToLower(strings.TrimSpace(address))}
+	return Principal{email.Name, strings.ToLower(strings.TrimSpace(address))}
 }
 
 // ExternalID names the identity an external sign-in proves, as
 // Identity.Subject, and the account with it.
-func ExternalID(subject string) Principal { return Principal{"external", subject} }
+func ExternalID(subject string) Principal { return Principal{external.Name, subject} }
 
 // UserID names an existing account by its user_id, ignoring case, as
 // user_ids are unique. It never admits a new account: anyone may request a
 // user_id.
-func UserID(id string) Principal { return Principal{"user", strings.ToLower(id)} }
+func UserID(id string) Principal { return Principal{principalUser, strings.ToLower(id)} }
+
+// principalOf names an identity, as the allowlist and Config.Roles match
+// it.
+func principalOf(id authn.Identity) Principal { return Principal{id.Scheme, id.Subject} }
 
 // String writes the principal as ParsePrincipal reads it: email:<address>,
-// external:<subject>, or user:<user_id>.
+// external:<subject>, webauthn:<user handle>, or user:<user_id>.
 func (p Principal) String() string { return p.kind + ":" + p.value }
 
-// ParsePrincipal reads email:<address>, external:<subject>, or
-// user:<user_id>; text with an @ and no such prefix is an address.
+// ParsePrincipal reads email:<address>, external:<subject>,
+// webauthn:<user handle>, or user:<user_id>; text with an @ and no such
+// prefix is an address.
 func ParsePrincipal(text string) (Principal, error) {
 	text = strings.TrimSpace(text)
-	kind, value, found := strings.Cut(text, ":")
-	switch {
-	case found && kind == "email":
-		return Email(value), Principal.check(Email(value))
-	case found && kind == "external":
-		return ExternalID(value), Principal.check(ExternalID(value))
-	case found && kind == "user":
-		return UserID(value), Principal.check(UserID(value))
-	case strings.Contains(text, "@"):
-		return Email(text), Principal.check(Email(text))
+	if kind, value, found := strings.Cut(text, ":"); found && slices.Contains(principalKinds, kind) {
+		p := newPrincipal(kind, value)
+		return p, p.check()
 	}
-	return Principal{}, fmt.Errorf("apron: %q is not email:<address>, external:<subject>, or user:<user_id>", text)
+	if strings.Contains(text, "@") {
+		p := Email(text)
+		return p, p.check()
+	}
+	return Principal{}, fmt.Errorf("apron: %q is not email:<address>, external:<subject>, webauthn:<user handle>, or user:<user_id>", text)
+}
+
+// newPrincipal names value of a kind, normalized as that kind's are.
+func newPrincipal(kind, value string) Principal {
+	switch kind {
+	case email.Name:
+		return Email(value)
+	case principalUser:
+		return UserID(value)
+	}
+	return Principal{kind, value}
+}
+
+// roleHolder reads a holder of a role in Config.Roles: a principal as
+// ParsePrincipal reads it, or a bare user_id or email address, which names
+// an account by its user_id, and by its address too when it is one.
+func roleHolder(text string) ([]Principal, error) {
+	text = strings.TrimSpace(text)
+	if kind, _, found := strings.Cut(text, ":"); found {
+		// No user_id has a colon, so a holder with one names a kind.
+		if !slices.Contains(principalKinds, kind) {
+			return nil, fmt.Errorf("apron: role holder %q names no kind of %s", text, strings.Join(principalKinds, ", "))
+		}
+		p, err := ParsePrincipal(text)
+		return []Principal{p}, err
+	}
+	var holders []Principal
+	if address := Email(text); address.check() == nil {
+		holders = append(holders, address)
+	}
+	if id := UserID(text); id.check() == nil {
+		holders = append(holders, id)
+	}
+	if holders == nil {
+		return nil, fmt.Errorf("apron: role holder %q is not a user_id, an email address, or kind:subject", text)
+	}
+	return holders, nil
 }
 
 func (p Principal) check() error {
 	switch {
-	case p.kind == "email" && normalizeEmail(p.value) == "":
+	case p.kind == email.Name && email.Normalize(p.value) == "":
 		return fmt.Errorf("apron: %q is not an email address", p.value)
-	case p.kind == "external" && p.value == "":
-		return errors.New("apron: an external identity is not empty")
-	case p.kind == "user" && !validID(p.value):
+	case p.kind == principalUser && !validID(p.value):
 		return fmt.Errorf("apron: %q is not a user_id", p.value)
 	case p.kind == "":
 		return errors.New("apron: the zero Principal names nobody")
+	case p.value == "":
+		return fmt.Errorf("apron: a %s principal is not empty", p.kind)
 	}
 	return nil
 }
@@ -165,8 +218,33 @@ func (s *Server) admittedLocked(u *userState) bool {
 	case !u.account():
 		return false
 	}
+	return s.listedLocked(u)
+}
+
+// admittedWithLocked reports whether an account, a guest's included, may
+// sign in once it has the identity id too: the list names it, or the
+// identity.
+func (s *Server) admittedWithLocked(u *userState, id authn.Identity) bool {
+	switch {
+	case s.allowlist == nil, u.botOf != "":
+		return true
+	}
+	return s.allowlist.principals[principalOf(id)] || s.listedLocked(u)
+}
+
+// listedLocked reports whether the list names an account, by its user_id or
+// an identity.
+func (s *Server) listedLocked(u *userState) bool {
 	allowed := s.allowlist.principals
-	return allowed[UserID(u.id)] || (u.email != "" && allowed[Email(u.email)]) || (u.external != "" && allowed[ExternalID(u.external)])
+	if allowed[UserID(u.id)] {
+		return true
+	}
+	for scheme, subject := range u.identities {
+		if allowed[principalOf(authn.Identity{Scheme: scheme, Subject: subject})] {
+			return true
+		}
+	}
+	return false
 }
 
 // admitLocked refuses a sign-in to an account the list does not name.
@@ -177,29 +255,25 @@ func (s *Server) admitLocked(u *userState) *Error {
 	return notAdmitted()
 }
 
-// admitsNewLocked reports whether a new account may be made for an email
-// address or an external identity, whichever is set.
-func (s *Server) admitsNewLocked(email, subject string) bool {
-	switch {
-	case s.allowlist == nil:
-		return true
-	case email != "":
-		return s.allowlist.principals[Email(email)]
-	case subject != "":
-		return s.allowlist.principals[ExternalID(subject)]
-	}
-	return false
+// admitsNewLocked reports whether a new account may be made for an
+// identity: one the list names, such as an email address.
+func (s *Server) admitsNewLocked(id authn.Identity) bool {
+	return s.allowlist == nil || s.allowlist.principals[principalOf(id)]
 }
 
-// checkSignIn checks, once the extensions are started, that someone
-// can sign in, and signs out the accounts that a restricted sign-in does
+// startSignIn starts sign-in once the extensions are started, and every
+// scheme is added: it checks that someone can sign in, hands the schemes
+// their records, and signs out the accounts that a restricted sign-in does
 // not admit, as when an entry was taken off the list while the server was
 // down: the list is the one the extensions made during Init.
-func (s *Server) checkSignIn() error {
+func (s *Server) startSignIn() error {
 	s.mu.Lock()
 	defer s.unlock()
-	if !s.guestsAllowedLocked() && s.config.WebAuthn == nil && s.config.EmailSender == nil && s.external == nil {
-		return errors.New("nobody can sign in: without guests, the server needs passkeys, email sign-in, or an extension's external sign-in")
+	if err := s.restoreSchemesLocked(); err != nil {
+		return fmt.Errorf("restoring the stored state: %w", err)
+	}
+	if !s.guestsAllowedLocked() && len(s.schemes) == 0 {
+		return errors.New("nobody can sign in: without guests, the server needs a sign-in scheme, such as passkeys, email sign-in, or an extension's external sign-in")
 	}
 	if s.allowlist != nil {
 		for _, u := range s.users {

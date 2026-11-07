@@ -5,6 +5,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/sha256"
+	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"fmt"
 	"io"
@@ -109,7 +110,7 @@ func addAccount(t *testing.T, app *Server, id string, others ...*testClient) *us
 	t.Helper()
 	app.mu.Lock()
 	u := newUserState(id, strings.ToUpper(id[:1])+id[1:])
-	u.passkey = &passkeyUser{user: u}
+	u.identities = map[string]string{"webauthn": id}
 	app.users[u.id] = u
 	app.addMemberLocked(u, app.rooms[defaultRoomID])
 	app.unlock()
@@ -874,7 +875,7 @@ func TestPushAndStatusSurviveRestart(t *testing.T) {
 	memory := store.NewMemory()
 	_, keys := testSubscription(t)
 	if err := memory.Apply([]store.Entry{
-		{Kind: entryUser, ID: "erin", Value: encodeJSON(storedUser{Name: "Erin", Passkey: &storedPasskey{Handle: []byte("h")}})},
+		{Kind: entryUser, ID: "erin", Value: encodeJSON(storedUser{Name: "Erin", Passkey: jsontext.Value(`{"handle":"aA=="}`)})},
 		{Kind: entryUser, ID: "finn", Value: []byte(`{"name":"Finn","passkey":{"handle":"aA=="},"status":"invisible"}`)},
 		{Kind: entryUser, ID: "gail", Value: []byte(`{"name":"Gail","passkey":{"handle":"aQ=="},"status":"away"}`)},
 		{Kind: entryPush, ID: pushKey("erin", "https://relay.example/erin"), Value: encodeJSON(storedPush{User: "erin", Kind: "relay", URL: "https://relay.example/erin", Token: "tok", Wake: defaultWake.names(), Renewed: time.Now()})},
@@ -1172,7 +1173,7 @@ func TestDisabledPushIgnoresStoredRegistrations(t *testing.T) {
 	memory := store.NewMemory()
 	url := "https://relay.example/erin"
 	if err := memory.Apply([]store.Entry{
-		{Kind: entryUser, ID: "erin", Value: encodeJSON(storedUser{Name: "Erin", Passkey: &storedPasskey{Handle: []byte("h")}})},
+		{Kind: entryUser, ID: "erin", Value: encodeJSON(storedUser{Name: "Erin", Passkey: jsontext.Value(`{"handle":"aA=="}`)})},
 		{Kind: entryPush, ID: pushKey("erin", url), Value: encodeJSON(storedPush{User: "erin", Kind: "relay", URL: url, Renewed: time.Now()})},
 	}); err != nil {
 		t.Fatal(err)

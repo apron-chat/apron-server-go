@@ -15,6 +15,8 @@ import (
 
 	"github.com/coder/websocket"
 
+	"github.com/apron-chat/apron-server-go/internal/auth/email"
+	"github.com/apron-chat/apron-server-go/internal/authn"
 	"github.com/apron-chat/apron-server-go/store"
 )
 
@@ -123,14 +125,20 @@ func pendingCode(t *testing.T, app *Server, userID string) string {
 }
 
 // ageSends moves an address's sends back by d, as if time had passed.
-func ageSends(app *Server, email string, d time.Duration) {
-	app.mu.Lock()
-	defer app.mu.Unlock()
-	if state := app.email.addresses[email]; state != nil {
-		for i := range state.sends {
-			state.sends[i] = state.sends[i].Add(-d)
-		}
-	}
+func ageSends(app *Server, address string, d time.Duration) {
+	emailSchemeOf(app).AgeSends(address, d)
+}
+
+// emailSchemeOf is the server's email sign-in.
+func emailSchemeOf(app *Server) *email.Scheme {
+	app.mu.RLock()
+	defer app.mu.RUnlock()
+	return app.schemeLocked(email.Name).(*email.Scheme)
+}
+
+// accountWithEmail is the account an address proves, if any.
+func accountWithEmail(app *Server, address string) *userState {
+	return app.accounts[authn.Identity{Scheme: email.Name, Subject: address}]
 }
 
 // dialFrom connects as a client at ip, for a server that reads
@@ -188,7 +196,7 @@ func TestEmailSignIn(t *testing.T) {
 	proposer.expectError(t, "auth", "invalid", map[string]any{"scheme": "email", "email": "Ada <ada@example.com>"}, CodeInvalidParams)
 	proposer.expectError(t, "auth", "missing", map[string]any{"scheme": "email"}, CodeInvalidParams)
 	// state is a string of at most 256 bytes.
-	proposer.expectError(t, "auth", "long-state", map[string]any{"scheme": "email", "email": "bob@example.com", "state": strings.Repeat("s", maxStateBytes+1)}, CodeTooLarge)
+	proposer.expectError(t, "auth", "long-state", map[string]any{"scheme": "email", "email": "bob@example.com", "state": strings.Repeat("s", 256+1)}, CodeTooLarge)
 	proposer.expectError(t, "auth", "state-type", map[string]any{"scheme": "email", "email": "bob@example.com", "state": 7}, CodeInvalidParams)
 
 	// The code works only on the proposing connection; the link token on
@@ -413,7 +421,7 @@ func TestEmailProposalsEndWithTheirIdentity(t *testing.T) {
 	}
 	c.expectError(t, "auth", "after-switch", map[string]any{"scheme": "email", "token": code}, CodeDenied)
 	app.mu.RLock()
-	added := app.emails["first@example.com"]
+	added := accountWithEmail(app, "first@example.com")
 	app.mu.RUnlock()
 	if added != nil {
 		t.Fatalf("the address was added to %s", added.id)
@@ -445,7 +453,7 @@ func TestEmailAddsToAPasskeyAccount(t *testing.T) {
 	}
 	app.mu.RLock()
 	defer app.mu.RUnlock()
-	if app.emails["owner@example.com"] == nil || app.emails["owner@example.com"].id != ownerID {
+	if owner := accountWithEmail(app, "owner@example.com"); owner == nil || owner.id != ownerID {
 		t.Fatal("the address was not added")
 	}
 }
@@ -463,7 +471,7 @@ func TestEmailProposalsExpireAndAreInvalidated(t *testing.T) {
 	}
 	c.expectError(t, "auth", "old-link", map[string]any{"scheme": "email", "token": linkToken(t, first)}, CodeDenied)
 	// A few wrong tokens invalidate it.
-	for range maxEmailAttempts - 2 {
+	for range maxProposalAttempts - 2 {
 		c.expectError(t, "auth", c.nextID("wrong"), map[string]any{"scheme": "email", "token": "wrong"}, CodeDenied)
 	}
 	c.expectError(t, "auth", "last-wrong", map[string]any{"scheme": "email", "token": "nope"}, CodeDenied)
@@ -480,7 +488,7 @@ func TestEmailProposalsExpireAndAreInvalidated(t *testing.T) {
 	app.mu.Unlock()
 	c.expectError(t, "auth", "expired", map[string]any{"scheme": "email", "token": expired.Code}, CodeDenied)
 	// A connection may propose only a few times.
-	for i := range emailSendsPerConnection - 3 {
+	for i := range proposalsPerConnection - 3 {
 		propose(t, c, fmt.Sprintf("user%d@example.com", i))
 		mailbox.receive(t)
 	}
@@ -539,7 +547,7 @@ func TestEmailProposalsOutliveTheirConnection(t *testing.T) {
 	}
 	// An expired link is denied.
 	app.mu.Lock()
-	for _, p := range app.email.links {
+	for _, p := range app.proposals.links {
 		p.expires = time.Now().Add(-time.Second)
 	}
 	app.mu.Unlock()
@@ -583,7 +591,7 @@ func TestEmailProposalsKeepNoClosedConnection(t *testing.T) {
 		}
 	}
 	app.mu.RLock()
-	links := len(app.email.links)
+	links := len(app.proposals.links)
 	app.mu.RUnlock()
 	if links != 2 {
 		t.Fatalf("%d proposals kept, want 2", links)
@@ -599,7 +607,7 @@ func TestEmailFailedAttemptsCountFromAnyConnection(t *testing.T) {
 	message := mailbox.receive(t)
 	link := linkToken(t, message)
 	wrong := link[:linkHandleBytes] + strings.Repeat("A", len(link)-linkHandleBytes)
-	for i := range maxEmailAttempts - 1 {
+	for i := range maxProposalAttempts - 1 {
 		guesser, _ := dialRaw(t, httpServer)
 		guesser.expectError(t, "auth", fmt.Sprintf("guess-%d", i), map[string]any{"scheme": "email", "token": wrong}, CodeDenied)
 	}
@@ -652,7 +660,7 @@ func TestEmailApprovesWithTheTokenScheme(t *testing.T) {
 	propose(t, third, "carol@example.com")
 	link = linkToken(t, mailbox.receive(t))
 	wrong := link[:linkHandleBytes] + strings.Repeat("A", len(link)-linkHandleBytes)
-	for i := range maxEmailAttempts {
+	for i := range maxProposalAttempts {
 		guesser, _ := dialRaw(t, httpServer)
 		guesser.expectError(t, "auth", fmt.Sprintf("guess-%d", i), map[string]any{"scheme": "token", "token": wrong}, CodeDenied)
 	}
@@ -672,46 +680,36 @@ func TestEmailApprovesWithTheTokenScheme(t *testing.T) {
 // forgets only entries whose limits have lapsed.
 func TestEmailSendLimits(t *testing.T) {
 	app, _, httpServer := emailTestServer(t, func(config *Config) { config.ClientIPHeader = "X-Forwarded-For" })
-	// At most maxEmailSendsPerWindow emails an hour to one address.
-	for i := range maxEmailSendsPerWindow {
+	// At most email.MaxSendsPerWindow emails an hour to one address.
+	for i := range email.MaxSendsPerWindow {
 		propose(t, dialFrom(t, httpServer, fmt.Sprintf("203.0.113.%d", i)), "carol@example.com")
-		ageSends(app, "carol@example.com", emailResendInterval)
+		ageSends(app, "carol@example.com", email.ResendInterval)
 	}
 	dialFrom(t, httpServer, "203.0.113.100").expectError(t, "auth", "capped", map[string]any{"scheme": "email", "email": "carol@example.com"}, CodeRetryAfter)
-	// One client proposes at most clientSendBurst times, across connections.
-	for i := range clientSendBurst {
+	// One client proposes at most email.ClientSendBurst times, across connections.
+	for i := range email.ClientSendBurst {
 		propose(t, dialFrom(t, httpServer, "198.51.100.200"), fmt.Sprintf("c%d@example.com", i))
 	}
 	flooder := dialFrom(t, httpServer, "198.51.100.200")
 	flooder.expectError(t, "auth", "client-sends", map[string]any{"scheme": "email", "email": "d@example.com"}, CodeRetryAfter)
 	// Refused proposals are not tracked.
-	app.mu.Lock()
-	before := len(app.email.addresses)
-	app.mu.Unlock()
+	before, _ := emailSchemeOf(app).Tracked("")
 	for i := range 100 {
 		flooder.call(t, "auth", fmt.Sprintf("refused-%d", i), map[string]any{"scheme": "email", "email": fmt.Sprintf("junk%d@example.com", i)})
 	}
-	app.mu.Lock()
-	after := len(app.email.addresses)
-	app.mu.Unlock()
+	after, _ := emailSchemeOf(app).Tracked("")
 	if after != before {
 		t.Fatalf("refused proposals made %d entries", after-before)
 	}
 
 	// A full table forgets an address whose emails are older than the
 	// window, and refuses when every entry is within it.
-	app.mu.Lock()
-	for i := 0; len(app.email.addresses) < maxTrackedEmailState; i++ {
-		app.email.createAddress(fmt.Sprintf("filler%d@example.com", i), time.Now()).sends = []time.Time{time.Now()}
-	}
-	app.mu.Unlock()
+	emailSchemeOf(app).Fill()
 	dialFrom(t, httpServer, "192.0.2.50").expectError(t, "auth", "full", map[string]any{"scheme": "email", "email": "late@example.com"}, CodeRetryAfter)
 	ageSends(app, "filler0@example.com", time.Hour)
 	propose(t, dialFrom(t, httpServer, "192.0.2.51"), "late@example.com")
-	app.mu.Lock()
-	_, kept := app.email.addresses["filler0@example.com"]
-	_, keptLive := app.email.addresses["filler1@example.com"]
-	app.mu.Unlock()
+	_, kept := emailSchemeOf(app).Tracked("filler0@example.com")
+	_, keptLive := emailSchemeOf(app).Tracked("filler1@example.com")
 	if kept || !keptLive {
 		t.Fatalf("eviction: lapsed kept %v, live kept %v", kept, keptLive)
 	}
@@ -736,7 +734,7 @@ func TestEmailDeliveriesAreBounded(t *testing.T) {
 		config.ClientIPHeader = "X-Forwarded-For"
 	})
 	defer close(mailbox.release)
-	for i := range maxConcurrentEmailSends {
+	for i := range email.MaxConcurrentSends {
 		propose(t, dialFrom(t, httpServer, fmt.Sprintf("198.51.100.%d", i)), fmt.Sprintf("q%d@example.com", i))
 	}
 	dialFrom(t, httpServer, "192.0.2.1").expectError(t, "auth", "busy", map[string]any{"scheme": "email", "email": "busy@example.com"}, CodeRetryAfter)
@@ -794,8 +792,8 @@ func TestNormalizeEmail(t *testing.T) {
 		"ada":                    "",
 		"":                       "",
 	} {
-		if got := normalizeEmail(value); got != want {
-			t.Errorf("normalizeEmail(%q) = %q, want %q", value, got, want)
+		if got := email.Normalize(value); got != want {
+			t.Errorf("email.Normalize(%q) = %q, want %q", value, got, want)
 		}
 	}
 }

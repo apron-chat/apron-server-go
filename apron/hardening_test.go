@@ -13,6 +13,7 @@ import (
 	"golang.org/x/time/rate"
 
 	"github.com/apron-chat/apron-server-go/store"
+	"github.com/go-webauthn/webauthn/webauthn"
 )
 
 // reply sends a request and returns its reply, skipping the notifications
@@ -126,10 +127,16 @@ func TestPasskeyLoginStoresTheSignCounter(t *testing.T) {
 		var counter uint32
 		err := memory.Load(func(e store.Entry) error {
 			var stored storedUser
-			if e.Kind != entryUser || json.Unmarshal(e.Value, &stored) != nil || stored.Passkey == nil {
+			if e.Kind != entryUser || json.Unmarshal(e.Value, &stored) != nil || stored.Records["webauthn"] == nil {
 				return nil
 			}
-			counter = stored.Passkey.Credentials[0].Authenticator.SignCount
+			var record struct {
+				Credentials []webauthn.Credential `json:"credentials"`
+			}
+			if json.Unmarshal(stored.Records["webauthn"], &record) != nil || len(record.Credentials) == 0 {
+				return nil
+			}
+			counter = record.Credentials[0].Authenticator.SignCount
 			return nil
 		})
 		if err != nil {
@@ -189,7 +196,7 @@ func TestSessionsPerAccountAreBounded(t *testing.T) {
 // addAccountLocked adds an account without a connection or rooms.
 func addAccountLocked(app *Server, id string) *userState {
 	u := newUserState(id, id)
-	u.passkey = &passkeyUser{user: u}
+	u.identities = map[string]string{"webauthn": id}
 	app.users[id] = u
 	return u
 }
