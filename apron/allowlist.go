@@ -93,7 +93,11 @@ func newPrincipal(kind, value string) Principal {
 // an account by its user_id, and by its address too when it is one.
 func roleHolder(text string) ([]Principal, error) {
 	text = strings.TrimSpace(text)
-	if kind, _, found := strings.Cut(text, ":"); found && slices.Contains(principalKinds, kind) {
+	if kind, _, found := strings.Cut(text, ":"); found {
+		// No user_id has a colon, so a holder with one names a kind.
+		if !slices.Contains(principalKinds, kind) {
+			return nil, fmt.Errorf("apron: role holder %q names no kind of %s", text, strings.Join(principalKinds, ", "))
+		}
 		p, err := ParsePrincipal(text)
 		return []Principal{p}, err
 	}

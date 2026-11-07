@@ -99,6 +99,9 @@ func (s *Server) pruneSessionsLocked(now time.Time) {
 // (§3.2), signs in with a device token (devices.go), or approves a
 // proposal with its temporary token (§4.11.2). Called holding s.mu.
 func (s *Server) authenticateToken(c *client, req request) (any, *Error) {
+	// Any token auth ends the schemes' pending work on the connection, such
+	// as a passkey ceremony, whether or not it signs in.
+	c.authStates = nil
 	now := time.Now()
 	token, err := parseString(req.params, "token", true)
 	if err != nil {

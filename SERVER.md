@@ -344,7 +344,8 @@ account. `--role` grants them roles, such as
 account with that `user_id`, ignoring case, and, when it is an email
 address, the account with that address; any other identity is named only as
 `scheme:subject`, exactly, such as `external:github:583231`, or as
-`email:<address>` or `user:<user_id>`. A holder that names nobody stops the
+`email:<address>` or `user:<user_id>`. A holder that names nobody, or a kind
+the server does not know, stops the
 server from starting. Roles are sent in current user objects (below), sorted, and are
 shown beside names; `admin` and `moderator` may also remove people from
 rooms, and `admin` may replace and remove any

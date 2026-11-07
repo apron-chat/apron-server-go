@@ -131,10 +131,12 @@ func TestRolesNameHoldersByPrincipal(t *testing.T) {
 		}
 	}
 
-	config.Roles = map[string][]string{"admin": {"not a holder"}}
-	if bad, err := Open(config); err == nil {
-		_ = bad.Shutdown(context.Background())
-		t.Fatal("Open accepted a role holder that names nobody")
+	for _, holder := range []string{"not a holder", "sso:ada", "Email:ada@example.com", "email:", "external:"} {
+		config.Roles = map[string][]string{"admin": {holder}}
+		if bad, err := Open(config); err == nil {
+			_ = bad.Shutdown(context.Background())
+			t.Errorf("Open accepted the role holder %q, which names nobody", holder)
+		}
 	}
 }
 
