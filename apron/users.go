@@ -12,6 +12,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/apron-chat/apron-server-go/internal/authn"
 	"golang.org/x/text/secure/precis"
 	"golang.org/x/time/rate"
 )
@@ -47,9 +48,10 @@ type userState struct {
 	// have none. They are derived from Config.Roles, granted, and bot
 	// (grantRolesLocked), and not stored themselves.
 	roles []string
-	// granted are the roles the account's latest external sign-in granted
-	// it (§4.11.5).
-	granted []string
+	// granted are the roles the account's identities grant it, by scheme,
+	// as of each identity's latest proof (authn.Proof.Roles), such as an
+	// external sign-in's (§4.11.5).
+	granted map[string][]string
 	// created is when the user was made; zero for users stored before it
 	// was kept.
 	created time.Time
@@ -378,6 +380,9 @@ func (s *Server) attachLocked(c *client, user *userState) {
 		s.dropProposalLocked(c.proposal)
 		c.proposal = nil
 	}
+	// So is what the schemes kept for it, such as a pending passkey
+	// ceremony.
+	c.authStates = nil
 	c.user = user
 	user.clients[c] = struct{}{}
 	// The previous identity's departure goes first, then the user's own
@@ -622,33 +627,27 @@ func jsonEqual(a, b any) bool {
 	return left != nil && right != nil && string(left) == string(right)
 }
 
-// grantRolesLocked sets the roles Config.Roles grants an account, by its
-// user_id or one of its identities (an email address, or scheme:subject),
-// and the roles its sign-in granted, and reports whether they changed. Guests hold no
-// roles, so a granted user_id taken by a guest grants nothing until it is an
-// account; assignUserIDLocked never hands out a granted user_id that was
-// never used.
+// grantRolesLocked sets the roles an account holds: those Config.Roles
+// grants it, by its user_id or an identity, those its identities grant it
+// (authn.Proof.Roles), and "bot" for a bot, and reports whether they
+// changed. Guests hold no roles, so a granted user_id taken by a guest
+// grants nothing until it is an account; assignUserIDLocked never hands out
+// a granted user_id that was never used.
 func (s *Server) grantRolesLocked(u *userState) bool {
 	var roles []string
 	if u.account() {
-		for role, holders := range s.config.Roles {
-			if slices.ContainsFunc(holders, func(holder string) bool {
-				if strings.EqualFold(holder, u.id) {
-					return true
-				}
-				// An identity grants by its subject, such as an address,
-				// or as scheme:subject.
-				for scheme, subject := range u.identities {
-					if strings.EqualFold(holder, subject) || strings.EqualFold(holder, scheme+":"+subject) {
-						return true
-					}
-				}
-				return false
-			}) {
-				roles = append(roles, strings.ToLower(role))
+		holders := []Principal{UserID(u.id)}
+		for scheme, subject := range u.identities {
+			holders = append(holders, principalOf(authn.Identity{Scheme: scheme, Subject: subject}))
+		}
+		for role, granted := range s.roleHolders {
+			if slices.ContainsFunc(granted, func(p Principal) bool { return slices.Contains(holders, p) }) {
+				roles = append(roles, role)
 			}
 		}
-		roles = append(roles, u.granted...)
+		for _, granted := range u.granted {
+			roles = append(roles, granted...)
+		}
 		if u.botOf != "" {
 			roles = append(roles, "bot")
 		}

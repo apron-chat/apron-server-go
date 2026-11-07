@@ -48,12 +48,7 @@ func (s *Server) signInLocked(c *client, req request, user *userState, now time.
 	return s.switchUserLocked(c, req, user, map[string]any{"token": token}, signIn, joinDefault), nil
 }
 
-// capSessionsLocked forgets user's sessions beyond maxSessionsPerUser, but
-// never keep, the one just made: the others that expire soonest, which were
-// used least recently, go first. Every sign-in adds a session, so an account
-// signing in again and again in a loop cannot grow the sessions, and the
-// store, without bound.
-// parseRequested parses the name and user_id that an approval may request
+// parseRequested parses the name and user_id that an auth request may request
 // for a new account.
 func parseRequested(req request) (name, requested string, err *Error) {
 	if name, err = parseString(req.params, "name", false); err != nil {
@@ -65,6 +60,11 @@ func parseRequested(req request) (name, requested string, err *Error) {
 	return name, requested, nil
 }
 
+// capSessionsLocked forgets user's sessions beyond maxSessionsPerUser, but
+// never keep, the one just made: the others that expire soonest, which were
+// used least recently, go first. Every sign-in adds a session, so an account
+// signing in again and again in a loop cannot grow the sessions, and the
+// store, without bound.
 func (s *Server) capSessionsLocked(user *userState, keep [32]byte) {
 	var keys [][32]byte
 	for key, session := range s.sessions {

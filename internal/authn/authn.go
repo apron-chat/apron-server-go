@@ -5,11 +5,21 @@
 // allowlist, and roles.
 //
 // A Scheme sees an auth request as a copy (Request), never the server's
-// state, and runs outside the server's lock. It answers with a Result: a
-// Reply that authenticates nothing, such as a WebAuthn challenge or an
-// email proposal's {}; an Approve that presents a proposal's temporary
-// token, which the server checks; or a Proven identity, which the server
-// signs in, adds to the connection's account, or makes an account for.
+// state, and runs outside the server's lock. It answers with a Result:
+//   - a *Reply, which authenticates nothing, such as a WebAuthn challenge;
+//   - an *Approve, which presents a proposal's temporary token, which the
+//     server checks;
+//   - a *SignIn, which signs in to the account of a subject it proved; or
+//   - an *Add, which adds a subject it proved to the connection's account.
+//
+// A scheme proves only subjects: the server names the identity with the
+// scheme's own Name, so no scheme can prove another's identities, and it
+// normalizes what a Proof requests for an account (its name, user_id, and
+// roles) as it does a client's.
+//
+// Lock order: the server calls Proof.Commit holding its own lock, so
+// Commit may take the scheme's locks, and the scheme must never call the
+// server (Conn, Core) while holding a lock that Commit takes.
 package authn
 
 import (
@@ -23,8 +33,9 @@ import (
 	"time"
 )
 
-// Identity is what a scheme proves: who someone is, in the scheme's terms.
-// An account has at most one identity of each scheme.
+// Identity is an account's identity of one scheme: who someone is, in the
+// scheme's terms. An account has at most one identity of each scheme, and
+// an identity at most one account.
 type Identity struct {
 	// Scheme is the auth scheme that proves it, such as "email".
 	Scheme string
@@ -43,23 +54,35 @@ type Account struct {
 	Name   string
 	// Guest is a connection signed in as a guest, which no identity proves.
 	Guest bool
-	// Identities are the account's, by scheme.
+	// Identities are the account's subjects, by scheme.
 	Identities map[string]string
 }
 
 // Scheme proves identities for one auth scheme.
 type Scheme interface {
-	// Name is the scheme, as auth requests and the server frame name it.
+	// Name is the scheme, as auth requests and the server frame name it,
+	// and as its identities' Scheme.
 	Name() string
+	// Label names the scheme's identities in refusals, such as "email
+	// address".
+	Label() string
 	// Auth answers an auth request of the scheme. A refusal is an *Error.
 	Auth(ctx context.Context, r *Request) (Result, error)
 }
 
-// Restorer is a Scheme that keeps data with the accounts it proves, such as
-// passkey credentials: the server stores what Proven.Commit returns with
-// the account, and hands it back at each start.
+// Binder is a Scheme that uses the server outside its auth requests, such
+// as for the pages of its proposals. The server binds it once, as it adds
+// the scheme, before any request.
+type Binder interface {
+	Bind(core Core)
+}
+
+// Restorer is a Scheme that keeps data with the identities it proves, such
+// as passkey credentials: the server stores what Proof.Commit returns with
+// the account, and hands it back once the server's schemes are all added,
+// before any request.
 type Restorer interface {
-	Restore(id Identity, record jsontext.Value) error
+	Restore(subject string, record jsontext.Value) error
 }
 
 // Router is a Scheme that serves HTTP routes, such as a sign-in page.
@@ -69,7 +92,12 @@ type Router interface {
 
 // Request is one auth request, as a scheme sees it.
 type Request struct {
+	// Params are the request's params: a copy.
 	Params map[string]jsontext.Value
+	// Name and UserID are what the request asks for a new account, as the
+	// server keeps them: the name normalized, and the user_id one that
+	// could be a user_id, or empty.
+	Name, UserID string
 	// Account is who the connection is signed in as; nil when it is not.
 	Account *Account
 	// Origin is the connection's Origin header; BaseURL the base of the
@@ -77,14 +105,12 @@ type Request struct {
 	// address, for rate limits.
 	Origin, BaseURL, ClientKey string
 	Now                        time.Time
-	// State is the scheme's per-connection state, such as a pending
-	// WebAuthn ceremony. Only the connection's own requests use it, one at a
-	// time.
+	// State is the scheme's state for the connection, such as a pending
+	// WebAuthn ceremony, which the connection's sign-in to another account
+	// clears. Only the connection's own requests use it, one at a time.
 	State *State
-	// Core is the server's side of sign-in.
-	Core Core
-	// Conn is the server's handle on the connection, for Core.
-	Conn any
+	// Conn is the server's side of the request's connection.
+	Conn Conn
 }
 
 // State holds a scheme's value for one connection.
@@ -96,54 +122,69 @@ func (s *State) Load() any { return s.value }
 // Store sets the value.
 func (s *State) Store(value any) { s.value = value }
 
-// Core is what the server offers schemes.
-type Core interface {
-	// Propose replaces the connection's proposal (§4.11.1) with a new one,
-	// and returns its temporary tokens.
-	Propose(r *Request, p Proposal) (Tokens, error)
-	// Page returns the proposal a sign-in page names, while it waits for
-	// its identity (Complete).
-	Page(page string) (Pending, bool)
-	// Complete gives the proposal a page names the identity an external
-	// provider proved, and returns its temporary tokens.
-	Complete(page string, proven Proven) (Completed, error)
-	// CanProve reports whether proving id on r would sign in or add it:
+// Conn is what the server offers a scheme for one request's connection.
+// Proposals (§4.11.1) are the connection's: a new one replaces any it has,
+// and on a signed-in connection, guests included, a proposal adds its
+// identity to the connection's account rather than signing in with it.
+// The connection's proposals share one budget, whatever their scheme.
+type Conn interface {
+	// ProposeCode proposes what the scheme proved already, such as an
+	// email address, whose temporary tokens prove it once delivered.
+	ProposeCode(p CodeProposal) (Tokens, error)
+	// ProposePage proposes an identity a page will prove, which the scheme
+	// then completes (Core.Complete), and returns the page's name.
+	ProposePage(p PageProposal) (page string, err error)
+	// CanProve reports whether proving subject would sign in or add it:
 	// whether an email code is worth mailing.
-	CanProve(r *Request, id Identity) bool
-	// Go runs fn on its own goroutine, which Shutdown waits for.
-	Go(fn func(ctx context.Context))
-	// NormalizeName prepares a display name as the server keeps names.
-	NormalizeName(name string) string
+	CanProve(subject string) bool
+}
+
+// Core is what the server offers a scheme outside its requests.
+type Core interface {
+	// Page returns the scheme's proposal a page names, while it waits for
+	// its identity.
+	Page(page string) (Pending, bool)
+	// Complete gives the scheme's proposal a page names the identity a
+	// page proved, and returns its temporary tokens. Approving them signs
+	// in with the identity, making an account for one that has none, or
+	// adds it to the proposing account.
+	Complete(page string, proof Proof) (Completed, error)
+	// Go runs fn on its own goroutine, which the server's shutdown waits
+	// for. Once the server is shutting down, it runs nothing and reports
+	// false.
+	Go(fn func(ctx context.Context)) bool
 	// Logger logs for the scheme.
 	Logger() *slog.Logger
 }
 
-// Proposal is a proposal to make (§4.11.1): to sign in, or, on a signed-in
-// connection, to add an identity to its account.
-type Proposal struct {
-	// Proven is what its token proves: an email proposal's address. Nil for
-	// a proposal whose page waits for the identity (Page and Complete).
-	Proven *Proven
-	// Page gives the proposal a page, which names it until Complete.
-	Page bool
-	// State is the client's, returned in the link (§4.11.1); ReturnURL
-	// the client's page that a link opens, which must be on a trusted
-	// origin; Link the server's page that a link opens instead, if any.
-	State, ReturnURL, Link string
-	// Name and UserID are what the client requested for a new account.
-	Name, UserID string
+// CodeProposal is a proposal of what the scheme proved already.
+type CodeProposal struct {
+	// Proof is what approving it proves. Approving a sign-in makes an
+	// account for an identity that has none.
+	Proof Proof
+	// State is the client's, returned in the link (§4.11.1).
+	State string
+	// LinkPage is the server's page that a link opens, empty for no link.
+	LinkPage string
+}
+
+// PageProposal is a proposal of an identity a page will prove.
+type PageProposal struct {
+	// State is the client's, returned in the link (§4.11.1); ReturnURL is
+	// the client's page the link opens, empty for a code to type, which
+	// must be an http or https URL on the connection's origin or the
+	// server's.
+	State, ReturnURL string
 }
 
 // Tokens are a proposal's temporary tokens (§4.11.2).
 type Tokens struct {
 	// Code is the short token to type, which works only on the proposing
-	// connection; empty until the proposal has its identity.
+	// connection.
 	Code string
 	// Link opens the proposal's link page with the long token, which
 	// works on any connection that may approve it; empty without one.
-	Link string
-	// Page names the proposal's page, if it has one.
-	Page    string
+	Link    string
 	Expires time.Time
 	// Add reports a proposal to add an identity to an account.
 	Add bool
@@ -160,55 +201,58 @@ type Pending struct {
 type Completed struct {
 	Tokens
 	// ReturnHost is the host of the client the link returns to; empty
-	// when the code is typed instead.
+	// when the code is typed instead, and then Link is too.
 	ReturnHost string
 }
 
-// Result is a scheme's answer: Reply, Approve, or Proven.
+// Proof is what a scheme proved: one of its subjects.
+type Proof struct {
+	// Subject names the identity within the scheme; never empty.
+	Subject string
+	// Name and UserID suggest a new account's display name and user_id,
+	// for a sign-in that makes one, or a guest's that an Add makes an
+	// account.
+	Name, UserID string
+	// Roles are the server roles the identity grants its account, as of
+	// this proof, replacing those it granted before.
+	Roles []string
+	// Commit, if set, is called once the server has checked the proof and
+	// before it changes anything; it returns the record the server keeps
+	// with the identity (Restorer), nil for none, or refuses. The server
+	// calls it holding its lock, so it must not block.
+	Commit func() (jsontext.Value, error)
+}
+
+// Result is a scheme's answer: *Reply, *Approve, *SignIn, or *Add.
 type Result interface{ result() }
 
 // Reply answers the request with a result, and authenticates nothing.
 type Reply struct{ Result any }
 
 // Approve approves a proposal with its temporary token (§4.11.3).
-type Approve struct {
-	Token string
-	// Name and UserID are what the approval requested for a new account.
-	Name, UserID string
-}
+type Approve struct{ Token string }
 
-// Proven is an identity the scheme proved.
-type Proven struct {
-	Identity Identity
-	// Add adds the identity to the connection's account, a guest's
-	// included, which then is an account; otherwise the connection signs
-	// in to the identity's account.
-	Add bool
+// SignIn signs the connection in to the account of the identity proven.
+type SignIn struct {
+	Proof
 	// Create makes an account for an identity no account has; otherwise
 	// such an identity is refused.
 	Create bool
-	// Name and UserID suggest a new account's display name and user_id.
-	// Name also names a guest that becomes an account by Add.
-	Name, UserID string
-	// Roles, when SetRoles, are the server roles the identity grants its
-	// account, as of this proof.
-	Roles    []string
-	SetRoles bool
-	// Session replies to an Add with a bearer token, as a sign-in does;
-	// otherwise an Add replies {}.
-	Session bool
-	// Label names the identity in refusals, such as "email address".
-	Label string
-	// Commit, if set, is called once the server has checked the identity
-	// and before it changes anything; it returns the record the server
-	// keeps with the account for the scheme (Restorer), nil for none, or
-	// refuses. The server calls it holding its lock, so it must not block.
-	Commit func(userID string) (jsontext.Value, error)
 }
 
-func (Reply) result()   {}
-func (Approve) result() {}
-func (Proven) result()  {}
+// Add adds the identity proven to the connection's account, a guest's
+// included, which then is an account.
+type Add struct {
+	Proof
+	// Session replies with a bearer token, as a sign-in does; otherwise
+	// the reply is {}.
+	Session bool
+}
+
+func (*Reply) result()   {}
+func (*Approve) result() {}
+func (*SignIn) result()  {}
+func (*Add) result()     {}
 
 // Error codes (PROTOCOL.md §1.1), as the server replies them.
 const (

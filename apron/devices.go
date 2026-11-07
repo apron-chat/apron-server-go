@@ -78,7 +78,7 @@ func (s *Server) devicesOfLocked(u *userState) ([][32]byte, []deviceToken) {
 func (s *Server) inviteDeviceCommand(c *client, r *roomState, _ map[string]any, args, _ string) (map[string]any, *Error) {
 	u := c.user
 	if !u.account() {
-		return nil, &Error{Code: CodeDenied, Message: "Sign in with a passkey or email to use /invite-device"}
+		return nil, &Error{Code: CodeDenied, Message: "Sign in with an account to use /invite-device"}
 	}
 	words := strings.Fields(args)
 	if len(words) != 1 {

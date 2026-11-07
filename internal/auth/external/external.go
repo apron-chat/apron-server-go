@@ -13,9 +13,6 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
-	"time"
-
-	"golang.org/x/time/rate"
 
 	"github.com/apron-chat/apron-server-go/internal/authn"
 )
@@ -23,21 +20,21 @@ import (
 // Name is the scheme's name, and its identities'.
 const Name = "external"
 
+// Disabled says why the scheme may be off.
+const Disabled = "External sign-in is not offered"
+
 // Path serves the pages of proposals: /external/<page>.
 const Path = "/external/"
 
-const (
-	// maxStateBytes bounds the state a proposal carries (§4.11.1).
-	maxStateBytes = 256
-	// proposalsPerConnection proposals may be made on one connection at
-	// once, refilled one per proposalRefill.
-	proposalsPerConnection = 5
-	proposalRefill         = 2 * time.Minute
-)
+// maxStateBytes bounds the state a proposal carries (§4.11.1).
+const maxStateBytes = 256
 
 // ErrUnknownProposal is returned by Complete for a proposal that is
 // unknown, expired, or completed.
-var ErrUnknownProposal = errors.New("apron: the sign-in proposal is unknown, expired, or completed")
+var ErrUnknownProposal = errors.New("external: the sign-in proposal is unknown, expired, or completed")
+
+// ErrNoSubject is returned by Complete for an identity without a Subject.
+var ErrNoSubject = errors.New("external: an identity needs a Subject")
 
 // Proposal is a proposal whose page a person opened.
 type Proposal struct {
@@ -60,24 +57,17 @@ func New(start func(w http.ResponseWriter, r *http.Request, p Proposal)) *Scheme
 // Bind gives the scheme the server's side of sign-in.
 func (s *Scheme) Bind(core authn.Core) { s.core = core }
 
-func (*Scheme) Name() string { return Name }
+func (*Scheme) Name() string  { return Name }
+func (*Scheme) Label() string { return "external sign-in" }
 
 // Auth proposes, returning the page to open, or approves with a token.
 func (s *Scheme) Auth(_ context.Context, r *authn.Request) (authn.Result, error) {
-	name, err := authn.String(r.Params, "name", false)
-	if err != nil {
-		return nil, err
-	}
-	requested, err := authn.String(r.Params, "user_id", false)
-	if err != nil {
-		return nil, err
-	}
 	if _, has := r.Params["token"]; has {
 		token, err := authn.String(r.Params, "token", true)
 		if err != nil {
 			return nil, err
 		}
-		return authn.Approve{Token: token, Name: name, UserID: requested}, nil
+		return &authn.Approve{Token: token}, nil
 	}
 	state, err := authn.String(r.Params, "state", false)
 	if err != nil {
@@ -96,22 +86,11 @@ func (s *Scheme) Auth(_ context.Context, r *authn.Request) (authn.Result, error)
 			return nil, authn.InvalidParams("return_url must be an http or https URL")
 		}
 	}
-	limiter, _ := r.State.Load().(*rate.Limiter)
-	if limiter == nil {
-		limiter = rate.NewLimiter(rate.Every(proposalRefill), proposalsPerConnection)
-		r.State.Store(limiter)
-	}
-	reservation := limiter.ReserveN(r.Now, 1)
-	if delay := reservation.DelayFrom(r.Now); delay > 0 {
-		reservation.CancelAt(r.Now)
-		return nil, authn.RetryAfter("Too many sign-ins proposed; try again later", delay)
-	}
-	tokens, proposeErr := r.Core.Propose(r, authn.Proposal{Page: true, State: state, ReturnURL: returnURL, Name: name, UserID: requested})
+	page, proposeErr := r.Conn.ProposePage(authn.PageProposal{State: state, ReturnURL: returnURL})
 	if proposeErr != nil {
-		reservation.CancelAt(r.Now)
 		return nil, proposeErr
 	}
-	return authn.Reply{Result: map[string]any{"url": r.BaseURL + Path + tokens.Page}}, nil
+	return &authn.Reply{Result: map[string]any{"url": r.BaseURL + Path + page}}, nil
 }
 
 // Routes serves the proposals' pages, handing them to the extension.
@@ -135,15 +114,14 @@ func (s *Scheme) Routes(mux *http.ServeMux) {
 // a page that shows the code to type in the client. For a proposal that is
 // no longer open, it answers with a page that says so, and returns
 // ErrUnknownProposal.
-func (s *Scheme) Complete(w http.ResponseWriter, id string, proven authn.Proven) error {
+func (s *Scheme) Complete(w http.ResponseWriter, id string, proof authn.Proof) error {
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Referrer-Policy", "no-referrer")
-	if proven.Identity.Subject == "" {
+	if proof.Subject == "" {
 		render(w, http.StatusInternalServerError, view{Title: "Sign-in failed", Text: "Start again in your app."})
-		return errors.New("apron: an identity needs a Subject")
+		return ErrNoSubject
 	}
-	proven.Identity.Scheme = Name
-	completed, err := s.core.Complete(id, proven)
+	completed, err := s.core.Complete(id, proof)
 	if err != nil {
 		render(w, http.StatusNotFound, view{Title: "This sign-in expired", Text: "Start again in your app."})
 		return ErrUnknownProposal

@@ -35,7 +35,8 @@ type ExternalProposal struct {
 	ReturnHost string
 }
 
-// Identity is who an external sign-in proved someone is.
+// Identity is who an external sign-in proved someone is: the account's
+// identity of the external scheme.
 type Identity struct {
 	// Subject names the identity, uniquely and for good, such as
 	// "github:583231": the same Subject signs in to the same account.
@@ -66,8 +67,10 @@ func (r *Registrar) ExternalSignIn(start func(w http.ResponseWriter, r *http.Req
 		case r.s.schemeLocked(external.Name) != nil:
 			return fmt.Errorf("extension %s offers external sign-in already", r.s.externalBy)
 		}
+		if err := r.s.addSchemeLocked(scheme); err != nil {
+			return err
+		}
 		r.s.externalBy = r.name
-		r.s.addSchemeLocked(scheme)
 		return nil
 	})
 	return &ExternalSignIn{scheme: scheme}
@@ -75,7 +78,7 @@ func (r *Registrar) ExternalSignIn(start func(w http.ResponseWriter, r *http.Req
 
 // ErrUnknownProposal is returned by Complete for a proposal that is
 // unknown, expired, or completed.
-var ErrUnknownProposal = external.ErrUnknownProposal
+var ErrUnknownProposal = errors.New("apron: the sign-in proposal is unknown, expired, or completed")
 
 // Complete completes the proposal named id with the identity the
 // extension proved, and answers the person's browser: with the client's
@@ -84,9 +87,14 @@ var ErrUnknownProposal = external.ErrUnknownProposal
 // client. For a proposal that is no longer open, it answers with a page
 // that says so, and returns ErrUnknownProposal.
 func (x *ExternalSignIn) Complete(w http.ResponseWriter, _ *http.Request, id string, identity Identity) error {
-	return x.scheme.Complete(w, id, authn.Proven{
-		Identity: authn.Identity{Scheme: external.Name, Subject: identity.Subject},
-		Create:   true, Name: identity.Name, UserID: identity.UserID,
-		Roles: normalizeRoles(identity.Roles), SetRoles: true, Label: "external sign-in",
+	err := x.scheme.Complete(w, id, authn.Proof{
+		Subject: identity.Subject, Name: identity.Name, UserID: identity.UserID, Roles: identity.Roles,
 	})
+	switch {
+	case errors.Is(err, external.ErrUnknownProposal):
+		return ErrUnknownProposal
+	case errors.Is(err, external.ErrNoSubject):
+		return errors.New("apron: an external Identity needs a Subject")
+	}
+	return err
 }

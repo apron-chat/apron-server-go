@@ -488,7 +488,7 @@ func TestEmailProposalsExpireAndAreInvalidated(t *testing.T) {
 	app.mu.Unlock()
 	c.expectError(t, "auth", "expired", map[string]any{"scheme": "email", "token": expired.Code}, CodeDenied)
 	// A connection may propose only a few times.
-	for i := range email.SendsPerConnection - 3 {
+	for i := range proposalsPerConnection - 3 {
 		propose(t, c, fmt.Sprintf("user%d@example.com", i))
 		mailbox.receive(t)
 	}

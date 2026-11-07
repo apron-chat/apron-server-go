@@ -14,8 +14,11 @@ forgets it on restart); see [SERVER.md](SERVER.md#storage).
   with a test that uses `internal/wstest`. Sign-in schemes live in
   `internal/auth/{email,passkey,external}`, and depend only on
   `internal/authn`, the boundary between them and the server: a scheme
-  proves an identity, and the server owns accounts, tokens, proposals, the
-  allowlist, and roles. See [SERVER.md](SERVER.md).
+  proves a subject of its own, and the server names the identity, and owns
+  accounts, tokens, proposals, the allowlist, and roles. Adding a scheme
+  takes a package that implements `authn.Scheme`, a line that adds it
+  (`addSchemeLocked`), and, so `--role` and the allowlist can name its
+  identities, its name in `principalKinds`. See [SERVER.md](SERVER.md).
 - [apron-chat/apron-web](https://github.com/apron-chat/apron-web): the
   SvelteKit and TypeScript web client, deployed at `https://web.apron.chat`.
   `.apron-web` is a submodule of it, pinned to the commit the browser tests,
@@ -92,7 +95,7 @@ To try it without sending email, run
 code, and a sign-in link when `--email.link-url` is set, to the server's log.
 Adding an address while signed in as a guest keeps the guest's identity, as
 adding a passkey does; see [SERVER.md](SERVER.md#email-sign-in). `--welcome` sets the text
-the sign-in screen shows, and `--role admin=<user_id or email>` grants a
+the sign-in screen shows, and `--role admin=<user_id, email, or scheme:subject>` grants a
 role, shown as a badge, that may remove people from any room.
 
 To try live text, send `/embed-terminal make test` or `/embed-append Here is

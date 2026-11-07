@@ -258,7 +258,7 @@ func TestInviteDeviceClosesADeviceThatGotASessionToken(t *testing.T) {
 func TestInviteDeviceDeniesGuests(t *testing.T) {
 	_, httpServer := passkeyTestServer(t)
 	guest := dialTestClient(t, httpServer)
-	expectFailure(t, commandError(t, guest, "/invite-device phone"), CodeDenied, "Sign in with a passkey or email to use /invite-device")
+	expectFailure(t, commandError(t, guest, "/invite-device phone"), CodeDenied, "Sign in with an account to use /invite-device")
 	if text := privateReply(t, guest, "/help"); strings.Contains(text, "invite-device") {
 		t.Fatalf("a guest's /help: %q", text)
 	}

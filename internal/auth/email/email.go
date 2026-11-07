@@ -8,9 +8,8 @@ package email
 import (
 	"container/list"
 	"context"
-	"encoding/json/jsontext"
-	"net"
 	"net/mail"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -37,10 +36,6 @@ const (
 	// maxConcurrentSends bounds deliveries in progress; beyond it a
 	// proposal is retry_after.
 	maxConcurrentSends = 16
-	// sendsPerConnection proposals may be made on one connection at once,
-	// refilled one per sendRefill.
-	sendsPerConnection = 5
-	sendRefill         = 2 * time.Minute
 	// sendTimeout bounds one delivery.
 	sendTimeout = 30 * time.Second
 	maxBytes    = 254
@@ -58,14 +53,13 @@ const (
 	ClientSendBurst     = clientSendBurst
 	MaxTrackedAddresses = maxTrackedAddresses
 	MaxConcurrentSends  = maxConcurrentSends
-	SendsPerConnection  = sendsPerConnection
 )
-
-// IdentityLabel names the scheme's identities in refusals.
-const IdentityLabel = "email address"
 
 // Name is the scheme's name, and its identities'.
 const Name = "email"
+
+// Disabled says why the scheme may be off.
+const Disabled = "Email sign-in is disabled"
 
 // Message is one sign-in code to deliver.
 type Message struct {
@@ -87,6 +81,7 @@ type Scheme struct {
 	clientLRU  *list.List
 	// slots holds a token for each delivery in progress.
 	slots chan struct{}
+	core  authn.Core
 }
 
 // New is email sign-in that delivers with deliver, and links to linkPage
@@ -100,7 +95,12 @@ func New(deliver func(ctx context.Context, m Message) error, linkPage string) *S
 	}
 }
 
-func (*Scheme) Name() string { return Name }
+func (*Scheme) Name() string  { return Name }
+func (*Scheme) Label() string { return "email address" }
+
+// Bind gives the scheme the server's side of sign-in, which delivers its
+// emails.
+func (s *Scheme) Bind(core authn.Core) { s.core = core }
 
 // address is what the scheme keeps about one address, in memory only: the
 // proposals accepted for it in the last window, emailed or not, so its
@@ -131,18 +131,14 @@ type clientBudget struct {
 // Auth proposes, mailing a code for the address, or approves with a token
 // (§4.11.3).
 func (s *Scheme) Auth(_ context.Context, r *authn.Request) (authn.Result, error) {
-	name, requested, err := parseRequested(r.Params)
-	if err != nil {
-		return nil, err
-	}
 	if _, has := r.Params["token"]; has {
 		token, err := authn.String(r.Params, "token", true)
 		if err != nil {
 			return nil, err
 		}
-		return authn.Approve{Token: token, Name: name, UserID: requested}, nil
+		return &authn.Approve{Token: token}, nil
 	}
-	return s.propose(r, name, requested)
+	return s.propose(r)
 }
 
 // propose makes a proposal (§4.11.1) and emails its tokens in the
@@ -155,11 +151,13 @@ func (s *Scheme) Auth(_ context.Context, r *authn.Request) (authn.Result, error)
 // sign-in when the address may sign in.
 //
 // Emails to one address are at least resendInterval apart and at most
-// maxSendsPerWindow an hour; a client address and a connection may propose
-// a few; and at most maxConcurrentSends deliveries run at once. Beyond any
-// of these the request is retry_after, whether or not the address has an
-// account.
-func (s *Scheme) propose(r *authn.Request, name, requested string) (authn.Result, error) {
+// maxSendsPerWindow an hour; a client address may propose a few, as may a
+// connection (authn.Conn); and at most maxConcurrentSends deliveries run at
+// once. Beyond any of these the request is retry_after, whether or not the
+// address has an account. A proposal takes its share of each limit as it
+// checks it, under s.mu, and gives it back if the server refuses it, so
+// that proposals made at once are limited as one after another are.
+func (s *Scheme) propose(r *authn.Request) (authn.Result, error) {
 	state, err := authn.String(r.Params, "state", false)
 	if err != nil {
 		return nil, err
@@ -176,92 +174,102 @@ func (s *Scheme) propose(r *authn.Request, name, requested string) (authn.Result
 		return nil, authn.InvalidParams("email must be an email address at a domain name")
 	}
 	now := r.Now
-	busy := authn.RetryAfter("Too many sign-ins in progress; try again shortly", resendInterval)
-	connection, _ := r.State.Load().(*rate.Limiter)
-	if connection == nil {
-		connection = rate.NewLimiter(rate.Every(sendRefill), sendsPerConnection)
-		r.State.Store(connection)
-	}
-	id := authn.Identity{Scheme: Name, Subject: addr}
-	deliver := r.Core.CanProve(r, id)
+	deliver := r.Conn.CanProve(addr)
 
 	s.mu.Lock()
-	a := s.address(addr, now)
-	if a != nil {
-		n := len(a.sends)
-		if wait := a.sends[n-1].Add(resendInterval).Sub(now); wait > 0 {
-			s.mu.Unlock()
-			return nil, authn.RetryAfter("An email was just sent to this address; try again shortly", wait)
-		}
-		if n >= maxSendsPerWindow {
-			s.mu.Unlock()
-			return nil, authn.RetryAfter("Too many emails were sent to this address; try again later", a.sends[0].Add(window).Sub(now))
-		}
-	}
-	budget := s.client(r.ClientKey, now)
-	if budget == nil {
-		s.mu.Unlock()
-		return nil, busy
-	}
-	if delay := wait(budget.sends, now); delay > 0 {
-		s.mu.Unlock()
-		return nil, authn.RetryAfter("Too many sign-ins proposed; try again later", delay)
-	}
-	if delay := wait(connection, now); delay > 0 {
-		s.mu.Unlock()
-		return nil, authn.RetryAfter("Too many sign-ins proposed; try again later", delay)
-	}
-	if a == nil {
-		// The entry is made only for a proposal that is accepted, emailed
-		// or not: one that sends nothing must count the same as one that
-		// does.
-		if a = s.createAddress(addr, now); a == nil {
-			s.mu.Unlock()
-			return nil, busy
-		}
-	}
-	// A slot is taken whether or not the code is mailed, so that the reply
-	// reads the same either way.
-	select {
-	case s.slots <- struct{}{}:
-	default:
-		s.mu.Unlock()
-		return nil, authn.RetryAfter("Too many emails are being sent; try again shortly", resendInterval)
-	}
+	a, client, refusal := s.reserve(addr, r.ClientKey, now)
 	s.mu.Unlock()
-
-	proposal := authn.Proposal{
-		Proven: &authn.Proven{Identity: id, Create: true, Label: IdentityLabel},
-		State:  state, Name: name, UserID: requested,
+	if refusal != nil {
+		return nil, refusal
 	}
+	proposal := authn.CodeProposal{Proof: authn.Proof{Subject: addr}, State: state}
 	if deliver {
-		proposal.Link = s.linkPage
+		proposal.LinkPage = s.linkPage
 	}
-	tokens, proposeErr := r.Core.Propose(r, proposal)
+	tokens, proposeErr := r.Conn.ProposeCode(proposal)
 	if proposeErr != nil {
-		<-s.slots
+		s.mu.Lock()
+		s.release(a, client, now)
+		s.mu.Unlock()
 		return nil, proposeErr
 	}
-	s.mu.Lock()
-	budget.sends.AllowN(now, 1)
-	connection.AllowN(now, 1)
-	a.sends = append(a.sends, now)
-	s.mu.Unlock()
 	if !deliver {
 		<-s.slots
-		return authn.Reply{Result: map[string]any{}}, nil
+		return &authn.Reply{Result: map[string]any{}}, nil
 	}
 	message := Message{To: addr, Code: tokens.Code, Link: tokens.Link, Expires: tokens.Expires, Add: tokens.Add}
-	logger := r.Core.Logger()
-	r.Core.Go(func(context.Context) {
+	logger := s.core.Logger()
+	if !s.core.Go(func(context.Context) {
 		defer func() { <-s.slots }()
 		ctx, cancel := context.WithTimeout(context.Background(), sendTimeout)
 		defer cancel()
 		if err := s.deliver(ctx, message); err != nil {
 			logger.Error("cannot send an email code", "error", err)
 		}
-	})
-	return authn.Reply{Result: map[string]any{}}, nil
+	}) {
+		<-s.slots
+	}
+	return &authn.Reply{Result: map[string]any{}}, nil
+}
+
+// reserve takes a proposal's share of the limits of addr, its client, and
+// the deliveries in progress, or returns why it may not. Called holding
+// s.mu.
+func (s *Scheme) reserve(addr, key string, now time.Time) (*address, *rate.Reservation, *authn.Error) {
+	busy := authn.RetryAfter("Too many sign-ins in progress; try again shortly", resendInterval)
+	a := s.address(addr, now)
+	if a != nil {
+		n := len(a.sends)
+		if wait := a.sends[n-1].Add(resendInterval).Sub(now); wait > 0 {
+			return nil, nil, authn.RetryAfter("An email was just sent to this address; try again shortly", wait)
+		}
+		if n >= maxSendsPerWindow {
+			return nil, nil, authn.RetryAfter("Too many emails were sent to this address; try again later", a.sends[0].Add(window).Sub(now))
+		}
+	}
+	budget := s.client(key, now)
+	if budget == nil {
+		return nil, nil, busy
+	}
+	client := budget.sends.ReserveN(now, 1)
+	if delay := client.DelayFrom(now); delay > 0 {
+		client.CancelAt(now)
+		return nil, nil, authn.RetryAfter("Too many sign-ins proposed; try again later", delay)
+	}
+	// A slot is taken whether or not the code is mailed, so that the reply
+	// reads the same either way.
+	select {
+	case s.slots <- struct{}{}:
+	default:
+		client.CancelAt(now)
+		return nil, nil, authn.RetryAfter("Too many emails are being sent; try again shortly", resendInterval)
+	}
+	if a == nil {
+		// The entry is made only for a proposal that is accepted, emailed
+		// or not: one that sends nothing must count the same as one that
+		// does.
+		if a = s.createAddress(addr, now); a == nil {
+			client.CancelAt(now)
+			<-s.slots
+			return nil, nil, busy
+		}
+	}
+	a.sends = append(a.sends, now)
+	return a, client, nil
+}
+
+// release gives back what reserve took for a proposal the server refused,
+// forgetting an address it leaves with no emails. Called holding s.mu.
+func (s *Scheme) release(a *address, client *rate.Reservation, now time.Time) {
+	client.CancelAt(now)
+	<-s.slots
+	if i := slices.IndexFunc(a.sends, now.Equal); i >= 0 {
+		a.sends = slices.Delete(a.sends, i, i+1)
+	}
+	if len(a.sends) == 0 && s.addresses[a.email] == a {
+		s.addressLRU.Remove(a.element)
+		delete(s.addresses, a.email)
+	}
 }
 
 // address returns the state of an address, pruned, or nil when there is
@@ -341,14 +349,6 @@ func evict(lru *list.List, scan int, forget func(value any) bool) bool {
 	return false
 }
 
-// wait is how long until limiter allows one more event, or 0.
-func wait(limiter *rate.Limiter, now time.Time) time.Duration {
-	reservation := limiter.ReserveN(now, 1)
-	delay := reservation.DelayFrom(now)
-	reservation.CancelAt(now)
-	return delay
-}
-
 // Normalize returns a bare address, lowercased, or "" if value is not one.
 // The domain must be a DNS name with a dot: address literals such as
 // a@[10.0.0.5] and single labels such as a@localhost are refused, so codes
@@ -377,31 +377,6 @@ func Normalize(value string) string {
 		return "" // an IPv4 address, not a domain
 	}
 	return value
-}
-
-// ClientKey identifies a connection's client for rate limits: its IP, or
-// the /64 of an IPv6 address, which one household or host usually has.
-func ClientKey(ip string) string {
-	parsed := net.ParseIP(ip)
-	if parsed == nil {
-		return ip
-	}
-	if v4 := parsed.To4(); v4 != nil {
-		return v4.String()
-	}
-	return parsed.Mask(net.CIDRMask(64, 128)).String() + "/64"
-}
-
-// parseRequested parses the name and user_id that a proposal or an
-// approval may request for a new account.
-func parseRequested(params map[string]jsontext.Value) (name, requested string, err *authn.Error) {
-	if name, err = authn.String(params, "name", false); err != nil {
-		return "", "", err
-	}
-	if requested, err = authn.String(params, "user_id", false); err != nil {
-		return "", "", err
-	}
-	return name, requested, nil
 }
 
 // AgeSends moves an address's emails back by d, for tests.

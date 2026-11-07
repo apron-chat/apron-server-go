@@ -15,6 +15,7 @@ import (
 	"encoding/json/v2"
 	"errors"
 	"net/http"
+	"slices"
 	"sync"
 	"time"
 
@@ -26,6 +27,9 @@ import (
 
 // Name is the scheme's name, and its identities'.
 const Name = "webauthn"
+
+// Disabled says why the scheme may be off.
+const Disabled = "Passkeys are disabled"
 
 const (
 	ceremonyLifetime = 2 * time.Minute
@@ -64,13 +68,14 @@ func New(w *webauthn.WebAuthn) *Scheme {
 	return &Scheme{w: w, byHandle: make(map[string]*holder), byCredential: make(map[string]*holder)}
 }
 
-func (*Scheme) Name() string { return Name }
+func (*Scheme) Name() string  { return Name }
+func (*Scheme) Label() string { return "passkey" }
 
 // Subject names a user handle's identity.
 func Subject(handle []byte) string { return base64.RawURLEncoding.EncodeToString(handle) }
 
 // Restore keeps an account's passkeys, as the server stored them.
-func (s *Scheme) Restore(id authn.Identity, record jsontext.Value) error {
+func (s *Scheme) Restore(_ string, record jsontext.Value) error {
 	var h holder
 	if err := json.Unmarshal(record, &h); err != nil {
 		return err
@@ -200,11 +205,7 @@ func (s *Scheme) begin(r *authn.Request, action string) (authn.Result, error) {
 		// A guest becoming an account may ask for its name with the begin
 		// (§3.2); a passkey added to an account keeps the account's name.
 		if account.Guest {
-			requested, err := authn.String(r.Params, "name", false)
-			if err != nil {
-				return nil, err
-			}
-			c.name = r.Core.NormalizeName(requested)
+			c.name = r.Name
 			if c.name != "" {
 				h.name = c.name
 			}
@@ -239,7 +240,7 @@ func (s *Scheme) begin(r *authn.Request, action string) (authn.Result, error) {
 	c.data.Expires = r.Now.Add(ceremonyLifetime)
 	c.expires = c.data.Expires
 	r.State.Store(c)
-	return authn.Reply{Result: map[string]any{"challenge_id": c.challengeID, "public_key": publicKey}}, nil
+	return &authn.Reply{Result: map[string]any{"challenge_id": c.challengeID, "public_key": publicKey}}, nil
 }
 
 func (s *Scheme) finish(r *authn.Request, action string) (authn.Result, error) {
@@ -295,10 +296,9 @@ func (s *Scheme) finishRegistration(r *authn.Request, c *ceremony) (authn.Result
 	if createErr != nil || credential == nil {
 		return nil, authn.Denied("Passkey verification failed")
 	}
-	return authn.Proven{
-		Identity: authn.Identity{Scheme: Name, Subject: Subject(c.handle)},
-		Add:      true, Session: true, Name: c.name, Label: "passkey",
-		Commit: func(string) (jsontext.Value, error) {
+	return &authn.Add{Session: true, Proof: authn.Proof{
+		Subject: Subject(c.handle), Name: c.name,
+		Commit: func() (jsontext.Value, error) {
 			s.mu.Lock()
 			defer s.mu.Unlock()
 			if s.byCredential[string(credential.ID)] != nil {
@@ -316,12 +316,15 @@ func (s *Scheme) finishRegistration(r *authn.Request, c *ceremony) (authn.Result
 			s.byCredential[string(credential.ID)] = h
 			return json.Marshal(h)
 		},
-	}, nil
+	}}, nil
 }
 
 // finishLogin verifies a passkey, which signs in to its account; Commit
 // keeps its advanced signature counter, which detects a cloned
-// authenticator only if it survives a restart.
+// authenticator only if it survives a restart. Logins are verified against
+// a copy of the credentials, outside any lock, so Commit checks the counter
+// again against the one kept: of two logins with the same counter, as from
+// a clone, or of a later counter committed first, only the first commits.
 func (s *Scheme) finishLogin(r *authn.Request, c *ceremony) (authn.Result, error) {
 	raw, err := parseCredential(r.Params, c.action)
 	if err != nil {
@@ -345,24 +348,27 @@ func (s *Scheme) finishLogin(r *authn.Request, c *ceremony) (authn.Result, error
 	if verifyErr != nil || verified == nil || credential == nil || credential.Authenticator.CloneWarning {
 		return nil, authn.Denied("Passkey verification failed")
 	}
-	return authn.Proven{
-		Identity: authn.Identity{Scheme: Name, Subject: Subject(handle)},
-		Label:    "passkey",
-		Commit: func(string) (jsontext.Value, error) {
+	return &authn.SignIn{Proof: authn.Proof{
+		Subject: Subject(handle),
+		Commit: func() (jsontext.Value, error) {
 			s.mu.Lock()
 			defer s.mu.Unlock()
-			h := s.byHandle[string(handle)]
-			if h == nil {
+			h := s.byCredential[string(credential.ID)]
+			if h == nil || !bytes.Equal(h.Handle, handle) {
 				return nil, authn.Denied("Passkey verification failed")
 			}
-			for i := range h.Credentials {
-				if bytes.Equal(h.Credentials[i].ID, credential.ID) {
-					h.Credentials[i] = *credential
-				}
+			i := slices.IndexFunc(h.Credentials, func(kept webauthn.Credential) bool { return bytes.Equal(kept.ID, credential.ID) })
+			if i < 0 {
+				return nil, authn.Denied("Passkey verification failed")
 			}
+			kept, next := h.Credentials[i].Authenticator.SignCount, credential.Authenticator.SignCount
+			if (kept != 0 || next != 0) && next <= kept {
+				return nil, authn.Denied("Passkey verification failed")
+			}
+			h.Credentials[i] = *credential
 			return json.Marshal(h)
 		},
-	}, nil
+	}}, nil
 }
 
 // Count counts the passkeys the scheme keeps, for tests.

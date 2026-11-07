@@ -14,6 +14,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/apron-chat/apron-server-go/internal/auth/email"
+	"github.com/apron-chat/apron-server-go/internal/auth/external"
 	"github.com/apron-chat/apron-server-go/internal/auth/passkey"
 	"github.com/apron-chat/apron-server-go/internal/authn"
 	"github.com/apron-chat/apron-server-go/store"
@@ -169,12 +171,16 @@ type storedUser struct {
 	Ext         extObject        `json:"ext,omitzero"`
 	AvatarEmbed string           `json:"avatar_embed,omitzero"`
 	LeftAt      map[string]int64 `json:"left_at,omitzero"`
-	// Identities are what prove the account, by scheme, and Records what
-	// each scheme keeps with it (auth.go).
+	// Identities are what prove the account, by scheme; Records what each
+	// scheme keeps with it; and Grants the roles each identity grants it
+	// (auth.go).
 	Identities map[string]string         `json:"identities,omitzero"`
 	Records    map[string]jsontext.Value `json:"records,omitzero"`
-	// Passkey, Email, and External are the identities of an account stored
-	// before identities were kept by scheme, which a restore converts.
+	Grants     map[string][]string       `json:"grants,omitzero"`
+	// Passkey, Email, External, and Granted are the identities, and the
+	// external sign-in's roles, as servers stored them before Identities:
+	// they are stored still, so such a server can read what this one
+	// stored, and read where Identities lacks their scheme.
 	Passkey jsontext.Value `json:"passkey,omitzero"`
 	Email   string         `json:"email,omitzero"`
 	// Status is the chosen status (§4.5.1), absent for online; Seen the
@@ -192,8 +198,7 @@ type storedUser struct {
 	Pings     map[string]int64      `json:"pings,omitzero"`
 	// Created is when the user was made, in Unix milliseconds; absent for
 	// users stored before it was kept. Bot names the Extension whose bot
-	// the account is (Registrar.Bot), and Granted the roles its external
-	// sign-in granted it.
+	// the account is (Registrar.Bot).
 	Created  int64    `json:"created,omitzero"`
 	Bot      string   `json:"bot,omitzero"`
 	External string   `json:"external,omitzero"`
@@ -412,7 +417,9 @@ func storedMessageOf(m *messageState) storedMessage {
 func storedUserOf(u *userState) storedUser {
 	stored := storedUser{
 		Name: u.name, Avatar: u.avatar, Ext: u.ext, LeftAt: u.leftAt, Pings: u.pings, Seen: u.seen, Shown: u.status != statusOffline,
-		Bot: u.botOf, Granted: u.granted, Identities: u.identities, Records: u.records,
+		Bot: u.botOf, Identities: u.identities, Records: u.records, Grants: u.granted,
+		Email: u.identities[email.Name], External: u.identities[external.Name],
+		Passkey: u.records[passkey.Name], Granted: u.granted[external.Name],
 	}
 	if !u.created.IsZero() {
 		stored.Created = u.created.UnixMilli()
@@ -602,7 +609,7 @@ func (s *Server) restoreLocked() (map[string]bool, error) {
 		if stored.Created != 0 {
 			u.created = time.UnixMilli(stored.Created)
 		}
-		u.botOf, u.granted = stored.Bot, stored.Granted
+		u.botOf = stored.Bot
 		if err := s.restoreIdentitiesLocked(u, stored); err != nil {
 			return nil, fmt.Errorf("stored user %q: %w", id, err)
 		}
@@ -813,15 +820,17 @@ func (s *Server) removeStaleUploads(keep map[string]bool) {
 	}
 }
 
-// restoreIdentitiesLocked gives a stored account its identities, and each
-// scheme the server offers what it keeps with them; records of schemes the
-// server no longer offers stay with the account. An account stored with its
-// email address, passkeys, and external identity in fields of their own
-// gets them as identities, and is stored again in the new form.
+// restoreIdentitiesLocked gives a stored account its identities, their
+// records, and the roles they grant; the schemes get the records once they
+// are all added (restoreSchemesLocked). An account stored by a server from
+// before Identities has its email address, passkeys, external identity, and
+// the external sign-in's roles in fields of their own, and is stored again
+// with them as identities.
 func (s *Server) restoreIdentitiesLocked(u *userState, stored storedUser) error {
 	u.identities, u.records = maps.Clone(stored.Identities), maps.Clone(stored.Records)
-	legacy := map[string]string{"email": stored.Email, "external": stored.External}
-	if len(stored.Passkey) > 0 {
+	u.granted = maps.Clone(stored.Grants)
+	legacy := map[string]string{email.Name: stored.Email, external.Name: stored.External}
+	if len(stored.Passkey) > 0 && u.identities[passkey.Name] == "" {
 		var old struct {
 			Handle []byte `json:"handle"`
 		}
@@ -835,7 +844,7 @@ func (s *Server) restoreIdentitiesLocked(u *userState, stored storedUser) error 
 		u.records[passkey.Name] = stored.Passkey
 	}
 	for scheme, subject := range legacy {
-		if subject == "" {
+		if subject == "" || u.identities[scheme] != "" {
 			continue
 		}
 		if u.identities == nil {
@@ -844,14 +853,12 @@ func (s *Server) restoreIdentitiesLocked(u *userState, stored storedUser) error 
 		u.identities[scheme] = subject
 		s.touchUser(u.id)
 	}
+	if len(stored.Granted) > 0 && stored.Grants == nil {
+		u.granted = map[string][]string{external.Name: stored.Granted}
+		s.touchUser(u.id)
+	}
 	for scheme, subject := range u.identities {
-		id := authn.Identity{Scheme: scheme, Subject: subject}
-		s.accounts[id] = u
-		if restorer, ok := s.schemeLocked(scheme).(authn.Restorer); ok && u.records[scheme] != nil {
-			if err := restorer.Restore(id, u.records[scheme]); err != nil {
-				return err
-			}
-		}
+		s.accounts[authn.Identity{Scheme: scheme, Subject: subject}] = u
 	}
 	return nil
 }

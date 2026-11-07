@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/json/jsontext"
 	"encoding/json/v2"
+	"errors"
 	"fmt"
 	"io/fs"
 	"log/slog"
@@ -26,6 +27,7 @@ import (
 
 	"github.com/coder/websocket"
 	"github.com/go-webauthn/webauthn/webauthn"
+	"golang.org/x/time/rate"
 
 	"github.com/apron-chat/apron-server-go/internal/auth/passkey"
 	"github.com/apron-chat/apron-server-go/internal/authn"
@@ -197,7 +199,11 @@ type Config struct {
 	Description string
 	Avatar      string
 	// Roles grants server roles (§3.3), such as "admin", to accounts: each
-	// role lists the user_ids or email addresses that hold it. Roles are
+	// role lists who holds it, as ParsePrincipal reads them, such as
+	// email:ada@example.com or external:github:583231, or by a bare user_id
+	// or email address, which names the account with that user_id, and with
+	// that address when it is one. Open refuses a holder that is none of
+	// these. Roles are
 	// shown beside names; "admin" and "moderator" may also remove others
 	// from rooms (§4.2.2), and "admin" may replace and remove any custom
 	// emoji (ext:emoji) and set the server's title, description, and avatar
@@ -450,9 +456,13 @@ type client struct {
 	baseURL string
 	origin  string
 	// authStates are each sign-in scheme's state for the connection, such
-	// as a pending passkey ceremony or a proposal budget. Only the
-	// connection's own auth requests use them, one at a time.
+	// as a pending passkey ceremony, which a sign-in to another account
+	// clears. Only the connection's own auth requests use them, one at a
+	// time.
 	authStates map[string]*authn.State
+	// proposalBudget limits the proposals made on the connection, of any
+	// scheme (proposalsPerConnection). Guarded by server.mu.
+	proposalBudget *rate.Limiter
 	// token is the key of the session token the connection last signed in
 	// or resumed with, which a later sign-in forgets. device is the key of
 	// the /invite-device token it signed in with, zero for none; a later
@@ -504,8 +514,10 @@ type Server struct {
 	// reissued (§3.3).
 	usedIDs map[string]bool
 	// grantedIDs holds the user_ids Config.Roles names, lowercased, which
-	// are never assigned to a new identity unless already used.
+	// are never assigned to a new identity unless already used; roleHolders
+	// are the principals Config.Roles grants each role, lowercased.
 	grantedIDs  map[string]bool
+	roleHolders map[string][]Principal
 	guestNumber uint64
 	// accountNumber numbers the user_<n> of new email accounts.
 	accountNumber uint64
@@ -557,9 +569,9 @@ type Server struct {
 	proposals proposals
 	// externalBy names the extension that offers external sign-in.
 	externalBy string
-	// mailing tracks the schemes' work in progress, such as email
+	// schemeWork tracks the schemes' work in progress, such as email
 	// deliveries, which Shutdown awaits.
-	mailing sync.WaitGroup
+	schemeWork sync.WaitGroup
 
 	ops  map[string]operation
 	push *pushDeliverer
@@ -637,6 +649,7 @@ func Open(config Config) (*Server, error) {
 		users:       make(map[string]*userState),
 		usedIDs:     make(map[string]bool),
 		grantedIDs:  make(map[string]bool),
+		roleHolders: make(map[string][]Principal),
 		embeds:      make(map[string]*embedState),
 		writes:      make(map[string]*embedState),
 		uploads:     list.New(),
@@ -662,9 +675,22 @@ func Open(config Config) (*Server, error) {
 		s.logger = slog.Default()
 	}
 	s.extContext, s.extCancel = context.WithCancel(context.Background())
-	for _, holders := range config.Roles {
+	for role, holders := range config.Roles {
+		role = strings.ToLower(strings.TrimSpace(role))
+		if role == "" {
+			return fail(errors.New("Config.Roles grants an empty role"))
+		}
 		for _, holder := range holders {
-			s.grantedIDs[strings.ToLower(holder)] = true
+			principals, err := roleHolder(holder)
+			if err != nil {
+				return fail(fmt.Errorf("Config.Roles[%q]: %w", role, err))
+			}
+			for _, p := range principals {
+				if p.kind == principalUser {
+					s.grantedIDs[p.value] = true
+				}
+			}
+			s.roleHolders[role] = append(s.roleHolders[role], principals...)
 		}
 	}
 	s.ops = s.operations()
@@ -680,13 +706,17 @@ func Open(config Config) (*Server, error) {
 	if s.push.subject == "" && strings.HasPrefix(config.PublicURL, "https://") {
 		s.push.subject = config.PublicURL
 	}
-	// The sign-in schemes are made before the state is restored, which
-	// gives them what they keep with the accounts.
+	// The sign-in schemes get what they keep with the accounts once the
+	// extensions have added theirs (startSignIn).
 	if config.WebAuthn != nil {
-		s.addSchemeLocked(passkey.New(config.WebAuthn))
+		if err := s.addSchemeLocked(passkey.New(config.WebAuthn)); err != nil {
+			return fail(err)
+		}
 	}
 	if config.EmailSender != nil {
-		s.addSchemeLocked(emailScheme(config.EmailSender, config.EmailLinkURL))
+		if err := s.addSchemeLocked(emailScheme(config.EmailSender, config.EmailLinkURL)); err != nil {
+			return fail(err)
+		}
 	}
 	s.openUploadDir()
 	go s.writeStore()
@@ -713,7 +743,7 @@ func Open(config Config) (*Server, error) {
 		s.handler, err = s.buildHandler(s.routes)
 	}
 	if err == nil {
-		err = s.checkSignIn()
+		err = s.startSignIn()
 	}
 	if err != nil {
 		// Shutdown stops what the extensions started, and closes the store.
@@ -845,7 +875,7 @@ func (s *Server) Shutdown(ctx context.Context) error {
 		s.connections.Wait()
 		s.badges.Wait()
 		s.push.wait()
-		s.mailing.Wait()
+		s.schemeWork.Wait()
 		// Extensions may keep values as they stop, so the store closes
 		// after them.
 		s.extensionWork.Wait()
