@@ -9,9 +9,8 @@ import (
 // Unread counts (§4.9): one count per user, the same in every push to any of
 // their registrations. A message counts toward a user's unread when it
 // arrived in a room after the user's read position there, is by someone
-// else, is not deleted, is not in a room the user muted (their own mute of
-// it or of a room it is a thread of, which silences mentions too, §4.5),
-// and
+// else, is not deleted, mentions the user or is not in a room the user
+// muted (their own mute of it or of a room it is a thread of, §4.5), and
 //
 //   - mentions the user, or
 //   - is in a joined room, or

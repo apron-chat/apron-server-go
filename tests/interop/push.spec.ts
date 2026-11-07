@@ -428,14 +428,17 @@ test('web push: register, wake rules, VAPID + aes128gcm delivery, service worker
 	await closePreferences(page);
 	await goIdle(page, tap);
 
-	// --- Room mute via raw status: it silences mentions and replies alike (§4.5) ---
+	// --- Room mute via raw status: it silences replies, but a mention still wakes (§4.5) ---
 	await injectStatus(tap, { room_id: 'general', mute: true });
 	await expect.poll(() => tap.received.find((frame) => frame.method === 'status' && frame.params?.room_id === 'general' && frame.params?.mute === true)).toBeTruthy();
 	evidence('room mute echo', tap.received.filter((frame) => frame.method === 'status' && 'room_id' in frame.params).map((f) => f.params));
 	before = capture.posts.length;
 	await user2.request('message', { room_id: 'general', body: { text: 'reply in muted room' }, reply_to: { message_id: ownId } });
-	await user2.request('message', { room_id: 'general', body: { text: `mention in muted room @${user1}`, mentions: [user1] } });
-	await expectNoPost(capture.posts, 'reply and mention in muted room', before);
+	await expectNoPost(capture.posts, 'reply in muted room', before);
+	const mutedMention = await user2.request('message', { room_id: 'general', body: { text: `mention in muted room @${user1}`, mentions: [user1] } });
+	const mutedPush = await pushOf(mutedMention.message_id);
+	expect(mutedPush.payload.message.body.text).toBe(`mention in muted room @${user1}`);
+	evidence('mention through a room mute', mutedPush.payload);
 	await injectStatus(tap, { room_id: 'general', mute: false });
 	await expect.poll(() => tap.received.find((frame) => frame.method === 'status' && frame.params?.room_id === 'general' && frame.params?.mute === false)).toBeTruthy();
 

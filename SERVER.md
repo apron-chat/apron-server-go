@@ -1083,8 +1083,8 @@ the valid fields beside an invalid one included:
   `true` until changed, or `false` for not muted, across
   connections and restarts. Without `room_id` it silences every push;
   with `room_id` it silences that room and its threads but for mentions
-  of the user, as in other chat apps, whether or not the user has joined it, and `false` removes the room's
-  mute. Both apply at once. A `dnd` status silences like the mute without
+  of the user, as in other chat apps, whether or not the user has joined
+  it, and `false` removes the room's mute. Both apply at once. A `dnd` status silences like the mute without
   `room_id`.
 - Each mute that is set, changed, or cleared is sent to every connection
   of the user, the sender's included, as `status` `{mute}` or `{room_id,
