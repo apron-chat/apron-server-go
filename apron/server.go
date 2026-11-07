@@ -959,7 +959,11 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	// which makes auth a barrier (§3.2), by a worker of the connection's
 	// own: the reader goes on reading meanwhile, which keeps the WebSocket's
 	// pings answered while an extension's callback runs. The worker's
-	// requests get a context that the connection's end cancels.
+	// requests get a context that the connection's end cancels. Frames read
+	// before the client closed the connection are still processed, so a
+	// request sent just before closing, such as the push_unregister of a
+	// sign-out, takes effect; only a connection the server closed with an
+	// error drops what is left.
 	ctx, cancel := context.WithCancel(r.Context())
 	frames := make(chan []byte, inboundQueue)
 	worked := make(chan struct{})
@@ -967,7 +971,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		defer close(worked)
 		c.request = ctx
 		for payload := range frames {
-			if ctx.Err() == nil {
+			if !c.closing.Load() {
 				s.processFrame(c, payload)
 			}
 		}
