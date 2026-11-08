@@ -1102,6 +1102,8 @@ func (s *Server) serverParams(baseURL string, revealed bool) map[string]any {
 		// always are, and are not listed.
 		"status": optionalStatuses,
 	}
+	// ext:editors (apron's EXTENSIONS.md) needs no data of its own.
+	params["capabilities"] = append(params["capabilities"].([]string), "ext:editors")
 	ext := make(map[string]any)
 	if emoji := s.emojiExt(baseURL); emoji != nil && revealed {
 		params["capabilities"] = append(params["capabilities"].([]string), "ext:emoji")

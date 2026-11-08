@@ -118,6 +118,7 @@ func (s *Server) saveMessage(c *client, req request) (any, bool, *Error) {
 	}
 	// The extensions' filters see what is saved, outside s.mu, and may
 	// change it or refuse it (Registrar.FilterMessage).
+	sharedFiltered := false
 	if !deleted {
 		draft := &Draft{RoomID: roomID, Body: body, ext: extWrite}
 		if replacing {
@@ -130,6 +131,7 @@ func (s *Server) saveMessage(c *client, req request) (any, bool, *Error) {
 			return nil, false, err
 		}
 		body, extWrite = draft.Body, draft.ext
+		sharedFiltered = draft.shared
 	}
 
 	s.mu.Lock()
@@ -144,13 +146,33 @@ func (s *Server) saveMessage(c *client, req request) (any, bool, *Error) {
 	}
 	from := u.from()
 	var current *messageState
+	// editor is set for a save by a mentioned user of the text that the
+	// sender shares (ext:editors), which changes only body.text.
+	editor := false
 	if replacing {
 		current = s.visibleMessageLocked(u, messageID)
 		if current == nil {
 			return nil, false, invalidParams("Unknown message %q", messageID)
 		}
 		if current.owner != u.id {
-			return nil, false, &Error{Code: CodeDenied, Message: "Only the author may edit, move, or delete this message"}
+			if deleted || !sharesText(current.snapshot(), u.id) {
+				return nil, false, &Error{Code: CodeDenied, Message: "Only the author may edit, move, or delete this message"}
+			}
+			// Live text is still writing into body.text (§4.8.5).
+			if hasLiveAppend(current.snapshot()) {
+				return nil, false, &Error{Code: CodeDenied, Message: "The message's text is still being written"}
+			}
+			// The filters ran before the grant or the mention reached this
+			// user, so they skipped the save: it goes only filtered.
+			if len(s.filters) > 0 && !sharedFiltered {
+				return nil, false, &Error{Code: CodeDenied, Message: "The message changed while it was saved; try again"}
+			}
+			// The save keeps every other field, so it neither moves the
+			// message nor changes what it replies to.
+			editor = true
+			destination = s.rooms[current.roomID]
+			roomID = destination.id
+			hasReply = false
 		}
 		// A move snapshot is logged in both rooms and names both, so a
 		// message may not move to a room that some who see its room cannot
@@ -176,6 +198,18 @@ func (s *Server) saveMessage(c *client, req request) (any, bool, *Error) {
 	if current != nil {
 		previous = current.snapshot()
 	}
+	if editor {
+		body = sharedTextBody(previous, body)
+		// The rest of the body is the sender's: the whole stays a body that
+		// its sender can send back in one frame (ReadLimit).
+		if encodedSize(body) > int(s.config.ReadLimit) {
+			return nil, false, &Error{Code: CodeTooLarge, Message: "The message would be too large to send back"}
+		}
+		if ref, ok := previous["reply_to"].(map[string]any); ok {
+			replyID, hasReply = ref["message_id"].(string)
+		}
+		extWrite = nil
+	}
 	// ext merges into the current snapshot's, and the limit applies to the
 	// result: one over it is too_large and changes nothing (§4.12). A
 	// creation, and a save onto a tombstone, merges into an empty ext, and a
@@ -187,6 +221,13 @@ func (s *Server) saveMessage(c *client, req request) (any, bool, *Error) {
 			kept = extOf(previous["ext"])
 		}
 		ext = mergeExt(kept, extWrite)
+		// ext:editors: edited_by names who saved the snapshot, when not
+		// the sender, and requests do not set it.
+		if editor {
+			ext = withEditedBy(ext, u.id)
+		} else {
+			ext = withEditedBy(ext, "")
+		}
 		if encodedSize(ext) > maxMessageExtBytes {
 			return nil, false, &Error{Code: CodeTooLarge, Message: fmt.Sprintf("The message's ext would be over %d bytes", maxMessageExtBytes)}
 		}
@@ -209,7 +250,9 @@ func (s *Server) saveMessage(c *client, req request) (any, bool, *Error) {
 	// Embeds are resolved last: a new upload, terminal, or append embed
 	// reserves a write.
 	var written []any
-	if body != nil {
+	// An editor's save keeps the embeds as they are stored: it starts no
+	// upload or live text, and releases none (ext:editors).
+	if body != nil && !editor {
 		var embeds []any
 		embeds, written, err = s.resolveEmbedsLocked(c, messageID, previous, body)
 		if err != nil {
