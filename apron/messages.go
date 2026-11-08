@@ -118,6 +118,7 @@ func (s *Server) saveMessage(c *client, req request) (any, bool, *Error) {
 	}
 	// The extensions' filters see what is saved, outside s.mu, and may
 	// change it or refuse it (Registrar.FilterMessage).
+	sharedFiltered := false
 	if !deleted {
 		draft := &Draft{RoomID: roomID, Body: body, ext: extWrite}
 		if replacing {
@@ -130,6 +131,7 @@ func (s *Server) saveMessage(c *client, req request) (any, bool, *Error) {
 			return nil, false, err
 		}
 		body, extWrite = draft.Body, draft.ext
+		sharedFiltered = draft.shared
 	}
 
 	s.mu.Lock()
@@ -159,6 +161,11 @@ func (s *Server) saveMessage(c *client, req request) (any, bool, *Error) {
 			// Live text is still writing into body.text (§4.8.5).
 			if hasLiveAppend(current.snapshot()) {
 				return nil, false, &Error{Code: CodeDenied, Message: "The message's text is still being written"}
+			}
+			// The filters ran before the grant or the mention reached this
+			// user, so they skipped the save: it goes only filtered.
+			if len(s.filters) > 0 && !sharedFiltered {
+				return nil, false, &Error{Code: CodeDenied, Message: "The message changed while it was saved; try again"}
 			}
 			// The save keeps every other field, so it neither moves the
 			// message nor changes what it replies to.
@@ -193,6 +200,11 @@ func (s *Server) saveMessage(c *client, req request) (any, bool, *Error) {
 	}
 	if editor {
 		body = sharedTextBody(previous, body)
+		// The rest of the body is the sender's: the whole stays a body that
+		// its sender can send back in one frame (ReadLimit).
+		if encodedSize(body) > int(s.config.ReadLimit) {
+			return nil, false, &Error{Code: CodeTooLarge, Message: "The message would be too large to send back"}
+		}
 		if ref, ok := previous["reply_to"].(map[string]any); ok {
 			replyID, hasReply = ref["message_id"].(string)
 		}
@@ -238,7 +250,9 @@ func (s *Server) saveMessage(c *client, req request) (any, bool, *Error) {
 	// Embeds are resolved last: a new upload, terminal, or append embed
 	// reserves a write.
 	var written []any
-	if body != nil {
+	// An editor's save keeps the embeds as they are stored: it starts no
+	// upload or live text, and releases none (ext:editors).
+	if body != nil && !editor {
 		var embeds []any
 		embeds, written, err = s.resolveEmbedsLocked(c, messageID, previous, body)
 		if err != nil {

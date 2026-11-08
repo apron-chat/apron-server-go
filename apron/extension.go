@@ -412,6 +412,9 @@ type Draft struct {
 	// filter the extension whose filter runs.
 	ext    extObject
 	filter string
+	// shared is set when the filters ran on a save of the text that the
+	// sender shares with its saver (ext:editors).
+	shared bool
 }
 
 // Text is the body's text.
@@ -483,7 +486,9 @@ func (r *Registrar) FilterMessage(fn func(ctx context.Context, d *Draft) error) 
 // checks what they leave: the body must still be one, and is normalized to
 // decoded JSON. A message to a room its author may not see, or an edit of
 // a message that is not theirs and does not share its text with them
-// (ext:editors), is left to the server to refuse, unfiltered.
+// (ext:editors), is left to the server to refuse, unfiltered. A save of
+// shared text is filtered as it will be saved: in the message's room, with
+// its reply and the rest of its body, and only the request's text.
 func (s *Server) filterMessage(c *client, d *Draft) *Error {
 	s.mu.RLock()
 	filters := s.filters
@@ -492,7 +497,21 @@ func (s *Server) filterMessage(c *client, d *Draft) *Error {
 	allowed := s.visibleRoomLocked(u, d.RoomID) != nil
 	if allowed && d.MessageID != "" {
 		m := s.visibleMessageLocked(u, d.MessageID)
-		allowed = m != nil && (m.owner == u.id || sharesText(m.snapshot(), u.id))
+		switch {
+		case m == nil:
+			allowed = false
+		case m.owner == u.id:
+		case sharesText(m.snapshot(), u.id):
+			snapshot := m.snapshot()
+			d.RoomID, d.ReplyTo, d.ext = m.roomID, "", nil
+			if ref, ok := snapshot["reply_to"].(map[string]any); ok {
+				d.ReplyTo, _ = ref["message_id"].(string)
+			}
+			d.Body = sharedTextBody(snapshot, d.Body)
+			d.shared = len(filters) > 0
+		default:
+			allowed = false
+		}
 	}
 	s.mu.RUnlock()
 	if len(filters) == 0 || !allowed {

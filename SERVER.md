@@ -825,10 +825,14 @@ a message whose current snapshot has `ext.editors` `{"body.text":
 Such a save takes only `body.text` from the request; the room, the rest of
 the body, `reply_to`, and `ext` stay as they were, and the snapshot's
 `ext.editors.edited_by` is the saver's `user_id`. It may not delete the
-message, nor save it while its live append text is still writing; either is
+message, nor save it while it has an `append` embed (§4.8.5), nor make it
+larger than a client frame (`ReadLimit`, `too_large`); either of the first two is
 `denied`, as is a save by anyone else. The server removes `edited_by` from
 the sender's saves, and from what any request writes. Extensions'
-message filters see such a save, as they see the sender's.
+message filters see such a save as it will be saved: in the message's room,
+with its reply and the rest of its body. A save that the filters skipped
+because the grant or the mention arrived meanwhile is `denied`, to be sent
+again.
 
 ## Commands
 

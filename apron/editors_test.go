@@ -1,7 +1,10 @@
 package apron
 
 import (
+	"context"
 	"fmt"
+	"strings"
+	"sync"
 	"reflect"
 	"testing"
 )
@@ -91,4 +94,70 @@ func TestEditorsShareText(t *testing.T) {
 		quiet()
 		bob.expectError(t, "message", fmt.Sprint("bob-after-revoke-", i), map[string]any{"message_id": id, "room_id": "general", "body": map[string]any{"text": "open"}}, CodeDenied)
 	}
+}
+
+// Filters see a save of shared text as it will be saved: in the message's
+// room, with its reply and the rest of its body, whatever room the request
+// names. A message with an append embed is refused to its editors.
+func TestEditorsFilteredAsSaved(t *testing.T) {
+	var mu sync.Mutex
+	var seen []string
+	_, httpServer := newTestServer(t, extensionConfig(testExtension{"guard", func(r *Registrar) error {
+		r.FilterMessage(func(_ context.Context, d *Draft) error {
+			mu.Lock()
+			seen = append(seen, fmt.Sprint(d.RoomID, "|", d.ReplyTo, "|", d.Body["format"]))
+			mu.Unlock()
+			if d.RoomID == "general" && strings.Contains(d.Text(), "spam") {
+				return Denied("No spam in general")
+			}
+			return nil
+		})
+		return nil
+	}}))
+	clients := dialGroup(t, httpServer, 2)
+	alice, bob := clients[0], clients[1]
+	quiet := func() {
+		t.Helper()
+		alice.drain(t)
+		bob.drain(t)
+	}
+	other, _ := saveRoom(t, alice, "room", map[string]any{"title": "Elsewhere"})
+	quiet()
+	_, target := save(t, alice, "target", map[string]any{"body": map[string]any{"text": "lunch?"}})
+	id, _ := save(t, alice, "create", map[string]any{
+		"reply_to": map[string]any{"message_id": target["message_id"]},
+		"body":     map[string]any{"text": "- [ ] soup", "format": "markdown", "mentions": []any{bob.userID}},
+		"ext":      map[string]any{"editors": map[string]any{"body.text": "mentioned"}},
+	})
+	quiet()
+	mu.Lock()
+	seen = nil
+	mu.Unlock()
+
+	// Naming another room doesn't take the save past a filter of the
+	// message's own room.
+	bob.expectError(t, "message", "elsewhere", map[string]any{"message_id": id, "room_id": other, "body": map[string]any{"text": "spam"}}, CodeDenied)
+	mu.Lock()
+	want := fmt.Sprint("general|", target["message_id"], "|markdown")
+	if len(seen) != 1 || seen[0] != want {
+		t.Fatalf("filter saw %q, want %q", seen, want)
+	}
+	mu.Unlock()
+	// And a save there lands in the message's room.
+	_, saved := save(t, bob, "fine", map[string]any{"message_id": id, "body": map[string]any{"text": "- [x] soup"}})
+	if saved["room_id"] != "general" {
+		t.Fatalf("saved in %v", saved["room_id"])
+	}
+	quiet()
+
+	// A message with an append embed is its sender's while its text may
+	// still be written.
+	_, result := alice.request(t, "message", "append", map[string]any{
+		"room_id": "general",
+		"body":    map[string]any{"text": "plan:", "mentions": []any{bob.userID}, "embeds": []any{map[string]any{"kind": "append"}}},
+		"ext":     map[string]any{"editors": map[string]any{"body.text": "mentioned"}},
+	})
+	appended := result["message_id"].(string)
+	quiet()
+	bob.expectError(t, "message", "append-save", map[string]any{"message_id": appended, "room_id": "general", "body": map[string]any{"text": "mine"}}, CodeDenied)
 }
