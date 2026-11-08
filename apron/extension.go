@@ -482,7 +482,8 @@ func (r *Registrar) FilterMessage(fn func(ctx context.Context, d *Draft) error) 
 // filterMessage runs the filters on a message c saves, outside s.mu, and
 // checks what they leave: the body must still be one, and is normalized to
 // decoded JSON. A message to a room its author may not see, or an edit of
-// a message that is not theirs, is left to the server to refuse, unfiltered.
+// a message that is not theirs and does not share its text with them
+// (ext:editors), is left to the server to refuse, unfiltered.
 func (s *Server) filterMessage(c *client, d *Draft) *Error {
 	s.mu.RLock()
 	filters := s.filters
@@ -491,7 +492,7 @@ func (s *Server) filterMessage(c *client, d *Draft) *Error {
 	allowed := s.visibleRoomLocked(u, d.RoomID) != nil
 	if allowed && d.MessageID != "" {
 		m := s.visibleMessageLocked(u, d.MessageID)
-		allowed = m != nil && m.owner == u.id
+		allowed = m != nil && (m.owner == u.id || sharesText(m.snapshot(), u.id))
 	}
 	s.mu.RUnlock()
 	if len(filters) == 0 || !allowed {

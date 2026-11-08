@@ -144,13 +144,28 @@ func (s *Server) saveMessage(c *client, req request) (any, bool, *Error) {
 	}
 	from := u.from()
 	var current *messageState
+	// editor is set for a save by a mentioned user of the text that the
+	// sender shares (ext:editors), which changes only body.text.
+	editor := false
 	if replacing {
 		current = s.visibleMessageLocked(u, messageID)
 		if current == nil {
 			return nil, false, invalidParams("Unknown message %q", messageID)
 		}
 		if current.owner != u.id {
-			return nil, false, &Error{Code: CodeDenied, Message: "Only the author may edit, move, or delete this message"}
+			if deleted || !sharesText(current.snapshot(), u.id) {
+				return nil, false, &Error{Code: CodeDenied, Message: "Only the author may edit, move, or delete this message"}
+			}
+			// Live text is still writing into body.text (§4.8.5).
+			if hasLiveAppend(current.snapshot()) {
+				return nil, false, &Error{Code: CodeDenied, Message: "The message's text is still being written"}
+			}
+			// The save keeps every other field, so it neither moves the
+			// message nor changes what it replies to.
+			editor = true
+			destination = s.rooms[current.roomID]
+			roomID = destination.id
+			hasReply = false
 		}
 		// A move snapshot is logged in both rooms and names both, so a
 		// message may not move to a room that some who see its room cannot
@@ -176,6 +191,13 @@ func (s *Server) saveMessage(c *client, req request) (any, bool, *Error) {
 	if current != nil {
 		previous = current.snapshot()
 	}
+	if editor {
+		body = sharedTextBody(previous, body)
+		if ref, ok := previous["reply_to"].(map[string]any); ok {
+			replyID, hasReply = ref["message_id"].(string)
+		}
+		extWrite = nil
+	}
 	// ext merges into the current snapshot's, and the limit applies to the
 	// result: one over it is too_large and changes nothing (§4.12). A
 	// creation, and a save onto a tombstone, merges into an empty ext, and a
@@ -187,6 +209,13 @@ func (s *Server) saveMessage(c *client, req request) (any, bool, *Error) {
 			kept = extOf(previous["ext"])
 		}
 		ext = mergeExt(kept, extWrite)
+		// ext:editors: edited_by names who saved the snapshot, when not
+		// the sender, and requests do not set it.
+		if editor {
+			ext = withEditedBy(ext, u.id)
+		} else {
+			ext = withEditedBy(ext, "")
+		}
 		if encodedSize(ext) > maxMessageExtBytes {
 			return nil, false, &Error{Code: CodeTooLarge, Message: fmt.Sprintf("The message's ext would be over %d bytes", maxMessageExtBytes)}
 		}
