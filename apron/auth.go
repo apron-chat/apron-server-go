@@ -371,6 +371,13 @@ func (s *Server) addProvenLocked(c *client, req request, scheme authn.Scheme, pr
 	case !s.admittedWithLocked(account, id):
 		return nil, notAdmitted()
 	}
+	if _, manages := scheme.(authn.Credentials); manages && account.identities[id.Scheme] != "" && s.config.ReauthToAddCredential {
+		// Another passkey for an account that has one: a stolen session
+		// token must not add a way back in.
+		if err := s.reauthenticatedLocked(c); err != nil {
+			return nil, err
+		}
+	}
 	record, err := commit(proof)
 	if err != nil {
 		return nil, err
@@ -392,11 +399,17 @@ func (s *Server) addProvenLocked(c *client, req request, scheme authn.Scheme, pr
 		if changed {
 			s.notifyProfileLocked(account, c, nil)
 		}
-		return s.signInLocked(c, req, account, time.Now(), false, false)
+		now := time.Now()
+		result, err := s.signInLocked(c, req, account, now, false, false)
+		if err == nil {
+			s.provedLocked(c, scheme, proof, now)
+		}
+		return result, err
 	}
 	if changed {
 		s.notifyProfileLocked(account, nil, nil)
 	}
+	s.provedLocked(c, scheme, proof, time.Now())
 	result := map[string]any{}
 	c.sendResult(req, result)
 	return result, nil
@@ -432,7 +445,11 @@ func (s *Server) signInProvenLocked(c *client, req request, scheme authn.Scheme,
 		s.grantRolesLocked(user)
 		// A new account joins the default room, as a new guest does,
 		// after the result (§3.2.2).
-		return s.signInLocked(c, req, user, now, true, true)
+		result, err := s.signInLocked(c, req, user, now, true, true)
+		if err == nil {
+			s.provedLocked(c, scheme, proof, now)
+		}
+		return result, err
 	}
 	if err := s.admitLocked(owner); err != nil {
 		return nil, err
@@ -448,8 +465,12 @@ func (s *Server) signInProvenLocked(c *client, req request, scheme authn.Scheme,
 		s.notifyProfileLocked(owner, nil, nil)
 	}
 	// Signing in again as the user the connection is signed in as changes
-	// no user: it is no sign-in (§4.5).
-	return s.signInLocked(c, req, owner, now, c.user != owner, false)
+	// no user: it is no sign-in (§4.5), but it is a reauthentication.
+	result, err := s.signInLocked(c, req, owner, now, c.user != owner, false)
+	if err == nil {
+		s.provedLocked(c, scheme, proof, now)
+	}
+	return result, err
 }
 
 // setIdentityLocked gives an account an identity, with its scheme's record

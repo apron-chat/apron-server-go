@@ -150,6 +150,8 @@ Flags (`aprond --help` lists them all):
   configure passkeys; `--webauthn.rp-id ''` disables them. The origins are
   also served at `/.well-known/webauthn`, so a frontend on another domain
   can use passkeys; see [Passkeys](#passkeys).
+  `--webauthn.reauth-to-add` makes adding a passkey to an account that has
+  one need a recent passkey sign-in; see [Managing passkeys](#managing-passkeys).
 - `--upload.dir <directory>` holds uploaded files, by default
   `aprond/uploads` in the user data directory. At start the server removes
   files named `*.upload` there that the store does not refer to, and nothing
@@ -1413,8 +1415,47 @@ that would expire soonest, those used least recently.
 Passkey users, their credentials, and unexpired tokens are kept in the store,
 so they survive a restart with the default SQLite store; with `--store memory`
 a restart invalidates them, including passkeys still present in your
-authenticator. Credential removal is future work; an account with an
-address recovers through [email sign-in](#email-sign-in).
+authenticator. An account that lost every passkey recovers through
+[email sign-in](#email-sign-in) if it has an address.
+
+### Managing passkeys
+
+With passkeys on, the `server` frame of a signed-in connection lists
+capability `ext:account`, whose methods let an account manage how it signs
+in:
+
+- `account.credentials` lists its passkeys as `credentials: [{scheme, id,
+  name?, created?, last_used?, current?}]`, `id` being the credential ID in
+  base64url, and `current` marking the one this connection signed in with,
+  or whose session token it resumed. `reauthenticated_until` (Unix
+  milliseconds) is present while the connection may make the changes
+  below that need a recent sign-in.
+- `account.credential_rename` `{id, name}` names one, in at most 64 bytes.
+- `account.credential_remove` `{id}` removes a lost one: it signs in no
+  more, the session tokens made by signing in with it end, and the
+  connections signed in with it close, this one after its result. The
+  account, its messages, and its other passkeys stay.
+- `account.sign_out` `{}` forgets this connection's session token and
+  closes it; `{others: true}` ends every other session token and device
+  token of the account, and closes its other connections.
+
+Adding a backup is registering another passkey while signed in, up to ten.
+Removing one and signing out the others need a passkey login as the same
+account on the asking connection within the last five minutes, which a
+stolen session token cannot make: otherwise they are `denied` with
+`data: {reauthenticate: true}`. Signing in again as the account you are
+signed in as is such a login. `--webauthn.reauth-to-add` (`Config.ReauthToAddCredential`)
+asks the same of adding a passkey to an account that has one. An account
+keeps one way to sign in: removing its last passkey, when it has no email
+address or external sign-in, is `denied`. These changes that revoke access
+are stored before their result (see [Storage](#storage)).
+
+A program or extension does the same without the reauthentication, since
+it decides who may: `Server.Credentials` and `Host.Credentials` list an
+account's passkeys, `RemoveCredential` removes one (but not the last,
+`ErrLastCredential`), and `SignOut` signs an account out everywhere, its
+session tokens, device tokens, push registrations, and unfinished writes
+included; each returns once its change is stored.
 
 ### Invitations
 

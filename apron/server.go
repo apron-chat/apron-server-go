@@ -149,6 +149,10 @@ type Config struct {
 	// Store keeps the server's state across restarts; nil keeps it in memory
 	// for this Server only. The server closes it on Shutdown.
 	Store store.Store
+	// ReauthToAddCredential makes adding a passkey to an account that has
+	// one need a recent passkey sign-in on the connection, as removing one
+	// does, so that a stolen session token cannot add a way back in.
+	ReauthToAddCredential bool
 	// OnStoreError, if set, is called once, from the store writer's
 	// goroutine, with the first error the store returns. The server then
 	// writes nothing more and fails Sync (see Server.Sync); the program
@@ -475,6 +479,12 @@ type client struct {
 	// the connection.
 	token  [32]byte
 	device [32]byte
+	// credential names the credential the connection signed in with, as
+	// scheme:id, such as a passkey's, or its session token was made with;
+	// verified is its latest proof of its account with a credential, a
+	// reauthentication (account.go). Guarded by server.mu.
+	credential string
+	verified   verification
 	// proposal is the connection's latest proposal (§4.11.1), which may
 	// have been dropped since, and clientKey names its client address for
 	// the limits of all its connections. Guarded by server.mu.
@@ -1128,6 +1138,14 @@ func (s *Server) serverParams(baseURL string, revealed bool) map[string]any {
 	}
 	// ext:editors (apron's EXTENSIONS.md) needs no data of its own.
 	params["capabilities"] = append(params["capabilities"].([]string), "ext:editors")
+	if revealed && slices.ContainsFunc(s.schemes, func(scheme authn.Scheme) bool {
+		_, ok := scheme.(authn.Credentials)
+		return ok
+	}) {
+		// ext:account (account.go): credentials, such as passkeys, and
+		// other sessions.
+		params["capabilities"] = append(params["capabilities"].([]string), "ext:"+accountExt)
+	}
 	ext := make(map[string]any)
 	if emoji := s.emojiExt(baseURL); emoji != nil && revealed {
 		params["capabilities"] = append(params["capabilities"].([]string), "ext:emoji")
@@ -1343,6 +1361,7 @@ func (s *Server) operations() map[string]operation {
 		"activity":   (*Server).activity,
 		"status":     (*Server).status,
 	}
+	accountOps(ops)
 	if !s.config.DisablePush {
 		ops["push_register"] = (*Server).registerPush
 		ops["push_unregister"] = (*Server).unregisterPush

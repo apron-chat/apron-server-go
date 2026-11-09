@@ -21,6 +21,9 @@ type session struct {
 	user    *userState
 	origin  string
 	expires time.Time
+	// credential names the credential the sign-in that made it proved, as
+	// scheme:id, if any (account.go).
+	credential string
 }
 
 // signInLocked makes an account the connection's identity after a scheme
@@ -140,6 +143,7 @@ func (s *Server) authenticateToken(c *client, req request) (any, *Error) {
 	s.sessions[key] = session
 	s.touchSession(key)
 	c.token = key
+	c.credential = session.credential
 	// Resuming the user the connection is signed in as is no sign-in
 	// (§4.5), and sends nothing after its result.
 	return s.switchUserLocked(c, req, session.user, map[string]any{"token": token}, c.user != session.user, false), nil

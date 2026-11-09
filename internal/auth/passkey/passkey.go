@@ -56,6 +56,9 @@ type Scheme struct {
 type holder struct {
 	Handle      []byte                `json:"handle"`
 	Credentials []webauthn.Credential `json:"credentials"`
+	// Meta is what the account keeps about each credential, by its ID in
+	// base64url: absent for credentials stored before it was kept.
+	Meta map[string]credentialMeta `json:"meta,omitzero"`
 	// name is the display name a registration shows, not kept.
 	name string
 }
@@ -64,6 +67,31 @@ func (h *holder) WebAuthnID() []byte                         { return h.Handle }
 func (h *holder) WebAuthnName() string                       { return h.name }
 func (h *holder) WebAuthnDisplayName() string                { return h.name }
 func (h *holder) WebAuthnCredentials() []webauthn.Credential { return h.Credentials }
+
+// credentialMeta is what an account keeps about one of its passkeys.
+type credentialMeta struct {
+	Name     string    `json:"name,omitzero"`
+	Created  time.Time `json:"created,omitzero"`
+	LastUsed time.Time `json:"last_used,omitzero"`
+}
+
+// maxCredentialNameBytes bounds a passkey's name.
+const maxCredentialNameBytes = 64
+
+// CredentialID names a credential, as the server and clients do.
+func CredentialID(id []byte) string { return base64.RawURLEncoding.EncodeToString(id) }
+
+func (h *holder) touch(id []byte, now time.Time, created bool) {
+	if h.Meta == nil {
+		h.Meta = make(map[string]credentialMeta)
+	}
+	meta := h.Meta[CredentialID(id)]
+	if created {
+		meta.Created = now
+	}
+	meta.LastUsed = now
+	h.Meta[CredentialID(id)] = meta
+}
 
 // New is passkey sign-in with w's relying party and origins.
 func New(w *webauthn.WebAuthn) *Scheme {
@@ -317,7 +345,7 @@ func (s *Scheme) finishRegistration(r *authn.Request, c *ceremony) (authn.Result
 		return nil, authn.Denied("Passkey verification failed")
 	}
 	return &authn.Add{Session: true, Proof: authn.Proof{
-		Subject: Subject(c.handle), Name: c.name,
+		Subject: Subject(c.handle), Name: c.name, Credential: CredentialID(credential.ID),
 		Commit: s.commitCredential(c.handle, credential),
 	}}, nil
 }
@@ -344,7 +372,7 @@ func (s *Scheme) finishInvited(r *authn.Request, c *ceremony) (authn.Result, err
 		return nil, authn.Denied("Passkey verification failed")
 	}
 	return &authn.SignIn{Create: true, Invitation: c.invitation, Proof: authn.Proof{
-		Subject: Subject(c.handle), Name: c.name, UserID: r.Invitation.UserID,
+		Subject: Subject(c.handle), Name: c.name, UserID: r.Invitation.UserID, Credential: CredentialID(credential.ID),
 		Commit: s.commitCredential(c.handle, credential),
 	}}, nil
 }
@@ -366,10 +394,82 @@ func (s *Scheme) commitCredential(handle []byte, credential *webauthn.Credential
 			return nil, authn.Denied("Registration changed; try again")
 		}
 		h.Credentials = append(h.Credentials, *credential)
+		h.touch(credential.ID, time.Now(), true)
 		s.byHandle[string(handle)] = h
 		s.byCredential[string(credential.ID)] = h
 		return json.Marshal(h)
 	}
+}
+
+// Credentials lists the passkeys of the user handle subject names.
+func (s *Scheme) Credentials(subject string) []authn.Credential {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	h := s.holderOf(subject)
+	if h == nil {
+		return nil
+	}
+	list := make([]authn.Credential, 0, len(h.Credentials))
+	for _, credential := range h.Credentials {
+		id := CredentialID(credential.ID)
+		meta := h.Meta[id]
+		list = append(list, authn.Credential{ID: id, Name: meta.Name, Created: meta.Created, LastUsed: meta.LastUsed})
+	}
+	return list
+}
+
+// RenameCredential names one of the user handle's passkeys.
+func (s *Scheme) RenameCredential(subject, id, name string) (jsontext.Value, error) {
+	if len(name) > maxCredentialNameBytes {
+		return nil, authn.InvalidParams("A passkey's name is at most %d bytes", maxCredentialNameBytes)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	h := s.holderOf(subject)
+	if h == nil || !slices.ContainsFunc(h.Credentials, func(c webauthn.Credential) bool { return CredentialID(c.ID) == id }) {
+		return nil, authn.InvalidParams("Unknown passkey %q", id)
+	}
+	if h.Meta == nil {
+		h.Meta = make(map[string]credentialMeta)
+	}
+	meta := h.Meta[id]
+	meta.Name = name
+	h.Meta[id] = meta
+	return json.Marshal(h)
+}
+
+// RemoveCredential removes one of the user handle's passkeys, which signs
+// in no more. Removing the last forgets the user handle, and returns no
+// record.
+func (s *Scheme) RemoveCredential(subject, id string) (jsontext.Value, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	h := s.holderOf(subject)
+	if h == nil {
+		return nil, authn.InvalidParams("Unknown passkey %q", id)
+	}
+	i := slices.IndexFunc(h.Credentials, func(c webauthn.Credential) bool { return CredentialID(c.ID) == id })
+	if i < 0 {
+		return nil, authn.InvalidParams("Unknown passkey %q", id)
+	}
+	delete(s.byCredential, string(h.Credentials[i].ID))
+	h.Credentials = slices.Delete(h.Credentials, i, i+1)
+	delete(h.Meta, id)
+	if len(h.Credentials) == 0 {
+		delete(s.byHandle, string(h.Handle))
+		return nil, nil
+	}
+	return json.Marshal(h)
+}
+
+// holderOf returns the passkeys of the user handle subject names. Called
+// holding s.mu.
+func (s *Scheme) holderOf(subject string) *holder {
+	handle, err := base64.RawURLEncoding.DecodeString(subject)
+	if err != nil {
+		return nil
+	}
+	return s.byHandle[string(handle)]
 }
 
 // finishLogin verifies a passkey, which signs in to its account; Commit
@@ -402,7 +502,7 @@ func (s *Scheme) finishLogin(r *authn.Request, c *ceremony) (authn.Result, error
 		return nil, authn.Denied("Passkey verification failed")
 	}
 	return &authn.SignIn{Proof: authn.Proof{
-		Subject: Subject(handle),
+		Subject: Subject(handle), Credential: CredentialID(credential.ID),
 		Commit: func() (jsontext.Value, error) {
 			s.mu.Lock()
 			defer s.mu.Unlock()
@@ -419,6 +519,7 @@ func (s *Scheme) finishLogin(r *authn.Request, c *ceremony) (authn.Result, error
 				return nil, authn.Denied("Passkey verification failed")
 			}
 			h.Credentials[i] = *credential
+			h.touch(credential.ID, time.Now(), false)
 			return json.Marshal(h)
 		},
 	}}, nil
