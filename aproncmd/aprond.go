@@ -187,6 +187,17 @@ func addExtensionFlags(parser *flags.Parser, extensions []apron.Extension) ([]co
 	return targets, nil
 }
 
+// ServerConfig converts parsed runner options into a server configuration, using
+// the same conversion and validation as Run. It does not open a store or start
+// listeners. Custom runners can adjust the returned configuration before calling
+// apron.Open and manage their own listener and shutdown lifecycle.
+//
+// Options should first be populated with flag defaults, just as they are for Run.
+// This conversion does not apply those defaults to a zero-valued Options.
+func ServerConfig(options Options) (apron.Config, error) {
+	return serverConfig(options)
+}
+
 // serverConfig turns options into the server's configuration.
 // The caller closes config.Store unless it hands it to a server.
 func serverConfig(options Options) (apron.Config, error) {
