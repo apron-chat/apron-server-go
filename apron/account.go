@@ -122,7 +122,7 @@ func (s *Server) removeCredentialLocked(u *userState, scheme, id string, except 
 		return invalidParams("Unknown credential %q", id)
 	}
 	if len(credentials) == 1 && len(u.identities) == 1 {
-		return &Error{Code: CodeDenied, Message: "This is the account's last way to sign in; add another before removing it"}
+		return lastCredential
 	}
 	record, err := manager.RemoveCredential(subject, id)
 	if err != nil {
@@ -357,6 +357,9 @@ func (s *Server) Credentials(userID string) []Credential {
 // Credentials lists an account's credentials; see Server.Credentials.
 func (h *Host) Credentials(userID string) []Credential { return h.s.Credentials(userID) }
 
+// lastCredential refuses to remove an account's last way to sign in.
+var lastCredential = &Error{Code: CodeDenied, Message: "This is the account's last way to sign in; add another before removing it"}
+
 // ErrLastCredential is returned by RemoveCredential for the credential an
 // account last signs in with.
 var ErrLastCredential = errors.New("apron: this is the account's last way to sign in")
@@ -377,7 +380,7 @@ func (s *Server) RemoveCredential(ctx context.Context, userID, scheme, id string
 	}
 	if err := s.removeCredentialLocked(u, scheme, id, nil); err != nil {
 		s.unlock()
-		if strings.Contains(err.Message, "last way to sign in") {
+		if err == lastCredential {
 			return ErrLastCredential
 		}
 		return err
