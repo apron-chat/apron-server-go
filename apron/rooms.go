@@ -56,6 +56,9 @@ type readCursor struct {
 // private room is hidden from everyone outside that room, members of the
 // thread included.
 func (r *roomState) visibleTo(u *userState) bool {
+	if !u.scope.allows(r) {
+		return false
+	}
 	for room := r; room != nil; room = room.parent {
 		if room.private && room.members[u.id] == nil {
 			return false
@@ -253,7 +256,7 @@ func (s *Server) deliverMembershipLocked(membership jsontext.Value, r *roomState
 // room's other members (§4.2.2). It returns the membership record, nil if
 // u was a member already.
 func (s *Server) addMemberLocked(u *userState, r *roomState) jsontext.Value {
-	if u.joined[r.id] != nil {
+	if u.joined[r.id] != nil || !u.scope.allows(r) {
 		return nil
 	}
 	u.joined[r.id] = r
@@ -450,7 +453,10 @@ func (s *Server) announceRoomLocked(r *roomState, editor *userState) {
 	}
 	frame := roomUpdate("updated", s.roomParamsLocked(r))
 	for _, member := range audience {
-		member.send(frame)
+		// A thread's record goes to its parent's members who may see it.
+		if r.visibleTo(member) {
+			member.send(frame)
+		}
 	}
 }
 
@@ -526,6 +532,11 @@ func (s *Server) setRoom(c *client, req request) (any, bool, *Error) {
 	} else if private && s.privateRoomsFullLocked(u) {
 		return nil, false, &Error{Code: CodeDenied, Message: fmt.Sprintf("You are in %d private rooms, the most at once; leave one to start another", s.config.MaxPrivateRooms)}
 	}
+	if !updating {
+		if err := mayCreateRoomLocked(u, parent); err != nil {
+			return nil, false, err
+		}
+	}
 	// ext merges into the room's (§4.12), and the limit applies to the
 	// result; other client fields are replaced (§4.2.4).
 	ext := mergeExt(keptExt, extWrite)
@@ -579,7 +590,7 @@ func (s *Server) setRoom(c *client, req request) (any, bool, *Error) {
 		if parent != nil && !r.private {
 			frame := roomUpdate("updated", s.roomParamsLocked(r))
 			for id, member := range parent.members {
-				if id != u.id {
+				if id != u.id && r.visibleTo(member) {
 					member.send(frame)
 				}
 			}
@@ -808,6 +819,9 @@ func (s *Server) joinRoom(c *client, req request) (any, bool, *Error) {
 		// that room first.
 		if r.parent != nil && !r.parent.visibleTo(target) {
 			return nil, false, &Error{Code: CodeDenied, Message: fmt.Sprintf("Add %s to the private room %s is in first", targetID, r.title())}
+		}
+		if !target.scope.allows(r) {
+			return nil, false, &Error{Code: CodeDenied, Message: fmt.Sprintf("%s is limited to other rooms", targetID)}
 		}
 		if r.private && r.parent == nil && r.members[target.id] == nil && s.privateRoomsFullLocked(target) {
 			return nil, false, &Error{Code: CodeDenied, Message: fmt.Sprintf("%s is in as many private rooms as anyone may be, so cannot be added to another", targetID)}

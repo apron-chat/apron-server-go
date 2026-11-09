@@ -183,6 +183,11 @@ func (s *Server) signOutOthersLocked(u *userState, keep *client) {
 			s.touchDevice(key)
 		}
 	}
+	for key, t := range s.services {
+		if t.user == u && (keep == nil || key != keep.service) {
+			s.revokeServiceLocked(key, "This account signed out its other sessions")
+		}
+	}
 }
 
 // accountOps are the account's methods (ext:account).
@@ -195,7 +200,10 @@ func accountOps(ops map[string]operation) {
 
 // accountLocked refuses the account methods to a guest.
 func accountLocked(c *client) *Error {
-	if !c.user.account() || c.user.botOf != "" {
+	if c.restrictedService() {
+		return serviceRefusal()
+	}
+	if !c.user.account() {
 		return &Error{Code: CodeDenied, Message: "Sign in with an account to manage it"}
 	}
 	return nil

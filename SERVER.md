@@ -1661,7 +1661,8 @@ rest of the server does:
   with its data in `server.ext.weather`, and add request methods named
   `weather.<name>`, which only signed-in users may send; any other method
   is still `unsupported`. Its flags are `--weather.<flag>`, and its config
-  file table `[weather]`. `emoji` and `settings` are the server's own.
+  file table `[weather]`. `emoji`, `settings`, and `account` are the
+  server's own.
 - Its commands follow the server's in `/help`, which lists one only where
   the extension says the sender may use it; one it refuses is `denied`.
   They run outside the server's lock, so their notices and effects precede
@@ -1704,8 +1705,81 @@ rest of the server does:
   emoji, or what extensions advertise), and the whole frame follows the
   sign-in (§3.1). Taking an entry off the list closes the connections of
   the accounts it let in, and forgets their session tokens, device tokens,
-  and push registrations. The same frame applies to `--disable-guests`.
+  service tokens, and push registrations, and ends their writes that had
+  not finished. The same frame applies to `--disable-guests`. An account
+  an [invitation](#invitations) made is admitted until the list's
+  `Disallow` names it.
 - Events are the log's records in `log_id` order, as clients receive them,
   every room's. A deletion's tombstone is an event; the records it redacts
   are not sent again. A room is public to an extension, such as for a web
   page, when it is not private and guests may sign in.
+
+### Room scopes
+
+An account may be limited to some rooms: `Host.SetScope(ctx, userID,
+&RoomScope{Rooms: [...], Threads: bool})`, or `BotOptions.Scope` for a bot
+from its start. It then sees only the rooms its scope lists, and, with
+`Threads`, their threads at any depth. Seeing is the one check the server
+makes of who may read or write a room, so the scope holds for every way in:
+the account's connections, its bot's in-process ones, and those its
+[service tokens](#service-accounts) sign in. A scoped account:
+
+- reads no `history`, `room_list` entry, or thread card of a room outside
+  it, and receives no `room_update` for one, a new thread's included;
+- cannot join one, nor be added to one (`denied`), and is taken out of
+  those it was in when its scope changes, which ends its writes into them;
+- cannot post, edit, react, start live text, or upload into one, and is
+  never woken or counted unread by a mention there;
+- makes no top-level room, and a thread only when its scope takes threads
+  in.
+
+The scope is stored with the account, and lifted with a nil scope. It
+limits what the account sees, not who sees the account: its profile still
+reaches the members of the rooms it is in.
+
+### Service accounts
+
+A bot's client outside the server's process, such as an agent in another
+language, signs in as the bot with a service token: `Bot.IssueToken`
+returns one, `apron_service_<random>`, once it is stored, and the server
+keeps only its hash. A client presents it with the token scheme, from any
+origin: `{"method": "auth", "params": {"scheme": "token", "token": "…"}}`.
+
+- Its expiry is fixed when it is issued (`Lifetime`, 30 days by default),
+  and use never extends it, unlike a session token's; unlike a device
+  token, it expires. The connections it signed in close when it expires,
+  so it bounds how long a connection lasts as well as when it may sign in.
+- `Bot.RotateToken` issues a replacement, and keeps the old token signing
+  in for an overlap, or ends it at once with none. `Bot.RevokeToken` ends
+  one, closing its connections, before it returns. `Bot.ServiceTokens`
+  lists them, without tokens. A bot holds at most ten.
+- Its connections may not manage the account: `account.*`, `/invite-device`,
+  and another `auth` on the same connection are `denied`, unless it was
+  issued with `ManageAccount`.
+- The bot's [scope](#room-scopes), if any, limits its connections as it
+  does the bot's in-process ones, and signing the bot out, or its
+  `account.sign_out` with `others`, revokes its service tokens.
+
+### Authorization
+
+These are the server's checks of who may read and write, and where an
+embedding program's or extension's own policy must fit in:
+
+| Path | Who may | Checked |
+| --- | --- | --- |
+| Sign-in, every scheme, token resume, device and service tokens | the allowlist, if any, or an invitation's admission | at each sign-in and resume; removal from the list signs the account out |
+| `history`, `room_list`, thread cards, `room_update` | who can see the room: private membership, then scope | per request and per delivery |
+| `message`, `reactions`, `room_join`, `room_set`, commands | who can see the room; a scope makes no rooms | per request |
+| Upload and live text writes (HTTP `PUT`, `LiveWriter`) | the write's author, while they may sign in and see the room | when the write starts, when an upload finishes, and at once when the author is signed out, leaves a private room, or is scoped out |
+| A live text's end by its duration limit | the server | whatever the author's access, the text written so far is kept |
+| File, live text, and emoji URLs (`GET`) | whoever holds the URL | never: they are bearer capabilities (see [Embeds](#embeds-uploads-and-live-text)) |
+| `account.*`, `/invite-device` | the account itself, not a restricted service token; removal and signing out others after a reauthentication | per request |
+| Extension commands, methods, filters | signed-in users; what else is the extension's (`Command.Available`, its own checks) | per request |
+| `Host`, `Bot`, and `Server` methods | the extension or program, which decides; a `Bot` gets a client's checks | — |
+
+An extension that shows messages anywhere checks `Host.Visible`, which
+applies a scope too. An extension's own policy belongs in a message filter
+(`FilterMessage`) for what is posted, `Command.Available` and its methods'
+own checks for what it adds, and `SetScope`, `Allowlist`, `SignOut`, and
+`RemoveCredential` for access the server enforces everywhere.
+

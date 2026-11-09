@@ -173,6 +173,11 @@ func (s *Server) authenticate(c *client, req request) (any, *Error) {
 		s.unlock()
 		return nil, connectionClosing()
 	}
+	if c.restrictedService() {
+		// It may not add to the account, nor become another.
+		s.unlock()
+		return nil, serviceRefusal()
+	}
 	name, err := parseString(req.params, "scheme", true)
 	if err != nil {
 		s.unlock()
@@ -184,7 +189,7 @@ func (s *Server) authenticate(c *client, req request) (any, *Error) {
 	switch {
 	case name == "guest" && !s.guestsAllowedLocked():
 		err = &Error{Code: CodeUnsupported, Message: "This server has no guests; sign in with an account"}
-	case name == "token" && len(s.schemes) == 0:
+	case name == "token" && len(s.schemes) == 0 && !presentsServiceToken(req):
 		err = &Error{Code: CodeUnsupported, Message: "This server has no sign-in sessions; use guest"}
 	case name == "guest", name == "token", scheme != nil:
 	case disabledSchemes[name] != "":
@@ -264,6 +269,13 @@ func (s *Server) authenticate(c *client, req request) (any, *Error) {
 	}
 	s.logger.Error("a sign-in scheme answered with no result", "scheme", name, "result", fmt.Sprintf("%T", result))
 	return nil, internalError()
+}
+
+// presentsServiceToken reports whether a token auth presents a bot's
+// service token, which signs in on a server without sign-in schemes too.
+func presentsServiceToken(req request) bool {
+	token, _ := parseString(req.params, "token", false)
+	return strings.HasPrefix(token, serviceTokenPrefix)
 }
 
 // authenticateGuestLocked signs the connection in as a new guest, or

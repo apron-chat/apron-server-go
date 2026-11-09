@@ -51,6 +51,11 @@ type Bot struct {
 type BotOptions struct {
 	// Name is the bot's display name when its account is made.
 	Name string
+	// Scope, if set, limits the bot to some rooms (Server.SetScope), from
+	// this start on: it sees no other, and leaves those it was in. A new
+	// bot joins the default room only if the scope lists it. Nil keeps the
+	// scope the bot had, if any; lift it with Host.SetScope.
+	Scope *RoomScope
 }
 
 // Bot makes the extension's bot with this user_id, or signs in the one it
@@ -89,7 +94,11 @@ func (r *Registrar) Bot(userID string, options BotOptions) (*Bot, error) {
 		s.users[userID] = u
 		s.touchUser(userID)
 		s.grantRolesLocked(u)
+		u.scope = newRoomScope(options.Scope)
 		s.joinDefaultRoomLocked(u)
+	}
+	if options.Scope != nil {
+		s.setScopeLocked(u, newRoomScope(options.Scope))
 	}
 	s.unlock()
 	b := &Bot{s: s, host: r.Host, userID: userID}

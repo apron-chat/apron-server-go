@@ -75,6 +75,7 @@ type dirtySet struct {
 	embeds   map[string]bool
 	// invitations are named by their tokens' SHA-256.
 	invitations map[[32]byte]bool
+	services    map[[32]byte]bool
 	pushes      map[string]bool
 	ext         map[extKey]bool
 	usedIDs     []string
@@ -92,6 +93,7 @@ func newDirtySet() dirtySet {
 		sessions:    make(map[[32]byte]bool),
 		devices:     make(map[[32]byte]bool),
 		invitations: make(map[[32]byte]bool),
+		services:    make(map[[32]byte]bool),
 		embeds:      make(map[string]bool),
 		pushes:      make(map[string]bool),
 		ext:         make(map[extKey]bool),
@@ -206,8 +208,10 @@ type storedUser struct {
 	Bot     string `json:"bot,omitzero"`
 	// Enrolled is what the invitation that made the account left with it.
 	Enrolled *storedEnrollment `json:"enrolled,omitzero"`
-	External string            `json:"external,omitzero"`
-	Granted  []string          `json:"granted,omitzero"`
+	// Scope is the rooms the account is limited to (scope.go).
+	Scope    *storedScope `json:"scope,omitzero"`
+	External string       `json:"external,omitzero"`
+	Granted  []string     `json:"granted,omitzero"`
 }
 
 type storedMute struct {
@@ -347,6 +351,7 @@ func (s *Server) entriesLocked(d dirtySet) []store.Entry {
 		}
 	}
 	s.invitationEntriesLocked(d, put, del)
+	s.serviceEntriesLocked(d, put, del)
 	for id := range d.embeds {
 		if e := s.embeds[id]; e != nil {
 			put(entryEmbed, id, storedEmbedOf(e))
@@ -433,7 +438,7 @@ func storedUserOf(u *userState) storedUser {
 		Bot: u.botOf, Identities: u.identities, Records: u.records, Grants: u.granted,
 		Email: u.identities[email.Name], External: u.identities[external.Name],
 		Passkey: u.records[passkey.Name], Granted: u.granted[external.Name],
-		Enrolled: u.enrolled.stored(),
+		Enrolled: u.enrolled.stored(), Scope: u.scope.stored(),
 	}
 	if !u.created.IsZero() {
 		stored.Created = u.created.UnixMilli()
@@ -762,6 +767,9 @@ func (s *Server) restoreLocked() (map[string]bool, error) {
 	if err := s.restoreInvitationsLocked(entries[entryInvitation], now); err != nil {
 		return nil, err
 	}
+	if err := s.restoreServicesLocked(entries[entryService], now); err != nil {
+		return nil, err
+	}
 	for id, raw := range entries[entryDevice] {
 		var stored storedDevice
 		key, err := hex.DecodeString(id)
@@ -861,6 +869,7 @@ func (s *Server) restoreIdentitiesLocked(u *userState, stored storedUser) error 
 	u.identities, u.records = maps.Clone(stored.Identities), maps.Clone(stored.Records)
 	u.granted = maps.Clone(stored.Grants)
 	u.enrolled = stored.Enrolled.restored()
+	u.scope = stored.Scope.restored()
 	legacy := map[string]string{email.Name: stored.Email, external.Name: stored.External}
 	if len(stored.Passkey) > 0 && u.identities[passkey.Name] == "" {
 		var old struct {

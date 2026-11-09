@@ -43,6 +43,11 @@
 //   - an allowlist of who may sign in, with no guests, which signs out
 //     whoever is taken off it ([Registrar.RestrictSignIn]).
 //
+// A scope ([Host.SetScope], [BotOptions].Scope) limits an account, such as
+// a bot, to some rooms, on every path the server checks who sees a room;
+// a bot's service tokens ([Bot.IssueToken]) sign in its clients outside
+// the process, expire on time, and are revoked at once.
+//
 // Invitations ([Host.Invite], [Server.Invite]) each let one person make an
 // account with a passkey, without a guest to start from: the account is
 // made, admitted, and given what the invitation grants in one stored

@@ -305,6 +305,7 @@ func connectionClosing() *Error {
 // have not finished end (endWritesLocked).
 func (s *Server) signOutLocked(u *userState) {
 	s.endWritesLocked(u, nil)
+	s.revokeServicesOfLocked(u)
 	for c := range u.clients {
 		c.closeWithError(&Error{Code: CodeDenied, Message: "This account may no longer sign in to this server"})
 	}

@@ -65,6 +65,8 @@ type userState struct {
 	// enrolled is what the invitation that made the account left with it,
 	// nil if none did (invitations.go).
 	enrolled *enrollment
+	// scope limits the rooms the account may see, nil for none (scope.go).
+	scope *roomScope
 
 	// fromValue caches from(); it is cleared when the name changes.
 	fromValue map[string]any

@@ -485,6 +485,11 @@ type client struct {
 	// reauthentication (account.go). Guarded by server.mu.
 	credential string
 	verified   verification
+	// service is the key of the service token the connection signed in
+	// with, zero for none, and serviceManage whether it may manage its
+	// account (service.go). Guarded by server.mu.
+	service       [32]byte
+	serviceManage bool
 	// proposal is the connection's latest proposal (§4.11.1), which may
 	// have been dropped since, and clientKey names its client address for
 	// the limits of all its connections. Guarded by server.mu.
@@ -587,6 +592,9 @@ type Server struct {
 	// invitations are the outstanding invitations by the SHA-256 of their
 	// tokens (invitations.go).
 	invitations map[[32]byte]*invitation
+	// services are the bots' service tokens by the SHA-256 of their tokens
+	// (service.go).
+	services map[[32]byte]*serviceToken
 	// schemes are the sign-in schemes the server offers (auth.go), in the
 	// order the server frame lists them; accounts are the accounts by the
 	// identities that prove them; proposals are the outstanding proposals
@@ -685,6 +693,7 @@ func Open(config Config) (*Server, error) {
 		sessions:    make(map[[32]byte]session),
 		devices:     make(map[[32]byte]deviceToken),
 		invitations: make(map[[32]byte]*invitation),
+		services:    make(map[[32]byte]*serviceToken),
 		accounts:    make(map[authn.Identity]*userState),
 		proposals:   proposals{links: make(map[string]*proposal), pages: make(map[string]*proposal)},
 		dirty:       newDirtySet(),
