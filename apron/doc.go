@@ -56,6 +56,16 @@
 // [Host.Public] whether anyone may: an extension that shows messages checks
 // them, so that it never shows a private room's.
 //
+// # Durability
+//
+// The server answers most requests once their changes are made in memory,
+// and writes them to [Config].Store in the background, in order. [Server.Sync]
+// and [Host.Sync] wait until every earlier change is stored; answers that
+// must mean a change is stored, such as a new account's from an
+// invitation, wait the same way. A store that fails stays failed:
+// [Config].OnStoreError is told, nothing more is written, and Sync returns
+// an error wrapping [ErrStoreFailed].
+//
 // The examples directory of the module holds complete servers built with
 // extensions, each with a test.
 package apron

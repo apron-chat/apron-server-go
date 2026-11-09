@@ -149,6 +149,11 @@ type Config struct {
 	// Store keeps the server's state across restarts; nil keeps it in memory
 	// for this Server only. The server closes it on Shutdown.
 	Store store.Store
+	// OnStoreError, if set, is called once, from the store writer's
+	// goroutine, with the first error the store returns. The server then
+	// writes nothing more and fails Sync (see Server.Sync); the program
+	// usually shuts it down.
+	OnStoreError func(error)
 	// DisablePush omits server.push and push registration.
 	DisablePush bool
 	// AllowInsecurePush accepts http push endpoints and internal addresses.
@@ -495,6 +500,10 @@ type client struct {
 type outboundBatch struct {
 	frames      [][]byte
 	closeReason string
+	// fence, if set, holds the writer until the changes before it are in the
+	// store (client.fenceLocked); the frames after it are never written if
+	// they are not.
+	fence *storeFence
 }
 
 // Server is an Apron server, which Open starts. It serves the protocol
@@ -552,14 +561,19 @@ type Server struct {
 	// dirty is the state changed under mu since it was last written to the
 	// store; storeWrites queues batches for the store writer.
 	dirty       dirtySet
-	storeWrites chan []store.Entry
+	storeWrites chan storeBatch
 	storeDone   chan struct{}
 	storeClosed bool
-	storedMeta  storedMeta
-	pushes      map[string]*pushRegistration
-	closed      bool
-	sessions    map[[32]byte]session
-	devices     map[[32]byte]deviceToken
+	// fences wait for the batch the next flush queues (newFenceLocked).
+	fences []*storeFence
+	// storeErr is the store's first failure, after which nothing more is
+	// written.
+	storeErr   atomic.Pointer[error]
+	storedMeta storedMeta
+	pushes     map[string]*pushRegistration
+	closed     bool
+	sessions   map[[32]byte]session
+	devices    map[[32]byte]deviceToken
 	// schemes are the sign-in schemes the server offers (auth.go), in the
 	// order the server frame lists them; accounts are the accounts by the
 	// identities that prove them; proposals are the outstanding proposals
@@ -660,7 +674,7 @@ func Open(config Config) (*Server, error) {
 		accounts:    make(map[authn.Identity]*userState),
 		proposals:   proposals{links: make(map[string]*proposal), pages: make(map[string]*proposal)},
 		dirty:       newDirtySet(),
-		storeWrites: make(chan []store.Entry, storeQueue),
+		storeWrites: make(chan storeBatch, storeQueue),
 		storeDone:   make(chan struct{}),
 		badgeDelay:  badgeDelay,
 		stopped:     make(chan struct{}),
@@ -838,6 +852,12 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	closed := s.closed
 	s.mu.RUnlock()
 	w.Header().Set("Content-Type", "application/json")
+	if s.StoreErr() != nil {
+		// The server serves what it holds, but keeps none of it.
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte(`{"status":"store_failed"}`))
+		return
+	}
 	if closed {
 		w.WriteHeader(http.StatusServiceUnavailable)
 	}
@@ -1156,6 +1176,23 @@ func (c *client) writeLoop() {
 		case <-c.done:
 			return
 		case batch := <-c.out:
+			if batch.fence != nil {
+				select {
+				case <-c.done:
+					return
+				case <-batch.fence.done:
+				}
+				if batch.fence.err != nil {
+					// What the frames behind it acknowledge is not stored: the
+					// connection closes rather than send them.
+					ctx, cancel := context.WithTimeout(context.Background(), c.server.config.WriteTimeout)
+					_ = c.conn.write(ctx, encodeJSON(errorResponse(nil, internalError())))
+					cancel()
+					c.stopConnection()
+					return
+				}
+				continue
+			}
 			for _, payload := range batch.frames {
 				select {
 				case <-c.done:

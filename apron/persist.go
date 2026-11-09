@@ -265,10 +265,16 @@ func (s *Server) metaLocked() storedMeta {
 
 func sessionID(key [32]byte) string { return hex.EncodeToString(key[:]) }
 
-// flushLocked queues the marked changes as one batch for the store writer.
+// flushLocked queues the marked changes as one batch for the store writer,
+// with the fences waiting for it.
 func (s *Server) flushLocked() {
+	fences := s.fences
+	s.fences = nil
 	if s.storeClosed {
 		s.dirty = newDirtySet()
+		for _, f := range fences {
+			f.release(ErrServerClosed)
+		}
 		return
 	}
 	batch := s.entriesLocked(s.dirty)
@@ -278,8 +284,8 @@ func (s *Server) flushLocked() {
 		batch = append(batch, store.Entry{Kind: entryMeta, ID: "counters", Value: encodeJSON(meta)})
 	}
 	s.dirty = newDirtySet()
-	if len(batch) > 0 {
-		s.storeWrites <- batch
+	if len(batch) > 0 || len(fences) > 0 {
+		s.storeWrites <- storeBatch{entries: batch, fences: fences}
 	}
 }
 
@@ -462,12 +468,26 @@ func storedEmbedOf(e *embedState) storedEmbed {
 	return stored
 }
 
-// writeStore applies batches to the store in order until the queue closes.
+// writeStore applies batches to the store in order until the queue closes,
+// then releases the fences behind each. After the store's first failure it
+// applies nothing more, so the store keeps the state as of the batch
+// before, and every later fence fails.
 func (s *Server) writeStore() {
 	defer close(s.storeDone)
 	for batch := range s.storeWrites {
-		if err := s.config.Store.Apply(batch); err != nil {
-			slog.Error("cannot write to the store", "error", err)
+		err := s.StoreErr()
+		if err == nil && len(batch.entries) > 0 {
+			if applyErr := s.config.Store.Apply(batch.entries); applyErr != nil {
+				err = fmt.Errorf("%w: %w", ErrStoreFailed, applyErr)
+				s.storeErr.Store(&err)
+				slog.Error("cannot write to the store; the server writes nothing more", "error", applyErr)
+				if s.config.OnStoreError != nil {
+					s.config.OnStoreError(err)
+				}
+			}
+		}
+		for _, f := range batch.fences {
+			f.release(err)
 		}
 	}
 }

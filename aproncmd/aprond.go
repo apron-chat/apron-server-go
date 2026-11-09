@@ -310,6 +310,10 @@ func Run(logger *slog.Logger, options Options, extensions ...apron.Extension) er
 	if err != nil {
 		return err
 	}
+	// A store that fails stays failed (apron.ErrStoreFailed): stop serving
+	// rather than go on acknowledging what is not kept.
+	storeFailed := make(chan error, 1)
+	config.OnStoreError = func(err error) { storeFailed <- err }
 	// The server owns the store from here, and closes it when Open fails.
 	app, err := apron.Open(config)
 	if err != nil {
@@ -400,7 +404,11 @@ func Run(logger *slog.Logger, options Options, extensions ...apron.Extension) er
 	}
 
 	group.Go(func() error {
-		<-ctx.Done()
+		var failed error
+		select {
+		case <-ctx.Done():
+		case failed = <-storeFailed:
+		}
 		shutdown, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		_ = app.Shutdown(shutdown)
@@ -409,7 +417,7 @@ func Run(logger *slog.Logger, options Options, extensions ...apron.Extension) er
 				logger.Error("graceful shutdown failed", "error", err)
 			}
 		}
-		return nil
+		return failed
 	})
 	return group.Wait()
 }

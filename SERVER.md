@@ -219,6 +219,26 @@ batches in order, outside the server's lock, so a slow disk delays
 persistence rather than requests. At start the server rebuilds its state
 from the store.
 
+Most answers do not wait for the store: a crash can lose the latest changes
+the server had acknowledged. Those that must not, the answers that make an
+account from an [invitation](#invitations), remove a passkey, or sign an
+account out everywhere ([Passkeys](#managing-passkeys)), and revoke or
+rotate a [service token](#service-accounts), wait until the batch holding
+their change, and every batch before it, is applied: a successful answer
+means the change is stored. If it cannot be, the connection closes with an
+internal error instead. An embedding program does the same with
+`Server.Sync`, and an extension with `Host.Sync`, after a change such as
+`Host.Store().Put`.
+
+A store that fails to apply a batch stays failed: the server writes nothing
+more, so the store holds a consistent state as of the batch before, logs
+the error, calls `Config.OnStoreError` once, answers `/healthz` with `503`
+and `{"status":"store_failed"}`, and fails every later `Sync` and every
+answer that waits for the store. It goes on serving what it holds in
+memory, none of which survives a restart; aprond shuts down, and a program
+embedding the server should stop it too, then fix the store and start it
+again.
+
 The store holds opaque entries by kind and ID (`store`), so a
 backend only keeps entries and applies batches:
 
