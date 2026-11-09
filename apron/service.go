@@ -163,13 +163,31 @@ func (s *Server) issueServiceToken(ctx context.Context, userID string, options S
 		s.unlock()
 		return ServiceToken{}, errors.New("apron: no such user")
 	}
+	// The limit counts the token being replaced as gone, and is checked
+	// before anything changes.
+	held, replacing := 0, false
+	for _, t := range s.services {
+		switch {
+		case t.user != u:
+		case replaces != "" && t.id == replaces:
+			replacing = true
+		default:
+			held++
+		}
+	}
+	if replaces != "" && !replacing {
+		s.unlock()
+		return ServiceToken{}, fmt.Errorf("apron: no service token %q", replaces)
+	}
+	if held >= maxServiceTokens {
+		s.unlock()
+		return ServiceToken{}, fmt.Errorf("apron: a bot holds at most %d service tokens; revoke one", maxServiceTokens)
+	}
 	if replaces != "" {
-		found := false
 		for oldKey, old := range s.services {
 			if old.id != replaces || old.user != u {
 				continue
 			}
-			found = true
 			if overlap == 0 {
 				s.revokeServiceLocked(oldKey, "This service token was replaced")
 			} else if until := now.Add(overlap); until.Before(old.expires) {
@@ -178,20 +196,6 @@ func (s *Server) issueServiceToken(ctx context.Context, userID string, options S
 				s.dirty.services[oldKey] = true
 			}
 		}
-		if !found {
-			s.unlock()
-			return ServiceToken{}, fmt.Errorf("apron: no service token %q", replaces)
-		}
-	}
-	held := 0
-	for _, t := range s.services {
-		if t.user == u {
-			held++
-		}
-	}
-	if held >= maxServiceTokens {
-		s.unlock()
-		return ServiceToken{}, fmt.Errorf("apron: a bot holds at most %d service tokens; revoke one", maxServiceTokens)
 	}
 	t := &serviceToken{
 		id: "svc_" + strings.ToLower(rand.Text()[:16]), user: u, name: options.Name,
@@ -264,6 +268,8 @@ func (s *Server) authenticateServiceLocked(c *client, req request, token string)
 		return nil, err
 	}
 	c.service, c.serviceManage = key, t.manage
+	// It signs in with no session, device token, or credential.
+	c.token, c.device, c.credential = [32]byte{}, [32]byte{}, ""
 	return s.switchUserLocked(c, req, t.user, nil, c.user != t.user, false), nil
 }
 

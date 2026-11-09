@@ -188,3 +188,36 @@ func TestServiceTokens(t *testing.T) {
 		t.Fatalf("tokens left: %#v", listed)
 	}
 }
+
+// Rotating a token with an overlap works at the limit, and changes nothing
+// when it fails; a service token's connection registers no push.
+func TestRotatingAServiceTokenAtTheLimit(t *testing.T) {
+	_, httpServer, _, bot := scopedBotServer(t)
+	ctx := context.Background()
+	var last ServiceToken
+	for range maxServiceTokens {
+		var err error
+		if last, err = bot.IssueToken(ctx, ServiceTokenOptions{Lifetime: time.Hour}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := bot.IssueToken(ctx, ServiceTokenOptions{}); err == nil {
+		t.Fatal("issued past the limit")
+	}
+	if _, err := bot.RotateToken(ctx, "svc_missing", time.Minute, ServiceTokenOptions{}); err == nil {
+		t.Fatal("rotated a token that does not exist")
+	}
+	rotated, err := bot.RotateToken(ctx, last.ID, time.Minute, ServiceTokenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, listed := range bot.ServiceTokens() {
+		if listed.ID == last.ID && time.Until(listed.Expires) > time.Minute {
+			t.Fatalf("the replaced token still expires at %v", listed.Expires)
+		}
+	}
+	agent, _ := dialRaw(t, httpServer)
+	agent.result(t, "auth", "auth", map[string]any{"scheme": "token", "token": rotated.Token})
+	agent.drain(t)
+	agent.expectError(t, "push_register", "push", map[string]any{"kind": "relay", "url": "https://push.example/agent"}, CodeDenied)
+}

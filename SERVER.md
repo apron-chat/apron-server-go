@@ -150,8 +150,10 @@ Flags (`aprond --help` lists them all):
   configure passkeys; `--webauthn.rp-id ''` disables them. The origins are
   also served at `/.well-known/webauthn`, so a frontend on another domain
   can use passkeys; see [Passkeys](#passkeys).
-  `--webauthn.reauth-to-add` makes adding a passkey to an account that has
-  one need a recent passkey sign-in; see [Managing passkeys](#managing-passkeys).
+  `--webauthn.add-without-reauth` lets a connection add a passkey to an
+  account that has one without a recent passkey sign-in, which a stolen
+  session token could then use to take the account over; see
+  [Managing passkeys](#managing-passkeys).
 - `--upload.dir <directory>` holds uploaded files, by default
   `aprond/uploads` in the user data directory. At start the server removes
   files named `*.upload` there that the store does not refer to, and nothing
@@ -234,7 +236,8 @@ internal error instead. An embedding program does the same with
 
 A store that fails to apply a batch stays failed: the server writes nothing
 more, so the store holds a consistent state as of the batch before, logs
-the error, calls `Config.OnStoreError` once, answers `/healthz` with `503`
+the error, calls `Config.OnStoreError` once, on a goroutine of its own so
+that it may call `Shutdown`, answers `/healthz` with `503`
 and `{"status":"store_failed"}`, and fails every later `Sync` and every
 answer that waits for the store. It goes on serving what it holds in
 memory, none of which survives a restart; aprond shuts down, and a program
@@ -671,7 +674,8 @@ before the write finishes, by being signed out (taken off the allowlist) or
 leaving a private room, the server ends it at once: a write that has not
 started, or an upload still arriving, fails, and live text being written
 finishes with what arrived, its writer answered `403`. An extension's
-[LiveWriter](#extensions) gets `ErrLiveTextEnded`.
+[LiveWriter](#extensions) gets `ErrLiveTextEnded`. A guest that leaves, as
+by reloading its page, is no such loss: what it started goes on.
 
 Write URLs, and the `url` of an upload or live text, are bearer
 capabilities: whoever holds one may use it without signing in, which lets
@@ -1435,20 +1439,32 @@ in:
   more, the session tokens made by signing in with it end, and the
   connections signed in with it close, this one after its result. The
   account, its messages, and its other passkeys stay.
-- `account.sign_out` `{}` forgets this connection's session token and
-  closes it; `{others: true}` ends every other session token and device
-  token of the account, and closes its other connections.
+- `account.sign_out` `{}` forgets the session token, device token, or
+  service token this connection signed in with, and the push registrations
+  it made, and closes it; `{others: true}` ends every other session, device,
+  and service token of the account, removes the push registrations they
+  made, and closes its other connections.
 
 Adding a backup is registering another passkey while signed in, up to ten.
-Removing one and signing out the others need a passkey login as the same
-account on the asking connection within the last five minutes, which a
-stolen session token cannot make: otherwise they are `denied` with
-`data: {reauthenticate: true}`. Signing in again as the account you are
-signed in as is such a login. `--webauthn.reauth-to-add` (`Config.ReauthToAddCredential`)
-asks the same of adding a passkey to an account that has one. An account
-keeps one way to sign in: removing its last passkey, when it has no email
-address or external sign-in, is `denied`. These changes that revoke access
-are stored before their result (see [Storage](#storage)).
+Adding one to an account that has one, removing one, and signing out the
+others need a passkey login as the same account on the asking connection
+within the last five minutes, which a stolen session token cannot make:
+otherwise they are `denied` with `data: {reauthenticate: true}`. Signing in
+again as the account you are signed in as is such a login, and so is a
+guest's registration of its first passkey; registering another passkey is
+not, so a passkey added cannot be used to remove the others without a
+login. `--webauthn.add-without-reauth`
+(`Config.AddCredentialWithoutReauth`) lifts the requirement to add, as
+servers did before, at the cost that a stolen session token can add a
+passkey of its own and sign in with it. An account keeps one way to sign
+in: removing its last passkey, when it has no email address or external
+sign-in, is `denied`. These changes that revoke access are stored before
+their result (see [Storage](#storage)).
+
+Removing a passkey ends the session tokens that signing in with it made.
+Session tokens made otherwise, by an email sign-in or before servers noted
+the passkey, and device tokens, are not tied to a passkey: end them with
+`account.sign_out` and `others`.
 
 A program or extension does the same without the reauthentication, since
 it decides who may: `Server.Credentials` and `Host.Credentials` list an
@@ -1755,7 +1771,8 @@ origin: `{"method": "auth", "params": {"scheme": "token", "token": "…"}}`.
   lists them, without tokens. A bot holds at most ten.
 - Its connections may not manage the account: `account.*`, `/invite-device`,
   and another `auth` on the same connection are `denied`, unless it was
-  issued with `ManageAccount`.
+  issued with `ManageAccount`. They register no push, which would outlive
+  the token.
 - The bot's [scope](#room-scopes), if any, limits its connections as it
   does the bot's in-process ones, and signing the bot out, or its
   `account.sign_out` with `others`, revokes its service tokens.

@@ -331,6 +331,11 @@ func (s *Server) writeAllowedLocked(e *embedState) bool {
 	if u == nil {
 		return true
 	}
+	if u.retired {
+		// A guest that left, as by reloading its page, has no access left
+		// to lose: what it started goes on, as it did before it left.
+		return true
+	}
 	if !s.admittedLocked(u) {
 		return false
 	}

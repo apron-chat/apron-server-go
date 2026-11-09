@@ -62,6 +62,9 @@ type userState struct {
 	avatarEmbed *embedState
 	// writes are the user's writes that have not finished (embedState.author).
 	writes map[*embedState]struct{}
+	// retired is set on a guest retired when its last connection closed,
+	// whose writes go on as they could when it left (writeAllowedLocked).
+	retired bool
 	// enrolled is what the invitation that made the account left with it,
 	// nil if none did (invitations.go).
 	enrolled *enrollment
@@ -424,6 +427,7 @@ func (s *Server) detachLocked(c *client) {
 // (§4.2.2). Its user_id is never reissued, so its records stay consistent
 // (§3.3).
 func (s *Server) retireLocked(u *userState) {
+	u.retired = true
 	rooms := slices.SortedFunc(maps.Values(u.joined), func(a, b *roomState) int {
 		return cmp.Compare(a.createdID, b.createdID)
 	})

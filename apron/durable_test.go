@@ -114,6 +114,15 @@ func TestAFailedStoreStaysFailed(t *testing.T) {
 	if backing.applied.Load() != applied {
 		t.Fatal("the server wrote to a store that failed")
 	}
+	// OnStoreError runs on a goroutine of its own.
+	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(5 * time.Millisecond) {
+		reportedMu.Lock()
+		n := len(reported)
+		reportedMu.Unlock()
+		if n > 0 || time.Now().After(deadline) {
+			break
+		}
+	}
 	reportedMu.Lock()
 	if len(reported) != 1 || !errors.Is(reported[0], ErrStoreFailed) || !errors.Is(app.StoreErr(), ErrStoreFailed) {
 		t.Fatalf("reported %v, StoreErr %v", reported, app.StoreErr())
@@ -121,5 +130,30 @@ func TestAFailedStoreStaysFailed(t *testing.T) {
 	reportedMu.Unlock()
 	if status, _, body := httpDo(t, http.MethodGet, httpServer.URL+"/healthz", nil, ""); status != http.StatusServiceUnavailable || string(body) != `{"status":"store_failed"}` {
 		t.Fatalf("healthz: %d %s", status, body)
+	}
+}
+
+// OnStoreError may shut the server down.
+func TestOnStoreErrorMayShutDown(t *testing.T) {
+	backing := &failingStore{Memory: store.NewMemory()}
+	var host *Host
+	done := make(chan error, 1)
+	var app *Server
+	config := extensionConfig(testExtension{"durable", func(r *Registrar) error {
+		host = r.Host
+		return nil
+	}})
+	config.Store = backing
+	config.OnStoreError = func(error) { done <- app.Shutdown(context.Background()) }
+	app, _ = newTestServer(t, config)
+	backing.failing.Store(true)
+	_ = host.Store().Put("k", "v")
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Shutdown from OnStoreError did not return")
 	}
 }

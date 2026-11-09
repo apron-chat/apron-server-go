@@ -46,6 +46,10 @@ func (s *Server) signInLocked(c *client, req request, user *userState, now time.
 	token := base64.RawURLEncoding.EncodeToString(secret)
 	c.token = sha256.Sum256([]byte(token))
 	c.service, c.serviceManage = [32]byte{}, false
+	// A sign-in that proved a credential notes it after (provedLocked). A
+	// device token the connection signed in with stays its own, so that
+	// replacing that token still closes it.
+	c.credential = ""
 	s.sessions[c.token] = session{user: user, origin: c.origin, expires: now.Add(sessionLifetime)}
 	s.touchSession(c.token)
 	s.capSessionsLocked(user, c.token)

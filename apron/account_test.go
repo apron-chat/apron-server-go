@@ -134,7 +134,6 @@ func TestManagingPasskeys(t *testing.T) {
 func TestAddingAPasskeyCanNeedReauthentication(t *testing.T) {
 	config := DefaultConfig()
 	config.WebAuthn = testWebAuthn(t)
-	config.ReauthToAddCredential = true
 	app, httpServer := newTestServer(t, config)
 	a, b := newTestAuthenticator(t), newTestAuthenticator(t)
 	first, _ := dialOrigin(t, httpServer, testPasskeyOrigin)
@@ -151,4 +150,69 @@ func TestAddingAPasskeyCanNeedReauthentication(t *testing.T) {
 	if n := len(app.Credentials(userID)); n != 2 {
 		t.Fatalf("credentials: %d", n)
 	}
+}
+
+// A stolen session token cannot take an account over: adding a passkey
+// takes a recent sign-in, and one added where that is not asked counts as
+// no reauthentication, so it cannot remove the owner's.
+func TestAStolenSessionCannotTakeTheAccountOver(t *testing.T) {
+	for _, without := range []bool{false, true} {
+		config := DefaultConfig()
+		config.WebAuthn = testWebAuthn(t)
+		config.AddCredentialWithoutReauth = without
+		_, httpServer := newTestServer(t, config)
+		owner := newTestAuthenticator(t)
+		first, _ := dialOrigin(t, httpServer, testPasskeyOrigin)
+		token := registerTestPasskey(t, first, owner)["token"].(string)
+
+		stolen, _ := dialOrigin(t, httpServer, testPasskeyOrigin)
+		passkeyResult(t, passkeyCall(t, stolen, "resume", "token", "", map[string]any{"token": token}))
+		stolen.drain(t)
+		added := addTestPasskey(t, stolen, newTestAuthenticator(t))
+		if !without {
+			passkeyDenied(t, added)
+			continue
+		}
+		passkeyResult(t, added)
+		stolen.drain(t)
+		stolen.expectError(t, "account.credential_remove", "remove", map[string]any{"id": b64(owner.id)}, CodeDenied)
+		stolen.expectError(t, "account.sign_out", "others", map[string]any{"others": true}, CodeDenied)
+	}
+}
+
+// Signing out the others removes the push registrations their sessions
+// made, and signing out a device connection forgets its device token.
+func TestSigningOutRemovesWhatTheSessionsMade(t *testing.T) {
+	app, httpServer := passkeyTestServer(t)
+	a := newTestAuthenticator(t)
+	first, _ := dialOrigin(t, httpServer, testPasskeyOrigin)
+	registered := registerTestPasskey(t, first, a)
+	userID := registered["you"].(map[string]any)["user_id"].(string)
+	first.drain(t)
+	other, _ := dialOrigin(t, httpServer, testPasskeyOrigin)
+	passkeyResult(t, passkeyCall(t, other, "resume", "token", "", map[string]any{"token": registered["token"]}))
+	other.drain(t)
+	keep, _ := dialOrigin(t, httpServer, testPasskeyOrigin)
+	loginTestPasskey(t, keep, a)
+	keep.drain(t)
+	other.result(t, "push_register", "other-push", map[string]any{"kind": "relay", "url": "https://push.example/other"})
+	keep.result(t, "push_register", "keep-push", map[string]any{"kind": "relay", "url": "https://push.example/keep"})
+
+	keep.result(t, "account.sign_out", "others", map[string]any{"others": true})
+	expectClosed(t, other)
+	app.mu.RLock()
+	_, kept := app.users[userID].pushes["https://push.example/keep"]
+	n := len(app.users[userID].pushes)
+	app.mu.RUnlock()
+	if !kept || n != 1 {
+		t.Fatalf("pushes after signing out the others: kept %v, %d left", kept, n)
+	}
+
+	// A device connection's sign-out forgets its device token.
+	deviceToken := inviteDevice(t, keep, userID, "laptop", false, wsURL(httpServer))
+	laptop, _ := deviceSignIn(t, httpServer, "", deviceToken)
+	laptop.result(t, "account.sign_out", "self", nil)
+	expectClosed(t, laptop)
+	again, _ := dialRaw(t, httpServer)
+	again.expectError(t, "auth", "again", map[string]any{"scheme": "token", "token": deviceToken}, CodeDenied)
 }

@@ -260,6 +260,8 @@ type storedPush struct {
 	// Device is the hex SHA-256 of the /invite-device token the registering
 	// connection signed in with.
 	Device string `json:"device,omitzero"`
+	// Session is the hex SHA-256 of the session token it signed in with.
+	Session string `json:"session,omitzero"`
 	// P256DH and Auth are the subscription's keys, in base64url.
 	P256DH string `json:"p256dh,omitzero"`
 	Auth   string `json:"auth,omitzero"`
@@ -374,6 +376,9 @@ func (s *Server) entriesLocked(d dirtySet) []store.Entry {
 			}
 			if p.device != [32]byte{} {
 				stored.Device = sessionID(p.device)
+			}
+			if p.session != [32]byte{} {
+				stored.Session = sessionID(p.session)
 			}
 			if p.keys != nil {
 				stored.P256DH, stored.Auth = encodeBase64URL(p.keys.p256dh), encodeBase64URL(p.keys.auth)
@@ -495,7 +500,9 @@ func (s *Server) writeStore() {
 				s.storeErr.Store(&err)
 				slog.Error("cannot write to the store; the server writes nothing more", "error", applyErr)
 				if s.config.OnStoreError != nil {
-					s.config.OnStoreError(err)
+					// On its own goroutine, so that it may call Shutdown,
+					// which waits for this writer.
+					go s.config.OnStoreError(err)
 				}
 			}
 		}
@@ -742,6 +749,9 @@ func (s *Server) restoreLocked() (map[string]bool, error) {
 		}
 		if device, err := hex.DecodeString(stored.Device); err == nil && len(device) == 32 {
 			p.device = [32]byte(device)
+		}
+		if session, err := hex.DecodeString(stored.Session); err == nil && len(session) == 32 {
+			p.session = [32]byte(session)
 		}
 		if u := s.users[stored.User]; u != nil && p.live(now) {
 			s.addPushLocked(u, p)

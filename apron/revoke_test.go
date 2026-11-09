@@ -114,3 +114,30 @@ func TestAWriteChecksItsAuthorWhenItStarts(t *testing.T) {
 	}
 	waitNoWrites(t, app, a.userID)
 }
+
+// A guest that leaves, as by reloading its page, keeps writing what it
+// started, even in a private room.
+func TestAGuestsWriteOutlivesItsConnection(t *testing.T) {
+	app, httpServer := newTestServer(t, DefaultConfig())
+	a := dialTestClient(t, httpServer)
+	roomID, _ := saveRoom(t, a, "secret", map[string]any{"title": "Secret", "private": true})
+	_, writeURL, _ := liveCommand(t, a, "into", map[string]any{"room_id": roomID, "body": map[string]any{"text": "/embed-terminal build"}})
+	pipe, writerDone := startLiveWrite(t, app, writeURL, "step 1\n")
+	_ = a.ws.CloseNow()
+	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(5 * time.Millisecond) {
+		app.mu.RLock()
+		gone := app.users[a.userID] == nil
+		app.mu.RUnlock()
+		if gone {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the guest was never retired")
+		}
+	}
+	_, _ = pipe.Write([]byte("step 2\n"))
+	_ = pipe.Close()
+	if status := <-writerDone; status != http.StatusNoContent {
+		t.Fatalf("writer status %d", status)
+	}
+}

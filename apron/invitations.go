@@ -401,7 +401,7 @@ func (s *Server) enrollLocked(c *client, req request, scheme authn.Scheme, proof
 	if err != nil {
 		return nil, err
 	}
-	s.provedLocked(c, scheme, proof, now)
+	s.provedLocked(c, scheme, proof, now, true)
 	for _, roomID := range inv.rooms {
 		r := s.rooms[roomID]
 		if r == nil || (r.parent != nil && !r.parent.visibleTo(user)) {

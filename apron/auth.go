@@ -383,13 +383,17 @@ func (s *Server) addProvenLocked(c *client, req request, scheme authn.Scheme, pr
 	case !s.admittedWithLocked(account, id):
 		return nil, notAdmitted()
 	}
-	if _, manages := scheme.(authn.Credentials); manages && account.identities[id.Scheme] != "" && s.config.ReauthToAddCredential {
+	if _, manages := scheme.(authn.Credentials); manages && account.identities[id.Scheme] != "" && !s.config.AddCredentialWithoutReauth {
 		// Another passkey for an account that has one: a stolen session
-		// token must not add a way back in.
+		// token must not add a way back in, nor one it could then sign in
+		// with to pass as the owner.
 		if err := s.reauthenticatedLocked(c); err != nil {
 			return nil, err
 		}
 	}
+	// Only a guest's first identity counts as proof of the account: it is
+	// the account's only one.
+	wasGuest := !account.account()
 	record, err := commit(proof)
 	if err != nil {
 		return nil, err
@@ -414,14 +418,14 @@ func (s *Server) addProvenLocked(c *client, req request, scheme authn.Scheme, pr
 		now := time.Now()
 		result, err := s.signInLocked(c, req, account, now, false, false)
 		if err == nil {
-			s.provedLocked(c, scheme, proof, now)
+			s.provedLocked(c, scheme, proof, now, wasGuest)
 		}
 		return result, err
 	}
 	if changed {
 		s.notifyProfileLocked(account, nil, nil)
 	}
-	s.provedLocked(c, scheme, proof, time.Now())
+	s.provedLocked(c, scheme, proof, time.Now(), wasGuest)
 	result := map[string]any{}
 	c.sendResult(req, result)
 	return result, nil
@@ -459,7 +463,7 @@ func (s *Server) signInProvenLocked(c *client, req request, scheme authn.Scheme,
 		// after the result (§3.2.2).
 		result, err := s.signInLocked(c, req, user, now, true, true)
 		if err == nil {
-			s.provedLocked(c, scheme, proof, now)
+			s.provedLocked(c, scheme, proof, now, true)
 		}
 		return result, err
 	}
@@ -480,7 +484,7 @@ func (s *Server) signInProvenLocked(c *client, req request, scheme authn.Scheme,
 	// no user: it is no sign-in (§4.5), but it is a reauthentication.
 	result, err := s.signInLocked(c, req, owner, now, c.user != owner, false)
 	if err == nil {
-		s.provedLocked(c, scheme, proof, now)
+		s.provedLocked(c, scheme, proof, now, true)
 	}
 	return result, err
 }

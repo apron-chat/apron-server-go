@@ -149,12 +149,14 @@ type Config struct {
 	// Store keeps the server's state across restarts; nil keeps it in memory
 	// for this Server only. The server closes it on Shutdown.
 	Store store.Store
-	// ReauthToAddCredential makes adding a passkey to an account that has
-	// one need a recent passkey sign-in on the connection, as removing one
-	// does, so that a stolen session token cannot add a way back in.
-	ReauthToAddCredential bool
-	// OnStoreError, if set, is called once, from the store writer's
-	// goroutine, with the first error the store returns. The server then
+	// AddCredentialWithoutReauth lets a connection add a passkey to an
+	// account that has one without a recent passkey sign-in on it. By
+	// default it needs one, as removing a passkey does: otherwise a stolen
+	// session token could add a passkey of its own, sign in with it, and
+	// remove the owner's.
+	AddCredentialWithoutReauth bool
+	// OnStoreError, if set, is called once, on a goroutine of its own, with
+	// the first error the store returns. The server then
 	// writes nothing more and fails Sync (see Server.Sync); the program
 	// usually shuts it down.
 	OnStoreError func(error)
@@ -900,6 +902,11 @@ func (s *Server) Shutdown(ctx context.Context) error {
 		}
 		for _, e := range s.embeds {
 			e.endLive()
+		}
+		for _, t := range s.services {
+			if t.timer != nil {
+				t.timer.Stop()
+			}
 		}
 		// Pending badge pushes would only be dropped once they fire, and
 		// the ends of timed mutes and coalesced statuses would find the

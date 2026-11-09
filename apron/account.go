@@ -48,20 +48,36 @@ func credentialKey(scheme, id string) string {
 
 // provedLocked notes the credential a proof that signed the connection in,
 // or added to its account, was made with: the connection's session token
-// remembers it, so removing the credential ends that session, and it
-// counts as a reauthentication of the connection's account.
-func (s *Server) provedLocked(c *client, scheme authn.Scheme, proof authn.Proof, now time.Time) {
+// remembers it, so removing the credential ends that session. With reauth,
+// the proof counts as a reauthentication of the connection's account: a
+// sign-in with a credential the account already had, or the account's
+// first credential of its scheme, as when an account is made. A credential
+// added beside others never counts, or a stolen session token could add
+// its own passkey and pass as the owner.
+func (s *Server) provedLocked(c *client, scheme authn.Scheme, proof authn.Proof, now time.Time, reauth bool) {
 	key := credentialKey(scheme.Name(), proof.Credential)
 	if key == "" || c.user == nil {
 		return
 	}
 	c.credential = key
-	c.verified = verification{user: c.user.id, credential: key, at: now}
+	if reauth {
+		c.verified = verification{user: c.user.id, credential: key, at: now}
+	}
 	if session, ok := s.sessions[c.token]; ok && session.user == c.user {
 		session.credential = key
 		s.sessions[c.token] = session
 		s.touchSession(c.token)
 	}
+}
+
+// sessionKeyLocked is the key of the session token the connection signed
+// in or resumed with, zero when it signed in otherwise, as with a device or
+// service token.
+func (c *client) sessionKeyLocked() [32]byte {
+	if session, ok := c.server.sessions[c.token]; ok && session.user == c.user {
+		return c.token
+	}
+	return [32]byte{}
 }
 
 // reauthenticatedLocked refuses a change that needs the connection to have
@@ -133,7 +149,9 @@ func (s *Server) removeCredentialLocked(u *userState, scheme, id string, except 
 		delete(u.identities, scheme)
 		delete(u.records, scheme)
 		delete(s.accounts, authn.Identity{Scheme: scheme, Subject: subject})
-		if s.setGrantLocked(u, scheme, nil) && s.grantRolesLocked(u) {
+		s.setGrantLocked(u, scheme, nil)
+		// Roles that Config.Roles granted the identity go with it.
+		if s.grantRolesLocked(u) {
 			s.notifyProfileLocked(u, nil, nil)
 		}
 	} else {
@@ -144,10 +162,17 @@ func (s *Server) removeCredentialLocked(u *userState, scheme, id string, except 
 	}
 	s.touchUser(u.id)
 	key := credentialKey(scheme, id)
+	ended := make(map[[32]byte]bool)
 	for token, session := range s.sessions {
 		if session.user == u && session.credential == key {
 			delete(s.sessions, token)
 			s.touchSession(token)
+			ended[token] = true
+		}
+	}
+	for _, registration := range u.pushes {
+		if ended[registration.session] {
+			s.removePushLocked(registration)
 		}
 	}
 	for c := range u.clients {
@@ -160,31 +185,47 @@ func (s *Server) removeCredentialLocked(u *userState, scheme, id string, except 
 		}
 		c.closeWithError(&Error{Code: CodeDenied, Message: "The passkey this connection signed in with was removed"})
 	}
+	if s.allowlist != nil && !s.admittedLocked(u) {
+		// The identity was what the allowlist named.
+		s.signOutLocked(u)
+	}
 	return nil
 }
 
-// signOutOthersLocked ends every session and device token of u's but the
-// connection's own session, and closes u's other connections.
+// signOutOthersLocked ends every session, device token, and service token
+// of u's but the one keep signed in with, removes the push registrations
+// they made, and closes u's other connections.
 func (s *Server) signOutOthersLocked(u *userState, keep *client) {
+	var session, device, service [32]byte
+	if keep != nil {
+		session, device, service = keep.sessionKeyLocked(), keep.device, keep.service
+	}
 	for c := range u.clients {
 		if c != keep {
 			c.closeWithError(&Error{Code: CodeDenied, Message: "This account signed out its other sessions"})
 		}
 	}
-	for key, session := range s.sessions {
-		if session.user == u && (keep == nil || key != keep.token) {
+	for key, s2 := range s.sessions {
+		if s2.user == u && (session == [32]byte{} || key != session) {
 			delete(s.sessions, key)
 			s.touchSession(key)
 		}
 	}
-	for key, device := range s.devices {
-		if device.user == u {
+	for key, d := range s.devices {
+		if d.user == u && (device == [32]byte{} || key != device) {
 			delete(s.devices, key)
 			s.touchDevice(key)
 		}
 	}
+	for _, registration := range u.pushes {
+		kept := (session != [32]byte{} && registration.session == session) ||
+			(device != [32]byte{} && registration.device == device && registration.session == [32]byte{})
+		if !kept {
+			s.removePushLocked(registration)
+		}
+	}
 	for key, t := range s.services {
-		if t.user == u && (keep == nil || key != keep.service) {
+		if t.user == u && (service == [32]byte{} || key != service) {
 			s.revokeServiceLocked(key, "This account signed out its other sessions")
 		}
 	}
@@ -311,7 +352,8 @@ func (s *Server) removeCredential(c *client, req request) (any, bool, *Error) {
 	return result, true, nil
 }
 
-// signOut forgets the connection's session token and closes it, or, with
+// signOut forgets the session, device, or service token the connection
+// signed in with, and the push registrations it made, and closes it, or, with
 // `others`, ends every other session and device token of the account and
 // closes its other connections, which needs a recent reauthentication.
 func (s *Server) signOut(c *client, req request) (any, bool, *Error) {
@@ -334,8 +376,23 @@ func (s *Server) signOut(c *client, req request) (any, bool, *Error) {
 		c.sendResult(req, result)
 		return result, true, nil
 	}
-	delete(s.sessions, c.token)
-	s.touchSession(c.token)
+	// What the connection signed in with signs in no more, nor wakes it.
+	session, device, service := c.sessionKeyLocked(), c.device, c.service
+	for _, registration := range c.user.pushes {
+		if (session != [32]byte{} && registration.session == session) || (device != [32]byte{} && registration.device == device) {
+			s.removePushLocked(registration)
+		}
+	}
+	switch {
+	case session != [32]byte{}:
+		delete(s.sessions, session)
+		s.touchSession(session)
+	case device != [32]byte{}:
+		delete(s.devices, device)
+		s.touchDevice(device)
+	case service != [32]byte{}:
+		s.revokeServiceLocked(service, "Signed out")
+	}
 	c.fenceLocked()
 	result := map[string]any{}
 	c.sendResult(req, result)
