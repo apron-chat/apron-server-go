@@ -84,6 +84,11 @@ func (s *Server) startWriterLocked(e *embedState) (int, string) {
 	if e.started {
 		return http.StatusConflict, "This live text already has a writer"
 	}
+	if !s.writeAllowedLocked(e) {
+		e.revoked = true
+		s.failWriteLocked(e)
+		return http.StatusForbidden, writeRevokedMessage
+	}
 	e.owned = map[string]any{"url": e.liveURL()}
 	if e.kind == kindTerminal {
 		e.owned["og"] = e.terminalOG()
@@ -245,6 +250,13 @@ func (s *Server) writeLive(w http.ResponseWriter, r *http.Request, e *embedState
 	s.mu.Lock()
 	defer s.unlock()
 	e.writing = false
+	if e.revoked {
+		// The author lost access (endWritesLocked): what arrived until then
+		// is kept.
+		s.finishLiveLocked(e)
+		http.Error(w, writeRevokedMessage, http.StatusForbidden)
+		return
+	}
 	if e.removed {
 		// A save without the embed ended the text: the writer's text was taken,
 		// up to the save, so it succeeded (§4.8.3).
@@ -275,6 +287,7 @@ func (s *Server) finishLiveLocked(e *embedState) {
 		return
 	}
 	e.finished = true
+	e.doneWriting()
 	e.live.end()
 	e.timer.Stop()
 	delete(s.writes, e.token)

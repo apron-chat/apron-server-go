@@ -364,6 +364,8 @@ func (s *Server) leaveLocked(u *userState, r *roomState) bool {
 	if r.private {
 		s.hideThreadsLocked(u, r)
 		s.unreadChangedLocked(u, "")
+		// Writes into what u can no longer see end.
+		s.endRefusedWritesLocked(u)
 	} else {
 		s.unreadChangedLocked(u, r.id)
 	}

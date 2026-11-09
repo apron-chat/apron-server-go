@@ -297,8 +297,10 @@ func connectionClosing() *Error {
 
 // signOutLocked signs an account out everywhere: its connections close,
 // and its session tokens, device tokens, and push registrations, which
-// would go on delivering its messages, are forgotten.
+// would go on delivering its messages, are forgotten, and its writes that
+// have not finished end (endWritesLocked).
 func (s *Server) signOutLocked(u *userState) {
+	s.endWritesLocked(u, nil)
 	for c := range u.clients {
 		c.closeWithError(&Error{Code: CodeDenied, Message: "This account may no longer sign in to this server"})
 	}

@@ -71,6 +71,12 @@ type embedState struct {
 	// post is the message a /embed-terminal or /embed-append command posts
 	// when its write starts; nil for an embed sent in a message.
 	post *pendingPost
+	// author is the user whose request made the write URL. Until the write
+	// finishes, the server checks that the author may still write it
+	// (writeAllowedLocked), and ends it when they may not (endWritesLocked).
+	// revoked is set when it ended that way.
+	author  *userState
+	revoked bool
 
 	// path is the file holding a finished upload's content, size its length,
 	// and upload its element in Server.uploads.
@@ -240,7 +246,12 @@ func (s *Server) newWriteLocked(c *client, id, kind, messageID string) *embedSta
 		baseURL:   c.baseURL,
 		secret:    rand.Text(),
 		token:     rand.Text(),
+		author:    c.user,
 	}
+	if c.user.writes == nil {
+		c.user.writes = make(map[*embedState]struct{})
+	}
+	c.user.writes[e] = struct{}{}
 	s.embeds[id] = e
 	s.touchEmbed(id)
 	s.writes[e.token] = e
@@ -300,6 +311,72 @@ func (s *Server) removeEmbedLocked(id string) {
 	delete(s.writes, e.token)
 	delete(s.embeds, id)
 	s.touchEmbed(id)
+	e.doneWriting()
+}
+
+// doneWriting forgets the write as one its author has outstanding.
+func (e *embedState) doneWriting() {
+	if e.author != nil {
+		delete(e.author.writes, e)
+	}
+}
+
+// writeAllowedLocked reports whether e's author may still write it: their
+// account may sign in (an allowlist names it), and they can see the room the
+// message is, or will be, posted in. Avatars, emoji, and the server avatar
+// belong to no room. It is checked when a write starts, when an upload
+// finishes, and when the author's access narrows (endWritesLocked).
+func (s *Server) writeAllowedLocked(e *embedState) bool {
+	u := e.author
+	if u == nil {
+		return true
+	}
+	if !s.admittedLocked(u) {
+		return false
+	}
+	roomID := ""
+	if e.post != nil {
+		roomID = e.post.roomID
+	} else if m := s.messages[e.messageID]; m != nil {
+		roomID = m.roomID
+	}
+	if roomID == "" {
+		return true
+	}
+	r := s.rooms[roomID]
+	return r != nil && r.visibleTo(u)
+}
+
+// endWritesLocked ends u's outstanding writes that keep refuses, or all of
+// them when keep is nil, as when u is signed out. A write that had not
+// started, or an upload still arriving, fails as an expired one does
+// (§4.8.3): its embed leaves its message, and a command's message is never
+// posted. Live text being written finishes with what arrived, and its
+// writer's next write fails.
+func (s *Server) endWritesLocked(u *userState, keep func(*embedState) bool) {
+	for e := range u.writes {
+		if e.removed || e.finished {
+			e.doneWriting()
+			continue
+		}
+		if keep != nil && keep(e) {
+			continue
+		}
+		e.revoked = true
+		if e.live != nil && e.started {
+			s.finishLiveLocked(e)
+			continue
+		}
+		s.failWriteLocked(e)
+	}
+}
+
+// endRefusedWritesLocked ends u's writes that u may no longer make, after
+// u's access narrowed.
+func (s *Server) endRefusedWritesLocked(u *userState) {
+	if len(u.writes) > 0 {
+		s.endWritesLocked(u, s.writeAllowedLocked)
+	}
 }
 
 // failWriteLocked finishes a write that never started or failed: the embed is
@@ -376,6 +453,13 @@ func (s *Server) handleWrite(w http.ResponseWriter, r *http.Request) {
 	if e == nil || e.removed || e.finished || (e.started && e.live == nil) {
 		s.unlock()
 		refuseWrite(w, "This write URL is unknown, used, or expired", http.StatusNotFound)
+		return
+	}
+	if !s.writeAllowedLocked(e) {
+		e.revoked = true
+		s.failWriteLocked(e)
+		s.unlock()
+		refuseWrite(w, writeRevokedMessage, http.StatusForbidden)
 		return
 	}
 	if e.live != nil {
@@ -472,8 +556,15 @@ func (s *Server) writeUpload(w http.ResponseWriter, r *http.Request, e *embedSta
 	}
 	var tooLarge *http.MaxBytesError
 	switch {
+	case e.revoked:
+		fail(http.StatusForbidden, writeRevokedMessage)
+		return
 	case e.removed:
 		fail(http.StatusGone, "The embed was removed from its message")
+		return
+	case !s.writeAllowedLocked(e):
+		e.revoked = true
+		fail(http.StatusForbidden, writeRevokedMessage)
 		return
 	case errors.As(err, &tooLarge):
 		fail(http.StatusRequestEntityTooLarge, tooLargeMessage)
@@ -509,6 +600,7 @@ func (s *Server) writeUpload(w http.ResponseWriter, r *http.Request, e *embedSta
 		}
 	}
 	e.finished = true
+	e.doneWriting()
 	e.path = file.Name()
 	e.size = size
 	if !e.apart() {
@@ -549,6 +641,10 @@ func (s *Server) writeUpload(w http.ResponseWriter, r *http.Request, e *embedSta
 }
 
 var errNotAvatar = errors.New("not an avatar image")
+
+// writeRevokedMessage refuses a write whose author may no longer make it
+// (writeAllowedLocked).
+const writeRevokedMessage = "The account that made this write URL may no longer write here"
 
 // errUploadStore is the server's failure to keep an upload's file, rather
 // than the writer's.

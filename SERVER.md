@@ -639,6 +639,29 @@ a write whose body would take them past it fails with `507` and
 more than it sent. A finished upload's file is synced before it is
 recorded, and a failure to write it is `500`.
 
+A write belongs to the account whose request made its URL, and lasts only
+as long as that account may make it: it may sign in (an
+[extension's allowlist](#extensions) names it), and it can see the room the
+message is in, or will be posted in. The server checks this when the write
+starts and again when an upload finishes, and a write that fails it is
+`403` and finished as a failed one is. When the account loses access
+before the write finishes, by being signed out (taken off the allowlist) or
+leaving a private room, the server ends it at once: a write that has not
+started, or an upload still arriving, fails, and live text being written
+finishes with what arrived, its writer answered `403`. An extension's
+[LiveWriter](#extensions) gets `ErrLiveTextEnded`.
+
+Write URLs, and the `url` of an upload or live text, are bearer
+capabilities: whoever holds one may use it without signing in, which lets
+a shell, `curl`, or an `<img>` use them. A file or live text URL keeps
+working for as long as its embed is kept, whoever its account is
+afterwards, so signing an account out, or removing it from a room, does not
+withdraw the URLs that others, or it, already hold; removing the embed or
+its message does (an edit, a deletion). Each URL carries a random secret,
+and the server never lists them apart from the messages that hold them.
+A deployment that must withdraw what an account could read should treat
+the URLs it was sent as disclosed.
+
 - **Uploads** (at most 20 MiB each, and 20 MiB for one message's uploads
   together; a message has at most 32 embeds, `denied` past that). While pending the embed has no `url`. When
   the write finishes the server publishes a snapshot with `url` set to the

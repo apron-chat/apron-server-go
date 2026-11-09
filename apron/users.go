@@ -60,6 +60,8 @@ type userState struct {
 	botOf string
 	// avatarEmbed is the hosted /avatar upload behind avatar, if any.
 	avatarEmbed *embedState
+	// writes are the user's writes that have not finished (embedState.author).
+	writes map[*embedState]struct{}
 
 	// fromValue caches from(); it is cleared when the name changes.
 	fromValue map[string]any
