@@ -175,8 +175,9 @@ func (a *Allowlist) Allow(principals ...Principal) error {
 	return nil
 }
 
-// Disallow takes the principals off the list, and signs out the accounts
-// they let in that nothing else on it does: their connections close, and
+// Disallow takes the principals off the list, ends the admission of the
+// accounts they name that an invitation made (Enrollment.Admitted), and
+// signs out the accounts they let in that nothing else on it does: their connections close, and
 // their session tokens, device tokens, and push registrations are
 // forgotten.
 func (a *Allowlist) Disallow(principals ...Principal) {
@@ -185,6 +186,7 @@ func (a *Allowlist) Disallow(principals ...Principal) {
 	defer s.unlock()
 	for _, p := range principals {
 		delete(s.allowlist.principals, p)
+		s.enrolledNamedLocked(p)
 	}
 	for _, u := range s.users {
 		if u.account() && !s.admittedLocked(u) {
@@ -217,6 +219,8 @@ func (s *Server) admittedLocked(u *userState) bool {
 		return true
 	case !u.account():
 		return false
+	case u.enrolled != nil && u.enrolled.admitted:
+		return true
 	}
 	return s.listedLocked(u)
 }
@@ -226,7 +230,7 @@ func (s *Server) admittedLocked(u *userState) bool {
 // identity.
 func (s *Server) admittedWithLocked(u *userState, id authn.Identity) bool {
 	switch {
-	case s.allowlist == nil, u.botOf != "":
+	case s.allowlist == nil, u.botOf != "", u.enrolled != nil && u.enrolled.admitted:
 		return true
 	}
 	return s.allowlist.principals[principalOf(id)] || s.listedLocked(u)

@@ -3,9 +3,9 @@ package apron
 import (
 	"context"
 	"fmt"
+	"reflect"
 	"strings"
 	"sync"
-	"reflect"
 	"testing"
 )
 

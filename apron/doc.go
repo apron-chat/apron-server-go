@@ -43,6 +43,11 @@
 //   - an allowlist of who may sign in, with no guests, which signs out
 //     whoever is taken off it ([Registrar.RestrictSignIn]).
 //
+// Invitations ([Host.Invite], [Server.Invite]) each let one person make an
+// account with a passkey, without a guest to start from: the account is
+// made, admitted, and given what the invitation grants in one stored
+// change, and [Host.Enrollment] returns the invitation's data with it.
+//
 // The Registrar's [Host] is the extension's handle on the server for as long
 // as it runs: its capability in the server frame ([Host.Advertise]), values
 // kept in the store ([Host.Store]), goroutines that run until Shutdown

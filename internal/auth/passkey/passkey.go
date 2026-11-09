@@ -1,6 +1,8 @@
 // Package passkey is the WebAuthn sign-in scheme (PROTOCOL.md §4.10):
 // registering a passkey adds it to the connection's account, a guest's
-// making it an account, and logging in with one signs in to its account.
+// making it an account, or, on a connection that presents an invitation
+// and is not signed in, makes a new account with it; logging in with one
+// signs in to its account.
 // The scheme keeps its credentials, which the server stores with each
 // account (authn.Restorer), and proves identities named by the passkey
 // user handle.
@@ -124,9 +126,12 @@ type ceremony struct {
 	// name is the display name a guest's registration asked for, applied
 	// when it finishes; empty for a login, or a passkey added to an
 	// account.
-	name    string
-	data    *webauthn.SessionData
-	expires time.Time
+	name string
+	// invitation is the invitation a registration that makes a new account
+	// presented; empty for one that adds to the connection's account.
+	invitation string
+	data       *webauthn.SessionData
+	expires    time.Time
 }
 
 // Expire makes a connection's pending ceremony expire, for tests.
@@ -179,13 +184,22 @@ func (s *Scheme) begin(r *authn.Request, action string) (authn.Result, error) {
 	var publicKey any
 	if action == "register" {
 		account := r.Account
+		if account == nil && r.Invitation != nil {
+			// A new account, which the invitation makes when the
+			// registration finishes: nothing is made before.
+			account = &authn.Account{Name: r.Invitation.Name, Guest: true}
+			c.invitation = r.Invitation.ID
+		}
 		if account == nil {
-			return nil, authn.Denied("Sign in as a guest before adding a passkey")
+			return nil, authn.Denied("Sign in as a guest, or present an invitation, before adding a passkey")
 		}
 		c.userID = account.UserID
 		h := &holder{name: account.Name}
 		if h.name == "" {
 			h.name = account.UserID
+		}
+		if h.name == "" {
+			h.name = "Apron"
 		}
 		if subject := account.Identities[Name]; subject != "" {
 			handle, err := base64.RawURLEncoding.DecodeString(subject)
@@ -209,6 +223,9 @@ func (s *Scheme) begin(r *authn.Request, action string) (authn.Result, error) {
 			if c.name != "" {
 				h.name = c.name
 			}
+		}
+		if c.invitation != "" && c.name == "" {
+			c.name = r.Invitation.Name
 		}
 		if len(h.Credentials) >= maxPasskeys {
 			return nil, authn.Denied("This identity already has ten passkeys")
@@ -263,6 +280,9 @@ func (s *Scheme) finish(r *authn.Request, action string) (authn.Result, error) {
 	if c.action != action || c.rpID != s.w.Config.RPID || c.origin != r.Origin || !r.Now.Before(c.expires) {
 		return nil, authn.Denied("Passkey challenge is missing or expired; try again")
 	}
+	if c.action == "register" && c.invitation != "" {
+		return s.finishInvited(r, c)
+	}
 	if c.action == "register" {
 		return s.finishRegistration(r, c)
 	}
@@ -298,25 +318,58 @@ func (s *Scheme) finishRegistration(r *authn.Request, c *ceremony) (authn.Result
 	}
 	return &authn.Add{Session: true, Proof: authn.Proof{
 		Subject: Subject(c.handle), Name: c.name,
-		Commit: func() (jsontext.Value, error) {
-			s.mu.Lock()
-			defer s.mu.Unlock()
-			if s.byCredential[string(credential.ID)] != nil {
-				return nil, authn.Denied("Passkey is already registered")
-			}
-			h := s.byHandle[string(c.handle)]
-			if h == nil {
-				h = &holder{Handle: c.handle}
-			}
-			if len(h.Credentials) >= maxPasskeys {
-				return nil, authn.Denied("Registration changed; try again")
-			}
-			h.Credentials = append(h.Credentials, *credential)
-			s.byHandle[string(c.handle)] = h
-			s.byCredential[string(credential.ID)] = h
-			return json.Marshal(h)
-		},
+		Commit: s.commitCredential(c.handle, credential),
 	}}, nil
+}
+
+// finishInvited verifies a passkey registered with an invitation, which
+// signs in to a new account that the invitation makes. The connection must
+// still be signed in to no account, and present the same invitation, which
+// the server checks again, still unused, as it makes the account. A
+// registration that fails here leaves the invitation for another try.
+func (s *Scheme) finishInvited(r *authn.Request, c *ceremony) (authn.Result, error) {
+	if r.Account != nil || r.Invitation == nil || r.Invitation.ID != c.invitation {
+		return nil, authn.Denied("Registration changed; try again")
+	}
+	raw, err := parseCredential(r.Params, c.action)
+	if err != nil {
+		return nil, err
+	}
+	parsed, parseErr := protocol.ParseCredentialCreationResponseBytes(raw)
+	if parseErr != nil {
+		return nil, authn.Denied("Passkey verification failed")
+	}
+	credential, createErr := s.w.CreateCredential(&holder{Handle: c.handle, name: c.name}, *c.data, parsed)
+	if createErr != nil || credential == nil {
+		return nil, authn.Denied("Passkey verification failed")
+	}
+	return &authn.SignIn{Create: true, Invitation: c.invitation, Proof: authn.Proof{
+		Subject: Subject(c.handle), Name: c.name, UserID: r.Invitation.UserID,
+		Commit: s.commitCredential(c.handle, credential),
+	}}, nil
+}
+
+// commitCredential adds a verified credential to the passkeys of the user
+// handle, a new one's included, and returns them as the account's record.
+func (s *Scheme) commitCredential(handle []byte, credential *webauthn.Credential) func() (jsontext.Value, error) {
+	return func() (jsontext.Value, error) {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		if s.byCredential[string(credential.ID)] != nil {
+			return nil, authn.Denied("Passkey is already registered")
+		}
+		h := s.byHandle[string(handle)]
+		if h == nil {
+			h = &holder{Handle: handle}
+		}
+		if len(h.Credentials) >= maxPasskeys {
+			return nil, authn.Denied("Registration changed; try again")
+		}
+		h.Credentials = append(h.Credentials, *credential)
+		s.byHandle[string(handle)] = h
+		s.byCredential[string(credential.ID)] = h
+		return json.Marshal(h)
+	}
 }
 
 // finishLogin verifies a passkey, which signs in to its account; Commit

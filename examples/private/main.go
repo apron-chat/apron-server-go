@@ -5,7 +5,9 @@
 // connections that are not signed in learn only how to sign in. Admins
 // manage the list from the chat with /allow, /disallow, and /allowed, and
 // taking someone off it signs them out everywhere, as does a restart
-// without their --private.allow entry.
+// without their --private.allow entry. /invite makes an invitation, which
+// lets one new person make an account with a passkey, without an address
+// on the list; /disallow user:<user_id> takes that back too.
 //
 // Run it with email sign-in, and yourself on the list and an admin:
 //
@@ -91,6 +93,10 @@ func (p *Private) Init(r *apron.Registrar) error {
 		Name: "allowed", Help: "list who may sign in",
 		Available: admin, Run: p.list,
 	})
+	r.Command(apron.Command{
+		Name: "invite", Usage: "/invite [user_id]", Help: "invite one person to make an account with a passkey",
+		Available: admin, Run: p.invite,
+	})
 	return nil
 }
 
@@ -140,5 +146,19 @@ func (p *Private) list(_ context.Context, call *apron.CommandCall) (map[string]a
 		fmt.Fprintf(&b, "- `%s`%s\n", principal, note)
 	}
 	call.Notice(b.String())
+	return nil, nil
+}
+
+func (p *Private) invite(ctx context.Context, call *apron.CommandCall) (map[string]any, error) {
+	userID := strings.TrimSpace(call.Args)
+	invitation, err := p.host.Invite(ctx, apron.InvitationOptions{UserID: userID})
+	if err != nil && userID != "" {
+		return nil, apron.InvalidParams("Usage: /invite [user_id]")
+	}
+	if err != nil {
+		return nil, err
+	}
+	call.Notice(fmt.Sprintf("This invitation makes one account with a passkey until %s:\n\n`%s`",
+		invitation.Expires.UTC().Format("2006-01-02 15:04 MST"), invitation.Token))
 	return nil, nil
 }

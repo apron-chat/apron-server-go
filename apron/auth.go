@@ -221,7 +221,15 @@ func (s *Server) authenticate(c *client, req request) (any, *Error) {
 		s.unlock()
 		return nil, err
 	}
+	presented, err := s.presentedInvitationLocked(c, req)
+	if err != nil {
+		s.unlock()
+		return nil, err
+	}
 	r := s.authRequestLocked(c, req, scheme, requestedName, requested)
+	if presented != nil {
+		r.Invitation = &authn.Invitation{ID: presented.id, Name: presented.name, UserID: presented.userID}
+	}
 	s.unlock()
 
 	result, schemeErr := scheme.Auth(s.requestContext(c), r)
@@ -243,6 +251,9 @@ func (s *Server) authenticate(c *client, req request) (any, *Error) {
 			return s.approveLocked(c, req, result.Token, requestedName, requested)
 		}
 	case *authn.SignIn:
+		if result != nil && result.Invitation != "" {
+			return s.enrollLocked(c, req, scheme, result.Proof, result.Invitation)
+		}
 		if result != nil {
 			return s.signInProvenLocked(c, req, scheme, result.Proof, result.Create)
 		}

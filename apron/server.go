@@ -574,6 +574,9 @@ type Server struct {
 	closed     bool
 	sessions   map[[32]byte]session
 	devices    map[[32]byte]deviceToken
+	// invitations are the outstanding invitations by the SHA-256 of their
+	// tokens (invitations.go).
+	invitations map[[32]byte]*invitation
 	// schemes are the sign-in schemes the server offers (auth.go), in the
 	// order the server frame lists them; accounts are the accounts by the
 	// identities that prove them; proposals are the outstanding proposals
@@ -671,6 +674,7 @@ func Open(config Config) (*Server, error) {
 		pushes:      make(map[string]*pushRegistration),
 		sessions:    make(map[[32]byte]session),
 		devices:     make(map[[32]byte]deviceToken),
+		invitations: make(map[[32]byte]*invitation),
 		accounts:    make(map[authn.Identity]*userState),
 		proposals:   proposals{links: make(map[string]*proposal), pages: make(map[string]*proposal)},
 		dirty:       newDirtySet(),

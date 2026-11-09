@@ -1416,6 +1416,47 @@ a restart invalidates them, including passkeys still present in your
 authenticator. Credential removal is future work; an account with an
 address recovers through [email sign-in](#email-sign-in).
 
+### Invitations
+
+An invitation makes one account without a guest to start from, as a
+server without guests, or whose sign-in an extension restricts, needs for
+its first account and each one after. The program that embeds the server
+makes one with `Server.Invite`, and an extension with `Host.Invite`; the
+[private example](examples/private) offers it to admins as `/invite`. It
+returns a token, `apron_invite_<random>`, once the invitation is stored, and
+the server keeps only the token's SHA-256. An invitation lasts seven days
+unless its `Lifetime` says otherwise; `Invitations` lists those
+outstanding, without tokens, and `RevokeInvitation` forgets one.
+
+A connection that is not signed in presents the token with a passkey
+registration, in both steps:
+
+```json
+{"method": "auth", "id": "1", "params": {"scheme": "webauthn", "action": "register", "step": "begin", "invitation": "apron_invite_…", "name": "Ada"}}
+{"method": "auth", "id": "2", "params": {"scheme": "webauthn", "action": "register", "step": "finish", "challenge_id": "…", "invitation": "apron_invite_…", "credential": {}}}
+```
+
+The begin makes nothing: no guest, and no account. The finish verifies the
+passkey as any registration does, then checks the invitation again, and in
+one change makes the account, with the name the request asked for or the
+invitation's, and the `user_id` the invitation asks for or `user_<n>`;
+gives it the roles the invitation grants and joins it to the default room,
+then the invitation's rooms (a private one as a member its creator added
+would be); keeps the invitation's `Data` with it; and uses the invitation
+up. The result, a sign-in's with a bearer token, is sent once that change is
+stored (see [Storage](#storage)). A registration that fails, or is
+abandoned, leaves the invitation for another try until it expires, and one
+presented on a signed-in connection, used, revoked, or expired is `denied`.
+
+On a server whose sign-in an extension restricts, an invitation admits the
+account it made whether or not the allowlist names it (`Enrollment.Admitted`).
+`Allowlist.Disallow`, naming the account by `user_id` or an identity, ends
+that and signs it out, as `RevokeEnrollment` does, which also takes back the
+roles the invitation granted. `Enrollment` returns what the invitation left
+with the account: its ID, who made it, when, and its `Data`, which an
+extension uses for policy of its own, such as which account is its owner,
+without a second write that a crash could separate from the account's.
+
 ### Example WebAuthn exchange
 
 These examples define the Go server's bearer-token policy alongside the canonical

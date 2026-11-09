@@ -73,25 +73,28 @@ type dirtySet struct {
 	sessions map[[32]byte]bool
 	devices  map[[32]byte]bool
 	embeds   map[string]bool
-	pushes   map[string]bool
-	ext      map[extKey]bool
-	usedIDs  []string
-	vapid    bool
-	emoji    bool
-	profile  bool
+	// invitations are named by their tokens' SHA-256.
+	invitations map[[32]byte]bool
+	pushes      map[string]bool
+	ext         map[extKey]bool
+	usedIDs     []string
+	vapid       bool
+	emoji       bool
+	profile     bool
 }
 
 func newDirtySet() dirtySet {
 	return dirtySet{
-		records:  make(map[*logRecord]bool),
-		rooms:    make(map[string]bool),
-		messages: make(map[string]bool),
-		users:    make(map[string]bool),
-		sessions: make(map[[32]byte]bool),
-		devices:  make(map[[32]byte]bool),
-		embeds:   make(map[string]bool),
-		pushes:   make(map[string]bool),
-		ext:      make(map[extKey]bool),
+		records:     make(map[*logRecord]bool),
+		rooms:       make(map[string]bool),
+		messages:    make(map[string]bool),
+		users:       make(map[string]bool),
+		sessions:    make(map[[32]byte]bool),
+		devices:     make(map[[32]byte]bool),
+		invitations: make(map[[32]byte]bool),
+		embeds:      make(map[string]bool),
+		pushes:      make(map[string]bool),
+		ext:         make(map[extKey]bool),
 	}
 }
 
@@ -199,10 +202,12 @@ type storedUser struct {
 	// Created is when the user was made, in Unix milliseconds; absent for
 	// users stored before it was kept. Bot names the Extension whose bot
 	// the account is (Registrar.Bot).
-	Created  int64    `json:"created,omitzero"`
-	Bot      string   `json:"bot,omitzero"`
-	External string   `json:"external,omitzero"`
-	Granted  []string `json:"granted,omitzero"`
+	Created int64  `json:"created,omitzero"`
+	Bot     string `json:"bot,omitzero"`
+	// Enrolled is what the invitation that made the account left with it.
+	Enrolled *storedEnrollment `json:"enrolled,omitzero"`
+	External string            `json:"external,omitzero"`
+	Granted  []string          `json:"granted,omitzero"`
 }
 
 type storedMute struct {
@@ -340,6 +345,7 @@ func (s *Server) entriesLocked(d dirtySet) []store.Entry {
 			del(entryDevice, sessionID(key))
 		}
 	}
+	s.invitationEntriesLocked(d, put, del)
 	for id := range d.embeds {
 		if e := s.embeds[id]; e != nil {
 			put(entryEmbed, id, storedEmbedOf(e))
@@ -426,6 +432,7 @@ func storedUserOf(u *userState) storedUser {
 		Bot: u.botOf, Identities: u.identities, Records: u.records, Grants: u.granted,
 		Email: u.identities[email.Name], External: u.identities[external.Name],
 		Passkey: u.records[passkey.Name], Granted: u.granted[external.Name],
+		Enrolled: u.enrolled.stored(),
 	}
 	if !u.created.IsZero() {
 		stored.Created = u.created.UnixMilli()
@@ -751,6 +758,9 @@ func (s *Server) restoreLocked() (map[string]bool, error) {
 			s.touchSession([32]byte(key))
 		}
 	}
+	if err := s.restoreInvitationsLocked(entries[entryInvitation], now); err != nil {
+		return nil, err
+	}
 	for id, raw := range entries[entryDevice] {
 		var stored storedDevice
 		key, err := hex.DecodeString(id)
@@ -849,6 +859,7 @@ func (s *Server) removeStaleUploads(keep map[string]bool) {
 func (s *Server) restoreIdentitiesLocked(u *userState, stored storedUser) error {
 	u.identities, u.records = maps.Clone(stored.Identities), maps.Clone(stored.Records)
 	u.granted = maps.Clone(stored.Grants)
+	u.enrolled = stored.Enrolled.restored()
 	legacy := map[string]string{email.Name: stored.Email, external.Name: stored.External}
 	if len(stored.Passkey) > 0 && u.identities[passkey.Name] == "" {
 		var old struct {

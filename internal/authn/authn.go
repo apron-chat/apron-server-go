@@ -111,6 +111,20 @@ type Request struct {
 	State *State
 	// Conn is the server's side of the request's connection.
 	Conn Conn
+	// Invitation is the invitation the request presents, on a connection
+	// that is not signed in, as the server checked it: valid and unused. A
+	// scheme may make a new account with it (SignIn.Invitation) where it
+	// otherwise needs one to add to, such as a passkey registration. Nil
+	// when the request presents none.
+	Invitation *Invitation
+}
+
+// Invitation is an invitation to make one account, as a scheme sees it.
+type Invitation struct {
+	// ID names the invitation; it is not the token that presents it.
+	ID string
+	// Name and UserID are what the invitation suggests for the account.
+	Name, UserID string
 }
 
 // State holds a scheme's value for one connection.
@@ -238,6 +252,10 @@ type SignIn struct {
 	// Create makes an account for an identity no account has; otherwise
 	// such an identity is refused.
 	Create bool
+	// Invitation, the ID of the request's Invitation, makes the account
+	// with that invitation, which the server uses up in the same change:
+	// the identity must be one no account has. Empty for none.
+	Invitation string
 }
 
 // Add adds the identity proven to the connection's account, a guest's
