@@ -361,6 +361,9 @@ func TestRegistrationTakesRequestedName(t *testing.T) {
 	// Adding a passkey to an account keeps the account's name, whatever is asked.
 	other, _ := dialOrigin(t, httpServer, testPasskeyOrigin)
 	passkeyResult(t, passkeyCall(t, other, "resume", "token", "", map[string]any{"token": result["token"]}))
+	other.drain(t)
+	// Adding another passkey takes a recent sign-in with one.
+	loginTestPasskey(t, other, a)
 	adding := passkeyResult(t, passkeyCall(t, other, "begin-add", "register", "begin", map[string]any{"name": "Someone else"}))
 	if userOf(adding)["name"] != "Ada Lovelace" {
 		t.Fatalf("added passkey not labelled with the account's name: %#v", userOf(adding))
@@ -386,6 +389,9 @@ func TestAddingPasskeyPreservesStoredName(t *testing.T) {
 			registered := registerTestPasskey(t, owner, original)
 			other, _ := dialOrigin(t, httpServer, testPasskeyOrigin)
 			passkeyResult(t, passkeyCall(t, other, "resume", "token", "", map[string]any{"token": registered["token"]}))
+			other.drain(t)
+			// Adding another passkey takes a recent sign-in with one.
+			loginTestPasskey(t, other, original)
 			rename := func() {
 				owner.write(t, map[string]any{"method": "me", "id": "rename", "params": map[string]any{"name": "Updated name"}})
 				result := passkeyResult(t, owner.read(t))

@@ -149,6 +149,17 @@ type Config struct {
 	// Store keeps the server's state across restarts; nil keeps it in memory
 	// for this Server only. The server closes it on Shutdown.
 	Store store.Store
+	// AddCredentialWithoutReauth lets a connection add a passkey to an
+	// account that has one without a recent passkey sign-in on it. By
+	// default it needs one, as removing a passkey does: otherwise a stolen
+	// session token could add a passkey of its own, sign in with it, and
+	// remove the owner's.
+	AddCredentialWithoutReauth bool
+	// OnStoreError, if set, is called once, on a goroutine of its own, with
+	// the first error the store returns. The server then
+	// writes nothing more and fails Sync (see Server.Sync); the program
+	// usually shuts it down.
+	OnStoreError func(error)
 	// DisablePush omits server.push and push registration.
 	DisablePush bool
 	// AllowInsecurePush accepts http push endpoints and internal addresses.
@@ -470,6 +481,17 @@ type client struct {
 	// the connection.
 	token  [32]byte
 	device [32]byte
+	// credential names the credential the connection signed in with, as
+	// scheme:id, such as a passkey's, or its session token was made with;
+	// verified is its latest proof of its account with a credential, a
+	// reauthentication (account.go). Guarded by server.mu.
+	credential string
+	verified   verification
+	// service is the key of the service token the connection signed in
+	// with, zero for none, and serviceManage whether it may manage its
+	// account (service.go). Guarded by server.mu.
+	service       [32]byte
+	serviceManage bool
 	// proposal is the connection's latest proposal (§4.11.1), which may
 	// have been dropped since, and clientKey names its client address for
 	// the limits of all its connections. Guarded by server.mu.
@@ -495,6 +517,10 @@ type client struct {
 type outboundBatch struct {
 	frames      [][]byte
 	closeReason string
+	// fence, if set, holds the writer until the changes before it are in the
+	// store (client.fenceLocked); the frames after it are never written if
+	// they are not.
+	fence *storeFence
 }
 
 // Server is an Apron server, which Open starts. It serves the protocol
@@ -552,14 +578,25 @@ type Server struct {
 	// dirty is the state changed under mu since it was last written to the
 	// store; storeWrites queues batches for the store writer.
 	dirty       dirtySet
-	storeWrites chan []store.Entry
+	storeWrites chan storeBatch
 	storeDone   chan struct{}
 	storeClosed bool
-	storedMeta  storedMeta
-	pushes      map[string]*pushRegistration
-	closed      bool
-	sessions    map[[32]byte]session
-	devices     map[[32]byte]deviceToken
+	// fences wait for the batch the next flush queues (newFenceLocked).
+	fences []*storeFence
+	// storeErr is the store's first failure, after which nothing more is
+	// written.
+	storeErr   atomic.Pointer[error]
+	storedMeta storedMeta
+	pushes     map[string]*pushRegistration
+	closed     bool
+	sessions   map[[32]byte]session
+	devices    map[[32]byte]deviceToken
+	// invitations are the outstanding invitations by the SHA-256 of their
+	// tokens (invitations.go).
+	invitations map[[32]byte]*invitation
+	// services are the bots' service tokens by the SHA-256 of their tokens
+	// (service.go).
+	services map[[32]byte]*serviceToken
 	// schemes are the sign-in schemes the server offers (auth.go), in the
 	// order the server frame lists them; accounts are the accounts by the
 	// identities that prove them; proposals are the outstanding proposals
@@ -657,10 +694,12 @@ func Open(config Config) (*Server, error) {
 		pushes:      make(map[string]*pushRegistration),
 		sessions:    make(map[[32]byte]session),
 		devices:     make(map[[32]byte]deviceToken),
+		invitations: make(map[[32]byte]*invitation),
+		services:    make(map[[32]byte]*serviceToken),
 		accounts:    make(map[authn.Identity]*userState),
 		proposals:   proposals{links: make(map[string]*proposal), pages: make(map[string]*proposal)},
 		dirty:       newDirtySet(),
-		storeWrites: make(chan []store.Entry, storeQueue),
+		storeWrites: make(chan storeBatch, storeQueue),
 		storeDone:   make(chan struct{}),
 		badgeDelay:  badgeDelay,
 		stopped:     make(chan struct{}),
@@ -838,6 +877,12 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	closed := s.closed
 	s.mu.RUnlock()
 	w.Header().Set("Content-Type", "application/json")
+	if s.StoreErr() != nil {
+		// The server serves what it holds, but keeps none of it.
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte(`{"status":"store_failed"}`))
+		return
+	}
 	if closed {
 		w.WriteHeader(http.StatusServiceUnavailable)
 	}
@@ -857,6 +902,11 @@ func (s *Server) Shutdown(ctx context.Context) error {
 		}
 		for _, e := range s.embeds {
 			e.endLive()
+		}
+		for _, t := range s.services {
+			if t.timer != nil {
+				t.timer.Stop()
+			}
 		}
 		// Pending badge pushes would only be dropped once they fire, and
 		// the ends of timed mutes and coalesced statuses would find the
@@ -1104,6 +1154,14 @@ func (s *Server) serverParams(baseURL string, revealed bool) map[string]any {
 	}
 	// ext:editors (apron's EXTENSIONS.md) needs no data of its own.
 	params["capabilities"] = append(params["capabilities"].([]string), "ext:editors")
+	if revealed && slices.ContainsFunc(s.schemes, func(scheme authn.Scheme) bool {
+		_, ok := scheme.(authn.Credentials)
+		return ok
+	}) {
+		// ext:account (account.go): credentials, such as passkeys, and
+		// other sessions.
+		params["capabilities"] = append(params["capabilities"].([]string), "ext:"+accountExt)
+	}
 	ext := make(map[string]any)
 	if emoji := s.emojiExt(baseURL); emoji != nil && revealed {
 		params["capabilities"] = append(params["capabilities"].([]string), "ext:emoji")
@@ -1156,6 +1214,23 @@ func (c *client) writeLoop() {
 		case <-c.done:
 			return
 		case batch := <-c.out:
+			if batch.fence != nil {
+				select {
+				case <-c.done:
+					return
+				case <-batch.fence.done:
+				}
+				if batch.fence.err != nil {
+					// What the frames behind it acknowledge is not stored: the
+					// connection closes rather than send them.
+					ctx, cancel := context.WithTimeout(context.Background(), c.server.config.WriteTimeout)
+					_ = c.conn.write(ctx, encodeJSON(errorResponse(nil, internalError())))
+					cancel()
+					c.stopConnection()
+					return
+				}
+				continue
+			}
 			for _, payload := range batch.frames {
 				select {
 				case <-c.done:
@@ -1302,6 +1377,7 @@ func (s *Server) operations() map[string]operation {
 		"activity":   (*Server).activity,
 		"status":     (*Server).status,
 	}
+	accountOps(ops)
 	if !s.config.DisablePush {
 		ops["push_register"] = (*Server).registerPush
 		ops["push_unregister"] = (*Server).unregisterPush

@@ -43,6 +43,16 @@
 //   - an allowlist of who may sign in, with no guests, which signs out
 //     whoever is taken off it ([Registrar.RestrictSignIn]).
 //
+// A scope ([Host.SetScope], [BotOptions].Scope) limits an account, such as
+// a bot, to some rooms, on every path the server checks who sees a room;
+// a bot's service tokens ([Bot.IssueToken]) sign in its clients outside
+// the process, expire on time, and are revoked at once.
+//
+// Invitations ([Host.Invite], [Server.Invite]) each let one person make an
+// account with a passkey, without a guest to start from: the account is
+// made, admitted, and given what the invitation grants in one stored
+// change, and [Host.Enrollment] returns the invitation's data with it.
+//
 // The Registrar's [Host] is the extension's handle on the server for as long
 // as it runs: its capability in the server frame ([Host.Advertise]), values
 // kept in the store ([Host.Store]), goroutines that run until Shutdown
@@ -55,6 +65,16 @@
 // client. [Host.Visible] says whether a user may see a room, and
 // [Host.Public] whether anyone may: an extension that shows messages checks
 // them, so that it never shows a private room's.
+//
+// # Durability
+//
+// The server answers most requests once their changes are made in memory,
+// and writes them to [Config].Store in the background, in order. [Server.Sync]
+// and [Host.Sync] wait until every earlier change is stored; answers that
+// must mean a change is stored, such as a new account's from an
+// invitation, wait the same way. A store that fails stays failed:
+// [Config].OnStoreError is told, nothing more is written, and Sync returns
+// an error wrapping [ErrStoreFailed].
 //
 // The examples directory of the module holds complete servers built with
 // extensions, each with a test.

@@ -21,6 +21,9 @@ type session struct {
 	user    *userState
 	origin  string
 	expires time.Time
+	// credential names the credential the sign-in that made it proved, as
+	// scheme:id, if any (account.go).
+	credential string
 }
 
 // signInLocked makes an account the connection's identity after a scheme
@@ -42,6 +45,11 @@ func (s *Server) signInLocked(c *client, req request, user *userState, now time.
 	}
 	token := base64.RawURLEncoding.EncodeToString(secret)
 	c.token = sha256.Sum256([]byte(token))
+	c.service, c.serviceManage = [32]byte{}, false
+	// A sign-in that proved a credential notes it after (provedLocked). A
+	// device token the connection signed in with stays its own, so that
+	// replacing that token still closes it.
+	c.credential = ""
 	s.sessions[c.token] = session{user: user, origin: c.origin, expires: now.Add(sessionLifetime)}
 	s.touchSession(c.token)
 	s.capSessionsLocked(user, c.token)
@@ -113,6 +121,9 @@ func (s *Server) authenticateToken(c *client, req request) (any, *Error) {
 	if strings.HasPrefix(token, deviceTokenPrefix) {
 		return s.authenticateDeviceLocked(c, req, token)
 	}
+	if strings.HasPrefix(token, serviceTokenPrefix) {
+		return s.authenticateServiceLocked(c, req, token)
+	}
 	s.pruneSessionsLocked(now)
 	key := sha256.Sum256([]byte(token))
 	session, ok := s.sessions[key]
@@ -140,6 +151,8 @@ func (s *Server) authenticateToken(c *client, req request) (any, *Error) {
 	s.sessions[key] = session
 	s.touchSession(key)
 	c.token = key
+	c.credential = session.credential
+	c.service, c.serviceManage = [32]byte{}, false
 	// Resuming the user the connection is signed in as is no sign-in
 	// (§4.5), and sends nothing after its result.
 	return s.switchUserLocked(c, req, session.user, map[string]any{"token": token}, c.user != session.user, false), nil

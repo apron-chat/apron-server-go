@@ -47,7 +47,7 @@ type Extension interface {
 var extensionNamePattern = regexp.MustCompile(`^[a-z][a-z0-9-]{0,31}$`)
 
 // reservedExtensionNames are the extensions the server implements itself.
-var reservedExtensionNames = []string{"emoji", "settings"}
+var reservedExtensionNames = []string{"emoji", "settings", accountExt}
 
 // Roles the server gives meaning to (§3.3.4). Config.Roles grants them, and
 // so may external sign-in; extensions may define others.

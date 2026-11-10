@@ -73,25 +73,30 @@ type dirtySet struct {
 	sessions map[[32]byte]bool
 	devices  map[[32]byte]bool
 	embeds   map[string]bool
-	pushes   map[string]bool
-	ext      map[extKey]bool
-	usedIDs  []string
-	vapid    bool
-	emoji    bool
-	profile  bool
+	// invitations are named by their tokens' SHA-256.
+	invitations map[[32]byte]bool
+	services    map[[32]byte]bool
+	pushes      map[string]bool
+	ext         map[extKey]bool
+	usedIDs     []string
+	vapid       bool
+	emoji       bool
+	profile     bool
 }
 
 func newDirtySet() dirtySet {
 	return dirtySet{
-		records:  make(map[*logRecord]bool),
-		rooms:    make(map[string]bool),
-		messages: make(map[string]bool),
-		users:    make(map[string]bool),
-		sessions: make(map[[32]byte]bool),
-		devices:  make(map[[32]byte]bool),
-		embeds:   make(map[string]bool),
-		pushes:   make(map[string]bool),
-		ext:      make(map[extKey]bool),
+		records:     make(map[*logRecord]bool),
+		rooms:       make(map[string]bool),
+		messages:    make(map[string]bool),
+		users:       make(map[string]bool),
+		sessions:    make(map[[32]byte]bool),
+		devices:     make(map[[32]byte]bool),
+		invitations: make(map[[32]byte]bool),
+		services:    make(map[[32]byte]bool),
+		embeds:      make(map[string]bool),
+		pushes:      make(map[string]bool),
+		ext:         make(map[extKey]bool),
 	}
 }
 
@@ -199,10 +204,14 @@ type storedUser struct {
 	// Created is when the user was made, in Unix milliseconds; absent for
 	// users stored before it was kept. Bot names the Extension whose bot
 	// the account is (Registrar.Bot).
-	Created  int64    `json:"created,omitzero"`
-	Bot      string   `json:"bot,omitzero"`
-	External string   `json:"external,omitzero"`
-	Granted  []string `json:"granted,omitzero"`
+	Created int64  `json:"created,omitzero"`
+	Bot     string `json:"bot,omitzero"`
+	// Enrolled is what the invitation that made the account left with it.
+	Enrolled *storedEnrollment `json:"enrolled,omitzero"`
+	// Scope is the rooms the account is limited to (scope.go).
+	Scope    *storedScope `json:"scope,omitzero"`
+	External string       `json:"external,omitzero"`
+	Granted  []string     `json:"granted,omitzero"`
 }
 
 type storedMute struct {
@@ -211,9 +220,10 @@ type storedMute struct {
 }
 
 type storedSession struct {
-	User    string    `json:"user"`
-	Origin  string    `json:"origin"`
-	Expires time.Time `json:"expires"`
+	User       string    `json:"user"`
+	Origin     string    `json:"origin"`
+	Expires    time.Time `json:"expires"`
+	Credential string    `json:"credential,omitzero"`
 }
 
 type storedDevice struct {
@@ -250,6 +260,8 @@ type storedPush struct {
 	// Device is the hex SHA-256 of the /invite-device token the registering
 	// connection signed in with.
 	Device string `json:"device,omitzero"`
+	// Session is the hex SHA-256 of the session token it signed in with.
+	Session string `json:"session,omitzero"`
 	// P256DH and Auth are the subscription's keys, in base64url.
 	P256DH string `json:"p256dh,omitzero"`
 	Auth   string `json:"auth,omitzero"`
@@ -265,10 +277,16 @@ func (s *Server) metaLocked() storedMeta {
 
 func sessionID(key [32]byte) string { return hex.EncodeToString(key[:]) }
 
-// flushLocked queues the marked changes as one batch for the store writer.
+// flushLocked queues the marked changes as one batch for the store writer,
+// with the fences waiting for it.
 func (s *Server) flushLocked() {
+	fences := s.fences
+	s.fences = nil
 	if s.storeClosed {
 		s.dirty = newDirtySet()
+		for _, f := range fences {
+			f.release(ErrServerClosed)
+		}
 		return
 	}
 	batch := s.entriesLocked(s.dirty)
@@ -278,8 +296,8 @@ func (s *Server) flushLocked() {
 		batch = append(batch, store.Entry{Kind: entryMeta, ID: "counters", Value: encodeJSON(meta)})
 	}
 	s.dirty = newDirtySet()
-	if len(batch) > 0 {
-		s.storeWrites <- batch
+	if len(batch) > 0 || len(fences) > 0 {
+		s.storeWrites <- storeBatch{entries: batch, fences: fences}
 	}
 }
 
@@ -322,7 +340,7 @@ func (s *Server) entriesLocked(d dirtySet) []store.Entry {
 	}
 	for key := range d.sessions {
 		if session, ok := s.sessions[key]; ok {
-			put(entrySession, sessionID(key), storedSession{User: session.user.id, Origin: session.origin, Expires: session.expires})
+			put(entrySession, sessionID(key), storedSession{User: session.user.id, Origin: session.origin, Expires: session.expires, Credential: session.credential})
 		} else {
 			del(entrySession, sessionID(key))
 		}
@@ -334,6 +352,8 @@ func (s *Server) entriesLocked(d dirtySet) []store.Entry {
 			del(entryDevice, sessionID(key))
 		}
 	}
+	s.invitationEntriesLocked(d, put, del)
+	s.serviceEntriesLocked(d, put, del)
 	for id := range d.embeds {
 		if e := s.embeds[id]; e != nil {
 			put(entryEmbed, id, storedEmbedOf(e))
@@ -356,6 +376,9 @@ func (s *Server) entriesLocked(d dirtySet) []store.Entry {
 			}
 			if p.device != [32]byte{} {
 				stored.Device = sessionID(p.device)
+			}
+			if p.session != [32]byte{} {
+				stored.Session = sessionID(p.session)
 			}
 			if p.keys != nil {
 				stored.P256DH, stored.Auth = encodeBase64URL(p.keys.p256dh), encodeBase64URL(p.keys.auth)
@@ -420,6 +443,7 @@ func storedUserOf(u *userState) storedUser {
 		Bot: u.botOf, Identities: u.identities, Records: u.records, Grants: u.granted,
 		Email: u.identities[email.Name], External: u.identities[external.Name],
 		Passkey: u.records[passkey.Name], Granted: u.granted[external.Name],
+		Enrolled: u.enrolled.stored(), Scope: u.scope.stored(),
 	}
 	if !u.created.IsZero() {
 		stored.Created = u.created.UnixMilli()
@@ -462,12 +486,28 @@ func storedEmbedOf(e *embedState) storedEmbed {
 	return stored
 }
 
-// writeStore applies batches to the store in order until the queue closes.
+// writeStore applies batches to the store in order until the queue closes,
+// then releases the fences behind each. After the store's first failure it
+// applies nothing more, so the store keeps the state as of the batch
+// before, and every later fence fails.
 func (s *Server) writeStore() {
 	defer close(s.storeDone)
 	for batch := range s.storeWrites {
-		if err := s.config.Store.Apply(batch); err != nil {
-			slog.Error("cannot write to the store", "error", err)
+		err := s.StoreErr()
+		if err == nil && len(batch.entries) > 0 {
+			if applyErr := s.config.Store.Apply(batch.entries); applyErr != nil {
+				err = fmt.Errorf("%w: %w", ErrStoreFailed, applyErr)
+				s.storeErr.Store(&err)
+				slog.Error("cannot write to the store; the server writes nothing more", "error", applyErr)
+				if s.config.OnStoreError != nil {
+					// On its own goroutine, so that it may call Shutdown,
+					// which waits for this writer.
+					go s.config.OnStoreError(err)
+				}
+			}
+		}
+		for _, f := range batch.fences {
+			f.release(err)
 		}
 	}
 }
@@ -710,6 +750,9 @@ func (s *Server) restoreLocked() (map[string]bool, error) {
 		if device, err := hex.DecodeString(stored.Device); err == nil && len(device) == 32 {
 			p.device = [32]byte(device)
 		}
+		if session, err := hex.DecodeString(stored.Session); err == nil && len(session) == 32 {
+			p.session = [32]byte(session)
+		}
 		if u := s.users[stored.User]; u != nil && p.live(now) {
 			s.addPushLocked(u, p)
 		} else {
@@ -726,10 +769,16 @@ func (s *Server) restoreLocked() (map[string]bool, error) {
 			return nil, err
 		}
 		if u := s.users[stored.User]; u != nil && u.account() && now.Before(stored.Expires) {
-			s.sessions[[32]byte(key)] = session{user: u, origin: stored.Origin, expires: stored.Expires}
+			s.sessions[[32]byte(key)] = session{user: u, origin: stored.Origin, expires: stored.Expires, credential: stored.Credential}
 		} else {
 			s.touchSession([32]byte(key))
 		}
+	}
+	if err := s.restoreInvitationsLocked(entries[entryInvitation], now); err != nil {
+		return nil, err
+	}
+	if err := s.restoreServicesLocked(entries[entryService], now); err != nil {
+		return nil, err
 	}
 	for id, raw := range entries[entryDevice] {
 		var stored storedDevice
@@ -829,6 +878,8 @@ func (s *Server) removeStaleUploads(keep map[string]bool) {
 func (s *Server) restoreIdentitiesLocked(u *userState, stored storedUser) error {
 	u.identities, u.records = maps.Clone(stored.Identities), maps.Clone(stored.Records)
 	u.granted = maps.Clone(stored.Grants)
+	u.enrolled = stored.Enrolled.restored()
+	u.scope = stored.Scope.restored()
 	legacy := map[string]string{email.Name: stored.Email, external.Name: stored.External}
 	if len(stored.Passkey) > 0 && u.identities[passkey.Name] == "" {
 		var old struct {

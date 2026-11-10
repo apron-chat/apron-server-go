@@ -111,6 +111,20 @@ type Request struct {
 	State *State
 	// Conn is the server's side of the request's connection.
 	Conn Conn
+	// Invitation is the invitation the request presents, on a connection
+	// that is not signed in, as the server checked it: valid and unused. A
+	// scheme may make a new account with it (SignIn.Invitation) where it
+	// otherwise needs one to add to, such as a passkey registration. Nil
+	// when the request presents none.
+	Invitation *Invitation
+}
+
+// Invitation is an invitation to make one account, as a scheme sees it.
+type Invitation struct {
+	// ID names the invitation; it is not the token that presents it.
+	ID string
+	// Name and UserID are what the invitation suggests for the account.
+	Name, UserID string
 }
 
 // State holds a scheme's value for one connection.
@@ -216,11 +230,38 @@ type Proof struct {
 	// Roles are the server roles the identity grants its account, as of
 	// this proof, replacing those it granted before.
 	Roles []string
+	// Credential names, within the identity, the credential that proved
+	// it, such as a passkey's ID, so the server can end the sessions it
+	// made when the credential is removed; empty for none.
+	Credential string
 	// Commit, if set, is called once the server has checked the proof and
 	// before it changes anything; it returns the record the server keeps
 	// with the identity (Restorer), nil for none, or refuses. The server
 	// calls it holding its lock, so it must not block.
 	Commit func() (jsontext.Value, error)
+}
+
+// Credential is one of an identity's credentials, such as a passkey.
+type Credential struct {
+	// ID names the credential within its identity.
+	ID string
+	// Name is what its owner calls it, if anything.
+	Name              string
+	Created, LastUsed time.Time
+}
+
+// Credentials is a Scheme whose identities each hold credentials their
+// owner manages, such as passkeys. The server calls its methods holding its
+// lock, as it does Proof.Commit, and keeps the record they return with the
+// identity.
+type Credentials interface {
+	// Credentials lists the identity's credentials.
+	Credentials(subject string) []Credential
+	// RenameCredential names one of the identity's credentials.
+	RenameCredential(subject, id, name string) (record jsontext.Value, err error)
+	// RemoveCredential removes one of the identity's credentials. When it
+	// was the last, the record is nil, and the identity proves nothing.
+	RemoveCredential(subject, id string) (record jsontext.Value, err error)
 }
 
 // Result is a scheme's answer: *Reply, *Approve, *SignIn, or *Add.
@@ -238,6 +279,10 @@ type SignIn struct {
 	// Create makes an account for an identity no account has; otherwise
 	// such an identity is refused.
 	Create bool
+	// Invitation, the ID of the request's Invitation, makes the account
+	// with that invitation, which the server uses up in the same change:
+	// the identity must be one no account has. Empty for none.
+	Invitation string
 }
 
 // Add adds the identity proven to the connection's account, a guest's

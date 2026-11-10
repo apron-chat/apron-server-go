@@ -80,6 +80,9 @@ func (s *Server) inviteDeviceCommand(c *client, r *roomState, _ map[string]any, 
 	if !u.account() {
 		return nil, &Error{Code: CodeDenied, Message: "Sign in with an account to use /invite-device"}
 	}
+	if c.restrictedService() {
+		return nil, serviceRefusal()
+	}
 	words := strings.Fields(args)
 	if len(words) != 1 {
 		return nil, invalidParams("Usage: /invite-device <name>")
@@ -159,6 +162,8 @@ func (s *Server) authenticateDeviceLocked(c *client, req request, token string) 
 		return nil, err
 	}
 	c.device = key
+	c.service, c.serviceManage = [32]byte{}, false
+	c.token, c.credential = [32]byte{}, ""
 	return s.switchUserLocked(c, req, device.user, nil, c.user != device.user, false), nil
 }
 

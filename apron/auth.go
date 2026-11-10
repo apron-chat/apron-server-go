@@ -173,6 +173,11 @@ func (s *Server) authenticate(c *client, req request) (any, *Error) {
 		s.unlock()
 		return nil, connectionClosing()
 	}
+	if c.restrictedService() {
+		// It may not add to the account, nor become another.
+		s.unlock()
+		return nil, serviceRefusal()
+	}
 	name, err := parseString(req.params, "scheme", true)
 	if err != nil {
 		s.unlock()
@@ -184,7 +189,7 @@ func (s *Server) authenticate(c *client, req request) (any, *Error) {
 	switch {
 	case name == "guest" && !s.guestsAllowedLocked():
 		err = &Error{Code: CodeUnsupported, Message: "This server has no guests; sign in with an account"}
-	case name == "token" && len(s.schemes) == 0:
+	case name == "token" && len(s.schemes) == 0 && !presentsServiceToken(req):
 		err = &Error{Code: CodeUnsupported, Message: "This server has no sign-in sessions; use guest"}
 	case name == "guest", name == "token", scheme != nil:
 	case disabledSchemes[name] != "":
@@ -221,7 +226,15 @@ func (s *Server) authenticate(c *client, req request) (any, *Error) {
 		s.unlock()
 		return nil, err
 	}
+	presented, err := s.presentedInvitationLocked(c, req)
+	if err != nil {
+		s.unlock()
+		return nil, err
+	}
 	r := s.authRequestLocked(c, req, scheme, requestedName, requested)
+	if presented != nil {
+		r.Invitation = &authn.Invitation{ID: presented.id, Name: presented.name, UserID: presented.userID}
+	}
 	s.unlock()
 
 	result, schemeErr := scheme.Auth(s.requestContext(c), r)
@@ -243,6 +256,9 @@ func (s *Server) authenticate(c *client, req request) (any, *Error) {
 			return s.approveLocked(c, req, result.Token, requestedName, requested)
 		}
 	case *authn.SignIn:
+		if result != nil && result.Invitation != "" {
+			return s.enrollLocked(c, req, scheme, result.Proof, result.Invitation)
+		}
 		if result != nil {
 			return s.signInProvenLocked(c, req, scheme, result.Proof, result.Create)
 		}
@@ -253,6 +269,13 @@ func (s *Server) authenticate(c *client, req request) (any, *Error) {
 	}
 	s.logger.Error("a sign-in scheme answered with no result", "scheme", name, "result", fmt.Sprintf("%T", result))
 	return nil, internalError()
+}
+
+// presentsServiceToken reports whether a token auth presents a bot's
+// service token, which signs in on a server without sign-in schemes too.
+func presentsServiceToken(req request) bool {
+	token, _ := parseString(req.params, "token", false)
+	return strings.HasPrefix(token, serviceTokenPrefix)
 }
 
 // authenticateGuestLocked signs the connection in as a new guest, or
@@ -360,6 +383,17 @@ func (s *Server) addProvenLocked(c *client, req request, scheme authn.Scheme, pr
 	case !s.admittedWithLocked(account, id):
 		return nil, notAdmitted()
 	}
+	if _, manages := scheme.(authn.Credentials); manages && account.identities[id.Scheme] != "" && !s.config.AddCredentialWithoutReauth {
+		// Another passkey for an account that has one: a stolen session
+		// token must not add a way back in, nor one it could then sign in
+		// with to pass as the owner.
+		if err := s.reauthenticatedLocked(c); err != nil {
+			return nil, err
+		}
+	}
+	// Only a guest's first identity counts as proof of the account: it is
+	// the account's only one.
+	wasGuest := !account.account()
 	record, err := commit(proof)
 	if err != nil {
 		return nil, err
@@ -381,11 +415,17 @@ func (s *Server) addProvenLocked(c *client, req request, scheme authn.Scheme, pr
 		if changed {
 			s.notifyProfileLocked(account, c, nil)
 		}
-		return s.signInLocked(c, req, account, time.Now(), false, false)
+		now := time.Now()
+		result, err := s.signInLocked(c, req, account, now, false, false)
+		if err == nil {
+			s.provedLocked(c, scheme, proof, now, wasGuest)
+		}
+		return result, err
 	}
 	if changed {
 		s.notifyProfileLocked(account, nil, nil)
 	}
+	s.provedLocked(c, scheme, proof, time.Now(), wasGuest)
 	result := map[string]any{}
 	c.sendResult(req, result)
 	return result, nil
@@ -421,7 +461,11 @@ func (s *Server) signInProvenLocked(c *client, req request, scheme authn.Scheme,
 		s.grantRolesLocked(user)
 		// A new account joins the default room, as a new guest does,
 		// after the result (§3.2.2).
-		return s.signInLocked(c, req, user, now, true, true)
+		result, err := s.signInLocked(c, req, user, now, true, true)
+		if err == nil {
+			s.provedLocked(c, scheme, proof, now, true)
+		}
+		return result, err
 	}
 	if err := s.admitLocked(owner); err != nil {
 		return nil, err
@@ -437,8 +481,12 @@ func (s *Server) signInProvenLocked(c *client, req request, scheme authn.Scheme,
 		s.notifyProfileLocked(owner, nil, nil)
 	}
 	// Signing in again as the user the connection is signed in as changes
-	// no user: it is no sign-in (§4.5).
-	return s.signInLocked(c, req, owner, now, c.user != owner, false)
+	// no user: it is no sign-in (§4.5), but it is a reauthentication.
+	result, err := s.signInLocked(c, req, owner, now, c.user != owner, false)
+	if err == nil {
+		s.provedLocked(c, scheme, proof, now, true)
+	}
+	return result, err
 }
 
 // setIdentityLocked gives an account an identity, with its scheme's record

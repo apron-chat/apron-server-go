@@ -236,14 +236,18 @@ func TestInviteDeviceReplacesTheNamesToken(t *testing.T) {
 }
 
 func TestInviteDeviceClosesADeviceThatGotASessionToken(t *testing.T) {
-	_, httpServer := passkeyTestServer(t)
+	config := DefaultConfig()
+	config.WebAuthn = testWebAuthn(t)
+	config.AddCredentialWithoutReauth = true
+	_, httpServer := newTestServer(t, config)
 	ada, adaID := passkeyAccount(t, httpServer)
 	link := wsURL(httpServer)
 	phone, _ := deviceSignIn(t, httpServer, testPasskeyOrigin, inviteDevice(t, ada, adaID, "phone", false, link))
 	ada.drain(t)
 
-	// Whoever holds a device token can add a passkey, which gives the
-	// connection a session token.
+	// Whoever holds a device token can add a passkey, where a recent
+	// passkey sign-in is not needed for it, which gives the connection a
+	// session token.
 	options := passkeyResult(t, passkeyCall(t, phone, "register-start", "register", "begin", nil))
 	registered := passkeyResult(t, passkeyCall(t, phone, "register-end", "register", "finish", map[string]any{"credential": newTestAuthenticator(t).registration(t, options, testPasskeyOrigin)}))
 	if _, ok := registered["token"].(string); !ok || registered["you"].(map[string]any)["user_id"] != adaID {

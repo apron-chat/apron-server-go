@@ -57,8 +57,9 @@ type Options struct {
 	Roles                  []string `long:"role" description:"Grant a role to an account as role=user_id, role=email, or role=scheme:subject, such as admin=ada; repeat for more. admin and moderator may remove others from rooms, and admin may replace and remove custom emoji and set the server's title, description, and avatar with /server"`
 
 	WebAuthn struct {
-		RPID    string   `long:"rp-id" default:"localhost" description:"Passkey relying party domain; empty disables passkeys"`
-		Origins []string `long:"origin" default:"http://localhost:5173" default:"http://localhost:8080" description:"Exact frontend origin for passkeys; repeat for more"`
+		RPID             string   `long:"rp-id" default:"localhost" description:"Passkey relying party domain; empty disables passkeys"`
+		Origins          []string `long:"origin" default:"http://localhost:5173" default:"http://localhost:8080" description:"Exact frontend origin for passkeys; repeat for more"`
+		AddWithoutReauth bool     `long:"add-without-reauth" description:"Let a connection add a passkey to an account that has one without a passkey sign-in in the last five minutes; a stolen session token could then take the account over"`
 	} `group:"Passkeys" namespace:"webauthn"`
 
 	Upload struct {
@@ -289,6 +290,7 @@ func serverConfig(options Options) (apron.Config, error) {
 		if err != nil {
 			return config, fmt.Errorf("invalid WebAuthn configuration: %w", err)
 		}
+		config.AddCredentialWithoutReauth = options.WebAuthn.AddWithoutReauth
 	}
 	return config, nil
 }
@@ -310,6 +312,10 @@ func Run(logger *slog.Logger, options Options, extensions ...apron.Extension) er
 	if err != nil {
 		return err
 	}
+	// A store that fails stays failed (apron.ErrStoreFailed): stop serving
+	// rather than go on acknowledging what is not kept.
+	storeFailed := make(chan error, 1)
+	config.OnStoreError = func(err error) { storeFailed <- err }
 	// The server owns the store from here, and closes it when Open fails.
 	app, err := apron.Open(config)
 	if err != nil {
@@ -400,7 +406,11 @@ func Run(logger *slog.Logger, options Options, extensions ...apron.Extension) er
 	}
 
 	group.Go(func() error {
-		<-ctx.Done()
+		var failed error
+		select {
+		case <-ctx.Done():
+		case failed = <-storeFailed:
+		}
 		shutdown, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		_ = app.Shutdown(shutdown)
@@ -409,7 +419,7 @@ func Run(logger *slog.Logger, options Options, extensions ...apron.Extension) er
 				logger.Error("graceful shutdown failed", "error", err)
 			}
 		}
-		return nil
+		return failed
 	})
 	return group.Wait()
 }

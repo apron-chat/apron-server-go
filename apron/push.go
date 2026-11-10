@@ -122,6 +122,10 @@ type pushRegistration struct {
 	// connection signed in with, zero for none, so replacing that token
 	// removes only the registrations it made.
 	device [32]byte
+	// session is the key of the session token the registering connection
+	// signed in or resumed with, zero for none, so ending that session
+	// (account.go) removes the registrations it made.
+	session [32]byte
 	// keys, for webpush and optionally relay, encrypt the payload.
 	keys *pushKeys
 	wake wakeScope
@@ -193,6 +197,11 @@ func (s *Server) removePushLocked(p *pushRegistration) {
 // users' registrations of the same url are their own. A user holds at most
 // maxPushesPerUser: another replaces the one least recently registered.
 func (s *Server) registerPush(c *client, req request) (any, bool, *Error) {
+	if c.service != [32]byte{} {
+		// A service token's client is a program, which push does not wake;
+		// a registration would outlive the token's revocation.
+		return nil, false, &Error{Code: CodeDenied, Message: "A service token's connection does not register for push"}
+	}
 	kind, err := parseString(req.params, "kind", true)
 	if err != nil {
 		return nil, false, err
@@ -260,7 +269,7 @@ func (s *Server) registerPush(c *client, req request) (any, bool, *Error) {
 		s.removePushLocked(oldest)
 	}
 	s.addPushLocked(u, &pushRegistration{
-		userID: u.id, kind: kind, url: endpoint, token: token, pushID: pushID, device: c.device,
+		userID: u.id, kind: kind, url: endpoint, token: token, pushID: pushID, device: c.device, session: c.sessionKeyLocked(),
 		keys: keys, wake: wake, renewed: now, lastUnread: -1,
 	})
 	return map[string]any{}, false, nil

@@ -98,6 +98,15 @@ func TestPrivate(t *testing.T) {
 	if _, err := ada.Command("general", "/disallow ada@example.com"); err == nil || !strings.Contains(err.Error(), "--private.allow") {
 		t.Fatalf("disallowing an entry from the flags: %v", err)
 	}
+	if notices, err := ada.Command("general", "/invite"); err != nil || len(notices) != 1 || !strings.Contains(notices[0], "apron_invite_") {
+		t.Fatalf("/invite = %q, %v", notices, err)
+	}
+	if invitations := app.Invitations(); len(invitations) != 1 || invitations[0].By != "private" {
+		t.Fatalf("invitations = %#v", invitations)
+	}
+	if _, err := bob.Command("general", "/invite"); err == nil {
+		t.Fatal("someone who is not an admin invited someone")
+	}
 	notices, err := ada.Command("general", "/allowed")
 	if err != nil || len(notices) != 1 || !strings.Contains(notices[0], "`email:bob@example.com`") {
 		t.Fatalf("/allowed = %q, %v", notices, err)

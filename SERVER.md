@@ -150,6 +150,10 @@ Flags (`aprond --help` lists them all):
   configure passkeys; `--webauthn.rp-id ''` disables them. The origins are
   also served at `/.well-known/webauthn`, so a frontend on another domain
   can use passkeys; see [Passkeys](#passkeys).
+  `--webauthn.add-without-reauth` lets a connection add a passkey to an
+  account that has one without a recent passkey sign-in, which a stolen
+  session token could then use to take the account over; see
+  [Managing passkeys](#managing-passkeys).
 - `--upload.dir <directory>` holds uploaded files, by default
   `aprond/uploads` in the user data directory. At start the server removes
   files named `*.upload` there that the store does not refer to, and nothing
@@ -218,6 +222,27 @@ form one batch that the store applies atomically; a single writer applies
 batches in order, outside the server's lock, so a slow disk delays
 persistence rather than requests. At start the server rebuilds its state
 from the store.
+
+Most answers do not wait for the store: a crash can lose the latest changes
+the server had acknowledged. Those that must not, the answers that make an
+account from an [invitation](#invitations), remove a passkey, or sign an
+account out everywhere ([Passkeys](#managing-passkeys)), and revoke or
+rotate a [service token](#service-accounts), wait until the batch holding
+their change, and every batch before it, is applied: a successful answer
+means the change is stored. If it cannot be, the connection closes with an
+internal error instead. An embedding program does the same with
+`Server.Sync`, and an extension with `Host.Sync`, after a change such as
+`Host.Store().Put`.
+
+A store that fails to apply a batch stays failed: the server writes nothing
+more, so the store holds a consistent state as of the batch before, logs
+the error, calls `Config.OnStoreError` once, on a goroutine of its own so
+that it may call `Shutdown`, answers `/healthz` with `503`
+and `{"status":"store_failed"}`, and fails every later `Sync` and every
+answer that waits for the store. It goes on serving what it holds in
+memory, none of which survives a restart; aprond shuts down, and a program
+embedding the server should stop it too, then fix the store and start it
+again.
 
 The store holds opaque entries by kind and ID (`store`), so a
 backend only keeps entries and applies batches:
@@ -638,6 +663,30 @@ a write whose body would take them past it fails with `507` and
 `Retry-After`. Only bytes that arrived count, so a slow writer holds no
 more than it sent. A finished upload's file is synced before it is
 recorded, and a failure to write it is `500`.
+
+A write belongs to the account whose request made its URL, and lasts only
+as long as that account may make it: it may sign in (an
+[extension's allowlist](#extensions) names it), and it can see the room the
+message is in, or will be posted in. The server checks this when the write
+starts and again when an upload finishes, and a write that fails it is
+`403` and finished as a failed one is. When the account loses access
+before the write finishes, by being signed out (taken off the allowlist) or
+leaving a private room, the server ends it at once: a write that has not
+started, or an upload still arriving, fails, and live text being written
+finishes with what arrived, its writer answered `403`. An extension's
+[LiveWriter](#extensions) gets `ErrLiveTextEnded`. A guest that leaves, as
+by reloading its page, is no such loss: what it started goes on.
+
+Write URLs, and the `url` of an upload or live text, are bearer
+capabilities: whoever holds one may use it without signing in, which lets
+a shell, `curl`, or an `<img>` use them. A file or live text URL keeps
+working for as long as its embed is kept, whoever its account is
+afterwards, so signing an account out, or removing it from a room, does not
+withdraw the URLs that others, or it, already hold; removing the embed or
+its message does (an edit, a deletion). Each URL carries a random secret,
+and the server never lists them apart from the messages that hold them.
+A deployment that must withdraw what an account could read should treat
+the URLs it was sent as disclosed.
 
 - **Uploads** (at most 20 MiB each, and 20 MiB for one message's uploads
   together; a message has at most 32 embeds, `denied` past that). While pending the embed has no `url`. When
@@ -1370,8 +1419,100 @@ that would expire soonest, those used least recently.
 Passkey users, their credentials, and unexpired tokens are kept in the store,
 so they survive a restart with the default SQLite store; with `--store memory`
 a restart invalidates them, including passkeys still present in your
-authenticator. Credential removal is future work; an account with an
-address recovers through [email sign-in](#email-sign-in).
+authenticator. An account that lost every passkey recovers through
+[email sign-in](#email-sign-in) if it has an address.
+
+### Managing passkeys
+
+With passkeys on, the `server` frame of a signed-in connection lists
+capability `ext:account`, whose methods let an account manage how it signs
+in:
+
+- `account.credentials` lists its passkeys as `credentials: [{scheme, id,
+  name?, created?, last_used?, current?}]`, `id` being the credential ID in
+  base64url, and `current` marking the one this connection signed in with,
+  or whose session token it resumed. `reauthenticated_until` (Unix
+  milliseconds) is present while the connection may make the changes
+  below that need a recent sign-in.
+- `account.credential_rename` `{id, name}` names one, in at most 64 bytes.
+- `account.credential_remove` `{id}` removes a lost one: it signs in no
+  more, the session tokens made by signing in with it end, and the
+  connections signed in with it close, this one after its result. The
+  account, its messages, and its other passkeys stay.
+- `account.sign_out` `{}` forgets the session token, device token, or
+  service token this connection signed in with, and the push registrations
+  it made, and closes it; `{others: true}` ends every other session, device,
+  and service token of the account, removes the push registrations they
+  made, and closes its other connections.
+
+Adding a backup is registering another passkey while signed in, up to ten.
+Adding one to an account that has one, removing one, and signing out the
+others need a passkey login as the same account on the asking connection
+within the last five minutes, which a stolen session token cannot make:
+otherwise they are `denied` with `data: {reauthenticate: true}`. Signing in
+again as the account you are signed in as is such a login, and so is a
+guest's registration of its first passkey; registering another passkey is
+not, so a passkey added cannot be used to remove the others without a
+login. `--webauthn.add-without-reauth`
+(`Config.AddCredentialWithoutReauth`) lifts the requirement to add, as
+servers did before, at the cost that a stolen session token can add a
+passkey of its own and sign in with it. An account keeps one way to sign
+in: removing its last passkey, when it has no email address or external
+sign-in, is `denied`. These changes that revoke access are stored before
+their result (see [Storage](#storage)).
+
+Removing a passkey ends the session tokens that signing in with it made.
+Session tokens made otherwise, by an email sign-in or before servers noted
+the passkey, and device tokens, are not tied to a passkey: end them with
+`account.sign_out` and `others`.
+
+A program or extension does the same without the reauthentication, since
+it decides who may: `Server.Credentials` and `Host.Credentials` list an
+account's passkeys, `RemoveCredential` removes one (but not the last,
+`ErrLastCredential`), and `SignOut` signs an account out everywhere, its
+session tokens, device tokens, push registrations, and unfinished writes
+included; each returns once its change is stored.
+
+### Invitations
+
+An invitation makes one account without a guest to start from, as a
+server without guests, or whose sign-in an extension restricts, needs for
+its first account and each one after. The program that embeds the server
+makes one with `Server.Invite`, and an extension with `Host.Invite`; the
+[private example](examples/private) offers it to admins as `/invite`. It
+returns a token, `apron_invite_<random>`, once the invitation is stored, and
+the server keeps only the token's SHA-256. An invitation lasts seven days
+unless its `Lifetime` says otherwise; `Invitations` lists those
+outstanding, without tokens, and `RevokeInvitation` forgets one.
+
+A connection that is not signed in presents the token with a passkey
+registration, in both steps:
+
+```json
+{"method": "auth", "id": "1", "params": {"scheme": "webauthn", "action": "register", "step": "begin", "invitation": "apron_invite_…", "name": "Ada"}}
+{"method": "auth", "id": "2", "params": {"scheme": "webauthn", "action": "register", "step": "finish", "challenge_id": "…", "invitation": "apron_invite_…", "credential": {}}}
+```
+
+The begin makes nothing: no guest, and no account. The finish verifies the
+passkey as any registration does, then checks the invitation again, and in
+one change makes the account, with the name the request asked for or the
+invitation's, and the `user_id` the invitation asks for or `user_<n>`;
+gives it the roles the invitation grants and joins it to the default room,
+then the invitation's rooms (a private one as a member its creator added
+would be); keeps the invitation's `Data` with it; and uses the invitation
+up. The result, a sign-in's with a bearer token, is sent once that change is
+stored (see [Storage](#storage)). A registration that fails, or is
+abandoned, leaves the invitation for another try until it expires, and one
+presented on a signed-in connection, used, revoked, or expired is `denied`.
+
+On a server whose sign-in an extension restricts, an invitation admits the
+account it made whether or not the allowlist names it (`Enrollment.Admitted`).
+`Allowlist.Disallow`, naming the account by `user_id` or an identity, ends
+that and signs it out, as `RevokeEnrollment` does, which also takes back the
+roles the invitation granted. `Enrollment` returns what the invitation left
+with the account: its ID, who made it, when, and its `Data`, which an
+extension uses for policy of its own, such as which account is its owner,
+without a second write that a crash could separate from the account's.
 
 ### Example WebAuthn exchange
 
@@ -1536,7 +1677,8 @@ rest of the server does:
   with its data in `server.ext.weather`, and add request methods named
   `weather.<name>`, which only signed-in users may send; any other method
   is still `unsupported`. Its flags are `--weather.<flag>`, and its config
-  file table `[weather]`. `emoji` and `settings` are the server's own.
+  file table `[weather]`. `emoji`, `settings`, and `account` are the
+  server's own.
 - Its commands follow the server's in `/help`, which lists one only where
   the extension says the sender may use it; one it refuses is `denied`.
   They run outside the server's lock, so their notices and effects precede
@@ -1579,8 +1721,82 @@ rest of the server does:
   emoji, or what extensions advertise), and the whole frame follows the
   sign-in (§3.1). Taking an entry off the list closes the connections of
   the accounts it let in, and forgets their session tokens, device tokens,
-  and push registrations. The same frame applies to `--disable-guests`.
+  service tokens, and push registrations, and ends their writes that had
+  not finished. The same frame applies to `--disable-guests`. An account
+  an [invitation](#invitations) made is admitted until the list's
+  `Disallow` names it.
 - Events are the log's records in `log_id` order, as clients receive them,
   every room's. A deletion's tombstone is an event; the records it redacts
   are not sent again. A room is public to an extension, such as for a web
   page, when it is not private and guests may sign in.
+
+### Room scopes
+
+An account may be limited to some rooms: `Host.SetScope(ctx, userID,
+&RoomScope{Rooms: [...], Threads: bool})`, or `BotOptions.Scope` for a bot
+from its start. It then sees only the rooms its scope lists, and, with
+`Threads`, their threads at any depth. Seeing is the one check the server
+makes of who may read or write a room, so the scope holds for every way in:
+the account's connections, its bot's in-process ones, and those its
+[service tokens](#service-accounts) sign in. A scoped account:
+
+- reads no `history`, `room_list` entry, or thread card of a room outside
+  it, and receives no `room_update` for one, a new thread's included;
+- cannot join one, nor be added to one (`denied`), and is taken out of
+  those it was in when its scope changes, which ends its writes into them;
+- cannot post, edit, react, start live text, or upload into one, and is
+  never woken or counted unread by a mention there;
+- makes no top-level room, and a thread only when its scope takes threads
+  in.
+
+The scope is stored with the account, and lifted with a nil scope. It
+limits what the account sees, not who sees the account: its profile still
+reaches the members of the rooms it is in.
+
+### Service accounts
+
+A bot's client outside the server's process, such as an agent in another
+language, signs in as the bot with a service token: `Bot.IssueToken`
+returns one, `apron_service_<random>`, once it is stored, and the server
+keeps only its hash. A client presents it with the token scheme, from any
+origin: `{"method": "auth", "params": {"scheme": "token", "token": "…"}}`.
+
+- Its expiry is fixed when it is issued (`Lifetime`, 30 days by default),
+  and use never extends it, unlike a session token's; unlike a device
+  token, it expires. The connections it signed in close when it expires,
+  so it bounds how long a connection lasts as well as when it may sign in.
+- `Bot.RotateToken` issues a replacement, and keeps the old token signing
+  in for an overlap, or ends it at once with none. `Bot.RevokeToken` ends
+  one, closing its connections, before it returns. `Bot.ServiceTokens`
+  lists them, without tokens. A bot holds at most ten.
+- Its connections may not manage the account: `account.*`, `/invite-device`,
+  and another `auth` on the same connection are `denied`, unless it was
+  issued with `ManageAccount`. They register no push, which would outlive
+  the token.
+- The bot's [scope](#room-scopes), if any, limits its connections as it
+  does the bot's in-process ones, and signing the bot out, or its
+  `account.sign_out` with `others`, revokes its service tokens.
+
+### Authorization
+
+These are the server's checks of who may read and write, and where an
+embedding program's or extension's own policy must fit in:
+
+| Path | Who may | Checked |
+| --- | --- | --- |
+| Sign-in, every scheme, token resume, device and service tokens | the allowlist, if any, or an invitation's admission | at each sign-in and resume; removal from the list signs the account out |
+| `history`, `room_list`, thread cards, `room_update` | who can see the room: private membership, then scope | per request and per delivery |
+| `message`, `reactions`, `room_join`, `room_set`, commands | who can see the room; a scope makes no rooms | per request |
+| Upload and live text writes (HTTP `PUT`, `LiveWriter`) | the write's author, while they may sign in and see the room | when the write starts, when an upload finishes, and at once when the author is signed out, leaves a private room, or is scoped out |
+| A live text's end by its duration limit | the server | whatever the author's access, the text written so far is kept |
+| File, live text, and emoji URLs (`GET`) | whoever holds the URL | never: they are bearer capabilities (see [Embeds](#embeds-uploads-and-live-text)) |
+| `account.*`, `/invite-device` | the account itself, not a restricted service token; removal and signing out others after a reauthentication | per request |
+| Extension commands, methods, filters | signed-in users; what else is the extension's (`Command.Available`, its own checks) | per request |
+| `Host`, `Bot`, and `Server` methods | the extension or program, which decides; a `Bot` gets a client's checks | — |
+
+An extension that shows messages anywhere checks `Host.Visible`, which
+applies a scope too. An extension's own policy belongs in a message filter
+(`FilterMessage`) for what is posted, `Command.Available` and its methods'
+own checks for what it adds, and `SetScope`, `Allowlist`, `SignOut`, and
+`RemoveCredential` for access the server enforces everywhere.
+
