@@ -1,8 +1,9 @@
 // Package authn is the boundary between the server and its sign-in schemes
 // (PROTOCOL.md §3.2): passkeys, email, and external sign-in. A scheme proves
-// who a connection is; the server owns everything that follows from that:
-// accounts and their identities, bearer tokens, proposals (§4.11), the
-// allowlist, and roles.
+// who a connection is, on the connection or on a page of its own; the
+// server owns everything that follows from that: accounts and their
+// identities, bearer tokens, email proposals (§4.11), the allowlist, and
+// roles.
 //
 // A Scheme sees an auth request as a copy (Request), never the server's
 // state, and runs outside the server's lock. It answers with a Result:
@@ -71,7 +72,7 @@ type Scheme interface {
 }
 
 // Binder is a Scheme that uses the server outside its auth requests, such
-// as for the pages of its proposals. The server binds it once, as it adds
+// as for its sign-in pages. The server binds it once, as it adds
 // the scheme, before any request.
 type Binder interface {
 	Bind(core Core)
@@ -145,24 +146,31 @@ type Conn interface {
 	// ProposeCode proposes what the scheme proved already, such as an
 	// email address, whose temporary tokens prove it once delivered.
 	ProposeCode(p CodeProposal) (Tokens, error)
-	// ProposePage proposes an identity a page will prove, which the scheme
-	// then completes (Core.Complete), and returns the page's name.
-	ProposePage(p PageProposal) (page string, err error)
 	// CanProve reports whether proving subject would sign in or add it:
 	// whether an email code is worth mailing.
 	CanProve(subject string) bool
 }
 
-// Core is what the server offers a scheme outside its requests.
+// Core is what the server offers a scheme outside its requests, such as
+// for its pages.
 type Core interface {
-	// Page returns the scheme's proposal a page names, while it waits for
-	// its identity.
-	Page(page string) (Pending, bool)
-	// Complete gives the scheme's proposal a page names the identity a
-	// page proved, and returns its temporary tokens. Approving them signs
-	// in with the identity, making an account for one that has none, or
-	// adds it to the proposing account.
-	Complete(page string, proof Proof) (Completed, error)
+	// BaseURL is the base of the server's URLs for a request to one of the
+	// scheme's routes, as a connection's (Request.BaseURL): Config.PublicURL,
+	// or the scheme and host the request arrived on.
+	BaseURL(r *http.Request) string
+	// Title is the server's display name (§3.1), empty for none.
+	Title() string
+	// Lookup returns the account that has the scheme's identity subject.
+	Lookup(subject string) (Account, bool)
+	// Admits reports whether proving subject could sign in: to its
+	// account, or, with create, to a new one.
+	Admits(subject string, create bool) bool
+	// Issue signs in to the account of an identity a page proved, making
+	// one for an identity that has none with create, outside any
+	// connection, and returns a bearer token for scheme "token" (§3.2.1)
+	// bound to origin, a frontend's Origin header or empty for none. A
+	// refusal is an *Error.
+	Issue(proof Proof, create bool, origin string) (token string, err error)
 	// Go runs fn on its own goroutine, which the server's shutdown waits
 	// for. Once the server is shutting down, it runs nothing and reports
 	// false.
@@ -182,15 +190,6 @@ type CodeProposal struct {
 	LinkPage string
 }
 
-// PageProposal is a proposal of an identity a page will prove.
-type PageProposal struct {
-	// State is the client's, returned in the link (§4.11.1); ReturnURL is
-	// the client's page the link opens, empty for a code to type, which
-	// must be an http or https URL on the connection's origin or the
-	// server's.
-	State, ReturnURL string
-}
-
 // Tokens are a proposal's temporary tokens (§4.11.2).
 type Tokens struct {
 	// Code is the short token to type, which works only on the proposing
@@ -202,21 +201,6 @@ type Tokens struct {
 	Expires time.Time
 	// Add reports a proposal to add an identity to an account.
 	Add bool
-}
-
-// Pending is a proposal whose page waits for its identity.
-type Pending struct {
-	Add bool
-	// ReturnHost is the host of the client a link returns to, if any.
-	ReturnHost string
-}
-
-// Completed is a proposal Complete gave its identity.
-type Completed struct {
-	Tokens
-	// ReturnHost is the host of the client the link returns to; empty
-	// when the code is typed instead, and then Link is too.
-	ReturnHost string
 }
 
 // Proof is what a scheme proved: one of its subjects.
@@ -290,7 +274,7 @@ type SignIn struct {
 type Add struct {
 	Proof
 	// Session replies with a bearer token, as a sign-in does; otherwise
-	// the reply is {}.
+	// the reply is {"you": …}.
 	Session bool
 }
 

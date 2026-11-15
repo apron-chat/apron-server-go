@@ -6,7 +6,6 @@ import (
 	"errors"
 	"io"
 	"net/http"
-	"regexp"
 	"slices"
 	"strings"
 	"sync/atomic"
@@ -698,65 +697,5 @@ func TestDisableGuests(t *testing.T) {
 	c.expectError(t, "auth", "a1", map[string]any{"scheme": "guest"}, CodeUnsupported)
 	if host.Public("general") {
 		t.Fatal("a room is public on a server without guests")
-	}
-}
-
-func TestExternalSignIn(t *testing.T) {
-	var host *Host
-	_, httpServer := newTestServer(t, extensionConfig(testExtension{"sso", func(r *Registrar) error {
-		host = r.Host
-		signIn := r.ExternalSignIn(func(w http.ResponseWriter, req *http.Request, p ExternalProposal) {
-			http.Redirect(w, req, "/sso/callback?p="+p.ID, http.StatusFound)
-		})
-		r.Handle("/sso/callback", http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-			_ = signIn.Complete(w, req, req.URL.Query().Get("p"), Identity{Subject: "idp:1", Name: "Ada", UserID: "ada", Roles: []string{"Staff"}})
-		}))
-		return nil
-	}}))
-	origin := httpServer.URL
-
-	// With return_url, the page links back to the client.
-	c, frame := dialOrigin(t, httpServer, origin)
-	if auth := asList(frame["params"].(map[string]any)["auth"]); !slices.Contains(auth, any("external")) || !slices.Contains(auth, any("token")) {
-		t.Fatalf("auth = %#v", auth)
-	}
-	c.expectError(t, "auth", "p0", map[string]any{"scheme": "external", "return_url": "https://evil.example/"}, CodeDenied)
-	result := c.result(t, "auth", "p1", map[string]any{"scheme": "external", "return_url": origin + "/app/", "state": "st1"})
-	pageURL := result["url"].(string)
-	status, _, body := httpDo(t, http.MethodGet, pageURL, nil, "")
-	link := regexp.MustCompile(`href="([^"]+)"`).FindStringSubmatch(string(body))
-	if status != http.StatusOK || link == nil || !strings.Contains(link[1], "state=st1") {
-		t.Fatalf("page = %d %s", status, body)
-	}
-	token := regexp.MustCompile(`#token=([^&]+)`).FindStringSubmatch(strings.ReplaceAll(link[1], "&amp;", "&"))[1]
-	if status, _, _ := httpDo(t, http.MethodGet, pageURL, nil, ""); status != http.StatusNotFound {
-		t.Fatalf("second visit = %d, want 404", status)
-	}
-
-	// The link signs in elsewhere on the client's origin.
-	other, _ := dialRaw(t, httpServer)
-	other.expectError(t, "auth", "a0", map[string]any{"scheme": "external", "token": token}, CodeDenied)
-	signIn, _ := dialOrigin(t, httpServer, origin)
-	_, result = signIn.request(t, "auth", "a1", map[string]any{"scheme": "external", "token": token})
-	you := result["you"].(map[string]any)
-	if you["user_id"] != "ada" || you["name"] != "Ada" || result["token"] == nil || !slices.Equal(asList(you["roles"]), []any{"staff"}) {
-		t.Fatalf("sign-in = %#v", result)
-	}
-	if user, _ := host.User("ada"); !user.Account || user.Bot {
-		t.Fatalf("user = %#v", user)
-	}
-
-	// Without return_url, the page shows a code for the proposing
-	// connection, which signs in to the same account.
-	again, _ := dialRaw(t, httpServer)
-	result = again.result(t, "auth", "p2", map[string]any{"scheme": "external"})
-	_, _, body = httpDo(t, http.MethodGet, result["url"].(string), nil, "")
-	code := regexp.MustCompile(`class="code">(\d{6})<`).FindStringSubmatch(string(body))
-	if code == nil {
-		t.Fatalf("page = %s", body)
-	}
-	_, result = again.request(t, "auth", "a2", map[string]any{"scheme": "external", "token": code[1]})
-	if result["you"].(map[string]any)["user_id"] != "ada" {
-		t.Fatalf("code sign-in = %#v", result)
 	}
 }

@@ -27,7 +27,10 @@ Defaults:
 
 - HTTP and WebSocket listener: `127.0.0.1:8080` (`--addr`)
 - WebSocket endpoint: `/ws`; health endpoint: `/healthz`; passkey related
-  origins: `/.well-known/webauthn`
+  origins: `/.well-known/webauthn`; with
+  [external sign-in](#external-sign-in), its OAuth authorization server:
+  `/.well-known/oauth-authorization-server`, `/oauth/authorize`, and
+  `/oauth/token`
 - embed endpoints: `/write/<token>`, `/files/<embed_id>/<secret>`,
   `/live/<embed_id>/<secret>`; custom emoji catalog:
   `/emoji/catalog-<hash>.json`
@@ -1547,7 +1550,7 @@ With both nil only guest authentication is enabled.
 
 ## Email sign-in
 
-With email sign-in ([PROTOCOL.md §4.11](https://github.com/shazow/apron/blob/main/PROTOCOL.md#411-email-and-external-sign-in)),
+With email sign-in ([PROTOCOL.md §4.11](https://github.com/shazow/apron/blob/main/PROTOCOL.md#411-email-sign-in)),
 `server.auth` and `server.signup` list `email`. An `auth` with
 `scheme: "email"` and `email` **proposes**, and one with `token`
 **approves**. A proposal returns `{}`, whether or not the address has an
@@ -1568,8 +1571,7 @@ identity changes (a guest `auth`, a token resume, an approval). Proposals
 are kept in memory only. Approval takes `email`, or `token` (§4.11.3): a
 `token` that resumes no session approves a proposal when the connection
 has one pending, or when its handle names one, and wrong tokens count the
-same way. External sign-in uses the same proposals and tokens; it is
-`unsupported` unless an extension offers it ([Extensions](#extensions)).
+same way.
 
 A link opens `--email.link-url` (or `--public-url`) with
 `#token=…&state=…&server=…` in its fragment: `state` when the proposal
@@ -1601,8 +1603,9 @@ carried one, and `server`, this server's WebSocket URL, when
   yet; otherwise the proposal still answers `{}`, and its tokens, never
   sent, are `denied`. Approving adds the address to the proposing account, which a
   guest becomes an account by, keeping its `user_id`, rooms, and messages,
-  and returns `{}`, with a `user` notification when the account's roles
-  change. A guest that added an address signs in with it later.
+  and returns the account as `you`, with its roles; the account's other
+  connections get a `user` notification when its roles change. A guest that
+  added an address signs in with it later.
 
 A sign-in's link proves only that its presenter read the mail, so a
 sign-in's tokens never add an address, and an addition's never sign anyone
@@ -1666,6 +1669,76 @@ Invitation tokens that sign up several people
 ([PROTOCOL.md Appendix B](https://github.com/shazow/apron/blob/main/PROTOCOL.md#appendix-b--valid-scenarios-informative))
 are not implemented: a token here always resumes one account.
 
+## External sign-in
+
+External sign-in ([PROTOCOL.md §4.12](https://github.com/shazow/apron/blob/main/PROTOCOL.md#412-external-sign-in))
+is a profile of OAuth 2.1. aprond is its own authorization server, so any
+app can use it without registering: it lists `external` in `server.auth`
+and `server.signup` once an [extension](#extensions) offers it
+(`Registrar.ExternalSignIn`, as the [sso example](examples/sso) does with
+GitHub), and it is `unsupported` otherwise.
+
+- **Begin.** `{"scheme": "external"}` authenticates nothing, and returns
+  `{"external": {"url": "https://chat.example/oauth/authorize"}}`, on the
+  connection's base URL (`--public-url`, or the scheme and host the
+  WebSocket request arrived on).
+- **The page.** The app opens that URL with `response_type=code`, any
+  `client_id`, a `redirect_uri`, PKCE (`code_challenge`,
+  `code_challenge_method=S256`), `state`, and `resource`, the server's
+  origin. `redirect_uri` must be `https`, a private-use scheme with a `.`
+  (`com.example.app:/signed-in`), or `http` on `127.0.0.1`, `[::1]`, or
+  `localhost` with any port. A request without a usable `client_id` or
+  `redirect_uri` shows its problem on the page and goes nowhere; any other
+  problem returns to the app as an OAuth error (`invalid_request`,
+  `unsupported_response_type`, or `invalid_target` for another `resource`),
+  with `state` and `iss`. The issuer is the server's origin, as above; a
+  development server on loopback `http` also takes `resource` spelled with
+  `https://` and the same host, which §4.12.1 has clients send.
+- **Confirmation.** The page first says who is asking, by the redirect's
+  host, "An app on this device (com.example.app)" for a private-use scheme,
+  or "An app on this device" for loopback, that it will be able to read and
+  send messages as the person, that the server has not verified the app,
+  and to continue only if they just started signing in there. Continue hands
+  the person to the extension's start function, which typically redirects
+  to an identity provider; the extension's callback calls `Complete` with
+  the identity (or `Cancel`, when the person declined there). The page then
+  asks "Allow … to use Ada (@ada)'s account?" for an identity with an
+  account, or says the app will create one, with "Not you? Sign in as
+  someone else" to start over. Allow redirects with `code`, `state`, and
+  `iss`; Cancel, on either screen, with `error=access_denied`. An identity
+  the server may not admit gets a page that says so instead. The pages
+  refuse to be framed (`frame-ancestors 'none'`, `X-Frame-Options: DENY`)
+  and are never cached. A person has ten minutes on the page.
+- **Codes** are single use, last five minutes, and are bound to the
+  request's `client_id`, `redirect_uri`, PKCE challenge, and `resource`;
+  codes and pages are kept in memory only, at most 10,000 of each.
+- **Redeeming on a connection.** `{"scheme": "external", "code", "code_verifier",
+  "redirect_uri", "client_id"}` on a connection not signed in signs in to
+  the identity's account, making one for a new identity, which takes the
+  requested `name` and `user_id`, else the extension's suggestions, as
+  email accounts do: `{you, token}`, the token a session token as a
+  passkey's is. On a signed-in connection, guests included, it adds the
+  identity to the account and returns `{you}` (with a `token` too for a
+  guest, which becomes an account by it), keeping the account's name; an
+  identity of another account, or a second external identity, is
+  `denied`. Each sign-in sets the roles the extension grants. A wrong,
+  used, or expired code is `denied`, and any attempt uses the code up. An
+  `external` request with `token` is `denied`: this server's tokens are
+  for `scheme: "token"`.
+- **Redeeming at the token endpoint.** `POST /oauth/token`, form-encoded
+  with `grant_type=authorization_code` and the same four fields (and
+  `resource`, which must match), returns `{"access_token", "token_type":
+  "Bearer"}`, a session token for `scheme: "token"` bound to the request's
+  `Origin` header (none for a native app), so it resumes on a WebSocket
+  from the same origin. Errors are OAuth's (`invalid_grant`,
+  `unsupported_grant_type`, `invalid_target`).
+- `/.well-known/oauth-authorization-server` is the server's metadata
+  (RFC 8414). It and the token endpoint allow any origin (CORS `*`).
+
+An extension names an identity by a `Subject` that never changes for the
+person, such as `github:583231`, never by a name; `--role` and the
+allowlist name it as `external:<subject>`.
+
 ## Extensions
 
 Package `apron` is the server as a library, and `aproncmd.Main` runs it with
@@ -1702,15 +1775,10 @@ rest of the server does:
   person's or another extension's. A bot's live text needs `--public-url`
   for its address, except in development on a loopback host. Bot
   connections do not count toward `--max-connections`.
-- External sign-in (§4.11.5), when an extension offers it, returns a page at
-  `/external/<proposal>`, which the extension takes over to sign the person
-  in. When it names the identity it proved, the page shows a code to type,
-  or, for a proposal with `return_url`, a button that continues to the
-  client with the sign-in link. `return_url` must be on the connection's
-  origin or `--public-url`'s, and its link token works only on a connection
-  from that origin. A new identity makes an account, which takes the
-  requested `user_id`, else the extension's suggestion, as email accounts
-  do; each sign-in sets the roles the extension grants.
+- An extension may offer [external sign-in](#external-sign-in): the
+  server's sign-in page hands the person to it, and it completes the
+  sign-in with the identity it proved, such as with an OpenID Connect
+  provider.
 - An extension may restrict sign-in to an allowlist of email addresses,
   external identities, and existing accounts' `user_id`s. The server then
   offers no guests, and checks the list wherever an account is made or

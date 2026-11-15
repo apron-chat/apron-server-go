@@ -1,19 +1,32 @@
-// Package external is the external sign-in scheme (PROTOCOL.md §4.11.5): a
-// client proposes it and opens the page the result names. The page is an
-// extension's, which signs the person in however it likes, such as with
-// OAuth, and completes the proposal with the identity it proved. The
-// server's proposals (authn.Core) make and check the temporary tokens; this
-// package serves the pages around them.
+// Package external is the external sign-in scheme (PROTOCOL.md §4.12), a
+// profile of OAuth 2.1 in which the server is its own authorization server.
+// A client begins, opens the authorization endpoint at /oauth/authorize
+// with PKCE, and redeems the code it gets back, on a connection or at
+// /oauth/token.
+//
+// The page confirms who is asking, then hands the person to the extension
+// that offers the sign-in, which signs them in however it likes, such as
+// with an OpenID Connect provider, and completes the sign-in with the
+// identity it proved (Complete). The page then shows the account, and on
+// Allow redirects to the client with a code that proves the identity.
+//
+// A server may instead name another authorization server (Foreign).
 package external
 
 import (
+	"cmp"
 	"context"
+	"encoding/json/jsontext"
+	"encoding/json/v2"
 	"errors"
 	"html/template"
 	"net/http"
 	"net/url"
-	"strings"
+	"slices"
+	"sync"
+	"time"
 
+	"github.com/apron-chat/apron-server-go/internal/auth/oauth"
 	"github.com/apron-chat/apron-server-go/internal/authn"
 )
 
@@ -23,34 +36,57 @@ const Name = "external"
 // Disabled says why the scheme may be off.
 const Disabled = "External sign-in is not offered"
 
-// Path serves the pages of proposals: /external/<page>.
-const Path = "/external/"
+// The authorization server's paths, on the server's origin.
+const (
+	AuthorizePath = "/oauth/authorize"
+	TokenPath     = "/oauth/token"
+	MetadataPath  = "/.well-known/oauth-authorization-server"
+)
 
-// maxStateBytes bounds the state a proposal carries (§4.11.1).
-const maxStateBytes = 256
-
-// ErrUnknownProposal is returned by Complete for a proposal that is
-// unknown, expired, or completed.
-var ErrUnknownProposal = errors.New("external: the sign-in proposal is unknown, expired, or completed")
+// ErrUnknownSignIn is returned by Complete and Cancel for a sign-in that
+// is unknown, expired, or completed.
+var ErrUnknownSignIn = errors.New("external: the sign-in is unknown, expired, or completed")
 
 // ErrNoSubject is returned by Complete for an identity without a Subject.
 var ErrNoSubject = errors.New("external: an identity needs a Subject")
 
-// Proposal is a proposal whose page a person opened.
-type Proposal struct {
-	ID         string
-	Add        bool
-	ReturnHost string
+// Request is a sign-in the page hands to the extension, once the person
+// chose to continue.
+type Request struct {
+	// ID names the sign-in to Complete. It is unguessable and works once,
+	// so it may serve as the state of the extension's own OAuth request.
+	ID string
+	// Client is who is asking, as the page showed it, such as
+	// chat.alice.dev or "An app on this device (com.example.app)".
+	Client string
 }
 
-// Scheme is external sign-in.
+// Scheme is external sign-in with the server as its own authorization
+// server.
 type Scheme struct {
-	start func(w http.ResponseWriter, r *http.Request, p Proposal)
+	start func(w http.ResponseWriter, r *http.Request, req Request)
 	core  authn.Core
+	// flows are the pages people have open, by the ID their forms post;
+	// signIns the same flows, by the ID the extension completes.
+	flows   oauth.Table[*flow]
+	signIns oauth.Table[*flow]
+	codes   oauth.Codes
 }
 
-// New is external sign-in whose pages start.
-func New(start func(w http.ResponseWriter, r *http.Request, p Proposal)) *Scheme {
+// flow is one person's way through the page: the client's request, and
+// the identity the extension proved, once it did.
+type flow struct {
+	id  string
+	req *oauth.Request
+
+	mu     sync.Mutex
+	signIn string
+	proof  *authn.Proof
+	done   bool
+}
+
+// New is external sign-in whose page hands people to start.
+func New(start func(w http.ResponseWriter, r *http.Request, req Request)) *Scheme {
 	return &Scheme{start: start}
 }
 
@@ -60,117 +96,335 @@ func (s *Scheme) Bind(core authn.Core) { s.core = core }
 func (*Scheme) Name() string  { return Name }
 func (*Scheme) Label() string { return "external sign-in" }
 
-// Auth proposes, returning the page to open, or approves with a token.
+// Auth begins (§4.12.1), or redeems a code from the page (§4.12.4).
 func (s *Scheme) Auth(_ context.Context, r *authn.Request) (authn.Result, error) {
-	if _, has := r.Params["token"]; has {
-		token, err := authn.String(r.Params, "token", true)
-		if err != nil {
+	_, hasCode := r.Params["code"]
+	_, hasToken := r.Params["token"]
+	switch {
+	case hasCode:
+		return s.redeem(r)
+	case hasToken:
+		if _, err := authn.String(r.Params, "token", true); err != nil {
 			return nil, err
 		}
-		return &authn.Approve{Token: token}, nil
+		// This server issues its own bearer tokens, for scheme "token".
+		return nil, authn.Denied("This server takes no external tokens; sign in with its page, and use its token with scheme token")
 	}
-	state, err := authn.String(r.Params, "state", false)
-	if err != nil {
-		return nil, err
-	}
-	if len(state) > maxStateBytes {
-		return nil, authn.TooLarge("state is at most 256 bytes")
-	}
-	returnURL, err := authn.String(r.Params, "return_url", false)
-	if err != nil {
-		return nil, err
-	}
-	if returnURL != "" {
-		parsed, parseErr := url.Parse(returnURL)
-		if parseErr != nil || (parsed.Scheme != "https" && parsed.Scheme != "http") || parsed.Host == "" || parsed.User != nil {
-			return nil, authn.InvalidParams("return_url must be an http or https URL")
-		}
-	}
-	page, proposeErr := r.Conn.ProposePage(authn.PageProposal{State: state, ReturnURL: returnURL})
-	if proposeErr != nil {
-		return nil, proposeErr
-	}
-	return &authn.Reply{Result: map[string]any{"url": r.BaseURL + Path + page}}, nil
+	return &authn.Reply{Result: map[string]any{"external": map[string]any{"url": r.BaseURL + AuthorizePath}}}, nil
 }
 
-// Routes serves the proposals' pages, handing them to the extension.
-func (s *Scheme) Routes(mux *http.ServeMux) {
-	mux.HandleFunc(Path, func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Cache-Control", "no-store")
-		w.Header().Set("Referrer-Policy", "no-referrer")
-		page := strings.TrimPrefix(r.URL.Path, Path)
-		pending, ok := s.core.Page(page)
-		if !ok {
-			render(w, http.StatusNotFound, view{Title: "This sign-in expired", Text: "Start again in your app."})
-			return
+// redeem uses up a code on the connection: it signs in with the identity,
+// or adds it to the connection's account.
+func (s *Scheme) redeem(r *authn.Request) (authn.Result, error) {
+	params, err := redemption(r.Params)
+	if err != nil {
+		return nil, err
+	}
+	value, grant, redeemErr := s.codes.Redeem(params.code, params.verifier, params.redirectURI, params.clientID, r.Now)
+	if redeemErr != nil || !slices.Contains(oauth.Resources(oauth.Origin(r.BaseURL)), grant.Resource) {
+		return nil, authn.Denied("The sign-in code is invalid, used, or expired; sign in again")
+	}
+	proof := value.(authn.Proof)
+	if r.Account != nil {
+		// An addition names nobody: the account keeps its name. A guest
+		// that becomes an account gets a token to come back with.
+		proof.Name, proof.UserID = "", ""
+		return &authn.Add{Proof: proof, Session: r.Account.Guest}, nil
+	}
+	// A new account takes the name and user_id the connection requested,
+	// else the extension's suggestion.
+	proof.Name, proof.UserID = cmp.Or(r.Name, proof.Name), cmp.Or(r.UserID, proof.UserID)
+	return &authn.SignIn{Proof: proof, Create: true}, nil
+}
+
+// codeParams are a code's redemption (§4.12.2).
+type codeParams struct{ code, verifier, redirectURI, clientID string }
+
+// redemption reads a redemption's params: all four strings, none empty.
+func redemption(params map[string]jsontext.Value) (codeParams, *authn.Error) {
+	var p codeParams
+	for _, field := range []struct {
+		name string
+		into *string
+	}{{"code", &p.code}, {"code_verifier", &p.verifier}, {"redirect_uri", &p.redirectURI}, {"client_id", &p.clientID}} {
+		value, err := authn.String(params, field.name, true)
+		if err != nil {
+			return p, err
 		}
-		s.start(w, r, Proposal{ID: page, Add: pending.Add, ReturnHost: pending.ReturnHost})
+		if value == "" {
+			return p, authn.InvalidParams("%s must be a non-empty string", field.name)
+		}
+		*field.into = value
+	}
+	return p, nil
+}
+
+// Routes serves the authorization server: its metadata, the page, and the
+// token endpoint.
+func (s *Scheme) Routes(mux *http.ServeMux) {
+	mux.HandleFunc("GET "+MetadataPath, s.metadata)
+	mux.HandleFunc("GET "+AuthorizePath, s.authorize)
+	mux.HandleFunc("POST "+AuthorizePath, s.decide)
+	mux.HandleFunc("POST "+TokenPath, s.token)
+	mux.HandleFunc("OPTIONS "+TokenPath, func(w http.ResponseWriter, _ *http.Request) {
+		cors(w)
+		w.Header().Set("Access-Control-Allow-Methods", "POST")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+		w.WriteHeader(http.StatusNoContent)
 	})
 }
 
-// Complete completes the proposal named id with the identity proven, and
-// answers the person's browser: with the client's return_url, a page that
-// asks them to continue to it with the sign-in link (§4.11.5), and without,
-// a page that shows the code to type in the client. For a proposal that is
-// no longer open, it answers with a page that says so, and returns
-// ErrUnknownProposal.
+func cors(w http.ResponseWriter) { w.Header().Set("Access-Control-Allow-Origin", "*") }
+
+// metadata is the authorization server's metadata (RFC 8414).
+func (s *Scheme) metadata(w http.ResponseWriter, r *http.Request) {
+	issuer := oauth.Origin(s.core.BaseURL(r))
+	cors(w)
+	w.Header().Set("Cache-Control", "public, max-age=300")
+	writeJSON(w, http.StatusOK, map[string]any{
+		"issuer":                                         issuer,
+		"authorization_endpoint":                         issuer + AuthorizePath,
+		"token_endpoint":                                 issuer + TokenPath,
+		"response_types_supported":                       []string{"code"},
+		"grant_types_supported":                          []string{"authorization_code"},
+		"code_challenge_methods_supported":               []string{"S256"},
+		"token_endpoint_auth_methods_supported":          []string{"none"},
+		"authorization_response_iss_parameter_supported": true,
+	})
+}
+
+// authorize opens the page for an authorization request: its first
+// screen, which says who is asking and what they get.
+func (s *Scheme) authorize(w http.ResponseWriter, r *http.Request) {
+	req, problem := oauth.Parse(r.URL.Query(), oauth.Origin(s.core.BaseURL(r)))
+	switch {
+	case problem != nil && problem.Page:
+		oauth.RenderProblem(w, problem)
+		return
+	case problem != nil:
+		req.Refuse(w, r, problem)
+		return
+	}
+	f := &flow{req: req}
+	id, err := s.flows.Put(f, oauth.FlowLifetime, time.Now())
+	if err != nil {
+		busy(w)
+		return
+	}
+	f.id = id
+	oauth.Render(w, http.StatusOK, s.consent(f))
+}
+
+// consent is the first screen.
+func (s *Scheme) consent(f *flow) oauth.Page {
+	host := hostOf(f.req.Issuer)
+	return oauth.Page{
+		Title: "Sign in to " + cmp.Or(s.core.Title(), host),
+		Lines: []template.HTML{oauth.Line(
+			oauth.Strong(f.req.Client()), " wants to sign in to your account on ", oauth.Strong(host),
+			". It will be able to read and send messages as you.",
+		)},
+		Note:    host + " has not verified this app.",
+		Warning: "Only continue if you just started signing in on " + f.req.Started() + ".",
+		Action:  AuthorizePath, Fields: map[string]string{"flow": f.id},
+		Buttons: []oauth.Button{{Op: "continue", Label: "Continue", Primary: true}, {Op: "cancel", Label: "Cancel"}},
+	}
+}
+
+// decide takes the page's buttons: continue to the extension's sign-in,
+// sign in as someone else, allow, or cancel.
+func (s *Scheme) decide(w http.ResponseWriter, r *http.Request) {
+	f, ok := s.flows.Get(r.PostFormValue("flow"), time.Now())
+	if !ok {
+		oauth.Expired(w)
+		return
+	}
+	f.mu.Lock()
+	if f.done {
+		f.mu.Unlock()
+		oauth.Expired(w)
+		return
+	}
+	switch r.PostFormValue("op") {
+	case "continue", "restart":
+		// A new sign-in replaces any the extension had, and the identity
+		// it proved.
+		if f.signIn != "" {
+			s.signIns.Delete(f.signIn)
+		}
+		f.proof = nil
+		signIn, err := s.signIns.Put(f, oauth.FlowLifetime, time.Now())
+		if err != nil {
+			f.mu.Unlock()
+			busy(w)
+			return
+		}
+		f.signIn = signIn
+		f.mu.Unlock()
+		s.start(w, r, Request{ID: signIn, Client: f.req.Client()})
+		return
+	case "allow":
+		if f.proof == nil {
+			break
+		}
+		code, err := s.codes.Issue(f.req.Grant(), *f.proof, time.Now())
+		if err != nil {
+			f.mu.Unlock()
+			busy(w)
+			return
+		}
+		s.finishLocked(f)
+		f.mu.Unlock()
+		f.req.Return(w, r, url.Values{"code": {code}})
+		return
+	case "cancel":
+		s.finishLocked(f)
+		f.mu.Unlock()
+		f.req.Deny(w, r)
+		return
+	}
+	f.mu.Unlock()
+	http.Error(w, "Unknown action", http.StatusBadRequest)
+}
+
+// finishLocked forgets a flow whose page redirected. Called holding f.mu.
+func (s *Scheme) finishLocked(f *flow) {
+	f.done = true
+	s.flows.Delete(f.id)
+	if f.signIn != "" {
+		s.signIns.Delete(f.signIn)
+	}
+}
+
+// Complete gives the sign-in named id the identity the extension proved,
+// and answers the person's browser with the page's next screen: the
+// account the identity signs in to and Allow, or that it makes a new
+// account, or that it may not sign in here. For a sign-in that is no
+// longer open, it answers with a page that says so, and returns
+// ErrUnknownSignIn.
 func (s *Scheme) Complete(w http.ResponseWriter, id string, proof authn.Proof) error {
-	w.Header().Set("Cache-Control", "no-store")
-	w.Header().Set("Referrer-Policy", "no-referrer")
 	if proof.Subject == "" {
-		render(w, http.StatusInternalServerError, view{Title: "Sign-in failed", Text: "Start again in your app."})
+		oauth.Render(w, http.StatusInternalServerError, oauth.Page{Title: "Sign-in failed", Lines: []template.HTML{oauth.Line("Go back to the app and try again.")}})
 		return ErrNoSubject
 	}
-	completed, err := s.core.Complete(id, proof)
-	if err != nil {
-		render(w, http.StatusNotFound, view{Title: "This sign-in expired", Text: "Start again in your app."})
-		return ErrUnknownProposal
+	f, ok := s.signIns.Take(id, time.Now())
+	if !ok {
+		oauth.Expired(w)
+		return ErrUnknownSignIn
 	}
-	page := view{Add: completed.Add}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.done || f.signIn != id {
+		oauth.Expired(w)
+		return ErrUnknownSignIn
+	}
+	f.signIn = ""
+	host := hostOf(f.req.Issuer)
+	client := f.req.Client()
+	page := oauth.Page{
+		Title:  "Sign in to " + cmp.Or(s.core.Title(), host),
+		Action: AuthorizePath, Fields: map[string]string{"flow": f.id},
+	}
+	account, known := s.core.Lookup(proof.Subject)
 	switch {
-	case completed.ReturnHost != "" && completed.Add:
-		page.Title, page.Text = "Add this sign-in to your account", "Continue to "+completed.ReturnHost+" to add it."
-	case completed.ReturnHost != "":
-		page.Title, page.Text = "Signed in", "Continue to "+completed.ReturnHost+" to finish signing in."
+	case !s.core.Admits(proof.Subject, true):
+		page.Lines = []template.HTML{oauth.Line("You can't sign in to ", oauth.Strong(host), " with this account.")}
+		page.Buttons = []oauth.Button{{Op: "restart", Label: "Sign in as someone else", Primary: true}, {Op: "cancel", Label: "Cancel"}}
+		oauth.Render(w, http.StatusForbidden, page)
+		return nil
+	case known:
+		page.Lines = []template.HTML{oauth.Line("Allow ", oauth.Strong(client), " to use ", oauth.Strong(oauth.AccountName(account.Name, account.UserID)), "’s account?")}
+		page.Alt = &oauth.Button{Op: "restart", Label: "Not you? Sign in as someone else"}
+		page.Buttons = []oauth.Button{{Op: "allow", Label: "Allow", Primary: true}, {Op: "cancel", Label: "Cancel"}}
 	default:
-		page.Title, page.Text = "Your code", "Type this code in the app where you started, and nowhere else."
-		page.Code = completed.Code
+		page.Lines = []template.HTML{oauth.Line(
+			oauth.Strong(client), " wants to create an account for you on ", oauth.Strong(host),
+			". It will be able to read and send messages as you.",
+		)}
+		page.Alt = &oauth.Button{Op: "restart", Label: "Not you? Sign in as someone else"}
+		page.Buttons = []oauth.Button{{Op: "allow", Label: "Continue", Primary: true}, {Op: "cancel", Label: "Cancel"}}
 	}
-	if completed.ReturnHost != "" {
-		page.Host, page.Link = completed.ReturnHost, template.URL(completed.Link)
-	}
-	render(w, http.StatusOK, page)
+	f.proof = &proof
+	oauth.Render(w, http.StatusOK, page)
 	return nil
 }
 
-type view struct {
-	Title, Text string
-	Add         bool
-	// Host and Link continue to the client; Code is typed in it.
-	Host string
-	Link template.URL
-	Code string
+// Cancel ends the sign-in named id, such as when the person declined at
+// the identity provider, and returns the person to the client with
+// error=access_denied.
+func (s *Scheme) Cancel(w http.ResponseWriter, r *http.Request, id string) error {
+	f, ok := s.signIns.Take(id, time.Now())
+	if !ok {
+		oauth.Expired(w)
+		return ErrUnknownSignIn
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.done {
+		oauth.Expired(w)
+		return ErrUnknownSignIn
+	}
+	s.finishLocked(f)
+	f.req.Deny(w, r)
+	return nil
 }
 
-var pageTemplate = template.Must(template.New("external").Parse(`<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{{.Title}}</title>
-<style>
-body{font:16px/1.5 system-ui,sans-serif;max-width:28rem;margin:4rem auto;padding:0 1rem;color:#1d1d1f;background:#fff}
-@media (prefers-color-scheme:dark){body{color:#eee;background:#161616}a.button{background:#4f7cff}}
-a.button{display:inline-block;padding:.6rem 1.2rem;border-radius:.4rem;background:#2f5be0;color:#fff;text-decoration:none}
-.code{font:600 2rem/1 ui-monospace,monospace;letter-spacing:.2em}
-</style></head><body>
-<h1>{{.Title}}</h1>
-<p>{{.Text}}</p>
-{{if .Link}}<p><a class="button" href="{{.Link}}">Continue to {{.Host}}</a></p>{{end}}
-{{if .Code}}<p class="code">{{.Code}}</p>{{end}}
-</body></html>
-`))
+// token is the token endpoint (§4.12.3): it redeems a code for a bearer
+// token for scheme "token".
+func (s *Scheme) token(w http.ResponseWriter, r *http.Request) {
+	cors(w)
+	w.Header().Set("Cache-Control", "no-store")
+	refuse := func(status int, code, description string) {
+		writeJSON(w, status, map[string]string{"error": code, "error_description": description})
+	}
+	if err := r.ParseForm(); err != nil {
+		refuse(http.StatusBadRequest, "invalid_request", "The body must be form-encoded")
+		return
+	}
+	if r.PostForm.Get("grant_type") != "authorization_code" {
+		refuse(http.StatusBadRequest, "unsupported_grant_type", "grant_type must be authorization_code")
+		return
+	}
+	value, grant, err := s.codes.Redeem(r.PostForm.Get("code"), r.PostForm.Get("code_verifier"), r.PostForm.Get("redirect_uri"), r.PostForm.Get("client_id"), time.Now())
+	if err != nil {
+		refuse(http.StatusBadRequest, "invalid_grant", "The code is invalid, used, or expired")
+		return
+	}
+	if resource := r.PostForm.Get("resource"); resource != "" && resource != grant.Resource {
+		refuse(http.StatusBadRequest, "invalid_target", "resource is not the one the code was issued for")
+		return
+	}
+	token, err := s.core.Issue(value.(authn.Proof), true, r.Header.Get("Origin"))
+	if err != nil {
+		description := "This account may not sign in"
+		if e, ok := errors.AsType[*authn.Error](err); ok {
+			description = e.Message
+		}
+		refuse(http.StatusBadRequest, "invalid_grant", description)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"access_token": token, "token_type": "Bearer"})
+}
 
-func render(w http.ResponseWriter, status int, page view) {
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'")
+func writeJSON(w http.ResponseWriter, status int, value any) {
+	body, _ := json.Marshal(value)
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.WriteHeader(status)
-	_ = pageTemplate.Execute(w, page)
+	_, _ = w.Write(body)
+}
+
+func busy(w http.ResponseWriter) {
+	oauth.Render(w, http.StatusServiceUnavailable, oauth.Page{
+		Title: "Too many sign-ins in progress",
+		Lines: []template.HTML{oauth.Line("Wait a minute, then go back to the app and try again.")},
+	})
+}
+
+// hostOf is a URL's host, as the page names the server.
+func hostOf(base string) string {
+	if parsed, err := url.Parse(base); err == nil && parsed.Host != "" {
+		return parsed.Host
+	}
+	return base
 }

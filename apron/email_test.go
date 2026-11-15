@@ -337,13 +337,13 @@ func TestEmailAdditions(t *testing.T) {
 	stranger.expectError(t, "auth", "link-other-account", map[string]any{"scheme": "email", "token": linkToken(t, message)}, CodeDenied)
 	victim.drain(t)
 	// Approving adds the address to the guest, which becomes an account
-	// keeping its messages, with the roles its address was granted: {} and
-	// a user notification with the new roles.
+	// keeping its messages, with the roles its address was granted: it
+	// replies with the account as you (§4.11.3), with its new roles.
 	before, result := approve(t, victim, message.Code, nil)
-	if len(result) != 0 || len(before) != 1 {
+	if len(before) != 0 || result["you"] == nil || result["token"] != nil {
 		t.Fatalf("approving an addition: %#v after %#v", result, before)
 	}
-	if you := notificationParams(t, before[0], "user")["you"].(map[string]any); !reflect.DeepEqual(you["roles"], []any{"admin"}) {
+	if you := result["you"].(map[string]any); !reflect.DeepEqual(you["roles"], []any{"admin"}) {
 		t.Fatalf("profile after the addition: %#v", you)
 	}
 	save(t, victim, "edit", map[string]any{"message_id": secret, "room_id": diary, "body": map[string]any{"text": "still mine"}})
@@ -448,7 +448,7 @@ func TestEmailAddsToAPasskeyAccount(t *testing.T) {
 	tab, _ := dialOrigin(t, httpServer, testPasskeyOrigin)
 	tab.result(t, "auth", "resume", map[string]any{"scheme": "token", "token": registered["token"]})
 	tab.drain(t)
-	if _, result := approve(t, tab, linkToken(t, mailbox.receive(t)), nil); len(result) != 0 {
+	if _, result := approve(t, tab, linkToken(t, mailbox.receive(t)), nil); result["you"].(map[string]any)["user_id"] != ownerID || len(result) != 1 {
 		t.Fatalf("adding an address to a passkey account: %#v", result)
 	}
 	app.mu.RLock()
@@ -505,13 +505,13 @@ func TestEmailProposalsExpireAndAreInvalidated(t *testing.T) {
 	propose(t, fresh, "erin@example.com")
 	signedIn.expectError(t, "auth", "signed-in", map[string]any{"scheme": "email", "token": linkToken(t, mailbox.receive(t))}, CodeDenied)
 	// Email sign-in is not offered without a sender, and external sign-in
-	// not at all, neither to propose nor to approve.
+	// not at all, neither to begin nor to redeem.
 	fresh.expectError(t, "auth", "external", map[string]any{"scheme": "external", "token": linkToken(t, second)}, CodeUnsupported)
 	_, plain := newTestServer(t, DefaultConfig())
 	guest, _ := dialRaw(t, plain)
 	guest.expectError(t, "auth", "email", map[string]any{"scheme": "email", "email": "ada@example.com"}, CodeUnsupported)
 	guest.expectError(t, "auth", "token", map[string]any{"scheme": "token", "token": "x"}, CodeUnsupported)
-	guest.expectError(t, "auth", "external", map[string]any{"scheme": "external", "return_url": "https://web.apron.chat/"}, CodeUnsupported)
+	guest.expectError(t, "auth", "external", map[string]any{"scheme": "external"}, CodeUnsupported)
 	// A scheme not offered is unsupported before its user_id is read.
 	for _, scheme := range []string{"email", "token", "webauthn", "external"} {
 		guest.expectError(t, "auth", "bad-id-"+scheme, map[string]any{"scheme": scheme, "user_id": ""}, CodeUnsupported)

@@ -1,6 +1,7 @@
 package apron
 
 import (
+	"cmp"
 	"errors"
 	"fmt"
 	"net/http"
@@ -9,37 +10,42 @@ import (
 	"github.com/apron-chat/apron-server-go/internal/authn"
 )
 
-// External sign-in (PROTOCOL.md §4.11.5): a client proposes it and opens
-// the page the result names, at /external/<proposal>. The server hands the
-// page to the extension that offers the sign-in (Registrar.ExternalSignIn),
-// which signs the person in however it likes, such as with OAuth or OpenID
-// Connect, and completes the proposal with the identity it proved
-// (ExternalSignIn.Complete). The server then gives the person the
-// proposal's temporary token, as a link back to the client or a code to
-// type, which the client presents to sign in.
+// External sign-in (PROTOCOL.md §4.12) is a profile of OAuth 2.1 in which
+// the server is its own authorization server. A client begins, and opens
+// the server's page at /oauth/authorize with PKCE. The page says which app
+// is asking, and when the person continues, the server hands them to the
+// extension that offers the sign-in (Registrar.ExternalSignIn), which signs
+// them in however it likes, such as with OAuth or OpenID Connect, and
+// completes the sign-in with the identity it proved
+// (ExternalSignIn.Complete). The page then shows the account, and on Allow
+// redirects to the app with a code. The app redeems the code on a
+// connection, which signs in, or adds the identity to the connection's
+// account, or at /oauth/token for a bearer token. The server also serves
+// its authorization server metadata at
+// /.well-known/oauth-authorization-server.
 
 // ExternalSignIn is the external sign-in an extension offers
-// (Registrar.ExternalSignIn), which completes the proposals it was given.
+// (Registrar.ExternalSignIn), which completes the sign-ins it was handed.
 type ExternalSignIn struct{ scheme *external.Scheme }
 
-// ExternalProposal is an external sign-in a client proposed, whose page a
-// person opened.
-type ExternalProposal struct {
-	// ID names the proposal to ExternalSignIn.Complete. It is unguessable,
-	// so it may serve as the state of an OAuth request.
+// ExternalRequest is a sign-in the server's page hands to the extension,
+// once the person chose to continue.
+type ExternalRequest struct {
+	// ID names the sign-in to ExternalSignIn.Complete. It is unguessable
+	// and works once, so it may serve as the state of an OAuth request.
 	ID string
-	// Add reports a proposal to add the identity to the account that is
-	// signed in where it was proposed, rather than to sign in with it.
-	Add bool
-	// ReturnHost is the host of the client the person returns to, if any.
-	ReturnHost string
+	// Client is who is asking, as the page showed it, such as
+	// chat.alice.dev or "An app on this device (com.example.app)".
+	Client string
 }
 
 // Identity is who an external sign-in proved someone is: the account's
 // identity of the external scheme.
 type Identity struct {
 	// Subject names the identity, uniquely and for good, such as
-	// "github:583231": the same Subject signs in to the same account.
+	// "github:583231": the same Subject signs in to the same account. It
+	// should be the provider's own stable ID for the person, never a
+	// name that can change (§4.12.4).
 	Subject string
 	// Name and UserID are the display name and the user_id requested for
 	// a new account, if the client requested none.
@@ -49,52 +55,62 @@ type Identity struct {
 	Roles []string
 }
 
-// ExternalSignIn offers external sign-in (§4.11.5), which start begins: it
-// is called with the page a person opened for a proposal, and typically
-// redirects to an identity provider, whose answer comes back to a route of
-// the extension's (Handle) that calls the returned ExternalSignIn's
-// Complete. One extension may offer it. Account creation is the extension's
-// policy: an identity it completes signs in, making an account if it has
-// none.
-func (r *Registrar) ExternalSignIn(start func(w http.ResponseWriter, r *http.Request, p ExternalProposal)) *ExternalSignIn {
-	scheme := external.New(func(w http.ResponseWriter, req *http.Request, p external.Proposal) {
-		start(w, req, ExternalProposal{ID: p.ID, Add: p.Add, ReturnHost: p.ReturnHost})
+// ExternalSignIn offers external sign-in (§4.12), which start begins: it
+// is called once the person on the server's page chose to continue, and
+// typically redirects to an identity provider, whose answer comes back to
+// a route of the extension's (Handle) that calls the returned
+// ExternalSignIn's Complete, or Cancel. One extension may offer it. Account
+// creation is the extension's policy: an identity it completes signs in,
+// making an account if it has none.
+func (r *Registrar) ExternalSignIn(start func(w http.ResponseWriter, r *http.Request, req ExternalRequest)) *ExternalSignIn {
+	scheme := external.New(func(w http.ResponseWriter, req *http.Request, p external.Request) {
+		start(w, req, ExternalRequest{ID: p.ID, Client: p.Client})
 	})
 	r.register("external sign-in", func() error {
 		switch {
 		case start == nil:
 			return errors.New("external sign-in needs a start function")
 		case r.s.schemeLocked(external.Name) != nil:
-			return fmt.Errorf("extension %s offers external sign-in already", r.s.externalBy)
+			return fmt.Errorf("%s offers external sign-in already", cmp.Or(r.s.externalBy, "the server"))
 		}
 		if err := r.s.addSchemeLocked(scheme); err != nil {
 			return err
 		}
-		r.s.externalBy = r.name
+		r.s.externalBy = "extension " + r.name
 		return nil
 	})
 	return &ExternalSignIn{scheme: scheme}
 }
 
-// ErrUnknownProposal is returned by Complete for a proposal that is
+// ErrUnknownSignIn is returned by Complete and Cancel for a sign-in that is
 // unknown, expired, or completed.
-var ErrUnknownProposal = errors.New("apron: the sign-in proposal is unknown, expired, or completed")
+var ErrUnknownSignIn = errors.New("apron: the sign-in is unknown, expired, or completed")
 
-// Complete completes the proposal named id with the identity the
-// extension proved, and answers the person's browser: with the client's
-// return_url, a page that asks them to continue to it with the sign-in
-// link (§4.11.5), and without, a page that shows the code to type in the
-// client. For a proposal that is no longer open, it answers with a page
-// that says so, and returns ErrUnknownProposal.
+// Complete completes the sign-in named id with the identity the extension
+// proved, and answers the person's browser with the page's next screen,
+// which asks them to allow the app to use the account, or to make one. For
+// a sign-in that is no longer open, it answers with a page that says so,
+// and returns ErrUnknownSignIn.
 func (x *ExternalSignIn) Complete(w http.ResponseWriter, _ *http.Request, id string, identity Identity) error {
 	err := x.scheme.Complete(w, id, authn.Proof{
 		Subject: identity.Subject, Name: identity.Name, UserID: identity.UserID, Roles: identity.Roles,
 	})
 	switch {
-	case errors.Is(err, external.ErrUnknownProposal):
-		return ErrUnknownProposal
+	case errors.Is(err, external.ErrUnknownSignIn):
+		return ErrUnknownSignIn
 	case errors.Is(err, external.ErrNoSubject):
 		return errors.New("apron: an external Identity needs a Subject")
 	}
 	return err
+}
+
+// Cancel ends the sign-in named id, such as when the person declined at
+// the identity provider, and sends them back to the app, which hears that
+// they declined (error=access_denied). For a sign-in that is no longer
+// open, it answers with a page that says so, and returns ErrUnknownSignIn.
+func (x *ExternalSignIn) Cancel(w http.ResponseWriter, r *http.Request, id string) error {
+	if errors.Is(x.scheme.Cancel(w, r, id), external.ErrUnknownSignIn) {
+		return ErrUnknownSignIn
+	}
+	return nil
 }

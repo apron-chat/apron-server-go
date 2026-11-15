@@ -39,21 +39,32 @@ func (s *Server) signInLocked(c *client, req request, user *userState, now time.
 	}
 	delete(s.sessions, c.token)
 	s.touchSession(c.token)
-	secret := make([]byte, 32)
-	if _, err := rand.Read(secret); err != nil {
-		return nil, &Error{Code: CodeInternalError, Message: "Unable to create a sign-in session"}
+	token, key, err := s.newSessionLocked(user, c.origin, now)
+	if err != nil {
+		return nil, err
 	}
-	token := base64.RawURLEncoding.EncodeToString(secret)
-	c.token = sha256.Sum256([]byte(token))
+	c.token = key
 	c.service, c.serviceManage = [32]byte{}, false
 	// A sign-in that proved a credential notes it after (provedLocked). A
 	// device token the connection signed in with stays its own, so that
 	// replacing that token still closes it.
 	c.credential = ""
-	s.sessions[c.token] = session{user: user, origin: c.origin, expires: now.Add(sessionLifetime)}
-	s.touchSession(c.token)
-	s.capSessionsLocked(user, c.token)
 	return s.switchUserLocked(c, req, user, map[string]any{"token": token}, signIn, joinDefault), nil
+}
+
+// newSessionLocked makes a bearer token that resumes user's sign-in from
+// origin (§3.2.1), and returns it with the key it is kept under.
+func (s *Server) newSessionLocked(user *userState, origin string, now time.Time) (string, [32]byte, *Error) {
+	secret := make([]byte, 32)
+	if _, err := rand.Read(secret); err != nil {
+		return "", [32]byte{}, &Error{Code: CodeInternalError, Message: "Unable to create a sign-in session"}
+	}
+	token := base64.RawURLEncoding.EncodeToString(secret)
+	key := sha256.Sum256([]byte(token))
+	s.sessions[key] = session{user: user, origin: origin, expires: now.Add(sessionLifetime)}
+	s.touchSession(key)
+	s.capSessionsLocked(user, key)
+	return token, key, nil
 }
 
 // parseRequested parses the name and user_id that an auth request may request

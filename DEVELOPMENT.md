@@ -15,7 +15,11 @@ forgets it on restart); see [SERVER.md](SERVER.md#storage).
   `internal/auth/{email,passkey,external}`, and depend only on
   `internal/authn`, the boundary between them and the server: a scheme
   proves a subject of its own, and the server names the identity, and owns
-  accounts, tokens, proposals, the allowlist, and roles. Adding a scheme
+  accounts, tokens, email proposals, the allowlist, and roles. The schemes'
+  OAuth pages (external sign-in's `/oauth/authorize`, and the passkey page)
+  share `internal/auth/oauth`: authorization requests, codes, redirects,
+  and the confirmation screens; `internal/oauthtest` drives them in tests
+  as an app and its browser would. Adding a scheme
   takes a package that implements `authn.Scheme`, a line that adds it
   (`addSchemeLocked`), and, so `--role` and the allowlist can name its
   identities, its name in `principalKinds`. See [SERVER.md](SERVER.md).
