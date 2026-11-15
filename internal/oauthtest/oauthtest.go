@@ -51,13 +51,19 @@ func (c *Client) Challenge() string {
 }
 
 // URL is the sign-in page a begin result named, with the app's parameters
-// added to its own query, as §4.12.2 says, and overrides applied.
+// added to its own query, as §4.12.2 says, and overrides applied. A
+// client_id in the page's query becomes the app's.
 func (c *Client) URL(page string, overrides url.Values) string {
 	parsed, err := url.Parse(page)
 	if err != nil {
 		c.t.Fatal(err)
 	}
 	query := parsed.Query()
+	// The app redeems with the client_id it sent: the page's own, if it
+	// names one (§4.12.1).
+	if id := query.Get("client_id"); id != "" {
+		c.ClientID = id
+	}
 	for name, value := range map[string]string{
 		"response_type": "code", "client_id": c.ClientID, "redirect_uri": c.RedirectURI,
 		"code_challenge": c.Challenge(), "code_challenge_method": "S256", "state": c.State, "resource": c.Resource,

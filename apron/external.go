@@ -24,6 +24,35 @@ import (
 // its authorization server metadata at
 // /.well-known/oauth-authorization-server.
 
+// ExternalIssuer is another OAuth authorization server that external
+// sign-in names (Config.ExternalIssuer), such as an OpenID Connect
+// provider like Pocket ID. A begin returns its authorization endpoint, with
+// ClientID and Scope in the query, and the issuer; the server redeems a
+// code at its token endpoint, which it finds from the issuer's metadata,
+// or takes an access token the client redeemed there itself (§4.12.4).
+//
+// The issuer must let any app in with ClientID (a public client that
+// accepts the apps' redirect URIs), bind access tokens to the resource the
+// app asks for (RFC 8707), and issue them as signed JWTs: the server
+// accepts only a token whose iss is Issuer, whose aud includes the
+// server's origin, which has not expired, and which is bound to no key
+// (cnf). The account's identity is the issuer and the token's sub, as
+// external:<issuer>#<sub>.
+type ExternalIssuer struct {
+	// Issuer is the authorization server's issuer identifier, an https URL
+	// such as https://id.example.
+	Issuer string
+	// ClientID is a client_id the issuer accepts from any app; empty for an
+	// issuer that needs none, such as one that reads client ID metadata
+	// documents.
+	ClientID string
+	// Scope, if set, goes in the authorization URL, such as "openid".
+	Scope string
+	// HTTPClient fetches the issuer's metadata, keys, and tokens; nil uses
+	// one with a ten-second timeout.
+	HTTPClient *http.Client
+}
+
 // ExternalSignIn is the external sign-in an extension offers
 // (Registrar.ExternalSignIn), which completes the sign-ins it was handed.
 type ExternalSignIn struct{ scheme *external.Scheme }

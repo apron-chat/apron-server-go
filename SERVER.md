@@ -50,7 +50,8 @@ Defaults:
 - seeded default room: `general` (title `General`)
 - authentication (`server.auth`, in this order): WebAuthn passkeys, email
   codes with `--email.enable` (off by default), `external` while an
-  [extension](#extensions) offers it, bearer-token resume, and `guest`
+  [extension](#extensions) offers it or `--external.issuer` names an
+  authorization server, bearer-token resume, and `guest`
   unless `--disable-guests`; `server.signup` lists every one but `token`,
   which only resumes an account: a guest who registers a passkey or adds an
   address becomes an account, and an email or external sign-in with a new
@@ -1724,7 +1725,8 @@ is a profile of OAuth 2.1. aprond is its own authorization server, so any
 app can use it without registering: it lists `external` in `server.auth`
 and `server.signup` once an [extension](#extensions) offers it
 (`Registrar.ExternalSignIn`, as the [sso example](examples/sso) does with
-GitHub), and it is `unsupported` otherwise.
+GitHub), or names [another authorization server](#another-authorization-server)
+with `--external.issuer`, and it is `unsupported` otherwise.
 
 - **Begin.** `{"scheme": "external"}` authenticates nothing, and returns
   `{"external": {"url": "https://chat.example/oauth/authorize"}}`, on the
@@ -1786,6 +1788,46 @@ GitHub), and it is `unsupported` otherwise.
 An extension names an identity by a `Subject` that never changes for the
 person, such as `github:583231`, never by a name; `--role` and the
 allowlist name it as `external:<subject>`.
+
+### Another authorization server
+
+Instead of an extension's sign-in on its own page, aprond can name another
+authorization server, such as an OpenID Connect provider like Pocket ID
+(`Config.ExternalIssuer` in the library):
+
+```sh
+aprond --public-url https://chat.example \
+  --external.issuer https://id.example \
+  --external.client-id apron --external.scope openid
+```
+
+- A begin returns the issuer's `authorization_endpoint`, from its metadata
+  (`/.well-known/oauth-authorization-server`, else
+  `/.well-known/openid-configuration`), with `client_id` and `scope` in its
+  query, and `issuer`: `{"external": {"url":
+  "https://id.example/authorize?client_id=apron&scope=openid", "issuer":
+  "https://id.example"}}`. Apps keep that `client_id` and redeem with it.
+- With `code`, aprond redeems the code at the issuer's `token_endpoint`,
+  sending `resource`, its origin; with `token`, it takes an access token the
+  app redeemed there itself.
+- It accepts only an access token that is a JWT signed by one of the
+  issuer's keys (`jwks_uri`; RS256/384/512, PS256/384/512, ES256/384, or
+  EdDSA), whose `iss` is the issuer, whose `aud` includes aprond's origin,
+  which has not expired, and which carries no `cnf` (a token bound to a
+  key, as is one whose `token_type` is not `Bearer`). Anything else is
+  `denied`. It does not introspect opaque tokens.
+- The identity is the issuer and the token's `sub`, as
+  `external:https://id.example#<sub>` for `--role` and the allowlist; a new
+  account takes the token's `name` and `preferred_username`, if any, as
+  suggestions. Signing in, adding to a signed-in account, and account
+  creation work as above.
+
+The issuer must be configured to fit (§4.12.3): a public client
+(`--external.client-id`) that accepts every redirect URI the apps use, PKCE,
+`iss` in its authorization responses, and access tokens whose audience is
+the `resource` an app asks for (RFC 8707) rather than the client. aprond
+serves no `/oauth/*` routes in this mode, and no extension may offer
+external sign-in beside it.
 
 ## Extensions
 

@@ -47,3 +47,18 @@ func TestServerConfigPreservesValidation(t *testing.T) {
 		t.Fatal("custom runners must retain insecure-push validation")
 	}
 }
+
+func TestServerConfigNamesAnExternalIssuer(t *testing.T) {
+	var options aproncmd.Options
+	parser := flags.NewParser(&options, flags.None)
+	if _, err := parser.ParseArgs([]string{"--external.issuer", "https://id.example", "--external.client-id", "apron", "--external.scope", "openid"}); err != nil {
+		t.Fatal(err)
+	}
+	config, err := aproncmd.ServerConfig(options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if issuer := config.ExternalIssuer; issuer == nil || issuer.Issuer != "https://id.example" || issuer.ClientID != "apron" || issuer.Scope != "openid" {
+		t.Fatalf("ExternalIssuer = %#v", config.ExternalIssuer)
+	}
+}

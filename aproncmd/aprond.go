@@ -93,6 +93,12 @@ type Options struct {
 		SMTPInsecure bool   `long:"smtp-insecure" description:"Send through a relay that does not offer STARTTLS, in cleartext (a relay on the same host only)"`
 	} `group:"Email sign-in" namespace:"email"`
 
+	External struct {
+		Issuer   string `long:"issuer" description:"Another OAuth authorization server for external sign-in, such as an OpenID Connect provider (https://id.example), instead of an extension's; it must bind access tokens to this server's origin (RFC 8707) as signed JWTs"`
+		ClientID string `long:"client-id" description:"A public client_id the issuer accepts from any app, which external sign-in's URL carries"`
+		Scope    string `long:"scope" description:"The scope external sign-in's URL asks the issuer for, such as openid"`
+	} `group:"External sign-in" namespace:"external"`
+
 	Push struct {
 		Disable         bool   `long:"disable" description:"Do not offer push registration"`
 		AllowInsecure   bool   `long:"allow-insecure" description:"Accept http push endpoints and ones on internal addresses, so any client can make the server POST into its network (tests only; refused with --public-url or --tls.domain)"`
@@ -281,6 +287,9 @@ func serverConfig(options Options) (apron.Config, error) {
 	config.EmailLinkURL = options.Email.LinkURL
 	if config.EmailLinkURL == "" {
 		config.EmailLinkURL = config.PublicURL
+	}
+	if options.External.Issuer != "" {
+		config.ExternalIssuer = &apron.ExternalIssuer{Issuer: options.External.Issuer, ClientID: options.External.ClientID, Scope: options.External.Scope}
 	}
 	if options.WebAuthn.RPID != "" {
 		var err error

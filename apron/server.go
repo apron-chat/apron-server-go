@@ -29,6 +29,7 @@ import (
 	"github.com/go-webauthn/webauthn/webauthn"
 	"golang.org/x/time/rate"
 
+	"github.com/apron-chat/apron-server-go/internal/auth/external"
 	"github.com/apron-chat/apron-server-go/internal/auth/passkey"
 	"github.com/apron-chat/apron-server-go/internal/authn"
 	"github.com/apron-chat/apron-server-go/store"
@@ -228,6 +229,11 @@ type Config struct {
 	// used) or X-Real-IP, for per-client rate limits. Empty uses the
 	// connection's own address. Set it only behind a proxy that sets it.
 	ClientIPHeader string
+	// ExternalIssuer names another OAuth authorization server for external
+	// sign-in (§4.12), such as an OpenID Connect provider, instead of an
+	// extension's sign-in on the server's own page; nil for none. Then no
+	// extension may offer external sign-in.
+	ExternalIssuer *ExternalIssuer
 	// EmailLinkURL is the page the links in sign-in emails open, such as
 	// https://chat.example/, with a token, the proposal's state, and this
 	// server's WebSocket URL in its fragment (§4.11.2). Empty sends codes
@@ -756,6 +762,16 @@ func Open(config Config) (*Server, error) {
 		if err := s.addSchemeLocked(emailScheme(config.EmailSender, config.EmailLinkURL)); err != nil {
 			return fail(err)
 		}
+	}
+	if issuer := config.ExternalIssuer; issuer != nil {
+		scheme, err := external.NewForeign(issuer.Issuer, issuer.ClientID, issuer.Scope, issuer.HTTPClient)
+		if err == nil {
+			err = s.addSchemeLocked(scheme)
+		}
+		if err != nil {
+			return fail(err)
+		}
+		s.externalBy = "Config.ExternalIssuer"
 	}
 	s.openUploadDir()
 	go s.writeStore()
