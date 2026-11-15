@@ -266,7 +266,9 @@ func (s *Scheme) decide(w http.ResponseWriter, r *http.Request) {
 		return
 	case "allow":
 		if f.proof == nil {
-			break
+			f.mu.Unlock()
+			http.Error(w, "Sign in first", http.StatusBadRequest)
+			return
 		}
 		code, err := s.codes.Issue(f.req.Grant(), *f.proof, time.Now())
 		if err != nil {
