@@ -120,7 +120,8 @@ func (f *Foreign) Auth(ctx context.Context, r *authn.Request) (authn.Result, err
 }
 
 // signIn checks an access token and proves its identity: a sign-in, or an
-// addition on a signed-in connection, as with the server's own codes.
+// addition on a signed-in connection, as with the server's own codes, whose
+// token resumes from any origin.
 func (f *Foreign) signIn(ctx context.Context, r *authn.Request, token string) (authn.Result, error) {
 	proof, err := f.check(ctx, token, oauth.Origin(r.BaseURL), r.Now)
 	if err != nil {
@@ -128,10 +129,10 @@ func (f *Foreign) signIn(ctx context.Context, r *authn.Request, token string) (a
 	}
 	if r.Account != nil {
 		proof.Name, proof.UserID = "", ""
-		return &authn.Add{Proof: proof, Session: r.Account.Guest}, nil
+		return &authn.Add{Proof: proof, Session: r.Account.Guest, AnyOrigin: true}, nil
 	}
 	proof.Name, proof.UserID = cmp.Or(r.Name, proof.Name), cmp.Or(r.UserID, proof.UserID)
-	return &authn.SignIn{Proof: proof, Create: true}, nil
+	return &authn.SignIn{Proof: proof, Create: true, AnyOrigin: true}, nil
 }
 
 // redeem exchanges a code at the issuer's token endpoint for an access

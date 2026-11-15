@@ -11,13 +11,19 @@ import (
 
 	"github.com/apron-chat/apron-server-go/internal/authn"
 	"github.com/apron-chat/apron-server-go/internal/oauthtest"
+	"github.com/apron-chat/apron-server-go/store"
 )
 
 // externalTestServer offers external sign-in through an extension whose
 // "identity provider" signs in whoever identity names, at once.
 func externalTestServer(t *testing.T, identity *Identity) (*Server, *httptest.Server) {
 	t.Helper()
-	return newTestServer(t, extensionConfig(testExtension{"sso", func(r *Registrar) error {
+	return newTestServer(t, extensionConfig(ssoExtension(identity)))
+}
+
+// ssoExtension is the extension of externalTestServer.
+func ssoExtension(identity *Identity) testExtension {
+	return testExtension{"sso", func(r *Registrar) error {
 		signIn := r.ExternalSignIn(func(w http.ResponseWriter, req *http.Request, p ExternalRequest) {
 			http.Redirect(w, req, "/sso/callback?state="+url.QueryEscape(p.ID), http.StatusFound)
 		})
@@ -29,7 +35,69 @@ func externalTestServer(t *testing.T, identity *Identity) (*Server, *httptest.Se
 			_ = signIn.Complete(w, req, req.URL.Query().Get("state"), *identity)
 		}))
 		return nil
-	}}))
+	}}
+}
+
+// tokenFromEndpoint redeems a code at the token endpoint, with origin as
+// the request's Origin header unless empty, and returns the access token.
+func tokenFromEndpoint(t *testing.T, app *oauthtest.Client, endpoint, code, origin string) string {
+	t.Helper()
+	form := url.Values{"grant_type": {"authorization_code"}, "code": {code}, "code_verifier": {app.Verifier}, "redirect_uri": {app.RedirectURI}, "client_id": {app.ClientID}}
+	request, err := http.NewRequest(http.MethodPost, endpoint, strings.NewReader(form.Encode()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	if origin != "" {
+		request.Header.Set("Origin", origin)
+	}
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	var token map[string]any
+	if err := json.UnmarshalRead(response.Body, &token); err != nil || response.StatusCode != http.StatusOK || token["access_token"] == nil {
+		t.Fatalf("token = %d %v %#v", response.StatusCode, err, token)
+	}
+	return token["access_token"].(string)
+}
+
+// resumes reports whether token resumes a sign-in on a new connection
+// from origin, none for empty.
+func resumes(t *testing.T, httpServer *httptest.Server, token any, origin string) bool {
+	t.Helper()
+	c, _ := dialOrigin(t, httpServer, origin)
+	c.write(t, map[string]any{"method": "auth", "id": "resume", "params": map[string]any{"scheme": "token", "token": token}})
+	for {
+		if frame := c.read(t); frame["id"] == "resume" {
+			return frame["error"] == nil
+		}
+	}
+}
+
+// A token from the token endpoint resumes from any origin, or none,
+// whatever the Origin of its request, and does so after a restart too
+// (§4.12.4).
+func TestExternalEndpointTokenSurvivesRestart(t *testing.T) {
+	identity := &Identity{Subject: "idp:6", Name: "Ida"}
+	memory, dir := store.NewMemory(), t.TempDir()
+	configure := func(c *Config) {
+		c.Extensions = []Extension{ssoExtension(identity)}
+		c.AllowAnyOrigin = true
+	}
+	_, httpServer, stop := startWith(t, memory, dir, configure)
+	app := oauthtest.New(t, httpServer.URL)
+	code := externalCode(t, app, httpServer.URL+"/oauth/authorize", httpServer.URL)
+	token := tokenFromEndpoint(t, app, httpServer.URL+"/oauth/token", code, "https://app.example")
+	stop()
+
+	_, httpServer, _ = startWith(t, memory, dir, configure)
+	for _, origin := range []string{"", "https://app.example", otherOrigin} {
+		if !resumes(t, httpServer, token, origin) {
+			t.Errorf("after a restart, the token did not resume from %q", origin)
+		}
+	}
 }
 
 // externalCode signs in on the page as the app would, through the

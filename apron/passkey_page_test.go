@@ -223,6 +223,49 @@ func TestPasskeyPageLogin(t *testing.T) {
 	}
 }
 
+// A token from a code is a bearer token that resumes from any origin, or
+// none: from either page, redeemed at the token endpoint or on a
+// connection (§4.12.4). One from a ceremony in the client stays bound to
+// the ceremony's origin (§4.10).
+func TestTokensFromCodesResumeFromAnyOrigin(t *testing.T) {
+	p := passkeyPageServer(t)
+	anywhere := []string{"", "https://other.example", testPasskeyOrigin}
+
+	// A ceremony in the client.
+	owner, _ := dialOrigin(t, p.http, testPasskeyOrigin)
+	a := newTestAuthenticator(t)
+	local := registerTestPasskey(t, owner, a)["token"]
+	if !resumes(t, p.http, local, testPasskeyOrigin) || resumes(t, p.http, local, "") || resumes(t, p.http, local, "https://other.example") {
+		t.Fatal("a token from a ceremony in the client resumed from another origin, or not from its own")
+	}
+
+	client := oauthtest.New(t, pageOrigin)
+	authorize := p.at(pageOrigin + "/oauth/authorize")
+	tokens := map[string]any{}
+	// At the token endpoint, whatever the request's Origin.
+	for _, origin := range []string{"", testPasskeyOrigin} {
+		tokens["token endpoint, Origin "+origin] = tokenFromEndpoint(t, client, p.at(pageOrigin+"/oauth/token"), externalCode(t, client, authorize, pageOrigin), origin)
+	}
+	// On a connection, from either page.
+	app, _ := dialOrigin(t, p.http, "https://app.example")
+	_, result := app.request(t, "auth", "external", redemption(client, externalCode(t, client, authorize, pageOrigin)))
+	tokens["external code on a connection"] = result["token"]
+	native, _ := dialRaw(t, p.http)
+	_, result = native.request(t, "auth", "finish", finishWithCode(client, "login", p.loginCode(t, client, a)))
+	tokens["passkey page code on a connection"] = result["token"]
+
+	for name, token := range tokens {
+		if token == nil {
+			t.Fatalf("%s: no token", name)
+		}
+		for _, origin := range anywhere {
+			if !resumes(t, p.http, token, origin) {
+				t.Errorf("%s: did not resume from %q", name, origin)
+			}
+		}
+	}
+}
+
 // loginCode signs in on the page with a, and returns the code.
 func (p *passkeyPage) loginCode(t *testing.T, client *oauthtest.Client, a *testAuthenticator) string {
 	t.Helper()

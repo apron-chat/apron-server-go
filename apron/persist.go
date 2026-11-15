@@ -222,6 +222,7 @@ type storedMute struct {
 type storedSession struct {
 	User       string    `json:"user"`
 	Origin     string    `json:"origin"`
+	AnyOrigin  bool      `json:"any_origin,omitzero"`
 	Expires    time.Time `json:"expires"`
 	Credential string    `json:"credential,omitzero"`
 }
@@ -340,7 +341,7 @@ func (s *Server) entriesLocked(d dirtySet) []store.Entry {
 	}
 	for key := range d.sessions {
 		if session, ok := s.sessions[key]; ok {
-			put(entrySession, sessionID(key), storedSession{User: session.user.id, Origin: session.origin, Expires: session.expires, Credential: session.credential})
+			put(entrySession, sessionID(key), storedSession{User: session.user.id, Origin: session.origin, AnyOrigin: session.anyOrigin, Expires: session.expires, Credential: session.credential})
 		} else {
 			del(entrySession, sessionID(key))
 		}
@@ -769,7 +770,7 @@ func (s *Server) restoreLocked() (map[string]bool, error) {
 			return nil, err
 		}
 		if u := s.users[stored.User]; u != nil && u.account() && now.Before(stored.Expires) {
-			s.sessions[[32]byte(key)] = session{user: u, origin: stored.Origin, expires: stored.Expires, credential: stored.Credential}
+			s.sessions[[32]byte(key)] = session{user: u, origin: stored.Origin, anyOrigin: stored.AnyOrigin, expires: stored.Expires, credential: stored.Credential}
 		} else {
 			s.touchSession([32]byte(key))
 		}

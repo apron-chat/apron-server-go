@@ -114,7 +114,8 @@ func (s *Scheme) Auth(_ context.Context, r *authn.Request) (authn.Result, error)
 }
 
 // redeem uses up a code on the connection: it signs in with the identity,
-// or adds it to the connection's account.
+// or adds it to the connection's account. A token from a code resumes from
+// any origin (§4.12.4).
 func (s *Scheme) redeem(r *authn.Request) (authn.Result, error) {
 	params, err := redemption(r.Params)
 	if err != nil {
@@ -129,12 +130,12 @@ func (s *Scheme) redeem(r *authn.Request) (authn.Result, error) {
 		// An addition names nobody: the account keeps its name. A guest
 		// that becomes an account gets a token to come back with.
 		proof.Name, proof.UserID = "", ""
-		return &authn.Add{Proof: proof, Session: r.Account.Guest}, nil
+		return &authn.Add{Proof: proof, Session: r.Account.Guest, AnyOrigin: true}, nil
 	}
 	// A new account takes the name and user_id the connection requested,
 	// else the extension's suggestion.
 	proof.Name, proof.UserID = cmp.Or(r.Name, proof.Name), cmp.Or(r.UserID, proof.UserID)
-	return &authn.SignIn{Proof: proof, Create: true}, nil
+	return &authn.SignIn{Proof: proof, Create: true, AnyOrigin: true}, nil
 }
 
 // codeParams are a code's redemption (§4.12.2).
@@ -369,7 +370,8 @@ func (s *Scheme) Cancel(w http.ResponseWriter, r *http.Request, id string) error
 }
 
 // token is the token endpoint (§4.12.3): it redeems a code for a bearer
-// token for scheme "token".
+// token for scheme "token", which resumes from any origin, as one redeemed
+// on a connection does (§4.12.4).
 func (s *Scheme) token(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, 16<<10)
 	cors(w)
@@ -394,7 +396,7 @@ func (s *Scheme) token(w http.ResponseWriter, r *http.Request) {
 		refuse(http.StatusBadRequest, "invalid_target", "resource is not the one the code was issued for")
 		return
 	}
-	token, err := s.core.Issue(value.(authn.Proof), true, r.Header.Get("Origin"))
+	token, err := s.core.Issue(value.(authn.Proof), true)
 	if err != nil {
 		description := "This account may not sign in"
 		if e, ok := errors.AsType[*authn.Error](err); ok {

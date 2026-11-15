@@ -364,7 +364,7 @@ func (s *Server) presentedInvitationLocked(c *client, req request) (*invitation,
 // invitation, the identity, and the allowlist are checked again first,
 // since the scheme ran outside s.mu, and nothing changes unless all pass.
 // The reply waits until the change is stored.
-func (s *Server) enrollLocked(c *client, req request, scheme authn.Scheme, proof authn.Proof, invitationID string) (any, *Error) {
+func (s *Server) enrollLocked(c *client, req request, scheme authn.Scheme, proof authn.Proof, invitationID string, anyOrigin bool) (any, *Error) {
 	inv, err := s.presentedInvitationLocked(c, req)
 	if err != nil {
 		return nil, err
@@ -397,7 +397,7 @@ func (s *Server) enrollLocked(c *client, req request, scheme authn.Scheme, proof
 	// Nothing the connection is sent from here on goes before the account
 	// and the used invitation are stored.
 	c.fenceLocked()
-	result, err := s.signInLocked(c, req, user, now, true, true)
+	result, err := s.signInLocked(c, req, user, now, true, true, anyOrigin)
 	if err != nil {
 		return nil, err
 	}

@@ -1412,7 +1412,9 @@ Successful registration or login, like an [email sign-in](#email-sign-in),
 returns an opaque bearer token for `scheme: "token"` on later connections
 ([PROTOCOL.md §3.2](https://github.com/shazow/apron/blob/main/PROTOCOL.md#32-authentication)).
 Tokens last 30 days from their latest use, are stored hashed on the
-server, and are bound to the frontend origin. A token sign-in renews the
+server, and are bound to the frontend origin, which alone may resume them
+(a token from a code, from the [passkey page](#the-passkey-page) or
+[external sign-in](#external-sign-in), is not). A token sign-in renews the
 token and answers with the same token rather than a replacement, since
 several tabs may share it; clients that keep the latest token keep it.
 Sign-out drops the local token and reconnects. Already authenticated
@@ -1470,8 +1472,8 @@ above do.
   client needs, an [invitation](#invitations) presented with the finish on
   a connection that is not signed in. A code from the page finishes only
   `webauthn` with its own action, works once, and lasts five minutes. The
-  token is bound to the finishing connection's origin, as every session
-  token is.
+  token, a token from a code, is bound to no origin: it resumes from any
+  origin, or with none, unlike one from a ceremony in the client.
 
 ### Managing passkeys
 
@@ -1764,26 +1766,28 @@ with `--external.issuer`, and it is `unsupported` otherwise.
 - **Codes** are single use, last five minutes, and are bound to the
   request's `client_id`, `redirect_uri`, PKCE challenge, and `resource`;
   codes and pages are kept in memory only, at most 10,000 of each.
-- **Redeeming on a connection.** `{"scheme": "external", "code", "code_verifier",
-  "redirect_uri", "client_id"}` on a connection not signed in signs in to
-  the identity's account, making one for a new identity, which takes the
-  requested `name` and `user_id`, else the extension's suggestions, as
-  email accounts do: `{you, token}`, the token a session token as a
-  passkey's is. On a signed-in connection, guests included, it adds the
-  identity to the account and returns `{you}` (with a `token` too for a
-  guest, which becomes an account by it), keeping the account's name; an
-  identity of another account, or a second external identity, is
-  `denied`. Each sign-in sets the roles the extension grants. A wrong,
-  used, or expired code is `denied`, and any attempt uses the code up. An
-  `external` request with `token` is `denied`: this server's tokens are
-  for `scheme: "token"`.
+- **Redeeming on a connection.** `{"scheme": "external", "code",
+  "code_verifier", "redirect_uri", "client_id"}` on a connection not
+  signed in signs in to the identity's account, making one for a new
+  identity, which takes the requested `name` and `user_id`, else the
+  extension's suggestions, as email accounts do: `{you, token}`, the token
+  a session token as a passkey's is, except that, as a token from a code,
+  it is bound to no origin, and resumes from any origin or with none. On a
+  signed-in connection, guests included, it adds the identity to the
+  account and returns `{you}` (with a `token` too for a guest, which
+  becomes an account by it), keeping the account's name; an identity of
+  another account, or a second external identity, is `denied`. Each
+  sign-in sets the roles the extension grants. A wrong, used, or expired
+  code is `denied`, and any attempt uses the code up. An `external`
+  request with `token` is `denied`: this server's tokens are for `scheme:
+  "token"`.
 - **Redeeming at the token endpoint.** `POST /oauth/token`, form-encoded
   with `grant_type=authorization_code` and the same four fields (and
   `resource`, which must match), returns `{"access_token", "token_type":
-  "Bearer"}`, a session token for `scheme: "token"` bound to the request's
-  `Origin` header (none for a native app), so it resumes on a WebSocket
-  from the same origin. Errors are OAuth's (`invalid_grant`,
-  `unsupported_grant_type`, `invalid_target`).
+  "Bearer"}`, a session token for `scheme: "token"` like one redeemed on a
+  connection: bound to no origin, whatever the request's `Origin`, so it
+  resumes on a WebSocket from any origin or with none. Errors are OAuth's
+  (`invalid_grant`, `unsupported_grant_type`, `invalid_target`).
 - `/.well-known/oauth-authorization-server` is the server's metadata
   (RFC 8414). It and the token endpoint allow any origin (CORS `*`).
 
@@ -1821,8 +1825,8 @@ aprond --public-url https://chat.example \
 - The identity is the issuer and the token's `sub`, as
   `external:https://id.example#<sub>` for `--role` and the allowlist; a new
   account takes the token's `name` and `preferred_username`, if any, as
-  suggestions. Signing in, adding to a signed-in account, and account
-  creation work as above.
+  suggestions. Signing in, adding to a signed-in account, account
+  creation, and the token, bound to no origin, work as above.
 
 The issuer must be configured to fit (§4.12.3): a public client
 (`--external.client-id`) that accepts every redirect URI the apps use, PKCE,

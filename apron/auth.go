@@ -250,14 +250,14 @@ func (s *Server) authenticate(c *client, req request) (any, *Error) {
 		}
 	case *authn.SignIn:
 		if result != nil && result.Invitation != "" {
-			return s.enrollLocked(c, req, scheme, result.Proof, result.Invitation)
+			return s.enrollLocked(c, req, scheme, result.Proof, result.Invitation, result.AnyOrigin)
 		}
 		if result != nil {
-			return s.signInProvenLocked(c, req, scheme, result.Proof, result.Create)
+			return s.signInProvenLocked(c, req, scheme, result.Proof, result.Create, result.AnyOrigin)
 		}
 	case *authn.Add:
 		if result != nil {
-			return s.addProvenLocked(c, req, scheme, result.Proof, result.Session)
+			return s.addProvenLocked(c, req, scheme, result.Proof, result.Session, result.AnyOrigin)
 		}
 	}
 	s.logger.Error("a sign-in scheme answered with no result", "scheme", name, "result", fmt.Sprintf("%T", result))
@@ -357,9 +357,10 @@ func commit(proof authn.Proof) (jsontext.Value, *Error) {
 // account, a guest's making it an account, with the name the proof
 // requested, unless another account has the identity or the account has
 // another of its scheme. With session, it replies as a sign-in does, with
-// a bearer token; otherwise with the account as you. Every check, the allowlist's included, comes before
-// anything changes (§3.2.2).
-func (s *Server) addProvenLocked(c *client, req request, scheme authn.Scheme, proof authn.Proof, session bool) (any, *Error) {
+// a bearer token, which anyOrigin lets resume from any origin; otherwise
+// with the account as you. Every check, the allowlist's included, comes
+// before anything changes (§3.2.2).
+func (s *Server) addProvenLocked(c *client, req request, scheme authn.Scheme, proof authn.Proof, session, anyOrigin bool) (any, *Error) {
 	id, err := identityOf(scheme, proof)
 	if err != nil {
 		return nil, err
@@ -409,7 +410,7 @@ func (s *Server) addProvenLocked(c *client, req request, scheme authn.Scheme, pr
 	}
 	if session {
 		now := time.Now()
-		result, err := s.signInLocked(c, req, account, now, false, false)
+		result, err := s.signInLocked(c, req, account, now, false, false, anyOrigin)
 		if err == nil {
 			s.provedLocked(c, scheme, proof, now, wasGuest)
 		}
@@ -422,10 +423,10 @@ func (s *Server) addProvenLocked(c *client, req request, scheme authn.Scheme, pr
 }
 
 // signInProvenLocked signs the connection in to the account of an identity
-// a scheme proved, making one if none has it and the proof may (create).
-// Every check, the allowlist's included, comes before anything changes
-// (§3.2.2).
-func (s *Server) signInProvenLocked(c *client, req request, scheme authn.Scheme, proof authn.Proof, create bool) (any, *Error) {
+// a scheme proved, making one if none has it and the proof may (create),
+// with a token that anyOrigin lets resume from any origin. Every check, the
+// allowlist's included, comes before anything changes (§3.2.2).
+func (s *Server) signInProvenLocked(c *client, req request, scheme authn.Scheme, proof authn.Proof, create, anyOrigin bool) (any, *Error) {
 	user, created, err := s.provenAccountLocked(scheme, proof, create)
 	if err != nil {
 		return nil, err
@@ -435,7 +436,7 @@ func (s *Server) signInProvenLocked(c *client, req request, scheme authn.Scheme,
 	// the result (§3.2.2). Signing in again as the user the connection is
 	// signed in as changes no user: it is no sign-in (§4.5), but it is a
 	// reauthentication.
-	result, err := s.signInLocked(c, req, user, now, created || c.user != user, created)
+	result, err := s.signInLocked(c, req, user, now, created || c.user != user, created, anyOrigin)
 	if err == nil {
 		s.provedLocked(c, scheme, proof, now, true)
 	}
@@ -547,7 +548,7 @@ func (s *Server) approveLocked(c *client, req request, token, name, requested st
 		s.dropProposalLocked(p)
 		// An addition names nobody: the account keeps its name.
 		proof.Name, proof.UserID = "", ""
-		return s.addProvenLocked(c, req, p.scheme, proof, false)
+		return s.addProvenLocked(c, req, p.scheme, proof, false, false)
 	}
 	// A sign-in authenticates a connection that is not signed in; the
 	// proposal stays for one that is not.
@@ -563,7 +564,7 @@ func (s *Server) approveLocked(c *client, req request, token, name, requested st
 		name, requested = cmp.Or(name, p.name), cmp.Or(requested, p.userID)
 	}
 	proof.Name, proof.UserID = cmp.Or(name, proof.Name), cmp.Or(requested, proof.UserID)
-	return s.signInProvenLocked(c, req, p.scheme, proof, true)
+	return s.signInProvenLocked(c, req, p.scheme, proof, true, false)
 }
 
 // mayApproveLocked reports whether token is one that proposalLocked would
@@ -793,8 +794,9 @@ func (sc schemeCore) Admits(subject string, create bool) bool {
 
 // Issue signs in outside any connection, as the token endpoint of a
 // scheme's page does (§4.12.3), and returns a bearer token for the
-// account, bound to origin as a connection's would be.
-func (sc schemeCore) Issue(proof authn.Proof, create bool, origin string) (string, error) {
+// account, which resumes from any origin, as a token from a code does
+// (§4.12.4).
+func (sc schemeCore) Issue(proof authn.Proof, create bool) (string, error) {
 	s := sc.s
 	s.mu.Lock()
 	defer s.unlock()
@@ -808,7 +810,7 @@ func (sc schemeCore) Issue(proof authn.Proof, create bool, origin string) (strin
 	if err != nil {
 		return "", &authn.Error{Code: err.Code, Message: err.Message, Data: err.Data}
 	}
-	token, key, err := s.newSessionLocked(user, origin, time.Now())
+	token, key, err := s.newSessionLocked(user, "", true, time.Now())
 	if err != nil {
 		return "", &authn.Error{Code: err.Code, Message: err.Message}
 	}

@@ -168,9 +168,9 @@ type Core interface {
 	// Issue signs in to the account of an identity a page proved, making
 	// one for an identity that has none with create, outside any
 	// connection, and returns a bearer token for scheme "token" (§3.2.1)
-	// bound to origin, a frontend's Origin header or empty for none. A
-	// refusal is an *Error.
-	Issue(proof Proof, create bool, origin string) (token string, err error)
+	// that resumes from any origin, as a token from a code does (§4.12.4).
+	// A refusal is an *Error.
+	Issue(proof Proof, create bool) (token string, err error)
 	// Go runs fn on its own goroutine, which the server's shutdown waits
 	// for. Once the server is shutting down, it runs nothing and reports
 	// false.
@@ -267,6 +267,11 @@ type SignIn struct {
 	// with that invitation, which the server uses up in the same change:
 	// the identity must be one no account has. Empty for none.
 	Invitation string
+	// AnyOrigin makes the result's token resume from any origin, or none,
+	// as a token from a code does (§4.12.4); otherwise it resumes only
+	// from the connection's Origin, as one from a ceremony in the client
+	// does (§4.10).
+	AnyOrigin bool
 }
 
 // Add adds the identity proven to the connection's account, a guest's
@@ -276,6 +281,8 @@ type Add struct {
 	// Session replies with a bearer token, as a sign-in does; otherwise
 	// the reply is {"you": …}.
 	Session bool
+	// AnyOrigin makes that token resume from any origin, as SignIn's.
+	AnyOrigin bool
 }
 
 func (*Reply) result()   {}

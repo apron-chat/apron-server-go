@@ -484,7 +484,8 @@ func (s *Scheme) sameOrigin(raw []byte, origin string) bool {
 // connection: a login signs in, a new account's registration makes the
 // account with the connection's invitation, and an addition adds the
 // passkey to the account that began it, only on a connection signed in to
-// it.
+// it. Unlike a ceremony in the client's, the token resumes from any origin:
+// it is a token from a code.
 func (s *Scheme) redeem(r *authn.Request, action string) (authn.Result, error) {
 	var p [4]string
 	for i, name := range []string{"code", "code_verifier", "redirect_uri", "client_id"} {
@@ -508,7 +509,7 @@ func (s *Scheme) redeem(r *authn.Request, action string) (authn.Result, error) {
 	}
 	switch {
 	case g.action == "login":
-		return &authn.SignIn{Proof: s.loginProof(g.handle, g.credential)}, nil
+		return &authn.SignIn{Proof: s.loginProof(g.handle, g.credential), AnyOrigin: true}, nil
 	case g.accountID != "":
 		if r.Account == nil || r.Account.UserID != g.accountID {
 			return nil, authn.Denied("Finish adding this passkey where the account that asked for it is signed in")
@@ -516,7 +517,7 @@ func (s *Scheme) redeem(r *authn.Request, action string) (authn.Result, error) {
 		if subject := r.Account.Identities[Name]; subject != "" && subject != Subject(g.handle) {
 			return nil, authn.Denied("Registration changed; try again")
 		}
-		return &authn.Add{Session: true, Proof: authn.Proof{
+		return &authn.Add{Session: true, AnyOrigin: true, Proof: authn.Proof{
 			Subject: Subject(g.handle), Name: g.name, Credential: CredentialID(g.credential.ID),
 			Commit: s.commitCredential(g.handle, g.credential),
 		}}, nil
@@ -529,7 +530,7 @@ func (s *Scheme) redeem(r *authn.Request, action string) (authn.Result, error) {
 	if r.Invitation == nil {
 		return nil, authn.Denied("Present an invitation to make an account with this passkey")
 	}
-	return &authn.SignIn{Create: true, Invitation: r.Invitation.ID, Proof: authn.Proof{
+	return &authn.SignIn{Create: true, Invitation: r.Invitation.ID, AnyOrigin: true, Proof: authn.Proof{
 		Subject: Subject(g.handle), Name: cmp.Or(r.Name, g.name, r.Invitation.Name), UserID: r.Invitation.UserID,
 		Credential: CredentialID(g.credential.ID), Commit: s.commitCredential(g.handle, g.credential),
 	}}, nil
