@@ -764,7 +764,7 @@ func Open(config Config) (*Server, error) {
 		}
 	}
 	if issuer := config.ExternalIssuer; issuer != nil {
-		scheme, err := external.NewForeign(issuer.Issuer, issuer.ClientID, issuer.Scope, issuer.HTTPClient)
+		scheme, err := external.NewForeign(issuer.Issuer, issuer.Scope, issuer.HTTPClient)
 		if err == nil {
 			err = s.addSchemeLocked(scheme)
 		}

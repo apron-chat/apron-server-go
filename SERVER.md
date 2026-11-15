@@ -1821,38 +1821,77 @@ authorization server, such as an OpenID Connect provider like Pocket ID
 
 ```sh
 aprond --public-url https://chat.example \
-  --external.issuer https://id.example \
-  --external.client-id apron --external.scope openid
+  --external.issuer https://id.example --external.scope "openid profile"
 ```
+
+Each app names itself to the issuer with its own `client_id`: the `https`
+URL of its [client ID metadata document](https://datatracker.ietf.org/doc/draft-ietf-oauth-client-id-metadata-document/),
+which lists its `client_name` and `redirect_uris`, with
+`token_endpoint_auth_method` `none`. aprond puts no `client_id` in the URL,
+and there is no shared client: `--external.client-id` is refused. An app
+without a metadata document cannot use this mode; an extension's sign-in on
+aprond's own page (above) takes any app.
 
 - A begin returns the issuer's `authorization_endpoint`, from its metadata
   (`/.well-known/oauth-authorization-server`, else
-  `/.well-known/openid-configuration`), with `client_id` and `scope` in its
-  query, and `issuer`: `{"external": {"url":
-  "https://id.example/authorize?client_id=apron&scope=openid", "issuer":
-  "https://id.example"}}`. Apps keep that `client_id` and redeem with it.
+  `/.well-known/openid-configuration`), with `scope` in its query, and
+  `issuer`: `{"external": {"url":
+  "https://id.example/authorize?scope=openid+profile", "issuer":
+  "https://id.example"}}`. The app adds its own `client_id`, and redeems
+  with it.
 - With `code`, aprond redeems the code at the issuer's `token_endpoint`,
   sending `resource`, its origin; with `token`, it takes an access token the
   app redeemed there itself.
 - It accepts only an access token that is a JWT (RFC 9068: header `typ`
   `at+jwt` or `application/at+jwt`, in any case, so never an ID token)
   signed by one of the issuer's keys (`jwks_uri`; RS256/384/512,
-  PS256/384/512, ES256/384, or EdDSA), whose `iss` is the issuer, whose `aud` includes aprond's origin,
-  which has not expired, and which carries no `cnf` (a token bound to a
-  key, as is one whose `token_type` is not `Bearer`). Anything else is
-  `denied`. It does not introspect opaque tokens.
+  PS256/384/512, ES256/384, or EdDSA), whose `iss` is the issuer, whose
+  `aud` includes aprond's origin, which has not expired, and which carries
+  no `cnf` (a token bound to a key, as is one whose `token_type` is not
+  `Bearer`). Anything else is `denied`. It does not introspect opaque
+  tokens.
 - The identity is the issuer and the token's `sub`, as
-  `external:https://id.example#<sub>` for `--role` and the allowlist; a new
-  account takes the token's `name` and `preferred_username`, if any, as
-  suggestions. Signing in, adding to a signed-in account, account
-  creation, and the token, bound to no origin, work as above.
+  `external:https://id.example#<sub>` for `--role` and the allowlist. A new
+  account takes the requested `name` and `user_id`, else the token's `name`
+  and `preferred_username`, else those of the issuer's `userinfo_endpoint`
+  (from either metadata document), which aprond asks with the access token
+  and believes only for the token's `sub`. Without an answer, the account
+  is made without a name, as `user_<n>`. Signing in, adding to a signed-in
+  account, account creation, and the token, bound to no origin, work as
+  above.
 
-The issuer must be configured to fit (§4.12.3): a public client
-(`--external.client-id`) that accepts every redirect URI the apps use, PKCE,
-`iss` in its authorization responses, and access tokens whose audience is
-the `resource` an app asks for (RFC 8707) rather than the client. aprond
-serves no `/oauth/*` routes in this mode, and no extension may offer
+aprond serves no `/oauth/*` routes in this mode, and no extension may offer
 external sign-in beside it.
+
+**The issuer** must accept client ID metadata documents, require PKCE,
+send `iss` in its authorization responses, and issue JWT access tokens
+whose audience is the `resource` an app asks for (RFC 8707) rather than the
+client. For userinfo to answer, the token must be for the issuer too, as an
+identity scope (`openid profile`) makes it. With
+[Pocket ID](https://pocket-id.org) 2.13 or later (client ID metadata
+documents and `at+jwt` access tokens came in 2.13):
+
+1. Turn on the **APIs** and **Client ID metadata documents** features (on
+   the setup screen, or under Configuration).
+2. Set the **client ID metadata document URL allowlist** to the documents
+   you accept, such as `https://*/**` for any `https` host on the default
+   port (it does not match a URL with an explicit port; add
+   `https://*:*/**` for those).
+3. Create an **API** for each Apron server, whose identifier is the
+   server's origin, such as `https://chat.example` (the `resource` apps
+   send).
+4. On that API, turn on **Allow CIMD clients**.
+
+Never use one public client that every app shares, with `*` (or
+`https://*/**`) callback URLs, instead. Pocket ID asks for consent once per
+client, and names only that client: never the app, its redirect host, or
+the Apron server. Once a person has consented and stays signed in, any
+site that can navigate their browser gets a code with no screen at all,
+with the shared `client_id` and its own `redirect_uri`, and signs in to
+their Apron account with it. aprond's own page names the redirect host and
+asks every time for that reason (§4.12.3). With metadata documents, an app
+can use only the redirect URIs its document lists, and another document is
+another client, whose consent names its host.
 
 ## Extensions
 

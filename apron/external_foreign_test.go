@@ -21,9 +21,12 @@ import (
 )
 
 // fakeIssuer is an in-process OAuth authorization server, such as Pocket
-// ID, which signs in "user-42" for any app with its public client_id, and
-// binds access tokens to the resource asked for. Its knobs make the tokens
-// it issues wrong in one way.
+// ID, which signs in "user-42" for any app that names itself with an https
+// client_id (a client ID metadata document, which it does not fetch), and
+// binds access tokens to the resource asked for. Like Pocket ID's, its
+// access tokens carry no profile claims; its userinfo endpoint, listed only
+// in its OpenID Connect metadata, names the person. Its knobs make the
+// tokens it issues, or its userinfo, wrong in one way.
 type fakeIssuer struct {
 	*httptest.Server
 	key, other *ecdsa.PrivateKey
@@ -38,13 +41,22 @@ type fakeIssuer struct {
 	tokenType  string
 	foreignKey bool
 	typ        *string
+	// issued are the access tokens it issued, which userinfo answers;
+	// userinfo is its answer, userinfoStatus replaces 200, and
+	// userinfoCalls counts the requests.
+	issued         map[string]bool
+	userinfo       map[string]any
+	userinfoStatus int
+	userinfoCalls  int
 }
 
-const publicClientID = "apron-public"
+// appClientID is the app's client_id: its client ID metadata document.
+const appClientID = "https://app.example/client.json"
 
 func newFakeIssuer(t *testing.T) *fakeIssuer {
 	t.Helper()
-	f := &fakeIssuer{codes: make(map[string]url.Values)}
+	f := &fakeIssuer{codes: make(map[string]url.Values), issued: make(map[string]bool)}
+	f.resetUserinfo()
 	f.key, _ = ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	f.other, _ = ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	mux := http.NewServeMux()
@@ -54,6 +66,26 @@ func newFakeIssuer(t *testing.T) *fakeIssuer {
 			"jwks_uri": f.URL + "/jwks", "code_challenge_methods_supported": []string{"S256"},
 		})
 	})
+	mux.HandleFunc("GET /.well-known/openid-configuration", func(w http.ResponseWriter, r *http.Request) {
+		writeTestJSON(w, map[string]any{
+			"issuer": f.URL, "authorization_endpoint": f.URL + "/authorize", "token_endpoint": f.URL + "/token",
+			"jwks_uri": f.URL + "/jwks", "userinfo_endpoint": f.URL + "/userinfo",
+		})
+	})
+	mux.HandleFunc("GET /userinfo", func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		f.userinfoCalls++
+		token, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
+		switch {
+		case !ok || !f.issued[token]:
+			w.WriteHeader(http.StatusUnauthorized)
+		case f.userinfoStatus != 0:
+			w.WriteHeader(f.userinfoStatus)
+		default:
+			writeTestJSON(w, f.userinfo)
+		}
+	})
 	mux.HandleFunc("GET /jwks", func(w http.ResponseWriter, r *http.Request) {
 		writeTestJSON(w, map[string]any{"keys": []any{map[string]any{
 			"kty": "EC", "crv": "P-256", "kid": "k1", "use": "sig", "alg": "ES256",
@@ -62,7 +94,7 @@ func newFakeIssuer(t *testing.T) *fakeIssuer {
 	})
 	mux.HandleFunc("GET /authorize", func(w http.ResponseWriter, r *http.Request) {
 		query := r.URL.Query()
-		if query.Get("client_id") != publicClientID || query.Get("code_challenge_method") != "S256" || query.Get("scope") != "openid" {
+		if !strings.HasPrefix(query.Get("client_id"), "https://") || query.Get("code_challenge_method") != "S256" || query.Get("scope") != "openid profile" {
 			http.Error(w, "bad request", http.StatusBadRequest)
 			return
 		}
@@ -81,7 +113,7 @@ func newFakeIssuer(t *testing.T) *fakeIssuer {
 		f.mu.Unlock()
 		digest := sha256.Sum256([]byte(r.FormValue("code_verifier")))
 		if asked == nil || asked.Get("code_challenge") != base64.RawURLEncoding.EncodeToString(digest[:]) ||
-			asked.Get("redirect_uri") != r.FormValue("redirect_uri") || r.FormValue("client_id") != publicClientID {
+			asked.Get("redirect_uri") != r.FormValue("redirect_uri") || r.FormValue("client_id") != asked.Get("client_id") {
 			w.WriteHeader(http.StatusBadRequest)
 			writeTestJSON(w, map[string]any{"error": "invalid_grant"})
 			return
@@ -94,7 +126,7 @@ func newFakeIssuer(t *testing.T) *fakeIssuer {
 			writeTestJSON(w, map[string]any{"error": "invalid_target"})
 			return
 		}
-		writeTestJSON(w, map[string]any{"access_token": f.token(resource), "token_type": f.tokenTypeOr("Bearer")})
+		writeTestJSON(w, map[string]any{"access_token": f.token(resource, asked.Get("client_id")), "token_type": f.tokenTypeOr("Bearer")})
 	})
 	f.Server = httptest.NewTLSServer(mux)
 	t.Cleanup(f.Close)
@@ -110,13 +142,20 @@ func (f *fakeIssuer) tokenTypeOr(fallback string) string {
 	return fallback
 }
 
-// token is an ES256 JWT access token for resource.
-func (f *fakeIssuer) token(resource string) string {
+// resetUserinfo makes userinfo name the person, and answer.
+func (f *fakeIssuer) resetUserinfo() {
+	f.userinfo = map[string]any{"sub": "user-42", "name": "Pat", "preferred_username": "pat"}
+	f.userinfoStatus = 0
+}
+
+// token is an ES256 JWT access token for resource, and for the issuer's
+// userinfo, as an identity scope makes Pocket ID's, issued to clientID.
+func (f *fakeIssuer) token(resource, clientID string) string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	claims := map[string]any{
-		"iss": f.URL, "sub": "user-42", "aud": []string{resource}, "exp": time.Now().Add(5 * time.Minute).Unix(),
-		"iat": time.Now().Unix(), "name": "Pat", "preferred_username": "pat", "client_id": publicClientID,
+		"iss": f.URL, "sub": "user-42", "aud": []string{resource, f.URL}, "exp": time.Now().Add(5 * time.Minute).Unix(),
+		"iat": time.Now().Unix(), "client_id": clientID,
 	}
 	for key, value := range f.claims {
 		if value == nil {
@@ -141,7 +180,9 @@ func (f *fakeIssuer) token(resource string) string {
 	}
 	digest := sha256.Sum256([]byte(signed))
 	r, s, _ := ecdsa.Sign(rand.Reader, key, digest[:])
-	return signed + "." + b64(append(r.FillBytes(make([]byte, 32)), s.FillBytes(make([]byte, 32))...))
+	token := signed + "." + b64(append(r.FillBytes(make([]byte, 32)), s.FillBytes(make([]byte, 32))...))
+	f.issued[token] = true
+	return token
 }
 
 func writeTestJSON(w http.ResponseWriter, value any) {
@@ -154,7 +195,7 @@ func foreignTestServer(t *testing.T) (*Server, *httptest.Server, *fakeIssuer) {
 	t.Helper()
 	issuer := newFakeIssuer(t)
 	config := DefaultConfig()
-	config.ExternalIssuer = &ExternalIssuer{Issuer: issuer.URL, ClientID: publicClientID, Scope: "openid", HTTPClient: issuer.Client()}
+	config.ExternalIssuer = &ExternalIssuer{Issuer: issuer.URL, Scope: "openid profile", HTTPClient: issuer.Client()}
 	app, httpServer := newTestServer(t, config)
 	return app, httpServer, issuer
 }
@@ -178,8 +219,9 @@ func TestExternalForeignIssuer(t *testing.T) {
 	}
 	external := c.result(t, "auth", "b", map[string]any{"scheme": "external"})["external"].(map[string]any)
 	page, _ := url.Parse(external["url"].(string))
+	// The URL names no client_id: the app names itself (§4.12.2).
 	if external["issuer"] != issuer.URL || !strings.HasPrefix(page.String(), issuer.URL+"/authorize?") ||
-		page.Query().Get("client_id") != publicClientID || page.Query().Get("scope") != "openid" {
+		page.Query().Has("client_id") || page.Query().Get("scope") != "openid profile" {
 		t.Fatalf("external = %#v", external)
 	}
 	// The server serves no authorization server of its own.
@@ -188,8 +230,11 @@ func TestExternalForeignIssuer(t *testing.T) {
 	}
 
 	client := oauthtest.New(t, origin)
+	client.ClientID = appClientID
 	client.HTTP.Transport = issuer.Client().Transport
 	_, result := c.request(t, "auth", "a", redemption(client, foreignCode(t, client, external)))
+	// The token names nobody; userinfo, found in the OpenID Connect
+	// metadata, names the new account.
 	you := result["you"].(map[string]any)
 	if you["user_id"] != "pat" || you["name"] != "Pat" || result["token"] == nil {
 		t.Fatalf("sign-in = %#v", result)
@@ -203,7 +248,7 @@ func TestExternalForeignIssuer(t *testing.T) {
 
 	// A client that redeemed the code itself presents the access token.
 	code := foreignCode(t, client, external)
-	form := url.Values{"grant_type": {"authorization_code"}, "code": {code}, "code_verifier": {client.Verifier}, "redirect_uri": {client.RedirectURI}, "client_id": {publicClientID}}
+	form := url.Values{"grant_type": {"authorization_code"}, "code": {code}, "code_verifier": {client.Verifier}, "redirect_uri": {client.RedirectURI}, "client_id": {appClientID}}
 	response, err := issuer.Client().PostForm(issuer.URL+"/token", form)
 	if err != nil {
 		t.Fatal(err)
@@ -254,7 +299,7 @@ func TestExternalForeignIssuer(t *testing.T) {
 		issuer.mu.Unlock()
 	}
 	setTyp(new("JWT"))
-	idToken := issuer.token(origin)
+	idToken := issuer.token(origin, appClientID)
 	setTyp(nil)
 	idCheck, _ := dialRaw(t, httpServer)
 	idCheck.expectError(t, "auth", "id", map[string]any{"scheme": "external", "token": idToken}, CodeDenied)
@@ -278,6 +323,58 @@ func TestExternalForeignIssuer(t *testing.T) {
 	guest, _ := dialRaw(t, httpServer)
 	guestAuth(t, guest)
 	guest.expectError(t, "auth", "add", redemption(client, foreignCode(t, client, external)), CodeDenied)
+}
+
+// A new account takes its name from the issuer's userinfo, asked with the
+// access token, when the token names nobody; a failure there still signs
+// in, without a name, and an existing account is not looked up.
+func TestExternalForeignIssuerUserinfo(t *testing.T) {
+	_, httpServer, issuer := foreignTestServer(t)
+	c, _ := dialRaw(t, httpServer)
+	external := c.result(t, "auth", "b", map[string]any{"scheme": "external"})["external"].(map[string]any)
+	client := oauthtest.New(t, httpServer.URL)
+	client.ClientID = appClientID
+	client.HTTP.Transport = issuer.Client().Transport
+	signIn := func(sub string, change func()) (map[string]any, int) {
+		t.Helper()
+		issuer.mu.Lock()
+		issuer.resetUserinfo()
+		issuer.claims = map[string]any{"sub": sub}
+		issuer.userinfo["sub"] = sub
+		change()
+		before := issuer.userinfoCalls
+		issuer.mu.Unlock()
+		fresh, _ := dialRaw(t, httpServer)
+		_, result := fresh.request(t, "auth", "a", redemption(client, foreignCode(t, client, external)))
+		issuer.mu.Lock()
+		defer issuer.mu.Unlock()
+		return result["you"].(map[string]any), issuer.userinfoCalls - before
+	}
+
+	if you, calls := signIn("user-1", func() {}); you["user_id"] != "pat" || you["name"] != "Pat" || calls != 1 {
+		t.Fatalf("named by userinfo: %#v, %d calls", you, calls)
+	}
+	// The same identity again: its account, with no lookup.
+	if you, calls := signIn("user-1", func() { issuer.userinfo["name"] = "Changed" }); you["user_id"] != "pat" || you["name"] != "Pat" || calls != 0 {
+		t.Fatalf("existing account: %#v, %d calls", you, calls)
+	}
+	// userinfo failing, or answering for someone else, names nobody.
+	for sub, change := range map[string]func(){
+		"user-2": func() { issuer.userinfoStatus = http.StatusInternalServerError },
+		"user-3": func() { issuer.userinfo["sub"] = "user-1" },
+		"user-4": func() { issuer.userinfo = map[string]any{"sub": "user-4", "name": 7} },
+	} {
+		you, calls := signIn(sub, change)
+		if id, _ := you["user_id"].(string); !strings.HasPrefix(id, "user_") || you["name"] != nil || calls != 1 {
+			t.Errorf("%s: %#v, %d calls", sub, you, calls)
+		}
+	}
+	// A token that names the person needs no lookup.
+	if you, calls := signIn("user-5", func() {
+		issuer.claims["name"], issuer.claims["preferred_username"] = "Quinn", "quinn"
+	}); you["user_id"] != "quinn" || you["name"] != "Quinn" || calls != 0 {
+		t.Fatalf("named by the token: %#v, %d calls", you, calls)
+	}
 }
 
 // No extension may offer external sign-in beside an issuer.

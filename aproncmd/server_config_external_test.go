@@ -1,6 +1,7 @@
 package aproncmd_test
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/apron-chat/apron-server-go/aproncmd"
@@ -51,14 +52,23 @@ func TestServerConfigPreservesValidation(t *testing.T) {
 func TestServerConfigNamesAnExternalIssuer(t *testing.T) {
 	var options aproncmd.Options
 	parser := flags.NewParser(&options, flags.None)
-	if _, err := parser.ParseArgs([]string{"--external.issuer", "https://id.example", "--external.client-id", "apron", "--external.scope", "openid"}); err != nil {
+	if _, err := parser.ParseArgs([]string{"--external.issuer", "https://id.example", "--external.scope", "openid profile"}); err != nil {
 		t.Fatal(err)
 	}
 	config, err := aproncmd.ServerConfig(options)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if issuer := config.ExternalIssuer; issuer == nil || issuer.Issuer != "https://id.example" || issuer.ClientID != "apron" || issuer.Scope != "openid" {
+	if issuer := config.ExternalIssuer; issuer == nil || issuer.Issuer != "https://id.example" || issuer.Scope != "openid profile" {
 		t.Fatalf("ExternalIssuer = %#v", config.ExternalIssuer)
+	}
+
+	// A client_id shared by every app is refused, saying why and what
+	// instead.
+	if _, err := parser.ParseArgs([]string{"--external.issuer", "https://id.example", "--external.client-id", "apron"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := aproncmd.ServerConfig(options); err == nil || !strings.Contains(err.Error(), "--external.client-id") || !strings.Contains(err.Error(), "client ID metadata document") {
+		t.Fatalf("ServerConfig with --external.client-id = %v", err)
 	}
 }

@@ -27,29 +27,29 @@ import (
 // ExternalIssuer is another OAuth authorization server that external
 // sign-in names (Config.ExternalIssuer), such as an OpenID Connect
 // provider like Pocket ID. A begin returns its authorization endpoint, with
-// ClientID and Scope in the query, and the issuer; the server redeems a
-// code at its token endpoint, which it finds from the issuer's metadata,
-// or takes an access token the client redeemed there itself (§4.12.4).
+// Scope in the query, and the issuer; the server redeems a code at its
+// token endpoint, which it finds from the issuer's metadata, or takes an
+// access token the app redeemed there itself (§4.12.4).
 //
-// The issuer must let any app in with ClientID (a public client that
-// accepts the apps' redirect URIs), bind access tokens to the resource the
-// app asks for (RFC 8707), and issue them as signed JWTs (RFC 9068, typ at+jwt): the server
-// accepts only a token whose iss is Issuer, whose aud includes the
-// server's origin, which has not expired, and which is bound to no key
-// (cnf). The account's identity is the issuer and the token's sub, as
-// external:<issuer>#<sub>.
+// The begin names no client_id: each app identifies itself to the issuer
+// with its own, the https URL of its client ID metadata document, so the
+// issuer asks for consent per app and names it. The issuer must accept
+// such clients, bind access tokens to the resource the app asks for (RFC
+// 8707), and issue them as signed JWT access tokens (RFC 9068, typ
+// at+jwt): the server accepts only a token whose iss is Issuer, whose aud
+// includes the server's origin, which has not expired, and which is bound
+// to no key (cnf). The account's identity is the issuer and the token's
+// sub, as external:<issuer>#<sub>. A new account's name comes from the
+// token, else from the issuer's userinfo endpoint, asked with the token.
 type ExternalIssuer struct {
 	// Issuer is the authorization server's issuer identifier, an https URL
 	// such as https://id.example.
 	Issuer string
-	// ClientID is a client_id the issuer accepts from any app; empty for an
-	// issuer that needs none, such as one that reads client ID metadata
-	// documents.
-	ClientID string
-	// Scope, if set, goes in the authorization URL, such as "openid".
+	// Scope, if set, goes in the authorization URL, such as "openid
+	// profile", which an issuer may need to answer userinfo.
 	Scope string
-	// HTTPClient fetches the issuer's metadata, keys, and tokens; nil uses
-	// one with a ten-second timeout.
+	// HTTPClient fetches the issuer's metadata, keys, tokens, and userinfo;
+	// nil uses one with a ten-second timeout.
 	HTTPClient *http.Client
 }
 

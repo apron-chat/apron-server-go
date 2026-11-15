@@ -94,9 +94,10 @@ type Options struct {
 	} `group:"Email sign-in" namespace:"email"`
 
 	External struct {
-		Issuer   string `long:"issuer" description:"Another OAuth authorization server for external sign-in, such as an OpenID Connect provider (https://id.example), instead of an extension's; it must bind access tokens to this server's origin (RFC 8707) as signed JWT access tokens (RFC 9068)"`
-		ClientID string `long:"client-id" description:"A public client_id the issuer accepts from any app, which external sign-in's URL carries"`
-		Scope    string `long:"scope" description:"The scope external sign-in's URL asks the issuer for, such as openid"`
+		Issuer string `long:"issuer" description:"Another OAuth authorization server for external sign-in, such as an OpenID Connect provider (https://id.example), instead of an extension's; apps name themselves to it with client ID metadata documents, and it must bind access tokens to this server's origin (RFC 8707) as signed JWT access tokens (RFC 9068)"`
+		// ClientID was a client_id shared by every app; it is refused.
+		ClientID string `long:"client-id" hidden:"true"`
+		Scope    string `long:"scope" description:"The scope external sign-in's URL asks the issuer for, such as \"openid profile\""`
 	} `group:"External sign-in" namespace:"external"`
 
 	Push struct {
@@ -288,8 +289,11 @@ func serverConfig(options Options) (apron.Config, error) {
 	if config.EmailLinkURL == "" {
 		config.EmailLinkURL = config.PublicURL
 	}
+	if options.External.ClientID != "" {
+		return config, errors.New("--external.client-id is no longer supported: a client_id shared by every app lets any site get a sign-in code for this server once a person consented to it; apps name themselves to the issuer with their own client ID metadata document instead (see SERVER.md, \"Another authorization server\")")
+	}
 	if options.External.Issuer != "" {
-		config.ExternalIssuer = &apron.ExternalIssuer{Issuer: options.External.Issuer, ClientID: options.External.ClientID, Scope: options.External.Scope}
+		config.ExternalIssuer = &apron.ExternalIssuer{Issuer: options.External.Issuer, Scope: options.External.Scope}
 	}
 	if options.WebAuthn.RPID != "" {
 		var err error

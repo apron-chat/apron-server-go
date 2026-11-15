@@ -22,17 +22,23 @@ import (
 
 // Foreign is external sign-in with another authorization server (§4.12),
 // such as an OpenID Connect provider: a begin names the issuer's
-// authorization endpoint, with a client_id it accepts from any client, and
-// the server redeems a code at the issuer's token endpoint, or takes an
-// access token the client redeemed itself, and accepts only a token the
-// issuer signed for this server (§4.12.4).
+// authorization endpoint, and the server redeems a code at the issuer's
+// token endpoint, or takes an access token the client redeemed itself, and
+// accepts only a token the issuer signed for this server (§4.12.4).
+//
+// The begin's URL carries no client_id: each app names itself with its
+// own, an https URL of its client ID metadata document, so the issuer asks
+// for consent per app and names it. A client_id shared by every app would
+// let any site that can navigate a person's browser get a code for this
+// server, without a screen once the person consented to that client.
 //
 // The issuer must issue access tokens as JWTs (RFC 9068, typ at+jwt: an ID
 // token is refused) whose aud names the server's origin, which it binds to the request's resource
 // (RFC 8707); introspection is not supported.
 type Foreign struct {
-	issuer, clientID, scope string
-	client                  *http.Client
+	issuer, scope string
+	client        *http.Client
+	core          authn.Core
 
 	mu       sync.Mutex
 	metadata *issuerMetadata
@@ -48,6 +54,9 @@ type issuerMetadata struct {
 	AuthorizationEndpoint string `json:"authorization_endpoint"`
 	TokenEndpoint         string `json:"token_endpoint"`
 	JWKSURI               string `json:"jwks_uri"`
+	// UserinfoEndpoint is OpenID Connect's, which names a new account; it
+	// may be only in the OpenID Connect metadata.
+	UserinfoEndpoint string `json:"userinfo_endpoint"`
 }
 
 const (
@@ -63,10 +72,9 @@ const (
 )
 
 // NewForeign is external sign-in with the authorization server issuer, an
-// https URL, which accepts clientID from any client (empty for an issuer
-// that needs none) and scope (empty for none), fetched with client (nil
-// for one with a timeout).
-func NewForeign(issuer, clientID, scope string, client *http.Client) (*Foreign, error) {
+// https URL, asked for scope (empty for none), fetched with client (nil for
+// one with a timeout).
+func NewForeign(issuer, scope string, client *http.Client) (*Foreign, error) {
 	parsed, err := url.Parse(issuer)
 	if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.RawQuery != "" || parsed.Fragment != "" || parsed.User != nil {
 		return nil, fmt.Errorf("external sign-in: the issuer %q is not an https URL without a query", issuer)
@@ -74,8 +82,11 @@ func NewForeign(issuer, clientID, scope string, client *http.Client) (*Foreign, 
 	if client == nil {
 		client = &http.Client{Timeout: 10 * time.Second}
 	}
-	return &Foreign{issuer: strings.TrimSuffix(issuer, "/"), clientID: clientID, scope: scope, client: client}, nil
+	return &Foreign{issuer: strings.TrimSuffix(issuer, "/"), scope: scope, client: client}, nil
 }
+
+// Bind gives the scheme the server's side of sign-in.
+func (f *Foreign) Bind(core authn.Core) { f.core = core }
 
 func (*Foreign) Name() string  { return Name }
 func (*Foreign) Label() string { return "external sign-in" }
@@ -109,9 +120,6 @@ func (f *Foreign) Auth(ctx context.Context, r *authn.Request) (authn.Result, err
 	}
 	page, _ := url.Parse(metadata.AuthorizationEndpoint)
 	query := page.Query()
-	if f.clientID != "" {
-		query.Set("client_id", f.clientID)
-	}
 	if f.scope != "" {
 		query.Set("scope", f.scope)
 	}
@@ -123,7 +131,7 @@ func (f *Foreign) Auth(ctx context.Context, r *authn.Request) (authn.Result, err
 // addition on a signed-in connection, as with the server's own codes, whose
 // token resumes from any origin.
 func (f *Foreign) signIn(ctx context.Context, r *authn.Request, token string) (authn.Result, error) {
-	proof, err := f.check(ctx, token, oauth.Origin(r.BaseURL), r.Now)
+	proof, sub, err := f.check(ctx, token, oauth.Origin(r.BaseURL), r.Now)
 	if err != nil {
 		return nil, err
 	}
@@ -132,6 +140,14 @@ func (f *Foreign) signIn(ctx context.Context, r *authn.Request, token string) (a
 		return &authn.Add{Proof: proof, Session: r.Account.Guest, AnyOrigin: true}, nil
 	}
 	proof.Name, proof.UserID = cmp.Or(r.Name, proof.Name), cmp.Or(r.UserID, proof.UserID)
+	if proof.Name == "" || proof.UserID == "" {
+		if _, known := f.lookup(proof.Subject); !known {
+			// A new account, which the access token may not name: Pocket
+			// ID's carry no profile claims. Ask the issuer who it is.
+			name, username := f.userinfo(ctx, token, sub)
+			proof.Name, proof.UserID = cmp.Or(proof.Name, name, username), cmp.Or(proof.UserID, username)
+		}
+	}
 	return &authn.SignIn{Proof: proof, Create: true, AnyOrigin: true}, nil
 }
 
@@ -167,17 +183,51 @@ func (f *Foreign) redeem(ctx context.Context, p codeParams, origin string) (stri
 	return answer.AccessToken, nil
 }
 
+// lookup is the account of an identity, if the scheme is bound.
+func (f *Foreign) lookup(subject string) (authn.Account, bool) {
+	if f.core == nil {
+		return authn.Account{}, false
+	}
+	return f.core.Lookup(subject)
+}
+
+// userinfo asks the issuer's userinfo endpoint (OpenID Connect Core §5.3)
+// with the access token for the person's name and preferred_username,
+// which it returns only for the token's sub. A failure is no name, not an
+// error: the account is made without one, as before.
+func (f *Foreign) userinfo(ctx context.Context, token, sub string) (name, username string) {
+	metadata, err := f.discover(ctx)
+	if err != nil || metadata.UserinfoEndpoint == "" {
+		return "", ""
+	}
+	request, _ := http.NewRequestWithContext(ctx, http.MethodGet, metadata.UserinfoEndpoint, nil)
+	request.Header.Set("Authorization", "Bearer "+token)
+	request.Header.Set("Accept", "application/json")
+	var claims struct {
+		Sub               string `json:"sub"`
+		Name              string `json:"name"`
+		PreferredUsername string `json:"preferred_username"`
+	}
+	if status, err := f.fetch(request, &claims); err != nil || status != http.StatusOK || claims.Sub != sub {
+		if f.core != nil {
+			f.core.Logger().Warn("external sign-in: no name from the issuer's userinfo", "status", status, "error", err, "sub_matches", claims.Sub == sub)
+		}
+		return "", ""
+	}
+	return claims.Name, claims.PreferredUsername
+}
+
 // check verifies an access token (§4.12.4): signed by the issuer, iss the
 // issuer, aud including this server's origin, unexpired, and bound to no
-// key. It proves the identity of the issuer and sub.
-func (f *Foreign) check(ctx context.Context, token, origin string, now time.Time) (authn.Proof, *authn.Error) {
+// key. It proves the identity of the issuer and sub, which it returns too.
+func (f *Foreign) check(ctx context.Context, token, origin string, now time.Time) (authn.Proof, string, *authn.Error) {
 	invalid := authn.Denied("The sign-in token is invalid, expired, or not for this server")
 	if _, err := f.discover(ctx); err != nil {
-		return authn.Proof{}, err
+		return authn.Proof{}, "", err
 	}
 	claims, err := verifyAccessToken(token, func(kid string) []crypto.PublicKey { return f.keysFor(ctx, kid) })
 	if err != nil {
-		return authn.Proof{}, invalid
+		return authn.Proof{}, "", invalid
 	}
 	var c struct {
 		Iss               string `json:"iss"`
@@ -189,27 +239,27 @@ func (f *Foreign) check(ctx context.Context, token, origin string, now time.Time
 	}
 	raw, _ := json.Marshal(claims)
 	if json.Unmarshal(raw, &c, json.RejectUnknownMembers(false)) != nil {
-		return authn.Proof{}, invalid
+		return authn.Proof{}, "", invalid
 	}
 	switch {
 	case c.Iss != f.issuer, c.Sub == "", c.Exp == nil:
-		return authn.Proof{}, invalid
+		return authn.Proof{}, "", invalid
 	case now.After(time.Unix(*c.Exp, 0).Add(clockSkew)):
-		return authn.Proof{}, invalid
+		return authn.Proof{}, "", invalid
 	case c.Nbf != nil && now.Add(clockSkew).Before(time.Unix(*c.Nbf, 0)):
-		return authn.Proof{}, invalid
+		return authn.Proof{}, "", invalid
 	case !audienceIncludes(claims["aud"], oauth.Resources(origin)):
-		return authn.Proof{}, invalid
+		return authn.Proof{}, "", invalid
 	}
 	if _, bound := claims["cnf"]; bound {
-		return authn.Proof{}, authn.Denied("The sign-in token is bound to a key, which this server cannot check")
+		return authn.Proof{}, "", authn.Denied("The sign-in token is bound to a key, which this server cannot check")
 	}
 	return authn.Proof{
 		// The issuer and its subject name the person for good (§4.12.4); an
 		// issuer URL has no "#".
 		Subject: f.issuer + "#" + c.Sub,
 		Name:    cmp.Or(c.Name, c.PreferredUsername), UserID: c.PreferredUsername,
-	}, nil
+	}, c.Sub, nil
 }
 
 // audienceIncludes reports whether aud, a string or an array of them,
@@ -241,6 +291,9 @@ func (f *Foreign) discover(ctx context.Context) (*issuerMetadata, *authn.Error) 
 		parsed.Scheme + "://" + parsed.Host + "/.well-known/oauth-authorization-server" + parsed.Path,
 		f.issuer + "/.well-known/openid-configuration",
 	}
+	// The first document that fits is the metadata. An RFC 8414 one may
+	// lack OpenID Connect's userinfo_endpoint, which the other then gives.
+	var found *issuerMetadata
 	for _, candidate := range candidates {
 		request, _ := http.NewRequestWithContext(ctx, http.MethodGet, candidate, nil)
 		request.Header.Set("Accept", "application/json")
@@ -251,10 +304,23 @@ func (f *Foreign) discover(ctx context.Context) (*issuerMetadata, *authn.Error) 
 		if metadata.Issuer != f.issuer || !isHTTPS(metadata.AuthorizationEndpoint) || !isHTTPS(metadata.TokenEndpoint) || !isHTTPS(metadata.JWKSURI) {
 			continue
 		}
+		if !isHTTPS(metadata.UserinfoEndpoint) {
+			metadata.UserinfoEndpoint = ""
+		}
+		if found == nil {
+			found = &metadata
+		} else {
+			found.UserinfoEndpoint = metadata.UserinfoEndpoint
+		}
+		if found.UserinfoEndpoint != "" {
+			break
+		}
+	}
+	if found != nil {
 		f.mu.Lock()
-		f.metadata, f.fetched = &metadata, time.Now()
+		f.metadata, f.fetched = found, time.Now()
 		f.mu.Unlock()
-		return &metadata, nil
+		return found, nil
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
