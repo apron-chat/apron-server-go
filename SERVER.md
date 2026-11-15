@@ -1613,17 +1613,21 @@ domain without a dot such as `a@localhost` is `invalid_params`, and so is a
 malformed `name` or `user_id`, which leaves the proposal usable.
 
 A proposal may carry `state`, a string of at most 256 bytes (longer is
-`too_large`), which its link returns unchanged. A connection has one
+`too_large`), which its link returns unchanged, and with which its code
+works on another connection. A connection has one
 pending proposal, and a new one replaces it. It lasts ten minutes, also
 after its connection closes, and is consumed when approved. Five wrong
 tokens cancel it: on its own connection any wrong token counts, and on any
-connection a link token whose handle (its first ten characters) names the
-proposal but whose secret is wrong. It is dropped when the connection's
+connection a wrong token with the proposal's `state`, and a link token
+whose handle (its first ten characters) names the proposal but whose
+secret is wrong. It is dropped when the connection's
 identity changes (a guest `auth`, a token resume, an approval). Proposals
-are kept in memory only. Approval takes `email`, or `token` (§4.11.3): a
-`token` that resumes no session approves a proposal when the connection
-has one pending, or when its handle names one, and wrong tokens count the
-same way.
+are kept in memory only. Approval takes `email`, or `token` (§4.11.3), and
+may carry the proposal's `state`: a `token` that resumes no session
+approves a proposal when the connection has one pending, when its handle
+names one, or when its `state` does, and wrong tokens count the same way.
+When proposals on several connections carry the same `state`, it names the
+latest.
 
 A link opens `--email.link-url` (or `--public-url`) with
 `#token=…&state=…&server=…` in its fragment: `state` when the proposal
@@ -1631,7 +1635,9 @@ carried one, and `server`, this server's WebSocket URL, when
 `--public-url` is set.
 
 - **Signing in**, proposed on a connection not signed in. The email carries
-  a six-digit code, which works only on the proposing connection, and, when
+  a six-digit code, which works only on the proposing connection, or with
+  the proposal's `state` on another, such as the proposer's after a
+  reconnect, and, when
   `--email.link-url` (or `--public-url`) is set, a link with a long token
   (130 random bits behind its handle), which works on any connection not
   signed in, such as one the link opens. Approving it signs the presenting connection in, which
@@ -1640,13 +1646,15 @@ carried one, and `server`, this server's WebSocket URL, when
   by the guests' rules or else `user_<n>`, honors a requested `name`, and
   joins `general`, delivered after the result. The `name` and `user_id`
   requested come from the approval, else, only when the proposing
-  connection approves, from the proposal: a link opened elsewhere is the
+  connection approves, from the proposal (a code with `state` elsewhere
+  takes them from the approval only, as a link carries the `state` too): a link opened elsewhere is the
   address's owner reading the email, whose account the proposer must not
   name. The result is `{you, token}`. Either token presented on
   a signed-in connection is `denied`, and the proposal stays.
 - **Adding** the address, proposed on a connection signed in, guests
   included. The email carries the code, which works only on the proposing
-  connection, and a link, whose token works only on a connection signed in
+  connection, or with the proposal's `state` on another connection signed in
+  to the proposing account, and a link, whose token works only on a connection signed in
   to the proposing account, such as another tab of it: so someone who
   proposes adding their victim's address to their own account cannot have
   the victim approve it by clicking. Elsewhere it is `denied`, and the
@@ -1674,10 +1682,12 @@ Limits keep proposals from flooding anyone with email. Each answers
   `--client-ip-header` behind a reverse proxy, the address the proxy
   reports): ten proposals, then one every three minutes.
 - Per connection: five proposals, then one every two minutes.
-- At most sixteen deliveries at once, and 10,000 outstanding links.
+- At most sixteen deliveries at once, 10,000 outstanding links, and 10,000
+  outstanding proposals with a `state`.
 
-A code can be guessed only on the connection that proposed it, five tries a
-proposal, and each proposal counts against its address, so the
+A code can be guessed only on the connection that proposed it, or with
+the proposal's unguessable `state`, five tries a proposal from any
+connection, and each proposal counts against its address, so the
 per-address limit bounds guessing to thirty tries an hour against a million codes; a link
 token cannot be guessed, and wrong guesses at the secret behind a known
 handle cancel its proposal.

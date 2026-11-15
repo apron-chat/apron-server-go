@@ -618,6 +618,83 @@ func TestEmailFailedAttemptsCountFromAnyConnection(t *testing.T) {
 	c.expectError(t, "auth", "cancelled-code", map[string]any{"scheme": "email", "token": message.Code}, CodeDenied)
 }
 
+// A code works on another connection with its proposal's state, as when the
+// proposer's connection dropped before the user typed it: under either
+// scheme, never without the state or with another, and wrong codes with the
+// state count against the proposal (§4.11.2, §4.11.3).
+func TestEmailCodesWorkElsewhereWithTheirState(t *testing.T) {
+	app, mailbox, httpServer := emailTestServer(t, nil)
+	proposer, _ := dialRaw(t, httpServer)
+	state := "q8Rz-state-of-the-proposer"
+	proposer.result(t, "auth", "propose", map[string]any{"scheme": "email", "email": "ada@example.com", "state": state, "name": "Ada"})
+	code := mailbox.receive(t).Code
+	_ = proposer.ws.Close(websocket.StatusNormalClosure, "dropped")
+
+	retry, _ := dialRaw(t, httpServer)
+	retry.expectError(t, "auth", "no-state", map[string]any{"scheme": "email", "token": code}, CodeDenied)
+	retry.expectError(t, "auth", "other-state", map[string]any{"scheme": "email", "token": code, "state": state + "x"}, CodeDenied)
+	retry.expectError(t, "auth", "token-no-state", map[string]any{"scheme": "token", "token": code}, CodeDenied)
+	retry.expectError(t, "auth", "state-type", map[string]any{"scheme": "email", "token": code, "state": 7}, CodeInvalidParams)
+	// A sign-in code with its state on a signed-in connection is denied, and
+	// the proposal stays.
+	signedIn := dialTestClient(t, httpServer)
+	signedIn.expectError(t, "auth", "signed-in", map[string]any{"scheme": "email", "token": code, "state": state}, CodeDenied)
+	// Wrong codes with the state count against the proposal, whichever
+	// connection sends them.
+	for i := range maxProposalAttempts - 2 {
+		guesser, _ := dialRaw(t, httpServer)
+		guesser.expectError(t, "auth", fmt.Sprintf("guess-%d", i), map[string]any{"scheme": "email", "token": "000000x", "state": state}, CodeDenied)
+	}
+	// The proposal's name applies only on its own connection.
+	_, result := signInByEmail(t, retry, code, map[string]any{"state": state})
+	if you := result["you"].(map[string]any); you["name"] == "Ada" {
+		t.Fatalf("sign-in elsewhere took the proposal's name: %#v", you)
+	}
+	// Used up.
+	again, _ := dialRaw(t, httpServer)
+	again.expectError(t, "auth", "reuse", map[string]any{"scheme": "email", "token": code, "state": state}, CodeDenied)
+
+	// Under scheme token too.
+	second, _ := dialRaw(t, httpServer)
+	second.result(t, "auth", "propose", map[string]any{"scheme": "email", "email": "bob@example.com", "state": "bob-state"})
+	code = mailbox.receive(t).Code
+	elsewhere, _ := dialRaw(t, httpServer)
+	elsewhere.expectError(t, "auth", "token-other-state", map[string]any{"scheme": "token", "token": code, "state": "carol-state"}, CodeDenied)
+	if result := elsewhere.result(t, "auth", "token", map[string]any{"scheme": "token", "token": code, "state": "bob-state"}); result["you"] == nil || result["token"] == nil {
+		t.Fatalf("sign-in by code and state with scheme token: %#v", result)
+	}
+
+	// A few wrong codes with the state cancel the proposal.
+	third, _ := dialRaw(t, httpServer)
+	third.result(t, "auth", "propose", map[string]any{"scheme": "email", "email": "carol@example.com", "state": "carol-state"})
+	code = mailbox.receive(t).Code
+	wrong := "wrong"
+	for i := range maxProposalAttempts {
+		guesser, _ := dialRaw(t, httpServer)
+		guesser.expectError(t, "auth", fmt.Sprintf("cancel-%d", i), map[string]any{"scheme": "email", "token": wrong, "state": "carol-state"}, CodeDenied)
+	}
+	late, _ := dialRaw(t, httpServer)
+	late.expectError(t, "auth", "cancelled", map[string]any{"scheme": "email", "token": code, "state": "carol-state"}, CodeDenied)
+	third.expectError(t, "auth", "cancelled-own", map[string]any{"scheme": "email", "token": code}, CodeDenied)
+
+	// An expired proposal is denied with its state, and forgotten.
+	fourth, _ := dialRaw(t, httpServer)
+	fourth.result(t, "auth", "propose", map[string]any{"scheme": "email", "email": "dave@example.com", "state": "dave-state"})
+	code = mailbox.receive(t).Code
+	app.mu.Lock()
+	for _, p := range app.proposals.states {
+		p.expires = time.Now().Add(-time.Second)
+	}
+	app.mu.Unlock()
+	late.expectError(t, "auth", "expired", map[string]any{"scheme": "email", "token": code, "state": "dave-state"}, CodeDenied)
+	app.mu.RLock()
+	kept := len(app.proposals.states)
+	app.mu.RUnlock()
+	if kept != 0 {
+		t.Fatalf("%d proposals kept by state, want 0", kept)
+	}
+}
+
 // Without a public URL, a link carries the WebSocket URL its proposal's
 // connection reached, so a page such as link.apron.chat knows where to sign in.
 func TestEmailLinksNameTheServerWithoutAPublicURL(t *testing.T) {

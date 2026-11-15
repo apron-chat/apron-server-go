@@ -193,7 +193,7 @@ type CodeProposal struct {
 // Tokens are a proposal's temporary tokens (§4.11.2).
 type Tokens struct {
 	// Code is the short token to type, which works only on the proposing
-	// connection.
+	// connection, or with the proposal's state.
 	Code string
 	// Link opens the proposal's link page with the long token, which
 	// works on any connection that may approve it; empty without one.
@@ -254,8 +254,9 @@ type Result interface{ result() }
 // Reply answers the request with a result, and authenticates nothing.
 type Reply struct{ Result any }
 
-// Approve approves a proposal with its temporary token (§4.11.3).
-type Approve struct{ Token string }
+// Approve approves a proposal with its temporary token, and the
+// proposal's state when the approval carries one (§4.11.3).
+type Approve struct{ Token, State string }
 
 // SignIn signs the connection in to the account of the identity proven.
 type SignIn struct {

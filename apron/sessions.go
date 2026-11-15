@@ -148,13 +148,18 @@ func (s *Server) authenticateToken(c *client, req request) (any, *Error) {
 	session, ok := s.sessions[key]
 	if !ok || !session.anyOrigin && session.origin != c.origin || !now.Before(session.expires) {
 		// A temporary token approves its proposal with this scheme too, as
-		// a client presents the token of a link that isn't its own (§4.11.2).
-		if s.mayApproveLocked(c, token) {
+		// a client presents the token of a link that isn't its own
+		// (§4.11.2), with the proposal's state or without (§4.11.3).
+		state, err := parseString(req.params, "state", false)
+		if err != nil {
+			return nil, err
+		}
+		if s.mayApproveLocked(c, token, state) {
 			name, requested, err := parseRequested(req)
 			if err != nil {
 				return nil, err
 			}
-			return s.approveLocked(c, req, token, name, requested)
+			return s.approveLocked(c, req, token, state, name, requested)
 		}
 		return nil, &Error{Code: CodeDenied, Message: "Session expired; sign in again"}
 	}

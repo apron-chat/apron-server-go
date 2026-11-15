@@ -703,7 +703,7 @@ func Open(config Config) (*Server, error) {
 		invitations: make(map[[32]byte]*invitation),
 		services:    make(map[[32]byte]*serviceToken),
 		accounts:    make(map[authn.Identity]*userState),
-		proposals:   proposals{links: make(map[string]*proposal)},
+		proposals:   proposals{links: make(map[string]*proposal), states: make(map[string]*proposal)},
 		dirty:       newDirtySet(),
 		storeWrites: make(chan storeBatch, storeQueue),
 		storeDone:   make(chan struct{}),

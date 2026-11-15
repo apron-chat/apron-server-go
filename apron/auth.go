@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/json/jsontext"
 	"errors"
@@ -49,6 +50,8 @@ const (
 	linkHandleBytes = 10
 	// maxLinks bounds the outstanding link tokens.
 	maxLinks = 10_000
+	// maxStates bounds the outstanding proposals that carry a state.
+	maxStates = 10_000
 	// accountIDPrefix starts the user_ids assigned to new accounts that did
 	// not request one.
 	accountIDPrefix = "user_"
@@ -67,9 +70,9 @@ var reservedSchemeNames = []string{"guest", "token", principalUser}
 
 // proposal is a pending email sign-in (§4.11.1): to sign in, or to add an
 // identity to the proposing account. Its short code
-// works only on its connection; its link token, a handle and an
-// unguessable secret, works on any connection that may approve it
-// (§4.11.3). It outlives its connection's disconnect, until it expires or
+// works only on its connection, or with its state (§4.11.2); its link
+// token, a handle and an unguessable secret, works on any connection that
+// may approve it (§4.11.3). It outlives its connection's disconnect, until it expires or
 // is approved, and holds neither the connection nor the account, so a
 // closed connection, and a retired guest, are not kept for it: the
 // connection holds the proposal instead. Guarded by s.mu.
@@ -87,7 +90,8 @@ type proposal struct {
 	// handle and secret make up the link token; both are empty when no
 	// link was made.
 	handle, secret string
-	// state is the client's, returned in the link.
+	// state is the client's, returned in the link, and which lets its
+	// code approve it on another connection.
 	state    string
 	expires  time.Time
 	attempts int
@@ -101,9 +105,18 @@ type proposal struct {
 	server string
 }
 
-// proposals are the outstanding proposals' link tokens.
+// proposals are the outstanding proposals' link tokens, and the proposals
+// that carry a state, by stateKey: the latest proposal with each state.
 type proposals struct {
-	links map[string]*proposal
+	links  map[string]*proposal
+	states map[string]*proposal
+}
+
+// stateKey indexes a proposal's state, hashed so that finding it takes no
+// time that depends on the state.
+func stateKey(state string) string {
+	sum := sha256.Sum256([]byte(state))
+	return string(sum[:])
 }
 
 // addSchemeLocked offers a sign-in scheme, under a name no other scheme
@@ -246,7 +259,7 @@ func (s *Server) authenticate(c *client, req request) (any, *Error) {
 	switch result := result.(type) {
 	case *authn.Approve:
 		if result != nil {
-			return s.approveLocked(c, req, result.Token, requestedName, requested)
+			return s.approveLocked(c, req, result.Token, result.State, requestedName, requested)
 		}
 	case *authn.SignIn:
 		if result != nil && result.Invitation != "" {
@@ -526,14 +539,15 @@ func (s *Server) setGrantLocked(u *userState, scheme string, roles []string) boo
 
 // approveLocked approves a proposal with its temporary token (§4.11.3),
 // under the scheme that proposed it or token: the code of the connection's
-// own proposal, or the link token of a proposal made on any connection.
+// own proposal, the code of a proposal with state, its state, or the link
+// token of a proposal made on any connection.
 // Approving a sign-in signs this connection, which must not be signed in,
 // in to the identity's account or a new one. Approving an addition, only on
 // a connection signed in to the proposing account, adds the identity to
 // that account and returns it as you. A token presented on a connection that may
 // not approve it is denied, and its proposal stays for one that may.
-func (s *Server) approveLocked(c *client, req request, token, name, requested string) (any, *Error) {
-	p := s.proposalLocked(c, token, time.Now())
+func (s *Server) approveLocked(c *client, req request, token, state, name, requested string) (any, *Error) {
+	p := s.proposalLocked(c, token, state, time.Now())
 	if p == nil || p.proof == nil {
 		return nil, &Error{Code: CodeDenied, Message: "The code is invalid or expired; ask for a new one"}
 	}
@@ -559,7 +573,8 @@ func (s *Server) approveLocked(c *client, req request, token, name, requested st
 	s.dropProposalLocked(p)
 	// A proposal's own name and user_id apply only on its connection: a
 	// link opened elsewhere is someone reading the email, whose account
-	// the proposer must not name.
+	// the proposer must not name, and so may be a code with the state that
+	// the link carries.
 	if own {
 		name, requested = cmp.Or(name, p.name), cmp.Or(requested, p.userID)
 	}
@@ -568,20 +583,23 @@ func (s *Server) approveLocked(c *client, req request, token, name, requested st
 }
 
 // mayApproveLocked reports whether token is one that proposalLocked would
-// check against a proposal: the connection's own, or the one its link
-// handle names. Then a wrong token counts as a failed attempt under any
-// scheme; any other token is no temporary token.
-func (s *Server) mayApproveLocked(c *client, token string) bool {
-	return c.proposal != nil || len(token) > linkHandleBytes && s.proposals.links[token[:linkHandleBytes]] != nil
+// check against a proposal: the connection's own, the one its link handle
+// names, or the one state names. Then a wrong token counts as a failed
+// attempt under any scheme; any other token is no temporary token.
+func (s *Server) mayApproveLocked(c *client, token, state string) bool {
+	return c.proposal != nil || len(token) > linkHandleBytes && s.proposals.links[token[:linkHandleBytes]] != nil ||
+		state != "" && s.proposals.states[stateKey(state)] != nil
 }
 
 // proposalLocked returns the live proposal that token approves: the
-// connection's own, by its code, or any, by its link token. Otherwise it
-// returns nil, and counts a failed attempt against the proposal that token
-// names by its link handle, else against the connection's own, whichever
-// connection presents it (§4.11.1): maxProposalAttempts of them cancel it.
-// Expired proposals are dropped.
-func (s *Server) proposalLocked(c *client, token string, now time.Time) *proposal {
+// connection's own, by its code; any, by its code with its state
+// (§4.11.2), which the state proves the proposer's client presents; or
+// any, by its link token. Otherwise it returns nil, and counts a failed
+// attempt against the proposal that token names by its link handle, else
+// against the one state names, else against the connection's own,
+// whichever connection presents it (§4.11.1): maxProposalAttempts of them
+// cancel it. Expired proposals are dropped.
+func (s *Server) proposalLocked(c *client, token, state string, now time.Time) *proposal {
 	own := c.proposal
 	if own != nil && (own.dropped || !now.Before(own.expires)) {
 		s.dropProposalLocked(own)
@@ -591,6 +609,12 @@ func (s *Server) proposalLocked(c *client, token string, now time.Time) *proposa
 		return own
 	}
 	target := own
+	if p := s.statedProposalLocked(state, now); p != nil {
+		if p.code != "" && subtle.ConstantTimeCompare([]byte(token), []byte(p.code)) == 1 {
+			return p
+		}
+		target = p
+	}
 	if len(token) > linkHandleBytes {
 		if p := s.proposals.links[token[:linkHandleBytes]]; p != nil {
 			if !now.Before(p.expires) {
@@ -611,11 +635,34 @@ func (s *Server) proposalLocked(c *client, token string, now time.Time) *proposa
 	return nil
 }
 
-// dropProposalLocked forgets a proposal: its connection's, and its link.
+// statedProposalLocked returns the live proposal whose state is state, if
+// any, and drops it if it expired.
+func (s *Server) statedProposalLocked(state string, now time.Time) *proposal {
+	if state == "" {
+		return nil
+	}
+	p := s.proposals.states[stateKey(state)]
+	if p == nil || subtle.ConstantTimeCompare([]byte(state), []byte(p.state)) != 1 {
+		return nil
+	}
+	if !now.Before(p.expires) {
+		s.dropProposalLocked(p)
+		return nil
+	}
+	return p
+}
+
+// dropProposalLocked forgets a proposal: its connection's, its link, and
+// its state.
 func (s *Server) dropProposalLocked(p *proposal) {
 	p.dropped = true
 	if p.handle != "" && s.proposals.links[p.handle] == p {
 		delete(s.proposals.links, p.handle)
+	}
+	if p.state != "" {
+		if key := stateKey(p.state); s.proposals.states[key] == p {
+			delete(s.proposals.states, key)
+		}
 	}
 }
 
@@ -674,7 +721,8 @@ func (sc *schemeConn) ProposeCode(spec authn.CodeProposal) (authn.Tokens, error)
 	}
 	s.mu.Lock()
 	defer s.unlock()
-	if spec.LinkPage != "" && !s.pruneProposalsLocked(s.proposals.links, maxLinks, sc.now) {
+	if spec.LinkPage != "" && !s.pruneProposalsLocked(s.proposals.links, maxLinks, sc.now) ||
+		spec.State != "" && !s.pruneProposalsLocked(s.proposals.states, maxStates, sc.now) {
 		return authn.Tokens{}, proposalsBusy()
 	}
 	p, refusal := sc.proposeLocked(spec.State)
@@ -683,6 +731,11 @@ func (sc *schemeConn) ProposeCode(spec authn.CodeProposal) (authn.Tokens, error)
 	}
 	proof := spec.Proof
 	p.proof, p.code = &proof, code
+	if p.state != "" {
+		// The latest proposal with a state is the one it names; an earlier
+		// one, of another connection, keeps its code there and its link.
+		s.proposals.states[stateKey(p.state)] = p
+	}
 	tokens := authn.Tokens{Code: code, Expires: p.expires, Add: p.add}
 	if spec.LinkPage != "" {
 		p.handle, p.secret = s.newLinkHandleLocked(), rand.Text()

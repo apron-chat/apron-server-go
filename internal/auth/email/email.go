@@ -128,15 +128,19 @@ type clientBudget struct {
 	element *list.Element
 }
 
-// Auth proposes, mailing a code for the address, or approves with a token
-// (§4.11.3).
+// Auth proposes, mailing a code for the address, or approves with a token,
+// and the proposal's state if the approval carries it (§4.11.3).
 func (s *Scheme) Auth(_ context.Context, r *authn.Request) (authn.Result, error) {
 	if _, has := r.Params["token"]; has {
 		token, err := authn.String(r.Params, "token", true)
 		if err != nil {
 			return nil, err
 		}
-		return &authn.Approve{Token: token}, nil
+		state, err := authn.String(r.Params, "state", false)
+		if err != nil {
+			return nil, err
+		}
+		return &authn.Approve{Token: token, State: state}, nil
 	}
 	return s.propose(r)
 }
