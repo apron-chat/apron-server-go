@@ -33,7 +33,7 @@ import (
 //
 // The issuer must let any app in with ClientID (a public client that
 // accepts the apps' redirect URIs), bind access tokens to the resource the
-// app asks for (RFC 8707), and issue them as signed JWTs: the server
+// app asks for (RFC 8707), and issue them as signed JWTs (RFC 9068, typ at+jwt): the server
 // accepts only a token whose iss is Issuer, whose aud includes the
 // server's origin, which has not expired, and which is bound to no key
 // (cnf). The account's identity is the issuer and the token's sub, as

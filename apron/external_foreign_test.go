@@ -33,9 +33,11 @@ type fakeIssuer struct {
 	// claims change the access token's claims; nil values remove them.
 	claims map[string]any
 	// tokenType replaces Bearer; foreignKey signs with a key not in the
-	// issuer's set.
+	// issuer's set; typ, if set, replaces the header's at+jwt, and an empty
+	// one leaves typ out.
 	tokenType  string
 	foreignKey bool
+	typ        *string
 }
 
 const publicClientID = "apron-public"
@@ -123,7 +125,14 @@ func (f *fakeIssuer) token(resource string) string {
 			claims[key] = value
 		}
 	}
-	header, _ := json.Marshal(map[string]any{"alg": "ES256", "kid": "k1", "typ": "at+jwt"})
+	fields := map[string]any{"alg": "ES256", "kid": "k1", "typ": "at+jwt"}
+	if f.typ != nil {
+		fields["typ"] = *f.typ
+		if *f.typ == "" {
+			delete(fields, "typ")
+		}
+	}
+	header, _ := json.Marshal(fields)
 	payload, _ := json.Marshal(claims)
 	signed := b64(header) + "." + b64(payload)
 	key := f.key
@@ -218,6 +227,10 @@ func TestExternalForeignIssuer(t *testing.T) {
 		"bound to a key":   func() { issuer.claims = map[string]any{"cnf": map[string]any{"jkt": "abc"}} },
 		"foreign key":      func() { issuer.foreignKey = true },
 		"DPoP token type":  func() { issuer.tokenType = "DPoP" },
+		// An ID token, signed with the same keys, is no access token
+		// (RFC 9068 §2.1), even addressed to this server.
+		"an ID token": func() { issuer.typ = new("JWT") },
+		"no typ":      func() { issuer.typ = new("") },
 	} {
 		t.Run(name, func(t *testing.T) {
 			issuer.mu.Lock()
@@ -225,13 +238,33 @@ func TestExternalForeignIssuer(t *testing.T) {
 			issuer.mu.Unlock()
 			defer func() {
 				issuer.mu.Lock()
-				issuer.claims, issuer.foreignKey, issuer.tokenType = nil, false, ""
+				issuer.claims, issuer.foreignKey, issuer.tokenType, issuer.typ = nil, false, "", nil
 				issuer.mu.Unlock()
 			}()
 			fresh, _ := dialRaw(t, httpServer)
 			fresh.expectError(t, "auth", "a", redemption(client, foreignCode(t, client, external)), CodeDenied)
 		})
 	}
+	// An ID token the client got itself is refused as a token too; the
+	// access token's typ is matched in any case, with or without
+	// application/.
+	setTyp := func(typ *string) {
+		issuer.mu.Lock()
+		issuer.typ = typ
+		issuer.mu.Unlock()
+	}
+	setTyp(new("JWT"))
+	idToken := issuer.token(origin)
+	setTyp(nil)
+	idCheck, _ := dialRaw(t, httpServer)
+	idCheck.expectError(t, "auth", "id", map[string]any{"scheme": "external", "token": idToken}, CodeDenied)
+	for _, typ := range []string{"AT+JWT", "application/at+jwt"} {
+		setTyp(&typ)
+		typed, _ := dialRaw(t, httpServer)
+		typed.result(t, "auth", "a", redemption(client, foreignCode(t, client, external)))
+	}
+	setTyp(nil)
+
 	// A used code, and a token that is no JWT, are refused too.
 	code = foreignCode(t, client, external)
 	used, _ := dialRaw(t, httpServer)

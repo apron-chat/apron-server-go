@@ -27,8 +27,8 @@ import (
 // access token the client redeemed itself, and accepts only a token the
 // issuer signed for this server (§4.12.4).
 //
-// The issuer must issue access tokens as JWTs (RFC 9068 or alike) whose
-// aud names the server's origin, which it binds to the request's resource
+// The issuer must issue access tokens as JWTs (RFC 9068, typ at+jwt: an ID
+// token is refused) whose aud names the server's origin, which it binds to the request's resource
 // (RFC 8707); introspection is not supported.
 type Foreign struct {
 	issuer, clientID, scope string
@@ -175,7 +175,7 @@ func (f *Foreign) check(ctx context.Context, token, origin string, now time.Time
 	if _, err := f.discover(ctx); err != nil {
 		return authn.Proof{}, err
 	}
-	claims, err := verifyJWT(token, func(kid string) []crypto.PublicKey { return f.keysFor(ctx, kid) })
+	claims, err := verifyAccessToken(token, func(kid string) []crypto.PublicKey { return f.keysFor(ctx, kid) })
 	if err != nil {
 		return authn.Proof{}, invalid
 	}

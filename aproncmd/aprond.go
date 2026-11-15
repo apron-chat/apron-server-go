@@ -94,7 +94,7 @@ type Options struct {
 	} `group:"Email sign-in" namespace:"email"`
 
 	External struct {
-		Issuer   string `long:"issuer" description:"Another OAuth authorization server for external sign-in, such as an OpenID Connect provider (https://id.example), instead of an extension's; it must bind access tokens to this server's origin (RFC 8707) as signed JWTs"`
+		Issuer   string `long:"issuer" description:"Another OAuth authorization server for external sign-in, such as an OpenID Connect provider (https://id.example), instead of an extension's; it must bind access tokens to this server's origin (RFC 8707) as signed JWT access tokens (RFC 9068)"`
 		ClientID string `long:"client-id" description:"A public client_id the issuer accepts from any app, which external sign-in's URL carries"`
 		Scope    string `long:"scope" description:"The scope external sign-in's URL asks the issuer for, such as openid"`
 	} `group:"External sign-in" namespace:"external"`

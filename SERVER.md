@@ -1834,9 +1834,10 @@ aprond --public-url https://chat.example \
 - With `code`, aprond redeems the code at the issuer's `token_endpoint`,
   sending `resource`, its origin; with `token`, it takes an access token the
   app redeemed there itself.
-- It accepts only an access token that is a JWT signed by one of the
-  issuer's keys (`jwks_uri`; RS256/384/512, PS256/384/512, ES256/384, or
-  EdDSA), whose `iss` is the issuer, whose `aud` includes aprond's origin,
+- It accepts only an access token that is a JWT (RFC 9068: header `typ`
+  `at+jwt` or `application/at+jwt`, in any case, so never an ID token)
+  signed by one of the issuer's keys (`jwks_uri`; RS256/384/512,
+  PS256/384/512, ES256/384, or EdDSA), whose `iss` is the issuer, whose `aud` includes aprond's origin,
   which has not expired, and which carries no `cnf` (a token bound to a
   key, as is one whose `token_type` is not `Bearer`). Anything else is
   `denied`. It does not introspect opaque tokens.

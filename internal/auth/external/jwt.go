@@ -79,12 +79,13 @@ func (k jwk) publicKey() (crypto.PublicKey, error) {
 	return nil, errors.New("unsupported key type")
 }
 
-// errToken is any problem with a token's form or signature.
-var errToken = errors.New("external: the token is not a valid JWT from the issuer")
+// errToken is any problem with a token's form, type, or signature.
+var errToken = errors.New("external: the token is not a valid access token from the issuer")
 
-// verifyJWT checks a compact JWS's signature with one of the keys that
-// keys returns for its kid, and returns its claims.
-func verifyJWT(token string, keys func(kid string) []crypto.PublicKey) (map[string]jsontext.Value, error) {
+// verifyAccessToken checks that a compact JWS is a JWT access token (RFC
+// 9068), by its typ, and its signature with one of the keys that keys
+// returns for its kid, and returns its claims.
+func verifyAccessToken(token string, keys func(kid string) []crypto.PublicKey) (map[string]jsontext.Value, error) {
 	parts := strings.Split(token, ".")
 	if len(parts) != 3 {
 		return nil, errToken
@@ -92,10 +93,11 @@ func verifyJWT(token string, keys func(kid string) []crypto.PublicKey) (map[stri
 	var header struct {
 		Alg  string   `json:"alg"`
 		Kid  string   `json:"kid"`
+		Typ  string   `json:"typ"`
 		Crit []string `json:"crit"`
 	}
 	rawHeader, err := base64.RawURLEncoding.DecodeString(parts[0])
-	if err != nil || json.Unmarshal(rawHeader, &header) != nil || len(header.Crit) > 0 {
+	if err != nil || json.Unmarshal(rawHeader, &header) != nil || len(header.Crit) > 0 || !accessTokenType(header.Typ) {
 		return nil, errToken
 	}
 	signature, err := base64.RawURLEncoding.DecodeString(parts[2])
@@ -119,6 +121,15 @@ func verifyJWT(token string, keys func(kid string) []crypto.PublicKey) (map[stri
 		return nil, errToken
 	}
 	return claims, nil
+}
+
+// accessTokenType reports whether typ is a JWT access token's (RFC 9068
+// §2.1): at+jwt, or application/at+jwt, in any case. An ID token, which an
+// issuer signs with the same keys and may address to the server too, has
+// another typ, or none, and is no access token.
+func accessTokenType(typ string) bool {
+	typ = strings.ToLower(typ)
+	return typ == "at+jwt" || typ == "application/at+jwt"
 }
 
 // verifySignature checks one signature by alg, which must suit the key:
