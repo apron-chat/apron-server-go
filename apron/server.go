@@ -1151,13 +1151,21 @@ func (s *Server) serverParams(baseURL string, revealed bool) map[string]any {
 	if len(authSchemes) > 0 {
 		authSchemes = append(authSchemes, "token")
 	}
-	if s.guestsAllowedLocked() {
+	guests := s.guestsAllowedLocked()
+	if guests {
 		authSchemes = append(authSchemes, "guest")
 	}
 	// signup (§3.2) lists the schemes that can create an account: every
-	// one but token, which only resumes one. A passkey registered by a
-	// guest makes the guest an account, and email and guest start one.
-	signup := slices.DeleteFunc(slices.Clone(authSchemes), func(scheme string) bool { return scheme == "token" })
+	// one but token, which only resumes one. Email, external sign-in, and
+	// guest start one. A passkey registration makes an account only of a
+	// guest, or with an invitation: without guests it is no way to sign
+	// up. An invitation does not put it back, since signup tells every
+	// client what it can do, and an invitation is a secret one person was
+	// given; an invited client registers anyway, as webauthn stays in
+	// auth.
+	signup := slices.DeleteFunc(slices.Clone(authSchemes), func(scheme string) bool {
+		return scheme == "token" || scheme == passkey.Name && !guests
+	})
 	params := map[string]any{
 		"apron":        10,
 		"agent":        "apron-go/10",
