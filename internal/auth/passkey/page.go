@@ -167,12 +167,8 @@ func (s *Scheme) page(w http.ResponseWriter, r *http.Request) {
 	}
 	origin := oauth.Origin(s.core.BaseURL(r))
 	req, problem := oauth.Parse(query, origin)
-	switch {
-	case problem != nil && problem.Page:
+	if problem != nil {
 		oauth.RenderProblem(w, problem)
-		return
-	case problem != nil:
-		req.Refuse(w, r, problem)
 		return
 	}
 	if !protocol.IsOriginInHaystack(origin, s.w.Config.RPOrigins) {
@@ -195,7 +191,7 @@ func (s *Scheme) page(w http.ResponseWriter, r *http.Request) {
 		f.addition, f.name = a, ""
 	case f.action == "register":
 	default:
-		req.Refuse(w, r, &oauth.Problem{Code: "invalid_request", Description: "action must be login or register, with request or name only for register"})
+		oauth.RenderProblem(w, &oauth.Problem{Code: "invalid_request", Description: "The app that sent you here asked for something this page does not do (action must be login or register, with request or name only for register)."})
 		return
 	}
 	id, err := s.flows.Put(f, oauth.FlowLifetime, time.Now())

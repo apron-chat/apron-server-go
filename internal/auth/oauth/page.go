@@ -111,13 +111,13 @@ func Render(w http.ResponseWriter, status int, page Page) {
 	}{page, nonce})
 }
 
-// RenderProblem shows a problem with an authorization request on the page:
-// one whose redirect_uri is not known to be good, which must not be
-// redirected to.
+// RenderProblem shows a problem with an authorization request on the page,
+// which goes nowhere (Problem).
 func RenderProblem(w http.ResponseWriter, p *Problem) {
 	Render(w, http.StatusBadRequest, Page{
 		Title: "This sign-in link doesn't work",
 		Lines: []template.HTML{Line(p.Description), Line("Go back to the app and try signing in again.")},
+		Note:  "Error: " + p.Code,
 	})
 }
 

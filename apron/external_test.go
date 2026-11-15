@@ -217,10 +217,14 @@ func TestExternalAuthorizationRequests(t *testing.T) {
 		"no challenge":    {url.Values{"code_challenge": nil}, "invalid_request"},
 		"token response":  {url.Values{"response_type": {"token"}}, "unsupported_response_type"},
 		"short challenge": {url.Values{"code_challenge": {"abc"}}, "invalid_request"},
+		"no state":        {url.Values{"state": nil}, "invalid_request"},
 	} {
+		// The page shows every problem itself, even with a good
+		// redirect_uri: it returns to the app only once the person acts
+		// (§4.12.3).
 		r := app.Get(app.URL(page, test.overrides))
-		if r.Return == nil || r.Return.Query().Get("error") != test.error || r.Return.Query().Get("state") != app.State || r.Return.Query().Get("iss") != issuer {
-			t.Errorf("%s: %d %v", name, r.Status, r.Return)
+		if r.Status != http.StatusBadRequest || r.Return != nil || r.Header.Get("Location") != "" || !strings.Contains(r.Body, "Error: "+test.error) {
+			t.Errorf("%s: %d %v %s", name, r.Status, r.Return, r.Body)
 		}
 	}
 

@@ -1448,7 +1448,8 @@ above do.
   `external` alone; without the page it is `denied`, as before.
 - **The page** takes the same authorization request as `/oauth/authorize`
   (PKCE `S256`, `state`, `resource` the server's origin), checks it the same
-  way, and asks first: "… wants to sign in to your account on …", that the
+  way, showing any problem on the page, as it does a bad `action`, and asks
+  first: "… wants to sign in to your account on …", that the
   server has not verified the app, and to continue only if they just
   started signing in there, with **Continue with passkey**. After the
   passkey it asks "Allow … to use Ada (@ada)'s account?", with "Not you?
@@ -1737,13 +1738,14 @@ with `--external.issuer`, and it is `unsupported` otherwise.
   `code_challenge_method=S256`), `state`, and `resource`, the server's
   origin. `redirect_uri` must be `https`, a private-use scheme with a `.`
   (`com.example.app:/signed-in`), or `http` on `127.0.0.1`, `[::1]`, or
-  `localhost` with any port. A request without a usable `client_id` or
-  `redirect_uri` shows its problem on the page and goes nowhere; any other
-  problem returns to the app as an OAuth error (`invalid_request`,
-  `unsupported_response_type`, or `invalid_target` for another `resource`),
-  with `state` and `iss`. The issuer is the server's origin, as above; a
-  development server on loopback `http` also takes `resource` spelled with
-  `https://` and the same host, which §4.12.1 has clients send.
+  `localhost` with any port. An invalid request shows its problem on the
+  page (`400`, naming the OAuth error, such as `invalid_target` for another
+  `resource`) and goes nowhere, even with a good `redirect_uri`: any app may
+  name an `https` one, so redirecting errors would make the page an open
+  redirector. The page returns to the app only once the person acts, with a
+  code or with `error=access_denied`. The issuer is the server's origin, as
+  above; a development server on loopback `http` also takes `resource`
+  spelled with `https://` and the same host, which §4.12.1 has clients send.
 - **Confirmation.** The page first says who is asking, by the redirect's
   host, "An app on this device (com.example.app)" for a private-use scheme,
   or "An app on this device" for loopback, that it will be able to read and

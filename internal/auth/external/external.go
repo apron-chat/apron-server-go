@@ -197,12 +197,8 @@ func (s *Scheme) metadata(w http.ResponseWriter, r *http.Request) {
 // screen, which says who is asking and what they get.
 func (s *Scheme) authorize(w http.ResponseWriter, r *http.Request) {
 	req, problem := oauth.Parse(r.URL.Query(), oauth.Origin(s.core.BaseURL(r)))
-	switch {
-	case problem != nil && problem.Page:
+	if problem != nil {
 		oauth.RenderProblem(w, problem)
-		return
-	case problem != nil:
-		req.Refuse(w, r, problem)
 		return
 	}
 	f := &flow{req: req}

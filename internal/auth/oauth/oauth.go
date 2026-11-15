@@ -57,15 +57,17 @@ type Request struct {
 	Issuer string
 }
 
-// Problem is why an authorization request is refused. Before its
-// redirect_uri is known to be good, a problem shows on the page (Page);
-// after, it is sent back to the client as an OAuth error.
+// Problem is why an authorization request is refused. The page shows it
+// (RenderProblem), and never redirects it, even once the redirect_uri is
+// known to be good: any client may name an https redirect_uri, so a page
+// that sent errors there would redirect anywhere for anyone. The page
+// redirects only after the person acts, with a code or with
+// error=access_denied (§4.12.3).
 type Problem struct {
-	Page bool
-	// Code is the OAuth error, such as invalid_request.
-	Code string
-	// Description explains it, for the person on the page or the client's
+	// Code is the OAuth error, such as invalid_request, for the client's
 	// developer.
+	Code string
+	// Description explains it to the person on the page.
 	Description string
 }
 
@@ -91,8 +93,7 @@ func Origin(base string) string {
 }
 
 // Parse reads an authorization request from a page's query, for a server
-// whose origin is issuer. client_id and redirect_uri are checked first:
-// until they pass, every problem is the page's.
+// whose origin is issuer.
 func Parse(query url.Values, issuer string) (*Request, *Problem) {
 	single := func(name string) (string, bool) {
 		values := query[name]
@@ -104,47 +105,42 @@ func Parse(query url.Values, issuer string) (*Request, *Problem) {
 		}
 		return values[0], true
 	}
+	refuse := func(code, description string) (*Request, *Problem) {
+		return nil, &Problem{Code: code, Description: "The app that sent you here " + description}
+	}
 	clientID, ok := single("client_id")
 	if !ok || clientID == "" {
-		return nil, &Problem{Page: true, Code: "invalid_request", Description: "The app that sent you here did not say who it is (client_id)."}
+		return refuse("invalid_request", "did not say who it is (client_id).")
 	}
 	redirectURI, ok := single("redirect_uri")
 	if !ok || !AllowedRedirect(redirectURI) {
-		return nil, &Problem{Page: true, Code: "invalid_request", Description: "The app that sent you here asked to return to an address this server does not send sign-ins to (redirect_uri)."}
+		return refuse("invalid_request", "asked to return to an address this server does not send sign-ins to (redirect_uri).")
 	}
 	r := &Request{ClientID: clientID, RedirectURI: redirectURI, Issuer: issuer}
-	// From here on the client hears of problems; state goes back with
-	// them when it is usable.
 	if state, ok := single("state"); ok {
 		r.State = state
 	}
-	refuse := func(code, description string) (*Request, *Problem) {
-		return r, &Problem{Code: code, Description: description}
-	}
 	if r.State == "" {
-		return refuse("invalid_request", "state is required")
+		return refuse("invalid_request", "did not name its sign-in (state is required).")
 	}
 	if value, ok := single("response_type"); !ok || value != "code" {
-		return refuse("unsupported_response_type", "response_type must be code")
+		return refuse("unsupported_response_type", "asked for a kind of sign-in this server does not offer (response_type must be code).")
 	}
 	if value, ok := single("code_challenge_method"); !ok || value != "S256" {
-		return refuse("invalid_request", "code_challenge_method must be S256")
+		return refuse("invalid_request", "did not protect its sign-in the way this server needs (code_challenge_method must be S256).")
 	}
 	challenge, ok := single("code_challenge")
 	if !ok || !validChallenge(challenge) {
-		return refuse("invalid_request", "code_challenge must be a base64url SHA-256 digest")
+		return refuse("invalid_request", "did not protect its sign-in the way this server needs (code_challenge must be a base64url SHA-256 digest).")
 	}
 	r.Challenge = challenge
 	resource, ok := single("resource")
-	if !ok || resource == "" {
-		return refuse("invalid_target", "resource must be this server's origin")
-	}
 	accepted := false
 	for _, candidate := range Resources(issuer) {
-		accepted = accepted || resource == candidate
+		accepted = accepted || ok && resource == candidate
 	}
 	if !accepted {
-		return refuse("invalid_target", "resource must be this server's origin, "+issuer)
+		return refuse("invalid_target", "asked to sign in to another server (resource must be this server's origin, "+issuer+").")
 	}
 	r.Resource = resource
 	return r, nil
@@ -246,12 +242,6 @@ func (r *Request) Return(w http.ResponseWriter, req *http.Request, params url.Va
 // declined or cancelled.
 func (r *Request) Deny(w http.ResponseWriter, req *http.Request) {
 	r.Return(w, req, url.Values{"error": {"access_denied"}})
-}
-
-// Refuse returns a problem with a request whose redirect_uri is good to the
-// client, as an OAuth error.
-func (r *Request) Refuse(w http.ResponseWriter, req *http.Request, p *Problem) {
-	r.Return(w, req, url.Values{"error": {p.Code}, "error_description": {p.Description}})
 }
 
 // Grant binds a code to its request (§4.12.3).

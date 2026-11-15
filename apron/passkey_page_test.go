@@ -336,8 +336,9 @@ func TestPasskeyPageRegistration(t *testing.T) {
 	}
 }
 
-// The page refuses what it must: a request without a valid redirect on the
-// page, a bad action back to the client, and unknown requests.
+// The page refuses what it must, on the page and never by redirecting: a
+// request without a valid redirect, a bad action or resource, and unknown
+// requests.
 func TestPasskeyPageRequests(t *testing.T) {
 	p := passkeyPageServer(t)
 	client := oauthtest.New(t, pageOrigin)
@@ -350,14 +351,14 @@ func TestPasskeyPageRequests(t *testing.T) {
 		"login with name":   "/passkey?action=login&name=Ada",
 		"login with handle": "/passkey?action=login&request=x",
 	} {
-		if r := client.Get(p.at(client.URL(pageOrigin+page, nil))); r.Return == nil || r.Return.Query().Get("error") != "invalid_request" {
+		if r := client.Get(p.at(client.URL(pageOrigin+page, nil))); r.Status != http.StatusBadRequest || r.Return != nil || !strings.Contains(r.Body, "Error: invalid_request") {
 			t.Errorf("%s: %d %v", name, r.Status, r.Return)
 		}
 	}
 	if r := client.Get(p.at(client.URL(pageOrigin+"/passkey?action=register&request=unknown", nil))); r.Status != http.StatusNotFound || r.Return != nil {
 		t.Fatalf("unknown request = %d %v", r.Status, r.Return)
 	}
-	if r := client.Get(p.at(client.URL(pageOrigin+"/passkey?action=login", url.Values{"resource": {"https://other.example"}}))); r.Return == nil || r.Return.Query().Get("error") != "invalid_target" {
+	if r := client.Get(p.at(client.URL(pageOrigin+"/passkey?action=login", url.Values{"resource": {"https://other.example"}}))); r.Status != http.StatusBadRequest || r.Return != nil || !strings.Contains(r.Body, "Error: invalid_target") {
 		t.Fatalf("other resource = %d %v", r.Status, r.Return)
 	}
 
