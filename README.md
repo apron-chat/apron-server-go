@@ -7,8 +7,8 @@ open chat protocol over WebSockets.**
 protocol v10: rooms, threads, and private rooms, full history, edits and
 replies, reactions and custom emoji, file uploads, live terminal output and
 text streamed into messages,
-commands, presence status and mutes, Web Push and relay push notifications, roles, and passkey
-and email sign-in. It keeps its state in SQLite, can serve a web client from the same
+commands, presence status and mutes, Web Push and relay push notifications, roles, and passkey,
+email, and external (OAuth) sign-in. It keeps its state in SQLite, can serve a web client from the same
 port, and can fetch its own TLS certificates.
 
 ## Quick start
@@ -43,11 +43,19 @@ aprond --static-dir .apron-web/build \
 
 To let a client on another domain, such as `https://web.apron.chat`, use
 passkeys too, add its origin with `--origin` and `--webauthn.origin`; see
-[Passkeys](SERVER.md#passkeys).
+[Passkeys](SERVER.md#passkeys). Clients that cannot use the RP ID at all,
+such as apps on other domains and terminals, sign in with a passkey on the
+server's own [passkey page](SERVER.md#the-passkey-page), which aprond offers
+while its `--public-url` is one of the `--webauthn.origin`s, as above.
 
 Email sign-in is off unless `--email.enable` is set. To try it locally, run
 `go run ./cmd/aprond --email.enable --email.sender log`, which writes codes to
 the server log instead of sending them.
+
+External sign-in, such as with GitHub or an OpenID Connect provider, is an
+extension's: aprond is the OAuth authorization server apps sign in with,
+and hands its page to the extension; see the [sso example](examples/sso)
+and [External sign-in](SERVER.md#external-sign-in).
 
 Run `aprond --help` for every flag, or `aprond --print-config > aprond.toml`
 to start a config file.

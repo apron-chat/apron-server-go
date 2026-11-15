@@ -234,6 +234,7 @@ func (s *Scheme) consent(f *flow) oauth.Page {
 // decide takes the page's buttons: continue to the extension's sign-in,
 // sign in as someone else, allow, or cancel.
 func (s *Scheme) decide(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 4<<10)
 	f, ok := s.flows.Get(r.PostFormValue("flow"), time.Now())
 	if !ok {
 		oauth.Expired(w)
@@ -372,6 +373,7 @@ func (s *Scheme) Cancel(w http.ResponseWriter, r *http.Request, id string) error
 // token is the token endpoint (§4.12.3): it redeems a code for a bearer
 // token for scheme "token".
 func (s *Scheme) token(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 16<<10)
 	cors(w)
 	w.Header().Set("Cache-Control", "no-store")
 	refuse := func(status int, code, description string) {

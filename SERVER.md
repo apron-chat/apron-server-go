@@ -27,7 +27,8 @@ Defaults:
 
 - HTTP and WebSocket listener: `127.0.0.1:8080` (`--addr`)
 - WebSocket endpoint: `/ws`; health endpoint: `/healthz`; passkey related
-  origins: `/.well-known/webauthn`; with
+  origins: `/.well-known/webauthn`; the [passkey page](#the-passkey-page):
+  `/passkey`; with
   [external sign-in](#external-sign-in), its OAuth authorization server:
   `/.well-known/oauth-authorization-server`, `/oauth/authorize`, and
   `/oauth/token`
@@ -1425,6 +1426,51 @@ a restart invalidates them, including passkeys still present in your
 authenticator. An account that lost every passkey recovers through
 [email sign-in](#email-sign-in) if it has an address.
 
+### The passkey page
+
+A client that cannot use the RP ID, such as an app, a terminal, or a web
+client on a domain the RP does not list, runs the passkey on aprond's own
+**passkey page** at `/passkey` instead, an OAuth authorization endpoint
+like [external sign-in](#external-sign-in)'s, and finishes the `webauthn`
+exchange with the code it returns. aprond offers the page while its own
+origin (`--public-url`, or the scheme and host a request arrives on) is one
+of the `--webauthn.origin`s: by default `http://localhost:8080`, so `make
+run` has it; a deployment lists its `--public-url` there, as the examples
+above do.
+
+- **Begin.** A begin step adds `"external": {"url": "https://chat.example/passkey?action=login"}`
+  to `challenge_id` and `public_key`. A registration's is
+  `?action=register&name=…`, and one on a signed-in connection, guests
+  included, an addition: `?action=register&request=<handle>`, which names
+  that account for ten minutes. A connection whose `Origin` is not a
+  `--webauthn.origin` cannot run the ceremony itself, so its begin returns
+  `external` alone; without the page it is `denied`, as before.
+- **The page** takes the same authorization request as `/oauth/authorize`
+  (PKCE `S256`, `state`, `resource` the server's origin), checks it the same
+  way, and asks first: "… wants to sign in to your account on …", that the
+  server has not verified the app, and to continue only if they just
+  started signing in there, with **Continue with passkey**. After the
+  passkey it asks "Allow … to use Ada (@ada)'s account?", with "Not you?
+  Use another passkey". A registration asks once ("wants to create an
+  account for you on …, with a new passkey", **Create passkey**), and so
+  does an addition, which names the account ("wants to add a passkey to
+  Ada (@ada)'s account on …"). Cancel returns `error=access_denied`. The
+  page's small script asks the page for WebAuthn options and posts the
+  result back; the page requires user verification, the page's own origin
+  in the client data, and no `crossOrigin` or `topOrigin`, and refuses to
+  be framed.
+- **Finishing.** `{"scheme": "webauthn", "action", "step": "finish", "code",
+  "code_verifier", "redirect_uri", "client_id"}`, with the begin's
+  `action`, on any connection: a login's code signs in to the passkey's
+  account (`{you, token}`); an addition's adds the passkey to the account
+  that began it, only on a connection signed in to it (`{you, token}`, as
+  in the client); and a new account's registration needs what one in the
+  client needs, an [invitation](#invitations) presented with the finish on
+  a connection that is not signed in. A code from the page finishes only
+  `webauthn` with its own action, works once, and lasts five minutes. The
+  token is bound to the finishing connection's origin, as every session
+  token is.
+
 ### Managing passkeys
 
 With passkeys on, the `server` frame of a signed-in connection lists
@@ -1525,17 +1571,19 @@ over the same WebSocket; no HTTP authentication endpoints are needed.
 
 | `params.action` and `params.step` | Other parameters | Result |
 | --- | --- | --- |
-| `action: "register", step: "begin"` | None; current connection must be authenticated | `{challenge_id, public_key}` creation options |
+| `action: "register", step: "begin"` | None; current connection must be authenticated, or present an invitation | `{challenge_id, public_key, external?}` creation options |
 | `action: "register", step: "finish"` | `challenge_id`, `credential`: browser credential JSON | `{you, token}` |
-| `action: "login", step: "begin"` | None | `{challenge_id, public_key}` discoverable request options |
+| `action: "login", step: "begin"` | None | `{challenge_id, public_key, external?}` discoverable request options |
 | `action: "login", step: "finish"` | `challenge_id`, `credential`: browser credential JSON | `{you, token}` |
+| either action, `step: "finish"` | `code`, `code_verifier`, `redirect_uri`, `client_id` from the [passkey page](#the-passkey-page) | `{you, token}` |
 
 Bearer resumption uses the separate `token` authentication scheme:
 `{"scheme":"token","token":"..."}`. Dropping the token and reconnecting
 signs out the current client; tokens remain valid for their configured lifetime
 and are not revoked by disconnecting.
 
-Every ceremony request includes `params.scheme: "webauthn"`. Binary values in options and
+Every ceremony request includes `params.scheme: "webauthn"`. `external` is
+the passkey page, present while the server offers it. Binary values in options and
 credentials use unpadded base64url, matching the browser's
 `PublicKeyCredential.parseCreationOptionsFromJSON`,
 `parseRequestOptionsFromJSON`, and `toJSON` APIs. Begin responses do not
