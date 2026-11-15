@@ -25,6 +25,10 @@ The WebAuthn suite uses Chromium's virtual authenticator against the real Go
 verifier. It covers passkey registration, login, sign-out, session resumption,
 message ownership, and recovery from an invalid signature. These tests use
 `localhost` to match the default RP ID; other browser tests use `127.0.0.1`.
+`passkey-page.spec.ts` drives the server's passkey page alone, with the same
+virtual authenticator: an app on another domain, a protocol client with no
+`Origin`, adds a passkey to its guest on the page and then signs in with it
+there, finishing each with the page's code.
 
 Install and run from the repository root:
 
