@@ -194,8 +194,10 @@ func (s *Server) removeCredentialLocked(u *userState, scheme, id string, except 
 
 // signOutOthersLocked ends every session, device token, and service token
 // of u's but the one keep signed in with, removes the push registrations
-// they made, and closes u's other connections.
+// they made, closes u's other connections, and forgets the apps u allowed,
+// which then ask again (consents.go).
 func (s *Server) signOutOthersLocked(u *userState, keep *client) {
+	s.forgetConsentsLocked(u)
 	var session, device, service [32]byte
 	if keep != nil {
 		session, device, service = keep.sessionKeyLocked(), keep.device, keep.service

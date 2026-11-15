@@ -4,8 +4,8 @@ import "html/template"
 
 // pageScript runs the passkey page's ceremony: on "Continue with passkey"
 // (or "Create passkey"), it asks the page for WebAuthn options, calls
-// navigator.credentials, has the page verify the result, and goes where the
-// page says: the allow screen, or back to the client with a code.
+// navigator.credentials, has the page verify the result, and goes back to
+// the client with the code the page answers with.
 const pageScript = template.JS(`(() => {
   const main = document.querySelector("main");
   const button = document.getElementById("passkey");
@@ -71,7 +71,7 @@ const pageScript = template.JS(`(() => {
       const credential = create ? await navigator.credentials.create({ publicKey }) : await navigator.credentials.get({ publicKey });
       if (!credential) throw new Error("No passkey was chosen. Try again.");
       const answer = await post("verify", { credential: JSON.stringify(serialize(credential)) });
-      window.location.assign(answer.redirect || answer.next);
+      window.location.assign(answer.redirect);
     } catch (error) {
       status.textContent = error && error.name === "NotAllowedError"
         ? "The passkey prompt was closed. Try again, or cancel."

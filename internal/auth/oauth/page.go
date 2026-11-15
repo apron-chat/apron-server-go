@@ -23,7 +23,7 @@ type Page struct {
 	Fields  map[string]string
 	Buttons []Button
 	// Alt is a secondary action, shown as a link under the lines, such as
-	// "Not you? Use another passkey".
+	// "Not you? Sign in as someone else".
 	Alt *Button
 	// Script runs on the page, with Data as its <main>'s data-* attributes.
 	Script template.JS

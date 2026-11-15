@@ -99,16 +99,11 @@ func TestSignInWithGitHub(t *testing.T) {
 		t.Fatalf("external = %#v", external)
 	}
 
-	// An app on this device opens the page, which says who is asking; the
-	// person continues to GitHub and back, then allows the app to make an
-	// account.
+	// An app on this device opens the page, which sends the person to
+	// GitHub and back, then says who is asking, and the person allows it.
 	app := oauthtest.New(t, base)
 	page := app.Get(app.URL(external["url"].(string), nil))
-	if page.Status != http.StatusOK || !strings.Contains(page.Body, "<strong>An app on this device (com.example.app)</strong> wants to sign in") {
-		t.Fatalf("page = %d %s", page.Status, page.Body)
-	}
-	page = app.Press(page, "continue")
-	if !strings.Contains(page.Body, "wants to create an account for you") {
+	if page.Status != http.StatusOK || !strings.Contains(page.Body, "<strong>An app on this device (com.example.app)</strong> wants to sign in to") {
 		t.Fatalf("after GitHub = %d %s", page.Status, page.Body)
 	}
 	code := app.Code(app.Press(page, "allow"), base)
@@ -122,7 +117,7 @@ func TestSignInWithGitHub(t *testing.T) {
 
 	// The next sign-in shows the account.
 	again := oauthtest.New(t, base)
-	page = again.Press(again.Get(again.URL(external["url"].(string), nil)), "continue")
+	page = again.Get(again.URL(external["url"].(string), nil))
 	if !strings.Contains(page.Body, "to use <strong>The Octocat (@octocat)</strong>’s account?") {
 		t.Fatalf("second sign-in = %d %s", page.Status, page.Body)
 	}
@@ -130,7 +125,7 @@ func TestSignInWithGitHub(t *testing.T) {
 	// Declining at GitHub returns to the app with access_denied.
 	declined := oauthtest.New(t, base)
 	github.decline = true
-	page = declined.Press(declined.Get(declined.URL(external["url"].(string), nil)), "continue")
+	page = declined.Get(declined.URL(external["url"].(string), nil))
 	if page.Return == nil || page.Return.Query().Get("error") != "access_denied" || page.Return.Query().Get("state") != declined.State {
 		t.Fatalf("declined = %d %v %s", page.Status, page.Return, page.Body)
 	}

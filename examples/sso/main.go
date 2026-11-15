@@ -4,10 +4,10 @@
 // of them admins.
 //
 // The server is the authorization server apps sign in with: an app opens
-// its page at /oauth/authorize, which says which app is asking and, when the
-// person continues, hands them to this extension. The extension sends them
-// to GitHub and back, and completes the sign-in with their GitHub identity;
-// the page then asks them to allow the app, and returns to it with a code.
+// its page at /oauth/authorize, which hands the person to this extension.
+// The extension sends them to GitHub and back, and completes the sign-in
+// with their GitHub identity; the page then asks them to allow the app,
+// naming it, and returns to it with a code.
 //
 // Register an OAuth app at https://github.com/settings/developers with the
 // callback URL https://chat.example/sso/callback, then run:

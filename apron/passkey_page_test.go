@@ -88,7 +88,7 @@ func (p *passkeyPage) script(t *testing.T, client *oauthtest.Client, screen oaut
 }
 
 // ceremony runs the passkey on the page with authenticator a, and returns
-// the page's answer to it: next, redirect, or error.
+// the page's answer to it: redirect, or error.
 func (p *passkeyPage) ceremony(t *testing.T, client *oauthtest.Client, screen oauthtest.Response, a *testAuthenticator, flags byte) (int, map[string]any) {
 	t.Helper()
 	status, options := p.script(t, client, screen, "options", nil)
@@ -105,7 +105,7 @@ func (p *passkeyPage) ceremony(t *testing.T, client *oauthtest.Client, screen oa
 	return p.script(t, client, screen, "verify", url.Values{"credential": {string(encoded)}})
 }
 
-// returned is the code a registration's redirect carries.
+// returned is the code a verified passkey's redirect carries.
 func returned(t *testing.T, client *oauthtest.Client, answer map[string]any) string {
 	t.Helper()
 	redirect, _ := answer["redirect"].(string)
@@ -145,13 +145,16 @@ func TestPasskeyPageLogin(t *testing.T) {
 		t.Fatalf("remote begin = %#v", begin)
 	}
 
+	// The page's one screen: who is asking, before the passkey.
 	client := oauthtest.New(t, pageOrigin)
 	screen := p.open(t, client, begin)
 	for _, want := range []string{
-		"<strong>An app on this device (com.example.app)</strong> wants to sign in to your account on <strong>localhost:8080</strong>. It will be able to read and send messages as you.",
+		"<h1>Sign in to localhost:8080 on an app on this device (com.example.app)?</h1>",
+		"<p>It will be able to read and send messages as you.</p>",
 		"localhost:8080 has not verified this app.",
-		"Only continue if you just started signing in on com.example.app.",
+		"Only continue if you just started signing in on an app on this device.",
 		">Continue with passkey</button>",
+		`value="cancel">Cancel</button>`,
 	} {
 		if !strings.Contains(screen.Body, want) {
 			t.Fatalf("first screen lacks %q: %s", want, screen.Body)
@@ -182,22 +185,15 @@ func TestPasskeyPageLogin(t *testing.T) {
 		t.Fatalf("verify without options = %d", status)
 	}
 
+	// A verified passkey returns to the app at once, and the flow is over.
 	status, answer := p.ceremony(t, client, screen, a, 0x05)
-	next, _ := answer["next"].(string)
-	if status != http.StatusOK || next == "" {
+	if status != http.StatusOK || answer["next"] != nil {
 		t.Fatalf("verify = %d %#v", status, answer)
 	}
-	allow := client.Get(p.at(pageOrigin + next))
-	if !strings.Contains(allow.Body, "Allow <strong>An app on this device (com.example.app)</strong> to use <strong>Ada (@"+ownerID+")</strong>’s account?") ||
-		!strings.Contains(allow.Body, "Not you? Use another passkey") {
-		t.Fatalf("allow screen = %d %s", allow.Status, allow.Body)
+	code := returned(t, client, answer)
+	if status, _ := p.script(t, client, screen, "options", nil); status != http.StatusNotFound {
+		t.Fatalf("options after the redirect = %d", status)
 	}
-	// "Not you?" goes back to the passkey.
-	if again := client.Press(allow, "again"); !strings.Contains(again.Body, ">Continue with passkey</button>") {
-		t.Fatalf("another passkey = %s", again.Body)
-	}
-	p.ceremony(t, client, screen, a, 0x05)
-	code := client.Code(client.Press(allow, "allow"), pageOrigin)
 
 	// The code finishes only a login, once, on any connection.
 	native.expectError(t, "auth", "wrong-action", finishWithCode(client, "register", code), CodeDenied)
@@ -274,7 +270,7 @@ func (p *passkeyPage) loginCode(t *testing.T, client *oauthtest.Client, a *testA
 	if status != http.StatusOK {
 		t.Fatalf("verify = %d %#v", status, answer)
 	}
-	return client.Code(client.Press(client.Get(p.at(pageOrigin+answer["next"].(string))), "allow"), pageOrigin)
+	return returned(t, client, answer)
 }
 
 // A passkey added on the page goes to the account that began it, only on a

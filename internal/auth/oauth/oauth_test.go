@@ -125,3 +125,23 @@ func TestTableBounds(t *testing.T) {
 		t.Fatalf("after expiry = %v, %d", err, table.Len())
 	}
 }
+
+// The pages name the client by its redirect_uri, and remember only an
+// https host that is not this device.
+func TestClientNames(t *testing.T) {
+	for redirect, want := range map[string][4]string{
+		"https://Chat.Alice.dev:8443/cb": {"Chat.Alice.dev:8443", "Chat.Alice.dev:8443", "Chat.Alice.dev:8443", "chat.alice.dev:8443"},
+		"https://chat.alice.dev/cb":      {"chat.alice.dev", "chat.alice.dev", "chat.alice.dev", "chat.alice.dev"},
+		"com.example.app:/signed-in":     {"An app on this device (com.example.app)", "an app on this device (com.example.app)", "an app on this device", ""},
+		"http://127.0.0.1:5173/cb":       {"An app on this device", "an app on this device", "an app on this device", ""},
+		"https://localhost:8443/cb":      {"localhost:8443", "localhost:8443", "localhost:8443", ""},
+		"https://127.0.0.1/cb":           {"127.0.0.1", "127.0.0.1", "127.0.0.1", ""},
+		"https://[::1]:8443/cb":          {"[::1]:8443", "[::1]:8443", "[::1]:8443", ""},
+		"https://app.localhost/cb":       {"app.localhost", "app.localhost", "app.localhost", ""},
+	} {
+		r := &Request{RedirectURI: redirect}
+		if got := [4]string{r.Client(), r.ClientInline(), r.Started(), r.RememberedHost()}; got != want {
+			t.Errorf("%s: %q, want %q", redirect, got, want)
+		}
+	}
+}

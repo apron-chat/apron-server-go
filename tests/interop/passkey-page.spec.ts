@@ -1,5 +1,6 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { expect, test, type BrowserContext, type Page } from '@playwright/test';
+import { SERVER_TITLE } from './server-look';
 
 // The passkey page (SERVER.md, "The passkey page") in a real browser, with Chromium's virtual
 // authenticator: an app that cannot use the RP ID, a protocol client here with no Origin, adds a
@@ -112,12 +113,12 @@ test('an app adds a passkey on the passkey page, then signs in with it there', a
 	const login = await app.request('auth', { scheme: 'webauthn', action: 'login', step: 'begin' });
 	request = authorize(login.external.url);
 	await page.goto(request.url);
-	await expect(page.getByText('app.example wants to sign in to your account on localhost:8080. It will be able to read and send messages as you.')).toBeVisible();
+	// One screen before the passkey; a verified passkey returns to the app at once.
+	await expect(page.getByRole('heading', { name: `Sign in to ${SERVER_TITLE} on app.example?` })).toBeVisible();
+	await expect(page.getByText('It will be able to read and send messages as you.')).toBeVisible();
+	await expect(page.getByText('localhost:8080 has not verified this app.')).toBeVisible();
 	await expect(page.getByText('Only continue if you just started signing in on app.example.')).toBeVisible();
-	await page.getByRole('button', { name: 'Continue with passkey' }).click();
-	await expect(page.getByText(`Allow app.example to use Grace (@${you.user_id})’s account?`)).toBeVisible();
-	await expect(page.getByRole('button', { name: 'Not you? Use another passkey' })).toBeVisible();
-	code = await returned(page, request.state, () => page.getByRole('button', { name: 'Allow' }).click());
+	code = await returned(page, request.state, () => page.getByRole('button', { name: 'Continue with passkey' }).click());
 	const signedIn = await app.request('auth', {
 		scheme: 'webauthn', action: 'login', step: 'finish', code, code_verifier: request.verifier, redirect_uri: redirectURI, client_id: clientID
 	});
@@ -189,9 +190,8 @@ test('the web app, where it cannot use the RP ID, creates an account and signs i
 	await connectToLocalhost(tab);
 	await signInCard(tab).getByRole('button', { name: 'Sign in with passkey', exact: true }).click();
 	await tab.waitForURL(/^http:\/\/localhost:8080\/passkey\?action=login&/);
+	await expect(tab.getByRole('heading', { name: `Sign in to ${SERVER_TITLE} on an app on this device?` })).toBeVisible();
 	await tab.getByRole('button', { name: 'Continue with passkey' }).click();
-	await expect(tab.getByText(/^Allow An app on this device to use Lin \(@guest_\d+\)’s account\?$/)).toBeVisible();
-	await tab.getByRole('button', { name: 'Allow', exact: true }).click();
 	await tab.waitForURL((url) => url.origin === 'http://127.0.0.1:5173' && url.pathname === '/');
 	await expect(tab.getByTestId('connection-status')).toHaveText('Connected');
 	await expect(tab.getByRole('button', { name: /^Open preferences\..*: Lin(,|$)/ })).toBeVisible();

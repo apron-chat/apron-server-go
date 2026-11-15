@@ -165,6 +165,13 @@ type Core interface {
 	// Admits reports whether proving subject could sign in: to its
 	// account, or, with create, to a new one.
 	Admits(subject string, create bool) bool
+	// Consented reports whether the account of the scheme's identity
+	// subject allowed an app at host before (oauth.Request.RememberedHost),
+	// so a sign-in page may skip asking it again.
+	Consented(subject, host string) bool
+	// Consent remembers that the account of subject allowed an app at
+	// host, with the account's other data, until it signs out everywhere.
+	Consent(subject, host string)
 	// Issue signs in to the account of an identity a page proved, making
 	// one for an identity that has none with create, outside any
 	// connection, and returns a bearer token for scheme "token" (§3.2.1)

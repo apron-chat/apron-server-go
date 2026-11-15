@@ -182,9 +182,20 @@ func isLoopback(host string) bool {
 	return ip != nil && (ip.Equal(net.IPv4(127, 0, 0, 1)) || ip.Equal(net.IPv6loopback))
 }
 
-// Client names who is asking, as the confirmation shows it: an https
-// redirect's host, "An app on this device (com.example.app)" for a
-// private-use scheme, or "An app on this device" for a loopback address.
+// isLoopbackHost reports whether host names this device, for remembering:
+// localhost and its subdomains, or any loopback address.
+func isLoopbackHost(host string) bool {
+	if host == "localhost" || strings.HasSuffix(host, ".localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+// Client names who is asking, as the confirmation shows it at the start
+// of a sentence: an https redirect's host, "An app on this device
+// (com.example.app)" for a private-use scheme, or "An app on this device"
+// for a loopback address.
 func (r *Request) Client() string {
 	parsed, _ := url.Parse(r.RedirectURI)
 	switch strings.ToLower(parsed.Scheme) {
@@ -196,17 +207,38 @@ func (r *Request) Client() string {
 	return "An app on this device (" + parsed.Scheme + ")"
 }
 
+// ClientInline is Client within a sentence, such as "Allow an app on this
+// device (com.example.app) to use …".
+func (r *Request) ClientInline() string {
+	client := r.Client()
+	if rest, ok := strings.CutPrefix(client, "An app"); ok {
+		return "an app" + rest
+	}
+	return client
+}
+
 // Started names where the person would have started signing in, for "Only
-// continue if you just started signing in on …".
+// continue if you just started signing in on …": an https redirect's
+// host, or "an app on this device".
 func (r *Request) Started() string {
 	parsed, _ := url.Parse(r.RedirectURI)
-	switch strings.ToLower(parsed.Scheme) {
-	case "https":
+	if strings.ToLower(parsed.Scheme) == "https" {
 		return parsed.Host
-	case "http":
-		return "an app on this device"
 	}
-	return parsed.Scheme
+	return "an app on this device"
+}
+
+// RememberedHost is the host, lowercased with any port, under which a
+// page may remember that an account allowed this request's client: an
+// https redirect's, not on a loopback host. It is empty for an app's
+// scheme or a loopback address, which any app on the device can claim, so
+// a page never remembers them.
+func (r *Request) RememberedHost() string {
+	parsed, err := url.Parse(r.RedirectURI)
+	if err != nil || strings.ToLower(parsed.Scheme) != "https" || parsed.Host == "" || isLoopbackHost(strings.ToLower(parsed.Hostname())) {
+		return ""
+	}
+	return strings.ToLower(parsed.Host)
 }
 
 // Grant is what a code is bound to (§4.12.3).

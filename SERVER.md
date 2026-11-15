@@ -262,8 +262,9 @@ backend only keeps entries and applies batches:
 
 What survives a restart: rooms and threads with their complete logs, message
 state and reactions, read cursors, accounts (passkey, email, and external
-sign-in users) with their identities, passkey credentials, and the roles
-their external sign-in granted, profiles, memberships, push registrations
+sign-in users) with their identities, passkey credentials, the roles
+their external sign-in granted, and the apps they allowed on the external
+sign-in page, profiles, memberships, push registrations
 (with their keys, `push_id`, scopes, and when they were last registered),
 when they were made, the status they choose with `me`, when they were last shown `offline`
 (`seen`) and whether they are shown otherwise, so that after a crash those
@@ -1453,15 +1454,18 @@ above do.
   `external` alone; without the page it is `denied`, as before.
 - **The page** takes the same authorization request as `/oauth/authorize`
   (PKCE `S256`, `state`, `resource` the server's origin), checks it the same
-  way, showing any problem on the page, as it does a bad `action`, and asks
-  first: "… wants to sign in to your account on …", that the
-  server has not verified the app, and to continue only if they just
-  started signing in there, with **Continue with passkey**. After the
-  passkey it asks "Allow … to use Ada (@ada)'s account?", with "Not you?
-  Use another passkey". A registration asks once ("wants to create an
-  account for you on …, with a new passkey", **Create passkey**), and so
-  does an addition, which names the account ("wants to add a passkey to
-  Ada (@ada)'s account on …"). Cancel returns `error=access_denied`. The
+  way, showing any problem on the page, as it does a bad `action`, and has
+  one screen. A login asks before the passkey: "Sign in to chat.example on
+  app.example?", "It will be able to read and send messages as you.", that
+  the server has not verified the app, and to continue only if they just
+  started signing in on app.example ("on an app on this device" for an
+  app's scheme or loopback), with **Continue with passkey**; once the
+  passkey is verified, the page returns to the app with a code at once,
+  without another screen. A registration asks the same way ("wants to
+  create an account for you on …, with a new passkey", **Create passkey**),
+  and so does an addition, which names the account before the passkey is
+  made ("wants to add a passkey to Ada (@ada)'s account on …"). Cancel
+  returns `error=access_denied`. The
   page's small script asks the page for WebAuthn options and posts the
   result back; the page requires user verification, the page's own origin
   in the client data, and no `crossOrigin` or `topOrigin`, and refuses to
@@ -1499,7 +1503,9 @@ in:
   service token this connection signed in with, and the push registrations
   it made, and closes it; `{others: true}` ends every other session, device,
   and service token of the account, removes the push registrations they
-  made, and closes its other connections.
+  made, closes its other connections, and forgets the apps it allowed on
+  the external sign-in page, which then ask again
+  ([remembered apps](#external-sign-in)).
 
 Adding a backup is registering another passkey while signed in, up to ten.
 Adding one to an account that has one, removing one, and signing out the
@@ -1766,21 +1772,37 @@ with `--external.issuer`, and it is `unsupported` otherwise.
   code or with `error=access_denied`. The issuer is the server's origin, as
   above; a development server on loopback `http` also takes `resource`
   spelled with `https://` and the same host, which §4.12.1 has clients send.
-- **Confirmation.** The page first says who is asking, by the redirect's
-  host, "An app on this device (com.example.app)" for a private-use scheme,
-  or "An app on this device" for loopback, that it will be able to read and
-  send messages as the person, that the server has not verified the app,
-  and to continue only if they just started signing in there. Continue hands
-  the person to the extension's start function, which typically redirects
-  to an identity provider; the extension's callback calls `Complete` with
-  the identity (or `Cancel`, when the person declined there). The page then
-  asks "Allow … to use Ada (@ada)'s account?" for an identity with an
-  account, or says the app will create one, with "Not you? Sign in as
-  someone else" to start over. Allow redirects with `code`, `state`, and
-  `iss`; Cancel, on either screen, with `error=access_denied`. An identity
-  the server may not admit gets a page that says so instead. The pages
-  refuse to be framed (`frame-ancestors 'none'`, `X-Frame-Options: DENY`)
-  and are never cached. A person has ten minutes on the page.
+- **Confirmation.** The page hands the person straight to the
+  extension's start function, which typically redirects to an identity
+  provider; the extension's callback calls `Complete` with the identity
+  (or `Cancel`, when the person declined there). The page then asks once,
+  naming who is asking by the redirect's host, "An app on this device
+  (com.example.app)" for a private-use scheme, or "An app on this device"
+  for loopback: "Allow chat.alice.dev to use Ada (@ada)'s account?" for an
+  identity with an account, or, for a new identity, "chat.alice.dev wants
+  to sign in to chat.example as you. It will be able to read and send
+  messages as you." (true whether the code makes an account or is added to
+  the redeeming connection's), with **Continue**. Both say that the server
+  has not verified the app, and to allow (or continue) only if they just
+  started signing in on that host, or "on an app on this device"; "Not
+  you? Sign in as someone else" starts the extension's sign-in again.
+  Allow redirects with `code`, `state`, and `iss`; Cancel with
+  `error=access_denied`. An identity the server may not admit gets a page
+  that says so instead. The pages refuse to be framed (`frame-ancestors
+  'none'`, `X-Frame-Options: DENY`) and are never cached. A person has ten
+  minutes on the page.
+- **Remembered apps.** When an account allows an app whose `redirect_uri`
+  is `https` on a host other than this device (not `localhost`, `*.localhost`,
+  or a loopback address), the account remembers that host, port included,
+  with its other data (at most 32 hosts, the oldest forgotten first). The
+  next sign-in to that account from any `redirect_uri` on that host skips
+  the confirmation and returns with a code at once. An app's scheme or a
+  loopback redirect, which any app on the device can claim, is never
+  remembered, and asks every time. Signing out the other sessions
+  (`account.sign_out` with `others`), `Server.SignOut`, and anything else
+  that signs the account out everywhere, such as `Allowlist.Disallow`,
+  forget every host. A new identity's Continue remembers nothing, as it
+  has no account yet; the account asks once more.
 - **Codes** are single use, last five minutes, and are bound to the
   request's `client_id`, `redirect_uri`, PKCE challenge, and `resource`;
   codes and pages are kept in memory only, at most 10,000 of each.
@@ -1888,8 +1910,9 @@ client, and names only that client: never the app, its redirect host, or
 the Apron server. Once a person has consented and stays signed in, any
 site that can navigate their browser gets a code with no screen at all,
 with the shared `client_id` and its own `redirect_uri`, and signs in to
-their Apron account with it. aprond's own page names the redirect host and
-asks every time for that reason (§4.12.3). With metadata documents, an app
+their Apron account with it. aprond's own page names the redirect host
+for that reason, and remembers an app only per account and host, after
+that account allowed it there (§4.12.3). With metadata documents, an app
 can use only the redirect URIs its document lists, and another document is
 another client, whose consent names its host.
 

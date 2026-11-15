@@ -4,11 +4,13 @@
 // with PKCE, and redeems the code it gets back, on a connection or at
 // /oauth/token.
 //
-// The page confirms who is asking, then hands the person to the extension
-// that offers the sign-in, which signs them in however it likes, such as
-// with an OpenID Connect provider, and completes the sign-in with the
-// identity it proved (Complete). The page then shows the account, and on
-// Allow redirects to the client with a code that proves the identity.
+// The page hands the person straight to the extension that offers the
+// sign-in, which signs them in however it likes, such as with an OpenID
+// Connect provider, and completes the sign-in with the identity it proved
+// (Complete). The page then asks once: to allow the client to use the
+// account, naming who is asking, and on Allow redirects to the client with
+// a code that proves the identity. An account that allowed an app at the
+// same https host before is not asked again (authn.Core.Consented).
 //
 // A server may instead name another authorization server (Foreign).
 package external
@@ -50,14 +52,14 @@ var ErrUnknownSignIn = errors.New("external: the sign-in is unknown, expired, or
 // ErrNoSubject is returned by Complete for an identity without a Subject.
 var ErrNoSubject = errors.New("external: an identity needs a Subject")
 
-// Request is a sign-in the page hands to the extension, once the person
-// chose to continue.
+// Request is a sign-in the page hands to the extension, as the client
+// opens the page, or when the person chose to sign in as someone else.
 type Request struct {
 	// ID names the sign-in to Complete. It is unguessable and works once,
 	// so it may serve as the state of the extension's own OAuth request.
 	ID string
-	// Client is who is asking, as the page showed it, such as
-	// chat.alice.dev or "An app on this device (com.example.app)".
+	// Client is who is asking, as the page's confirmation shows it, such
+	// as chat.alice.dev or "An app on this device (com.example.app)".
 	Client string
 }
 
@@ -82,7 +84,10 @@ type flow struct {
 	mu     sync.Mutex
 	signIn string
 	proof  *authn.Proof
-	done   bool
+	// known is set when the proof's identity has an account, which Allow
+	// then remembers for the request's host.
+	known bool
+	done  bool
 }
 
 // New is external sign-in whose page hands people to start.
@@ -194,8 +199,8 @@ func (s *Scheme) metadata(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// authorize opens the page for an authorization request: its first
-// screen, which says who is asking and what they get.
+// authorize opens the page for an authorization request, which hands the
+// person straight to the extension's sign-in.
 func (s *Scheme) authorize(w http.ResponseWriter, r *http.Request) {
 	req, problem := oauth.Parse(r.URL.Query(), oauth.Origin(s.core.BaseURL(r)))
 	if problem != nil {
@@ -209,27 +214,31 @@ func (s *Scheme) authorize(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	f.id = id
-	oauth.Render(w, http.StatusOK, s.consent(f))
+	f.mu.Lock()
+	s.signInLocked(w, r, f)
 }
 
-// consent is the first screen.
-func (s *Scheme) consent(f *flow) oauth.Page {
-	host := hostOf(f.req.Issuer)
-	return oauth.Page{
-		Title: "Sign in to " + cmp.Or(s.core.Title(), host),
-		Lines: []template.HTML{oauth.Line(
-			oauth.Strong(f.req.Client()), " wants to sign in to your account on ", oauth.Strong(host),
-			". It will be able to read and send messages as you.",
-		)},
-		Note:    host + " has not verified this app.",
-		Warning: "Only continue if you just started signing in on " + f.req.Started() + ".",
-		Action:  AuthorizePath, Fields: map[string]string{"flow": f.id},
-		Buttons: []oauth.Button{{Op: "continue", Label: "Continue", Primary: true}, {Op: "cancel", Label: "Cancel"}},
+// signInLocked hands the person to the extension's sign-in, which replaces
+// any it had, and the identity it proved. Called holding f.mu, which it
+// releases.
+func (s *Scheme) signInLocked(w http.ResponseWriter, r *http.Request, f *flow) {
+	if f.signIn != "" {
+		s.signIns.Delete(f.signIn)
 	}
+	f.proof, f.known = nil, false
+	signIn, err := s.signIns.Put(f, oauth.FlowLifetime, time.Now())
+	if err != nil {
+		f.mu.Unlock()
+		busy(w)
+		return
+	}
+	f.signIn = signIn
+	f.mu.Unlock()
+	s.start(w, r, Request{ID: signIn, Client: f.req.Client()})
 }
 
-// decide takes the page's buttons: continue to the extension's sign-in,
-// sign in as someone else, allow, or cancel.
+// decide takes the confirmation's buttons: sign in as someone else, allow,
+// or cancel.
 func (s *Scheme) decide(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, 4<<10)
 	f, ok := s.flows.Get(r.PostFormValue("flow"), time.Now())
@@ -244,22 +253,8 @@ func (s *Scheme) decide(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	switch r.PostFormValue("op") {
-	case "continue", "restart":
-		// A new sign-in replaces any the extension had, and the identity
-		// it proved.
-		if f.signIn != "" {
-			s.signIns.Delete(f.signIn)
-		}
-		f.proof = nil
-		signIn, err := s.signIns.Put(f, oauth.FlowLifetime, time.Now())
-		if err != nil {
-			f.mu.Unlock()
-			busy(w)
-			return
-		}
-		f.signIn = signIn
-		f.mu.Unlock()
-		s.start(w, r, Request{ID: signIn, Client: f.req.Client()})
+	case "restart":
+		s.signInLocked(w, r, f)
 		return
 	case "allow":
 		if f.proof == nil {
@@ -267,15 +262,10 @@ func (s *Scheme) decide(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "Sign in first", http.StatusBadRequest)
 			return
 		}
-		code, err := s.codes.Issue(f.req.Grant(), *f.proof, time.Now())
-		if err != nil {
-			f.mu.Unlock()
-			busy(w)
-			return
+		if f.known {
+			s.core.Consent(f.proof.Subject, f.req.RememberedHost())
 		}
-		s.finishLocked(f)
-		f.mu.Unlock()
-		f.req.Return(w, r, url.Values{"code": {code}})
+		s.returnCodeLocked(w, r, f)
 		return
 	case "cancel":
 		s.finishLocked(f)
@@ -285,6 +275,20 @@ func (s *Scheme) decide(w http.ResponseWriter, r *http.Request) {
 	}
 	f.mu.Unlock()
 	http.Error(w, "Unknown action", http.StatusBadRequest)
+}
+
+// returnCodeLocked redirects to the client with a code for the flow's
+// proof, and forgets the flow. Called holding f.mu, which it releases.
+func (s *Scheme) returnCodeLocked(w http.ResponseWriter, r *http.Request, f *flow) {
+	code, err := s.codes.Issue(f.req.Grant(), *f.proof, time.Now())
+	if err != nil {
+		f.mu.Unlock()
+		busy(w)
+		return
+	}
+	s.finishLocked(f)
+	f.mu.Unlock()
+	f.req.Return(w, r, url.Values{"code": {code}})
 }
 
 // finishLocked forgets a flow whose page redirected. Called holding f.mu.
@@ -297,12 +301,14 @@ func (s *Scheme) finishLocked(f *flow) {
 }
 
 // Complete gives the sign-in named id the identity the extension proved,
-// and answers the person's browser with the page's next screen: the
-// account the identity signs in to and Allow, or that it makes a new
-// account, or that it may not sign in here. For a sign-in that is no
+// and answers the person's browser with the page's confirmation: to allow
+// the client to use the identity's account, or to sign in with a new
+// identity, or that it may not sign in here. An account that allowed an
+// app at the request's https host before is not asked again: the page
+// returns to the client with a code at once. For a sign-in that is no
 // longer open, it answers with a page that says so, and returns
 // ErrUnknownSignIn.
-func (s *Scheme) Complete(w http.ResponseWriter, id string, proof authn.Proof) error {
+func (s *Scheme) Complete(w http.ResponseWriter, r *http.Request, id string, proof authn.Proof) error {
 	if proof.Subject == "" {
 		oauth.Render(w, http.StatusInternalServerError, oauth.Page{Title: "Sign-in failed", Lines: []template.HTML{oauth.Line("Go back to the app and try again.")}})
 		return ErrNoSubject
@@ -313,38 +319,49 @@ func (s *Scheme) Complete(w http.ResponseWriter, id string, proof authn.Proof) e
 		return ErrUnknownSignIn
 	}
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	if f.done || f.signIn != id {
+		f.mu.Unlock()
 		oauth.Expired(w)
 		return ErrUnknownSignIn
 	}
 	f.signIn = ""
 	host := hostOf(f.req.Issuer)
-	client := f.req.Client()
 	page := oauth.Page{
-		Title:  "Sign in to " + cmp.Or(s.core.Title(), host),
-		Action: AuthorizePath, Fields: map[string]string{"flow": f.id},
+		Title:   "Sign in to " + cmp.Or(s.core.Title(), host),
+		Note:    host + " has not verified this app.",
+		Warning: "Only allow if you just started signing in on " + f.req.Started() + ".",
+		Action:  AuthorizePath, Fields: map[string]string{"flow": f.id},
+		Alt:     &oauth.Button{Op: "restart", Label: "Not you? Sign in as someone else"},
+		Buttons: []oauth.Button{{Op: "allow", Label: "Allow", Primary: true}, {Op: "cancel", Label: "Cancel"}},
 	}
 	account, known := s.core.Lookup(proof.Subject)
 	switch {
 	case !s.core.Admits(proof.Subject, true):
+		f.mu.Unlock()
 		page.Lines = []template.HTML{oauth.Line("You can't sign in to ", oauth.Strong(host), " with this account.")}
+		page.Note, page.Warning, page.Alt = "", "", nil
 		page.Buttons = []oauth.Button{{Op: "restart", Label: "Sign in as someone else", Primary: true}, {Op: "cancel", Label: "Cancel"}}
 		oauth.Render(w, http.StatusForbidden, page)
 		return nil
 	case known:
-		page.Lines = []template.HTML{oauth.Line("Allow ", oauth.Strong(client), " to use ", oauth.Strong(oauth.AccountName(account.Name, account.UserID)), "’s account?")}
-		page.Alt = &oauth.Button{Op: "restart", Label: "Not you? Sign in as someone else"}
-		page.Buttons = []oauth.Button{{Op: "allow", Label: "Allow", Primary: true}, {Op: "cancel", Label: "Cancel"}}
+		f.proof, f.known = &proof, true
+		if s.core.Consented(proof.Subject, f.req.RememberedHost()) {
+			s.returnCodeLocked(w, r, f)
+			return nil
+		}
+		page.Lines = []template.HTML{oauth.Line("Allow ", oauth.Strong(f.req.ClientInline()), " to use ", oauth.Strong(oauth.AccountName(account.Name, account.UserID)), "’s account?")}
 	default:
+		// The code may make an account, or be added to the one the
+		// redeeming connection is signed in to: this is true of both.
+		f.proof = &proof
 		page.Lines = []template.HTML{oauth.Line(
-			oauth.Strong(client), " wants to create an account for you on ", oauth.Strong(host),
-			". It will be able to read and send messages as you.",
+			oauth.Strong(f.req.Client()), " wants to sign in to ", oauth.Strong(host),
+			" as you. It will be able to read and send messages as you.",
 		)}
-		page.Alt = &oauth.Button{Op: "restart", Label: "Not you? Sign in as someone else"}
-		page.Buttons = []oauth.Button{{Op: "allow", Label: "Continue", Primary: true}, {Op: "cancel", Label: "Cancel"}}
+		page.Warning = "Only continue if you just started signing in on " + f.req.Started() + "."
+		page.Buttons[0].Label = "Continue"
 	}
-	f.proof = &proof
+	f.mu.Unlock()
 	oauth.Render(w, http.StatusOK, page)
 	return nil
 }

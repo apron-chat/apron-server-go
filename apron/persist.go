@@ -209,9 +209,12 @@ type storedUser struct {
 	// Enrolled is what the invitation that made the account left with it.
 	Enrolled *storedEnrollment `json:"enrolled,omitzero"`
 	// Scope is the rooms the account is limited to (scope.go).
-	Scope    *storedScope `json:"scope,omitzero"`
-	External string       `json:"external,omitzero"`
-	Granted  []string     `json:"granted,omitzero"`
+	Scope *storedScope `json:"scope,omitzero"`
+	// Consents are the hosts of apps the account allowed on the external
+	// sign-in page, with when, in Unix milliseconds (consents.go).
+	Consents map[string]int64 `json:"consents,omitzero"`
+	External string           `json:"external,omitzero"`
+	Granted  []string         `json:"granted,omitzero"`
 }
 
 type storedMute struct {
@@ -444,7 +447,7 @@ func storedUserOf(u *userState) storedUser {
 		Bot: u.botOf, Identities: u.identities, Records: u.records, Grants: u.granted,
 		Email: u.identities[email.Name], External: u.identities[external.Name],
 		Passkey: u.records[passkey.Name], Granted: u.granted[external.Name],
-		Enrolled: u.enrolled.stored(), Scope: u.scope.stored(),
+		Enrolled: u.enrolled.stored(), Scope: u.scope.stored(), Consents: u.consents,
 	}
 	if !u.created.IsZero() {
 		stored.Created = u.created.UnixMilli()
@@ -673,6 +676,7 @@ func (s *Server) restoreLocked() (map[string]bool, error) {
 		if stored.Pings != nil {
 			u.pings = stored.Pings
 		}
+		u.consents = stored.Consents
 		s.users[id] = u
 	}
 	for _, id := range order {

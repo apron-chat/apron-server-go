@@ -26,10 +26,10 @@ import (
 // The passkey page (PLAN_WEBAUTHN_EXTERNAL.md) runs a ceremony for a client
 // that cannot use the RP ID: a web client on another domain, an app, or a
 // terminal. A begin step names it in `external`, and the client opens it as
-// an OAuth authorization endpoint (§4.12.3). The page asks who is asking,
-// runs the passkey on the server's own origin, asks to allow the client,
-// and redirects with a code, which finishes the webauthn exchange on a
-// connection instead of a credential.
+// an OAuth authorization endpoint (§4.12.3). The page asks once, naming who
+// is asking, runs the passkey on the server's own origin, and redirects
+// with a code, which finishes the webauthn exchange on a connection instead
+// of a credential.
 //
 // A code from this page finishes only webauthn, with the action of its
 // begin: the page keeps codes of its own. A login's code signs in to the
@@ -79,11 +79,7 @@ type pageFlow struct {
 	// account's passkey gets.
 	data   *webauthn.SessionData
 	handle []byte
-	// login is the passkey a login verified, until it is allowed, and
-	// account the account it signs in to.
-	login   *pageGrant
-	account authn.Account
-	done    bool
+	done   bool
 }
 
 // addition is a registration begun on a signed-in connection, which the
@@ -157,14 +153,10 @@ func (s *Scheme) pageRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST "+PagePath, s.pagePost)
 }
 
-// page opens the passkey page for an authorization request: its first
+// page opens the passkey page for an authorization request: its one
 // screen, which says who is asking and what they get.
 func (s *Scheme) page(w http.ResponseWriter, r *http.Request) {
 	query := r.URL.Query()
-	if query.Has("flow") {
-		s.allowPage(w, query.Get("flow"))
-		return
-	}
 	origin := oauth.Origin(s.core.BaseURL(r))
 	req, problem := oauth.Parse(query, origin)
 	if problem != nil {
@@ -200,12 +192,12 @@ func (s *Scheme) page(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	f.id = id
-	oauth.Render(w, http.StatusOK, s.firstScreen(f))
+	oauth.Render(w, http.StatusOK, s.screen(f))
 }
 
-// firstScreen is the screen before the passkey: who is asking, and what
-// they get ("Confirmation").
-func (s *Scheme) firstScreen(f *pageFlow) oauth.Page {
+// screen is the page's one screen, before the passkey: who is asking, and
+// what they get. A login redirects as soon as its passkey is verified.
+func (s *Scheme) screen(f *pageFlow) oauth.Page {
 	host := hostOf(f.origin)
 	client := f.req.Client()
 	page := oauth.Page{
@@ -233,49 +225,15 @@ func (s *Scheme) firstScreen(f *pageFlow) oauth.Page {
 		)}
 		button.Label, page.Data["ceremony"] = "Create passkey", "create"
 	default:
-		page.Lines = []template.HTML{oauth.Line(
-			oauth.Strong(client), " wants to sign in to your account on ", oauth.Strong(host),
-			". It will be able to read and send messages as you.",
-		)}
+		page.Title = "Sign in to " + cmp.Or(s.core.Title(), host) + " on " + f.req.ClientInline() + "?"
+		page.Lines = []template.HTML{oauth.Line("It will be able to read and send messages as you.")}
 	}
 	page.Buttons = []oauth.Button{button, {Op: "cancel", Label: "Cancel"}}
 	return page
 }
 
-// allowPage shows the screen after a login's passkey, which its script
-// goes to once the passkey is verified.
-func (s *Scheme) allowPage(w http.ResponseWriter, id string) {
-	f, ok := s.flows.Get(id, time.Now())
-	if ok {
-		f.mu.Lock()
-		defer f.mu.Unlock()
-		ok = !f.done
-	}
-	switch {
-	case !ok:
-		oauth.Expired(w)
-	case f.login == nil:
-		oauth.Render(w, http.StatusOK, s.firstScreen(f))
-	default:
-		oauth.Render(w, http.StatusOK, s.allowScreen(f, f.account))
-	}
-}
-
-// allowScreen is the screen after a login's passkey: the account, and
-// Allow.
-func (s *Scheme) allowScreen(f *pageFlow, account authn.Account) oauth.Page {
-	host := hostOf(f.origin)
-	return oauth.Page{
-		Title:  "Sign in to " + cmp.Or(s.core.Title(), host),
-		Lines:  []template.HTML{oauth.Line("Allow ", oauth.Strong(f.req.Client()), " to use ", oauth.Strong(oauth.AccountName(account.Name, account.UserID)), "’s account?")},
-		Action: PagePath, Fields: map[string]string{"flow": f.id},
-		Alt:     &oauth.Button{Op: "again", Label: "Not you? Use another passkey"},
-		Buttons: []oauth.Button{{Op: "allow", Label: "Allow", Primary: true}, {Op: "cancel", Label: "Cancel"}},
-	}
-}
-
 // pagePost takes the page's requests: the script's options and verify,
-// and the buttons allow, again, and cancel.
+// and the button cancel.
 func (s *Scheme) pagePost(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxPostBytes)
 	op := r.PostFormValue("op")
@@ -299,21 +257,6 @@ func (s *Scheme) pagePost(w http.ResponseWriter, r *http.Request) {
 		s.pageOptions(w, f)
 	case "verify":
 		s.pageVerify(w, r, f)
-	case "allow":
-		if f.login == nil {
-			http.Error(w, "Use your passkey first", http.StatusBadRequest)
-			return
-		}
-		code, err := s.codes.Issue(f.req.Grant(), f.login, time.Now())
-		if err != nil {
-			oauth.Render(w, http.StatusServiceUnavailable, oauth.Page{Title: "Too many sign-ins in progress", Lines: []template.HTML{oauth.Line("Wait a minute, then try again.")}})
-			return
-		}
-		s.finishFlowLocked(f)
-		f.req.Return(w, r, url.Values{"code": {code}})
-	case "again":
-		f.login = nil
-		oauth.Render(w, http.StatusOK, s.firstScreen(f))
 	case "cancel":
 		s.finishFlowLocked(f)
 		f.req.Deny(w, r)
@@ -332,7 +275,7 @@ func (s *Scheme) finishFlowLocked(f *pageFlow) {
 // pageOptions begins the page's ceremony, replacing any it had, and
 // answers with its WebAuthn options, as public_key.
 func (s *Scheme) pageOptions(w http.ResponseWriter, f *pageFlow) {
-	f.data, f.login = nil, nil
+	f.data = nil
 	var publicKey any
 	if f.action == "login" {
 		assertion, data, err := s.w.BeginDiscoverableLogin(webauthn.WithLoginOrigin(f.origin), webauthn.WithUserVerification(protocol.VerificationRequired))
@@ -383,9 +326,8 @@ func (s *Scheme) pageOptions(w http.ResponseWriter, f *pageFlow) {
 	pageJSON(w, http.StatusOK, map[string]any{"public_key": publicKey})
 }
 
-// pageVerify verifies the page's ceremony, which it uses up. A login then
-// asks to allow the client (next); a registration redirects to it with a
-// code (redirect).
+// pageVerify verifies the page's ceremony, which it uses up, and answers
+// with the redirect to the client with a code.
 func (s *Scheme) pageVerify(w http.ResponseWriter, r *http.Request, f *pageFlow) {
 	data := f.data
 	f.data = nil
@@ -413,13 +355,12 @@ func (s *Scheme) pageVerify(w http.ResponseWriter, r *http.Request, f *pageFlow)
 			return
 		}
 		subject := Subject(handle)
-		account, known := s.core.Lookup(subject)
+		_, known := s.core.Lookup(subject)
 		if !known || !s.core.Admits(subject, false) {
 			fail("This passkey's account can't sign in to " + hostOf(f.origin) + ".")
 			return
 		}
-		f.login, f.account = &pageGrant{action: "login", handle: handle, credential: verified}, account
-		pageJSON(w, http.StatusOK, map[string]string{"next": PagePath + "?" + url.Values{"flow": {f.id}}.Encode()})
+		s.redirectWithCode(w, f, &pageGrant{action: "login", handle: handle, credential: verified})
 		return
 	}
 	g := &pageGrant{action: "register", name: f.name}
@@ -436,9 +377,15 @@ func (s *Scheme) pageVerify(w http.ResponseWriter, r *http.Request, f *pageFlow)
 		fail("That passkey didn't work. Try again.")
 		return
 	}
-	code, issueErr := s.codes.Issue(f.req.Grant(), g, time.Now())
-	if issueErr != nil {
-		fail("Too many sign-ins in progress. Wait a minute, then try again.")
+	s.redirectWithCode(w, f, g)
+}
+
+// redirectWithCode answers the page's script with the redirect to the
+// client with a code for g, and ends the flow. Called holding f.mu.
+func (s *Scheme) redirectWithCode(w http.ResponseWriter, f *pageFlow, g *pageGrant) {
+	code, err := s.codes.Issue(f.req.Grant(), g, time.Now())
+	if err != nil {
+		pageJSON(w, http.StatusBadRequest, map[string]string{"error": "Too many sign-ins in progress. Wait a minute, then try again."})
 		return
 	}
 	if f.addition != nil {

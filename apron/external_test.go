@@ -1,6 +1,7 @@
 package apron
 
 import (
+	"context"
 	"encoding/json/v2"
 	"net/http"
 	"net/http/httptest"
@@ -101,14 +102,18 @@ func TestExternalEndpointTokenSurvivesRestart(t *testing.T) {
 }
 
 // externalCode signs in on the page as the app would, through the
-// extension and Allow, and returns the code.
+// extension and Allow, unless the page remembered the app, and returns the
+// code.
 func externalCode(t *testing.T, app *oauthtest.Client, page, issuer string) string {
 	t.Helper()
 	screen := app.Get(app.URL(page, nil))
+	if screen.Return != nil {
+		return app.Code(screen, issuer)
+	}
 	if screen.Status != http.StatusOK {
 		t.Fatalf("page = %d %s", screen.Status, screen.Body)
 	}
-	return app.Code(app.Press(app.Press(screen, "continue"), "allow"), issuer)
+	return app.Code(app.Press(screen, "allow"), issuer)
 }
 
 func redemption(app *oauthtest.Client, code string) map[string]any {
@@ -133,27 +138,27 @@ func TestExternalSignIn(t *testing.T) {
 		t.Fatalf("external = %#v", external)
 	}
 
-	// The page says who is asking, and refuses to be framed.
+	// The page goes straight to the extension's sign-in, then asks once,
+	// saying who is asking, and refuses to be framed. For a new identity it
+	// says what is true whether the code makes an account or is added to
+	// one.
 	app := oauthtest.New(t, issuer)
 	screen := app.Get(app.URL(page, nil))
 	for _, want := range []string{
 		"<h1>Sign in to 127.0.0.1:",
-		"<strong>An app on this device (com.example.app)</strong> wants to sign in to your account on <strong>127.0.0.1:",
-		"It will be able to read and send messages as you.",
+		"<strong>An app on this device (com.example.app)</strong> wants to sign in to <strong>127.0.0.1:",
+		"</strong> as you. It will be able to read and send messages as you.",
 		"has not verified this app.",
-		"Only continue if you just started signing in on com.example.app.",
+		"Only continue if you just started signing in on an app on this device.",
+		"Not you? Sign in as someone else",
+		`value="allow" class="primary">Continue</button>`,
 	} {
 		if !strings.Contains(screen.Body, want) {
-			t.Fatalf("first screen lacks %q: %s", want, screen.Body)
+			t.Fatalf("new identity's screen lacks %q: %d %s", want, screen.Status, screen.Body)
 		}
 	}
 	if csp := screen.Header.Get("Content-Security-Policy"); !strings.Contains(csp, "frame-ancestors 'none'") || screen.Header.Get("X-Frame-Options") != "DENY" || screen.Header.Get("Cache-Control") != "no-store" {
 		t.Fatalf("headers = %v", screen.Header)
-	}
-	// A new identity: the page says it makes an account.
-	screen = app.Press(screen, "continue")
-	if !strings.Contains(screen.Body, "<strong>An app on this device (com.example.app)</strong> wants to create an account for you") {
-		t.Fatalf("second screen = %d %s", screen.Status, screen.Body)
 	}
 	code := app.Code(app.Press(screen, "allow"), issuer)
 
@@ -189,10 +194,21 @@ func TestExternalSignIn(t *testing.T) {
 
 	// The next sign-in shows the account, and offers someone else.
 	again := oauthtest.New(t, issuer)
-	screen = again.Press(again.Get(again.URL(page, nil)), "continue")
-	if !strings.Contains(screen.Body, "Allow <strong>An app on this device (com.example.app)</strong> to use <strong>Ada (@ada)</strong>’s account?") ||
-		!strings.Contains(screen.Body, "Not you? Sign in as someone else") {
-		t.Fatalf("known account = %s", screen.Body)
+	screen = again.Get(again.URL(page, nil))
+	for _, want := range []string{
+		"Allow <strong>an app on this device (com.example.app)</strong> to use <strong>Ada (@ada)</strong>’s account?",
+		"has not verified this app.",
+		"Only allow if you just started signing in on an app on this device.",
+		"Not you? Sign in as someone else",
+		`value="allow" class="primary">Allow</button>`,
+	} {
+		if !strings.Contains(screen.Body, want) {
+			t.Fatalf("known account's screen lacks %q: %s", want, screen.Body)
+		}
+	}
+	// "Not you?" starts the extension's sign-in again, which asks again.
+	if restarted := again.Press(screen, "restart"); !strings.Contains(restarted.Body, "to use <strong>Ada (@ada)</strong>’s account?") || restarted.Field("flow") != screen.Field("flow") {
+		t.Fatalf("restart = %d %s", restarted.Status, restarted.Body)
 	}
 	// Cancel returns access_denied, with state and iss.
 	declined := again.Press(screen, "cancel")
@@ -297,6 +313,7 @@ func TestExternalAuthorizationRequests(t *testing.T) {
 	}
 
 	// Who is asking, by redirect_uri.
+	identity.Subject = "idp:who"
 	for redirect, want := range map[string]string{
 		"https://chat.alice.dev/callback":  "<strong>chat.alice.dev</strong> wants to sign in",
 		"http://127.0.0.1:53682/callback":  "<strong>An app on this device</strong> wants to sign in",
@@ -315,15 +332,15 @@ func TestExternalAuthorizationRequests(t *testing.T) {
 		t.Fatalf("https resource: %d %v", r.Status, r.Return)
 	}
 
-	// Declining at the identity provider returns access_denied.
-	screen := app.Press(app.Get(app.URL(page, nil)), "continue")
-	if screen.Return == nil || screen.Return.Query().Get("error") != "access_denied" {
-		t.Fatalf("declined = %d %v %s", screen.Status, screen.Return, screen.Body)
-	}
-	// Cancel on the first screen too.
+	// Cancel on the confirmation returns access_denied.
 	app.State = "second"
 	if r := app.Press(app.Get(app.URL(page, nil)), "cancel"); r.Return == nil || r.Return.Query().Get("error") != "access_denied" || r.Return.Query().Get("state") != "second" {
 		t.Fatalf("cancel = %d %v", r.Status, r.Return)
+	}
+	// So does declining at the identity provider.
+	identity.Subject = ""
+	if screen := app.Get(app.URL(page, nil)); screen.Return == nil || screen.Return.Query().Get("error") != "access_denied" {
+		t.Fatalf("declined = %d %v %s", screen.Status, screen.Return, screen.Body)
 	}
 	// A stale or unknown flow is a page, not a redirect.
 	if r := app.Post(page, url.Values{"flow": {"nope"}, "op": {"allow"}}); r.Status != http.StatusNotFound || r.Return != nil {
@@ -396,4 +413,90 @@ func must[T any](value T, err error) T {
 		panic(err)
 	}
 	return value
+}
+
+// The page remembers that an account allowed an app at an https host, and
+// then returns to it at once, across restarts, until the account signs out
+// everywhere; never for an app's scheme or a loopback redirect, and never
+// for another host or another account.
+func TestExternalRemembersConsent(t *testing.T) {
+	identity := &Identity{Subject: "idp:7", Name: "Rem", UserID: "rem"}
+	memory, dir := store.NewMemory(), t.TempDir()
+	configure := func(c *Config) { c.Extensions = []Extension{ssoExtension(identity)} }
+	app, httpServer, stop := startWith(t, memory, dir, configure)
+	defer func() { stop() }()
+	client := func(redirect string) *oauthtest.Client {
+		c := oauthtest.New(t, httpServer.URL)
+		c.ClientID, c.RedirectURI = "https://chat.alice.dev/", redirect
+		return c
+	}
+	// asks signs in from redirect, allowing it if the page asks, and
+	// reports whether it did.
+	asks := func(redirect string) bool {
+		t.Helper()
+		c := client(redirect)
+		screen := c.Get(c.URL(httpServer.URL+"/oauth/authorize", nil))
+		if screen.Return != nil {
+			c.Code(screen, httpServer.URL)
+			return false
+		}
+		if !strings.Contains(screen.Body, `value="allow"`) {
+			t.Fatalf("%s: %d %s", redirect, screen.Status, screen.Body)
+		}
+		c.Code(c.Press(screen, "allow"), httpServer.URL)
+		return true
+	}
+
+	// A new identity has no account to remember for: it asks, and so does
+	// the account it makes, the first time.
+	c := client("https://chat.alice.dev/cb")
+	code := externalCode(t, c, httpServer.URL+"/oauth/authorize", httpServer.URL)
+	fresh, _ := dialRaw(t, httpServer)
+	fresh.request(t, "auth", "a", redemption(c, code))
+	if !asks("https://chat.alice.dev/cb") {
+		t.Fatal("did not ask the first time")
+	}
+	// Then not, at any path of that host; another host or port asks.
+	if asks("https://chat.alice.dev/cb") || asks("https://CHAT.alice.dev/elsewhere") {
+		t.Fatal("asked again for an allowed host")
+	}
+	if !asks("https://chat.alice.dev:8443/cb") || !asks("https://evil.example/cb") {
+		t.Fatal("did not ask for another host")
+	}
+	// An app's scheme or a loopback redirect asks every time.
+	for _, redirect := range []string{"com.example.app:/signed-in", "http://127.0.0.1:5173/cb", "https://localhost:8443/cb", "https://127.0.0.1/cb"} {
+		if !asks(redirect) || !asks(redirect) {
+			t.Errorf("%s: remembered", redirect)
+		}
+	}
+	// Another account at the same host asks.
+	identity.Subject, identity.UserID = "idp:8", "other"
+	c = client("https://chat.alice.dev/cb")
+	fresh, _ = dialRaw(t, httpServer)
+	fresh.request(t, "auth", "a", redemption(c, externalCode(t, c, httpServer.URL+"/oauth/authorize", httpServer.URL)))
+	if !asks("https://chat.alice.dev/cb") {
+		t.Fatal("another account did not ask")
+	}
+	identity.Subject = "idp:7"
+
+	// It is kept with the account.
+	stop()
+	app, httpServer, stop = startWith(t, memory, dir, configure)
+	if asks("https://chat.alice.dev/cb") {
+		t.Fatal("asked again after a restart")
+	}
+	// Signing out everywhere forgets it, as does signing out the other
+	// sessions.
+	if err := app.SignOut(context.Background(), "rem"); err != nil {
+		t.Fatal(err)
+	}
+	if !asks("https://chat.alice.dev/cb") || asks("https://chat.alice.dev/cb") {
+		t.Fatal("signing out everywhere did not forget the app, or allowing it did not remember")
+	}
+	app.mu.Lock()
+	app.signOutOthersLocked(app.users["rem"], nil)
+	app.unlock()
+	if !asks("https://chat.alice.dev/cb") {
+		t.Fatal("signing out the other sessions did not forget the app")
+	}
 }
