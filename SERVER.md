@@ -1793,15 +1793,16 @@ with `--external.issuer`, and it is `unsupported` otherwise.
   minutes on the page.
 - **Remembered apps.** When an account allows an app whose `redirect_uri`
   is `https` on a host other than this device (not `localhost`, `*.localhost`,
-  or a loopback address), the account remembers that host, port included,
-  with its other data (at most 32 hosts, the oldest forgotten first). The
-  next sign-in to that account from any `redirect_uri` on that host skips
-  the confirmation and returns with a code at once. An app's scheme or a
+  or a loopback address), the account remembers that exact `redirect_uri`
+  with its other data (at most 32, the oldest forgotten first). The next
+  sign-in to that account with the same `redirect_uri` skips the
+  confirmation and returns with a code at once; another page on the same
+  host is asked again. An app's scheme or a
   loopback redirect, which any app on the device can claim, is never
   remembered, and asks every time. Signing out the other sessions
   (`account.sign_out` with `others`), `Server.SignOut`, and anything else
   that signs the account out everywhere, such as `Allowlist.Disallow`,
-  forget every host. A new identity's Continue remembers nothing, as it
+  forget them all. A new identity's Continue remembers nothing, as it
   has no account yet; the account asks once more.
 - **Codes** are single use, last five minutes, and are bound to the
   request's `client_id`, `redirect_uri`, PKCE challenge, and `resource`;
@@ -1911,7 +1912,7 @@ the Apron server. Once a person has consented and stays signed in, any
 site that can navigate their browser gets a code with no screen at all,
 with the shared `client_id` and its own `redirect_uri`, and signs in to
 their Apron account with it. aprond's own page names the redirect host
-for that reason, and remembers an app only per account and host, after
+for that reason, and remembers an app only per account and `redirect_uri`, after
 that account allowed it there (§4.12.3). With metadata documents, an app
 can use only the redirect URIs its document lists, and another document is
 another client, whose consent names its host.

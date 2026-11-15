@@ -127,11 +127,11 @@ func TestTableBounds(t *testing.T) {
 }
 
 // The pages name the client by its redirect_uri, and remember only an
-// https host that is not this device.
+// https redirect_uri that is not on this device.
 func TestClientNames(t *testing.T) {
 	for redirect, want := range map[string][4]string{
-		"https://Chat.Alice.dev:8443/cb": {"Chat.Alice.dev:8443", "Chat.Alice.dev:8443", "Chat.Alice.dev:8443", "chat.alice.dev:8443"},
-		"https://chat.alice.dev/cb":      {"chat.alice.dev", "chat.alice.dev", "chat.alice.dev", "chat.alice.dev"},
+		"https://Chat.Alice.dev:8443/cb": {"Chat.Alice.dev:8443", "Chat.Alice.dev:8443", "Chat.Alice.dev:8443", "https://chat.alice.dev:8443/cb"},
+		"https://chat.alice.dev/cb":      {"chat.alice.dev", "chat.alice.dev", "chat.alice.dev", "https://chat.alice.dev/cb"},
 		"com.example.app:/signed-in":     {"An app on this device (com.example.app)", "an app on this device (com.example.app)", "an app on this device", ""},
 		"http://127.0.0.1:5173/cb":       {"An app on this device", "an app on this device", "an app on this device", ""},
 		"https://localhost:8443/cb":      {"localhost:8443", "localhost:8443", "localhost:8443", ""},
@@ -140,7 +140,7 @@ func TestClientNames(t *testing.T) {
 		"https://app.localhost/cb":       {"app.localhost", "app.localhost", "app.localhost", ""},
 	} {
 		r := &Request{RedirectURI: redirect}
-		if got := [4]string{r.Client(), r.ClientInline(), r.Started(), r.RememberedHost()}; got != want {
+		if got := [4]string{r.Client(), r.ClientInline(), r.Started(), r.RememberedRedirect()}; got != want {
 			t.Errorf("%s: %q, want %q", redirect, got, want)
 		}
 	}

@@ -415,10 +415,10 @@ func must[T any](value T, err error) T {
 	return value
 }
 
-// The page remembers that an account allowed an app at an https host, and
+// The page remembers that an account allowed an app at an https redirect_uri, and
 // then returns to it at once, across restarts, until the account signs out
 // everywhere; never for an app's scheme or a loopback redirect, and never
-// for another host or another account.
+// for another redirect_uri, host, or account.
 func TestExternalRemembersConsent(t *testing.T) {
 	identity := &Identity{Subject: "idp:7", Name: "Rem", UserID: "rem"}
 	memory, dir := store.NewMemory(), t.TempDir()
@@ -456,12 +456,13 @@ func TestExternalRemembersConsent(t *testing.T) {
 	if !asks("https://chat.alice.dev/cb") {
 		t.Fatal("did not ask the first time")
 	}
-	// Then not, at any path of that host; another host or port asks.
-	if asks("https://chat.alice.dev/cb") || asks("https://CHAT.alice.dev/elsewhere") {
-		t.Fatal("asked again for an allowed host")
+	// Then not, for the same redirect_uri (the host's case aside); another
+	// path, port, or host asks.
+	if asks("https://chat.alice.dev/cb") || asks("https://CHAT.alice.dev/cb") {
+		t.Fatal("asked again for an allowed redirect_uri")
 	}
-	if !asks("https://chat.alice.dev:8443/cb") || !asks("https://evil.example/cb") {
-		t.Fatal("did not ask for another host")
+	if !asks("https://chat.alice.dev/elsewhere") || !asks("https://chat.alice.dev:8443/cb") || !asks("https://evil.example/cb") {
+		t.Fatal("did not ask for another redirect_uri")
 	}
 	// An app's scheme or a loopback redirect asks every time.
 	for _, redirect := range []string{"com.example.app:/signed-in", "http://127.0.0.1:5173/cb", "https://localhost:8443/cb", "https://127.0.0.1/cb"} {

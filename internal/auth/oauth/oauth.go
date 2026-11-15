@@ -228,17 +228,20 @@ func (r *Request) Started() string {
 	return "an app on this device"
 }
 
-// RememberedHost is the host, lowercased with any port, under which a
-// page may remember that an account allowed this request's client: an
-// https redirect's, not on a loopback host. It is empty for an app's
-// scheme or a loopback address, which any app on the device can claim, so
-// a page never remembers them.
-func (r *Request) RememberedHost() string {
+// RememberedRedirect is the redirect_uri, with its scheme and host
+// lowercased, under which a page may remember that an account allowed this
+// request's client (§4.12.3): an https redirect, not on a loopback host. It
+// is the whole redirect_uri, not its host, so that another page on the same
+// host is asked again. It is empty for an app's scheme or a loopback
+// address, which any app on the device can claim, so a page never
+// remembers them.
+func (r *Request) RememberedRedirect() string {
 	parsed, err := url.Parse(r.RedirectURI)
 	if err != nil || strings.ToLower(parsed.Scheme) != "https" || parsed.Host == "" || isLoopbackHost(strings.ToLower(parsed.Hostname())) {
 		return ""
 	}
-	return strings.ToLower(parsed.Host)
+	parsed.Scheme, parsed.Host = "https", strings.ToLower(parsed.Host)
+	return parsed.String()
 }
 
 // Grant is what a code is bound to (§4.12.3).

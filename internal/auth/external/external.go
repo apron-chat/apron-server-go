@@ -263,7 +263,7 @@ func (s *Scheme) decide(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if f.known {
-			s.core.Consent(f.proof.Subject, f.req.RememberedHost())
+			s.core.Consent(f.proof.Subject, f.req.RememberedRedirect())
 		}
 		s.returnCodeLocked(w, r, f)
 		return
@@ -345,7 +345,7 @@ func (s *Scheme) Complete(w http.ResponseWriter, r *http.Request, id string, pro
 		return nil
 	case known:
 		f.proof, f.known = &proof, true
-		if s.core.Consented(proof.Subject, f.req.RememberedHost()) {
+		if s.core.Consented(proof.Subject, f.req.RememberedRedirect()) {
 			s.returnCodeLocked(w, r, f)
 			return nil
 		}
