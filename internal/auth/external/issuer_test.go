@@ -2,7 +2,13 @@ package external
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/ed25519"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/rsa"
 	"encoding/json/v2"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -164,5 +170,189 @@ func TestForeignRedeem(t *testing.T) {
 	i.tokenEndpoint = gone.URL + "/token"
 	if token, err := i.foreign(t).redeem(context.Background(), p, testOrigin); err == nil || err.Code != authn.CodeRetryAfter {
 		t.Errorf("unreachable: %q, %v", token, err)
+	}
+}
+
+// testKey is a signing key, with its public JWK as the issuer lists it.
+type testKey struct {
+	private any
+	alg     jose.SignatureAlgorithm
+	public  jose.JSONWebKey
+}
+
+func newTestKey(t *testing.T, kid string) testKey {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return testKey{key, jose.ES256, jose.JSONWebKey{Key: &key.PublicKey, KeyID: kid, Use: "sig"}}
+}
+
+// token is an access token for testOrigin from the issuer, signed with k.
+func (i *testIssuer) token(t *testing.T, k testKey) string {
+	t.Helper()
+	payload, _ := json.Marshal(map[string]any{"iss": i.URL, "sub": "user-42", "aud": testOrigin, "exp": time.Now().Add(5 * time.Minute).Unix()})
+	if k.alg == algEd25519 {
+		// go-jose signs with no Ed25519 alg: by hand.
+		header, _ := json.Marshal(map[string]any{"alg": k.alg, "kid": k.public.KeyID, "typ": "at+jwt"})
+		signed := b64(header) + "." + b64(payload)
+		return signed + "." + b64(ed25519.Sign(k.private.(ed25519.PrivateKey), []byte(signed)))
+	}
+	signer, err := jose.NewSigner(jose.SigningKey{Algorithm: k.alg, Key: jose.JSONWebKey{Key: k.private, KeyID: k.public.KeyID}},
+		(&jose.SignerOptions{}).WithType("at+jwt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	signed, err := signer.Sign(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	token, _ := signed.CompactSerialize()
+	return token
+}
+
+// publish makes keys the issuer's key set.
+func (i *testIssuer) publish(keys ...testKey) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	i.keys = nil
+	for _, k := range keys {
+		i.keys = append(i.keys, k.public)
+	}
+}
+
+// fetches is how many times the key set was fetched.
+func (i *testIssuer) fetches() int {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	return i.jwksCalls
+}
+
+// accepts reports whether the server takes the token.
+func accepts(f *Foreign, token string) bool {
+	_, _, err := f.check(context.Background(), token, testOrigin, time.Now())
+	return err == nil
+}
+
+// age makes the server's key set old enough to fetch again.
+func age(f *Foreign) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.keyed = f.keyed.Add(-keysRefresh)
+}
+
+// An issuer that serves only one of the metadata documents works: its
+// keys verify a token, and only the OpenID Connect one names userinfo.
+func TestForeignOneMetadataDocument(t *testing.T) {
+	for name, only := range map[string]func(*testIssuer){
+		"RFC 8414":       func(i *testIssuer) { i.noOIDC = true },
+		"OpenID Connect": func(i *testIssuer) { i.noRFC8414 = true },
+	} {
+		t.Run(name, func(t *testing.T) {
+			i := newTestIssuer(t)
+			only(i)
+			key := newTestKey(t, "k1")
+			i.publish(key)
+			f := i.foreign(t)
+			proof, sub, err := f.check(context.Background(), i.token(t, key), testOrigin, time.Now())
+			if err != nil || proof.Subject != i.URL+"#user-42" || sub != "user-42" {
+				t.Fatalf("check = %#v %q %v", proof, sub, err)
+			}
+			if got, _ := f.userinfo(context.Background(), "at", sub); (got == "Pat") != (name == "OpenID Connect") {
+				t.Errorf("name from userinfo = %q", got)
+			}
+		})
+	}
+}
+
+// A key the issuer rotates in is fetched for the first token that names
+// it once the server's key set is a minute old, and not before: a token
+// that names an unknown kid costs at most one fetch a minute.
+func TestForeignKeyRotation(t *testing.T) {
+	i := newTestIssuer(t)
+	old, rotated := newTestKey(t, "k1"), newTestKey(t, "k2")
+	i.publish(old)
+	f := i.foreign(t)
+	if !accepts(f, i.token(t, old)) || i.fetches() != 1 {
+		t.Fatalf("first token: %d fetches", i.fetches())
+	}
+	i.publish(rotated)
+	if accepts(f, i.token(t, rotated)) || i.fetches() != 1 {
+		t.Fatalf("within the minute: %d fetches", i.fetches())
+	}
+	age(f)
+	if !accepts(f, i.token(t, rotated)) || i.fetches() != 2 {
+		t.Fatalf("after the minute: %d fetches", i.fetches())
+	}
+	if accepts(f, i.token(t, old)) || !accepts(f, i.token(t, rotated)) || i.fetches() != 2 {
+		t.Fatalf("the old key: %d fetches", i.fetches())
+	}
+}
+
+// Tokens with unknown kids, which anyone can make, cost the issuer at most
+// one key set fetch a minute, however many arrive at once.
+func TestForeignUnknownKidsFetchOnce(t *testing.T) {
+	i := newTestIssuer(t)
+	key := newTestKey(t, "k1")
+	i.publish(key)
+	f := i.foreign(t)
+	if !accepts(f, i.token(t, key)) {
+		t.Fatal("token refused")
+	}
+	age(f)
+	i.mu.Lock()
+	i.jwksDelay = 50 * time.Millisecond
+	i.mu.Unlock()
+	before := i.fetches()
+	const forged = 20
+	var wg sync.WaitGroup
+	for n := range forged {
+		token := i.token(t, newTestKey(t, fmt.Sprint("forged-", n)))
+		wg.Go(func() {
+			if accepts(f, token) {
+				t.Errorf("forged token %d accepted", n)
+			}
+		})
+	}
+	wg.Wait()
+	if calls := i.fetches() - before; calls > 1 {
+		t.Fatalf("%d forged tokens caused %d key set fetches", forged, calls)
+	}
+	if !accepts(f, i.token(t, key)) {
+		t.Fatal("token refused after the forged ones")
+	}
+}
+
+// The server uses only the issuer's public signing keys, and no RSA key
+// under 2048 bits; Ed25519 keys verify EdDSA and Ed25519 tokens.
+func TestForeignKeySet(t *testing.T) {
+	rsaKey := func(bits int) testKey {
+		key, err := rsa.GenerateKey(rand.Reader, bits)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return testKey{key, jose.RS256, jose.JSONWebKey{Key: &key.PublicKey, KeyID: "k", Use: "sig"}}
+	}
+	public, private, _ := ed25519.GenerateKey(rand.Reader)
+	edKey := testKey{private, jose.EdDSA, jose.JSONWebKey{Key: public, KeyID: "k"}}
+	encryption := newTestKey(t, "k")
+	encryption.public.Use = "enc"
+	for name, test := range map[string]struct {
+		key testKey
+		ok  bool
+	}{
+		"EC P-256":    {newTestKey(t, "k"), true},
+		"EC, use enc": {encryption, false},
+		"RSA 2048":    {rsaKey(2048), true},
+		"RSA 1024":    {rsaKey(1024), false},
+		"Ed25519":     {edKey, true},
+		"Ed25519 alg": {testKey{private, algEd25519, edKey.public}, true},
+	} {
+		i := newTestIssuer(t)
+		i.publish(test.key)
+		if got := accepts(i.foreign(t), i.token(t, test.key)); got != test.ok {
+			t.Errorf("%s: accepted %v, want %v", name, got, test.ok)
+		}
 	}
 }

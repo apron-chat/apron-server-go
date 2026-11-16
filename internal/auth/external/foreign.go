@@ -47,9 +47,10 @@ type Foreign struct {
 	metadata *issuerMetadata
 	fetched  time.Time
 	// keys is the issuer's key set, nil until a fetch of it worked; keyed
-	// is when it was last fetched.
-	keys  *jose.JSONWebKeySet
-	keyed time.Time
+	// is when it was last fetched. keying is held while it is.
+	keys   *jose.JSONWebKeySet
+	keyed  time.Time
+	keying sync.Mutex
 }
 
 // issuerMetadata is what the server reads of the issuer's metadata.
@@ -326,14 +327,20 @@ func isHTTPS(u string) bool {
 }
 
 // keysFor returns the issuer's signing keys for kid, all of them for an
-// empty kid, fetching them again when kid is unknown, at most once a minute.
+// empty kid, fetching them again when kid is unknown, at most once a minute
+// however many tokens name unknown kids at once.
 func (f *Foreign) keysFor(ctx context.Context, kid string) []jose.JSONWebKey {
+	if keys, known := f.knownKeys(kid); known {
+		return keys
+	}
+	// One fetch at a time: the others then find it fresh.
+	f.keying.Lock()
+	defer f.keying.Unlock()
 	f.mu.Lock()
-	known := f.keys != nil && (kid == "" || len(f.keys.Key(kid)) > 0)
 	fresh := time.Since(f.keyed) < keysRefresh
 	metadata := f.metadata
 	f.mu.Unlock()
-	if !known && !fresh && metadata != nil {
+	if !fresh && metadata != nil {
 		request, _ := http.NewRequestWithContext(ctx, http.MethodGet, metadata.JWKSURI, nil)
 		request.Header.Set("Accept", "application/json")
 		var set struct {
@@ -356,15 +363,23 @@ func (f *Foreign) keysFor(ctx context.Context, kid string) []jose.JSONWebKey {
 		f.keyed = time.Now()
 		f.mu.Unlock()
 	}
+	keys, _ := f.knownKeys(kid)
+	return keys
+}
+
+// knownKeys returns the keys for kid in the key set the server has, if it
+// knows kid: any kid, once it has a set, for an empty one.
+func (f *Foreign) knownKeys(kid string) ([]jose.JSONWebKey, bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	switch {
 	case f.keys == nil:
-		return nil
+		return nil, false
 	case kid == "":
-		return f.keys.Keys
+		return f.keys.Keys, true
 	}
-	return f.keys.Key(kid)
+	keys := f.keys.Key(kid)
+	return keys, len(keys) > 0
 }
 
 // fetch makes a request to the issuer and decodes its JSON answer into
