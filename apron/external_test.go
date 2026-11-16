@@ -131,6 +131,16 @@ func TestExternalSignIn(t *testing.T) {
 	if auth := asList(frame["params"].(map[string]any)["auth"]); !slices.Contains(auth, any("external")) || !slices.Contains(auth, any("token")) {
 		t.Fatalf("auth = %#v", auth)
 	}
+	// ext:oauth comes with external, before signing in too, without guests.
+	if capabilities := asList(frame["params"].(map[string]any)["capabilities"]); !slices.Contains(capabilities, any("ext:oauth")) {
+		t.Fatalf("capabilities = %#v", capabilities)
+	}
+	closed := extensionConfig(ssoExtension(identity))
+	closed.DisableGuests = true
+	_, closedServer := newTestServer(t, closed)
+	if _, frame := dialRaw(t, closedServer); !slices.Contains(asList(frame["params"].(map[string]any)["capabilities"]), any("ext:oauth")) {
+		t.Fatalf("capabilities without guests = %#v", frame["params"])
+	}
 	// A begin authenticates nothing, and names the page.
 	external := c.result(t, "auth", "b", map[string]any{"scheme": "external"})["external"].(map[string]any)
 	page := external["url"].(string)

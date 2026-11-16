@@ -217,6 +217,9 @@ func TestExternalForeignIssuer(t *testing.T) {
 	if auth := asList(frame["params"].(map[string]any)["auth"]); !slicesContains(auth, "external") {
 		t.Fatalf("auth = %#v", auth)
 	}
+	if capabilities := asList(frame["params"].(map[string]any)["capabilities"]); !slicesContains(capabilities, "ext:oauth") {
+		t.Fatalf("capabilities = %#v", capabilities)
+	}
 	external := c.result(t, "auth", "b", map[string]any{"scheme": "external"})["external"].(map[string]any)
 	page, _ := url.Parse(external["url"].(string))
 	// The URL names no client_id: the app names itself (§4.12.2).

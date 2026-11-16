@@ -1178,6 +1178,13 @@ func (s *Server) serverParams(baseURL string, revealed bool) map[string]any {
 	}
 	// ext:editors (apron's EXTENSIONS.md) needs no data of its own.
 	params["capabilities"] = append(params["capabilities"].([]string), "ext:editors")
+	if slices.Contains(authSchemes, external.Name) {
+		// ext:oauth: external sign-in's OAuth extras (SERVER.md), the
+		// server's own authorization server metadata and token endpoint,
+		// or its protected resource metadata naming another issuer. A
+		// client needs it to sign in, so it is listed before.
+		params["capabilities"] = append(params["capabilities"].([]string), "ext:oauth")
+	}
 	if revealed && slices.ContainsFunc(s.schemes, func(scheme authn.Scheme) bool {
 		_, ok := scheme.(authn.Credentials)
 		return ok
