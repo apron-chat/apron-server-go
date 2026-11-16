@@ -17,6 +17,7 @@ import (
 
 	jose "github.com/go-jose/go-jose/v4"
 	"github.com/go-jose/go-jose/v4/jwt"
+	"golang.org/x/oauth2"
 
 	"github.com/apron-chat/apron-server-go/internal/auth/oauth"
 	"github.com/apron-chat/apron-server-go/internal/authn"
@@ -170,22 +171,19 @@ func (f *Foreign) redeem(ctx context.Context, p codeParams, origin string) (stri
 	if err != nil {
 		return "", err
 	}
-	form := url.Values{
-		"grant_type": {"authorization_code"}, "code": {p.code}, "code_verifier": {p.verifier},
-		"redirect_uri": {p.redirectURI}, "client_id": {p.clientID}, "resource": {origin},
-	}
-	request, _ := http.NewRequestWithContext(ctx, http.MethodPost, metadata.TokenEndpoint, strings.NewReader(form.Encode()))
-	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	request.Header.Set("Accept", "application/json")
-	var answer struct {
-		AccessToken string `json:"access_token"`
-		TokenType   string `json:"token_type"`
-	}
-	status, fetchErr := f.fetch(request, &answer)
+	// A public client, with client_id in the form: never first by HTTP
+	// Basic, as oauth2.AuthStyleAutoDetect would, which spends the
+	// single-use code on a try the issuer may refuse.
+	config := oauth2.Config{ClientID: p.clientID, RedirectURL: p.redirectURI, Endpoint: oauth2.Endpoint{
+		TokenURL: metadata.TokenEndpoint, AuthStyle: oauth2.AuthStyleInParams,
+	}}
+	answer, exchangeErr := config.Exchange(context.WithValue(ctx, oauth2.HTTPClient, f.client), p.code,
+		oauth2.VerifierOption(p.verifier), oauth2.SetAuthURLParam("resource", origin))
+	var unreachable *url.Error
 	switch {
-	case fetchErr != nil && status == 0:
+	case errors.As(exchangeErr, &unreachable):
 		return "", authn.RetryAfter("The sign-in provider is unreachable; try again shortly", 30*time.Second)
-	case status != http.StatusOK || answer.AccessToken == "":
+	case exchangeErr != nil:
 		return "", authn.Denied("The sign-in code is invalid, used, or expired; sign in again")
 	case !strings.EqualFold(answer.TokenType, "Bearer"):
 		// A DPoP or other bound token needs a proof this protocol has none
