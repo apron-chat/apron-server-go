@@ -19,15 +19,28 @@ import (
 // selfAddress is the address of the bridge's server (A), as B knows it.
 const selfAddress = "ws://a.test:8081/ws"
 
-// startA opens server A with the bridge on a store, and returns it and a
+// modExtension gives A a moderator bot, mod.
+type modExtension struct{ bot **apron.Bot }
+
+func (modExtension) Name() string { return "mod" }
+func (m modExtension) Init(r *apron.Registrar) error {
+	var err error
+	*m.bot, err = r.Bot("mod", apron.BotOptions{Name: "Mod"})
+	return err
+}
+
+// startA opens server A with the bridge on a store, with self as
+// --federation.self, and returns its moderator bot, its server, and a
 // function that shuts it down.
-func startA(t *testing.T, memory store.Store, link string) (*apron.Server, *httptest.Server, func()) {
+func startA(t *testing.T, memory store.Store, link, self string) (*apron.Bot, *httptest.Server, func()) {
 	t.Helper()
 	f := &Federation{}
-	f.Settings.Link, f.Settings.Room, f.Settings.Self = link, "ops", selfAddress
+	f.Settings.Link, f.Settings.Room, f.Settings.Self = link, "ops", self
+	var mod *apron.Bot
 	config := apron.DefaultConfig()
 	config.Store = memory
-	config.Extensions = []apron.Extension{f}
+	config.Roles = map[string][]string{"moderator": {"mod"}}
+	config.Extensions = []apron.Extension{f, modExtension{&mod}}
 	app, err := apron.Open(config)
 	if err != nil {
 		t.Fatal(err)
@@ -47,7 +60,7 @@ func startA(t *testing.T, memory store.Store, link string) (*apron.Server, *http
 		server.Close()
 	}
 	t.Cleanup(stop)
-	return app, server, stop
+	return mod, server, stop
 }
 
 // person signs in to A as a guest with this user_id and joins ops.
@@ -155,7 +168,9 @@ func TestFederation(t *testing.T) {
 
 	memory := store.NewMemory()
 	link := "https://link.apron.chat/#server=" + b.address() + "&room=r1&token=tok"
-	_, server, stop := startA(t, memory, link)
+	// Without --federation.self, the bridge reads the address B knows A
+	// by from the link's ext.remote.
+	_, server, stop := startA(t, memory, link, "")
 	alice := person(t, server, "alice", "Alice")
 
 	// A → B: Alice's message goes to B as her shadow, which the bridge
@@ -351,7 +366,7 @@ func TestFederation(t *testing.T) {
 	// After a restart, the bridge finds its copies again: an edit saves
 	// the copy rather than making another, both ways.
 	stop()
-	_, server, _ = startA(t, memory, link)
+	mod, server, _ := startA(t, memory, link, "")
 	carol := person(t, server, "carol", "Carol")
 	b.edit("bob", away, "while you were away (edited)")
 	if _, err := carol.Call("message", map[string]any{"room_id": "ops", "reply_to": map[string]any{"message_id": hello}, "body": map[string]any{"text": "late reply"}}); err != nil {
@@ -377,13 +392,80 @@ func TestFederation(t *testing.T) {
 	if copies != 1 {
 		t.Fatalf("%d copies of Bob's message after the restart", copies)
 	}
+
+	// The bridge finds the copies it made before the restart lazily: B's
+	// copy of Alice's message, in its ext.remote, for Bob's reply to it,
+	// and with a create that B answers as a duplicate, for Carol's
+	// reaction to Alice's message.
+	historiesBefore := func() int { b.mu.Lock(); defer b.mu.Unlock(); return b.histories }()
+	awayB := b.find(func(m map[string]any) bool { return remoteExtOf(m)["message_id"] == awayA })[0]["message_id"].(string)
+	reply2 := b.post("bob", "replying after the restart", nil, awayB)
+	if _, err := carol.Call("reactions", map[string]any{"message_id": hello, "emojis": []any{"👀"}}); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "the lookups", func() string {
+		messages, _ := opsMessages(t, carol)
+		switch {
+		case copyOf(messages, reply2) == nil || replyOf(copyOf(messages, reply2)) != awayA:
+			return fmt.Sprintf("Bob's reply on A: %#v", copyOf(messages, reply2))
+		case !slices.Equal(b.reactionsOf(helloB, "carol@a.test:8081"), []string{"👀"}):
+			return "Carol's reaction is not on B"
+		}
+		return ""
+	})
+	if n := len(b.find(func(m map[string]any) bool { return remoteExtOf(m)["message_id"] == hello })); n != 1 {
+		t.Fatalf("%d copies of Alice's message on B after the lookup", n)
+	}
+	if n := func() int { b.mu.Lock(); defer b.mu.Unlock(); return b.histories }() - historiesBefore; n != 1 {
+		t.Fatalf("%d history requests to look up one copy", n)
+	}
+
+	// A remote user removed from A's room is not added back: the bridge
+	// stops copying their records there.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if _, err := mod.Call(ctx, "room_leave", map[string]any{"room_id": "ops", "user_id": bobOnA}); err != nil {
+		t.Fatal(err)
+	}
+	b.addUser("dave", "Dave")
+	removed := b.post("bob", "after my removal", nil, "")
+	daves := b.post("dave", "dave here", nil, "")
+	eventually(t, "Dave's message on A", func() string {
+		if messages, _ := opsMessages(t, carol); copyOf(messages, daves) == nil {
+			return "no copy"
+		}
+		return ""
+	})
+	if messages, _ := opsMessages(t, carol); copyOf(messages, removed) != nil {
+		t.Fatal("the bridge copied the removed user's message")
+	}
+
+	// A local user's remote user removed from B's room: B refuses the
+	// link's writes as them (denied), which the bridge skips.
+	b.kick("carol@a.test:8081")
+	if _, err := carol.Post("ops", "after my removal on B"); err != nil {
+		t.Fatal(err)
+	}
+	erin := person(t, server, "erin", "Erin")
+	if _, err := erin.Post("ops", "erin here"); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "Erin's message on B", func() string {
+		if len(b.find(func(m map[string]any) bool { return text(m) == "erin here" })) != 1 {
+			return "no copy"
+		}
+		return ""
+	})
+	if len(b.find(func(m map[string]any) bool { return text(m) == "after my removal on B" })) != 0 {
+		t.Fatal("B copied the removed user's message")
+	}
 }
 
 func TestFederationWire(t *testing.T) {
 	// Exactly what the link sends B, for the other implementation.
 	b := newFakeB(t, selfAddress, "tok")
 	b.addUser("bob", "Bob")
-	_, server, _ := startA(t, store.NewMemory(), "apron:?server="+b.address()+"&room=r1&token=tok")
+	_, server, _ := startA(t, store.NewMemory(), "apron:?server="+b.address()+"&room=r1&token=tok", selfAddress)
 	alice := person(t, server, "alice", "Alice")
 	hello, err := alice.Post("ops", "hi @bob")
 	if err != nil {
@@ -434,7 +516,7 @@ func TestFederationWire(t *testing.T) {
 
 func TestFederationStopsWhenDenied(t *testing.T) {
 	b := newFakeB(t, selfAddress, "tok")
-	startA(t, store.NewMemory(), "https://link.apron.chat/#server="+b.address()+"&room=r1&token=wrong")
+	startA(t, store.NewMemory(), "https://link.apron.chat/#server="+b.address()+"&room=r1&token=wrong", selfAddress)
 	time.Sleep(2500 * time.Millisecond)
 	b.mu.Lock()
 	auths := b.auths
@@ -452,8 +534,11 @@ func TestRewriteMentions(t *testing.T) {
 		{"mail ada@x.org, @ada: and @adam", "mail ada@x.org, @ADA@b.example: and @adam"},
 		{"@&ada role, (@ada)", "@&ada role, (@ADA@b.example)"},
 		{"@bob@a.test:8081 hi", "@BOB@A.TEST:8081@b.example hi"},
+		{"`@ada` and @ada", "`@ada` and @ADA@b.example"},
+		{"```\n@ada\n```\n@ada ``x`` `` @ada ``", "```\n@ada\n```\n@ADA@b.example ``x`` `` @ada ``"},
+		{"`unclosed @ada", "`unclosed @ADA@b.example"},
 	} {
-		got := rewriteMentions(tc.in, map[string]bool{"ada": true, "bob@a.test:8081": true}, upper)
+		got := rewriteMentions(tc.in, true, map[string]bool{"ada": true, "bob@a.test:8081": true}, upper)
 		if got != tc.want {
 			t.Errorf("rewriteMentions(%q) = %q, want %q", tc.in, got, tc.want)
 		}

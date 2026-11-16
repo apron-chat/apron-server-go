@@ -24,14 +24,26 @@ func idEdge(r rune) bool {
 // mapUser(id), by the grammar of Appendix A.3: the prefix is not preceded
 // by a letter or digit, and the ID is the longest run of ID characters
 // that starts and ends with a letter, a digit, or _. A role (@&) and an
-// @id that mentions does not list stay as they are.
-func rewriteMentions(text string, mentions map[string]bool, mapUser func(string) string) string {
+// @id that mentions does not list stay as they are, and so does code in
+// Markdown: a code span or a fenced block, from a run of backticks to the
+// next run of as many.
+func rewriteMentions(text string, markdown bool, mentions map[string]bool, mapUser func(string) string) string {
 	if len(mentions) == 0 || !strings.Contains(text, "@") {
 		return text
 	}
 	var out strings.Builder
 	previous := rune(-1)
 	for i := 0; i < len(text); {
+		if markdown && text[i] == '`' {
+			n := len(text[i:]) - len(strings.TrimLeft(text[i:], "`"))
+			end := closingTicks(text, i+n, n)
+			if end < 0 {
+				end = i + n
+			}
+			out.WriteString(text[i:end])
+			previous, i = '`', end
+			continue
+		}
 		r, size := utf8.DecodeRuneInString(text[i:])
 		if r != '@' || previous >= 0 && (unicode.IsLetter(previous) || unicode.IsDigit(previous)) {
 			out.WriteString(text[i : i+size])
@@ -61,6 +73,23 @@ func rewriteMentions(text string, mentions map[string]bool, mapUser func(string)
 	return out.String()
 }
 
+// closingTicks is the end of the first run of exactly n backticks at or
+// after from, or -1.
+func closingTicks(text string, from, n int) int {
+	for i := from; i < len(text); {
+		if text[i] != '`' {
+			i++
+			continue
+		}
+		run := len(text[i:]) - len(strings.TrimLeft(text[i:], "`"))
+		if run == n {
+			return i + run
+		}
+		i += run
+	}
+	return -1
+}
+
 // mapBody is a message body for the other server: its text with the @ids
 // it mentions rewritten, its mentions mapped, and its format. Embeds are
 // not copied (uploads, live text, and previews load only from their own
@@ -82,7 +111,7 @@ func mapBody(body map[string]any, mapUser func(string) string) map[string]any {
 			mapped["mentions"] = ids
 		}
 	}
-	text = rewriteMentions(text, mentions, mapUser)
+	text = rewriteMentions(text, body["format"] == "markdown", mentions, mapUser)
 	if embeds, ok := body["embeds"].([]any); ok && len(embeds) > 0 {
 		for _, value := range embeds {
 			embed, _ := value.(map[string]any)

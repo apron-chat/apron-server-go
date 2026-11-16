@@ -2127,7 +2127,10 @@ extension may take it.
   its extension's in-process sessions (the returned `Bot`) sign in as it.
 - Its requests are a client's, with the same checks and limits, which are
   the shadow's own: its messages are its own to edit and delete, and its
-  reactions and profile its own.
+  reactions and profile its own. It writes messages and reactions only in
+  rooms it is in (`denied` otherwise): one that left a room, or was
+  removed, stays out until a member adds it again, which `Host.Member`
+  tells an extension, so that it does not add it back by itself.
 - The server sets its `ext.remote` `{"server", "user_id"}`, which its own
   `me` cannot change. A message it creates carries the same, plus the
   `room_id` and `message_id` (strings) that its request writes in

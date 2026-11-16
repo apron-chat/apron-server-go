@@ -190,6 +190,11 @@ func (s *Server) saveMessage(c *client, req request) (any, bool, *Error) {
 		}
 		from = current.from
 	}
+	// A shadow user writes only in rooms it is in: one that left or was
+	// removed stays out until a member adds it again (ext:remote).
+	if u.shadow != nil && (destination.members[u.id] == nil || current != nil && s.rooms[current.roomID].members[u.id] == nil) {
+		return nil, false, &Error{Code: CodeDenied, Message: "A remote user writes only in rooms it is in"}
+	}
 	if hasReply {
 		target := s.visibleMessageLocked(u, replyID)
 		if target == nil || (replacing && replyID == messageID) {
@@ -581,6 +586,9 @@ func (s *Server) react(c *client, req request) (any, bool, *Error) {
 	m := s.visibleMessageLocked(u, messageID)
 	if m == nil {
 		return nil, false, invalidParams("Unknown message %q", messageID)
+	}
+	if u.shadow != nil && s.rooms[m.roomID].members[u.id] == nil {
+		return nil, false, &Error{Code: CodeDenied, Message: "A remote user writes only in rooms it is in"}
 	}
 	// A key must be a custom emoji (ext:emoji), unless the set has it
 	// already, so that a removed one does not keep the user from changing

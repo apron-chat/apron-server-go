@@ -244,6 +244,28 @@ func TestShadowUsers(t *testing.T) {
 	if !member {
 		t.Fatal("the shadow left ops at the restart")
 	}
+
+	// A shadow that left a room writes there no more, until it is added
+	// again.
+	callAs(t, shadow, "room_leave", map[string]any{"room_id": "ops"})
+	if joined, left := host.Member("ops", carol); joined || !left {
+		t.Fatalf("Member after the leave = %v, %v", joined, left)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	for method, params := range map[string]map[string]any{
+		"message":   {"room_id": "ops", "body": map[string]any{"text": "still here?"}},
+		"reactions": {"message_id": messageID, "emojis": []any{"👀"}},
+	} {
+		if _, err := shadow.Call(ctx, method, params); err == nil || err.(*Error).Code != CodeDenied {
+			t.Fatalf("%s after leaving: %v", method, err)
+		}
+	}
+	callAs(t, bot, "room_join", map[string]any{"room_id": "ops", "user_id": carol})
+	if joined, left := host.Member("ops", carol); !joined || left {
+		t.Fatalf("Member after the add = %v, %v", joined, left)
+	}
+	callAs(t, shadow, "message", map[string]any{"room_id": "ops", "body": map[string]any{"text": "back"}})
 }
 
 // lastSnapshot is a message's current snapshot.

@@ -653,6 +653,24 @@ func (h *Host) Public(roomID string) bool {
 	return everyone
 }
 
+// Member reports whether the user is a member of the room, and, if not,
+// whether it left it or was removed from it, and has not joined it since
+// (§4.2.2), such as a shadow user (Host.Shadow) that a moderator removed,
+// which an extension does not add back by itself.
+func (h *Host) Member(roomID, userID string) (joined, left bool) {
+	h.s.mu.RLock()
+	defer h.s.mu.RUnlock()
+	u := h.s.users[userID]
+	if u == nil {
+		return false, false
+	}
+	if u.joined[roomID] != nil {
+		return true, false
+	}
+	_, left = u.leftAt[roomID]
+	return false, left
+}
+
 // RoomNotice posts a ~room notice (Appendix A.1), logged, to the room's
 // members.
 func (h *Host) RoomNotice(roomID, text string) error {

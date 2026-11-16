@@ -39,8 +39,15 @@ type fakeB struct {
 	messages map[string]*fakeMessage
 	records  []fakeRecord
 	conns    map[*fakeConn]bool
-	// requests are the link's requests, other than auth and history.
-	requests []map[string]any
+	// requests are the link's requests, other than auth and history, and
+	// histories its history requests.
+	requests  []map[string]any
+	histories int
+	// removed are the users removed from the room, whom the link cannot
+	// write as again; created are the messages the link created, by the
+	// room_id and message_id of their ext.remote, for duplicate creates.
+	removed map[string]bool
+	created map[string]string
 }
 
 type fakeUser struct {
@@ -73,8 +80,9 @@ func newFakeB(t *testing.T, self, token string) *fakeB {
 		t: t, self: self, selfAuthority: authority, room: "r1", link: "link_a",
 		tokens: map[string]bool{token: true}, users: make(map[string]*fakeUser), members: make(map[string]bool),
 		messages: make(map[string]*fakeMessage), conns: make(map[*fakeConn]bool),
+		removed: make(map[string]bool), created: make(map[string]string),
 	}
-	b.users[b.link] = &fakeUser{id: b.link, name: "Link to A"}
+	b.users[b.link] = &fakeUser{id: b.link, name: "Link to A", remote: map[string]any{"server": self}}
 	b.members[b.link] = true
 	b.server = httptest.NewServer(http.HandlerFunc(b.serve))
 	t.Cleanup(func() {
@@ -313,6 +321,18 @@ func (b *fakeB) rename(userID, name string) {
 	b.renameLocked(b.users[userID], name)
 }
 
+// kick removes a user from the room.
+func (b *fakeB) kick(userID string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	delete(b.members, userID)
+	b.removed[userID] = true
+	logID := b.nextLocked()
+	b.appendLocked("membership", map[string]any{
+		"log_id": strconv.FormatInt(logID, 10), "room_id": b.room, "members": []any{map[string]any{"user": b.users[userID].from(), "joined": false}},
+	})
+}
+
 // drop closes every connection, as a restart of B would.
 func (b *fakeB) drop() {
 	b.mu.Lock()
@@ -464,6 +484,7 @@ func (b *fakeB) handle(c *fakeConn, method string, params map[string]any, raw []
 		return nil, &rpcError{Code: codeDenied, Message: "Sign in first"}
 	}
 	if method == "history" {
+		b.histories++
 		return b.historyLocked(params), nil
 	}
 	var request map[string]any
@@ -481,6 +502,9 @@ func (b *fakeB) handle(c *fakeConn, method string, params map[string]any, raw []
 					b.users[shadowID] = &fakeUser{id: shadowID, remote: map[string]any{"server": b.self, "user_id": id}}
 				}
 				actor = b.users[shadowID]
+				if b.removed[shadowID] {
+					return nil, &rpcError{Code: codeDenied, Message: "The remote user was removed from the room"}
+				}
 				remote = map[string]any{"server": b.self, "user_id": id}
 				for _, key := range []string{"room_id", "message_id"} {
 					if value, ok := r[key].(string); ok {
@@ -498,9 +522,21 @@ func (b *fakeB) handle(c *fakeConn, method string, params map[string]any, raw []
 				remote = nil
 			}
 		}
+		key := ""
+		if remote != nil && params["message_id"] == nil {
+			// A create of a message the link created already is a
+			// duplicate.
+			key = stringOf(remote["room_id"]) + "|" + stringOf(remote["message_id"])
+			if id, ok := b.created[key]; ok && remote["message_id"] != nil {
+				return map[string]any{"message_id": id}, nil
+			}
+		}
 		id, err := b.saveLocked(actor, params, remote)
 		if err != nil {
 			return nil, err
+		}
+		if key != "" {
+			b.created[key] = id
 		}
 		return map[string]any{"message_id": id}, nil
 	case "reactions":

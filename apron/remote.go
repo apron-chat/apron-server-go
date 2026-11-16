@@ -85,6 +85,8 @@ func ShadowID(server, remoteUserID string) (string, error) {
 // edits, deletions, reactions, and joins are the shadow's own, with it as
 // `from`. Unlike a bot it holds no roles, joins no room by itself (join it
 // with room_join, or have a member add it with room_join and its user_id),
+// writes messages and reactions only in rooms it is in, so one that left or
+// was removed (Host.Member) writes there no more until it is added again,
 // shows as offline, cannot sign in from outside the process (it has no
 // credential, and Bot.IssueToken refuses it), and its owner may make it
 // at any time, not only during Init.
