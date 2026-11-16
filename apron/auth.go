@@ -906,7 +906,9 @@ func (sc schemeCore) Go(fn func(ctx context.Context)) bool {
 // (§4.11.2): #token=<token>, &state=<state> with the proposal's state,
 // unchanged, when it carried one, and &server=<URL> with this server's
 // WebSocket URL when it is known, so a client that speaks to several
-// servers presents it to the right one. Values are form-encoded.
+// servers presents it to the right one. Values are form-encoded, and
+// server with `:` and `/` left as they are, as a link spells it
+// (PROTOCOL.md Appendix A.4).
 func signInLink(page, token, state, server string) string {
 	page, _, _ = strings.Cut(page, "#")
 	link := page + "#token=" + url.QueryEscape(token)
@@ -914,7 +916,7 @@ func signInLink(page, token, state, server string) string {
 		link += "&state=" + url.QueryEscape(state)
 	}
 	if server != "" {
-		link += "&server=" + url.QueryEscape(server)
+		link += "&server=" + linkEscape(server)
 	}
 	return link
 }

@@ -184,7 +184,7 @@ func TestEmailSignIn(t *testing.T) {
 	// the proposal's state unchanged, and this server's WebSocket URL in its
 	// fragment, and no address (§4.11.2).
 	link := linkToken(t, message)
-	want := "https://chat.example/login#token=" + link + "&state=" + url.QueryEscape(state) + "&server=wss%3A%2F%2Fchat.example%2Fapp%2Fws"
+	want := "https://chat.example/login#token=" + link + "&state=" + url.QueryEscape(state) + "&server=wss://chat.example/app/ws"
 	if message.Link != want || len(link) < 26 || strings.Contains(message.Link, "ada") || linkFragment(t, message).Get("state") != state {
 		t.Fatalf("link %q, want %q", message.Link, want)
 	}
@@ -720,6 +720,20 @@ func TestEmailLinksNameTheServerWithoutAPublicURL(t *testing.T) {
 	}
 	if message.Server != wsURL(httpServer) || !strings.Contains(message.Text(), "Your sign-in code for "+wsURL(httpServer)) {
 		t.Fatalf("server %q, text %q", message.Server, message.Text())
+	}
+}
+
+// A link leaves `:` and `/` in server as they are (PROTOCOL.md Appendix
+// A.4) and percent-encodes the rest of what form decoding would misread, so
+// a client decodes the server it names either way.
+func TestSignInLinkSpellsServerAsALink(t *testing.T) {
+	link := signInLink("https://chat.example/login#old", "t", "", "wss://chat.example/a b?x=1&y+z/ws")
+	if want := "https://chat.example/login#token=t&server=wss://chat.example/a%20b%3Fx%3D1%26y%2Bz/ws"; link != want {
+		t.Fatalf("link %q, want %q", link, want)
+	}
+	_, fragment, _ := strings.Cut(link, "#")
+	if values, err := url.ParseQuery(fragment); err != nil || values.Get("server") != "wss://chat.example/a b?x=1&y+z/ws" {
+		t.Fatalf("fragment %q: %v, %v", fragment, values, err)
 	}
 }
 
