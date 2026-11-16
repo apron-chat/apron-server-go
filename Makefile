@@ -47,15 +47,13 @@ test-wire: $(FIXTURES)
 # in an implementation's CI: aprond with an in-memory store, its own origin a passkey origin, and email sign-in that
 # logs its mail, in a Python environment of their own under build/. The passkey portal signs in on aprond's pages in
 # Chromium, with tests/interop's Playwright (`npx playwright install chromium` there). A portal that cannot run skips
-# the sign-in checks rather than failing them, so such a skip fails the target. aprond listens on every interface,
-# because localhost (the passkey origin) can resolve to ::1 first, and conform.py's slow-reader check connects only to
-# the first address.
+# the sign-in checks rather than failing them, so such a skip fails the target.
 CONFORM_PORT := 8080
 test-conformance: $(FIXTURES)
 	go build -o build/aprond ./cmd/aprond
 	test -x build/conform/bin/python || python3 -m venv build/conform
 	build/conform/bin/pip install -q "websockets>=14,<17" "jsonschema>=4.18" "cryptography>=42"
-	./build/aprond --addr=:$(CONFORM_PORT) --store=memory --upload.dir="$$(mktemp -d)" \
+	./build/aprond --addr=127.0.0.1:$(CONFORM_PORT) --store=memory --upload.dir="$$(mktemp -d)" \
 		--webauthn.origin=http://localhost:$(CONFORM_PORT) --email.enable --email.sender=log & pid=$$!; \
 		trap 'kill $$pid; wait $$pid' EXIT; \
 		NODE_PATH="$(CURDIR)/tests/interop/node_modules$${NODE_PATH:+:$$NODE_PATH}" \
