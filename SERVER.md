@@ -166,6 +166,15 @@ Flags (`aprond --help` lists them all):
   account that has one without a recent passkey sign-in, which a stolen
   session token could then use to take the account over; see
   [Managing passkeys](#managing-passkeys).
+  `--webauthn.signal-unknown` (`Config.SignalUnknownPasskeys`, off by
+  default) has the passkey page ask the browser to hide a passkey no
+  account here has; see [The passkey page](#the-passkey-page).
+  Leave it off for now: on iOS and macOS 26, `signalUnknownCredential`
+  can delete other accounts' passkeys
+  ([WebKit bug 302624](https://bugs.webkit.org/show_bug.cgi?id=302624),
+  [WebKit bug 322267](https://bugs.webkit.org/show_bug.cgi?id=322267));
+  check again on 2027-02-16. Even then, turn it on only where this server
+  is the sole user of its RP ID.
 - `--upload.dir <directory>` holds uploaded files, by default
   `aprond/uploads` in the user data directory. At start the server removes
   files named `*.upload` there that the store does not refer to, and nothing
@@ -1480,8 +1489,9 @@ above do.
   presents a passkey that no account has, and no registration may yet
   make it one's (no live code from the page holds it, nor a registration
   the server has verified but not finished), the page says "This passkey
-  isn't for an account on chat.example. Try another passkey, or cancel.",
-  stays open, and asks the passkey provider to hide it with
+  isn't for an account on chat.example. Try another passkey, or cancel."
+  and stays open. With `--webauthn.signal-unknown` it also asks the
+  passkey provider to hide it with
   [`PublicKeyCredential.signalUnknownCredential`](https://www.w3.org/TR/webauthn-3/#sctn-signal-methods)
   where the browser has it, with the RP ID and the ID of the passkey just
   used. Only an assertion made for the page's ceremony counts (its
@@ -1489,7 +1499,18 @@ above do.
   such as a known passkey's bad signature, is the usual error and
   signals nothing. A passkey removed with `account.credential_remove` is
   then one no account has, and so, after a restart with `--store memory`,
-  is every earlier passkey: a login with one is signalled too.
+  is every earlier passkey: a login with one gets the message, and is
+  signalled too when the signal is on.
+  The signal is off by default. On iOS and macOS 26, WebKit's
+  `signalUnknownCredential` can delete passkeys of other accounts on the
+  same RP ID
+  ([WebKit bug 302624](https://bugs.webkit.org/show_bug.cgi?id=302624),
+  [WebKit bug 322267](https://bugs.webkit.org/show_bug.cgi?id=322267)),
+  so leave it off until Apple fixes them; check again on 2027-02-16. And
+  a server knows only its own accounts: turn it on only where it is the
+  sole user of its RP ID, with no other service on a parent-domain RP ID
+  and no other deployment on the same RP ID with storage of its own,
+  whose passkeys would look unknown here.
 - **Finishing.** `{"scheme": "webauthn", "action", "step": "finish", "code",
   "code_verifier", "redirect_uri", "client_id"}`, with the begin's
   `action`, on any connection: a login's code signs in to the passkey's
