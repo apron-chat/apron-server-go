@@ -1,6 +1,7 @@
 package passkey
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -232,5 +233,48 @@ func TestRegisteringUntilCommitted(t *testing.T) {
 	s.mu.Unlock()
 	if !until.After(time.Now().Add(oauth.CodeLifetime)) {
 		t.Fatalf("a code's credential is pending until %v", until)
+	}
+}
+
+// An addition's request is sealed: it opens the page while it lasts, as
+// the account it names, and nobody can read, alter, or make one, nor use
+// one another process sealed.
+func TestSealedAdditions(t *testing.T) {
+	w, err := webauthn.New(&webauthn.Config{RPID: "localhost", RPDisplayName: "Apron", RPOrigins: []string{origin}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, other := New(w), New(w)
+	now := time.Now()
+	a := &addition{UserID: "ada", Name: "Ada Lovelace", Requested: "Ada", Guest: true, Handle: []byte("handle"), Expires: now.Add(oauth.FlowLifetime).Unix()}
+	request, err := s.sealAddition(a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if opened, ok := s.openAddition(request, now); !ok || opened.UserID != "ada" || opened.Name != "Ada Lovelace" || opened.Requested != "Ada" || !opened.Guest || string(opened.Handle) != "handle" {
+		t.Fatalf("opened = %#v, %v", opened, ok)
+	}
+	for _, plain := range []string{"ada", "Lovelace", b64([]byte("handle"))} {
+		if bytes.Contains([]byte(request), []byte(plain)) {
+			t.Fatalf("request %q shows %q", request, plain)
+		}
+	}
+	altered := []byte(request)
+	altered[len(altered)/2] ^= 1
+	for name, request := range map[string]string{
+		"altered":   string(altered),
+		"truncated": request[:len(request)-4],
+		"empty":     "",
+		"oversized": request + string(make([]byte, maxRequestBytes)),
+	} {
+		if _, ok := s.openAddition(request, now); ok {
+			t.Errorf("%s request opened", name)
+		}
+	}
+	if _, ok := s.openAddition(request, now.Add(oauth.FlowLifetime)); ok {
+		t.Error("expired request opened")
+	}
+	if _, ok := other.openAddition(request, now); ok {
+		t.Error("another process's request opened")
 	}
 }

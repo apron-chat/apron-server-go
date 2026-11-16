@@ -171,16 +171,60 @@ func (c *pageClients) evict(now time.Time) bool {
 
 // addition is a registration begun on a signed-in connection, which the
 // page's `request` names: the account, and the user handle its passkey
-// gets.
+// gets. The request carries it sealed (sealAddition), so the server keeps
+// nothing for it, and no number of begins can fill a table that the
+// client's own ceremony or another account's addition then waits on.
 type addition struct {
-	id     string
-	userID string
-	// name is the account's, as the page shows it; requested the name a
+	UserID string `json:"u"`
+	// Name is the account's, as the page shows it; Requested the name a
 	// guest asked for with the begin, which a guest becoming an account
 	// takes.
-	name, requested string
-	guest           bool
-	handle          []byte
+	Name      string `json:"n,omitzero"`
+	Requested string `json:"r,omitzero"`
+	Guest     bool   `json:"g,omitzero"`
+	Handle    []byte `json:"h"`
+	// Expires is when the request stops opening the page, in Unix
+	// seconds.
+	Expires int64 `json:"e"`
+}
+
+// maxRequestBytes bounds a sealed request the page opens: a sealed
+// addition, whose names are at most 64 characters, is a few hundred bytes.
+const maxRequestBytes = 4096
+
+// additionData binds a sealed request to its use, should the key ever
+// seal anything else.
+var additionData = []byte("apron passkey addition")
+
+// sealAddition is the page's `request` for an addition: the addition,
+// encrypted and authenticated with the scheme's key, which only this
+// process has, so nobody else can read or make one.
+func (s *Scheme) sealAddition(a *addition) (string, error) {
+	plain, err := json.Marshal(a)
+	if err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(s.sealer.Seal(nil, nil, plain, additionData)), nil
+}
+
+// openAddition is the addition a `request` names, while it lasts.
+func (s *Scheme) openAddition(request string, now time.Time) (*addition, bool) {
+	if len(request) > maxRequestBytes {
+		return nil, false
+	}
+	sealed, err := base64.RawURLEncoding.DecodeString(request)
+	if err != nil {
+		return nil, false
+	}
+	plain, err := s.sealer.Open(nil, nil, sealed, additionData)
+	if err != nil {
+		return nil, false
+	}
+	a := new(addition)
+	if json.Unmarshal(plain, a) != nil || !now.Before(time.Unix(a.Expires, 0)) {
+		return nil, false
+	}
+	return a, true
 }
 
 // pageGrant is what a code from the page proves.
@@ -196,8 +240,8 @@ type pageGrant struct {
 
 // pageURL is the passkey page for a begin step, or empty when the page
 // cannot serve this server: its origin, the server's, must be one the RP
-// accepts. For an addition it records the account, which the page's
-// `request` names.
+// accepts. For an addition, its sealed `request` names the account for
+// oauth.FlowLifetime.
 func (s *Scheme) pageURL(r *authn.Request, action string) (string, error) {
 	origin := oauth.Origin(r.BaseURL)
 	if s.core == nil || !protocol.IsOriginInHaystack(origin, s.w.Config.RPOrigins) {
@@ -207,25 +251,24 @@ func (s *Scheme) pageURL(r *authn.Request, action string) (string, error) {
 	if action == "register" {
 		switch {
 		case r.Account != nil:
-			a := &addition{userID: r.Account.UserID, name: r.Account.Name, guest: r.Account.Guest}
-			if a.guest {
-				a.requested = r.Name
+			a := &addition{UserID: r.Account.UserID, Name: r.Account.Name, Guest: r.Account.Guest, Expires: r.Now.Add(oauth.FlowLifetime).Unix()}
+			if a.Guest {
+				a.Requested = r.Name
 			}
 			if subject := r.Account.Identities[Name]; subject != "" {
 				handle, err := base64.RawURLEncoding.DecodeString(subject)
 				if err != nil {
 					return "", authn.Internal("Unable to begin passkey registration")
 				}
-				a.handle = handle
+				a.Handle = handle
 			} else {
-				a.handle = []byte(rand.Text())
+				a.Handle = []byte(rand.Text())
 			}
-			id, err := s.additions.Put(a, oauth.FlowLifetime, r.Now)
+			request, err := s.sealAddition(a)
 			if err != nil {
-				return "", authn.RetryAfter("Too many passkeys are being added; try again shortly", 30*time.Second)
+				return "", authn.Internal("Unable to begin passkey registration")
 			}
-			a.id = id
-			query.Set("request", id)
+			query.Set("request", request)
 		case r.Invitation != nil:
 			if name := cmp.Or(r.Name, r.Invitation.Name); name != "" {
 				query.Set("name", name)
@@ -262,7 +305,7 @@ func (s *Scheme) page(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case f.action == "login" && !query.Has("request") && !query.Has("name"):
 	case f.action == "register" && query.Has("request"):
-		a, ok := s.additions.Get(query.Get("request"), time.Now())
+		a, ok := s.openAddition(query.Get("request"), time.Now())
 		if !ok {
 			oauth.Expired(w)
 			return
@@ -300,7 +343,7 @@ func (s *Scheme) screen(f *pageFlow) oauth.Page {
 	case f.addition != nil:
 		page.Title = "Add a passkey"
 		page.Lines = []template.HTML{oauth.Line(
-			oauth.Strong(client), " wants to add a passkey to ", oauth.Strong(oauth.AccountName(f.addition.name, f.addition.userID)),
+			oauth.Strong(client), " wants to add a passkey to ", oauth.Strong(oauth.AccountName(f.addition.Name, f.addition.UserID)),
 			"’s account on ", oauth.Strong(host), ".",
 		)}
 		button.Label, page.Data["ceremony"] = "Create passkey", "create"
@@ -375,9 +418,9 @@ func (s *Scheme) pageOptions(w http.ResponseWriter, f *pageFlow) {
 	} else {
 		h := &holder{name: cmp.Or(f.name, hostOf(f.origin))}
 		if a := f.addition; a != nil {
-			h.Handle, h.name = a.handle, cmp.Or(a.requested, a.name, a.userID)
+			h.Handle, h.name = a.Handle, cmp.Or(a.Requested, a.Name, a.UserID)
 			s.mu.Lock()
-			if existing := s.byHandle[string(a.handle)]; existing != nil {
+			if existing := s.byHandle[string(a.Handle)]; existing != nil {
 				h.Credentials = append([]webauthn.Credential(nil), existing.Credentials...)
 			}
 			s.mu.Unlock()
@@ -478,9 +521,9 @@ func (s *Scheme) pageVerify(w http.ResponseWriter, r *http.Request, f *pageFlow)
 	}
 	g := &pageGrant{action: "register", name: f.name}
 	if a := f.addition; a != nil {
-		g.handle, g.accountID = a.handle, a.userID
-		if a.guest {
-			g.name = a.requested
+		g.handle, g.accountID = a.Handle, a.UserID
+		if a.Guest {
+			g.name = a.Requested
 		}
 	} else {
 		g.handle = f.handle
@@ -505,9 +548,6 @@ func (s *Scheme) redirectWithCode(w http.ResponseWriter, f *pageFlow, g *pageGra
 	if err != nil {
 		pageJSON(w, http.StatusBadRequest, map[string]string{"error": "Too many sign-ins in progress. Wait a minute, then try again."})
 		return
-	}
-	if f.addition != nil {
-		s.additions.Delete(f.addition.id)
 	}
 	s.finishFlowLocked(f)
 	pageJSON(w, http.StatusOK, map[string]string{"redirect": f.req.ReturnURL(url.Values{"code": {code}})})

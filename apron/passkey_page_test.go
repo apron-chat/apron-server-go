@@ -12,6 +12,7 @@ import (
 
 	"github.com/go-webauthn/webauthn/webauthn"
 
+	"github.com/apron-chat/apron-server-go/internal/auth/oauth"
 	"github.com/apron-chat/apron-server-go/internal/auth/passkey"
 	"github.com/apron-chat/apron-server-go/internal/oauthtest"
 )
@@ -327,15 +328,75 @@ func TestPasskeyPageAddition(t *testing.T) {
 	if you := result["you"].(map[string]any); you["user_id"] != guestID || you["name"] != "Grace" || result["token"] == nil {
 		t.Fatalf("addition = %#v", result)
 	}
-	// Its request is used up.
-	if r := client.Get(p.at(client.URL(page, nil))); r.Status != http.StatusNotFound {
-		t.Fatalf("used request = %d", r.Status)
+	// Its request names the account sealed, which nobody can alter.
+	target, _ := url.Parse(page)
+	query := target.Query()
+	request := []byte(query.Get("request"))
+	request[0] ^= 1
+	query.Set("request", string(request))
+	target.RawQuery = query.Encode()
+	if r := client.Get(p.at(client.URL(target.String(), nil))); r.Status != http.StatusNotFound {
+		t.Fatalf("altered request = %d", r.Status)
 	}
 	// The passkey signs in, on the page too.
 	code = p.loginCode(t, client, b)
 	fresh, _ := dialRaw(t, p.http)
 	if _, result := fresh.request(t, "auth", "login", finishWithCode(client, "login", code)); result["you"].(map[string]any)["user_id"] != guestID {
 		t.Fatalf("login = %#v", result)
+	}
+}
+
+// No number of register begins, on any number of connections, keeps a
+// client from running its own ceremony, nor another account from adding a
+// passkey on the page: an addition's request is sealed, and the server
+// keeps nothing for it.
+func TestPasskeyPageAdditionsFlood(t *testing.T) {
+	p := passkeyPageServer(t)
+	const connections, perConnection = 20, oauth.MaxEntries/20 + 1
+	for range connections {
+		flooder, _ := dialRaw(t, p.http)
+		guestAuth(t, flooder)
+		// In batches, which the connection's queues hold.
+		for sent := 0; sent < perConnection; sent += 20 {
+			ids := make([]string, min(20, perConnection-sent))
+			for i := range ids {
+				ids[i] = flooder.nextID("flood")
+				flooder.write(t, map[string]any{"method": "auth", "id": ids[i], "params": map[string]any{"scheme": "webauthn", "action": "register", "step": "begin"}})
+			}
+			for _, id := range ids {
+				frame := flooder.read(t)
+				for frame["id"] == nil {
+					// Such as an earlier flooder leaving general.
+					frame = flooder.read(t)
+				}
+				if result, _ := frame["result"].(map[string]any); frame["id"] != id || result["external"] == nil {
+					t.Fatalf("flooding begin %s = %#v", id, frame)
+				}
+			}
+		}
+		_ = flooder.ws.CloseNow()
+	}
+
+	// A guest whose origin the RP accepts runs its own ceremony, with the
+	// page as another way.
+	local, _ := dialOrigin(t, p.http, testPasskeyOrigin)
+	guestAuth(t, local)
+	begin := passkeyResult(t, passkeyCall(t, local, "local", "register", "begin", nil))
+	if begin["challenge_id"] == nil || begin["public_key"] == nil || begin["external"] == nil {
+		t.Fatalf("in-client begin after the flood = %#v", begin)
+	}
+	// One that only the page serves still adds its passkey there.
+	native, _ := dialRaw(t, p.http)
+	nativeID := guestAuth(t, native)["you"].(map[string]any)["user_id"].(string)
+	begin = passkeyResult(t, passkeyCall(t, native, "native", "register", "begin", nil))
+	client := oauthtest.New(t, pageOrigin)
+	status, answer := p.ceremony(t, client, p.open(t, client, begin), newTestAuthenticator(t), 0)
+	if status != http.StatusOK {
+		t.Fatalf("verify = %d %#v", status, answer)
+	}
+	native.drain(t)
+	if _, result := native.request(t, "auth", "finish", finishWithCode(client, "register", returned(t, client, answer))); result["you"].(map[string]any)["user_id"] != nativeID {
+		t.Fatalf("addition after the flood = %#v", result)
 	}
 }
 

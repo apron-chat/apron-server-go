@@ -1465,9 +1465,16 @@ above do.
   to `challenge_id` and `public_key`. A registration's is
   `?action=register&name=…`, and one on a signed-in connection, guests
   included, an addition: `?action=register&request=<handle>`, which names
-  that account for ten minutes. A connection whose `Origin` is not a
-  `--webauthn.origin` cannot run the ceremony itself, so its begin returns
-  `external` alone; without the page it is `denied`, as before.
+  that account for ten minutes. The handle is the account, sealed
+  (AES-GCM, with a key each aprond makes as it starts), so aprond keeps
+  nothing for an addition, and no number of begins can fill a table that
+  holds up anyone's ceremony; a handle opens the page until it expires, or
+  aprond restarts, and its code adds a passkey only on a connection signed
+  in to that account. A begin whose page cannot be offered still returns
+  `challenge_id` and `public_key` to a connection that can run the
+  ceremony itself. A connection whose `Origin` is not a
+  `--webauthn.origin` cannot, so its begin returns `external` alone;
+  without the page it is `denied`, as before.
 - **The page** takes the same authorization request as `/oauth/authorize`
   (PKCE `S256`, `state`, `resource` the server's origin), checks it the same
   way, showing any problem on the page, as it does a bad `action`, and has

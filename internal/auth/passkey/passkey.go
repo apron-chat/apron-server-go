@@ -15,6 +15,8 @@ package passkey
 import (
 	"bytes"
 	"context"
+	"crypto/aes"
+	"crypto/cipher"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
@@ -57,13 +59,14 @@ type Scheme struct {
 	// apron.Config's SignalUnknownPasskeys says when it is safe.
 	SignalUnknown bool
 
-	// The passkey page's state: the pages people have open, the additions
-	// begun on signed-in connections, the codes the page issued, and the
-	// verify budgets of its clients.
-	flows     oauth.Table[*pageFlow]
-	additions oauth.Table[*addition]
-	codes     oauth.Codes
-	clients   pageClients
+	// The passkey page's state: the pages people have open, the codes the
+	// page issued, and the verify budgets of its clients; and sealer, which
+	// seals the additions begun on signed-in connections into the page's
+	// `request` (sealAddition).
+	flows   oauth.Table[*pageFlow]
+	codes   oauth.Codes
+	clients pageClients
+	sealer  cipher.AEAD
 
 	// mu guards the credentials of each account's passkey holder, by user
 	// handle, and the holders by credential ID. Commit changes them under
@@ -121,7 +124,17 @@ func (h *holder) touch(id []byte, now time.Time, created bool) {
 
 // New is passkey sign-in with w's relying party and origins.
 func New(w *webauthn.WebAuthn) *Scheme {
-	return &Scheme{w: w, byHandle: make(map[string]*holder), byCredential: make(map[string]*holder), pending: make(map[string]time.Time)}
+	key := make([]byte, 32)
+	_, _ = rand.Read(key) // never fails (crypto/rand)
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		panic(err)
+	}
+	sealer, err := cipher.NewGCMWithRandomNonce(block)
+	if err != nil {
+		panic(err)
+	}
+	return &Scheme{w: w, sealer: sealer, byHandle: make(map[string]*holder), byCredential: make(map[string]*holder), pending: make(map[string]time.Time)}
 }
 
 // Bind gives the scheme the server's side of sign-in, for its page.
@@ -249,7 +262,12 @@ func (s *Scheme) begin(r *authn.Request, action string, local bool) (authn.Resul
 	}
 	page, err := s.pageURL(r, action)
 	if err != nil {
-		return nil, err
+		if !local {
+			return nil, err
+		}
+		// The client can run the ceremony itself: the page is only another
+		// way, so whatever it lacks never stops the ceremony.
+		page = ""
 	}
 	if !local {
 		if page == "" {
