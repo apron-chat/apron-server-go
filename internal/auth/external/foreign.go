@@ -3,7 +3,6 @@ package external
 import (
 	"cmp"
 	"context"
-	"crypto"
 	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"errors"
@@ -15,6 +14,9 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	jose "github.com/go-jose/go-jose/v4"
+	"github.com/go-jose/go-jose/v4/jwt"
 
 	"github.com/apron-chat/apron-server-go/internal/auth/oauth"
 	"github.com/apron-chat/apron-server-go/internal/authn"
@@ -43,9 +45,10 @@ type Foreign struct {
 	mu       sync.Mutex
 	metadata *issuerMetadata
 	fetched  time.Time
-	keys     map[string][]crypto.PublicKey
-	all      []crypto.PublicKey
-	keyed    time.Time
+	// keys is the issuer's key set, nil until a fetch of it worked; keyed
+	// is when it was last fetched.
+	keys  *jose.JSONWebKeySet
+	keyed time.Time
 }
 
 // issuerMetadata is what the server reads of the issuer's metadata.
@@ -234,55 +237,34 @@ func (f *Foreign) check(ctx context.Context, token, origin string, now time.Time
 	if _, err := f.discover(ctx); err != nil {
 		return authn.Proof{}, "", err
 	}
-	claims, err := verifyAccessToken(token, func(kid string) []crypto.PublicKey { return f.keysFor(ctx, kid) })
+	payload, err := verifyAccessToken(token, func(kid string) []jose.JSONWebKey { return f.keysFor(ctx, kid) })
 	if err != nil {
 		return authn.Proof{}, "", invalid
 	}
 	var c struct {
-		Iss               string `json:"iss"`
-		Sub               string `json:"sub"`
-		Exp               *int64 `json:"exp"`
-		Nbf               *int64 `json:"nbf"`
-		Name              string `json:"name"`
-		PreferredUsername string `json:"preferred_username"`
+		jwt.Claims
+		Name              string         `json:"name"`
+		PreferredUsername string         `json:"preferred_username"`
+		Cnf               jsontext.Value `json:"cnf"`
 	}
-	raw, _ := json.Marshal(claims)
-	if json.Unmarshal(raw, &c, json.RejectUnknownMembers(false)) != nil {
+	if json.Unmarshal(payload, &c, json.RejectUnknownMembers(false)) != nil || c.Subject == "" || c.Expiry == nil {
 		return authn.Proof{}, "", invalid
 	}
-	switch {
-	case c.Iss != f.issuer, c.Sub == "", c.Exp == nil:
-		return authn.Proof{}, "", invalid
-	case now.After(time.Unix(*c.Exp, 0).Add(clockSkew)):
-		return authn.Proof{}, "", invalid
-	case c.Nbf != nil && now.Add(clockSkew).Before(time.Unix(*c.Nbf, 0)):
-		return authn.Proof{}, "", invalid
-	case !audienceIncludes(claims["aud"], oauth.Resources(origin)):
+	// Only exp and nbf bound the token's time, not iat.
+	c.IssuedAt = nil
+	if c.ValidateWithLeeway(jwt.Expected{Issuer: f.issuer, Time: now}, clockSkew) != nil ||
+		!slices.ContainsFunc(oauth.Resources(origin), c.Audience.Contains) {
 		return authn.Proof{}, "", invalid
 	}
-	if _, bound := claims["cnf"]; bound {
+	if c.Cnf != nil {
 		return authn.Proof{}, "", authn.Denied("The sign-in token is bound to a key, which this server cannot check")
 	}
 	return authn.Proof{
 		// The issuer and its subject name the person for good (§4.12.4); an
 		// issuer URL has no "#".
-		Subject: f.issuer + "#" + c.Sub,
+		Subject: f.issuer + "#" + c.Subject,
 		Name:    cmp.Or(c.Name, c.PreferredUsername), UserID: c.PreferredUsername,
-	}, c.Sub, nil
-}
-
-// audienceIncludes reports whether aud, a string or an array of them,
-// names one of origins.
-func audienceIncludes(aud jsontext.Value, origins []string) bool {
-	var one string
-	if json.Unmarshal(aud, &one) == nil {
-		return slices.Contains(origins, one)
-	}
-	var many []string
-	if json.Unmarshal(aud, &many) != nil {
-		return false
-	}
-	return slices.ContainsFunc(many, func(a string) bool { return slices.Contains(origins, a) })
+	}, c.Subject, nil
 }
 
 // discover returns the issuer's metadata (RFC 8414, or OpenID Connect
@@ -345,11 +327,11 @@ func isHTTPS(u string) bool {
 	return err == nil && parsed.Scheme == "https" && parsed.Host != ""
 }
 
-// keysFor returns the issuer's keys for kid, all of them for an empty kid,
-// fetching them again when kid is unknown, at most once a minute.
-func (f *Foreign) keysFor(ctx context.Context, kid string) []crypto.PublicKey {
+// keysFor returns the issuer's signing keys for kid, all of them for an
+// empty kid, fetching them again when kid is unknown, at most once a minute.
+func (f *Foreign) keysFor(ctx context.Context, kid string) []jose.JSONWebKey {
 	f.mu.Lock()
-	known := f.keys != nil && (kid == "" || f.keys[kid] != nil)
+	known := f.keys != nil && (kid == "" || len(f.keys.Key(kid)) > 0)
 	fresh := time.Since(f.keyed) < keysRefresh
 	metadata := f.metadata
 	f.mu.Unlock()
@@ -357,22 +339,19 @@ func (f *Foreign) keysFor(ctx context.Context, kid string) []crypto.PublicKey {
 		request, _ := http.NewRequestWithContext(ctx, http.MethodGet, metadata.JWKSURI, nil)
 		request.Header.Set("Accept", "application/json")
 		var set struct {
-			Keys []jwk `json:"keys"`
+			Keys []jsontext.Value `json:"keys"`
 		}
 		if status, err := f.fetch(request, &set); err == nil && status == http.StatusOK {
-			keys := make(map[string][]crypto.PublicKey)
-			var all []crypto.PublicKey
-			for _, k := range set.Keys {
-				if k.Use != "" && k.Use != "sig" {
-					continue
-				}
-				if key, err := k.publicKey(); err == nil {
-					keys[k.Kid] = append(keys[k.Kid], key)
-					all = append(all, key)
+			// A key this server cannot use is skipped, not the set.
+			keys := new(jose.JSONWebKeySet)
+			for _, raw := range set.Keys {
+				var k jose.JSONWebKey
+				if k.UnmarshalJSON(raw) == nil && signingKey(k) {
+					keys.Keys = append(keys.Keys, k)
 				}
 			}
 			f.mu.Lock()
-			f.keys, f.all = keys, all
+			f.keys = keys
 			f.mu.Unlock()
 		}
 		f.mu.Lock()
@@ -381,10 +360,13 @@ func (f *Foreign) keysFor(ctx context.Context, kid string) []crypto.PublicKey {
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if kid == "" {
-		return f.all
+	switch {
+	case f.keys == nil:
+		return nil
+	case kid == "":
+		return f.keys.Keys
 	}
-	return f.keys[kid]
+	return f.keys.Key(kid)
 }
 
 // fetch makes a request to the issuer and decodes its JSON answer into

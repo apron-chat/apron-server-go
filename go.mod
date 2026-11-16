@@ -6,6 +6,7 @@ require (
 	github.com/BurntSushi/toml v1.6.0
 	github.com/coder/websocket v1.8.14
 	github.com/fxamacker/cbor/v2 v2.9.4
+	github.com/go-jose/go-jose/v4 v4.1.9
 	github.com/go-webauthn/webauthn v0.18.2
 	github.com/jessevdk/go-flags v1.6.1
 	golang.org/x/crypto v0.57.0
