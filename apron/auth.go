@@ -812,6 +812,10 @@ func (sc schemeCore) Logger() *slog.Logger { return sc.s.logger.With("scheme", s
 // route, as for a WebSocket request.
 func (sc schemeCore) BaseURL(r *http.Request) string { return sc.s.baseURL(r) }
 
+// ClientKey is the client address of a request to a scheme's route, as
+// for a WebSocket request.
+func (sc schemeCore) ClientKey(r *http.Request) string { return clientKey(sc.s.clientIP(r)) }
+
 // Title is the server's display name, as the server frame has it.
 func (sc schemeCore) Title() string {
 	sc.s.mu.RLock()

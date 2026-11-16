@@ -158,6 +158,9 @@ type Core interface {
 	// scheme's routes, as a connection's (Request.BaseURL): Config.PublicURL,
 	// or the scheme and host the request arrived on.
 	BaseURL(r *http.Request) string
+	// ClientKey is the client address of a request to one of the scheme's
+	// routes, for rate limits, as a connection's (Request.ClientKey).
+	ClientKey(r *http.Request) string
 	// Title is the server's display name (§3.1), empty for none.
 	Title() string
 	// Lookup returns the account that has the scheme's identity subject.

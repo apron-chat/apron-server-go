@@ -58,10 +58,12 @@ type Scheme struct {
 	SignalUnknown bool
 
 	// The passkey page's state: the pages people have open, the additions
-	// begun on signed-in connections, and the codes the page issued.
+	// begun on signed-in connections, the codes the page issued, and the
+	// verify budgets of its clients.
 	flows     oauth.Table[*pageFlow]
 	additions oauth.Table[*addition]
 	codes     oauth.Codes
+	clients   pageClients
 
 	// mu guards the credentials of each account's passkey holder, by user
 	// handle, and the holders by credential ID. Commit changes them under

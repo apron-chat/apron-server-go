@@ -2,6 +2,7 @@ package passkey
 
 import (
 	"cmp"
+	"container/list"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json/jsontext"
@@ -10,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -18,6 +20,7 @@ import (
 
 	"github.com/go-webauthn/webauthn/protocol"
 	"github.com/go-webauthn/webauthn/webauthn"
+	"golang.org/x/time/rate"
 
 	"github.com/apron-chat/apron-server-go/internal/auth/oauth"
 	"github.com/apron-chat/apron-server-go/internal/authn"
@@ -53,6 +56,23 @@ const (
 	// maxLabelBytes bounds the name a registration's passkey is labelled
 	// with.
 	maxLabelBytes = 64
+	// The page's verify step, per client address (IP, or IPv6 /64): a
+	// burst of clientVerifyBurst, refilled one per clientVerifyRefill;
+	// and at most maxFlowVerifies on one page, which then ends.
+	clientVerifyBurst  = 30
+	clientVerifyRefill = 10 * time.Second
+	maxFlowVerifies    = 10
+	// maxTrackedClients bounds the table of client budgets, and
+	// evictionScan how many of its least recently used a full table looks
+	// at for one it may forget.
+	maxTrackedClients = 100_000
+	evictionScan      = 256
+)
+
+// Limits, exported for the server's tests.
+const (
+	ClientVerifyBurst = clientVerifyBurst
+	MaxFlowVerifies   = maxFlowVerifies
 )
 
 // label is a name to label a new passkey with: printable, and at most
@@ -82,10 +102,69 @@ type pageFlow struct {
 
 	mu sync.Mutex
 	// data is the pending ceremony; handle the user handle a new
-	// account's passkey gets.
-	data   *webauthn.SessionData
-	handle []byte
-	done   bool
+	// account's passkey gets; verifies counts the verify steps.
+	data     *webauthn.SessionData
+	handle   []byte
+	verifies int
+	done     bool
+}
+
+// pageClients are the verify budgets of the page's client addresses, kept
+// in least recently used order.
+type pageClients struct {
+	mu      sync.Mutex
+	budgets map[string]*clientBudget
+	lru     *list.List
+}
+
+// clientBudget is the verify budget of one client address.
+type clientBudget struct {
+	key      string
+	verifies *rate.Limiter
+	element  *list.Element
+}
+
+// take takes one verify from the budget of a client address, or returns
+// how long to wait for one. When the table is full it forgets the least
+// recently used client whose budget is full again, and when it finds none
+// the client waits as if its own were empty.
+func (c *pageClients) take(key string, now time.Time) time.Duration {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.budgets == nil {
+		c.budgets, c.lru = make(map[string]*clientBudget), list.New()
+	}
+	b := c.budgets[key]
+	if b == nil {
+		if len(c.budgets) >= maxTrackedClients && !c.evict(now) {
+			return clientVerifyRefill
+		}
+		b = &clientBudget{key: key, verifies: rate.NewLimiter(rate.Every(clientVerifyRefill), clientVerifyBurst)}
+		b.element = c.lru.PushFront(b)
+		c.budgets[key] = b
+	}
+	c.lru.MoveToFront(b.element)
+	reservation := b.verifies.ReserveN(now, 1)
+	if delay := reservation.DelayFrom(now); delay > 0 {
+		reservation.CancelAt(now)
+		return delay
+	}
+	return 0
+}
+
+// evict forgets the least recently used client, among the last
+// evictionScan, whose budget is full again, and reports whether there was
+// one. Called holding c.mu.
+func (c *pageClients) evict(now time.Time) bool {
+	scan := evictionScan
+	for element := c.lru.Back(); element != nil && scan > 0; element, scan = element.Prev(), scan-1 {
+		if old := element.Value.(*clientBudget); old.verifies.TokensAt(now) >= clientVerifyBurst {
+			c.lru.Remove(element)
+			delete(c.budgets, old.key)
+			return true
+		}
+	}
+	return false
 }
 
 // addition is a registration begun on a signed-in connection, which the
@@ -335,6 +414,18 @@ func (s *Scheme) pageOptions(w http.ResponseWriter, f *pageFlow) {
 // pageVerify verifies the page's ceremony, which it uses up, and answers
 // with the redirect to the client with a code.
 func (s *Scheme) pageVerify(w http.ResponseWriter, r *http.Request, f *pageFlow) {
+	// Every verify counts, before anything is parsed, so a passkey any
+	// account has and one none has spend the same.
+	if wait := s.clients.take(s.core.ClientKey(r), time.Now()); wait > 0 {
+		w.Header().Set("Retry-After", strconv.FormatInt(authn.Seconds(wait), 10))
+		pageJSON(w, http.StatusTooManyRequests, map[string]string{"error": "Too many tries. Wait a minute, then try again."})
+		return
+	}
+	if f.verifies++; f.verifies > maxFlowVerifies {
+		s.finishFlowLocked(f)
+		pageJSON(w, http.StatusTooManyRequests, map[string]string{"error": "Too many tries. Go back to the app and start again."})
+		return
+	}
 	data := f.data
 	f.data = nil
 	fail := func(message string) {

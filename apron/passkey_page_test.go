@@ -12,6 +12,7 @@ import (
 
 	"github.com/go-webauthn/webauthn/webauthn"
 
+	"github.com/apron-chat/apron-server-go/internal/auth/passkey"
 	"github.com/apron-chat/apron-server-go/internal/oauthtest"
 )
 
@@ -559,5 +560,68 @@ func TestPasskeyPageUnknownCredentialSignalOffByDefault(t *testing.T) {
 	status, answer := login(stranger)
 	if status != knownStatus || !reflect.DeepEqual(answer, knownAnswer) {
 		t.Fatalf("an unknown passkey = %d %#v, a known one that fails = %d %#v", status, answer, knownStatus, knownAnswer)
+	}
+}
+
+// The page's verify step is limited per page, which then ends, and per
+// client address, across pages.
+func TestPasskeyPageVerifyLimits(t *testing.T) {
+	p := passkeyPageServer(t, func(c *Config) { c.ClientIPHeader = "X-Forwarded-For" })
+	client := oauthtest.New(t, pageOrigin)
+	open := func() oauthtest.Response {
+		t.Helper()
+		return client.Get(p.at(client.URL(pageOrigin+"/passkey?action=login", nil)))
+	}
+	verify := func(screen oauthtest.Response, from string) (int, http.Header, map[string]any) {
+		t.Helper()
+		form := url.Values{"flow": {screen.Data("flow")}, "op": {"verify"}, "credential": {"{}"}}
+		req, err := http.NewRequest(http.MethodPost, p.at(screen.Data("post")), strings.NewReader(form.Encode()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		req.Header.Set("X-Forwarded-For", from)
+		response, err := client.HTTP.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer response.Body.Close()
+		var answer map[string]any
+		if err := json.UnmarshalRead(response.Body, &answer); err != nil {
+			t.Fatalf("verify = %d: %v", response.StatusCode, err)
+		}
+		return response.StatusCode, response.Header, answer
+	}
+
+	// One page takes passkey.MaxFlowVerifies tries, then ends.
+	screen := open()
+	for range passkey.MaxFlowVerifies {
+		if status, _, answer := verify(screen, "198.51.100.1"); status != http.StatusBadRequest {
+			t.Fatalf("verify = %d %#v", status, answer)
+		}
+	}
+	if status, _, answer := verify(screen, "198.51.100.1"); status != http.StatusTooManyRequests || answer["error"] != "Too many tries. Go back to the app and start again." {
+		t.Fatalf("a try too many = %d %#v", status, answer)
+	}
+	if status, _ := p.script(t, client, screen, "options", nil); status != http.StatusNotFound {
+		t.Fatalf("options after the last try = %d", status)
+	}
+
+	// One client takes passkey.ClientVerifyBurst tries, across pages; then
+	// it waits, and another client does not.
+	for i := range passkey.ClientVerifyBurst {
+		if i%passkey.MaxFlowVerifies == 0 {
+			screen = open()
+		}
+		if status, _, answer := verify(screen, "198.51.100.2"); status != http.StatusBadRequest {
+			t.Fatalf("verify %d = %d %#v", i, status, answer)
+		}
+	}
+	screen = open()
+	if status, header, answer := verify(screen, "198.51.100.2"); status != http.StatusTooManyRequests || header.Get("Retry-After") == "" || answer["error"] != "Too many tries. Wait a minute, then try again." {
+		t.Fatalf("a client's try too many = %d %v %#v", status, header, answer)
+	}
+	if status, _, answer := verify(screen, "203.0.113.9"); status != http.StatusBadRequest {
+		t.Fatalf("another client = %d %#v", status, answer)
 	}
 }
