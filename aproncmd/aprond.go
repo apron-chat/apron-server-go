@@ -60,6 +60,12 @@ type Options struct {
 		RPID             string   `long:"rp-id" default:"localhost" description:"Passkey relying party domain; empty disables passkeys"`
 		Origins          []string `long:"origin" default:"http://localhost:5173" default:"http://localhost:8080" description:"Exact frontend origin for passkeys; repeat for more"`
 		AddWithoutReauth bool     `long:"add-without-reauth" description:"Let a connection add a passkey to an account that has one without a passkey sign-in in the last five minutes; a stolen session token could then take the account over"`
+		// FIXME: keep off until Apple fixes https://bugs.webkit.org/show_bug.cgi?id=302624
+		// and https://bugs.webkit.org/show_bug.cgi?id=322267
+		// (signalUnknownCredential can delete other accounts' passkeys on
+		// iOS/macOS 26). Check again on 2027-02-16. Turn on only where this
+		// server is the sole user of its RP ID.
+		SignalUnknown bool `long:"signal-unknown" description:"On the passkey page, ask the browser to hide a passkey no account here has (signalUnknownCredential); only for a server that is the sole user of its RP ID, and off while WebKit can delete other accounts' passkeys with it"`
 	} `group:"Passkeys" namespace:"webauthn"`
 
 	Upload struct {
@@ -304,6 +310,7 @@ func serverConfig(options Options) (apron.Config, error) {
 			return config, fmt.Errorf("invalid WebAuthn configuration: %w", err)
 		}
 		config.AddCredentialWithoutReauth = options.WebAuthn.AddWithoutReauth
+		config.SignalUnknownPasskeys = options.WebAuthn.SignalUnknown
 	}
 	return config, nil
 }

@@ -26,7 +26,7 @@ type passkeyPage struct {
 	host *Host
 }
 
-func passkeyPageServer(t *testing.T) *passkeyPage {
+func passkeyPageServer(t *testing.T, configure ...func(*Config)) *passkeyPage {
 	t.Helper()
 	p := &passkeyPage{}
 	config := extensionConfig(testExtension{"sso", func(r *Registrar) error {
@@ -48,6 +48,9 @@ func passkeyPageServer(t *testing.T) *passkeyPage {
 	// reach at the test server's address.
 	config.PublicURL = pageOrigin
 	config.AllowAnyOrigin = true
+	for _, f := range configure {
+		f(&config)
+	}
 	p.app, p.http = newTestServer(t, config)
 	return p
 }
@@ -411,10 +414,11 @@ func TestPasskeyPageRequests(t *testing.T) {
 
 // A login on the page with a passkey that no account has, nor may yet
 // have, tells the page's script to signal it unknown (WebAuthn's
-// signalUnknownCredential), and stays on the page. Anything less certain
-// is the page's usual error, which signals nothing.
+// signalUnknownCredential), with SignalUnknownPasskeys, and stays on the
+// page. Anything less certain is the page's usual error, which signals
+// nothing.
 func TestPasskeyPageUnknownCredential(t *testing.T) {
-	p := passkeyPageServer(t)
+	p := passkeyPageServer(t, func(c *Config) { c.SignalUnknownPasskeys = true })
 	client := oauthtest.New(t, pageOrigin)
 	login := func(a *testAuthenticator, rpID string, flags byte) map[string]any {
 		t.Helper()
@@ -492,4 +496,27 @@ func TestPasskeyPageUnknownCredential(t *testing.T) {
 	}
 	// And it still signs in.
 	p.loginCode(t, client, known)
+}
+
+// By default the page signals nothing: a passkey no account has gets the
+// page's message that it is not for an account here, and no
+// unknown_credential.
+func TestPasskeyPageUnknownCredentialSignalOffByDefault(t *testing.T) {
+	p := passkeyPageServer(t)
+	client := oauthtest.New(t, pageOrigin)
+	screen := client.Get(p.at(client.URL(pageOrigin+"/passkey?action=login", nil)))
+	status, options := p.script(t, client, screen, "options", nil)
+	if status != http.StatusOK {
+		t.Fatalf("options = %d %#v", status, options)
+	}
+	stranger := newTestAuthenticator(t)
+	stranger.handle = b64([]byte("a user handle no account has"))
+	encoded, _ := json.Marshal(stranger.assertion(t, options, pageOrigin, "localhost", 0x05))
+	status, answer := p.script(t, client, screen, "verify", url.Values{"credential": {string(encoded)}})
+	if status != http.StatusBadRequest || answer["error"] != "This passkey isn't for an account on localhost:8080. Try another passkey, or cancel." {
+		t.Fatalf("verify = %d %#v", status, answer)
+	}
+	if _, signals := answer["unknown_credential"]; signals {
+		t.Fatalf("signalled by default: %#v", answer)
+	}
 }

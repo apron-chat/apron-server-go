@@ -35,6 +35,9 @@ func TestServerConfigForCustomRunner(t *testing.T) {
 	if config.WebAuthn == nil || config.MaxUploadBytes != 3<<20 {
 		t.Fatal("custom runner lost passkey or upload options")
 	}
+	if config.SignalUnknownPasskeys {
+		t.Fatal("the passkey page signals unknown passkeys without --webauthn.signal-unknown")
+	}
 	if config.Store != nil {
 		t.Fatal("configuration conversion must not open a store")
 	}
@@ -70,5 +73,20 @@ func TestServerConfigNamesAnExternalIssuer(t *testing.T) {
 	}
 	if _, err := aproncmd.ServerConfig(options); err == nil || !strings.Contains(err.Error(), "--external.client-id") || !strings.Contains(err.Error(), "client ID metadata document") {
 		t.Fatalf("ServerConfig with --external.client-id = %v", err)
+	}
+}
+
+func TestServerConfigSignalsUnknownPasskeysWhenAsked(t *testing.T) {
+	var options aproncmd.Options
+	parser := flags.NewParser(&options, flags.None)
+	if _, err := parser.ParseArgs([]string{"--webauthn.signal-unknown"}); err != nil {
+		t.Fatal(err)
+	}
+	config, err := aproncmd.ServerConfig(options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !config.SignalUnknownPasskeys {
+		t.Fatal("--webauthn.signal-unknown did not reach the server's config")
 	}
 }

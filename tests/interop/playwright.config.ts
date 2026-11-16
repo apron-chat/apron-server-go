@@ -12,9 +12,12 @@ const webDirectory = process.env.APRON_WEB_DIR ? path.resolve(process.env.APRON_
 // push endpoint: a fixed VAPID key, whose public half the test checks tokens against, and
 // --push.allow-insecure, so the test's capture endpoint on http://127.0.0.1 is accepted. The title,
 // description and avatar are how the server shows itself, for reference.spec.ts.
+// --webauthn.signal-unknown (off by default) lets passkey-page.spec.ts see the page signal a
+// passkey no account has; the virtual authenticator holds no other site's passkeys.
 const aprondFlags = [
 	'--store memory',
 	'--addr 127.0.0.1:8080',
+	'--webauthn.signal-unknown',
 	'--push.allow-insecure',
 	`--push.vapid-private-key ${TEST_VAPID_PRIVATE_KEY}`,
 	`--push.vapid-subject ${TEST_VAPID_SUBJECT}`,

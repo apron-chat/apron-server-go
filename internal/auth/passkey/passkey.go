@@ -50,6 +50,13 @@ type Scheme struct {
 	w    *webauthn.WebAuthn
 	core authn.Core
 
+	// SignalUnknown has the page's script ask the passkey provider to hide
+	// a passkey that no account has, nor may yet have
+	// (signalUnknownCredential). Off, the page says so and signals nothing.
+	// Set it before the server serves the page; apron.Config's
+	// SignalUnknownPasskeys says when it is safe.
+	SignalUnknown bool
+
 	// The passkey page's state: the pages people have open, the additions
 	// begun on signed-in connections, and the codes the page issued.
 	flows     oauth.Table[*pageFlow]

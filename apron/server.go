@@ -156,6 +156,21 @@ type Config struct {
 	// session token could add a passkey of its own, sign in with it, and
 	// remove the owner's.
 	AddCredentialWithoutReauth bool
+	// SignalUnknownPasskeys has the passkey page ask the browser to hide a
+	// passkey that no account has, nor may yet have
+	// (signalUnknownCredential). Off, the page still says the passkey is
+	// not for an account here, and signals nothing. A server knows only its
+	// own accounts, so turn it on only where it is the sole user of its RP
+	// ID: no parent-domain RP ID shared with other services, and no other
+	// deployment on the same RP ID with storage of its own.
+	//
+	// FIXME: keep off until Apple fixes
+	// https://bugs.webkit.org/show_bug.cgi?id=302624 and
+	// https://bugs.webkit.org/show_bug.cgi?id=322267 (signalUnknownCredential
+	// can delete other accounts' passkeys on iOS/macOS 26). Check again on
+	// 2027-02-16. Turn on only where this server is the sole user of its RP
+	// ID.
+	SignalUnknownPasskeys bool
 	// OnStoreError, if set, is called once, on a goroutine of its own, with
 	// the first error the store returns. The server then
 	// writes nothing more and fails Sync (see Server.Sync); the program
@@ -754,7 +769,9 @@ func Open(config Config) (*Server, error) {
 	// The sign-in schemes get what they keep with the accounts once the
 	// extensions have added theirs (startSignIn).
 	if config.WebAuthn != nil {
-		if err := s.addSchemeLocked(passkey.New(config.WebAuthn)); err != nil {
+		scheme := passkey.New(config.WebAuthn)
+		scheme.SignalUnknown = config.SignalUnknownPasskeys
+		if err := s.addSchemeLocked(scheme); err != nil {
 			return fail(err)
 		}
 	}
