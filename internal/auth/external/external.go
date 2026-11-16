@@ -9,8 +9,8 @@
 // Connect provider, and completes the sign-in with the identity it proved
 // (Complete). The page then asks once: to allow the client to use the
 // account, naming who is asking, and on Allow redirects to the client with
-// a code that proves the identity. An account that allowed an app at the
-// same https host before is not asked again (authn.Core.Consented).
+// a code that proves the identity. An account that allowed the same https
+// redirect_uri before is not asked again (authn.Core.Consented).
 //
 // A server may instead name another authorization server (Foreign).
 package external
@@ -87,7 +87,8 @@ type flow struct {
 	signIn string
 	proof  *authn.Proof
 	// known is set when the proof's identity has an account, which Allow
-	// then remembers for the request's host.
+	// then remembers for the request's https redirect_uri
+	// (oauth.Request.RememberedRedirect).
 	known bool
 	done  bool
 }
@@ -324,9 +325,9 @@ func (s *Scheme) finishLocked(f *flow) {
 // Complete gives the sign-in named id the identity the extension proved,
 // and answers the person's browser with the page's confirmation: to allow
 // the client to use the identity's account, or to sign in with a new
-// identity, or that it may not sign in here. An account that allowed an
-// app at the request's https host before is not asked again: the page
-// returns to the client with a code at once. For a sign-in that is no
+// identity, or that it may not sign in here. An account that allowed the
+// request's https redirect_uri before is not asked again: the page returns
+// to the client with a code at once. For a sign-in that is no
 // longer open, it answers with a page that says so, and returns
 // ErrUnknownSignIn.
 func (s *Scheme) Complete(w http.ResponseWriter, r *http.Request, id string, proof authn.Proof) error {

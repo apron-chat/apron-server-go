@@ -18,7 +18,7 @@ import (
 // with OAuth or OpenID Connect, and completes the sign-in with the identity
 // it proved (ExternalSignIn.Complete). The page then asks once, naming the
 // app and the account, and on Allow redirects to the app with a code; an
-// account that allowed an app at the same https host before is not asked
+// account that allowed the same https redirect_uri before is not asked
 // again, until it signs out everywhere. The app redeems the code on a
 // connection, which signs in, or adds the identity to the connection's
 // account, or at /oauth/token for a bearer token. The server also serves
@@ -123,8 +123,8 @@ var ErrUnknownSignIn = errors.New("apron: the sign-in is unknown, expired, or co
 // Complete completes the sign-in named id with the identity the extension
 // proved, and answers the person's browser with the page's confirmation,
 // which asks them to allow the app to use the account, or to sign in as
-// them with a new identity; or, for an account that allowed an app at the
-// same https host before, with the redirect to the app. For a sign-in that
+// them with a new identity; or, for an account that allowed the same https
+// redirect_uri before, with the redirect to the app. For a sign-in that
 // is no longer open, it answers with a page that says so, and returns
 // ErrUnknownSignIn.
 func (x *ExternalSignIn) Complete(w http.ResponseWriter, r *http.Request, id string, identity Identity) error {

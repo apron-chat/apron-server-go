@@ -72,8 +72,10 @@ type Problem struct {
 }
 
 // Resources are the values of resource that name a server whose origin is
-// issuer: the issuer itself and, for a loopback server in development on
-// http, https:// with the same host, which §4.12.1 says clients send.
+// issuer: the issuer itself and, for a server on http, https:// with the
+// same host. §4.12.1 gives a ws:// address on a loopback host an http://
+// origin, but clients written to its earlier drafts, which gave every
+// address an https:// origin, send https://.
 func Resources(issuer string) []string {
 	resources := []string{issuer}
 	if parsed, err := url.Parse(issuer); err == nil && parsed.Scheme == "http" {

@@ -70,8 +70,9 @@ type userState struct {
 	enrolled *enrollment
 	// scope limits the rooms the account may see, nil for none (scope.go).
 	scope *roomScope
-	// consents are the https hosts of apps the account allowed on the
-	// external sign-in page, with when, in Unix milliseconds (consents.go).
+	// consents are the https redirect URIs of apps the account allowed on
+	// the external sign-in page, with when, in Unix milliseconds
+	// (consents.go).
 	consents map[string]int64
 
 	// fromValue caches from(); it is cleared when the name changes.
