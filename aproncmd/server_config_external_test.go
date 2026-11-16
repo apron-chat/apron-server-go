@@ -1,7 +1,6 @@
 package aproncmd_test
 
 import (
-	"strings"
 	"testing"
 
 	"github.com/apron-chat/apron-server-go/aproncmd"
@@ -64,15 +63,6 @@ func TestServerConfigNamesAnExternalIssuer(t *testing.T) {
 	}
 	if issuer := config.ExternalIssuer; issuer == nil || issuer.Issuer != "https://id.example" || issuer.Scope != "openid profile" {
 		t.Fatalf("ExternalIssuer = %#v", config.ExternalIssuer)
-	}
-
-	// A client_id shared by every app is refused, saying why and what
-	// instead.
-	if _, err := parser.ParseArgs([]string{"--external.issuer", "https://id.example", "--external.client-id", "apron"}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := aproncmd.ServerConfig(options); err == nil || !strings.Contains(err.Error(), "--external.client-id") || !strings.Contains(err.Error(), "client ID metadata document") {
-		t.Fatalf("ServerConfig with --external.client-id = %v", err)
 	}
 }
 

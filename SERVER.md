@@ -1950,7 +1950,7 @@ Each app names itself to the issuer with its own `client_id`: the `https`
 URL of its [client ID metadata document](https://datatracker.ietf.org/doc/draft-ietf-oauth-client-id-metadata-document/),
 which lists its `client_name` and `redirect_uris`, with
 `token_endpoint_auth_method` `none`. aprond puts no `client_id` in the URL,
-and there is no shared client: `--external.client-id` is refused. An app
+and there is no shared client. An app
 without a metadata document cannot use this mode; an extension's sign-in on
 aprond's own page (above) takes any app.
 
