@@ -1,4 +1,4 @@
-import { createHash, randomBytes } from 'node:crypto';
+import { createHash, generateKeyPairSync, randomBytes } from 'node:crypto';
 import { expect, test, type BrowserContext, type Page } from '@playwright/test';
 import { SERVER_TITLE } from './server-look';
 
@@ -143,32 +143,32 @@ test('a passkey no account has is signalled unknown on the passkey page, which s
 		};
 	});
 
-	// A passkey made on the page, whose code is burned: it is on the device, and no account has it.
-	const guest = await Connection.open();
-	await guest.request('auth', { scheme: 'guest', name: 'Orphan' });
-	const adding = await guest.request('auth', { scheme: 'webauthn', action: 'register', step: 'begin' });
-	let request = authorize(adding.external.url);
-	await page.goto(request.url);
-	const code = await returned(page, request.state, () => page.getByRole('button', { name: 'Create passkey' }).click());
-	await expect(
-		guest.request('auth', {
-			scheme: 'webauthn', action: 'register', step: 'finish', code, code_verifier: randomBytes(32).toString('base64url'), redirect_uri: redirectURI, client_id: clientID
-		})
-	).rejects.toThrow();
-	guest.close();
-	const { credentials } = await cdp.send('WebAuthn.getCredentials', { authenticatorId });
-	expect(credentials).toHaveLength(1);
+	// A passkey on the device that no account has, nor may yet: as one made on the page is once its
+	// code is unused and its time is up (SERVER.md, "A passkey no account has").
+	const credentialId = randomBytes(16);
+	const { privateKey } = generateKeyPairSync('ec', { namedCurve: 'P-256' });
+	await cdp.send('WebAuthn.addCredential', {
+		authenticatorId,
+		credential: {
+			credentialId: credentialId.toString('base64'),
+			isResidentCredential: true,
+			rpId: 'localhost',
+			privateKey: privateKey.export({ format: 'der', type: 'pkcs8' }).toString('base64'),
+			userHandle: randomBytes(16).toString('base64'),
+			signCount: 0
+		}
+	});
 
 	// Signing in with it: the page signals it unknown, says so, and stays, to try again or cancel.
 	const app = await Connection.open();
 	const login = await app.request('auth', { scheme: 'webauthn', action: 'login', step: 'begin' });
 	app.close();
-	request = authorize(login.external.url);
+	const request = authorize(login.external.url);
 	await page.goto(request.url);
 	await page.getByRole('button', { name: 'Continue with passkey' }).click();
 	await expect(page.getByText("This passkey isn't for an account on localhost:8080. Try another passkey, or cancel.")).toBeVisible();
 	expect(await page.evaluate(() => (window as any).signalled)).toEqual([
-		{ rpId: 'localhost', credentialId: Buffer.from(credentials[0].credentialId, 'base64').toString('base64url') }
+		{ rpId: 'localhost', credentialId: credentialId.toString('base64url') }
 	]);
 	expect(new URL(page.url()).pathname).toBe('/passkey');
 	await expect(page.getByRole('button', { name: 'Continue with passkey' })).toBeEnabled();
