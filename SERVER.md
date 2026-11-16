@@ -137,7 +137,8 @@ Flags (`aprond --help` lists them all):
   not, a new `server` frame after the `room_update` and before the result.
 - `--client-ip-header <header>`, behind a reverse proxy, names the header
   that carries the client's address, such as `X-Forwarded-For` or
-  `X-Real-IP`, for the per-client limits of email sign-in. The server takes
+  `X-Real-IP`, for the per-client limits of email sign-in and the
+  [passkey page](#the-passkey-page). The server takes
   the last entry across every line of the header, which the proxy in front
   added itself, and drops a port; a value that is not an IP address falls
   back to the connection's own. Set it only behind a proxy that adds that
@@ -1489,10 +1490,12 @@ above do.
   never redeemed (the tab closed, or the code failed or was used up) stays
   on the device, and a later login may offer it. With
   `--webauthn.signal-unknown`, when a login on the page presents a passkey
-  that no account has, and no registration may yet make it one's (no live
-  code from the page holds it, nor a registration the server has verified
-  but not finished), the page says "This passkey isn't for an account on
-  chat.example. Try another passkey, or cancel.", stays open, and asks the
+  that no account has, and no registration may yet make it one's (one
+  verified on the page counts until the server finishes it, or else for
+  seven minutes, its code's five and two more, even once the code is used
+  or refused; one verified in the client, until the server finishes it),
+  the page says "This passkey isn't for an account on chat.example. Try
+  another passkey, or cancel.", stays open, and asks the
   passkey provider to hide it with
   [`PublicKeyCredential.signalUnknownCredential`](https://www.w3.org/TR/webauthn-3/#sctn-signal-methods)
   where the browser has it, with the RP ID and the ID of the passkey just
@@ -1526,6 +1529,13 @@ above do.
   `webauthn` with its own action, works once, and lasts five minutes. The
   token, a token from a code, is bound to no origin: it resumes from any
   origin, or with none, unlike one from a ceremony in the client.
+- **Limits.** Each client (its IP address, or IPv6 /64; with
+  `--client-ip-header`, the address the proxy reports) may have the page
+  verify thirty passkeys, then one every ten seconds; past that the page
+  answers `429` with `Retry-After` and "Too many tries. Wait a minute, then
+  try again." One page verifies at most ten, then ends: "Too many tries.
+  Go back to the app and start again." Each try counts before the passkey
+  is looked at, whether or not an account has it.
 
 ### Managing passkeys
 
