@@ -31,7 +31,9 @@ Defaults:
   `/passkey`; with
   [external sign-in](#external-sign-in), its OAuth authorization server:
   `/.well-known/oauth-authorization-server`, `/oauth/authorize`, and
-  `/oauth/token`
+  `/oauth/token`, and its protected resource metadata:
+  `/.well-known/oauth-protected-resource` (the only one of these with
+  `--external.issuer`)
 - embed endpoints: `/write/<token>`, `/files/<embed_id>/<secret>`,
   `/live/<embed_id>/<secret>`; custom emoji catalog:
   `/emoji/catalog-<hash>.json`
@@ -39,7 +41,9 @@ Defaults:
 - `server` frame: `apron: 10`, `agent: "apron-go/10"`, and
   `capabilities`: `history`, `edit`, `rooms`, `reactions`, `activity`,
   `embed:upload`, `embed:append`, `embed:terminal`, `command`, `status`,
-  `ext`, `ext:editors` (see [Extension data](#extension-data)), `ext:emoji`,
+  `ext`, `ext:editors` (see [Extension data](#extension-data)), `ext:oauth`
+  while `server.auth` lists `external` (see [External sign-in](#external-sign-in)),
+  `ext:emoji`,
   with `server.ext.emoji.catalog_url` (see [Custom emoji](#custom-emoji);
   not on a connection whose URLs would be plain `http:` on a host other than
   a loopback one), and, while `--max-private-rooms` bounds private rooms,
@@ -1755,6 +1759,18 @@ and `server.signup` once an [extension](#extensions) offers it
 GitHub), or names [another authorization server](#another-authorization-server)
 with `--external.issuer`, and it is `unsupported` otherwise.
 
+The `server` frame then lists capability `ext:oauth` too, before signing
+in as after; it carries no `server.ext` data. PROTOCOL.md's `external` is
+a minimal core: a begin returns the page's `url` (and `issuer`, which
+stays in the core), and the app redeems the code on a connection.
+`ext:oauth` says the server also offers what generic OAuth clients and
+libraries use, below: as its own authorization server, its metadata (RFC
+8414) and `POST /oauth/token`, which takes the client by body or by HTTP
+Basic; with `--external.issuer`, the
+[issuer's features](#another-authorization-server); and in either mode,
+protected resource metadata (RFC 9728) that names the authorization
+server.
+
 - **Begin.** `{"scheme": "external"}` authenticates nothing, and returns
   `{"external": {"url": "https://chat.example/oauth/authorize"}}`, on the
   connection's base URL (`--public-url`, or the scheme and host the
@@ -1828,9 +1844,35 @@ with `--external.issuer`, and it is `unsupported` otherwise.
   "Bearer"}`, a session token for `scheme: "token"` like one redeemed on a
   connection: bound to no origin, whatever the request's `Origin`, so it
   resumes on a WebSocket from any origin or with none. Errors are OAuth's
-  (`invalid_grant`, `unsupported_grant_type`, `invalid_target`).
+  (`invalid_request`, `invalid_client`, `invalid_grant`,
+  `unsupported_grant_type`, `invalid_target`).
+- **Client authentication.** Every app is a public client. It names itself
+  with `client_id` in the body, or by HTTP Basic with an empty password
+  (RFC 6749 §2.3.1: `Authorization: Basic base64(urlencode(client_id) +
+  ":")`), as OAuth libraries such as golang.org/x/oauth2 try first; the
+  two are the same. Both, naming different clients, are `invalid_request`;
+  another `Authorization` scheme, or a Basic password, is `invalid_client`
+  (`401`, with `WWW-Authenticate`), which keeps the code, so a library
+  that then retries with `client_id` in the body succeeds. A
+  `client_secret` in the body is ignored. The metadata lists
+  `token_endpoint_auth_methods_supported: ["none"]`, since Basic carries
+  no secret here.
+- **Refusals keep the code.** A request refused before the code is looked
+  up does not use it up: one not form-encoded, with a parameter twice,
+  another `grant_type`, the client refusals above, or without `code`,
+  `code_verifier`, `redirect_uri`, or a `client_id`. A redemption attempt
+  uses it up, right or wrong, however the app named itself.
 - `/.well-known/oauth-authorization-server` is the server's metadata
-  (RFC 8414). It and the token endpoint allow any origin (CORS `*`).
+  (RFC 8414). `/.well-known/oauth-protected-resource` is its protected
+  resource metadata (RFC 9728): `{"resource": "https://chat.example",
+  "authorization_servers": ["https://chat.example"]}`, naming the server's
+  origin both as the resource and as its authorization server, the issuer
+  of its metadata, so a client that starts from the resource, as MCP's
+  do, finds the same issuer either way. It lists no
+  `bearer_methods_supported`: a token goes in the WebSocket's `auth`
+  request, not in RFC 6750's header, body, or query. The metadata
+  documents and the token endpoint allow any origin (CORS `*`, and
+  `Authorization` in a preflight).
 
 An extension names an identity by a `Subject` that never changes for the
 person, such as `github:583231`, never by a name; `--role` and the
@@ -1856,8 +1898,9 @@ without a metadata document cannot use this mode; an extension's sign-in on
 aprond's own page (above) takes any app.
 
 - A begin returns the issuer's `authorization_endpoint`, from its metadata
-  (`/.well-known/oauth-authorization-server`, else
-  `/.well-known/openid-configuration`), with `scope` in its query, and
+  (RFC 8414's `/.well-known/oauth-authorization-server`, before any path
+  of the issuer's, else OpenID Connect's `/.well-known/openid-configuration`
+  after it; either alone will do), with `scope` in its query, and
   `issuer`: `{"external": {"url":
   "https://id.example/authorize?scope=openid+profile", "issuer":
   "https://id.example"}}`. The app adds its own `client_id`, and redeems
@@ -1883,8 +1926,13 @@ aprond's own page (above) takes any app.
   account, account creation, and the token, bound to no origin, work as
   above.
 
-aprond serves no `/oauth/*` routes in this mode, and no extension may offer
-external sign-in beside it.
+aprond serves no `/oauth/*` routes or authorization server metadata in
+this mode, and no extension may offer external sign-in beside it. It
+serves its protected resource metadata (RFC 9728) at
+`/.well-known/oauth-protected-resource`, naming the issuer:
+`{"resource": "https://chat.example", "authorization_servers":
+["https://id.example"]}`, with CORS `*`; the begin's `issuer` names it
+too.
 
 **The issuer** must accept client ID metadata documents, require PKCE,
 send `iss` in its authorization responses, and issue JWT access tokens
