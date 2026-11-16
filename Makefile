@@ -55,7 +55,7 @@ test-conformance: $(FIXTURES)
 	build/conform/bin/pip install -q "websockets>=14,<17" "jsonschema>=4.18" "cryptography>=42"
 	./build/aprond --addr=127.0.0.1:$(CONFORM_PORT) --store=memory --upload.dir="$$(mktemp -d)" \
 		--webauthn.origin=http://localhost:$(CONFORM_PORT) --email.enable --email.sender=log & pid=$$!; \
-		trap 'kill $$pid' EXIT; \
+		trap 'kill $$pid; wait $$pid' EXIT; \
 		NODE_PATH="$(CURDIR)/tests/interop/node_modules$${NODE_PATH:+:$$NODE_PATH}" \
 			build/conform/bin/python testdata/apron/tests/conformance/conform.py ws://localhost:$(CONFORM_PORT)/ws \
 			--portal "node testdata/apron/tests/conformance/portals/passkey.cjs" --json build/conformance.json && \
