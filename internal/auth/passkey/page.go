@@ -26,7 +26,7 @@ import (
 	"github.com/apron-chat/apron-server-go/internal/authn"
 )
 
-// The passkey page (PLAN_WEBAUTHN_EXTERNAL.md) runs a ceremony for a client
+// The passkey page (PROTOCOL.md §4.10.1) runs a ceremony for a client
 // that cannot use the RP ID: a web client on another domain, an app, or a
 // terminal. A begin step names it in `external`, and the client opens it as
 // an OAuth authorization endpoint (§4.12.3). The page asks once, naming who
