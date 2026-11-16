@@ -502,7 +502,7 @@ the user leaves one to make room. Threads are not counted, since only a
 private room's members can be added to its threads. With a bound, the
 `server` frame advertises it as `ext.settings.private_rooms` under capability
 `ext:settings`, which
-[apron's EXTENSIONS.md](https://github.com/shazow/apron/blob/main/EXTENSIONS.md#extsettings)
+[apron's `ext:settings`](https://github.com/shazow/apron/blob/main/extensions/ext_settings.md)
 defines; its `read_cursors` is absent, so `true`, since the server keeps
 read cursors.
 There is no server-wide bound, and a private room is never removed: like
@@ -791,7 +791,7 @@ the URLs it was sent as disclosed.
 ## Custom emoji
 
 The server offers custom emoji as
-[apron's EXTENSIONS.md](https://github.com/shazow/apron/blob/main/EXTENSIONS.md#extemoji)
+[apron's `ext:emoji`](https://github.com/shazow/apron/blob/main/extensions/ext_emoji.md)
 defines them, under capability `ext:emoji`. Every `server` frame carries
 `ext.emoji.catalog_url`, before sign-in too, except on a connection whose
 URLs would start with `http:` and a host other than a loopback one
@@ -881,7 +881,7 @@ extension asks of them without it: every user may write, any member of a
 room may add others to it with `room_join` and a `user_id`, and only a
 message's author may move it.
 
-The server offers [`ext:editors`](https://github.com/shazow/apron/blob/main/EXTENSIONS.md#exteditors):
+The server offers [`ext:editors`](https://github.com/shazow/apron/blob/main/extensions/ext_editors.md):
 a message whose current snapshot has `ext.editors` `{"body.text":
 "mentioned"}` lets each user in its current `body.mentions` save its text.
 Such a save takes only `body.text` from the request; the room, the rest of
@@ -1905,9 +1905,11 @@ aprond's own page (above) takes any app.
   "https://id.example/authorize?scope=openid+profile", "issuer":
   "https://id.example"}}`. The app adds its own `client_id`, and redeems
   with it.
-- With `code`, aprond redeems the code at the issuer's `token_endpoint`,
-  sending `resource`, its origin; with `token`, it takes an access token the
-  app redeemed there itself.
+- With `code` (PROTOCOL.md's core), aprond redeems the code at the issuer's
+  `token_endpoint`, sending `resource`, its origin. With `token` (`ext:oauth`
+  only; a core server answers it `denied`), it takes an access token that the
+  app redeemed there itself, and that the app presents again on each
+  connection, so that the issuer's revocation and policy apply.
 - It accepts only an access token that is a JWT (RFC 9068: header `typ`
   `at+jwt` or `application/at+jwt`, in any case, so never an ID token)
   signed by one of the issuer's keys (`jwks_uri`; RS256/384/512,
