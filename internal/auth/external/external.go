@@ -175,7 +175,7 @@ func (s *Scheme) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("OPTIONS "+TokenPath, func(w http.ResponseWriter, _ *http.Request) {
 		cors(w)
 		w.Header().Set("Access-Control-Allow-Methods", "POST")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+		w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
 		w.WriteHeader(http.StatusNoContent)
 	})
 }
@@ -389,6 +389,12 @@ func (s *Scheme) Cancel(w http.ResponseWriter, r *http.Request, id string) error
 // token is the token endpoint (§4.12.3): it redeems a code for a bearer
 // token for scheme "token", which resumes from any origin, as one redeemed
 // on a connection does (§4.12.4).
+//
+// A public client names itself by client_id in the body, or by HTTP Basic
+// with an empty password (RFC 6749 §2.3.1), which some OAuth libraries
+// try first. A request refused before the code is looked up, as one that
+// is malformed or whose client_id differs between the two, leaves the code
+// for another try; any redemption attempt uses it up.
 func (s *Scheme) token(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, 16<<10)
 	cors(w)
@@ -400,11 +406,37 @@ func (s *Scheme) token(w http.ResponseWriter, r *http.Request) {
 		refuse(http.StatusBadRequest, "invalid_request", "The body must be form-encoded")
 		return
 	}
+	for _, name := range []string{"grant_type", "code", "code_verifier", "redirect_uri", "client_id"} {
+		if len(r.PostForm[name]) > 1 {
+			refuse(http.StatusBadRequest, "invalid_request", name+" must be given once")
+			return
+		}
+	}
 	if r.PostForm.Get("grant_type") != "authorization_code" {
 		refuse(http.StatusBadRequest, "unsupported_grant_type", "grant_type must be authorization_code")
 		return
 	}
-	value, grant, err := s.codes.Redeem(r.PostForm.Get("code"), r.PostForm.Get("code_verifier"), r.PostForm.Get("redirect_uri"), r.PostForm.Get("client_id"), time.Now())
+	clientID := r.PostForm.Get("client_id")
+	if r.Header.Get("Authorization") != "" {
+		basic, ok := basicClientID(r)
+		if !ok {
+			w.Header().Set("WWW-Authenticate", `Basic realm="token"`)
+			refuse(http.StatusUnauthorized, "invalid_client", "Authorization must be HTTP Basic with the client_id and an empty password")
+			return
+		}
+		if clientID != "" && clientID != basic {
+			refuse(http.StatusBadRequest, "invalid_request", "client_id differs from the one in Authorization")
+			return
+		}
+		clientID = basic
+	}
+	for _, field := range [][2]string{{"code", r.PostForm.Get("code")}, {"code_verifier", r.PostForm.Get("code_verifier")}, {"redirect_uri", r.PostForm.Get("redirect_uri")}, {"client_id", clientID}} {
+		if field[1] == "" {
+			refuse(http.StatusBadRequest, "invalid_request", field[0]+" is missing")
+			return
+		}
+	}
+	value, grant, err := s.codes.Redeem(r.PostForm.Get("code"), r.PostForm.Get("code_verifier"), r.PostForm.Get("redirect_uri"), clientID, time.Now())
 	if err != nil {
 		refuse(http.StatusBadRequest, "invalid_grant", "The code is invalid, used, or expired")
 		return
@@ -423,6 +455,19 @@ func (s *Scheme) token(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"access_token": token, "token_type": "Bearer"})
+}
+
+// basicClientID is the client_id of a public client's HTTP Basic
+// Authorization: the user name, form-urlencoded before base64 as RFC 6749
+// §2.3.1 says, with an empty password, since the server issues no client
+// secrets.
+func basicClientID(r *http.Request) (string, bool) {
+	user, password, ok := r.BasicAuth()
+	if !ok || password != "" {
+		return "", false
+	}
+	clientID, err := url.QueryUnescape(user)
+	return clientID, err == nil && clientID != ""
 }
 
 func writeJSON(w http.ResponseWriter, status int, value any) {

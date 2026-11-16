@@ -2,6 +2,7 @@ package apron
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json/v2"
 	"net/http"
 	"net/http/httptest"
@@ -414,6 +415,133 @@ func TestExternalMetadataAndTokenEndpoint(t *testing.T) {
 		}
 	}
 	if status, header, _ := httpDo(t, http.MethodOptions, issuer+"/oauth/token", nil, ""); status != http.StatusNoContent || header.Get("Access-Control-Allow-Origin") != "*" {
+		t.Fatalf("preflight = %d %v", status, header)
+	}
+}
+
+// A public client names itself at the token endpoint by client_id in the
+// body or by HTTP Basic with an empty password (RFC 6749 §2.3.1), as
+// golang.org/x/oauth2's default AuthStyleAutoDetect tries first. A request
+// refused before the code is looked up leaves it for another try; a
+// redemption attempt uses it up, however the client named itself.
+func TestExternalTokenEndpointClientAuth(t *testing.T) {
+	identity := &Identity{Subject: "idp:6", Name: "Basil", UserID: "basil"}
+	_, httpServer := externalTestServer(t, identity)
+	issuer := httpServer.URL
+	app := oauthtest.New(t, issuer)
+	// A client_id that form-urlencoding changes, as a client ID metadata
+	// document's URL is.
+	app.ClientID = "https://app.example/client.json?v=1&a b"
+	post := func(form url.Values, authorization string) (int, http.Header, map[string]any) {
+		t.Helper()
+		request, err := http.NewRequest(http.MethodPost, issuer+"/oauth/token", strings.NewReader(form.Encode()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		if authorization != "" {
+			request.Header.Set("Authorization", authorization)
+		}
+		response, err := http.DefaultClient.Do(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer response.Body.Close()
+		var body map[string]any
+		_ = json.UnmarshalRead(response.Body, &body)
+		return response.StatusCode, response.Header, body
+	}
+	// basic is x/oauth2's header: SetBasicAuth(url.QueryEscape(clientID),
+	// url.QueryEscape(clientSecret)), with no secret.
+	basic := func(clientID, secret string) string {
+		return "Basic " + base64.StdEncoding.EncodeToString([]byte(url.QueryEscape(clientID)+":"+url.QueryEscape(secret)))
+	}
+	form := func(code string, withClientID bool) url.Values {
+		values := url.Values{"grant_type": {"authorization_code"}, "code": {code}, "code_verifier": {app.Verifier}, "redirect_uri": {app.RedirectURI}}
+		if withClientID {
+			values.Set("client_id", app.ClientID)
+		}
+		return values
+	}
+	redeemed := func(name string, status int, body map[string]any) {
+		t.Helper()
+		if status != http.StatusOK || body["token_type"] != "Bearer" || body["access_token"] == nil {
+			t.Fatalf("%s: %d %#v", name, status, body)
+		}
+	}
+
+	// x/oauth2's AuthStyleAutoDetect: Basic, with no client_id in the body,
+	// which succeeds the first time.
+	status, _, body := post(form(externalCode(t, app, issuer+"/oauth/authorize", issuer), false), basic(app.ClientID, ""))
+	redeemed("basic", status, body)
+	// Both, the same: one client.
+	status, _, body = post(form(externalCode(t, app, issuer+"/oauth/authorize", issuer), true), basic(app.ClientID, ""))
+	redeemed("basic and body", status, body)
+
+	// Refused before the code is looked up: the same code then works.
+	code := externalCode(t, app, issuer+"/oauth/authorize", issuer)
+	for _, refusal := range []struct {
+		name          string
+		form          url.Values
+		authorization string
+		status        int
+		error         string
+	}{
+		{"client_id differs", form(code, true), basic("https://other.example/client.json", ""), http.StatusBadRequest, "invalid_request"},
+		{"secret", form(code, false), basic(app.ClientID, "s3cret"), http.StatusUnauthorized, "invalid_client"},
+		{"not Basic", form(code, true), "Bearer abc", http.StatusUnauthorized, "invalid_client"},
+		{"bad base64", form(code, true), "Basic !!!", http.StatusUnauthorized, "invalid_client"},
+		{"bad escape", form(code, false), "Basic " + base64.StdEncoding.EncodeToString([]byte("%zz:")), http.StatusUnauthorized, "invalid_client"},
+		{"no client_id", form(code, false), "", http.StatusBadRequest, "invalid_request"},
+		{"no verifier", func() url.Values { f := form(code, true); f.Del("code_verifier"); return f }(), "", http.StatusBadRequest, "invalid_request"},
+		{"no redirect_uri", func() url.Values { f := form(code, true); f.Del("redirect_uri"); return f }(), "", http.StatusBadRequest, "invalid_request"},
+		{"twice", func() url.Values { f := form(code, true); f.Add("redirect_uri", "https://evil.example/"); return f }(), "", http.StatusBadRequest, "invalid_request"},
+		{"grant type", func() url.Values { f := form(code, true); f.Set("grant_type", "refresh_token"); return f }(), "", http.StatusBadRequest, "unsupported_grant_type"},
+	} {
+		status, header, body := post(refusal.form, refusal.authorization)
+		if status != refusal.status || body["error"] != refusal.error {
+			t.Errorf("%s: %d %#v", refusal.name, status, body)
+		}
+		if status == http.StatusUnauthorized && header.Get("WWW-Authenticate") == "" {
+			t.Errorf("%s: no WWW-Authenticate", refusal.name)
+		}
+	}
+	status, _, body = post(form(code, false), basic(app.ClientID, ""))
+	redeemed("after refusals", status, body)
+
+	// AuthStyleAutoDetect with a client secret configured: Basic is
+	// refused, keeping the code, and the retry with client_id and
+	// client_secret in the body succeeds.
+	code = externalCode(t, app, issuer+"/oauth/authorize", issuer)
+	if status, _, body := post(form(code, false), basic(app.ClientID, "s3cret")); status != http.StatusUnauthorized || body["error"] != "invalid_client" {
+		t.Fatalf("basic with a secret: %d %#v", status, body)
+	}
+	retry := form(code, true)
+	retry.Set("client_secret", "s3cret")
+	status, _, body = post(retry, "")
+	redeemed("retry in the body", status, body)
+
+	// A redemption attempt with another client_id uses the code up, by
+	// Basic as in the body.
+	for _, wrong := range []struct {
+		name string
+		form func(code string) url.Values
+		auth string
+	}{
+		{"basic", func(code string) url.Values { return form(code, false) }, basic("com.other.app", "")},
+		{"body", func(code string) url.Values { f := form(code, false); f.Set("client_id", "com.other.app"); return f }, ""},
+	} {
+		code := externalCode(t, app, issuer+"/oauth/authorize", issuer)
+		if status, _, body := post(wrong.form(code), wrong.auth); status != http.StatusBadRequest || body["error"] != "invalid_grant" {
+			t.Errorf("%s: %d %#v", wrong.name, status, body)
+		}
+		if status, _, body := post(form(code, true), ""); status != http.StatusBadRequest || body["error"] != "invalid_grant" {
+			t.Errorf("%s: the code was not used up: %d %#v", wrong.name, status, body)
+		}
+	}
+
+	// Browsers may send Authorization across origins.
+	if status, header, _ := httpDo(t, http.MethodOptions, issuer+"/oauth/token", nil, ""); status != http.StatusNoContent || !strings.Contains(header.Get("Access-Control-Allow-Headers"), "Authorization") {
 		t.Fatalf("preflight = %d %v", status, header)
 	}
 }
