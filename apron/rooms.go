@@ -508,6 +508,11 @@ func (s *Server) setRoom(c *client, req request) (any, bool, *Error) {
 	if err != nil {
 		return nil, false, err
 	}
+	// ext.remote is the server's, but for an extension's sessions
+	// (ext:remote).
+	if extWrite, err = s.remoteExtWrite(c, extWrite, remoteOnRoom, !updating); err != nil {
+		return nil, false, err
+	}
 	private, err := parseBool(req.params, "private", false)
 	if err != nil {
 		return nil, false, err

@@ -206,6 +206,9 @@ type storedUser struct {
 	// the account is (Registrar.Bot).
 	Created int64  `json:"created,omitzero"`
 	Bot     string `json:"bot,omitzero"`
+	// Shadow marks a shadow user (Host.Shadow): its extension and the
+	// remote user it stands for.
+	Shadow *storedShadow `json:"shadow,omitzero"`
 	// Enrolled is what the invitation that made the account left with it.
 	Enrolled *storedEnrollment `json:"enrolled,omitzero"`
 	// Scope is the rooms the account is limited to (scope.go).
@@ -444,7 +447,7 @@ func storedMessageOf(m *messageState) storedMessage {
 func storedUserOf(u *userState) storedUser {
 	stored := storedUser{
 		Name: u.name, Avatar: u.avatar, Ext: u.ext, LeftAt: u.leftAt, Pings: u.pings, Seen: u.seen, Shown: u.status != statusOffline,
-		Bot: u.botOf, Identities: u.identities, Records: u.records, Grants: u.granted,
+		Bot: u.botOf, Shadow: u.shadow.stored(), Identities: u.identities, Records: u.records, Grants: u.granted,
 		Email: u.identities[email.Name], External: u.identities[external.Name],
 		Passkey: u.records[passkey.Name], Granted: u.granted[external.Name],
 		Enrolled: u.enrolled.stored(), Scope: u.scope.stored(), Consents: u.consents,
@@ -654,6 +657,7 @@ func (s *Server) restoreLocked() (map[string]bool, error) {
 			u.created = time.UnixMilli(stored.Created)
 		}
 		u.botOf = stored.Bot
+		u.shadow = stored.Shadow.restore()
 		if err := s.restoreIdentitiesLocked(u, stored); err != nil {
 			return nil, fmt.Errorf("stored user %q: %w", id, err)
 		}

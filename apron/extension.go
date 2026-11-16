@@ -47,7 +47,7 @@ type Extension interface {
 var extensionNamePattern = regexp.MustCompile(`^[a-z][a-z0-9-]{0,31}$`)
 
 // reservedExtensionNames are the extensions the server implements itself.
-var reservedExtensionNames = []string{"emoji", "settings", accountExt}
+var reservedExtensionNames = []string{"emoji", "settings", accountExt, remoteExt}
 
 // Roles the server gives meaning to (§3.3.4). Config.Roles grants them, and
 // so may external sign-in; extensions may define others.
@@ -544,6 +544,9 @@ type User struct {
 	Account bool
 	// Bot marks an extension's bot (Registrar.Bot).
 	Bot bool
+	// Remote is set on a shadow user (Host.Shadow): the remote user it
+	// stands for.
+	Remote *RemoteUser
 	// Email is the account's sign-in address, if any.
 	Email string
 	// Created is when the user was made, zero if not known, as for
@@ -559,7 +562,7 @@ func userViewOf(u *userState) User {
 		return User{}
 	}
 	return User{
-		ID: u.id, Name: u.name, Roles: slices.Clone(u.roles), Account: u.account(), Bot: u.botOf != "",
+		ID: u.id, Name: u.name, Roles: slices.Clone(u.roles), Account: u.account(), Bot: u.botOf != "", Remote: remoteOf(u),
 		Email: u.identities[email.Name], Created: u.created,
 	}
 }
@@ -662,6 +665,55 @@ func (h *Host) RoomNotice(roomID, text string) error {
 	}
 	s.postRoomNoticeLocked(r, text)
 	return nil
+}
+
+// RoomOptions describe a room an extension creates (Host.CreateRoom).
+type RoomOptions struct {
+	// Title and Description are the room's (§4.2).
+	Title, Description string
+}
+
+// CreateRoom creates a public top-level room with this room_id, with no
+// members, unless there is one, and returns the room and whether it
+// created it: an extension's own room, such as one it bridges, which
+// people join as any room. The room_id follows the rules for requested
+// user_ids (§3.3), so it never looks like a log_id-derived one, and may not
+// be a user_id that anyone has, or ever had, or another room's in another
+// case. A room that exists is left as it is.
+func (h *Host) CreateRoom(roomID string, options RoomOptions) (Room, bool, error) {
+	if !requestable(roomID) {
+		return Room{}, false, fmt.Errorf("apron: %q is no room_id an extension can create", roomID)
+	}
+	if len(options.Title) > maxTitleBytes || len(options.Description) > maxDescriptionBytes {
+		return Room{}, false, fmt.Errorf("apron: a title is at most %d bytes, and a description %d", maxTitleBytes, maxDescriptionBytes)
+	}
+	s := h.s
+	s.mu.Lock()
+	defer s.unlock()
+	if r := s.rooms[roomID]; r != nil {
+		return s.roomViewLocked(r), false, nil
+	}
+	switch {
+	case s.closed:
+		return Room{}, false, ErrServerClosed
+	case s.usedIDs[strings.ToLower(roomID)] || s.grantedIDs[strings.ToLower(roomID)] || strings.EqualFold(roomID, defaultRoomID):
+		return Room{}, false, fmt.Errorf("apron: %q is a user_id", roomID)
+	}
+	for id := range s.rooms {
+		if strings.EqualFold(id, roomID) {
+			return Room{}, false, fmt.Errorf("apron: room %q exists in another case", id)
+		}
+	}
+	fields := make(map[string]any)
+	if options.Title != "" {
+		fields["title"] = options.Title
+	}
+	if options.Description != "" {
+		fields["description"] = options.Description
+	}
+	r := s.commitRoomLocked(roomID, nil, false, fields)
+	s.touchRoom(r)
+	return s.roomViewLocked(r), true, nil
 }
 
 // ErrServerClosed is returned by what an extension asks of a server that

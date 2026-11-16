@@ -41,7 +41,7 @@ Defaults:
 - `server` frame: `apron: 10`, `agent: "apron-go/10"`, and
   `capabilities`: `history`, `edit`, `rooms`, `reactions`, `activity`,
   `embed:upload`, `embed:append`, `embed:terminal`, `command`, `status`,
-  `ext`, `ext:editors` (see [Extension data](#extension-data)), `ext:oauth`
+  `ext`, `ext:editors`, `ext:remote` (see [Extension data](#extension-data)), `ext:oauth`
   while `server.auth` lists `external` (see [External sign-in](#external-sign-in)),
   `ext:emoji`,
   with `server.ext.emoji.catalog_url` (see [Custom emoji](#custom-emoji);
@@ -907,6 +907,17 @@ message filters see such a save as it will be saved: in the message's room,
 with its reply and the rest of its body. A save that the filters skipped
 because the grant or the mention arrived meanwhile is `denied`, to be sent
 again.
+
+The server offers [`ext:remote`](https://github.com/shazow/apron/blob/main/extensions/ext_remote.md):
+`ext.remote`, where a user, message, or room comes from, is the server's.
+It is dropped from what any client writes with `me`, `message`, and
+`room_set`, so a save keeps the stored value, and only an extension's
+in-process sessions write it: its bot as written, and its
+[shadow users](#shadow-users) with `server`, and on a message `user_id`,
+set to the shadow's. A shadow's user object and the recorded `from` of its
+records (messages, reactions, memberships) carry
+`ext.remote` `{"server", "user_id"}`, so clients show where it is from in
+history too.
 
 ## Commands
 
@@ -2050,8 +2061,8 @@ rest of the server does:
   with its data in `server.ext.weather`, and add request methods named
   `weather.<name>`, which only signed-in users may send; any other method
   is still `unsupported`. Its flags are `--weather.<flag>`, and its config
-  file table `[weather]`. `emoji`, `settings`, and `account` are the
-  server's own.
+  file table `[weather]`. `emoji`, `settings`, `account`, and `remote` are
+  the server's own.
 - Its commands follow the server's in `/help`, which lists one only where
   the extension says the sender may use it; one it refuses is `denied`.
   They run outside the server's lock, so their notices and effects precede
@@ -2097,6 +2108,32 @@ rest of the server does:
   every room's. A deletion's tombstone is an event; the records it redacts
   are not sent again. A room is public to an extension, such as for a web
   page, when it is not private and guests may sign in.
+
+### Shadow users
+
+An extension that copies another server's rooms into this one, as
+[`examples/federation`](examples/federation) does, speaks for that
+server's users through shadow users: `Host.Shadow(server, userID)` makes,
+or returns, the account `<userID>@<authority>`, where the authority is the
+host of the remote server's address, lowercased, and its port as written
+(`carol@b.example`, `carol@127.0.0.1:8787`). Such a `user_id` has an `@`,
+so nobody can request it, and once made it is the shadow's for good:
+the same arguments return the same account at any later start, and no other
+extension may take it.
+
+- It is an account, kept across restarts, that holds no roles, joins no
+  room by itself (a member adds it with `room_join` and its `user_id`), and
+  shows as `offline`. It has no credential, and no service token: only
+  its extension's in-process sessions (the returned `Bot`) sign in as it.
+- Its requests are a client's, with the same checks and limits, which are
+  the shadow's own: its messages are its own to edit and delete, and its
+  reactions and profile its own.
+- The server sets its `ext.remote` `{"server", "user_id"}`, which its own
+  `me` cannot change. A message it creates carries the same, plus the
+  `room_id` and `message_id` (strings) that its request writes in
+  `ext.remote`, for the original's IDs; its saves keep them.
+- `Host.CreateRoom(roomID, options)` makes a public room with a chosen
+  `room_id`, such as the one an extension bridges, if there is none.
 
 ### Room scopes
 

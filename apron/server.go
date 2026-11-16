@@ -1198,6 +1198,10 @@ func (s *Server) serverParams(baseURL string, revealed bool) map[string]any {
 	}
 	// ext:editors (apron's EXTENSIONS.md) needs no data of its own.
 	params["capabilities"] = append(params["capabilities"].([]string), "ext:editors")
+	// ext:remote (apron's extensions/ext_remote.md): ext.remote is the
+	// server's, set on extensions' shadow users (Host.Shadow) and what
+	// they copy.
+	params["capabilities"] = append(params["capabilities"].([]string), "ext:remote")
 	if slices.Contains(authSchemes, external.Name) {
 		// ext:oauth: external sign-in's OAuth extras (SERVER.md), the
 		// server's own authorization server metadata and token endpoint,

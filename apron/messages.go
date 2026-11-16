@@ -116,6 +116,13 @@ func (s *Server) saveMessage(c *client, req request) (any, bool, *Error) {
 	if err != nil {
 		return nil, false, err
 	}
+	// ext.remote is the server's, but for an extension's sessions
+	// (ext:remote).
+	if !deleted {
+		if extWrite, err = s.remoteExtWrite(c, extWrite, remoteOnMessage, !replacing); err != nil {
+			return nil, false, err
+		}
+	}
 	// The extensions' filters see what is saved, outside s.mu, and may
 	// change it or refuse it (Registrar.FilterMessage).
 	sharedFiltered := false

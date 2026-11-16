@@ -212,10 +212,10 @@ func (s *Server) guestsAllowedLocked() bool {
 
 // admittedLocked reports whether the account may sign in: always, unless
 // sign-in is restricted, and then when the list names it. An extension's
-// bot always may; a guest never may on a restricted server.
+// bot and shadow user always may; a guest never may on a restricted server.
 func (s *Server) admittedLocked(u *userState) bool {
 	switch {
-	case s.allowlist == nil, u.botOf != "":
+	case s.allowlist == nil, u.botOf != "", u.shadow != nil:
 		return true
 	case !u.account():
 		return false
@@ -230,7 +230,7 @@ func (s *Server) admittedLocked(u *userState) bool {
 // identity.
 func (s *Server) admittedWithLocked(u *userState, id authn.Identity) bool {
 	switch {
-	case s.allowlist == nil, u.botOf != "", u.enrolled != nil && u.enrolled.admitted:
+	case s.allowlist == nil, u.botOf != "", u.shadow != nil, u.enrolled != nil && u.enrolled.admitted:
 		return true
 	}
 	return s.allowlist.principals[principalOf(id)] || s.listedLocked(u)
