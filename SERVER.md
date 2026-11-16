@@ -167,8 +167,10 @@ Flags (`aprond --help` lists them all):
   session token could then use to take the account over; see
   [Managing passkeys](#managing-passkeys).
   `--webauthn.signal-unknown` (`Config.SignalUnknownPasskeys`, off by
-  default) has the passkey page ask the browser to hide a passkey no
-  account here has; see [The passkey page](#the-passkey-page).
+  default) has the passkey page say a passkey is for no account here and
+  ask the browser to hide it; off, that is the page's usual error, which
+  tells no one whether a credential is registered. See
+  [The passkey page](#the-passkey-page).
   Leave it off for now: on iOS and macOS 26, `signalUnknownCredential`
   can delete other accounts' passkeys
   ([WebKit bug 302624](https://bugs.webkit.org/show_bug.cgi?id=302624),
@@ -1485,12 +1487,12 @@ above do.
   be framed.
 - **A passkey no account has.** A passkey made on the page whose code is
   never redeemed (the tab closed, or the code failed or was used up) stays
-  on the device, and a later login may offer it. When a login on the page
-  presents a passkey that no account has, and no registration may yet
-  make it one's (no live code from the page holds it, nor a registration
-  the server has verified but not finished), the page says "This passkey
-  isn't for an account on chat.example. Try another passkey, or cancel."
-  and stays open. With `--webauthn.signal-unknown` it also asks the
+  on the device, and a later login may offer it. With
+  `--webauthn.signal-unknown`, when a login on the page presents a passkey
+  that no account has, and no registration may yet make it one's (no live
+  code from the page holds it, nor a registration the server has verified
+  but not finished), the page says "This passkey isn't for an account on
+  chat.example. Try another passkey, or cancel.", stays open, and asks the
   passkey provider to hide it with
   [`PublicKeyCredential.signalUnknownCredential`](https://www.w3.org/TR/webauthn-3/#sctn-signal-methods)
   where the browser has it, with the RP ID and the ID of the passkey just
@@ -1499,11 +1501,13 @@ above do.
   such as a known passkey's bad signature, is the usual error and
   signals nothing. A passkey removed with `account.credential_remove` is
   then one no account has, and so, after a restart with `--store memory`,
-  is every earlier passkey: a login with one gets the message, and is
-  signalled too when the signal is on.
-  The signal is off by default. On iOS and macOS 26, WebKit's
-  `signalUnknownCredential` can delete passkeys of other accounts on the
-  same RP ID
+  is every earlier passkey: a login with one is signalled too.
+  The signal is off by default, and then a passkey no account has gets the
+  usual error, exactly as a known passkey that fails: the distinct answer
+  would tell anyone who posts a made-up assertion whether a credential ID
+  is registered, which is worth it only for the signal. On iOS and macOS
+  26, WebKit's `signalUnknownCredential` can delete passkeys of other
+  accounts on the same RP ID
   ([WebKit bug 302624](https://bugs.webkit.org/show_bug.cgi?id=302624),
   [WebKit bug 322267](https://bugs.webkit.org/show_bug.cgi?id=322267)),
   so leave it off until Apple fixes them; check again on 2027-02-16. And
