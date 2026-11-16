@@ -1482,8 +1482,13 @@ above do.
   and so does an addition, which names the account before the passkey is
   made ("wants to add a passkey to Ada (@ada)'s account on …"). Cancel
   returns `error=access_denied`. The
-  page's small script asks the page for WebAuthn options and posts the
-  result back; the page requires user verification, the page's own origin
+  page's small script asks the page for WebAuthn options before the tap:
+  as the page shows, again after an attempt that fails or is dismissed,
+  and every minute, half the two minutes a ceremony lasts, so the tap goes
+  straight to the passkey, within its user activation, as Safari needs.
+  Options held longer, as in a background tab, are asked for again on the
+  tap, and the page says to tap again. The script posts the result back;
+  the page requires user verification, the page's own origin
   in the client data, and no `crossOrigin` or `topOrigin`, and refuses to
   be framed.
 - **A passkey no account has.** A passkey made on the page whose code is

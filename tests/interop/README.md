@@ -28,7 +28,10 @@ message ownership, and recovery from an invalid signature. These tests use
 `passkey-page.spec.ts` drives the server's passkey page alone, with the same
 virtual authenticator: an app on another domain, a protocol client with no
 `Origin`, adds a passkey to its guest on the page and then signs in with it
-there, finishing each with the page's code. Another burns a passkey's
+there, finishing each with the page's code. Another checks the page asks
+for its WebAuthn options before the tap, again each minute, and again on a
+tap once they are held too long, and that a tap calls `navigator.credentials`
+before any request, as Safari's user activation needs. Another burns a passkey's
 code, then signs in with it on the page, which signals it unknown
 (`signalUnknownCredential`, on with `--webauthn.signal-unknown`) and stays open. Its last test drives the web client itself
 from `127.0.0.1`, which cannot use the `localhost` RP ID, against the server at

@@ -32,7 +32,9 @@ import (
 // an OAuth authorization endpoint (§4.12.3). The page asks once, naming who
 // is asking, runs the passkey on the server's own origin, and redirects
 // with a code, which finishes the webauthn exchange on a connection instead
-// of a credential.
+// of a credential. Its script asks for the ceremony's options before the
+// tap (pageScript), so the tap goes straight to the passkey, within its
+// user activation.
 //
 // A code from this page finishes only webauthn, with the action of its
 // begin: the page keeps codes of its own. A login's code signs in to the

@@ -126,6 +126,69 @@ test('an app adds a passkey on the passkey page, then signs in with it there', a
 	app.close();
 });
 
+test('the passkey page asks for options before the tap, which goes straight to the passkey', async ({ page, context }) => {
+	const cdp = await context.newCDPSession(page);
+	await cdp.send('WebAuthn.enable');
+	await cdp.send('WebAuthn.addVirtualAuthenticator', {
+		options: { protocol: 'ctap2', transport: 'internal', hasResidentKey: true, hasUserVerification: true, isUserVerified: true, automaticPresenceSimulation: true }
+	});
+	await page.route('https://app.example/**', (route) => route.fulfill({ contentType: 'text/plain', body: 'Back in the app' }));
+	await page.clock.install();
+	// Records, in order, the page's requests by op, its clicks, and its passkey ceremonies. Safari
+	// needs navigator.credentials within the tap's activation, which Chromium keeps across a request,
+	// so the order is what shows no request comes between the tap and the passkey.
+	const log: string[] = [];
+	const taken = () => log.splice(0);
+	await page.exposeFunction('record', (event: string) => log.push(event));
+	await page.addInitScript(() => {
+		const record = (window as any).record as (event: string) => void;
+		const fetch = window.fetch.bind(window);
+		window.fetch = (input, init) => {
+			record(`fetch ${new URLSearchParams(String(init?.body)).get('op')}`);
+			return fetch(input, init);
+		};
+		const create = navigator.credentials.create.bind(navigator.credentials);
+		navigator.credentials.create = (options) => {
+			record('credentials');
+			return create(options);
+		};
+		document.addEventListener('click', () => record('click'), true);
+	});
+
+	const guest = await Connection.open();
+	await guest.request('auth', { scheme: 'guest', name: 'Ines' });
+	const adding = await guest.request('auth', { scheme: 'webauthn', action: 'register', step: 'begin' });
+	const request = authorize(adding.external.url);
+	await page.goto(request.url);
+	const button = page.getByRole('button', { name: 'Create passkey' });
+	await expect(button).toBeEnabled();
+	await expect.poll(() => log.length).toBe(1);
+	expect(taken()).toEqual(['fetch options']);
+
+	// Held options are asked for again at half the ceremony's two minutes.
+	await page.clock.fastForward(60_000);
+	await expect.poll(() => log.length).toBe(1);
+	await expect(button).toBeEnabled();
+	expect(taken()).toEqual(['fetch options']);
+
+	// Options held longer, as when a background tab held the timer back: the tap asks for new ones,
+	// not the passkey, and says to tap again.
+	await page.clock.setSystemTime((await page.evaluate(() => Date.now())) + 61_000);
+	await button.click();
+	await expect(page.getByText('Ready. Press “Create passkey” again.')).toBeVisible();
+	await expect(button).toBeEnabled();
+	expect(taken()).toEqual(['click', 'fetch options']);
+
+	// Then the tap goes to the passkey before any request, and the page returns to the app.
+	const code = await returned(page, request.state, () => button.click());
+	expect(taken()).toEqual(['click', 'credentials', 'fetch verify']);
+	const added = await guest.request('auth', {
+		scheme: 'webauthn', action: 'register', step: 'finish', code, code_verifier: request.verifier, redirect_uri: redirectURI, client_id: clientID
+	});
+	expect(typeof added.token).toBe('string');
+	guest.close();
+});
+
 test('a passkey no account has is signalled unknown on the passkey page, which stays open', async ({ page, context }) => {
 	const cdp = await context.newCDPSession(page);
 	await cdp.send('WebAuthn.enable');
