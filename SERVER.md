@@ -1474,6 +1474,22 @@ above do.
   result back; the page requires user verification, the page's own origin
   in the client data, and no `crossOrigin` or `topOrigin`, and refuses to
   be framed.
+- **A passkey no account has.** A passkey made on the page whose code is
+  never redeemed (the tab closed, or the code failed or was used up) stays
+  on the device, and a later login may offer it. When a login on the page
+  presents a passkey that no account has, and no registration may yet
+  make it one's (no live code from the page holds it, nor a registration
+  the server has verified but not finished), the page says "This passkey
+  isn't for an account on chat.example. Try another passkey, or cancel.",
+  stays open, and asks the passkey provider to hide it with
+  [`PublicKeyCredential.signalUnknownCredential`](https://www.w3.org/TR/webauthn-3/#sctn-signal-methods)
+  where the browser has it, with the RP ID and the ID of the passkey just
+  used. Only an assertion made for the page's ceremony counts (its
+  challenge, RP ID, origin, and user verification); any other failure,
+  such as a known passkey's bad signature, is the usual error and
+  signals nothing. A passkey removed with `account.credential_remove` is
+  then one no account has, and so, after a restart with `--store memory`,
+  is every earlier passkey: a login with one is signalled too.
 - **Finishing.** `{"scheme": "webauthn", "action", "step": "finish", "code",
   "code_verifier", "redirect_uri", "client_id"}`, with the begin's
   `action`, on any connection: a login's code signs in to the passkey's
