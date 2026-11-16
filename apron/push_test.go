@@ -76,6 +76,12 @@ func (relay *testRelay) pushes(t *testing.T, app *Server, c *testClient) []relay
 	c.drain(t)
 	app.badges.Wait()
 	app.push.wait()
+	// A later Add to either WaitGroup must happen after these Waits, and a
+	// server timer, such as a mute running out, can add one at any time. The
+	// server adds only holding app.mu, so taking it here orders those Adds
+	// after the Waits.
+	app.mu.Lock()
+	app.mu.Unlock()
 	var requests []relayRequest
 	for len(relay.received) > 0 {
 		requests = append(requests, <-relay.received)
