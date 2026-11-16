@@ -19,7 +19,12 @@ forgets it on restart); see [SERVER.md](SERVER.md#storage).
   OAuth pages (external sign-in's `/oauth/authorize`, and the passkey page)
   share `internal/auth/oauth`: authorization requests, codes, redirects,
   and the confirmation screens; `internal/oauthtest` drives them in tests
-  as an app and its browser would. Adding a scheme
+  as an app and its browser would. With another authorization server,
+  `internal/auth/external` checks its access tokens and keys with
+  [go-jose](https://github.com/go-jose/go-jose) and redeems codes with
+  [golang.org/x/oauth2](https://pkg.go.dev/golang.org/x/oauth2); the
+  issuer's discovery, the key set's cache, and RFC 9068's checks are its
+  own. Adding a scheme
   takes a package that implements `authn.Scheme`, a line that adds it
   (`addSchemeLocked`), and, so `--role` and the allowlist can name its
   identities, its name in `principalKinds`. See [SERVER.md](SERVER.md).

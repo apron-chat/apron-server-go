@@ -1912,8 +1912,10 @@ aprond's own page (above) takes any app.
   connection, so that the issuer's revocation and policy apply.
 - It accepts only an access token that is a JWT (RFC 9068: header `typ`
   `at+jwt` or `application/at+jwt`, in any case, so never an ID token)
-  signed by one of the issuer's keys (`jwks_uri`; RS256/384/512,
-  PS256/384/512, ES256/384, or EdDSA), whose `iss` is the issuer, whose
+  signed by one of the issuer's signing keys (`jwks_uri`, fetched again
+  for an unknown `kid` at most once a minute; RS256/384/512 and
+  PS256/384/512 with an RSA key of 2048 to 4096 bits, ES256/384, or EdDSA,
+  also by the name Ed25519), whose `iss` is the issuer, whose
   `aud` includes aprond's origin, which has not expired, and which carries
   no `cnf` (a token bound to a key, as is one whose `token_type` is not
   `Bearer`). Anything else is `denied`. It does not introspect opaque
