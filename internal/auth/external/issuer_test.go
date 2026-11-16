@@ -7,6 +7,7 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/rsa"
+	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"fmt"
 	"net/http"
@@ -189,10 +190,15 @@ func newTestKey(t *testing.T, kid string) testKey {
 	return testKey{key, jose.ES256, jose.JSONWebKey{Key: &key.PublicKey, KeyID: kid, Use: "sig"}}
 }
 
-// token is an access token for testOrigin from the issuer, signed with k.
-func (i *testIssuer) token(t *testing.T, k testKey) string {
+// token is an access token for testOrigin from the issuer, signed with k,
+// with its claims changed by change.
+func (i *testIssuer) token(t *testing.T, k testKey, change ...func(claims map[string]any)) string {
 	t.Helper()
-	payload, _ := json.Marshal(map[string]any{"iss": i.URL, "sub": "user-42", "aud": testOrigin, "exp": time.Now().Add(5 * time.Minute).Unix()})
+	claims := map[string]any{"iss": i.URL, "sub": "user-42", "aud": testOrigin, "exp": time.Now().Add(5 * time.Minute).Unix()}
+	for _, c := range change {
+		c(claims)
+	}
+	payload, _ := json.Marshal(claims)
 	if k.alg == algEd25519 {
 		// go-jose signs with no Ed25519 alg: by hand.
 		header, _ := json.Marshal(map[string]any{"alg": k.alg, "kid": k.public.KeyID, "typ": "at+jwt"})
@@ -352,6 +358,53 @@ func TestForeignKeySet(t *testing.T) {
 		i := newTestIssuer(t)
 		i.publish(test.key)
 		if got := accepts(i.foreign(t), i.token(t, test.key)); got != test.ok {
+			t.Errorf("%s: accepted %v, want %v", name, got, test.ok)
+		}
+	}
+}
+
+// A token is the issuer's, for this server, for a subject, and current
+// within a minute's leeway, and bound to no key.
+func TestForeignClaims(t *testing.T) {
+	i := newTestIssuer(t)
+	key := newTestKey(t, "k1")
+	i.publish(key)
+	f := i.foreign(t)
+	set := func(name string, value any) func(map[string]any) {
+		return func(claims map[string]any) {
+			if value == nil {
+				delete(claims, name)
+			} else {
+				claims[name] = value
+			}
+		}
+	}
+	in := func(d time.Duration) int64 { return time.Now().Add(d).Unix() }
+	for name, test := range map[string]struct {
+		change func(map[string]any)
+		ok     bool
+	}{
+		"as issued":            {func(map[string]any) {}, true},
+		"other issuer":         {set("iss", "https://other.example"), false},
+		"no sub":               {set("sub", nil), false},
+		"empty sub":            {set("sub", ""), false},
+		"no exp":               {set("exp", nil), false},
+		"expired":              {set("exp", in(-2*time.Minute)), false},
+		"expired, in leeway":   {set("exp", in(-30*time.Second)), true},
+		"fractional exp":       {set("exp", float64(in(time.Minute))+0.5), true},
+		"nbf ahead":            {set("nbf", in(2*time.Minute)), false},
+		"nbf ahead, in leeway": {set("nbf", in(30*time.Second)), true},
+		// Only exp and nbf bound the time: an iat ahead is no reason.
+		"iat ahead":        {set("iat", in(5*time.Minute)), true},
+		"no aud":           {set("aud", nil), false},
+		"other aud":        {set("aud", "https://other.example"), false},
+		"aud with a path":  {set("aud", testOrigin+"/"), false},
+		"aud among others": {set("aud", []string{"https://other.example", testOrigin}), true},
+		"aud not a string": {set("aud", 1), false},
+		"cnf":              {set("cnf", map[string]any{"jkt": "x"}), false},
+		"cnf null":         {set("cnf", jsontext.Value("null")), false},
+	} {
+		if got := accepts(f, i.token(t, key, test.change)); got != test.ok {
 			t.Errorf("%s: accepted %v, want %v", name, got, test.ok)
 		}
 	}
