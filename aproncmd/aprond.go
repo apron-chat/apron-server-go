@@ -65,7 +65,7 @@ type Options struct {
 		// (signalUnknownCredential can delete other accounts' passkeys on
 		// iOS/macOS 26). Check again on 2027-02-16. Turn on only where this
 		// server is the sole user of its RP ID.
-		SignalUnknown bool `long:"signal-unknown" description:"On the passkey page, ask the browser to hide a passkey no account here has (signalUnknownCredential); only for a server that is the sole user of its RP ID, and off while WebKit can delete other accounts' passkeys with it"`
+		SignalUnknown bool `long:"signal-unknown" description:"On the passkey page, say a passkey is for no account here and ask the browser to hide it (signalUnknownCredential); off, it is the usual error, which tells no one whether a credential is registered. Only for a server that is the sole user of its RP ID, and off while WebKit can delete other accounts' passkeys with it"`
 	} `group:"Passkeys" namespace:"webauthn"`
 
 	Upload struct {

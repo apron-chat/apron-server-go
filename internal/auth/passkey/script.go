@@ -6,9 +6,9 @@ import "html/template"
 // (or "Create passkey"), it asks the page for WebAuthn options, calls
 // navigator.credentials, has the page verify the result, and goes back to
 // the client with the code the page answers with. When the page answers
-// that no account has the passkey, it stays on the page, and asks the
-// passkey provider to hide it where the browser can, if the answer says to
-// (unknown_credential, with Scheme.SignalUnknown).
+// that no account has the passkey (unknown_credential, only with
+// Scheme.SignalUnknown), it asks the passkey provider to hide it, where the
+// browser can, and stays on the page.
 const pageScript = template.JS(`(() => {
   const main = document.querySelector("main");
   const button = document.getElementById("passkey");

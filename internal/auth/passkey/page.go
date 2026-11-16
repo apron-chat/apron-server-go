@@ -37,11 +37,11 @@ import (
 // does; and an addition's, begun on a signed-in connection, adds the
 // passkey to that account, only on a connection signed in to it.
 //
-// A login with a passkey that no account has, nor may yet have, such as
-// one made on the page whose code was never redeemed, stays on the page
-// and says so; with SignalUnknown, its script also asks the passkey
+// With SignalUnknown, a login with a passkey that no account has, nor may
+// yet have, such as one made on the page whose code was never redeemed,
+// stays on the page, which says so and whose script asks the passkey
 // provider to hide it (WebAuthn's signalUnknownCredential). Every other
-// failure is the usual error.
+// failure, and that one without SignalUnknown, is the usual error.
 
 // PagePath is the passkey page.
 const PagePath = "/passkey"
@@ -356,17 +356,18 @@ func (s *Scheme) pageVerify(w http.ResponseWriter, r *http.Request, f *pageFlow)
 	}
 	if f.action == "login" {
 		handle, verified, unknown, err := s.verifyLogin(raw, data)
-		if unknown != nil && !s.registering(unknown) {
+		if unknown != nil && s.SignalUnknown && !s.registering(unknown) {
 			// No account has this passkey, and no registration may yet
 			// make it one's, such as one whose code was never redeemed:
-			// the person stays on the page, and with SignalUnknown the
-			// script asks the passkey provider to hide it
-			// (signalUnknownCredential, with the ID of its own assertion).
-			answer := map[string]any{"error": "This passkey isn't for an account on " + hostOf(f.origin) + ". Try another passkey, or cancel."}
-			if s.SignalUnknown {
-				answer["unknown_credential"] = true
-			}
-			pageJSON(w, http.StatusBadRequest, answer)
+			// the script asks the passkey provider to hide it
+			// (signalUnknownCredential, with the ID of its own
+			// assertion), and the person stays on the page. Without
+			// SignalUnknown it is the usual error, which tells nobody
+			// whether a credential ID is registered.
+			pageJSON(w, http.StatusBadRequest, map[string]any{
+				"error":              "This passkey isn't for an account on " + hostOf(f.origin) + ". Try another passkey, or cancel.",
+				"unknown_credential": true,
+			})
 			return
 		}
 		if err != nil {

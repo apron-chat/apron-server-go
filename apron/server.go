@@ -156,13 +156,16 @@ type Config struct {
 	// session token could add a passkey of its own, sign in with it, and
 	// remove the owner's.
 	AddCredentialWithoutReauth bool
-	// SignalUnknownPasskeys has the passkey page ask the browser to hide a
-	// passkey that no account has, nor may yet have
-	// (signalUnknownCredential). Off, the page still says the passkey is
-	// not for an account here, and signals nothing. A server knows only its
-	// own accounts, so turn it on only where it is the sole user of its RP
-	// ID: no parent-domain RP ID shared with other services, and no other
-	// deployment on the same RP ID with storage of its own.
+	// SignalUnknownPasskeys has the passkey page say that no account has a
+	// passkey, when none has nor may yet have it, and ask the browser to
+	// hide it (signalUnknownCredential). Off, such a login gets the page's
+	// usual error, the same as a known passkey that fails: the distinct
+	// answer tells anyone who posts a made-up assertion whether a
+	// credential ID is registered, which is worth it only for the signal.
+	// A server knows only its own accounts, so turn it on only where it is
+	// the sole user of its RP ID: no parent-domain RP ID shared with other
+	// services, and no other deployment on the same RP ID with storage of
+	// its own.
 	//
 	// FIXME: keep off until Apple fixes
 	// https://bugs.webkit.org/show_bug.cgi?id=302624 and

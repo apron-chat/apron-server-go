@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -498,25 +499,35 @@ func TestPasskeyPageUnknownCredential(t *testing.T) {
 	p.loginCode(t, client, known)
 }
 
-// By default the page signals nothing: a passkey no account has gets the
-// page's message that it is not for an account here, and no
-// unknown_credential.
+// By default the page signals nothing, and a passkey no account has gets
+// exactly the answer of a known passkey that fails, so the page tells no
+// one whether a credential ID is registered.
 func TestPasskeyPageUnknownCredentialSignalOffByDefault(t *testing.T) {
 	p := passkeyPageServer(t)
 	client := oauthtest.New(t, pageOrigin)
-	screen := client.Get(p.at(client.URL(pageOrigin+"/passkey?action=login", nil)))
-	status, options := p.script(t, client, screen, "options", nil)
-	if status != http.StatusOK {
-		t.Fatalf("options = %d %#v", status, options)
+	login := func(a *testAuthenticator) (int, map[string]any) {
+		t.Helper()
+		screen := client.Get(p.at(client.URL(pageOrigin+"/passkey?action=login", nil)))
+		status, options := p.script(t, client, screen, "options", nil)
+		if status != http.StatusOK {
+			t.Fatalf("options = %d %#v", status, options)
+		}
+		encoded, _ := json.Marshal(a.assertion(t, options, pageOrigin, "localhost", 0x05))
+		return p.script(t, client, screen, "verify", url.Values{"credential": {string(encoded)}})
+	}
+	owner, _ := dialOrigin(t, p.http, testPasskeyOrigin)
+	known := newTestAuthenticator(t)
+	registerTestPasskey(t, owner, known)
+	impostor := newTestAuthenticator(t)
+	impostor.id, impostor.handle = known.id, known.handle
+	knownStatus, knownAnswer := login(impostor)
+	if knownStatus != http.StatusBadRequest || knownAnswer["error"] == nil {
+		t.Fatalf("a known passkey's bad signature = %d %#v", knownStatus, knownAnswer)
 	}
 	stranger := newTestAuthenticator(t)
 	stranger.handle = b64([]byte("a user handle no account has"))
-	encoded, _ := json.Marshal(stranger.assertion(t, options, pageOrigin, "localhost", 0x05))
-	status, answer := p.script(t, client, screen, "verify", url.Values{"credential": {string(encoded)}})
-	if status != http.StatusBadRequest || answer["error"] != "This passkey isn't for an account on localhost:8080. Try another passkey, or cancel." {
-		t.Fatalf("verify = %d %#v", status, answer)
-	}
-	if _, signals := answer["unknown_credential"]; signals {
-		t.Fatalf("signalled by default: %#v", answer)
+	status, answer := login(stranger)
+	if status != knownStatus || !reflect.DeepEqual(answer, knownAnswer) {
+		t.Fatalf("an unknown passkey = %d %#v, a known one that fails = %d %#v", status, answer, knownStatus, knownAnswer)
 	}
 }
