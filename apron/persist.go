@@ -209,9 +209,12 @@ type storedUser struct {
 	// Enrolled is what the invitation that made the account left with it.
 	Enrolled *storedEnrollment `json:"enrolled,omitzero"`
 	// Scope is the rooms the account is limited to (scope.go).
-	Scope    *storedScope `json:"scope,omitzero"`
-	External string       `json:"external,omitzero"`
-	Granted  []string     `json:"granted,omitzero"`
+	Scope *storedScope `json:"scope,omitzero"`
+	// Consents are the hosts of apps the account allowed on the external
+	// sign-in page, with when, in Unix milliseconds (consents.go).
+	Consents map[string]int64 `json:"consents,omitzero"`
+	External string           `json:"external,omitzero"`
+	Granted  []string         `json:"granted,omitzero"`
 }
 
 type storedMute struct {
@@ -222,6 +225,7 @@ type storedMute struct {
 type storedSession struct {
 	User       string    `json:"user"`
 	Origin     string    `json:"origin"`
+	AnyOrigin  bool      `json:"any_origin,omitzero"`
 	Expires    time.Time `json:"expires"`
 	Credential string    `json:"credential,omitzero"`
 }
@@ -340,7 +344,7 @@ func (s *Server) entriesLocked(d dirtySet) []store.Entry {
 	}
 	for key := range d.sessions {
 		if session, ok := s.sessions[key]; ok {
-			put(entrySession, sessionID(key), storedSession{User: session.user.id, Origin: session.origin, Expires: session.expires, Credential: session.credential})
+			put(entrySession, sessionID(key), storedSession{User: session.user.id, Origin: session.origin, AnyOrigin: session.anyOrigin, Expires: session.expires, Credential: session.credential})
 		} else {
 			del(entrySession, sessionID(key))
 		}
@@ -443,7 +447,7 @@ func storedUserOf(u *userState) storedUser {
 		Bot: u.botOf, Identities: u.identities, Records: u.records, Grants: u.granted,
 		Email: u.identities[email.Name], External: u.identities[external.Name],
 		Passkey: u.records[passkey.Name], Granted: u.granted[external.Name],
-		Enrolled: u.enrolled.stored(), Scope: u.scope.stored(),
+		Enrolled: u.enrolled.stored(), Scope: u.scope.stored(), Consents: u.consents,
 	}
 	if !u.created.IsZero() {
 		stored.Created = u.created.UnixMilli()
@@ -672,6 +676,7 @@ func (s *Server) restoreLocked() (map[string]bool, error) {
 		if stored.Pings != nil {
 			u.pings = stored.Pings
 		}
+		u.consents = stored.Consents
 		s.users[id] = u
 	}
 	for _, id := range order {
@@ -769,7 +774,7 @@ func (s *Server) restoreLocked() (map[string]bool, error) {
 			return nil, err
 		}
 		if u := s.users[stored.User]; u != nil && u.account() && now.Before(stored.Expires) {
-			s.sessions[[32]byte(key)] = session{user: u, origin: stored.Origin, expires: stored.Expires, credential: stored.Credential}
+			s.sessions[[32]byte(key)] = session{user: u, origin: stored.Origin, anyOrigin: stored.AnyOrigin, expires: stored.Expires, credential: stored.Credential}
 		} else {
 			s.touchSession([32]byte(key))
 		}

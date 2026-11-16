@@ -27,7 +27,13 @@ Defaults:
 
 - HTTP and WebSocket listener: `127.0.0.1:8080` (`--addr`)
 - WebSocket endpoint: `/ws`; health endpoint: `/healthz`; passkey related
-  origins: `/.well-known/webauthn`
+  origins: `/.well-known/webauthn`; the [passkey page](#the-passkey-page):
+  `/passkey`; with
+  [external sign-in](#external-sign-in), its OAuth authorization server:
+  `/.well-known/oauth-authorization-server`, `/oauth/authorize`, and
+  `/oauth/token`, and its protected resource metadata:
+  `/.well-known/oauth-protected-resource` (the only one of these with
+  `--external.issuer`)
 - embed endpoints: `/write/<token>`, `/files/<embed_id>/<secret>`,
   `/live/<embed_id>/<secret>`; custom emoji catalog:
   `/emoji/catalog-<hash>.json`
@@ -35,7 +41,9 @@ Defaults:
 - `server` frame: `apron: 10`, `agent: "apron-go/10"`, and
   `capabilities`: `history`, `edit`, `rooms`, `reactions`, `activity`,
   `embed:upload`, `embed:append`, `embed:terminal`, `command`, `status`,
-  `ext`, `ext:editors` (see [Extension data](#extension-data)), `ext:emoji`,
+  `ext`, `ext:editors` (see [Extension data](#extension-data)), `ext:oauth`
+  while `server.auth` lists `external` (see [External sign-in](#external-sign-in)),
+  `ext:emoji`,
   with `server.ext.emoji.catalog_url` (see [Custom emoji](#custom-emoji);
   not on a connection whose URLs would be plain `http:` on a host other than
   a loopback one), and, while `--max-private-rooms` bounds private rooms,
@@ -46,11 +54,15 @@ Defaults:
 - seeded default room: `general` (title `General`)
 - authentication (`server.auth`, in this order): WebAuthn passkeys, email
   codes with `--email.enable` (off by default), `external` while an
-  [extension](#extensions) offers it, bearer-token resume, and `guest`
+  [extension](#extensions) offers it or `--external.issuer` names an
+  authorization server, bearer-token resume, and `guest`
   unless `--disable-guests`; `server.signup` lists every one but `token`,
   which only resumes an account: a guest who registers a passkey or adds an
   address becomes an account, and an email or external sign-in with a new
-  address or identity creates one
+  address or identity creates one. Without guests (`--disable-guests`, or
+  sign-in an extension restricts), `signup` leaves out `webauthn` too, since
+  a passkey registration then makes an account only with an
+  [invitation](#invitations); with no other scheme it is `[]`
 - passkey RP ID: `localhost`; frontend origins: `http://localhost:5173` and
   `http://localhost:8080`
 - no `server.welcome`, `title`, or `avatar`, `description` the `general`
@@ -125,7 +137,8 @@ Flags (`aprond --help` lists them all):
   not, a new `server` frame after the `room_update` and before the result.
 - `--client-ip-header <header>`, behind a reverse proxy, names the header
   that carries the client's address, such as `X-Forwarded-For` or
-  `X-Real-IP`, for the per-client limits of email sign-in. The server takes
+  `X-Real-IP`, for the per-client limits of email sign-in and the
+  [passkey page](#the-passkey-page). The server takes
   the last entry across every line of the header, which the proxy in front
   added itself, and drops a port; a value that is not an IP address falls
   back to the connection's own. Set it only behind a proxy that adds that
@@ -154,6 +167,17 @@ Flags (`aprond --help` lists them all):
   account that has one without a recent passkey sign-in, which a stolen
   session token could then use to take the account over; see
   [Managing passkeys](#managing-passkeys).
+  `--webauthn.signal-unknown` (`Config.SignalUnknownPasskeys`, off by
+  default) has the passkey page say a passkey is for no account here and
+  ask the browser to hide it; off, that is the page's usual error, which
+  tells no one whether a credential is registered. See
+  [The passkey page](#the-passkey-page).
+  Leave it off for now: on iOS and macOS 26, `signalUnknownCredential`
+  can delete other accounts' passkeys
+  ([WebKit bug 302624](https://bugs.webkit.org/show_bug.cgi?id=302624),
+  [WebKit bug 322267](https://bugs.webkit.org/show_bug.cgi?id=322267));
+  check again on 2027-02-16. Even then, turn it on only where this server
+  is the sole user of its RP ID.
 - `--upload.dir <directory>` holds uploaded files, by default
   `aprond/uploads` in the user data directory. At start the server removes
   files named `*.upload` there that the store does not refer to, and nothing
@@ -254,8 +278,9 @@ backend only keeps entries and applies batches:
 
 What survives a restart: rooms and threads with their complete logs, message
 state and reactions, read cursors, accounts (passkey, email, and external
-sign-in users) with their identities, passkey credentials, and the roles
-their external sign-in granted, profiles, memberships, push registrations
+sign-in users) with their identities, passkey credentials, the roles
+their external sign-in granted, and the apps they allowed on the external
+sign-in page, profiles, memberships, push registrations
 (with their keys, `push_id`, scopes, and when they were last registered),
 when they were made, the status they choose with `me`, when they were last shown `offline`
 (`seen`) and whether they are shown otherwise, so that after a crash those
@@ -489,7 +514,7 @@ the user leaves one to make room. Threads are not counted, since only a
 private room's members can be added to its threads. With a bound, the
 `server` frame advertises it as `ext.settings.private_rooms` under capability
 `ext:settings`, which
-[apron's EXTENSIONS.md](https://github.com/shazow/apron/blob/main/EXTENSIONS.md#extsettings)
+[apron's `ext:settings`](https://github.com/shazow/apron/blob/main/extensions/ext_settings.md)
 defines; its `read_cursors` is absent, so `true`, since the server keeps
 read cursors.
 There is no server-wide bound, and a private room is never removed: like
@@ -778,7 +803,7 @@ the URLs it was sent as disclosed.
 ## Custom emoji
 
 The server offers custom emoji as
-[apron's EXTENSIONS.md](https://github.com/shazow/apron/blob/main/EXTENSIONS.md#extemoji)
+[apron's `ext:emoji`](https://github.com/shazow/apron/blob/main/extensions/ext_emoji.md)
 defines them, under capability `ext:emoji`. Every `server` frame carries
 `ext.emoji.catalog_url`, before sign-in too, except on a connection whose
 URLs would start with `http:` and a host other than a loopback one
@@ -868,7 +893,7 @@ extension asks of them without it: every user may write, any member of a
 room may add others to it with `room_join` and a `user_id`, and only a
 message's author may move it.
 
-The server offers [`ext:editors`](https://github.com/shazow/apron/blob/main/EXTENSIONS.md#exteditors):
+The server offers [`ext:editors`](https://github.com/shazow/apron/blob/main/extensions/ext_editors.md):
 a message whose current snapshot has `ext.editors` `{"body.text":
 "mentioned"}` lets each user in its current `body.mentions` save its text.
 Such a save takes only `body.text` from the request; the room, the rest of
@@ -1407,7 +1432,9 @@ Successful registration or login, like an [email sign-in](#email-sign-in),
 returns an opaque bearer token for `scheme: "token"` on later connections
 ([PROTOCOL.md §3.2](https://github.com/shazow/apron/blob/main/PROTOCOL.md#32-authentication)).
 Tokens last 30 days from their latest use, are stored hashed on the
-server, and are bound to the frontend origin. A token sign-in renews the
+server, and are bound to the frontend origin, which alone may resume them
+(a token from a code, from the [passkey page](#the-passkey-page) or
+[external sign-in](#external-sign-in), is not). A token sign-in renews the
 token and answers with the same token rather than a replacement, since
 several tabs may share it; clients that keep the latest token keep it.
 Sign-out drops the local token and reconnects. Already authenticated
@@ -1421,6 +1448,106 @@ so they survive a restart with the default SQLite store; with `--store memory`
 a restart invalidates them, including passkeys still present in your
 authenticator. An account that lost every passkey recovers through
 [email sign-in](#email-sign-in) if it has an address.
+
+### The passkey page
+
+A client that cannot use the RP ID, such as an app, a terminal, or a web
+client on a domain the RP does not list, runs the passkey on aprond's own
+**passkey page** at `/passkey` instead, an OAuth authorization endpoint
+like [external sign-in](#external-sign-in)'s, and finishes the `webauthn`
+exchange with the code it returns. aprond offers the page while its own
+origin (`--public-url`, or the scheme and host a request arrives on) is one
+of the `--webauthn.origin`s: by default `http://localhost:8080`, so `make
+run` has it; a deployment lists its `--public-url` there, as the examples
+above do.
+
+- **Begin.** A begin step adds `"external": {"url": "https://chat.example/passkey?action=login"}`
+  to `challenge_id` and `public_key`. A registration's is
+  `?action=register&name=…`, and one on a signed-in connection, guests
+  included, an addition: `?action=register&request=<handle>`, which names
+  that account for ten minutes. The handle is the account, sealed
+  (AES-GCM, with a key each aprond makes as it starts), so aprond keeps
+  nothing for an addition, and no number of begins can fill a table that
+  holds up anyone's ceremony; a handle opens the page until it expires, or
+  aprond restarts, and its code adds a passkey only on a connection signed
+  in to that account. A begin whose page cannot be offered still returns
+  `challenge_id` and `public_key` to a connection that can run the
+  ceremony itself. A connection whose `Origin` is not a
+  `--webauthn.origin` cannot, so its begin returns `external` alone;
+  without the page it is `denied`, as before.
+- **The page** takes the same authorization request as `/oauth/authorize`
+  (PKCE `S256`, `state`, `resource` the server's origin), checks it the same
+  way, showing any problem on the page, as it does a bad `action`, and has
+  one screen. A login asks before the passkey: "Sign in to chat.example on
+  app.example?", "It will be able to read and send messages as you.", that
+  the server has not verified the app, and to continue only if they just
+  started signing in on app.example ("on an app on this device" for an
+  app's scheme or loopback), with **Continue with passkey**; once the
+  passkey is verified, the page returns to the app with a code at once,
+  without another screen. A registration asks the same way ("wants to
+  create an account for you on …, with a new passkey", **Create passkey**),
+  and so does an addition, which names the account before the passkey is
+  made ("wants to add a passkey to Ada (@ada)'s account on …"). Cancel
+  returns `error=access_denied`. The
+  page's small script asks the page for WebAuthn options before the tap:
+  as the page shows, again after an attempt that fails or is dismissed,
+  and every minute, half the two minutes a ceremony lasts, so the tap goes
+  straight to the passkey, within its user activation, as Safari needs.
+  Options held longer, as in a background tab, are asked for again on the
+  tap, and the page says to tap again. The script posts the result back;
+  the page requires user verification, the page's own origin
+  in the client data, and no `crossOrigin` or `topOrigin`, and refuses to
+  be framed.
+- **A passkey no account has.** A passkey made on the page whose code is
+  never redeemed (the tab closed, or the code failed or was used up) stays
+  on the device, and a later login may offer it. With
+  `--webauthn.signal-unknown`, when a login on the page presents a passkey
+  that no account has, and no registration may yet make it one's (one
+  verified on the page counts until the server finishes it, or else for
+  seven minutes, its code's five and two more, even once the code is used
+  or refused; one verified in the client, until the server finishes it),
+  the page says "This passkey isn't for an account on chat.example. Try
+  another passkey, or cancel.", stays open, and asks the
+  passkey provider to hide it with
+  [`PublicKeyCredential.signalUnknownCredential`](https://www.w3.org/TR/webauthn-3/#sctn-signal-methods)
+  where the browser has it, with the RP ID and the ID of the passkey just
+  used. Only an assertion made for the page's ceremony counts (its
+  challenge, RP ID, origin, and user verification); any other failure,
+  such as a known passkey's bad signature, is the usual error and
+  signals nothing. A passkey removed with `account.credential_remove` is
+  then one no account has, and so, after a restart with `--store memory`,
+  is every earlier passkey: a login with one is signalled too.
+  The signal is off by default, and then a passkey no account has gets the
+  usual error, exactly as a known passkey that fails: the distinct answer
+  would tell anyone who posts a made-up assertion whether a credential ID
+  is registered, which is worth it only for the signal. On iOS and macOS
+  26, WebKit's `signalUnknownCredential` can delete passkeys of other
+  accounts on the same RP ID
+  ([WebKit bug 302624](https://bugs.webkit.org/show_bug.cgi?id=302624),
+  [WebKit bug 322267](https://bugs.webkit.org/show_bug.cgi?id=322267)),
+  so leave it off until Apple fixes them; check again on 2027-02-16. And
+  a server knows only its own accounts: turn it on only where it is the
+  sole user of its RP ID, with no other service on a parent-domain RP ID
+  and no other deployment on the same RP ID with storage of its own,
+  whose passkeys would look unknown here.
+- **Finishing.** `{"scheme": "webauthn", "action", "step": "finish", "code",
+  "code_verifier", "redirect_uri", "client_id"}`, with the begin's
+  `action`, on any connection: a login's code signs in to the passkey's
+  account (`{you, token}`); an addition's adds the passkey to the account
+  that began it, only on a connection signed in to it (`{you, token}`, as
+  in the client); and a new account's registration needs what one in the
+  client needs, an [invitation](#invitations) presented with the finish on
+  a connection that is not signed in. A code from the page finishes only
+  `webauthn` with its own action, works once, and lasts five minutes. The
+  token, a token from a code, is bound to no origin: it resumes from any
+  origin, or with none, unlike one from a ceremony in the client.
+- **Limits.** Each client (its IP address, or IPv6 /64; with
+  `--client-ip-header`, the address the proxy reports) may have the page
+  verify thirty passkeys, then one every ten seconds; past that the page
+  answers `429` with `Retry-After` and "Too many tries. Wait a minute, then
+  try again." One page verifies at most ten, then ends: "Too many tries.
+  Go back to the app and start again." Each try counts before the passkey
+  is looked at, whether or not an account has it.
 
 ### Managing passkeys
 
@@ -1443,7 +1570,9 @@ in:
   service token this connection signed in with, and the push registrations
   it made, and closes it; `{others: true}` ends every other session, device,
   and service token of the account, removes the push registrations they
-  made, and closes its other connections.
+  made, closes its other connections, and forgets the apps it allowed on
+  the external sign-in page, which then ask again
+  ([remembered apps](#external-sign-in)).
 
 Adding a backup is registering another passkey while signed in, up to ten.
 Adding one to an account that has one, removing one, and signing out the
@@ -1493,6 +1622,11 @@ registration, in both steps:
 {"method": "auth", "id": "2", "params": {"scheme": "webauthn", "action": "register", "step": "finish", "challenge_id": "…", "invitation": "apron_invite_…", "credential": {}}}
 ```
 
+`server.signup` does not list `webauthn` on a server without guests,
+since only someone with an invitation can register there, and `signup` is
+what any client can do; an invited client registers all the same, as
+`webauthn` is in `server.auth`.
+
 The begin makes nothing: no guest, and no account. The finish verifies the
 passkey as any registration does, then checks the invitation again, and in
 one change makes the account, with the name the request asked for or the
@@ -1522,17 +1656,19 @@ over the same WebSocket; no HTTP authentication endpoints are needed.
 
 | `params.action` and `params.step` | Other parameters | Result |
 | --- | --- | --- |
-| `action: "register", step: "begin"` | None; current connection must be authenticated | `{challenge_id, public_key}` creation options |
+| `action: "register", step: "begin"` | None; current connection must be authenticated, or present an invitation | `{challenge_id, public_key, external?}` creation options |
 | `action: "register", step: "finish"` | `challenge_id`, `credential`: browser credential JSON | `{you, token}` |
-| `action: "login", step: "begin"` | None | `{challenge_id, public_key}` discoverable request options |
+| `action: "login", step: "begin"` | None | `{challenge_id, public_key, external?}` discoverable request options |
 | `action: "login", step: "finish"` | `challenge_id`, `credential`: browser credential JSON | `{you, token}` |
+| either action, `step: "finish"` | `code`, `code_verifier`, `redirect_uri`, `client_id` from the [passkey page](#the-passkey-page) | `{you, token}` |
 
 Bearer resumption uses the separate `token` authentication scheme:
 `{"scheme":"token","token":"..."}`. Dropping the token and reconnecting
 signs out the current client; tokens remain valid for their configured lifetime
 and are not revoked by disconnecting.
 
-Every ceremony request includes `params.scheme: "webauthn"`. Binary values in options and
+Every ceremony request includes `params.scheme: "webauthn"`. `external` is
+the passkey page, present while the server offers it. Binary values in options and
 credentials use unpadded base64url, matching the browser's
 `PublicKeyCredential.parseCreationOptionsFromJSON`,
 `parseRequestOptionsFromJSON`, and `toJSON` APIs. Begin responses do not
@@ -1547,7 +1683,7 @@ With both nil only guest authentication is enabled.
 
 ## Email sign-in
 
-With email sign-in ([PROTOCOL.md §4.11](https://github.com/shazow/apron/blob/main/PROTOCOL.md#411-email-and-external-sign-in)),
+With email sign-in ([PROTOCOL.md §4.11](https://github.com/shazow/apron/blob/main/PROTOCOL.md#411-email-sign-in)),
 `server.auth` and `server.signup` list `email`. An `auth` with
 `scheme: "email"` and `email` **proposes**, and one with `token`
 **approves**. A proposal returns `{}`, whether or not the address has an
@@ -1558,26 +1694,38 @@ domain without a dot such as `a@localhost` is `invalid_params`, and so is a
 malformed `name` or `user_id`, which leaves the proposal usable.
 
 A proposal may carry `state`, a string of at most 256 bytes (longer is
-`too_large`), which its link returns unchanged. A connection has one
+`too_large`), which its link returns unchanged, and with which its code
+works on another connection. A connection has one
 pending proposal, and a new one replaces it. It lasts ten minutes, also
 after its connection closes, and is consumed when approved. Five wrong
 tokens cancel it: on its own connection any wrong token counts, and on any
-connection a link token whose handle (its first ten characters) names the
-proposal but whose secret is wrong. It is dropped when the connection's
+connection a wrong token with the proposal's `state`, and a link token
+whose handle (its first ten characters) names the proposal but whose
+secret is wrong. It is dropped when the connection's
 identity changes (a guest `auth`, a token resume, an approval). Proposals
-are kept in memory only. Approval takes `email`, or `token` (§4.11.3): a
-`token` that resumes no session approves a proposal when the connection
-has one pending, or when its handle names one, and wrong tokens count the
-same way. External sign-in uses the same proposals and tokens; it is
-`unsupported` unless an extension offers it ([Extensions](#extensions)).
+are kept in memory only. Approval takes `email`, or `token` (§4.11.3), and
+may carry the proposal's `state`: a `token` that resumes no session
+approves a proposal when the connection has one pending, when its handle
+names one, or when its `state` does, and wrong tokens count the same way.
+When proposals on several connections carry the same `state`, it names the
+latest.
 
 A link opens `--email.link-url` (or `--public-url`) with
 `#token=…&state=…&server=…` in its fragment: `state` when the proposal
-carried one, and `server`, this server's WebSocket URL, when
-`--public-url` is set.
+carried one, and always `server`, this server's WebSocket URL, under
+`--public-url`, or else under the scheme and host the proposing connection
+arrived on.
+
+Each email gives this server's WebSocket URL with the code, as in "Your
+sign-in code for wss://chat.example/ws is 418092", and says to type the
+code only in an app connected to it (§4.11.2). A sender of its own
+(`apron.EmailSender`) finds it in `SignInEmail.Server`, and
+`SignInEmail.Text` writes both.
 
 - **Signing in**, proposed on a connection not signed in. The email carries
-  a six-digit code, which works only on the proposing connection, and, when
+  a six-digit code, which works only on the proposing connection, or with
+  the proposal's `state` on another, such as the proposer's after a
+  reconnect, and, when
   `--email.link-url` (or `--public-url`) is set, a link with a long token
   (130 random bits behind its handle), which works on any connection not
   signed in, such as one the link opens. Approving it signs the presenting connection in, which
@@ -1586,13 +1734,15 @@ carried one, and `server`, this server's WebSocket URL, when
   by the guests' rules or else `user_<n>`, honors a requested `name`, and
   joins `general`, delivered after the result. The `name` and `user_id`
   requested come from the approval, else, only when the proposing
-  connection approves, from the proposal: a link opened elsewhere is the
+  connection approves, from the proposal (a code with `state` elsewhere
+  takes them from the approval only, as a link carries the `state` too): a link opened elsewhere is the
   address's owner reading the email, whose account the proposer must not
   name. The result is `{you, token}`. Either token presented on
   a signed-in connection is `denied`, and the proposal stays.
 - **Adding** the address, proposed on a connection signed in, guests
   included. The email carries the code, which works only on the proposing
-  connection, and a link, whose token works only on a connection signed in
+  connection, or with the proposal's `state` on another connection signed in
+  to the proposing account, and a link, whose token works only on a connection signed in
   to the proposing account, such as another tab of it: so someone who
   proposes adding their victim's address to their own account cannot have
   the victim approve it by clicking. Elsewhere it is `denied`, and the
@@ -1601,8 +1751,9 @@ carried one, and `server`, this server's WebSocket URL, when
   yet; otherwise the proposal still answers `{}`, and its tokens, never
   sent, are `denied`. Approving adds the address to the proposing account, which a
   guest becomes an account by, keeping its `user_id`, rooms, and messages,
-  and returns `{}`, with a `user` notification when the account's roles
-  change. A guest that added an address signs in with it later.
+  and returns the account as `you`, with its roles; the account's other
+  connections get a `user` notification when its roles change. A guest that
+  added an address signs in with it later.
 
 A sign-in's link proves only that its presenter read the mail, so a
 sign-in's tokens never add an address, and an addition's never sign anyone
@@ -1619,10 +1770,12 @@ Limits keep proposals from flooding anyone with email. Each answers
   `--client-ip-header` behind a reverse proxy, the address the proxy
   reports): ten proposals, then one every three minutes.
 - Per connection: five proposals, then one every two minutes.
-- At most sixteen deliveries at once, and 10,000 outstanding links.
+- At most sixteen deliveries at once, 10,000 outstanding links, and 10,000
+  outstanding proposals with a `state`.
 
-A code can be guessed only on the connection that proposed it, five tries a
-proposal, and each proposal counts against its address, so the
+A code can be guessed only on the connection that proposed it, or with
+the proposal's unguessable `state`, five tries a proposal from any
+connection, and each proposal counts against its address, so the
 per-address limit bounds guessing to thirty tries an hour against a million codes; a link
 token cannot be guessed, and wrong guesses at the secret behind a known
 handle cancel its proposal.
@@ -1641,10 +1794,10 @@ Email accounts are kept like passkey users, and an account may have both: a
 passkey registered on a signed-in connection is added to that account
 (§4.10). The address is never sent to clients.
 
-A sign-in link opens that page with the token in the fragment, and, with
-`--public-url`, this server's WebSocket URL (§4.11's suggested convention),
-form-encoded:
-`https://chat.example/#token=Hk41x9…&server=wss%3A%2F%2Fchat.example%2Fws`.
+A sign-in link opens that page with the token and this server's WebSocket
+URL in the fragment (§4.11's suggested convention), form-encoded, and the
+URL with `:` and `/` left as they are (PROTOCOL.md Appendix A.4):
+`https://chat.example/#token=Hk41x9…&server=wss://chat.example/ws`.
 A client reads it to sign in, on a connection not signed in, to the server
 named.
 The log sender, for development, writes codes and links to the server log
@@ -1665,6 +1818,226 @@ implementing `apron.EmailSender`.
 Invitation tokens that sign up several people
 ([PROTOCOL.md Appendix B](https://github.com/shazow/apron/blob/main/PROTOCOL.md#appendix-b--valid-scenarios-informative))
 are not implemented: a token here always resumes one account.
+
+## External sign-in
+
+External sign-in ([PROTOCOL.md §4.12](https://github.com/shazow/apron/blob/main/PROTOCOL.md#412-external-sign-in))
+is a profile of OAuth 2.1. aprond is its own authorization server, so any
+app can use it without registering: it lists `external` in `server.auth`
+and `server.signup` once an [extension](#extensions) offers it
+(`Registrar.ExternalSignIn`, as the [sso example](examples/sso) does with
+GitHub), or names [another authorization server](#another-authorization-server)
+with `--external.issuer`, and it is `unsupported` otherwise.
+
+The `server` frame then lists capability `ext:oauth` too, before signing
+in as after; it carries no `server.ext` data. PROTOCOL.md's `external` is
+a minimal core: a begin returns the page's `url` (and `issuer`, which
+stays in the core), and the app redeems the code on a connection.
+`ext:oauth` says the server also offers what generic OAuth clients and
+libraries use, below: as its own authorization server, its metadata (RFC
+8414) and `POST /oauth/token`, which takes the client by body or by HTTP
+Basic; with `--external.issuer`, the
+[issuer's features](#another-authorization-server); and in either mode,
+protected resource metadata (RFC 9728) that names the authorization
+server.
+
+- **Begin.** `{"scheme": "external"}` authenticates nothing, and returns
+  `{"external": {"url": "https://chat.example/oauth/authorize"}}`, on the
+  connection's base URL (`--public-url`, or the scheme and host the
+  WebSocket request arrived on).
+- **The page.** The app opens that URL with `response_type=code`, any
+  `client_id`, a `redirect_uri`, PKCE (`code_challenge`,
+  `code_challenge_method=S256`), `state`, and `resource`, the server's
+  origin. `redirect_uri` must be `https`, a private-use scheme with a `.`
+  (`com.example.app:/signed-in`), or `http` on `127.0.0.1`, `[::1]`, or
+  `localhost` with any port. An invalid request shows its problem on the
+  page (`400`, naming the OAuth error, such as `invalid_target` for another
+  `resource`) and goes nowhere, even with a good `redirect_uri`: any app may
+  name an `https` one, so redirecting errors would make the page an open
+  redirector. The page returns to the app only once the person acts, with a
+  code or with `error=access_denied`. The issuer is the server's origin, as
+  above; a development server on loopback `http` also takes `resource`
+  spelled with `https://` and the same host, which §4.12.1 has clients send.
+- **Confirmation.** The page hands the person straight to the
+  extension's start function, which typically redirects to an identity
+  provider; the extension's callback calls `Complete` with the identity
+  (or `Cancel`, when the person declined there). The page then asks once,
+  naming who is asking by the redirect's host, "An app on this device
+  (com.example.app)" for a private-use scheme, or "An app on this device"
+  for loopback: "Allow chat.alice.dev to use Ada (@ada)'s account?" for an
+  identity with an account, or, for a new identity, "chat.alice.dev wants
+  to sign in to chat.example as you. It will be able to read and send
+  messages as you." (true whether the code makes an account or is added to
+  the redeeming connection's), with **Continue**. Both say that the server
+  has not verified the app, and to allow (or continue) only if they just
+  started signing in on that host, or "on an app on this device"; "Not
+  you? Sign in as someone else" starts the extension's sign-in again.
+  Allow redirects with `code`, `state`, and `iss`; Cancel with
+  `error=access_denied`. An identity the server may not admit gets a page
+  that says so instead. The pages refuse to be framed (`frame-ancestors
+  'none'`, `X-Frame-Options: DENY`) and are never cached. A person has ten
+  minutes on the page.
+- **Remembered apps.** When an account allows an app whose `redirect_uri`
+  is `https` on a host other than this device (not `localhost`, `*.localhost`,
+  or a loopback address), the account remembers that exact `redirect_uri`
+  with its other data (at most 32, the oldest forgotten first). The next
+  sign-in to that account with the same `redirect_uri` skips the
+  confirmation and returns with a code at once; another page on the same
+  host is asked again. An app's scheme or a
+  loopback redirect, which any app on the device can claim, is never
+  remembered, and asks every time. Signing out the other sessions
+  (`account.sign_out` with `others`), `Server.SignOut`, and anything else
+  that signs the account out everywhere, such as `Allowlist.Disallow`,
+  forget them all. A new identity's Continue remembers nothing, as it
+  has no account yet; the account asks once more.
+- **Codes** are single use, last five minutes, and are bound to the
+  request's `client_id`, `redirect_uri`, PKCE challenge, and `resource`;
+  codes and pages are kept in memory only, at most 10,000 of each.
+- **Redeeming on a connection.** `{"scheme": "external", "code",
+  "code_verifier", "redirect_uri", "client_id"}` on a connection not
+  signed in signs in to the identity's account, making one for a new
+  identity, which takes the requested `name` and `user_id`, else the
+  extension's suggestions, as email accounts do: `{you, token}`, the token
+  a session token as a passkey's is, except that, as a token from a code,
+  it is bound to no origin, and resumes from any origin or with none. On a
+  signed-in connection, guests included, it adds the identity to the
+  account and returns `{you}` (with a `token` too for a guest, which
+  becomes an account by it), keeping the account's name; an identity of
+  another account, or a second external identity, is `denied`. Each
+  sign-in sets the roles the extension grants. A wrong, used, or expired
+  code is `denied`, and any attempt uses the code up. An `external`
+  request with `token` is `denied`: this server's tokens are for `scheme:
+  "token"`.
+- **Redeeming at the token endpoint.** `POST /oauth/token`, form-encoded
+  with `grant_type=authorization_code` and the same four fields (and
+  `resource`, which must match), returns `{"access_token", "token_type":
+  "Bearer"}`, a session token for `scheme: "token"` like one redeemed on a
+  connection: bound to no origin, whatever the request's `Origin`, so it
+  resumes on a WebSocket from any origin or with none. Errors are OAuth's
+  (`invalid_request`, `invalid_client`, `invalid_grant`,
+  `unsupported_grant_type`, `invalid_target`).
+- **Client authentication.** Every app is a public client. It names itself
+  with `client_id` in the body, or by HTTP Basic with an empty password
+  (RFC 6749 §2.3.1: `Authorization: Basic base64(urlencode(client_id) +
+  ":")`), as OAuth libraries such as golang.org/x/oauth2 try first; the
+  two are the same. Both, naming different clients, are `invalid_request`;
+  another `Authorization` scheme, or a Basic password, is `invalid_client`
+  (`401`, with `WWW-Authenticate`), which keeps the code, so a library
+  that then retries with `client_id` in the body succeeds. A
+  `client_secret` in the body is ignored. The metadata lists
+  `token_endpoint_auth_methods_supported: ["none"]`, since Basic carries
+  no secret here.
+- **Refusals keep the code.** A request refused before the code is looked
+  up does not use it up: one not form-encoded, with a parameter twice,
+  another `grant_type`, the client refusals above, or without `code`,
+  `code_verifier`, `redirect_uri`, or a `client_id`. A redemption attempt
+  uses it up, right or wrong, however the app named itself.
+- `/.well-known/oauth-authorization-server` is the server's metadata
+  (RFC 8414). `/.well-known/oauth-protected-resource` is its protected
+  resource metadata (RFC 9728): `{"resource": "https://chat.example",
+  "authorization_servers": ["https://chat.example"]}`, naming the server's
+  origin both as the resource and as its authorization server, the issuer
+  of its metadata, so a client that starts from the resource, as MCP's
+  do, finds the same issuer either way. It lists no
+  `bearer_methods_supported`: a token goes in the WebSocket's `auth`
+  request, not in RFC 6750's header, body, or query. The metadata
+  documents and the token endpoint allow any origin (CORS `*`, and
+  `Authorization` in a preflight).
+
+An extension names an identity by a `Subject` that never changes for the
+person, such as `github:583231`, never by a name; `--role` and the
+allowlist name it as `external:<subject>`.
+
+### Another authorization server
+
+Instead of an extension's sign-in on its own page, aprond can name another
+authorization server, such as an OpenID Connect provider like Pocket ID
+(`Config.ExternalIssuer` in the library):
+
+```sh
+aprond --public-url https://chat.example \
+  --external.issuer https://id.example --external.scope "openid profile"
+```
+
+Each app names itself to the issuer with its own `client_id`: the `https`
+URL of its [client ID metadata document](https://datatracker.ietf.org/doc/draft-ietf-oauth-client-id-metadata-document/),
+which lists its `client_name` and `redirect_uris`, with
+`token_endpoint_auth_method` `none`. aprond puts no `client_id` in the URL,
+and there is no shared client. An app
+without a metadata document cannot use this mode; an extension's sign-in on
+aprond's own page (above) takes any app.
+
+- A begin returns the issuer's `authorization_endpoint`, from its metadata
+  (RFC 8414's `/.well-known/oauth-authorization-server`, before any path
+  of the issuer's, else OpenID Connect's `/.well-known/openid-configuration`
+  after it; either alone will do), with `scope` in its query, and
+  `issuer`: `{"external": {"url":
+  "https://id.example/authorize?scope=openid+profile", "issuer":
+  "https://id.example"}}`. The app adds its own `client_id`, and redeems
+  with it.
+- With `code` (PROTOCOL.md's core), aprond redeems the code at the issuer's
+  `token_endpoint`, sending `resource`, its origin. With `token` (`ext:oauth`
+  only; a core server answers it `denied`), it takes an access token that the
+  app redeemed there itself, and that the app presents again on each
+  connection, so that the issuer's revocation and policy apply.
+- It accepts only an access token that is a JWT (RFC 9068: header `typ`
+  `at+jwt` or `application/at+jwt`, in any case, so never an ID token)
+  signed by one of the issuer's signing keys (`jwks_uri`, fetched again
+  for an unknown `kid` at most once a minute; RS256/384/512 and
+  PS256/384/512 with an RSA key of 2048 to 4096 bits, ES256/384, or EdDSA,
+  also by the name Ed25519), whose `iss` is the issuer, whose
+  `aud` includes aprond's origin, which has not expired, and which carries
+  no `cnf` (a token bound to a key, as is one whose `token_type` is not
+  `Bearer`). Anything else is `denied`. It does not introspect opaque
+  tokens.
+- The identity is the issuer and the token's `sub`, as
+  `external:https://id.example#<sub>` for `--role` and the allowlist. A new
+  account takes the requested `name` and `user_id`, else the token's `name`
+  and `preferred_username`, else those of the issuer's `userinfo_endpoint`
+  (from either metadata document), which aprond asks with the access token
+  and believes only for the token's `sub`. Without an answer, the account
+  is made without a name, as `user_<n>`. Signing in, adding to a signed-in
+  account, account creation, and the token, bound to no origin, work as
+  above.
+
+aprond serves no `/oauth/*` routes or authorization server metadata in
+this mode, and no extension may offer external sign-in beside it. It
+serves its protected resource metadata (RFC 9728) at
+`/.well-known/oauth-protected-resource`, naming the issuer:
+`{"resource": "https://chat.example", "authorization_servers":
+["https://id.example"]}`, with CORS `*`; the begin's `issuer` names it
+too.
+
+**The issuer** must accept client ID metadata documents, require PKCE,
+send `iss` in its authorization responses, and issue JWT access tokens
+whose audience is the `resource` an app asks for (RFC 8707) rather than the
+client. For userinfo to answer, the token must be for the issuer too, as an
+identity scope (`openid profile`) makes it. With
+[Pocket ID](https://pocket-id.org) 2.13 or later (client ID metadata
+documents and `at+jwt` access tokens came in 2.13):
+
+1. Turn on the **APIs** and **Client ID metadata documents** features (on
+   the setup screen, or under Configuration).
+2. Set the **client ID metadata document URL allowlist** to the documents
+   you accept, such as `https://*/**` for any `https` host on the default
+   port (it does not match a URL with an explicit port; add
+   `https://*:*/**` for those).
+3. Create an **API** for each Apron server, whose identifier is the
+   server's origin, such as `https://chat.example` (the `resource` apps
+   send).
+4. On that API, turn on **Allow CIMD clients**.
+
+Never use one public client that every app shares, with `*` (or
+`https://*/**`) callback URLs, instead. Pocket ID asks for consent once per
+client, and names only that client: never the app, its redirect host, or
+the Apron server. Once a person has consented and stays signed in, any
+site that can navigate their browser gets a code with no screen at all,
+with the shared `client_id` and its own `redirect_uri`, and signs in to
+their Apron account with it. aprond's own page names the redirect host
+for that reason, and remembers an app only per account and `redirect_uri`, after
+that account allowed it there (§4.12.3). With metadata documents, an app
+can use only the redirect URIs its document lists, and another document is
+another client, whose consent names its host.
 
 ## Extensions
 
@@ -1702,15 +2075,10 @@ rest of the server does:
   person's or another extension's. A bot's live text needs `--public-url`
   for its address, except in development on a loopback host. Bot
   connections do not count toward `--max-connections`.
-- External sign-in (§4.11.5), when an extension offers it, returns a page at
-  `/external/<proposal>`, which the extension takes over to sign the person
-  in. When it names the identity it proved, the page shows a code to type,
-  or, for a proposal with `return_url`, a button that continues to the
-  client with the sign-in link. `return_url` must be on the connection's
-  origin or `--public-url`'s, and its link token works only on a connection
-  from that origin. A new identity makes an account, which takes the
-  requested `user_id`, else the extension's suggestion, as email accounts
-  do; each sign-in sets the roles the extension grants.
+- An extension may offer [external sign-in](#external-sign-in): the
+  server's sign-in page hands the person to it, and it completes the
+  sign-in with the identity it proved, such as with an OpenID Connect
+  provider.
 - An extension may restrict sign-in to an allowlist of email addresses,
   external identities, and existing accounts' `user_id`s. The server then
   offers no guests, and checks the list wherever an account is made or

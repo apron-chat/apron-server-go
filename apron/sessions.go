@@ -16,11 +16,13 @@ const sessionLifetime = 30 * 24 * time.Hour
 const maxSessionsPerUser = 100
 
 // session is a bearer token's sign-in (§3.2): the account it resumes, bound
-// to the frontend origin that signed in.
+// to the frontend origin that signed in, or, for a token from a code
+// (§4.12.4), to no origin (anyOrigin).
 type session struct {
-	user    *userState
-	origin  string
-	expires time.Time
+	user      *userState
+	origin    string
+	anyOrigin bool
+	expires   time.Time
 	// credential names the credential the sign-in that made it proved, as
 	// scheme:id, if any (account.go).
 	credential string
@@ -33,27 +35,44 @@ type session struct {
 // user it was not signed in as, rather than adding a passkey to it or
 // authenticating it again as the same user, which alone sends what follows
 // a sign-in (§4.5). joinDefault joins a new account to the default room.
-func (s *Server) signInLocked(c *client, req request, user *userState, now time.Time, signIn, joinDefault bool) (any, *Error) {
+// The token resumes from the connection's origin, or with anyOrigin from
+// any.
+func (s *Server) signInLocked(c *client, req request, user *userState, now time.Time, signIn, joinDefault, anyOrigin bool) (any, *Error) {
 	if err := s.admitLocked(user); err != nil {
 		return nil, err
 	}
 	delete(s.sessions, c.token)
 	s.touchSession(c.token)
-	secret := make([]byte, 32)
-	if _, err := rand.Read(secret); err != nil {
-		return nil, &Error{Code: CodeInternalError, Message: "Unable to create a sign-in session"}
+	token, key, err := s.newSessionLocked(user, c.origin, anyOrigin, now)
+	if err != nil {
+		return nil, err
 	}
-	token := base64.RawURLEncoding.EncodeToString(secret)
-	c.token = sha256.Sum256([]byte(token))
+	c.token = key
 	c.service, c.serviceManage = [32]byte{}, false
 	// A sign-in that proved a credential notes it after (provedLocked). A
 	// device token the connection signed in with stays its own, so that
 	// replacing that token still closes it.
 	c.credential = ""
-	s.sessions[c.token] = session{user: user, origin: c.origin, expires: now.Add(sessionLifetime)}
-	s.touchSession(c.token)
-	s.capSessionsLocked(user, c.token)
 	return s.switchUserLocked(c, req, user, map[string]any{"token": token}, signIn, joinDefault), nil
+}
+
+// newSessionLocked makes a bearer token that resumes user's sign-in from
+// origin, or with anyOrigin from any origin or none (§3.2.1), and returns it
+// with the key it is kept under.
+func (s *Server) newSessionLocked(user *userState, origin string, anyOrigin bool, now time.Time) (string, [32]byte, *Error) {
+	secret := make([]byte, 32)
+	if _, err := rand.Read(secret); err != nil {
+		return "", [32]byte{}, &Error{Code: CodeInternalError, Message: "Unable to create a sign-in session"}
+	}
+	token := base64.RawURLEncoding.EncodeToString(secret)
+	key := sha256.Sum256([]byte(token))
+	if anyOrigin {
+		origin = ""
+	}
+	s.sessions[key] = session{user: user, origin: origin, anyOrigin: anyOrigin, expires: now.Add(sessionLifetime)}
+	s.touchSession(key)
+	s.capSessionsLocked(user, key)
+	return token, key, nil
 }
 
 // parseRequested parses the name and user_id that an auth request may request
@@ -127,15 +146,20 @@ func (s *Server) authenticateToken(c *client, req request) (any, *Error) {
 	s.pruneSessionsLocked(now)
 	key := sha256.Sum256([]byte(token))
 	session, ok := s.sessions[key]
-	if !ok || session.origin != c.origin || !now.Before(session.expires) {
+	if !ok || !session.anyOrigin && session.origin != c.origin || !now.Before(session.expires) {
 		// A temporary token approves its proposal with this scheme too, as
-		// a client presents the token of a link that isn't its own (§4.11.2).
-		if s.mayApproveLocked(c, token) {
+		// a client presents the token of a link that isn't its own
+		// (§4.11.2), with the proposal's state or without (§4.11.3).
+		state, err := parseString(req.params, "state", false)
+		if err != nil {
+			return nil, err
+		}
+		if s.mayApproveLocked(c, token, state) {
 			name, requested, err := parseRequested(req)
 			if err != nil {
 				return nil, err
 			}
-			return s.approveLocked(c, req, token, name, requested)
+			return s.approveLocked(c, req, token, state, name, requested)
 		}
 		return nil, &Error{Code: CodeDenied, Message: "Session expired; sign in again"}
 	}

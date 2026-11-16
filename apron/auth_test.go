@@ -4,10 +4,7 @@ import (
 	"context"
 	"encoding/json/v2"
 	"maps"
-	"net/http"
-	"regexp"
 	"slices"
-	"strings"
 	"testing"
 	"time"
 
@@ -172,49 +169,6 @@ func TestEmailLimitsHoldForProposalsMadeAtOnce(t *testing.T) {
 	case message := <-mailbox:
 		t.Fatalf("a second email went out: %#v", message)
 	case <-time.After(100 * time.Millisecond):
-	}
-}
-
-// An external sign-in's name is normalized as a client's is, and adding an
-// external sign-in to an account renames nobody.
-func TestExternalNamesAreNormalized(t *testing.T) {
-	name := "Ev‮il\u0007" + strings.Repeat("x", 200)
-	subject := "idp:1"
-	app, httpServer := newTestServer(t, extensionConfig(testExtension{"sso", func(r *Registrar) error {
-		signIn := r.ExternalSignIn(func(w http.ResponseWriter, req *http.Request, p ExternalProposal) {
-			http.Redirect(w, req, "/sso/callback?p="+p.ID, http.StatusFound)
-		})
-		r.Handle("/sso/callback", http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-			_ = signIn.Complete(w, req, req.URL.Query().Get("p"), Identity{Subject: subject, Name: name})
-		}))
-		return nil
-	}}))
-	code := func(c *testClient) string {
-		t.Helper()
-		_, result := c.request(t, "auth", "p", map[string]any{"scheme": "external"})
-		_, _, body := httpDo(t, http.MethodGet, result["url"].(string), nil, "")
-		match := regexp.MustCompile(`class="code">(\d{6})<`).FindStringSubmatch(string(body))
-		if match == nil {
-			t.Fatalf("page = %s", body)
-		}
-		return match[1]
-	}
-
-	c, _ := dialRaw(t, httpServer)
-	_, result := c.request(t, "auth", "a", map[string]any{"scheme": "external", "token": code(c)})
-	if got := result["you"].(map[string]any)["name"]; got != normalizeName(name) || got == name {
-		t.Fatalf("new account's name = %q", got)
-	}
-
-	subject = "idp:2"
-	guest, _ := dialRaw(t, httpServer)
-	guest.request(t, "auth", "g", map[string]any{"scheme": "guest", "name": "Grace"})
-	guest.request(t, "auth", "a", map[string]any{"scheme": "external", "token": code(guest)})
-	app.mu.RLock()
-	added := app.accounts[authn.Identity{Scheme: "external", Subject: "idp:2"}]
-	app.mu.RUnlock()
-	if added == nil || added.name != "Grace" {
-		t.Fatalf("the account an external sign-in was added to = %#v", added)
 	}
 }
 

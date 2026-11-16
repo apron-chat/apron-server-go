@@ -643,7 +643,7 @@ func TestAdditionsAreNotSignIns(t *testing.T) {
 	if !message.Add {
 		t.Fatalf("addition email: %#v", message)
 	}
-	if _, result := approve(t, c, message.Code, nil); len(result) != 0 {
+	if _, result := approve(t, c, message.Code, nil); len(result) != 1 || result["you"] == nil {
 		t.Fatalf("approving an addition: %#v", result)
 	}
 	if frames := c.drain(t); len(frames) != 0 {

@@ -64,8 +64,11 @@ const Disabled = "Email sign-in is disabled"
 // Message is one sign-in code to deliver.
 type Message struct {
 	To, Code, Link string
-	Expires        time.Time
-	Add            bool
+	// Server is the server's WebSocket URL, which the email gives with the
+	// code (§4.11.2); empty when it is not known.
+	Server  string
+	Expires time.Time
+	Add     bool
 }
 
 // Scheme is email sign-in.
@@ -128,15 +131,19 @@ type clientBudget struct {
 	element *list.Element
 }
 
-// Auth proposes, mailing a code for the address, or approves with a token
-// (§4.11.3).
+// Auth proposes, mailing a code for the address, or approves with a token,
+// and the proposal's state if the approval carries it (§4.11.3).
 func (s *Scheme) Auth(_ context.Context, r *authn.Request) (authn.Result, error) {
 	if _, has := r.Params["token"]; has {
 		token, err := authn.String(r.Params, "token", true)
 		if err != nil {
 			return nil, err
 		}
-		return &authn.Approve{Token: token}, nil
+		state, err := authn.String(r.Params, "state", false)
+		if err != nil {
+			return nil, err
+		}
+		return &authn.Approve{Token: token, State: state}, nil
 	}
 	return s.propose(r)
 }
@@ -197,7 +204,7 @@ func (s *Scheme) propose(r *authn.Request) (authn.Result, error) {
 		<-s.slots
 		return &authn.Reply{Result: map[string]any{}}, nil
 	}
-	message := Message{To: addr, Code: tokens.Code, Link: tokens.Link, Expires: tokens.Expires, Add: tokens.Add}
+	message := Message{To: addr, Code: tokens.Code, Link: tokens.Link, Server: tokens.Server, Expires: tokens.Expires, Add: tokens.Add}
 	logger := s.core.Logger()
 	if !s.core.Go(func(context.Context) {
 		defer func() { <-s.slots }()

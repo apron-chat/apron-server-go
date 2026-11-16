@@ -50,7 +50,7 @@ type userState struct {
 	roles []string
 	// granted are the roles the account's identities grant it, by scheme,
 	// as of each identity's latest proof (authn.Proof.Roles), such as an
-	// external sign-in's (§4.11.5).
+	// external sign-in's (§4.12).
 	granted map[string][]string
 	// created is when the user was made; zero for users stored before it
 	// was kept.
@@ -70,6 +70,10 @@ type userState struct {
 	enrolled *enrollment
 	// scope limits the rooms the account may see, nil for none (scope.go).
 	scope *roomScope
+	// consents are the https redirect URIs of apps the account allowed on
+	// the external sign-in page, with when, in Unix milliseconds
+	// (consents.go).
+	consents map[string]int64
 
 	// fromValue caches from(); it is cleared when the name changes.
 	fromValue map[string]any

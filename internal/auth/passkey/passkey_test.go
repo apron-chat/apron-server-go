@@ -1,6 +1,7 @@
 package passkey
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -16,6 +17,7 @@ import (
 	"github.com/fxamacker/cbor/v2"
 	"github.com/go-webauthn/webauthn/webauthn"
 
+	"github.com/apron-chat/apron-server-go/internal/auth/oauth"
 	"github.com/apron-chat/apron-server-go/internal/authn"
 )
 
@@ -186,5 +188,93 @@ func TestCommitKeepsTheSignCounterAdvancing(t *testing.T) {
 	}
 	if count := kept.Credentials[0].Authenticator.SignCount; count != 4 {
 		t.Fatalf("kept counter %d, want 4", count)
+	}
+}
+
+// A verified registration's credential is pending until the server commits
+// it, or until it expires if the server never does: until then, a login
+// with it is not of an unknown credential (registering).
+func TestRegisteringUntilCommitted(t *testing.T) {
+	w, err := webauthn.New(&webauthn.Config{RPID: "localhost", RPDisplayName: "Apron", RPOrigins: []string{origin}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := New(w)
+	committed, abandoned := &webauthn.Credential{ID: []byte("committed")}, &webauthn.Credential{ID: []byte("abandoned")}
+	if s.registering(committed.ID) {
+		t.Fatal("a credential nobody registered is registering")
+	}
+	commit := s.commitCredential([]byte("handle"), committed)
+	s.commitCredential([]byte("other"), abandoned)
+	if !s.registering(committed.ID) || !s.registering(abandoned.ID) {
+		t.Fatal("a verified registration is not registering before its commit")
+	}
+	if _, err := commit(); err != nil {
+		t.Fatal(err)
+	}
+	if !s.registering(committed.ID) {
+		t.Fatal("a committed credential is not known")
+	}
+	s.mu.Lock()
+	_, stillPending := s.pending[string(committed.ID)]
+	s.pending[string(abandoned.ID)] = time.Now().Add(-time.Second)
+	s.mu.Unlock()
+	if stillPending || s.registering(abandoned.ID) {
+		t.Fatal("a credential stays pending after its commit, or after it expired")
+	}
+
+	// One verified on the page is pending from before its code is issued,
+	// and a redemption's shorter mark does not cut that short.
+	paged := &webauthn.Credential{ID: []byte("paged")}
+	s.markPending(paged.ID, oauth.CodeLifetime+ceremonyLifetime)
+	s.commitCredential([]byte("paged"), paged)
+	s.mu.Lock()
+	until := s.pending[string(paged.ID)]
+	s.mu.Unlock()
+	if !until.After(time.Now().Add(oauth.CodeLifetime)) {
+		t.Fatalf("a code's credential is pending until %v", until)
+	}
+}
+
+// An addition's request is sealed: it opens the page while it lasts, as
+// the account it names, and nobody can read, alter, or make one, nor use
+// one another process sealed.
+func TestSealedAdditions(t *testing.T) {
+	w, err := webauthn.New(&webauthn.Config{RPID: "localhost", RPDisplayName: "Apron", RPOrigins: []string{origin}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, other := New(w), New(w)
+	now := time.Now()
+	a := &addition{UserID: "ada", Name: "Ada Lovelace", Requested: "Ada", Guest: true, Handle: []byte("handle"), Expires: now.Add(oauth.FlowLifetime).Unix()}
+	request, err := s.sealAddition(a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if opened, ok := s.openAddition(request, now); !ok || opened.UserID != "ada" || opened.Name != "Ada Lovelace" || opened.Requested != "Ada" || !opened.Guest || string(opened.Handle) != "handle" {
+		t.Fatalf("opened = %#v, %v", opened, ok)
+	}
+	for _, plain := range []string{"ada", "Lovelace", b64([]byte("handle"))} {
+		if bytes.Contains([]byte(request), []byte(plain)) {
+			t.Fatalf("request %q shows %q", request, plain)
+		}
+	}
+	altered := []byte(request)
+	altered[len(altered)/2] ^= 1
+	for name, request := range map[string]string{
+		"altered":   string(altered),
+		"truncated": request[:len(request)-4],
+		"empty":     "",
+		"oversized": request + string(make([]byte, maxRequestBytes)),
+	} {
+		if _, ok := s.openAddition(request, now); ok {
+			t.Errorf("%s request opened", name)
+		}
+	}
+	if _, ok := s.openAddition(request, now.Add(oauth.FlowLifetime)); ok {
+		t.Error("expired request opened")
+	}
+	if _, ok := other.openAddition(request, now); ok {
+		t.Error("another process's request opened")
 	}
 }

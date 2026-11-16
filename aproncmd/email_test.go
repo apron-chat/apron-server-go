@@ -74,7 +74,7 @@ func fakeRelay(t *testing.T, stall bool) (string, chan string) {
 
 func TestSMTPSenderRequiresSTARTTLS(t *testing.T) {
 	addr, received := fakeRelay(t, false)
-	message := apron.SignInEmail{To: "ada@example.com", Code: "418092", Expires: time.Now().Add(10 * time.Minute)}
+	message := apron.SignInEmail{To: "ada@example.com", Code: "418092", Server: "wss://chat.example/ws", Expires: time.Now().Add(10 * time.Minute)}
 	sender, err := newSMTPSender(addr, "Apron <chat@example.com>", "", "", false)
 	if err != nil {
 		t.Fatal(err)
@@ -86,7 +86,8 @@ func TestSMTPSenderRequiresSTARTTLS(t *testing.T) {
 	if err := sender.SendSignInCode(context.Background(), message); err != nil {
 		t.Fatal(err)
 	}
-	if data := <-received; !strings.Contains(data, "Subject: Your sign-in code is 418092") || !strings.Contains(data, "To: ada@example.com") {
+	if data := <-received; !strings.Contains(data, "Subject: Your sign-in code is 418092") || !strings.Contains(data, "To: ada@example.com") ||
+		!strings.Contains(data, "Your sign-in code for wss://chat.example/ws is 418092.\r\nType it only in an app that is connected to wss://chat.example/ws.\r\n") {
 		t.Fatalf("message: %q", data)
 	}
 }

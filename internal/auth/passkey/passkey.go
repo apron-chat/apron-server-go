@@ -6,12 +6,19 @@
 // The scheme keeps its credentials, which the server stores with each
 // account (authn.Restorer), and proves identities named by the passkey
 // user handle.
+//
+// A client that cannot use the RP ID runs the ceremony on the passkey page
+// instead (page.go), on the server's own origin, which returns a code that
+// finishes the exchange on the connection.
 package passkey
 
 import (
 	"bytes"
 	"context"
+	"crypto/aes"
+	"crypto/cipher"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json/jsontext"
 	"encoding/json/v2"
@@ -24,6 +31,7 @@ import (
 	"github.com/go-webauthn/webauthn/protocol"
 	"github.com/go-webauthn/webauthn/webauthn"
 
+	"github.com/apron-chat/apron-server-go/internal/auth/oauth"
 	"github.com/apron-chat/apron-server-go/internal/authn"
 )
 
@@ -41,14 +49,35 @@ const (
 
 // Scheme is passkey sign-in.
 type Scheme struct {
-	w *webauthn.WebAuthn
+	w    *webauthn.WebAuthn
+	core authn.Core
+
+	// SignalUnknown has the page say that no account has a passkey, when
+	// none has nor may yet have it, and its script ask the passkey
+	// provider to hide it (signalUnknownCredential). Off, such a login is
+	// the page's usual error. Set it before the server serves the page;
+	// apron.Config's SignalUnknownPasskeys says when it is safe.
+	SignalUnknown bool
+
+	// The passkey page's state: the pages people have open, the codes the
+	// page issued, and the verify budgets of its clients; and sealer, which
+	// seals the additions begun on signed-in connections into the page's
+	// `request` (sealAddition).
+	flows   oauth.Table[*pageFlow]
+	codes   oauth.Codes
+	clients pageClients
+	sealer  cipher.AEAD
 
 	// mu guards the credentials of each account's passkey holder, by user
 	// handle, and the holders by credential ID. Commit changes them under
-	// the server's lock; lookups for a login take only mu.
+	// the server's lock; lookups for a login take only mu. It also guards
+	// pending: the credentials of verified registrations that no Commit
+	// has added or refused yet, a code from the page's included, until
+	// when they count as pending (markPending).
 	mu           sync.Mutex
 	byHandle     map[string]*holder
 	byCredential map[string]*holder
+	pending      map[string]time.Time
 }
 
 // holder is one account's passkeys: its user handle and credentials, which
@@ -95,8 +124,21 @@ func (h *holder) touch(id []byte, now time.Time, created bool) {
 
 // New is passkey sign-in with w's relying party and origins.
 func New(w *webauthn.WebAuthn) *Scheme {
-	return &Scheme{w: w, byHandle: make(map[string]*holder), byCredential: make(map[string]*holder)}
+	key := make([]byte, 32)
+	_, _ = rand.Read(key) // never fails (crypto/rand)
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		panic(err)
+	}
+	sealer, err := cipher.NewGCMWithRandomNonce(block)
+	if err != nil {
+		panic(err)
+	}
+	return &Scheme{w: w, sealer: sealer, byHandle: make(map[string]*holder), byCredential: make(map[string]*holder), pending: make(map[string]time.Time)}
 }
+
+// Bind gives the scheme the server's side of sign-in, for its page.
+func (s *Scheme) Bind(core authn.Core) { s.core = core }
 
 func (*Scheme) Name() string  { return Name }
 func (*Scheme) Label() string { return "passkey" }
@@ -124,6 +166,7 @@ func (s *Scheme) Restore(_ string, record jsontext.Value) error {
 // configured frontend origin, so a browser on a frontend outside the RP
 // ID's domain may use it. Browsers fetch it only from the RP ID's host.
 func (s *Scheme) Routes(mux *http.ServeMux) {
+	s.pageRoutes(mux)
 	mux.HandleFunc("/.well-known/webauthn", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet && r.Method != http.MethodHead {
 			w.Header().Set("Allow", "GET, HEAD")
@@ -171,7 +214,8 @@ func Expire(state *authn.State) {
 
 // Auth runs a registration or a login, a begin or a finish step (§4.10).
 // Auth responses are never deduplicated, so replay cannot resurrect a
-// consumed challenge.
+// consumed challenge. A finish with a code from the passkey page works on
+// any connection, whatever its origin.
 func (s *Scheme) Auth(_ context.Context, r *authn.Request) (authn.Result, error) {
 	action, err := authn.String(r.Params, "action", true)
 	if err != nil {
@@ -180,46 +224,67 @@ func (s *Scheme) Auth(_ context.Context, r *authn.Request) (authn.Result, error)
 	if action == "" {
 		return nil, authn.InvalidParams("action must be a non-empty string")
 	}
-	if !protocol.IsOriginInHaystack(r.Origin, s.w.Config.RPOrigins) {
-		return nil, authn.Denied("Frontend origin is not configured for passkeys")
+	if action != "register" && action != "login" {
+		return nil, authn.InvalidParams("Unknown passkey action")
 	}
-	switch action {
-	case "register", "login":
-		step, err := authn.String(r.Params, "step", true)
-		if err != nil {
-			return nil, err
-		}
-		switch step {
-		case "":
-			return nil, authn.InvalidParams("step must be a non-empty string")
-		case "begin":
-			return s.begin(r, action)
-		case "finish":
-			return s.finish(r, action)
-		}
-		return nil, authn.InvalidParams("Passkey step must be begin or finish")
+	step, err := authn.String(r.Params, "step", true)
+	if err != nil {
+		return nil, err
 	}
-	return nil, authn.InvalidParams("Unknown passkey action")
+	// A client on an origin the RP does not list cannot run the ceremony
+	// itself, but may use the passkey page.
+	local := protocol.IsOriginInHaystack(r.Origin, s.w.Config.RPOrigins)
+	switch step {
+	case "":
+		return nil, authn.InvalidParams("step must be a non-empty string")
+	case "begin":
+		return s.begin(r, action, local)
+	case "finish":
+		if _, has := r.Params["code"]; has {
+			return s.redeem(r, action)
+		}
+		if !local {
+			return nil, authn.Denied("Frontend origin is not configured for passkeys")
+		}
+		return s.finish(r, action)
+	}
+	return nil, authn.InvalidParams("Passkey step must be begin or finish")
 }
 
-func (s *Scheme) begin(r *authn.Request, action string) (authn.Result, error) {
+func (s *Scheme) begin(r *authn.Request, action string, local bool) (authn.Result, error) {
 	// Starting any new ceremony replaces the previous pending one. The
 	// replacement happens before policy and library errors so a stale
 	// pending challenge can never be resumed after a new begin was
 	// attempted.
 	r.State.Store(nil)
+	if action == "register" && r.Account == nil && r.Invitation == nil {
+		return nil, authn.Denied("Sign in as a guest, or present an invitation, before adding a passkey")
+	}
+	page, err := s.pageURL(r, action)
+	if err != nil {
+		if !local {
+			return nil, err
+		}
+		// The client can run the ceremony itself: the page is only another
+		// way, so whatever it lacks never stops the ceremony.
+		page = ""
+	}
+	if !local {
+		if page == "" {
+			return nil, authn.Denied("Frontend origin is not configured for passkeys")
+		}
+		// Only the page can run the ceremony for this client.
+		return &authn.Reply{Result: map[string]any{"external": map[string]any{"url": page}}}, nil
+	}
 	c := &ceremony{challengeID: rand.Text(), action: action, rpID: s.w.Config.RPID, origin: r.Origin}
 	var publicKey any
 	if action == "register" {
 		account := r.Account
-		if account == nil && r.Invitation != nil {
+		if account == nil {
 			// A new account, which the invitation makes when the
 			// registration finishes: nothing is made before.
 			account = &authn.Account{Name: r.Invitation.Name, Guest: true}
 			c.invitation = r.Invitation.ID
-		}
-		if account == nil {
-			return nil, authn.Denied("Sign in as a guest, or present an invitation, before adding a passkey")
 		}
 		c.userID = account.UserID
 		h := &holder{name: account.Name}
@@ -285,7 +350,11 @@ func (s *Scheme) begin(r *authn.Request, action string) (authn.Result, error) {
 	c.data.Expires = r.Now.Add(ceremonyLifetime)
 	c.expires = c.data.Expires
 	r.State.Store(c)
-	return &authn.Reply{Result: map[string]any{"challenge_id": c.challengeID, "public_key": publicKey}}, nil
+	result := map[string]any{"challenge_id": c.challengeID, "public_key": publicKey}
+	if page != "" {
+		result["external"] = map[string]any{"url": page}
+	}
+	return &authn.Reply{Result: result}, nil
 }
 
 func (s *Scheme) finish(r *authn.Request, action string) (authn.Result, error) {
@@ -335,14 +404,9 @@ func (s *Scheme) finishRegistration(r *authn.Request, c *ceremony) (authn.Result
 	if err != nil {
 		return nil, err
 	}
-	parsed, parseErr := protocol.ParseCredentialCreationResponseBytes(raw)
-	if parseErr != nil {
-		return nil, authn.Denied("Passkey verification failed")
-	}
-	registering := &holder{Handle: c.handle, name: account.Name}
-	credential, createErr := s.w.CreateCredential(registering, *c.data, parsed)
-	if createErr != nil || credential == nil {
-		return nil, authn.Denied("Passkey verification failed")
+	credential, err := s.verifyRegistration(raw, c.data, c.handle, account.Name)
+	if err != nil {
+		return nil, err
 	}
 	return &authn.Add{Session: true, Proof: authn.Proof{
 		Subject: Subject(c.handle), Name: c.name, Credential: CredentialID(credential.ID),
@@ -363,13 +427,9 @@ func (s *Scheme) finishInvited(r *authn.Request, c *ceremony) (authn.Result, err
 	if err != nil {
 		return nil, err
 	}
-	parsed, parseErr := protocol.ParseCredentialCreationResponseBytes(raw)
-	if parseErr != nil {
-		return nil, authn.Denied("Passkey verification failed")
-	}
-	credential, createErr := s.w.CreateCredential(&holder{Handle: c.handle, name: c.name}, *c.data, parsed)
-	if createErr != nil || credential == nil {
-		return nil, authn.Denied("Passkey verification failed")
+	credential, err := s.verifyRegistration(raw, c.data, c.handle, c.name)
+	if err != nil {
+		return nil, err
 	}
 	return &authn.SignIn{Create: true, Invitation: c.invitation, Proof: authn.Proof{
 		Subject: Subject(c.handle), Name: c.name, UserID: r.Invitation.UserID, Credential: CredentialID(credential.ID),
@@ -377,12 +437,46 @@ func (s *Scheme) finishInvited(r *authn.Request, c *ceremony) (authn.Result, err
 	}}, nil
 }
 
+// verifyRegistration verifies a new credential for a user handle against
+// a registration's session data.
+func (s *Scheme) verifyRegistration(raw []byte, data *webauthn.SessionData, handle []byte, name string) (*webauthn.Credential, *authn.Error) {
+	parsed, parseErr := protocol.ParseCredentialCreationResponseBytes(raw)
+	if parseErr != nil {
+		return nil, authn.Denied("Passkey verification failed")
+	}
+	credential, createErr := s.w.CreateCredential(&holder{Handle: handle, name: name}, *data, parsed)
+	if createErr != nil || credential == nil {
+		return nil, authn.Denied("Passkey verification failed")
+	}
+	return credential, nil
+}
+
+// markPending makes a verified registration's credential pending
+// (registering) for at least ttl, until a Commit adds or refuses it.
+func (s *Scheme) markPending(id []byte, ttl time.Duration) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := time.Now()
+	for pending, until := range s.pending {
+		if !now.Before(until) {
+			delete(s.pending, pending)
+		}
+	}
+	if until := now.Add(ttl); until.After(s.pending[string(id)]) {
+		s.pending[string(id)] = until
+	}
+}
+
 // commitCredential adds a verified credential to the passkeys of the user
 // handle, a new one's included, and returns them as the account's record.
+// Until the server calls it, or for a ceremony's lifetime if it never does,
+// the credential is pending (registering).
 func (s *Scheme) commitCredential(handle []byte, credential *webauthn.Credential) func() (jsontext.Value, error) {
+	s.markPending(credential.ID, ceremonyLifetime)
 	return func() (jsontext.Value, error) {
 		s.mu.Lock()
 		defer s.mu.Unlock()
+		delete(s.pending, string(credential.ID))
 		if s.byCredential[string(credential.ID)] != nil {
 			return nil, authn.Denied("Passkey is already registered")
 		}
@@ -483,25 +577,81 @@ func (s *Scheme) finishLogin(r *authn.Request, c *ceremony) (authn.Result, error
 	if err != nil {
 		return nil, err
 	}
+	handle, credential, _, err := s.verifyLogin(raw, c.data)
+	if err != nil {
+		return nil, err
+	}
+	return &authn.SignIn{Proof: s.loginProof(handle, credential)}, nil
+}
+
+// verifyLogin verifies an assertion against a login's session data, and
+// returns the user handle and the credential, with its new counter. A
+// login that fails only because no account has its credential returns the
+// credential's ID as unknown: one whose lookup found nothing, in an
+// assertion made for this ceremony (forCeremony). Any other failure,
+// a known credential's included, returns none.
+func (s *Scheme) verifyLogin(raw []byte, data *webauthn.SessionData) (handle []byte, credential *webauthn.Credential, unknown []byte, err *authn.Error) {
+	failed := authn.Denied("Passkey verification failed")
 	parsed, parseErr := protocol.ParseCredentialRequestResponseBytes(raw)
 	if parseErr != nil {
-		return nil, authn.Denied("Passkey verification failed")
+		return nil, nil, nil, failed
 	}
-	var handle []byte
+	absent := false
 	verified, credential, verifyErr := s.w.ValidatePasskeyLogin(func(id, userHandle []byte) (webauthn.User, error) {
 		s.mu.Lock()
 		defer s.mu.Unlock()
 		h := s.byCredential[string(id)]
-		if h == nil || !bytes.Equal(h.Handle, userHandle) {
+		if h == nil {
+			absent = true
 			return nil, errors.New("unknown credential")
+		}
+		if !bytes.Equal(h.Handle, userHandle) {
+			return nil, errors.New("credential of another user handle")
 		}
 		handle = h.Handle
 		return &holder{Handle: h.Handle, Credentials: append([]webauthn.Credential(nil), h.Credentials...)}, nil
-	}, *c.data, parsed)
+	}, *data, parsed)
 	if verifyErr != nil || verified == nil || credential == nil || credential.Authenticator.CloneWarning {
-		return nil, authn.Denied("Passkey verification failed")
+		if absent && s.forCeremony(parsed, data) {
+			return nil, nil, parsed.RawID, failed
+		}
+		return nil, nil, nil, failed
 	}
-	return &authn.SignIn{Proof: authn.Proof{
+	return handle, credential, nil, nil
+}
+
+// forCeremony reports whether an assertion was made for a login's ceremony,
+// as far as it can be told without the credential's public key: its type,
+// challenge, RP ID, user presence and verification, and the ceremony's time.
+// The library looks a credential up before it checks these, so a lookup
+// that found nothing says nothing of them. The page checks the origin
+// itself (sameOrigin).
+func (s *Scheme) forCeremony(parsed *protocol.ParsedCredentialAssertionData, data *webauthn.SessionData) bool {
+	client, authData := parsed.Response.CollectedClientData, parsed.Response.AuthenticatorData
+	rpIDHash := sha256.Sum256([]byte(s.w.Config.RPID))
+	return client.Type == protocol.AssertCeremony && data.Challenge != "" && client.Challenge == data.Challenge &&
+		bytes.Equal(authData.RPIDHash, rpIDHash[:]) && authData.Flags.UserPresent() && authData.Flags.UserVerified() &&
+		len(parsed.RawID) > 0 && time.Now().Before(data.Expires)
+}
+
+// registering reports whether a credential may yet be an account's: a
+// registration verified it and the server has not committed it yet, or has
+// since. One verified on the page is pending from before its code is
+// issued until a Commit, or until the code and then a ceremony's lifetime
+// have passed (redirectWithCode), so a redemption, which takes the code
+// before it reaches Commit, leaves no moment when it is neither.
+func (s *Scheme) registering(id []byte) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	until, pending := s.pending[string(id)]
+	return pending && time.Now().Before(until) || s.byCredential[string(id)] != nil
+}
+
+// loginProof proves the identity of a verified login. Its Commit keeps
+// the credential's advanced signature counter, checked again against the
+// one kept (finishLogin).
+func (s *Scheme) loginProof(handle []byte, credential *webauthn.Credential) authn.Proof {
+	return authn.Proof{
 		Subject: Subject(handle), Credential: CredentialID(credential.ID),
 		Commit: func() (jsontext.Value, error) {
 			s.mu.Lock()
@@ -522,7 +672,7 @@ func (s *Scheme) finishLogin(r *authn.Request, c *ceremony) (authn.Result, error
 			h.touch(credential.ID, time.Now(), false)
 			return json.Marshal(h)
 		},
-	}}, nil
+	}
 }
 
 // Count counts the passkeys the scheme keeps, for tests.

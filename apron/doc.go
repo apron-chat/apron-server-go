@@ -39,7 +39,8 @@
 //   - followers of the log ([Registrar.OnEvent], [Registrar.OnEventFrom],
 //     and [Registrar.Follow], which keeps its place across restarts), with
 //     [DecodeMessage] to read messages;
-//   - external sign-in, such as OAuth ([Registrar.ExternalSignIn]);
+//   - external sign-in, such as OAuth or OpenID Connect, on the server's own
+//     OAuth authorization page ([Registrar.ExternalSignIn]);
 //   - an allowlist of who may sign in, with no guests, which signs out
 //     whoever is taken off it ([Registrar.RestrictSignIn]).
 //

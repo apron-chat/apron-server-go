@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/json/jsontext"
 	"errors"
@@ -11,6 +12,7 @@ import (
 	"log/slog"
 	"maps"
 	"math/big"
+	"net/http"
 	"net/url"
 	"slices"
 	"strings"
@@ -46,10 +48,10 @@ const (
 	// proposal, so a wrong secret behind it counts against that proposal
 	// from any connection.
 	linkHandleBytes = 10
-	// maxLinks and maxPages bound the outstanding link tokens and sign-in
-	// pages.
+	// maxLinks bounds the outstanding link tokens.
 	maxLinks = 10_000
-	maxPages = 10_000
+	// maxStates bounds the outstanding proposals that carry a state.
+	maxStates = 10_000
 	// accountIDPrefix starts the user_ids assigned to new accounts that did
 	// not request one.
 	accountIDPrefix = "user_"
@@ -66,19 +68,18 @@ var disabledSchemes = map[string]string{
 // kind of a Principal that names a user_id.
 var reservedSchemeNames = []string{"guest", "token", principalUser}
 
-// proposal is a pending sign-in that finishes out of band (§4.11.1): to
-// sign in, or to add an identity to the proposing account. Its short code
-// works only on its connection; its link token, a handle and an
-// unguessable secret, works on any connection that may approve it
-// (§4.11.3). It outlives its connection's disconnect, until it expires or
+// proposal is a pending email sign-in (§4.11.1): to sign in, or to add an
+// identity to the proposing account. Its short code
+// works only on its connection, or with its state (§4.11.2); its link
+// token, a handle and an unguessable secret, works on any connection that
+// may approve it (§4.11.3). It outlives its connection's disconnect, until it expires or
 // is approved, and holds neither the connection nor the account, so a
 // closed connection, and a retired guest, are not kept for it: the
 // connection holds the proposal instead. Guarded by s.mu.
 type proposal struct {
 	// scheme proves its identity.
 	scheme authn.Scheme
-	// proof is what approving it proves; nil while its page waits for the
-	// identity.
+	// proof is what approving it proves.
 	proof *authn.Proof
 	// accountID is the user_id of the proposing account, for an addition.
 	// User_ids are never reissued, so only a connection signed in to that
@@ -89,7 +90,8 @@ type proposal struct {
 	// handle and secret make up the link token; both are empty when no
 	// link was made.
 	handle, secret string
-	// state is the client's, returned in the link.
+	// state is the client's, returned in the link, and which lets its
+	// code approve it on another connection.
 	state    string
 	expires  time.Time
 	attempts int
@@ -99,18 +101,22 @@ type proposal struct {
 	// name and userID are what the proposing connection requested for a
 	// new account.
 	name, userID string
-	// page names the proposal at its scheme's page until its identity is
-	// proven; returnURL, on returnOrigin, is where a link returns to, and
-	// server the WebSocket URL a link names.
-	page                    string
-	returnURL, returnOrigin string
-	server                  string
+	// server is the WebSocket URL a link names.
+	server string
 }
 
-// proposals are the outstanding proposals' link tokens and pages.
+// proposals are the outstanding proposals' link tokens, and the proposals
+// that carry a state, by stateKey: the latest proposal with each state.
 type proposals struct {
-	links map[string]*proposal
-	pages map[string]*proposal
+	links  map[string]*proposal
+	states map[string]*proposal
+}
+
+// stateKey indexes a proposal's state, hashed so that finding it takes no
+// time that depends on the state.
+func stateKey(state string) string {
+	sum := sha256.Sum256([]byte(state))
+	return string(sum[:])
 }
 
 // addSchemeLocked offers a sign-in scheme, under a name no other scheme
@@ -253,18 +259,18 @@ func (s *Server) authenticate(c *client, req request) (any, *Error) {
 	switch result := result.(type) {
 	case *authn.Approve:
 		if result != nil {
-			return s.approveLocked(c, req, result.Token, requestedName, requested)
+			return s.approveLocked(c, req, result.Token, result.State, requestedName, requested)
 		}
 	case *authn.SignIn:
 		if result != nil && result.Invitation != "" {
-			return s.enrollLocked(c, req, scheme, result.Proof, result.Invitation)
+			return s.enrollLocked(c, req, scheme, result.Proof, result.Invitation, result.AnyOrigin)
 		}
 		if result != nil {
-			return s.signInProvenLocked(c, req, scheme, result.Proof, result.Create)
+			return s.signInProvenLocked(c, req, scheme, result.Proof, result.Create, result.AnyOrigin)
 		}
 	case *authn.Add:
 		if result != nil {
-			return s.addProvenLocked(c, req, scheme, result.Proof, result.Session)
+			return s.addProvenLocked(c, req, scheme, result.Proof, result.Session, result.AnyOrigin)
 		}
 	}
 	s.logger.Error("a sign-in scheme answered with no result", "scheme", name, "result", fmt.Sprintf("%T", result))
@@ -364,9 +370,10 @@ func commit(proof authn.Proof) (jsontext.Value, *Error) {
 // account, a guest's making it an account, with the name the proof
 // requested, unless another account has the identity or the account has
 // another of its scheme. With session, it replies as a sign-in does, with
-// a bearer token. Every check, the allowlist's included, comes before
-// anything changes (§3.2.2).
-func (s *Server) addProvenLocked(c *client, req request, scheme authn.Scheme, proof authn.Proof, session bool) (any, *Error) {
+// a bearer token, which anyOrigin lets resume from any origin; otherwise
+// with the account as you. Every check, the allowlist's included, comes
+// before anything changes (§3.2.2).
+func (s *Server) addProvenLocked(c *client, req request, scheme authn.Scheme, proof authn.Proof, session, anyOrigin bool) (any, *Error) {
 	id, err := identityOf(scheme, proof)
 	if err != nil {
 		return nil, err
@@ -409,70 +416,81 @@ func (s *Server) addProvenLocked(c *client, req request, scheme authn.Scheme, pr
 	s.setGrantLocked(account, id.Scheme, proof.Roles)
 	// An account takes the roles its user_id or new identity is granted.
 	changed := s.grantRolesLocked(account) || renamed
+	// The result carries the account as `you`, so its own connection is
+	// told no more.
+	if changed {
+		s.notifyProfileLocked(account, c, nil)
+	}
 	if session {
-		// The result carries the account as `you`, so its own connection
-		// is told no more.
-		if changed {
-			s.notifyProfileLocked(account, c, nil)
-		}
 		now := time.Now()
-		result, err := s.signInLocked(c, req, account, now, false, false)
+		result, err := s.signInLocked(c, req, account, now, false, false, anyOrigin)
 		if err == nil {
 			s.provedLocked(c, scheme, proof, now, wasGuest)
 		}
 		return result, err
 	}
-	if changed {
-		s.notifyProfileLocked(account, nil, nil)
-	}
 	s.provedLocked(c, scheme, proof, time.Now(), wasGuest)
-	result := map[string]any{}
+	result := map[string]any{"you": account.you()}
 	c.sendResult(req, result)
 	return result, nil
 }
 
 // signInProvenLocked signs the connection in to the account of an identity
 // a scheme proved, making one if none has it and the proof may (create),
-// which takes the user_id the proof requested as guests do, or user_<n>.
-// Every check, the allowlist's included, comes before anything changes
-// (§3.2.2).
-func (s *Server) signInProvenLocked(c *client, req request, scheme authn.Scheme, proof authn.Proof, create bool) (any, *Error) {
-	id, err := identityOf(scheme, proof)
+// with a token that anyOrigin lets resume from any origin. Every check, the
+// allowlist's included, comes before anything changes (§3.2.2).
+func (s *Server) signInProvenLocked(c *client, req request, scheme authn.Scheme, proof authn.Proof, create, anyOrigin bool) (any, *Error) {
+	user, created, err := s.provenAccountLocked(scheme, proof, create)
 	if err != nil {
 		return nil, err
 	}
 	now := time.Now()
+	// A new account joins the default room, as a new guest does, after
+	// the result (§3.2.2). Signing in again as the user the connection is
+	// signed in as changes no user: it is no sign-in (§4.5), but it is a
+	// reauthentication.
+	result, err := s.signInLocked(c, req, user, now, created || c.user != user, created, anyOrigin)
+	if err == nil {
+		s.provedLocked(c, scheme, proof, now, true)
+	}
+	return result, err
+}
+
+// provenAccountLocked returns the account of an identity a scheme proved,
+// after its checks and its Commit: the identity's, or, with create, a new
+// one for an identity that none has, which takes the user_id the proof
+// requested as guests do, or user_<n>; created reports a new one. It
+// changes nothing it refuses.
+func (s *Server) provenAccountLocked(scheme authn.Scheme, proof authn.Proof, create bool) (user *userState, created bool, err *Error) {
+	id, err := identityOf(scheme, proof)
+	if err != nil {
+		return nil, false, err
+	}
 	owner := s.accounts[id]
 	if owner == nil {
 		switch {
 		case !create:
-			return nil, &Error{Code: CodeDenied, Message: "This " + scheme.Label() + " belongs to no account"}
+			return nil, false, &Error{Code: CodeDenied, Message: "This " + scheme.Label() + " belongs to no account"}
 		case !s.admitsNewLocked(id):
-			return nil, notAdmitted()
+			return nil, false, notAdmitted()
 		}
 		record, err := commit(proof)
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		user := newUserState(s.assignAccountIDLocked(proof.UserID), normalizeName(proof.Name))
 		s.users[user.id] = user
 		s.setIdentityLocked(user, id, record)
 		s.setGrantLocked(user, id.Scheme, proof.Roles)
 		s.grantRolesLocked(user)
-		// A new account joins the default room, as a new guest does,
-		// after the result (§3.2.2).
-		result, err := s.signInLocked(c, req, user, now, true, true)
-		if err == nil {
-			s.provedLocked(c, scheme, proof, now, true)
-		}
-		return result, err
+		return user, true, nil
 	}
 	if err := s.admitLocked(owner); err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	record, err := commit(proof)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	if record != nil {
 		s.setIdentityLocked(owner, id, record)
@@ -480,13 +498,7 @@ func (s *Server) signInProvenLocked(c *client, req request, scheme authn.Scheme,
 	if s.setGrantLocked(owner, id.Scheme, proof.Roles) && s.grantRolesLocked(owner) {
 		s.notifyProfileLocked(owner, nil, nil)
 	}
-	// Signing in again as the user the connection is signed in as changes
-	// no user: it is no sign-in (§4.5), but it is a reauthentication.
-	result, err := s.signInLocked(c, req, owner, now, c.user != owner, false)
-	if err == nil {
-		s.provedLocked(c, scheme, proof, now, true)
-	}
-	return result, err
+	return owner, false, nil
 }
 
 // setIdentityLocked gives an account an identity, with its scheme's record
@@ -527,20 +539,17 @@ func (s *Server) setGrantLocked(u *userState, scheme string, roles []string) boo
 
 // approveLocked approves a proposal with its temporary token (§4.11.3),
 // under the scheme that proposed it or token: the code of the connection's
-// own proposal, or the link token of a proposal made on any connection.
+// own proposal, the code of a proposal with state, its state, or the link
+// token of a proposal made on any connection.
 // Approving a sign-in signs this connection, which must not be signed in,
 // in to the identity's account or a new one. Approving an addition, only on
 // a connection signed in to the proposing account, adds the identity to
-// that account and returns {}. A token presented on a connection that may
+// that account and returns it as you. A token presented on a connection that may
 // not approve it is denied, and its proposal stays for one that may.
-func (s *Server) approveLocked(c *client, req request, token, name, requested string) (any, *Error) {
-	p := s.proposalLocked(c, token, time.Now())
+func (s *Server) approveLocked(c *client, req request, token, state, name, requested string) (any, *Error) {
+	p := s.proposalLocked(c, token, state, time.Now())
 	if p == nil || p.proof == nil {
 		return nil, &Error{Code: CodeDenied, Message: "The code is invalid or expired; ask for a new one"}
-	}
-	// A link token works only where its client is (§4.11.5).
-	if p.returnOrigin != "" && c.proposal != p && !strings.EqualFold(c.origin, p.returnOrigin) {
-		return nil, &Error{Code: CodeDenied, Message: "Open this link in the app that asked for it"}
 	}
 	proof := *p.proof
 	if p.add {
@@ -553,7 +562,7 @@ func (s *Server) approveLocked(c *client, req request, token, name, requested st
 		s.dropProposalLocked(p)
 		// An addition names nobody: the account keeps its name.
 		proof.Name, proof.UserID = "", ""
-		return s.addProvenLocked(c, req, p.scheme, proof, false)
+		return s.addProvenLocked(c, req, p.scheme, proof, false, false)
 	}
 	// A sign-in authenticates a connection that is not signed in; the
 	// proposal stays for one that is not.
@@ -564,29 +573,33 @@ func (s *Server) approveLocked(c *client, req request, token, name, requested st
 	s.dropProposalLocked(p)
 	// A proposal's own name and user_id apply only on its connection: a
 	// link opened elsewhere is someone reading the email, whose account
-	// the proposer must not name.
+	// the proposer must not name, and so may be a code with the state that
+	// the link carries.
 	if own {
 		name, requested = cmp.Or(name, p.name), cmp.Or(requested, p.userID)
 	}
 	proof.Name, proof.UserID = cmp.Or(name, proof.Name), cmp.Or(requested, proof.UserID)
-	return s.signInProvenLocked(c, req, p.scheme, proof, true)
+	return s.signInProvenLocked(c, req, p.scheme, proof, true, false)
 }
 
 // mayApproveLocked reports whether token is one that proposalLocked would
-// check against a proposal: the connection's own, or the one its link
-// handle names. Then a wrong token counts as a failed attempt under any
-// scheme; any other token is no temporary token.
-func (s *Server) mayApproveLocked(c *client, token string) bool {
-	return c.proposal != nil || len(token) > linkHandleBytes && s.proposals.links[token[:linkHandleBytes]] != nil
+// check against a proposal: the connection's own, the one its link handle
+// names, or the one state names. Then a wrong token counts as a failed
+// attempt under any scheme; any other token is no temporary token.
+func (s *Server) mayApproveLocked(c *client, token, state string) bool {
+	return c.proposal != nil || len(token) > linkHandleBytes && s.proposals.links[token[:linkHandleBytes]] != nil ||
+		state != "" && s.proposals.states[stateKey(state)] != nil
 }
 
 // proposalLocked returns the live proposal that token approves: the
-// connection's own, by its code, or any, by its link token. Otherwise it
-// returns nil, and counts a failed attempt against the proposal that token
-// names by its link handle, else against the connection's own, whichever
-// connection presents it (§4.11.1): maxProposalAttempts of them cancel it.
-// Expired proposals are dropped.
-func (s *Server) proposalLocked(c *client, token string, now time.Time) *proposal {
+// connection's own, by its code; any, by its code with its state
+// (§4.11.2), which the state proves the proposer's client presents; or
+// any, by its link token. Otherwise it returns nil, and counts a failed
+// attempt against the proposal that token names by its link handle, else
+// against the one state names, else against the connection's own,
+// whichever connection presents it (§4.11.1): maxProposalAttempts of them
+// cancel it. Expired proposals are dropped.
+func (s *Server) proposalLocked(c *client, token, state string, now time.Time) *proposal {
 	own := c.proposal
 	if own != nil && (own.dropped || !now.Before(own.expires)) {
 		s.dropProposalLocked(own)
@@ -596,6 +609,12 @@ func (s *Server) proposalLocked(c *client, token string, now time.Time) *proposa
 		return own
 	}
 	target := own
+	if p := s.statedProposalLocked(state, now); p != nil {
+		if p.code != "" && subtle.ConstantTimeCompare([]byte(token), []byte(p.code)) == 1 {
+			return p
+		}
+		target = p
+	}
 	if len(token) > linkHandleBytes {
 		if p := s.proposals.links[token[:linkHandleBytes]]; p != nil {
 			if !now.Before(p.expires) {
@@ -616,15 +635,34 @@ func (s *Server) proposalLocked(c *client, token string, now time.Time) *proposa
 	return nil
 }
 
+// statedProposalLocked returns the live proposal whose state is state, if
+// any, and drops it if it expired.
+func (s *Server) statedProposalLocked(state string, now time.Time) *proposal {
+	if state == "" {
+		return nil
+	}
+	p := s.proposals.states[stateKey(state)]
+	if p == nil || subtle.ConstantTimeCompare([]byte(state), []byte(p.state)) != 1 {
+		return nil
+	}
+	if !now.Before(p.expires) {
+		s.dropProposalLocked(p)
+		return nil
+	}
+	return p
+}
+
 // dropProposalLocked forgets a proposal: its connection's, its link, and
-// its page.
+// its state.
 func (s *Server) dropProposalLocked(p *proposal) {
 	p.dropped = true
-	if p.page != "" && s.proposals.pages[p.page] == p {
-		delete(s.proposals.pages, p.page)
-	}
 	if p.handle != "" && s.proposals.links[p.handle] == p {
 		delete(s.proposals.links, p.handle)
+	}
+	if p.state != "" {
+		if key := stateKey(p.state); s.proposals.states[key] == p {
+			delete(s.proposals.states, key)
+		}
 	}
 }
 
@@ -660,18 +698,6 @@ func sixDigits() (string, error) {
 	return fmt.Sprintf("%06d", number), nil
 }
 
-// trustedOriginLocked reports whether a return_url on origin may receive a
-// sign-in link: the connection's own origin, or the server's.
-func (s *Server) trustedOriginLocked(c *client, origin string) bool {
-	if c.origin != "" && strings.EqualFold(c.origin, origin) {
-		return true
-	}
-	if public, err := url.Parse(s.config.PublicURL); err == nil && public.Host != "" {
-		return strings.EqualFold(public.Scheme+"://"+public.Host, origin)
-	}
-	return false
-}
-
 // schemeConn is the server's side of one auth request's connection, for
 // its scheme (authn.Conn). The scheme calls it outside s.mu.
 type schemeConn struct {
@@ -695,16 +721,22 @@ func (sc *schemeConn) ProposeCode(spec authn.CodeProposal) (authn.Tokens, error)
 	}
 	s.mu.Lock()
 	defer s.unlock()
-	if spec.LinkPage != "" && !s.pruneProposalsLocked(s.proposals.links, maxLinks, sc.now) {
+	if spec.LinkPage != "" && !s.pruneProposalsLocked(s.proposals.links, maxLinks, sc.now) ||
+		spec.State != "" && !s.pruneProposalsLocked(s.proposals.states, maxStates, sc.now) {
 		return authn.Tokens{}, proposalsBusy()
 	}
-	p, refusal := sc.proposeLocked(spec.State, "")
+	p, refusal := sc.proposeLocked(spec.State)
 	if refusal != nil {
 		return authn.Tokens{}, refusal
 	}
 	proof := spec.Proof
 	p.proof, p.code = &proof, code
-	tokens := authn.Tokens{Code: code, Expires: p.expires, Add: p.add}
+	if p.state != "" {
+		// The latest proposal with a state is the one it names; an earlier
+		// one, of another connection, keeps its code there and its link.
+		s.proposals.states[stateKey(p.state)] = p
+	}
+	tokens := authn.Tokens{Code: code, Server: p.server, Expires: p.expires, Add: p.add}
 	if spec.LinkPage != "" {
 		p.handle, p.secret = s.newLinkHandleLocked(), rand.Text()
 		s.proposals.links[p.handle] = p
@@ -716,40 +748,9 @@ func (sc *schemeConn) ProposeCode(spec authn.CodeProposal) (authn.Tokens, error)
 	return tokens, nil
 }
 
-// ProposePage proposes an identity a page will prove (§4.11.5). A
-// return_url must be an http or https URL on the connection's origin, or
-// on Config.PublicURL's.
-func (sc *schemeConn) ProposePage(spec authn.PageProposal) (string, error) {
-	s := sc.s
-	var origin string
-	if spec.ReturnURL != "" {
-		parsed, err := url.Parse(spec.ReturnURL)
-		if err != nil || (parsed.Scheme != "https" && parsed.Scheme != "http") || parsed.Host == "" || parsed.User != nil {
-			return "", authn.InvalidParams("return_url must be an http or https URL")
-		}
-		origin = parsed.Scheme + "://" + parsed.Host
-	}
-	s.mu.Lock()
-	defer s.unlock()
-	if origin != "" && !s.trustedOriginLocked(sc.c, origin) {
-		return "", authn.Denied("return_url must be on the origin of this client")
-	}
-	if !s.pruneProposalsLocked(s.proposals.pages, maxPages, sc.now) {
-		return "", proposalsBusy()
-	}
-	p, refusal := sc.proposeLocked(spec.State, spec.ReturnURL)
-	if refusal != nil {
-		return "", refusal
-	}
-	p.returnOrigin = origin
-	p.page = rand.Text()
-	s.proposals.pages[p.page] = p
-	return p.page, nil
-}
-
 // proposeLocked replaces the connection's proposal with a new one, which
 // takes one of the connection's proposals (proposalsPerConnection).
-func (sc *schemeConn) proposeLocked(state, returnURL string) (*proposal, *authn.Error) {
+func (sc *schemeConn) proposeLocked(state string) (*proposal, *authn.Error) {
 	s, c := sc.s, sc.c
 	if c.closing.Load() {
 		return nil, authn.Denied("This connection is closing")
@@ -764,7 +765,7 @@ func (sc *schemeConn) proposeLocked(state, returnURL string) (*proposal, *authn.
 	}
 	p := &proposal{
 		scheme: sc.scheme, add: c.user != nil, state: state, expires: sc.now.Add(proposalLifetime),
-		name: sc.name, userID: sc.userID, returnURL: returnURL, server: webSocketURL(c.baseURL),
+		name: sc.name, userID: sc.userID, server: webSocketURL(c.baseURL),
 	}
 	if p.add {
 		p.accountID = c.user.id
@@ -799,13 +800,86 @@ func (sc *schemeConn) CanProve(subject string) bool {
 }
 
 // schemeCore is the server's side of a scheme outside its requests
-// (authn.Core), which touches only the scheme's own proposals.
+// (authn.Core), which sees only the scheme's own identities.
 type schemeCore struct {
 	s      *Server
 	scheme authn.Scheme
 }
 
 func (sc schemeCore) Logger() *slog.Logger { return sc.s.logger.With("scheme", sc.scheme.Name()) }
+
+// BaseURL is the base of the server's URLs for a request to a scheme's
+// route, as for a WebSocket request.
+func (sc schemeCore) BaseURL(r *http.Request) string { return sc.s.baseURL(r) }
+
+// ClientKey is the client address of a request to a scheme's route, as
+// for a WebSocket request.
+func (sc schemeCore) ClientKey(r *http.Request) string { return clientKey(sc.s.clientIP(r)) }
+
+// Title is the server's display name, as the server frame has it.
+func (sc schemeCore) Title() string {
+	sc.s.mu.RLock()
+	defer sc.s.mu.RUnlock()
+	title, _ := sc.s.profileValueLocked("title")
+	return title
+}
+
+// Lookup returns the account that has an identity of the scheme.
+func (sc schemeCore) Lookup(subject string) (authn.Account, bool) {
+	s := sc.s
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	u := s.accounts[authn.Identity{Scheme: sc.scheme.Name(), Subject: subject}]
+	if u == nil {
+		return authn.Account{}, false
+	}
+	return authn.Account{UserID: u.id, Name: u.name, Guest: !u.account(), Identities: maps.Clone(u.identities)}, true
+}
+
+// Admits reports whether an identity of the scheme could sign in: to its
+// account, or, with create, to a new one.
+func (sc schemeCore) Admits(subject string, create bool) bool {
+	s := sc.s
+	id := authn.Identity{Scheme: sc.scheme.Name(), Subject: subject}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if owner := s.accounts[id]; owner != nil {
+		return s.admittedLocked(owner)
+	}
+	return create && s.admitsNewLocked(id)
+}
+
+// Issue signs in outside any connection, as the token endpoint of a
+// scheme's page does (§4.12.3), and returns a bearer token for the
+// account, which resumes from any origin, as a token from a code does
+// (§4.12.4).
+func (sc schemeCore) Issue(proof authn.Proof, create bool) (string, error) {
+	s := sc.s
+	s.mu.Lock()
+	defer s.unlock()
+	if s.closed {
+		return "", authn.RetryAfter("The server is shutting down", retryAfterSeconds*time.Second)
+	}
+	user, created, err := s.provenAccountLocked(sc.scheme, proof, create)
+	if err == nil {
+		err = s.admitLocked(user)
+	}
+	if err != nil {
+		return "", &authn.Error{Code: err.Code, Message: err.Message, Data: err.Data}
+	}
+	token, key, err := s.newSessionLocked(user, "", true, time.Now())
+	if err != nil {
+		return "", &authn.Error{Code: err.Code, Message: err.Message}
+	}
+	if session, ok := s.sessions[key]; ok {
+		session.credential = credentialKey(sc.scheme.Name(), proof.Credential)
+		s.sessions[key] = session
+	}
+	if created {
+		s.joinDefaultRoomLocked(user)
+	}
+	return token, nil
+}
 
 // Go runs fn as the scheme's work, which Shutdown waits for, unless the
 // server is closed.
@@ -827,76 +901,14 @@ func (sc schemeCore) Go(fn func(ctx context.Context)) bool {
 	return true
 }
 
-// livePageLocked returns the scheme's proposal a page names while it waits
-// for its identity, dropping it once expired.
-func (s *Server) livePageLocked(scheme authn.Scheme, page string) *proposal {
-	p := s.proposals.pages[page]
-	if p == nil || p.scheme != scheme {
-		return nil
-	}
-	if p.dropped || !time.Now().Before(p.expires) {
-		s.dropProposalLocked(p)
-		return nil
-	}
-	return p
-}
-
-func returnHost(returnURL string) string {
-	if parsed, err := url.Parse(returnURL); err == nil {
-		return parsed.Host
-	}
-	return ""
-}
-
-func (sc schemeCore) Page(page string) (authn.Pending, bool) {
-	s := sc.s
-	s.mu.Lock()
-	defer s.unlock()
-	p := s.livePageLocked(sc.scheme, page)
-	if p == nil {
-		return authn.Pending{}, false
-	}
-	return authn.Pending{Add: p.add, ReturnHost: returnHost(p.returnURL)}, true
-}
-
-// Complete gives a page's proposal its identity, and its tokens, which
-// expire within minutes of their delivery (§4.11.2).
-func (sc schemeCore) Complete(page string, proof authn.Proof) (authn.Completed, error) {
-	if proof.Subject == "" {
-		return authn.Completed{}, errors.New("apron: a proposal proves an empty subject")
-	}
-	s := sc.s
-	code, err := sixDigits()
-	if err != nil {
-		return authn.Completed{}, err
-	}
-	s.mu.Lock()
-	defer s.unlock()
-	p := s.livePageLocked(sc.scheme, page)
-	if p == nil {
-		return authn.Completed{}, errors.New("apron: the proposal is unknown, expired, or completed")
-	}
-	p.proof = &proof
-	delete(s.proposals.pages, p.page)
-	p.page = ""
-	p.expires = time.Now().Add(proposalLifetime)
-	p.code = code
-	p.handle, p.secret = s.newLinkHandleLocked(), rand.Text()
-	s.proposals.links[p.handle] = p
-	completed := authn.Completed{Tokens: authn.Tokens{Code: code, Expires: p.expires, Add: p.add}}
-	if p.returnURL != "" {
-		completed.ReturnHost = returnHost(p.returnURL)
-		completed.Link = signInLink(p.returnURL, p.handle+p.secret, p.state, p.server)
-	}
-	return completed, nil
-}
-
 // signInLink builds a link from a page, never from request fields other
 // than state, with the token in the fragment so it stays out of server logs
 // (§4.11.2): #token=<token>, &state=<state> with the proposal's state,
 // unchanged, when it carried one, and &server=<URL> with this server's
 // WebSocket URL when it is known, so a client that speaks to several
-// servers presents it to the right one. Values are form-encoded.
+// servers presents it to the right one. Values are form-encoded, and
+// server with `:` and `/` left as they are, as a link spells it
+// (PROTOCOL.md Appendix A.4).
 func signInLink(page, token, state, server string) string {
 	page, _, _ = strings.Cut(page, "#")
 	link := page + "#token=" + url.QueryEscape(token)
@@ -904,7 +916,7 @@ func signInLink(page, token, state, server string) string {
 		link += "&state=" + url.QueryEscape(state)
 	}
 	if server != "" {
-		link += "&server=" + url.QueryEscape(server)
+		link += "&server=" + linkEscape(server)
 	}
 	return link
 }

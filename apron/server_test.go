@@ -135,6 +135,44 @@ func TestServerFrame(t *testing.T) {
 	c.expectError(t, "push_register", "p", map[string]any{"kind": "relay", "url": "https://relay.example/p"}, CodeUnsupported)
 }
 
+// signup lists webauthn only where a registration can make an account
+// without a secret: a guest's. Without guests, by DisableGuests or a
+// restricted sign-in, a passkey only signs in, and an invited client
+// registers anyway, as webauthn stays in auth (§3.2).
+func TestSignupWithoutGuests(t *testing.T) {
+	for name, configure := range map[string]func(*Config){
+		"guests disabled": func(c *Config) { c.DisableGuests = true },
+		"sign-in restricted": func(c *Config) {
+			c.Extensions = []Extension{testExtension{"private", func(r *Registrar) error {
+				r.RestrictSignIn()
+				return nil
+			}}}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			config := DefaultConfig()
+			config.WebAuthn = testWebAuthn(t)
+			configure(&config)
+			_, passkeys := newTestServer(t, config)
+			_, frame := dialRaw(t, passkeys)
+			params := frame["params"].(map[string]any)
+			// No scheme makes an account: signup is there, and empty.
+			if !reflect.DeepEqual(params["auth"], []any{"webauthn", "token"}) || !reflect.DeepEqual(params["signup"], []any{}) {
+				t.Fatalf("auth: %#v, signup: %#v", params["auth"], params["signup"])
+			}
+
+			config.EmailSender = make(testMailbox, 1)
+			config.EmailLinkURL = "https://chat.example/login"
+			_, both := newTestServer(t, config)
+			_, frame = dialRaw(t, both)
+			params = frame["params"].(map[string]any)
+			if !reflect.DeepEqual(params["auth"], []any{"webauthn", "email", "token"}) || !reflect.DeepEqual(params["signup"], []any{"email"}) {
+				t.Fatalf("with email, auth: %#v, signup: %#v", params["auth"], params["signup"])
+			}
+		})
+	}
+}
+
 func TestGuestAuth(t *testing.T) {
 	_, httpServer := newTestServer(t, DefaultConfig())
 	c, _ := dialRaw(t, httpServer)

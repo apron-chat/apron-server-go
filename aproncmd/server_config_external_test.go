@@ -34,6 +34,9 @@ func TestServerConfigForCustomRunner(t *testing.T) {
 	if config.WebAuthn == nil || config.MaxUploadBytes != 3<<20 {
 		t.Fatal("custom runner lost passkey or upload options")
 	}
+	if config.SignalUnknownPasskeys {
+		t.Fatal("the passkey page signals unknown passkeys without --webauthn.signal-unknown")
+	}
 	if config.Store != nil {
 		t.Fatal("configuration conversion must not open a store")
 	}
@@ -45,5 +48,35 @@ func TestServerConfigPreservesValidation(t *testing.T) {
 	options.Push.AllowInsecure = true
 	if _, err := aproncmd.ServerConfig(options); err == nil {
 		t.Fatal("custom runners must retain insecure-push validation")
+	}
+}
+
+func TestServerConfigNamesAnExternalIssuer(t *testing.T) {
+	var options aproncmd.Options
+	parser := flags.NewParser(&options, flags.None)
+	if _, err := parser.ParseArgs([]string{"--external.issuer", "https://id.example", "--external.scope", "openid profile"}); err != nil {
+		t.Fatal(err)
+	}
+	config, err := aproncmd.ServerConfig(options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if issuer := config.ExternalIssuer; issuer == nil || issuer.Issuer != "https://id.example" || issuer.Scope != "openid profile" {
+		t.Fatalf("ExternalIssuer = %#v", config.ExternalIssuer)
+	}
+}
+
+func TestServerConfigSignalsUnknownPasskeysWhenAsked(t *testing.T) {
+	var options aproncmd.Options
+	parser := flags.NewParser(&options, flags.None)
+	if _, err := parser.ParseArgs([]string{"--webauthn.signal-unknown"}); err != nil {
+		t.Fatal(err)
+	}
+	config, err := aproncmd.ServerConfig(options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !config.SignalUnknownPasskeys {
+		t.Fatal("--webauthn.signal-unknown did not reach the server's config")
 	}
 }

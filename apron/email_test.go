@@ -184,12 +184,21 @@ func TestEmailSignIn(t *testing.T) {
 	// the proposal's state unchanged, and this server's WebSocket URL in its
 	// fragment, and no address (§4.11.2).
 	link := linkToken(t, message)
-	want := "https://chat.example/login#token=" + link + "&state=" + url.QueryEscape(state) + "&server=wss%3A%2F%2Fchat.example%2Fapp%2Fws"
+	want := "https://chat.example/login#token=" + link + "&state=" + url.QueryEscape(state) + "&server=wss://chat.example/app/ws"
 	if message.Link != want || len(link) < 26 || strings.Contains(message.Link, "ada") || linkFragment(t, message).Get("state") != state {
 		t.Fatalf("link %q, want %q", message.Link, want)
 	}
 	if !strings.Contains(message.Text(), message.Code) || !strings.Contains(message.Text(), message.Link) {
 		t.Fatalf("text: %q", message.Text())
+	}
+	// The email gives the server's address, the link's server, with the
+	// code, and says to type it only in an app connected there (§4.11.2).
+	if message.Server != "wss://chat.example/app/ws" || linkFragment(t, message).Get("server") != message.Server {
+		t.Fatalf("server %q, link %q", message.Server, message.Link)
+	}
+	if text := message.Text(); !strings.Contains(text, "Your sign-in code for wss://chat.example/app/ws is "+message.Code+".") ||
+		!strings.Contains(text, "Type it only in an app that is connected to wss://chat.example/app/ws.") {
+		t.Fatalf("text: %q", text)
 	}
 	// Another proposal for the address so soon is retry_after.
 	proposer.expectError(t, "auth", "again", map[string]any{"scheme": "email", "email": "ada@example.com"}, CodeRetryAfter)
@@ -324,6 +333,10 @@ func TestEmailAdditions(t *testing.T) {
 	if !message.Add || message.Link == "" || !strings.Contains(message.Text(), "add this address") || !strings.Contains(message.Text(), message.Link) {
 		t.Fatalf("addition email: %#v", message)
 	}
+	if text := message.Text(); message.Server != wsURL(httpServer) || !strings.Contains(text, "account on "+message.Server+" is "+message.Code+".") ||
+		!strings.Contains(text, "Type it only in an app that is connected to "+message.Server+".") {
+		t.Fatalf("addition email without the server's address: %q", text)
+	}
 	// Someone else's proposal for the address does not touch it, the code
 	// works on no other connection, and the link on no connection of
 	// another account or none (§4.11.3), which leaves the proposal.
@@ -337,13 +350,13 @@ func TestEmailAdditions(t *testing.T) {
 	stranger.expectError(t, "auth", "link-other-account", map[string]any{"scheme": "email", "token": linkToken(t, message)}, CodeDenied)
 	victim.drain(t)
 	// Approving adds the address to the guest, which becomes an account
-	// keeping its messages, with the roles its address was granted: {} and
-	// a user notification with the new roles.
+	// keeping its messages, with the roles its address was granted: it
+	// replies with the account as you (§4.11.3), with its new roles.
 	before, result := approve(t, victim, message.Code, nil)
-	if len(result) != 0 || len(before) != 1 {
+	if len(before) != 0 || result["you"] == nil || result["token"] != nil {
 		t.Fatalf("approving an addition: %#v after %#v", result, before)
 	}
-	if you := notificationParams(t, before[0], "user")["you"].(map[string]any); !reflect.DeepEqual(you["roles"], []any{"admin"}) {
+	if you := result["you"].(map[string]any); !reflect.DeepEqual(you["roles"], []any{"admin"}) {
 		t.Fatalf("profile after the addition: %#v", you)
 	}
 	save(t, victim, "edit", map[string]any{"message_id": secret, "room_id": diary, "body": map[string]any{"text": "still mine"}})
@@ -448,7 +461,7 @@ func TestEmailAddsToAPasskeyAccount(t *testing.T) {
 	tab, _ := dialOrigin(t, httpServer, testPasskeyOrigin)
 	tab.result(t, "auth", "resume", map[string]any{"scheme": "token", "token": registered["token"]})
 	tab.drain(t)
-	if _, result := approve(t, tab, linkToken(t, mailbox.receive(t)), nil); len(result) != 0 {
+	if _, result := approve(t, tab, linkToken(t, mailbox.receive(t)), nil); result["you"].(map[string]any)["user_id"] != ownerID || len(result) != 1 {
 		t.Fatalf("adding an address to a passkey account: %#v", result)
 	}
 	app.mu.RLock()
@@ -505,13 +518,13 @@ func TestEmailProposalsExpireAndAreInvalidated(t *testing.T) {
 	propose(t, fresh, "erin@example.com")
 	signedIn.expectError(t, "auth", "signed-in", map[string]any{"scheme": "email", "token": linkToken(t, mailbox.receive(t))}, CodeDenied)
 	// Email sign-in is not offered without a sender, and external sign-in
-	// not at all, neither to propose nor to approve.
+	// not at all, neither to begin nor to redeem.
 	fresh.expectError(t, "auth", "external", map[string]any{"scheme": "external", "token": linkToken(t, second)}, CodeUnsupported)
 	_, plain := newTestServer(t, DefaultConfig())
 	guest, _ := dialRaw(t, plain)
 	guest.expectError(t, "auth", "email", map[string]any{"scheme": "email", "email": "ada@example.com"}, CodeUnsupported)
 	guest.expectError(t, "auth", "token", map[string]any{"scheme": "token", "token": "x"}, CodeUnsupported)
-	guest.expectError(t, "auth", "external", map[string]any{"scheme": "external", "return_url": "https://web.apron.chat/"}, CodeUnsupported)
+	guest.expectError(t, "auth", "external", map[string]any{"scheme": "external"}, CodeUnsupported)
 	// A scheme not offered is unsupported before its user_id is read.
 	for _, scheme := range []string{"email", "token", "webauthn", "external"} {
 		guest.expectError(t, "auth", "bad-id-"+scheme, map[string]any{"scheme": scheme, "user_id": ""}, CodeUnsupported)
@@ -618,6 +631,83 @@ func TestEmailFailedAttemptsCountFromAnyConnection(t *testing.T) {
 	c.expectError(t, "auth", "cancelled-code", map[string]any{"scheme": "email", "token": message.Code}, CodeDenied)
 }
 
+// A code works on another connection with its proposal's state, as when the
+// proposer's connection dropped before the user typed it: under either
+// scheme, never without the state or with another, and wrong codes with the
+// state count against the proposal (§4.11.2, §4.11.3).
+func TestEmailCodesWorkElsewhereWithTheirState(t *testing.T) {
+	app, mailbox, httpServer := emailTestServer(t, nil)
+	proposer, _ := dialRaw(t, httpServer)
+	state := "q8Rz-state-of-the-proposer"
+	proposer.result(t, "auth", "propose", map[string]any{"scheme": "email", "email": "ada@example.com", "state": state, "name": "Ada"})
+	code := mailbox.receive(t).Code
+	_ = proposer.ws.Close(websocket.StatusNormalClosure, "dropped")
+
+	retry, _ := dialRaw(t, httpServer)
+	retry.expectError(t, "auth", "no-state", map[string]any{"scheme": "email", "token": code}, CodeDenied)
+	retry.expectError(t, "auth", "other-state", map[string]any{"scheme": "email", "token": code, "state": state + "x"}, CodeDenied)
+	retry.expectError(t, "auth", "token-no-state", map[string]any{"scheme": "token", "token": code}, CodeDenied)
+	retry.expectError(t, "auth", "state-type", map[string]any{"scheme": "email", "token": code, "state": 7}, CodeInvalidParams)
+	// A sign-in code with its state on a signed-in connection is denied, and
+	// the proposal stays.
+	signedIn := dialTestClient(t, httpServer)
+	signedIn.expectError(t, "auth", "signed-in", map[string]any{"scheme": "email", "token": code, "state": state}, CodeDenied)
+	// Wrong codes with the state count against the proposal, whichever
+	// connection sends them.
+	for i := range maxProposalAttempts - 2 {
+		guesser, _ := dialRaw(t, httpServer)
+		guesser.expectError(t, "auth", fmt.Sprintf("guess-%d", i), map[string]any{"scheme": "email", "token": "000000x", "state": state}, CodeDenied)
+	}
+	// The proposal's name applies only on its own connection.
+	_, result := signInByEmail(t, retry, code, map[string]any{"state": state})
+	if you := result["you"].(map[string]any); you["name"] == "Ada" {
+		t.Fatalf("sign-in elsewhere took the proposal's name: %#v", you)
+	}
+	// Used up.
+	again, _ := dialRaw(t, httpServer)
+	again.expectError(t, "auth", "reuse", map[string]any{"scheme": "email", "token": code, "state": state}, CodeDenied)
+
+	// Under scheme token too.
+	second, _ := dialRaw(t, httpServer)
+	second.result(t, "auth", "propose", map[string]any{"scheme": "email", "email": "bob@example.com", "state": "bob-state"})
+	code = mailbox.receive(t).Code
+	elsewhere, _ := dialRaw(t, httpServer)
+	elsewhere.expectError(t, "auth", "token-other-state", map[string]any{"scheme": "token", "token": code, "state": "carol-state"}, CodeDenied)
+	if result := elsewhere.result(t, "auth", "token", map[string]any{"scheme": "token", "token": code, "state": "bob-state"}); result["you"] == nil || result["token"] == nil {
+		t.Fatalf("sign-in by code and state with scheme token: %#v", result)
+	}
+
+	// A few wrong codes with the state cancel the proposal.
+	third, _ := dialRaw(t, httpServer)
+	third.result(t, "auth", "propose", map[string]any{"scheme": "email", "email": "carol@example.com", "state": "carol-state"})
+	code = mailbox.receive(t).Code
+	wrong := "wrong"
+	for i := range maxProposalAttempts {
+		guesser, _ := dialRaw(t, httpServer)
+		guesser.expectError(t, "auth", fmt.Sprintf("cancel-%d", i), map[string]any{"scheme": "email", "token": wrong, "state": "carol-state"}, CodeDenied)
+	}
+	late, _ := dialRaw(t, httpServer)
+	late.expectError(t, "auth", "cancelled", map[string]any{"scheme": "email", "token": code, "state": "carol-state"}, CodeDenied)
+	third.expectError(t, "auth", "cancelled-own", map[string]any{"scheme": "email", "token": code}, CodeDenied)
+
+	// An expired proposal is denied with its state, and forgotten.
+	fourth, _ := dialRaw(t, httpServer)
+	fourth.result(t, "auth", "propose", map[string]any{"scheme": "email", "email": "dave@example.com", "state": "dave-state"})
+	code = mailbox.receive(t).Code
+	app.mu.Lock()
+	for _, p := range app.proposals.states {
+		p.expires = time.Now().Add(-time.Second)
+	}
+	app.mu.Unlock()
+	late.expectError(t, "auth", "expired", map[string]any{"scheme": "email", "token": code, "state": "dave-state"}, CodeDenied)
+	app.mu.RLock()
+	kept := len(app.proposals.states)
+	app.mu.RUnlock()
+	if kept != 0 {
+		t.Fatalf("%d proposals kept by state, want 0", kept)
+	}
+}
+
 // Without a public URL, a link carries the WebSocket URL its proposal's
 // connection reached, so a page such as link.apron.chat knows where to sign in.
 func TestEmailLinksNameTheServerWithoutAPublicURL(t *testing.T) {
@@ -627,6 +717,48 @@ func TestEmailLinksNameTheServerWithoutAPublicURL(t *testing.T) {
 	message := mailbox.receive(t)
 	if server := linkFragment(t, message).Get("server"); server != wsURL(httpServer) || !strings.HasPrefix(message.Link, "https://link.apron.chat/#token=") {
 		t.Fatalf("link %q, want server %q", message.Link, wsURL(httpServer))
+	}
+	if message.Server != wsURL(httpServer) || !strings.Contains(message.Text(), "Your sign-in code for "+wsURL(httpServer)) {
+		t.Fatalf("server %q, text %q", message.Server, message.Text())
+	}
+}
+
+// A link leaves `:` and `/` in server as they are (PROTOCOL.md Appendix
+// A.4) and percent-encodes the rest of what form decoding would misread, so
+// a client decodes the server it names either way.
+func TestSignInLinkSpellsServerAsALink(t *testing.T) {
+	link := signInLink("https://chat.example/login#old", "t", "", "wss://chat.example/a b?x=1&y+z/ws")
+	if want := "https://chat.example/login#token=t&server=wss://chat.example/a%20b%3Fx%3D1%26y%2Bz/ws"; link != want {
+		t.Fatalf("link %q, want %q", link, want)
+	}
+	_, fragment, _ := strings.Cut(link, "#")
+	if values, err := url.ParseQuery(fragment); err != nil || values.Get("server") != "wss://chat.example/a b?x=1&y+z/ws" {
+		t.Fatalf("fragment %q: %v, %v", fragment, values, err)
+	}
+}
+
+// Without a link page, the email still gives the server's address with
+// the code (§4.11.2).
+func TestEmailCodesNameTheServerWithoutALink(t *testing.T) {
+	_, mailbox, httpServer := emailTestServer(t, func(config *Config) { config.EmailLinkURL = "" })
+	c, _ := dialRaw(t, httpServer)
+	propose(t, c, "ada@example.com")
+	message := mailbox.receive(t)
+	if message.Link != "" || message.Server != wsURL(httpServer) {
+		t.Fatalf("link %q, server %q", message.Link, message.Server)
+	}
+	if text := message.Text(); !strings.Contains(text, "Your sign-in code for "+wsURL(httpServer)+" is "+message.Code+".") ||
+		!strings.Contains(text, "Type it only in an app that is connected to "+wsURL(httpServer)+".") {
+		t.Fatalf("text: %q", text)
+	}
+}
+
+// A message without the server's address, from a sender that builds its
+// own, still gives the code.
+func TestSignInEmailTextWithoutAServer(t *testing.T) {
+	text := SignInEmail{To: "ada@example.com", Code: "418092", Expires: time.Now().Add(10 * time.Minute)}.Text()
+	if !strings.HasPrefix(text, "Your sign-in code is 418092.\n") || strings.Contains(text, "Type it only") {
+		t.Fatalf("text: %q", text)
 	}
 }
 

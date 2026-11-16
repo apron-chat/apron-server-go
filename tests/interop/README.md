@@ -25,6 +25,20 @@ The WebAuthn suite uses Chromium's virtual authenticator against the real Go
 verifier. It covers passkey registration, login, sign-out, session resumption,
 message ownership, and recovery from an invalid signature. These tests use
 `localhost` to match the default RP ID; other browser tests use `127.0.0.1`.
+`passkey-page.spec.ts` drives the server's passkey page alone, with the same
+virtual authenticator: an app on another domain, a protocol client with no
+`Origin`, adds a passkey to its guest on the page and then signs in with it
+there, finishing each with the page's code. Another checks the page asks
+for its WebAuthn options before the tap, again each minute, and again on a
+tap once they are held too long, and that a tap calls `navigator.credentials`
+before any request, as Safari's user activation needs. Another burns a passkey's
+code, then signs in with it on the page, which signals it unknown
+(`signalUnknownCredential`, on with `--webauthn.signal-unknown`) and stays open. Its last test drives the web client itself
+from `127.0.0.1`, which cannot use the `localhost` RP ID, against the server at
+`localhost:8080`: the guest creates an account on the page in a popup, and another browser
+whose popups are blocked signs in on the page in its own tab and finishes on the way back to
+`/signed-in/`. It skips itself with a web client that predates the passkey page (no
+`/signed-in/`); run it with `APRON_WEB_DIR` pointing at one that has it.
 
 Install and run from the repository root:
 

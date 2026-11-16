@@ -3,11 +3,8 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"io"
 	"net/http"
-	"net/http/cookiejar"
 	"net/http/httptest"
-	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -15,13 +12,25 @@ import (
 	"github.com/coder/websocket"
 
 	"github.com/apron-chat/apron-server-go/apron"
+	"github.com/apron-chat/apron-server-go/internal/oauthtest"
 	"github.com/apron-chat/apron-server-go/internal/wstest"
 )
 
-// fakeGitHub signs in octocat, a member of acme, whatever is asked.
-func fakeGitHub(t *testing.T) *httptest.Server {
+// gitHub is a fake GitHub, which signs in octocat, a member of acme,
+// whatever is asked, unless the person declines.
+type gitHub struct {
+	*httptest.Server
+	decline bool
+}
+
+func fakeGitHub(t *testing.T) *gitHub {
 	mux := http.NewServeMux()
+	g := &gitHub{}
 	mux.HandleFunc("GET /login/oauth/authorize", func(w http.ResponseWriter, r *http.Request) {
+		if g.decline {
+			http.Redirect(w, r, r.URL.Query().Get("redirect_uri")+"?error=access_denied&state="+r.URL.Query().Get("state"), http.StatusFound)
+			return
+		}
 		http.Redirect(w, r, r.URL.Query().Get("redirect_uri")+"?code=c0de&state="+r.URL.Query().Get("state"), http.StatusFound)
 	})
 	mux.HandleFunc("POST /login/oauth/access_token", func(w http.ResponseWriter, r *http.Request) {
@@ -37,9 +46,9 @@ func fakeGitHub(t *testing.T) *httptest.Server {
 	mux.HandleFunc("GET /user/memberships/orgs/acme", func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]any{"state": "active"})
 	})
-	server := httptest.NewServer(mux)
-	t.Cleanup(server.Close)
-	return server
+	g.Server = httptest.NewServer(mux)
+	t.Cleanup(g.Close)
+	return g
 }
 
 func TestSignInWithGitHub(t *testing.T) {
@@ -85,23 +94,40 @@ func TestSignInWithGitHub(t *testing.T) {
 			}
 		}
 	}
-	page := call(map[string]any{"scheme": "external"})["url"].(string)
+	external := call(map[string]any{"scheme": "external"})["external"].(map[string]any)
+	if external["url"] != base+"/oauth/authorize" {
+		t.Fatalf("external = %#v", external)
+	}
 
-	// The browser follows the page to GitHub and back, then shows a code.
-	jar, _ := cookiejar.New(nil)
-	response, err := (&http.Client{Jar: jar}).Get(page)
-	if err != nil {
-		t.Fatal(err)
+	// An app on this device opens the page, which sends the person to
+	// GitHub and back, then says who is asking, and the person allows it.
+	app := oauthtest.New(t, base)
+	page := app.Get(app.URL(external["url"].(string), nil))
+	if page.Status != http.StatusOK || !strings.Contains(page.Body, "<strong>An app on this device (com.example.app)</strong> wants to sign in to") {
+		t.Fatalf("after GitHub = %d %s", page.Status, page.Body)
 	}
-	body, _ := io.ReadAll(response.Body)
-	response.Body.Close()
-	code := regexp.MustCompile(`class="code">(\d{6})<`).FindStringSubmatch(string(body))
-	if code == nil {
-		t.Fatalf("page = %d %s", response.StatusCode, body)
-	}
-	you := call(map[string]any{"scheme": "external", "token": code[1]})["you"].(map[string]any)
-	if you["user_id"] != "octocat" || you["name"] != "The Octocat" || !strings.Contains(strings.Join(toStrings(you["roles"]), ","), "admin") {
+	code := app.Code(app.Press(page, "allow"), base)
+	params := app.Redemption(code)
+	params["scheme"] = "external"
+	result := call(params)
+	you := result["you"].(map[string]any)
+	if you["user_id"] != "octocat" || you["name"] != "The Octocat" || result["token"] == nil || !strings.Contains(strings.Join(toStrings(you["roles"]), ","), "admin") {
 		t.Fatalf("you = %#v", you)
+	}
+
+	// The next sign-in shows the account.
+	again := oauthtest.New(t, base)
+	page = again.Get(again.URL(external["url"].(string), nil))
+	if !strings.Contains(page.Body, "to use <strong>The Octocat (@octocat)</strong>’s account?") {
+		t.Fatalf("second sign-in = %d %s", page.Status, page.Body)
+	}
+
+	// Declining at GitHub returns to the app with access_denied.
+	declined := oauthtest.New(t, base)
+	github.decline = true
+	page = declined.Get(declined.URL(external["url"].(string), nil))
+	if page.Return == nil || page.Return.Query().Get("error") != "access_denied" || page.Return.Query().Get("state") != declined.State {
+		t.Fatalf("declined = %d %v %s", page.Status, page.Return, page.Body)
 	}
 }
 

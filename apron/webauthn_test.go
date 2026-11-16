@@ -103,6 +103,9 @@ type testAuthenticator struct {
 	id      []byte
 	handle  string
 	counter uint32
+	// clientData adds to or replaces the fields of the client data it
+	// signs, such as crossOrigin.
+	clientData map[string]any
 }
 
 func newTestAuthenticator(t *testing.T) *testAuthenticator {
@@ -116,8 +119,12 @@ func newTestAuthenticator(t *testing.T) *testAuthenticator {
 
 func b64(value []byte) string { return base64.RawURLEncoding.EncodeToString(value) }
 
-func clientData(kind, challenge, origin string) []byte {
-	data, _ := json.Marshal(map[string]any{"type": kind, "challenge": challenge, "origin": origin, "crossOrigin": false})
+func clientData(kind, challenge, origin string, extra map[string]any) []byte {
+	fields := map[string]any{"type": kind, "challenge": challenge, "origin": origin, "crossOrigin": false}
+	for key, value := range extra {
+		fields[key] = value
+	}
+	data, _ := json.Marshal(fields)
 	return data
 }
 
@@ -145,7 +152,7 @@ func (a *testAuthenticator) registration(t *testing.T, options map[string]any, o
 	}
 	return map[string]any{
 		"id": b64(a.id), "rawId": b64(a.id), "type": "public-key", "clientExtensionResults": map[string]any{},
-		"response": map[string]any{"clientDataJSON": b64(clientData("webauthn.create", publicKey["challenge"].(string), origin)), "attestationObject": b64(attestation)},
+		"response": map[string]any{"clientDataJSON": b64(clientData("webauthn.create", publicKey["challenge"].(string), origin, a.clientData)), "attestationObject": b64(attestation)},
 	}
 }
 
@@ -153,7 +160,7 @@ func (a *testAuthenticator) assertion(t *testing.T, options map[string]any, orig
 	t.Helper()
 	a.counter++
 	publicKey := passkeyPublicKey(t, options)
-	client := clientData("webauthn.get", publicKey["challenge"].(string), origin)
+	client := clientData("webauthn.get", publicKey["challenge"].(string), origin, a.clientData)
 	hash := sha256.Sum256([]byte(rpID))
 	data := append(hash[:], flags)
 	data = binary.BigEndian.AppendUint32(data, a.counter)

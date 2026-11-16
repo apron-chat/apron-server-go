@@ -60,6 +60,12 @@ type Options struct {
 		RPID             string   `long:"rp-id" default:"localhost" description:"Passkey relying party domain; empty disables passkeys"`
 		Origins          []string `long:"origin" default:"http://localhost:5173" default:"http://localhost:8080" description:"Exact frontend origin for passkeys; repeat for more"`
 		AddWithoutReauth bool     `long:"add-without-reauth" description:"Let a connection add a passkey to an account that has one without a passkey sign-in in the last five minutes; a stolen session token could then take the account over"`
+		// FIXME: keep off until Apple fixes https://bugs.webkit.org/show_bug.cgi?id=302624
+		// and https://bugs.webkit.org/show_bug.cgi?id=322267
+		// (signalUnknownCredential can delete other accounts' passkeys on
+		// iOS/macOS 26). Check again on 2027-02-16. Turn on only where this
+		// server is the sole user of its RP ID.
+		SignalUnknown bool `long:"signal-unknown" description:"On the passkey page, say a passkey is for no account here and ask the browser to hide it (signalUnknownCredential); off, it is the usual error, which tells no one whether a credential is registered. Only for a server that is the sole user of its RP ID, and off while WebKit can delete other accounts' passkeys with it"`
 	} `group:"Passkeys" namespace:"webauthn"`
 
 	Upload struct {
@@ -92,6 +98,11 @@ type Options struct {
 		SMTPPassword string `long:"smtp-password" description:"SMTP password"`
 		SMTPInsecure bool   `long:"smtp-insecure" description:"Send through a relay that does not offer STARTTLS, in cleartext (a relay on the same host only)"`
 	} `group:"Email sign-in" namespace:"email"`
+
+	External struct {
+		Issuer string `long:"issuer" description:"Another OAuth authorization server for external sign-in, such as an OpenID Connect provider (https://id.example), instead of an extension's; apps name themselves to it with client ID metadata documents, and it must bind access tokens to this server's origin (RFC 8707) as signed JWT access tokens (RFC 9068)"`
+		Scope  string `long:"scope" description:"The scope external sign-in's URL asks the issuer for, such as \"openid profile\""`
+	} `group:"External sign-in" namespace:"external"`
 
 	Push struct {
 		Disable         bool   `long:"disable" description:"Do not offer push registration"`
@@ -282,6 +293,9 @@ func serverConfig(options Options) (apron.Config, error) {
 	if config.EmailLinkURL == "" {
 		config.EmailLinkURL = config.PublicURL
 	}
+	if options.External.Issuer != "" {
+		config.ExternalIssuer = &apron.ExternalIssuer{Issuer: options.External.Issuer, Scope: options.External.Scope}
+	}
 	if options.WebAuthn.RPID != "" {
 		var err error
 		config.WebAuthn, err = webauthn.New(&webauthn.Config{
@@ -291,6 +305,7 @@ func serverConfig(options Options) (apron.Config, error) {
 			return config, fmt.Errorf("invalid WebAuthn configuration: %w", err)
 		}
 		config.AddCredentialWithoutReauth = options.WebAuthn.AddWithoutReauth
+		config.SignalUnknownPasskeys = options.WebAuthn.SignalUnknown
 	}
 	return config, nil
 }

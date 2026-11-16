@@ -1,7 +1,13 @@
 // Command sso is an Apron server for a team that signs in with GitHub: an
-// extension offers external sign-in (PROTOCOL.md §4.11.5) through a GitHub
+// extension offers external sign-in (PROTOCOL.md §4.12) through a GitHub
 // OAuth app, lets in only the members of one organization, and makes some
 // of them admins.
+//
+// The server is the authorization server apps sign in with: an app opens
+// its page at /oauth/authorize, which hands the person to this extension.
+// The extension sends them to GitHub and back, and completes the sign-in
+// with their GitHub identity; the page then asks them to allow the app,
+// naming it, and returns to it with a code.
 //
 // Register an OAuth app at https://github.com/settings/developers with the
 // callback URL https://chat.example/sso/callback, then run:
@@ -66,13 +72,13 @@ func (s *SSO) Init(r *apron.Registrar) error {
 	return nil
 }
 
-// start sends the person to GitHub. The proposal's ID is unguessable and
+// start sends the person to GitHub. The sign-in's ID is unguessable and
 // works once, so it serves as OAuth's state.
-func (s *SSO) start(w http.ResponseWriter, r *http.Request, p apron.ExternalProposal) {
+func (s *SSO) start(w http.ResponseWriter, r *http.Request, req apron.ExternalRequest) {
 	query := url.Values{
 		"client_id":    {s.Settings.ClientID},
 		"redirect_uri": {s.callback()},
-		"state":        {p.ID},
+		"state":        {req.ID},
 		"allow_signup": {"false"},
 	}
 	if s.Settings.Org != "" {
@@ -82,16 +88,21 @@ func (s *SSO) start(w http.ResponseWriter, r *http.Request, p apron.ExternalProp
 }
 
 // finish exchanges GitHub's code for the person's identity and completes
-// the proposal with it.
+// the sign-in with it; the server's page then asks them to allow the app.
+// A person who declined at GitHub goes back to the app, which hears so.
 func (s *SSO) finish(w http.ResponseWriter, r *http.Request) {
-	proposal := r.URL.Query().Get("state")
+	signIn := r.URL.Query().Get("state")
+	if r.URL.Query().Get("error") == "access_denied" {
+		_ = s.signIn.Cancel(w, r, signIn)
+		return
+	}
 	identity, err := s.identify(r.Context(), r.URL.Query().Get("code"))
 	if err != nil {
 		s.host.Logger().Warn("GitHub sign-in refused", "error", err)
 		http.Error(w, "Sign-in failed: "+err.Error(), http.StatusForbidden)
 		return
 	}
-	if err := s.signIn.Complete(w, r, proposal, identity); err != nil {
+	if err := s.signIn.Complete(w, r, signIn, identity); err != nil {
 		s.host.Logger().Info("sign-in not completed", "error", err)
 	}
 }

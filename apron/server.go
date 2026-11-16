@@ -29,6 +29,7 @@ import (
 	"github.com/go-webauthn/webauthn/webauthn"
 	"golang.org/x/time/rate"
 
+	"github.com/apron-chat/apron-server-go/internal/auth/external"
 	"github.com/apron-chat/apron-server-go/internal/auth/passkey"
 	"github.com/apron-chat/apron-server-go/internal/authn"
 	"github.com/apron-chat/apron-server-go/store"
@@ -155,6 +156,24 @@ type Config struct {
 	// session token could add a passkey of its own, sign in with it, and
 	// remove the owner's.
 	AddCredentialWithoutReauth bool
+	// SignalUnknownPasskeys has the passkey page say that no account has a
+	// passkey, when none has nor may yet have it, and ask the browser to
+	// hide it (signalUnknownCredential). Off, such a login gets the page's
+	// usual error, the same as a known passkey that fails: the distinct
+	// answer tells anyone who posts a made-up assertion whether a
+	// credential ID is registered, which is worth it only for the signal.
+	// A server knows only its own accounts, so turn it on only where it is
+	// the sole user of its RP ID: no parent-domain RP ID shared with other
+	// services, and no other deployment on the same RP ID with storage of
+	// its own.
+	//
+	// FIXME: keep off until Apple fixes
+	// https://bugs.webkit.org/show_bug.cgi?id=302624 and
+	// https://bugs.webkit.org/show_bug.cgi?id=322267 (signalUnknownCredential
+	// can delete other accounts' passkeys on iOS/macOS 26). Check again on
+	// 2027-02-16. Turn on only where this server is the sole user of its RP
+	// ID.
+	SignalUnknownPasskeys bool
 	// OnStoreError, if set, is called once, on a goroutine of its own, with
 	// the first error the store returns. The server then
 	// writes nothing more and fails Sync (see Server.Sync); the program
@@ -228,6 +247,11 @@ type Config struct {
 	// used) or X-Real-IP, for per-client rate limits. Empty uses the
 	// connection's own address. Set it only behind a proxy that sets it.
 	ClientIPHeader string
+	// ExternalIssuer names another OAuth authorization server for external
+	// sign-in (§4.12), such as an OpenID Connect provider, instead of an
+	// extension's sign-in on the server's own page; nil for none. Then no
+	// extension may offer external sign-in.
+	ExternalIssuer *ExternalIssuer
 	// EmailLinkURL is the page the links in sign-in emails open, such as
 	// https://chat.example/, with a token, the proposal's state, and this
 	// server's WebSocket URL in its fragment (§4.11.2). Empty sends codes
@@ -697,7 +721,7 @@ func Open(config Config) (*Server, error) {
 		invitations: make(map[[32]byte]*invitation),
 		services:    make(map[[32]byte]*serviceToken),
 		accounts:    make(map[authn.Identity]*userState),
-		proposals:   proposals{links: make(map[string]*proposal), pages: make(map[string]*proposal)},
+		proposals:   proposals{links: make(map[string]*proposal), states: make(map[string]*proposal)},
 		dirty:       newDirtySet(),
 		storeWrites: make(chan storeBatch, storeQueue),
 		storeDone:   make(chan struct{}),
@@ -748,7 +772,9 @@ func Open(config Config) (*Server, error) {
 	// The sign-in schemes get what they keep with the accounts once the
 	// extensions have added theirs (startSignIn).
 	if config.WebAuthn != nil {
-		if err := s.addSchemeLocked(passkey.New(config.WebAuthn)); err != nil {
+		scheme := passkey.New(config.WebAuthn)
+		scheme.SignalUnknown = config.SignalUnknownPasskeys
+		if err := s.addSchemeLocked(scheme); err != nil {
 			return fail(err)
 		}
 	}
@@ -756,6 +782,16 @@ func Open(config Config) (*Server, error) {
 		if err := s.addSchemeLocked(emailScheme(config.EmailSender, config.EmailLinkURL)); err != nil {
 			return fail(err)
 		}
+	}
+	if issuer := config.ExternalIssuer; issuer != nil {
+		scheme, err := external.NewForeign(issuer.Issuer, issuer.Scope, issuer.HTTPClient)
+		if err == nil {
+			err = s.addSchemeLocked(scheme)
+		}
+		if err != nil {
+			return fail(err)
+		}
+		s.externalBy = "Config.ExternalIssuer"
 	}
 	s.openUploadDir()
 	go s.writeStore()
@@ -1135,13 +1171,21 @@ func (s *Server) serverParams(baseURL string, revealed bool) map[string]any {
 	if len(authSchemes) > 0 {
 		authSchemes = append(authSchemes, "token")
 	}
-	if s.guestsAllowedLocked() {
+	guests := s.guestsAllowedLocked()
+	if guests {
 		authSchemes = append(authSchemes, "guest")
 	}
 	// signup (§3.2) lists the schemes that can create an account: every
-	// one but token, which only resumes one. A passkey registered by a
-	// guest makes the guest an account, and email and guest start one.
-	signup := slices.DeleteFunc(slices.Clone(authSchemes), func(scheme string) bool { return scheme == "token" })
+	// one but token, which only resumes one. Email, external sign-in, and
+	// guest start one. A passkey registration makes an account only of a
+	// guest, or with an invitation: without guests it is no way to sign
+	// up. An invitation does not put it back, since signup tells every
+	// client what it can do, and an invitation is a secret one person was
+	// given; an invited client registers anyway, as webauthn stays in
+	// auth.
+	signup := slices.DeleteFunc(slices.Clone(authSchemes), func(scheme string) bool {
+		return scheme == "token" || scheme == passkey.Name && !guests
+	})
 	params := map[string]any{
 		"apron":        10,
 		"agent":        "apron-go/10",
@@ -1154,6 +1198,13 @@ func (s *Server) serverParams(baseURL string, revealed bool) map[string]any {
 	}
 	// ext:editors (apron's EXTENSIONS.md) needs no data of its own.
 	params["capabilities"] = append(params["capabilities"].([]string), "ext:editors")
+	if slices.Contains(authSchemes, external.Name) {
+		// ext:oauth: external sign-in's OAuth extras (SERVER.md), the
+		// server's own authorization server metadata and token endpoint,
+		// or its protected resource metadata naming another issuer. A
+		// client needs it to sign in, so it is listed before.
+		params["capabilities"] = append(params["capabilities"].([]string), "ext:oauth")
+	}
 	if revealed && slices.ContainsFunc(s.schemes, func(scheme authn.Scheme) bool {
 		_, ok := scheme.(authn.Credentials)
 		return ok
