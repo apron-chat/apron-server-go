@@ -1700,8 +1700,9 @@ latest.
 
 A link opens `--email.link-url` (or `--public-url`) with
 `#token=…&state=…&server=…` in its fragment: `state` when the proposal
-carried one, and `server`, this server's WebSocket URL, when
-`--public-url` is set.
+carried one, and always `server`, this server's WebSocket URL, under
+`--public-url`, or else under the scheme and host the proposing connection
+arrived on.
 
 Each email gives this server's WebSocket URL with the code, as in "Your
 sign-in code for wss://chat.example/ws is 418092", and says to type the
@@ -1781,9 +1782,8 @@ Email accounts are kept like passkey users, and an account may have both: a
 passkey registered on a signed-in connection is added to that account
 (§4.10). The address is never sent to clients.
 
-A sign-in link opens that page with the token in the fragment, and, with
-`--public-url`, this server's WebSocket URL (§4.11's suggested convention),
-form-encoded:
+A sign-in link opens that page with the token and this server's WebSocket
+URL in the fragment (§4.11's suggested convention), form-encoded:
 `https://chat.example/#token=Hk41x9…&server=wss%3A%2F%2Fchat.example%2Fws`.
 A client reads it to sign in, on a connection not signed in, to the server
 named.
