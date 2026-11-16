@@ -191,6 +191,15 @@ func TestEmailSignIn(t *testing.T) {
 	if !strings.Contains(message.Text(), message.Code) || !strings.Contains(message.Text(), message.Link) {
 		t.Fatalf("text: %q", message.Text())
 	}
+	// The email gives the server's address, the link's server, with the
+	// code, and says to type it only in an app connected there (§4.11.2).
+	if message.Server != "wss://chat.example/app/ws" || linkFragment(t, message).Get("server") != message.Server {
+		t.Fatalf("server %q, link %q", message.Server, message.Link)
+	}
+	if text := message.Text(); !strings.Contains(text, "Your sign-in code for wss://chat.example/app/ws is "+message.Code+".") ||
+		!strings.Contains(text, "Type it only in an app that is connected to wss://chat.example/app/ws.") {
+		t.Fatalf("text: %q", text)
+	}
 	// Another proposal for the address so soon is retry_after.
 	proposer.expectError(t, "auth", "again", map[string]any{"scheme": "email", "email": "ada@example.com"}, CodeRetryAfter)
 	proposer.expectError(t, "auth", "invalid", map[string]any{"scheme": "email", "email": "Ada <ada@example.com>"}, CodeInvalidParams)
@@ -323,6 +332,10 @@ func TestEmailAdditions(t *testing.T) {
 	message := mailbox.receive(t)
 	if !message.Add || message.Link == "" || !strings.Contains(message.Text(), "add this address") || !strings.Contains(message.Text(), message.Link) {
 		t.Fatalf("addition email: %#v", message)
+	}
+	if text := message.Text(); message.Server != wsURL(httpServer) || !strings.Contains(text, "account on "+message.Server+" is "+message.Code+".") ||
+		!strings.Contains(text, "Type it only in an app that is connected to "+message.Server+".") {
+		t.Fatalf("addition email without the server's address: %q", text)
 	}
 	// Someone else's proposal for the address does not touch it, the code
 	// works on no other connection, and the link on no connection of
@@ -704,6 +717,34 @@ func TestEmailLinksNameTheServerWithoutAPublicURL(t *testing.T) {
 	message := mailbox.receive(t)
 	if server := linkFragment(t, message).Get("server"); server != wsURL(httpServer) || !strings.HasPrefix(message.Link, "https://link.apron.chat/#token=") {
 		t.Fatalf("link %q, want server %q", message.Link, wsURL(httpServer))
+	}
+	if message.Server != wsURL(httpServer) || !strings.Contains(message.Text(), "Your sign-in code for "+wsURL(httpServer)) {
+		t.Fatalf("server %q, text %q", message.Server, message.Text())
+	}
+}
+
+// Without a link page, the email still gives the server's address with
+// the code (§4.11.2).
+func TestEmailCodesNameTheServerWithoutALink(t *testing.T) {
+	_, mailbox, httpServer := emailTestServer(t, func(config *Config) { config.EmailLinkURL = "" })
+	c, _ := dialRaw(t, httpServer)
+	propose(t, c, "ada@example.com")
+	message := mailbox.receive(t)
+	if message.Link != "" || message.Server != wsURL(httpServer) {
+		t.Fatalf("link %q, server %q", message.Link, message.Server)
+	}
+	if text := message.Text(); !strings.Contains(text, "Your sign-in code for "+wsURL(httpServer)+" is "+message.Code+".") ||
+		!strings.Contains(text, "Type it only in an app that is connected to "+wsURL(httpServer)+".") {
+		t.Fatalf("text: %q", text)
+	}
+}
+
+// A message without the server's address, from a sender that builds its
+// own, still gives the code.
+func TestSignInEmailTextWithoutAServer(t *testing.T) {
+	text := SignInEmail{To: "ada@example.com", Code: "418092", Expires: time.Now().Add(10 * time.Minute)}.Text()
+	if !strings.HasPrefix(text, "Your sign-in code is 418092.\n") || strings.Contains(text, "Type it only") {
+		t.Fatalf("text: %q", text)
 	}
 }
 

@@ -21,14 +21,22 @@ type EmailSender interface {
 type SignInEmail struct {
 	// To is the address, as the server normalized it.
 	To string
-	// Code is the short token to type, six digits, which works only on the
-	// connection that made the proposal.
+	// Code is the short token to type, six digits, which works on the
+	// connection that made the proposal, or on another with the proposal's
+	// state.
 	Code string
 	// Link opens Config.EmailLinkURL with the long token in its fragment,
 	// which works on any connection: for a sign-in, one not signed in, and
 	// for an addition, one signed in to the proposing account. Empty when
 	// no link is configured.
 	Link string
+	// Server is this server's WebSocket URL that the proposal came in on,
+	// as the link's server gives it, such as wss://chat.example/ws; empty
+	// when it is not known. The email gives it with the code, and tells the
+	// person to type the code only in an app connected to it (§4.11.2), so
+	// that another server that proposed with their address cannot get the
+	// code from them.
+	Server string
 	// Expires is when the code and the link stop working.
 	Expires time.Time
 	// Add reports a proposal to add the address to a signed-in account,
@@ -39,10 +47,18 @@ type SignInEmail struct {
 // Text renders the message as plain text, for senders without templates.
 func (m SignInEmail) Text() string {
 	var b strings.Builder
-	if m.Add {
+	switch {
+	case m.Server == "" && m.Add:
 		fmt.Fprintf(&b, "Your code to add this address to your account is %s.\n", m.Code)
-	} else {
+	case m.Server == "":
 		fmt.Fprintf(&b, "Your sign-in code is %s.\n", m.Code)
+	case m.Add:
+		fmt.Fprintf(&b, "Your code to add this address to your account on %s is %s.\n", m.Server, m.Code)
+	default:
+		fmt.Fprintf(&b, "Your sign-in code for %s is %s.\n", m.Server, m.Code)
+	}
+	if m.Server != "" {
+		fmt.Fprintf(&b, "Type it only in an app that is connected to %s.\n", m.Server)
 	}
 	switch {
 	case m.Link == "":
@@ -68,13 +84,13 @@ func (l LogEmailSender) SendSignInCode(_ context.Context, m SignInEmail) error {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	logger.Info("email sign-in code (not sent; development sender)", "to", m.To, "code", m.Code, "link", m.Link)
+	logger.Info("email sign-in code (not sent; development sender)", "to", m.To, "server", m.Server, "code", m.Code, "link", m.Link)
 	return nil
 }
 
 // emailScheme is email sign-in delivering with sender.
 func emailScheme(sender EmailSender, linkPage string) *email.Scheme {
 	return email.New(func(ctx context.Context, m email.Message) error {
-		return sender.SendSignInCode(ctx, SignInEmail{To: m.To, Code: m.Code, Link: m.Link, Expires: m.Expires, Add: m.Add})
+		return sender.SendSignInCode(ctx, SignInEmail{To: m.To, Code: m.Code, Link: m.Link, Server: m.Server, Expires: m.Expires, Add: m.Add})
 	}, linkPage)
 }

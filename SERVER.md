@@ -1703,6 +1703,12 @@ A link opens `--email.link-url` (or `--public-url`) with
 carried one, and `server`, this server's WebSocket URL, when
 `--public-url` is set.
 
+Each email gives this server's WebSocket URL with the code, as in "Your
+sign-in code for wss://chat.example/ws is 418092", and says to type the
+code only in an app connected to it (§4.11.2). A sender of its own
+(`apron.EmailSender`) finds it in `SignInEmail.Server`, and
+`SignInEmail.Text` writes both.
+
 - **Signing in**, proposed on a connection not signed in. The email carries
   a six-digit code, which works only on the proposing connection, or with
   the proposal's `state` on another, such as the proposer's after a

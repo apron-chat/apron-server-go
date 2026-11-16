@@ -207,7 +207,10 @@ type Tokens struct {
 	Code string
 	// Link opens the proposal's link page with the long token, which
 	// works on any connection that may approve it; empty without one.
-	Link    string
+	Link string
+	// Server is the server's WebSocket URL that the proposal came in on,
+	// as Link's server gives it; empty when it is not known.
+	Server  string
 	Expires time.Time
 	// Add reports a proposal to add an identity to an account.
 	Add bool

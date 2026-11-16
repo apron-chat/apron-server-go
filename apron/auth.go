@@ -736,7 +736,7 @@ func (sc *schemeConn) ProposeCode(spec authn.CodeProposal) (authn.Tokens, error)
 		// one, of another connection, keeps its code there and its link.
 		s.proposals.states[stateKey(p.state)] = p
 	}
-	tokens := authn.Tokens{Code: code, Expires: p.expires, Add: p.add}
+	tokens := authn.Tokens{Code: code, Server: p.server, Expires: p.expires, Add: p.add}
 	if spec.LinkPage != "" {
 		p.handle, p.secret = s.newLinkHandleLocked(), rand.Text()
 		s.proposals.links[p.handle] = p
