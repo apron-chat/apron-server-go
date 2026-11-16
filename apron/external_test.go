@@ -383,6 +383,23 @@ func TestExternalMetadataAndTokenEndpoint(t *testing.T) {
 		}
 	}
 
+	// Its protected resource metadata (RFC 9728) names itself, the issuer
+	// of the metadata above, as the authorization server.
+	status, header, body = httpDo(t, http.MethodGet, issuer+"/.well-known/oauth-protected-resource", nil, "")
+	var resource map[string]any
+	if err := json.Unmarshal(body, &resource); status != http.StatusOK || err != nil || header.Get("Access-Control-Allow-Origin") != "*" ||
+		len(resource) != 2 || resource["resource"] != issuer || len(asList(resource["authorization_servers"])) != 1 || asList(resource["authorization_servers"])[0] != metadata["issuer"] {
+		t.Fatalf("protected resource metadata = %d %v %s", status, header, body)
+	}
+
+	// Without external sign-in, there is neither.
+	_, plain := newTestServer(t, DefaultConfig())
+	for _, path := range []string{"/.well-known/oauth-protected-resource", "/.well-known/oauth-authorization-server"} {
+		if status, _, _ := httpDo(t, http.MethodGet, plain.URL+path, nil, ""); status != http.StatusNotFound {
+			t.Errorf("without external sign-in, %s = %d", path, status)
+		}
+	}
+
 	app := oauthtest.New(t, issuer)
 	code := externalCode(t, app, issuer+"/oauth/authorize", issuer)
 	form := url.Values{"grant_type": {"authorization_code"}, "code": {code}, "code_verifier": {app.Verifier}, "redirect_uri": {app.RedirectURI}, "client_id": {app.ClientID}, "resource": {issuer}}

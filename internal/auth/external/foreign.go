@@ -91,6 +91,15 @@ func (f *Foreign) Bind(core authn.Core) { f.core = core }
 func (*Foreign) Name() string  { return Name }
 func (*Foreign) Label() string { return "external sign-in" }
 
+// Routes serves the server's protected resource metadata (RFC 9728),
+// which names the issuer as its authorization server; the server serves
+// no authorization server of its own.
+func (f *Foreign) Routes(mux *http.ServeMux) {
+	mux.HandleFunc("GET "+ResourcePath, func(w http.ResponseWriter, r *http.Request) {
+		resourceMetadata(w, oauth.Origin(f.core.BaseURL(r)), f.issuer)
+	})
+}
+
 // Auth begins, naming the issuer's page, or redeems a code at the issuer,
 // or checks a token the client redeemed there.
 func (f *Foreign) Auth(ctx context.Context, r *authn.Request) (authn.Result, error) {

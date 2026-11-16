@@ -23,14 +23,17 @@ import (
 // connection, which signs in, or adds the identity to the connection's
 // account, or at /oauth/token for a bearer token. The server also serves
 // its authorization server metadata at
-// /.well-known/oauth-authorization-server.
+// /.well-known/oauth-authorization-server, and its protected resource
+// metadata, which names itself as the authorization server, at
+// /.well-known/oauth-protected-resource.
 
 // ExternalIssuer is another OAuth authorization server that external
 // sign-in names (Config.ExternalIssuer), such as an OpenID Connect
 // provider like Pocket ID. A begin returns its authorization endpoint, with
 // Scope in the query, and the issuer; the server redeems a code at its
 // token endpoint, which it finds from the issuer's metadata, or takes an
-// access token the app redeemed there itself (§4.12.4).
+// access token the app redeemed there itself (§4.12.4). The server's
+// protected resource metadata (RFC 9728) names the issuer too.
 //
 // The begin names no client_id: each app identifies itself to the issuer
 // with its own, the https URL of its client ID metadata document, so the

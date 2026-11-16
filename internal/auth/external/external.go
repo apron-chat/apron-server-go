@@ -43,6 +43,8 @@ const (
 	AuthorizePath = "/oauth/authorize"
 	TokenPath     = "/oauth/token"
 	MetadataPath  = "/.well-known/oauth-authorization-server"
+	// ResourcePath is the server's protected resource metadata (RFC 9728).
+	ResourcePath = "/.well-known/oauth-protected-resource"
 )
 
 // ErrUnknownSignIn is returned by Complete and Cancel for a sign-in that
@@ -169,6 +171,10 @@ func redemption(params map[string]jsontext.Value) (codeParams, *authn.Error) {
 // token endpoint.
 func (s *Scheme) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET "+MetadataPath, s.metadata)
+	mux.HandleFunc("GET "+ResourcePath, func(w http.ResponseWriter, r *http.Request) {
+		origin := oauth.Origin(s.core.BaseURL(r))
+		resourceMetadata(w, origin, origin)
+	})
 	mux.HandleFunc("GET "+AuthorizePath, s.authorize)
 	mux.HandleFunc("POST "+AuthorizePath, s.decide)
 	mux.HandleFunc("POST "+TokenPath, s.token)
@@ -196,6 +202,21 @@ func (s *Scheme) metadata(w http.ResponseWriter, r *http.Request) {
 		"code_challenge_methods_supported":               []string{"S256"},
 		"token_endpoint_auth_methods_supported":          []string{"none"},
 		"authorization_response_iss_parameter_supported": true,
+	})
+}
+
+// resourceMetadata is the server's protected resource metadata (RFC
+// 9728): the server, by its origin, which §4.12.2 has clients send as
+// resource, and the authorization server that issues tokens for it, by
+// its issuer identifier. It names no bearer_methods_supported: a client
+// presents a token in the WebSocket's auth request, none of RFC 6750's
+// header, body, or query.
+func resourceMetadata(w http.ResponseWriter, origin, issuer string) {
+	cors(w)
+	w.Header().Set("Cache-Control", "public, max-age=300")
+	writeJSON(w, http.StatusOK, map[string]any{
+		"resource":              origin,
+		"authorization_servers": []string{issuer},
 	})
 }
 

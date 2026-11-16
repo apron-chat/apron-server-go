@@ -228,8 +228,18 @@ func TestExternalForeignIssuer(t *testing.T) {
 		t.Fatalf("external = %#v", external)
 	}
 	// The server serves no authorization server of its own.
-	if status, _, _ := httpDo(t, http.MethodGet, origin+"/oauth/authorize", nil, ""); status != http.StatusNotFound {
-		t.Fatalf("own page = %d", status)
+	for _, path := range []string{"/oauth/authorize", "/.well-known/oauth-authorization-server"} {
+		if status, _, _ := httpDo(t, http.MethodGet, origin+path, nil, ""); status != http.StatusNotFound {
+			t.Fatalf("own %s = %d", path, status)
+		}
+	}
+	// Its protected resource metadata (RFC 9728) names the issuer, as the
+	// begin does.
+	status, header, body := httpDo(t, http.MethodGet, origin+"/.well-known/oauth-protected-resource", nil, "")
+	var resource map[string]any
+	if err := json.Unmarshal(body, &resource); status != http.StatusOK || err != nil || header.Get("Access-Control-Allow-Origin") != "*" ||
+		len(resource) != 2 || resource["resource"] != origin || len(asList(resource["authorization_servers"])) != 1 || asList(resource["authorization_servers"])[0] != external["issuer"] {
+		t.Fatalf("protected resource metadata = %d %v %s", status, header, body)
 	}
 
 	client := oauthtest.New(t, origin)
