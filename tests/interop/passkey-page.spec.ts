@@ -126,6 +126,55 @@ test('an app adds a passkey on the passkey page, then signs in with it there', a
 	app.close();
 });
 
+test('a passkey no account has is signalled unknown on the passkey page, which stays open', async ({ page, context }) => {
+	const cdp = await context.newCDPSession(page);
+	await cdp.send('WebAuthn.enable');
+	const { authenticatorId } = await cdp.send('WebAuthn.addVirtualAuthenticator', {
+		options: { protocol: 'ctap2', transport: 'internal', hasResidentKey: true, hasUserVerification: true, isUserVerified: true, automaticPresenceSimulation: true }
+	});
+	await page.route('https://app.example/**', (route) => route.fulfill({ contentType: 'text/plain', body: 'Back in the app' }));
+	// Records the page's signals, whether or not this browser has the Signal API.
+	await page.addInitScript(() => {
+		const signalled: unknown[] = ((window as any).signalled = []);
+		const original = (PublicKeyCredential as any).signalUnknownCredential?.bind(PublicKeyCredential);
+		(PublicKeyCredential as any).signalUnknownCredential = (options: unknown) => {
+			signalled.push(options);
+			return original ? original(options) : Promise.resolve();
+		};
+	});
+
+	// A passkey made on the page, whose code is burned: it is on the device, and no account has it.
+	const guest = await Connection.open();
+	await guest.request('auth', { scheme: 'guest', name: 'Orphan' });
+	const adding = await guest.request('auth', { scheme: 'webauthn', action: 'register', step: 'begin' });
+	let request = authorize(adding.external.url);
+	await page.goto(request.url);
+	const code = await returned(page, request.state, () => page.getByRole('button', { name: 'Create passkey' }).click());
+	await expect(
+		guest.request('auth', {
+			scheme: 'webauthn', action: 'register', step: 'finish', code, code_verifier: randomBytes(32).toString('base64url'), redirect_uri: redirectURI, client_id: clientID
+		})
+	).rejects.toThrow();
+	guest.close();
+	const { credentials } = await cdp.send('WebAuthn.getCredentials', { authenticatorId });
+	expect(credentials).toHaveLength(1);
+
+	// Signing in with it: the page signals it unknown, says so, and stays, to try again or cancel.
+	const app = await Connection.open();
+	const login = await app.request('auth', { scheme: 'webauthn', action: 'login', step: 'begin' });
+	app.close();
+	request = authorize(login.external.url);
+	await page.goto(request.url);
+	await page.getByRole('button', { name: 'Continue with passkey' }).click();
+	await expect(page.getByText("This passkey isn't for an account on localhost:8080. Try another passkey, or cancel.")).toBeVisible();
+	expect(await page.evaluate(() => (window as any).signalled)).toEqual([
+		{ rpId: 'localhost', credentialId: Buffer.from(credentials[0].credentialId, 'base64').toString('base64url') }
+	]);
+	expect(new URL(page.url()).pathname).toBe('/passkey');
+	await expect(page.getByRole('button', { name: 'Continue with passkey' })).toBeEnabled();
+	await expect(page.getByRole('button', { name: 'Cancel' })).toBeVisible();
+});
+
 // The web client on an origin that cannot use the RP ID: the app at 127.0.0.1 (the config's
 // baseURL) connects to the server at localhost, whose passkeys are for localhost. Its passkey
 // ceremonies go to the server's page, in a popup, or in the app's own tab when the browser blocks

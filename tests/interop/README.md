@@ -28,7 +28,9 @@ message ownership, and recovery from an invalid signature. These tests use
 `passkey-page.spec.ts` drives the server's passkey page alone, with the same
 virtual authenticator: an app on another domain, a protocol client with no
 `Origin`, adds a passkey to its guest on the page and then signs in with it
-there, finishing each with the page's code. Its second test drives the web client itself
+there, finishing each with the page's code. Another burns a passkey's
+code, then signs in with it on the page, which signals it unknown
+(`signalUnknownCredential`) and stays open. Its last test drives the web client itself
 from `127.0.0.1`, which cannot use the `localhost` RP ID, against the server at
 `localhost:8080`: the guest creates an account on the page in a popup, and another browser
 whose popups are blocked signs in on the page in its own tab and finishes on the way back to

@@ -408,3 +408,88 @@ func TestPasskeyPageRequests(t *testing.T) {
 		t.Fatalf("begin without the page = %#v", begin)
 	}
 }
+
+// A login on the page with a passkey that no account has, nor may yet
+// have, tells the page's script to signal it unknown (WebAuthn's
+// signalUnknownCredential), and stays on the page. Anything less certain
+// is the page's usual error, which signals nothing.
+func TestPasskeyPageUnknownCredential(t *testing.T) {
+	p := passkeyPageServer(t)
+	client := oauthtest.New(t, pageOrigin)
+	login := func(a *testAuthenticator, rpID string, flags byte) map[string]any {
+		t.Helper()
+		screen := client.Get(p.at(client.URL(pageOrigin+"/passkey?action=login", nil)))
+		status, options := p.script(t, client, screen, "options", nil)
+		if status != http.StatusOK {
+			t.Fatalf("options = %d %#v", status, options)
+		}
+		encoded, _ := json.Marshal(a.assertion(t, options, pageOrigin, rpID, flags))
+		status, answer := p.script(t, client, screen, "verify", url.Values{"credential": {string(encoded)}})
+		if status != http.StatusBadRequest || answer["redirect"] != nil || answer["error"] == nil {
+			t.Fatalf("verify = %d %#v", status, answer)
+		}
+		// The page is still there, to try again or cancel.
+		if status, _ := p.script(t, client, screen, "options", nil); status != http.StatusOK {
+			t.Fatalf("options after the error = %d", status)
+		}
+		return answer
+	}
+	signals := func(answer map[string]any) bool { return answer["unknown_credential"] == true }
+
+	// A passkey registered on the page, whose code is not redeemed yet,
+	// may still become an account's.
+	invitation, err := p.host.Invite(context.Background(), InvitationOptions{Name: "Newcomer"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	native, _ := dialRaw(t, p.http)
+	begin := passkeyResult(t, passkeyCall(t, native, "b", "register", "begin", map[string]any{"invitation": invitation.Token}))
+	orphan := newTestAuthenticator(t)
+	status, answer := p.ceremony(t, client, p.open(t, client, begin), orphan, 0)
+	if status != http.StatusOK {
+		t.Fatalf("registration = %d %#v", status, answer)
+	}
+	code := returned(t, client, answer)
+	if answer := login(orphan, "localhost", 0x05); signals(answer) {
+		t.Fatalf("a passkey whose registration's code is live was signalled: %#v", answer)
+	}
+
+	// Once its code is burned, no account has it, nor may one.
+	native.expectError(t, "auth", "no-invitation", finishWithCode(client, "register", code), CodeDenied)
+	if answer := login(orphan, "localhost", 0x05); !signals(answer) || answer["error"] != "This passkey isn't for an account on localhost:8080. Try another passkey, or cancel." {
+		t.Fatalf("unknown passkey = %#v", answer)
+	}
+	// Unless the assertion was not made for this ceremony: another RP ID,
+	// no user verification, another challenge.
+	if answer := login(orphan, "other.example", 0x05); signals(answer) {
+		t.Fatalf("an assertion for another RP ID was signalled: %#v", answer)
+	}
+	if answer := login(orphan, "localhost", 0x01); signals(answer) {
+		t.Fatalf("an assertion without user verification was signalled: %#v", answer)
+	}
+	orphan.clientData = map[string]any{"challenge": b64([]byte("another challenge"))}
+	if answer := login(orphan, "localhost", 0x05); signals(answer) {
+		t.Fatalf("an assertion for another challenge was signalled: %#v", answer)
+	}
+	orphan.clientData = nil
+
+	// A known passkey that fails verification signals nothing: a wrong
+	// signature, another user handle, no user verification.
+	owner, _ := dialOrigin(t, p.http, testPasskeyOrigin)
+	known := newTestAuthenticator(t)
+	registerTestPasskey(t, owner, known)
+	impostor := newTestAuthenticator(t)
+	impostor.id, impostor.handle = known.id, known.handle
+	stranger := *known
+	stranger.handle = b64([]byte("another user handle"))
+	for name, a := range map[string]*testAuthenticator{"wrong signature": impostor, "other user handle": &stranger} {
+		if answer := login(a, "localhost", 0x05); signals(answer) {
+			t.Errorf("%s: signalled %#v", name, answer)
+		}
+	}
+	if answer := login(known, "localhost", 0x01); signals(answer) {
+		t.Fatalf("a known passkey without user verification was signalled: %#v", answer)
+	}
+	// And it still signs in.
+	p.loginCode(t, client, known)
+}

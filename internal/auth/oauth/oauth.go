@@ -310,6 +310,13 @@ func (c *Codes) Redeem(value, verifier, redirectURI, clientID string, now time.T
 	return issued.value, issued.grant, nil
 }
 
+// Holds reports whether a live code holds a value that match reports, such
+// as a registration that redeeming the code may still finish. It calls
+// match holding the codes' lock.
+func (c *Codes) Holds(match func(value any) bool, now time.Time) bool {
+	return c.table.Any(func(issued code) bool { return match(issued.value) }, now)
+}
+
 // VerifyPKCE reports whether verifier is the code_verifier of an S256
 // challenge.
 func VerifyPKCE(verifier, challenge string) bool {
@@ -374,6 +381,19 @@ func (t *Table[V]) Get(id string, now time.Time) (V, bool) {
 		return zero, false
 	}
 	return e.value, true
+}
+
+// Any reports whether match reports any live value, which it calls
+// holding the table's lock.
+func (t *Table[V]) Any(match func(V) bool, now time.Time) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for _, e := range t.entries {
+		if now.Before(e.expires) && match(e.value) {
+			return true
+		}
+	}
+	return false
 }
 
 // Take returns the live value under id, and forgets it.

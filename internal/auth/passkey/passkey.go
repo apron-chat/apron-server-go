@@ -16,6 +16,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json/jsontext"
 	"encoding/json/v2"
@@ -57,10 +58,13 @@ type Scheme struct {
 
 	// mu guards the credentials of each account's passkey holder, by user
 	// handle, and the holders by credential ID. Commit changes them under
-	// the server's lock; lookups for a login take only mu.
+	// the server's lock; lookups for a login take only mu. It also guards
+	// pending: the credentials of verified registrations that no Commit
+	// has added or refused yet, until when they count as pending.
 	mu           sync.Mutex
 	byHandle     map[string]*holder
 	byCredential map[string]*holder
+	pending      map[string]time.Time
 }
 
 // holder is one account's passkeys: its user handle and credentials, which
@@ -107,7 +111,7 @@ func (h *holder) touch(id []byte, now time.Time, created bool) {
 
 // New is passkey sign-in with w's relying party and origins.
 func New(w *webauthn.WebAuthn) *Scheme {
-	return &Scheme{w: w, byHandle: make(map[string]*holder), byCredential: make(map[string]*holder)}
+	return &Scheme{w: w, byHandle: make(map[string]*holder), byCredential: make(map[string]*holder), pending: make(map[string]time.Time)}
 }
 
 // Bind gives the scheme the server's side of sign-in, for its page.
@@ -421,10 +425,22 @@ func (s *Scheme) verifyRegistration(raw []byte, data *webauthn.SessionData, hand
 
 // commitCredential adds a verified credential to the passkeys of the user
 // handle, a new one's included, and returns them as the account's record.
+// Until the server calls it, or for a ceremony's lifetime if it never does,
+// the credential is pending (registering).
 func (s *Scheme) commitCredential(handle []byte, credential *webauthn.Credential) func() (jsontext.Value, error) {
+	s.mu.Lock()
+	now := time.Now()
+	for id, until := range s.pending {
+		if !now.Before(until) {
+			delete(s.pending, id)
+		}
+	}
+	s.pending[string(credential.ID)] = now.Add(ceremonyLifetime)
+	s.mu.Unlock()
 	return func() (jsontext.Value, error) {
 		s.mu.Lock()
 		defer s.mu.Unlock()
+		delete(s.pending, string(credential.ID))
 		if s.byCredential[string(credential.ID)] != nil {
 			return nil, authn.Denied("Passkey is already registered")
 		}
@@ -525,7 +541,7 @@ func (s *Scheme) finishLogin(r *authn.Request, c *ceremony) (authn.Result, error
 	if err != nil {
 		return nil, err
 	}
-	handle, credential, err := s.verifyLogin(raw, c.data)
+	handle, credential, _, err := s.verifyLogin(raw, c.data)
 	if err != nil {
 		return nil, err
 	}
@@ -533,27 +549,72 @@ func (s *Scheme) finishLogin(r *authn.Request, c *ceremony) (authn.Result, error
 }
 
 // verifyLogin verifies an assertion against a login's session data, and
-// returns the user handle and the credential, with its new counter.
-func (s *Scheme) verifyLogin(raw []byte, data *webauthn.SessionData) ([]byte, *webauthn.Credential, *authn.Error) {
+// returns the user handle and the credential, with its new counter. A
+// login that fails only because no account has its credential returns the
+// credential's ID as unknown: one whose lookup found nothing, in an
+// assertion made for this ceremony (forCeremony). Any other failure,
+// a known credential's included, returns none.
+func (s *Scheme) verifyLogin(raw []byte, data *webauthn.SessionData) (handle []byte, credential *webauthn.Credential, unknown []byte, err *authn.Error) {
+	failed := authn.Denied("Passkey verification failed")
 	parsed, parseErr := protocol.ParseCredentialRequestResponseBytes(raw)
 	if parseErr != nil {
-		return nil, nil, authn.Denied("Passkey verification failed")
+		return nil, nil, nil, failed
 	}
-	var handle []byte
+	absent := false
 	verified, credential, verifyErr := s.w.ValidatePasskeyLogin(func(id, userHandle []byte) (webauthn.User, error) {
 		s.mu.Lock()
 		defer s.mu.Unlock()
 		h := s.byCredential[string(id)]
-		if h == nil || !bytes.Equal(h.Handle, userHandle) {
+		if h == nil {
+			absent = true
 			return nil, errors.New("unknown credential")
+		}
+		if !bytes.Equal(h.Handle, userHandle) {
+			return nil, errors.New("credential of another user handle")
 		}
 		handle = h.Handle
 		return &holder{Handle: h.Handle, Credentials: append([]webauthn.Credential(nil), h.Credentials...)}, nil
 	}, *data, parsed)
 	if verifyErr != nil || verified == nil || credential == nil || credential.Authenticator.CloneWarning {
-		return nil, nil, authn.Denied("Passkey verification failed")
+		if absent && s.forCeremony(parsed, data) {
+			return nil, nil, parsed.RawID, failed
+		}
+		return nil, nil, nil, failed
 	}
-	return handle, credential, nil
+	return handle, credential, nil, nil
+}
+
+// forCeremony reports whether an assertion was made for a login's ceremony,
+// as far as it can be told without the credential's public key: its type,
+// challenge, RP ID, user presence and verification, and the ceremony's time.
+// The library looks a credential up before it checks these, so a lookup
+// that found nothing says nothing of them. The page checks the origin
+// itself (sameOrigin).
+func (s *Scheme) forCeremony(parsed *protocol.ParsedCredentialAssertionData, data *webauthn.SessionData) bool {
+	client, authData := parsed.Response.CollectedClientData, parsed.Response.AuthenticatorData
+	rpIDHash := sha256.Sum256([]byte(s.w.Config.RPID))
+	return client.Type == protocol.AssertCeremony && data.Challenge != "" && client.Challenge == data.Challenge &&
+		bytes.Equal(authData.RPIDHash, rpIDHash[:]) && authData.Flags.UserPresent() && authData.Flags.UserVerified() &&
+		len(parsed.RawID) > 0 && time.Now().Before(data.Expires)
+}
+
+// registering reports whether a credential may yet be an account's: a live
+// code from the page holds it, which redeeming may make an account's, or a
+// registration verified it and the server has not committed it yet
+// (commitCredential), or has since. Codes are checked first, since a
+// redemption takes its code before it marks the credential pending.
+func (s *Scheme) registering(id []byte) bool {
+	now := time.Now()
+	if s.codes.Holds(func(value any) bool {
+		g, ok := value.(*pageGrant)
+		return ok && g.credential != nil && bytes.Equal(g.credential.ID, id)
+	}, now) {
+		return true
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	until, pending := s.pending[string(id)]
+	return pending && now.Before(until) || s.byCredential[string(id)] != nil
 }
 
 // loginProof proves the identity of a verified login. Its Commit keeps

@@ -188,3 +188,36 @@ func TestCommitKeepsTheSignCounterAdvancing(t *testing.T) {
 		t.Fatalf("kept counter %d, want 4", count)
 	}
 }
+
+// A verified registration's credential is pending until the server commits
+// it, or until it expires if the server never does: until then, a login
+// with it is not of an unknown credential (registering).
+func TestRegisteringUntilCommitted(t *testing.T) {
+	w, err := webauthn.New(&webauthn.Config{RPID: "localhost", RPDisplayName: "Apron", RPOrigins: []string{origin}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := New(w)
+	committed, abandoned := &webauthn.Credential{ID: []byte("committed")}, &webauthn.Credential{ID: []byte("abandoned")}
+	if s.registering(committed.ID) {
+		t.Fatal("a credential nobody registered is registering")
+	}
+	commit := s.commitCredential([]byte("handle"), committed)
+	s.commitCredential([]byte("other"), abandoned)
+	if !s.registering(committed.ID) || !s.registering(abandoned.ID) {
+		t.Fatal("a verified registration is not registering before its commit")
+	}
+	if _, err := commit(); err != nil {
+		t.Fatal(err)
+	}
+	if !s.registering(committed.ID) {
+		t.Fatal("a committed credential is not known")
+	}
+	s.mu.Lock()
+	_, stillPending := s.pending[string(committed.ID)]
+	s.pending[string(abandoned.ID)] = time.Now().Add(-time.Second)
+	s.mu.Unlock()
+	if stillPending || s.registering(abandoned.ID) {
+		t.Fatal("a credential stays pending after its commit, or after it expired")
+	}
+}

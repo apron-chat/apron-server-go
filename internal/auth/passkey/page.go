@@ -36,6 +36,11 @@ import (
 // passkey's account; a registration's makes a new account, as an invitation
 // does; and an addition's, begun on a signed-in connection, adds the
 // passkey to that account, only on a connection signed in to it.
+//
+// A login with a passkey that no account has, nor may yet have, such as
+// one made on the page whose code was never redeemed, stays on the page,
+// whose script asks the passkey provider to hide it (WebAuthn's
+// signalUnknownCredential). Every other failure is the usual error.
 
 // PagePath is the passkey page.
 const PagePath = "/passkey"
@@ -349,7 +354,19 @@ func (s *Scheme) pageVerify(w http.ResponseWriter, r *http.Request, f *pageFlow)
 		return
 	}
 	if f.action == "login" {
-		handle, verified, err := s.verifyLogin(raw, data)
+		handle, verified, unknown, err := s.verifyLogin(raw, data)
+		if unknown != nil && !s.registering(unknown) {
+			// No account has this passkey, and no registration may yet
+			// make it one's, such as one whose code was never redeemed:
+			// the script asks the passkey provider to hide it
+			// (signalUnknownCredential, with the ID of its own
+			// assertion), and the person stays on the page.
+			pageJSON(w, http.StatusBadRequest, map[string]any{
+				"error":              "This passkey isn't for an account on " + hostOf(f.origin) + ". Try another passkey, or cancel.",
+				"unknown_credential": true,
+			})
+			return
+		}
 		if err != nil {
 			fail("That passkey didn't work. Try again, or use another passkey.")
 			return

@@ -5,7 +5,9 @@ import "html/template"
 // pageScript runs the passkey page's ceremony: on "Continue with passkey"
 // (or "Create passkey"), it asks the page for WebAuthn options, calls
 // navigator.credentials, has the page verify the result, and goes back to
-// the client with the code the page answers with.
+// the client with the code the page answers with. When the page answers
+// that no account has the passkey, it asks the passkey provider to hide it,
+// where the browser can, and stays on the page.
 const pageScript = template.JS(`(() => {
   const main = document.querySelector("main");
   const button = document.getElementById("passkey");
@@ -58,7 +60,7 @@ const pageScript = template.JS(`(() => {
       credentials: "same-origin",
     });
     const answer = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(answer.error || "Something went wrong. Try again.");
+    if (!response.ok) throw Object.assign(new Error(answer.error || "Something went wrong. Try again."), { unknownCredential: answer.unknown_credential === true });
     return answer;
   };
   button.addEventListener("click", async () => {
@@ -70,7 +72,19 @@ const pageScript = template.JS(`(() => {
       const publicKey = parse(options);
       const credential = create ? await navigator.credentials.create({ publicKey }) : await navigator.credentials.get({ publicKey });
       if (!credential) throw new Error("No passkey was chosen. Try again.");
-      const answer = await post("verify", { credential: JSON.stringify(serialize(credential)) });
+      let answer;
+      try {
+        answer = await post("verify", { credential: JSON.stringify(serialize(credential)) });
+      } catch (error) {
+        // No account here has this passkey: the passkey provider may hide
+        // it, so it is not offered again. Its answer tells nothing.
+        if (error.unknownCredential && !create && options.rpId && PublicKeyCredential.signalUnknownCredential) {
+          try {
+            Promise.resolve(PublicKeyCredential.signalUnknownCredential({ rpId: options.rpId, credentialId: credential.id })).catch(() => {});
+          } catch (_) {}
+        }
+        throw error;
+      }
       window.location.assign(answer.redirect);
     } catch (error) {
       status.textContent = error && error.name === "NotAllowedError"
