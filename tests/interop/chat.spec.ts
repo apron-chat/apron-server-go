@@ -276,6 +276,9 @@ test.describe('chat protocol interoperability', () => {
 	test('replies to another sender, preserves references on edits, and replays deleted targets', async ({ browser }) => {
 		const owner = await browser.newContext();
 		const reader = await browser.newContext();
+		// The new reader that replays history is a browser of its own: one window of a browser connects to a server
+		// at a time, and a second one there would take it from pageB, which goes on to remove its reply reference.
+		const replayer = await browser.newContext();
 		try {
 			const pageA = await owner.newPage();
 			const pageB = await reader.newPage();
@@ -300,7 +303,7 @@ test.describe('chat protocol interoperability', () => {
 			await expect(stableReply.getByTestId('reply-reference')).toContainText(`${token}-target`);
 			await deleteMessage(pageA, targetA);
 			await expect(stableReply.getByTestId('reply-reference')).toContainText('Message deleted');
-			const history = await reader.newPage();
+			const history = await replayer.newPage();
 			await openChat(history);
 			const replayed = history.locator(`article[data-message-id="${replyId}"]`);
 			await expect(replayed).toContainText(`${token}-edited`);
@@ -309,7 +312,7 @@ test.describe('chat protocol interoperability', () => {
 			await expect(stableReply.getByTestId('reply-reference')).toHaveCount(0);
 			await expect(replayed.getByTestId('reply-reference')).toHaveCount(0);
 		} finally {
-			await Promise.all([owner.close(), reader.close()]);
+			await Promise.all([owner.close(), reader.close(), replayer.close()]);
 		}
 	});
 
@@ -735,6 +738,9 @@ test.describe('chat protocol interoperability', () => {
 	test('reacts across clients, toggles reactions off, replays them, and hides them on tombstones', async ({ browser }) => {
 		const contextA = await browser.newContext();
 		const contextB = await browser.newContext();
+		// The new reader is a browser of its own: one window of a browser connects to a server at a time, and a second
+		// one in contextB would take it from pageB, which goes on reacting.
+		const contextC = await browser.newContext();
 		try {
 			const pageA = await contextA.newPage();
 			const pageB = await contextB.newPage();
@@ -767,7 +773,7 @@ test.describe('chat protocol interoperability', () => {
 			await expect(reactionChip(onA, '🎉')).toHaveText('🎉1');
 
 			// A new reader replays reactions with the room's history.
-			const pageC = await contextB.newPage();
+			const pageC = await contextC.newPage();
 			await openChat(pageC);
 			const onC = pageC.locator(`article[data-message-id="${messageId}"]`);
 			await expect(reactionChip(onC, '👍')).toHaveText('👍1');
@@ -786,7 +792,7 @@ test.describe('chat protocol interoperability', () => {
 			await onB.hover();
 			await expect(onB.getByRole('button', { name: 'React', exact: true })).toHaveCount(0);
 		} finally {
-			await Promise.all([contextA.close(), contextB.close()]);
+			await Promise.all([contextA.close(), contextB.close(), contextC.close()]);
 		}
 	});
 

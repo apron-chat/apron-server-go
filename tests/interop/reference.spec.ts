@@ -361,8 +361,9 @@ test.describe('reference features against the Go server', () => {
 		await expect(head.locator('.ap-shell-sidehead-host')).toHaveText(new URL(page.url()).host);
 		await expect(head.locator('img.ap-shell-sidehead-avatar')).toHaveAttribute('src', SERVER_AVATAR);
 
-		// The connect screen, from the server pane, for the server you're on: its title and its description (--description).
-		const card = await openConnectScreen(page);
+		// The connect screen, from the server pane, for the server you're on: its title and its description (--description),
+		// shown once Continue has gone on from choosing the server to signing in to it.
+		const card = await openConnectScreen(page, { signIn: true });
 		await expect(card.getByTestId('connect-server')).toContainText(SERVER_TITLE);
 		await expect(card).toContainText(SERVER_DESCRIPTION);
 	});

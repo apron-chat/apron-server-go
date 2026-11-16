@@ -171,10 +171,15 @@ test('cancelling an active passkey prompt leaves sign-in and server changes usab
 	await createAccount(page).click();
 	await expect(card.getByRole('button', { name: 'Signing in…', exact: true })).toBeVisible();
 	await card.getByRole('button', { name: 'Cancel', exact: true }).click();
-	// The connect screen as it is, from the server pane's Connect to another server… button.
+	// The connect screen as it is, from the server pane's Connect to another server… button: Continue reads the other
+	// server's greeting, then its Guest joins it. The server lists guest last, so it isn't chosen first.
 	await openConnectScreen(page);
 	await page.getByTestId('server-url-input').fill('ws://localhost:8080/ws');
-	await card.getByRole('button', { name: 'Connect', exact: true }).click();
+	await card.getByRole('button', { name: 'Continue', exact: true }).click();
+	await expect(card.getByTestId('connect-server')).toContainText('ws://localhost:8080/ws');
+	await card.getByRole('radiogroup', { name: 'Sign in with', exact: true }).getByRole('radio', { name: 'Guest', exact: true }).click();
+	await card.getByRole('button', { name: 'Join', exact: true }).click();
+	await expect(card).toHaveCount(0);
 	await expect(page.getByTestId('connection-status')).toHaveText('Connected');
 	await cdp.send('WebAuthn.setAutomaticPresenceSimulation', { authenticatorId, enabled: true });
 	await registerPasskey(page);

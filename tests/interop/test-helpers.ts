@@ -118,12 +118,21 @@ export async function closePreferences(page: Page): Promise<void> {
 	await expect(page).not.toHaveURL(/[#&]preferences=/);
 }
 
-/** The connect screen for another server, from the server pane that the rooms list's head opens. */
-export async function openConnectScreen(page: Page): Promise<Locator> {
+/**
+ * The connect screen for another server, from the server pane that the rooms list's head opens. It works in two steps:
+ * it opens at choosing the server, the Server field (`server-url-input`) alone, and Continue reads that server's
+ * greeting, then offers its ways in, with the server as it shows itself (`connect-server`) at the top. With `signIn`,
+ * Continue goes on to that second step for the server already in the field, the connected one. Returns the form.
+ */
+export async function openConnectScreen(page: Page, options: { signIn?: boolean } = {}): Promise<Locator> {
 	await page.getByRole('button', { name: /^Server: / }).click();
 	await page.getByTestId('server-pane').getByRole('button', { name: 'Connect to another server…', exact: true }).click();
 	const card = page.getByRole('form', { name: 'Sign in' });
 	await expect(card).toBeVisible();
+	if (options.signIn) {
+		await card.getByRole('button', { name: 'Continue', exact: true }).click();
+		await expect(card.getByTestId('connect-server')).toBeVisible();
+	}
 	return card;
 }
 

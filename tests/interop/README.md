@@ -110,7 +110,15 @@ Notifications, with its switch and Pause, is a press away in its navigation.
 The open section is in the page's address, so the helpers in `test-helpers.ts`
 close Preferences with its close button and wait for the address to drop it.
 The connect screen for another server is the server pane's Connect to another
-server…, which the rooms list's head opens.
+server…, which the rooms list's head opens. It opens at choosing the server,
+the Server field alone; Continue reads that server's greeting, then shows the
+server as it shows itself (`connect-server`) and the ways in it offers, such as
+Guest, whose button is Join (`openConnectScreen` in `test-helpers.ts`).
+
+One window of a browser connects to a server at a time: a newer one takes it,
+and the older says "Apron is open in another window" and offers Use here. A
+test that needs another reader live beside a page gives it a browser context of
+its own.
 
 `seen.spec.ts` checks `seen` (§4.5.2), when a user was last shown offline, as
 the web client shows it in another browser: an offline member's row in the
