@@ -1783,8 +1783,8 @@ passkey registered on a signed-in connection is added to that account
 (§4.10). The address is never sent to clients.
 
 A sign-in link opens that page with the token and this server's WebSocket
-URL in the fragment (§4.11's suggested convention), form-encoded with `:`
-and `/` left as they are (PROTOCOL.md Appendix A.4):
+URL in the fragment (§4.11's suggested convention), form-encoded, and the
+URL with `:` and `/` left as they are (PROTOCOL.md Appendix A.4):
 `https://chat.example/#token=Hk41x9…&server=wss://chat.example/ws`.
 A client reads it to sign in, on a connection not signed in, to the server
 named.
