@@ -16,6 +16,7 @@ import (
 	"github.com/fxamacker/cbor/v2"
 	"github.com/go-webauthn/webauthn/webauthn"
 
+	"github.com/apron-chat/apron-server-go/internal/auth/oauth"
 	"github.com/apron-chat/apron-server-go/internal/authn"
 )
 
@@ -219,5 +220,17 @@ func TestRegisteringUntilCommitted(t *testing.T) {
 	s.mu.Unlock()
 	if stillPending || s.registering(abandoned.ID) {
 		t.Fatal("a credential stays pending after its commit, or after it expired")
+	}
+
+	// One verified on the page is pending from before its code is issued,
+	// and a redemption's shorter mark does not cut that short.
+	paged := &webauthn.Credential{ID: []byte("paged")}
+	s.markPending(paged.ID, oauth.CodeLifetime+ceremonyLifetime)
+	s.commitCredential([]byte("paged"), paged)
+	s.mu.Lock()
+	until := s.pending[string(paged.ID)]
+	s.mu.Unlock()
+	if !until.After(time.Now().Add(oauth.CodeLifetime)) {
+		t.Fatalf("a code's credential is pending until %v", until)
 	}
 }

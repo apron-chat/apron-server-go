@@ -401,8 +401,13 @@ func (s *Scheme) pageVerify(w http.ResponseWriter, r *http.Request, f *pageFlow)
 }
 
 // redirectWithCode answers the page's script with the redirect to the
-// client with a code for g, and ends the flow. Called holding f.mu.
+// client with a code for g, and ends the flow. A registration's credential
+// is pending before the code exists, and as long as redeeming it may yet
+// reach Commit (registering). Called holding f.mu.
 func (s *Scheme) redirectWithCode(w http.ResponseWriter, f *pageFlow, g *pageGrant) {
+	if g.action == "register" {
+		s.markPending(g.credential.ID, oauth.CodeLifetime+ceremonyLifetime)
+	}
 	code, err := s.codes.Issue(f.req.Grant(), g, time.Now())
 	if err != nil {
 		pageJSON(w, http.StatusBadRequest, map[string]string{"error": "Too many sign-ins in progress. Wait a minute, then try again."})

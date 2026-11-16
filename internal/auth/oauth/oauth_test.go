@@ -101,10 +101,6 @@ func TestCodes(t *testing.T) {
 
 	// Codes expire within minutes.
 	code, _ = codes.Issue(grant, "proof", now)
-	isProof := func(value any) bool { return value == "proof" }
-	if !codes.Holds(isProof, now) || codes.Holds(isProof, now.Add(CodeLifetime)) {
-		t.Fatal("Holds counts expired codes, or not live ones")
-	}
 	if _, _, err := codes.Redeem(code, verifier, grant.RedirectURI, grant.ClientID, now.Add(CodeLifetime)); err != ErrInvalidGrant {
 		t.Fatalf("expired = %v", err)
 	}

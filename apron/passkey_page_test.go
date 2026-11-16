@@ -441,8 +441,40 @@ func TestPasskeyPageUnknownCredential(t *testing.T) {
 	}
 	signals := func(answer map[string]any) bool { return answer["unknown_credential"] == true }
 
-	// A passkey registered on the page, whose code is not redeemed yet,
-	// may still become an account's.
+	// A passkey no account has, nor may: the page signals it.
+	stranger := newTestAuthenticator(t)
+	stranger.handle = b64([]byte("a user handle no account has"))
+	if answer := login(stranger, "localhost", 0x05); !signals(answer) || answer["error"] != "This passkey isn't for an account on localhost:8080. Try another passkey, or cancel." {
+		t.Fatalf("unknown passkey = %#v", answer)
+	}
+	// Unless the assertion was not made for this ceremony: another RP ID,
+	// no user verification, no user presence, another challenge, another
+	// ceremony's type, another origin (one the RP accepts, which only the
+	// page refuses).
+	for name, test := range map[string]struct {
+		rpID       string
+		flags      byte
+		clientData map[string]any
+	}{
+		"other RP ID":          {"other.example", 0x05, nil},
+		"no user verification": {"localhost", 0x01, nil},
+		"no user presence":     {"localhost", 0x04, nil},
+		"other challenge":      {"localhost", 0x05, map[string]any{"challenge": b64([]byte("another challenge"))}},
+		"registration type":    {"localhost", 0x05, map[string]any{"type": "webauthn.create"}},
+		"other origin":         {"localhost", 0x05, map[string]any{"origin": testPasskeyOrigin}},
+	} {
+		stranger.clientData = test.clientData
+		if answer := login(stranger, test.rpID, test.flags); signals(answer) {
+			t.Errorf("%s: signalled %#v", name, answer)
+		}
+	}
+	stranger.clientData = nil
+
+	// A passkey registered on the page may still become an account's:
+	// while its code is live, and once a redemption has taken the code,
+	// until the server commits it, or the code's and a ceremony's
+	// lifetimes pass. A redemption refused after it took the code, for
+	// want of an invitation, stays in that window.
 	invitation, err := p.host.Invite(context.Background(), InvitationOptions{Name: "Newcomer"})
 	if err != nil {
 		t.Fatal(err)
@@ -458,25 +490,10 @@ func TestPasskeyPageUnknownCredential(t *testing.T) {
 	if answer := login(orphan, "localhost", 0x05); signals(answer) {
 		t.Fatalf("a passkey whose registration's code is live was signalled: %#v", answer)
 	}
-
-	// Once its code is burned, no account has it, nor may one.
 	native.expectError(t, "auth", "no-invitation", finishWithCode(client, "register", code), CodeDenied)
-	if answer := login(orphan, "localhost", 0x05); !signals(answer) || answer["error"] != "This passkey isn't for an account on localhost:8080. Try another passkey, or cancel." {
-		t.Fatalf("unknown passkey = %#v", answer)
-	}
-	// Unless the assertion was not made for this ceremony: another RP ID,
-	// no user verification, another challenge.
-	if answer := login(orphan, "other.example", 0x05); signals(answer) {
-		t.Fatalf("an assertion for another RP ID was signalled: %#v", answer)
-	}
-	if answer := login(orphan, "localhost", 0x01); signals(answer) {
-		t.Fatalf("an assertion without user verification was signalled: %#v", answer)
-	}
-	orphan.clientData = map[string]any{"challenge": b64([]byte("another challenge"))}
 	if answer := login(orphan, "localhost", 0x05); signals(answer) {
-		t.Fatalf("an assertion for another challenge was signalled: %#v", answer)
+		t.Fatalf("a passkey whose registration's code was taken was signalled: %#v", answer)
 	}
-	orphan.clientData = nil
 
 	// A known passkey that fails verification signals nothing: a wrong
 	// signature, another user handle, no user verification.
@@ -485,9 +502,9 @@ func TestPasskeyPageUnknownCredential(t *testing.T) {
 	registerTestPasskey(t, owner, known)
 	impostor := newTestAuthenticator(t)
 	impostor.id, impostor.handle = known.id, known.handle
-	stranger := *known
-	stranger.handle = b64([]byte("another user handle"))
-	for name, a := range map[string]*testAuthenticator{"wrong signature": impostor, "other user handle": &stranger} {
+	otherHandle := *known
+	otherHandle.handle = b64([]byte("another user handle"))
+	for name, a := range map[string]*testAuthenticator{"wrong signature": impostor, "other user handle": &otherHandle} {
 		if answer := login(a, "localhost", 0x05); signals(answer) {
 			t.Errorf("%s: signalled %#v", name, answer)
 		}
@@ -497,6 +514,19 @@ func TestPasskeyPageUnknownCredential(t *testing.T) {
 	}
 	// And it still signs in.
 	p.loginCode(t, client, known)
+
+	// A passkey removed with account.credential_remove is one no account
+	// has.
+	holder, _ := dialOrigin(t, p.http, testPasskeyOrigin)
+	lost, kept := newTestAuthenticator(t), newTestAuthenticator(t)
+	registerTestPasskey(t, holder, lost)
+	holder.drain(t)
+	passkeyResult(t, addTestPasskey(t, holder, kept))
+	holder.drain(t)
+	holder.result(t, "account.credential_remove", "remove", map[string]any{"id": b64(lost.id)})
+	if answer := login(lost, "localhost", 0x05); !signals(answer) {
+		t.Fatalf("a removed passkey was not signalled: %#v", answer)
+	}
 }
 
 // By default the page signals nothing, and a passkey no account has gets

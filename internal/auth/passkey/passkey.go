@@ -67,7 +67,8 @@ type Scheme struct {
 	// handle, and the holders by credential ID. Commit changes them under
 	// the server's lock; lookups for a login take only mu. It also guards
 	// pending: the credentials of verified registrations that no Commit
-	// has added or refused yet, until when they count as pending.
+	// has added or refused yet, a code from the page's included, until
+	// when they count as pending (markPending).
 	mu           sync.Mutex
 	byHandle     map[string]*holder
 	byCredential map[string]*holder
@@ -430,20 +431,28 @@ func (s *Scheme) verifyRegistration(raw []byte, data *webauthn.SessionData, hand
 	return credential, nil
 }
 
+// markPending makes a verified registration's credential pending
+// (registering) for at least ttl, until a Commit adds or refuses it.
+func (s *Scheme) markPending(id []byte, ttl time.Duration) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := time.Now()
+	for pending, until := range s.pending {
+		if !now.Before(until) {
+			delete(s.pending, pending)
+		}
+	}
+	if until := now.Add(ttl); until.After(s.pending[string(id)]) {
+		s.pending[string(id)] = until
+	}
+}
+
 // commitCredential adds a verified credential to the passkeys of the user
 // handle, a new one's included, and returns them as the account's record.
 // Until the server calls it, or for a ceremony's lifetime if it never does,
 // the credential is pending (registering).
 func (s *Scheme) commitCredential(handle []byte, credential *webauthn.Credential) func() (jsontext.Value, error) {
-	s.mu.Lock()
-	now := time.Now()
-	for id, until := range s.pending {
-		if !now.Before(until) {
-			delete(s.pending, id)
-		}
-	}
-	s.pending[string(credential.ID)] = now.Add(ceremonyLifetime)
-	s.mu.Unlock()
+	s.markPending(credential.ID, ceremonyLifetime)
 	return func() (jsontext.Value, error) {
 		s.mu.Lock()
 		defer s.mu.Unlock()
@@ -605,23 +614,17 @@ func (s *Scheme) forCeremony(parsed *protocol.ParsedCredentialAssertionData, dat
 		len(parsed.RawID) > 0 && time.Now().Before(data.Expires)
 }
 
-// registering reports whether a credential may yet be an account's: a live
-// code from the page holds it, which redeeming may make an account's, or a
-// registration verified it and the server has not committed it yet
-// (commitCredential), or has since. Codes are checked first, since a
-// redemption takes its code before it marks the credential pending.
+// registering reports whether a credential may yet be an account's: a
+// registration verified it and the server has not committed it yet, or has
+// since. One verified on the page is pending from before its code is
+// issued until a Commit, or until the code and then a ceremony's lifetime
+// have passed (redirectWithCode), so a redemption, which takes the code
+// before it reaches Commit, leaves no moment when it is neither.
 func (s *Scheme) registering(id []byte) bool {
-	now := time.Now()
-	if s.codes.Holds(func(value any) bool {
-		g, ok := value.(*pageGrant)
-		return ok && g.credential != nil && bytes.Equal(g.credential.ID, id)
-	}, now) {
-		return true
-	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	until, pending := s.pending[string(id)]
-	return pending && now.Before(until) || s.byCredential[string(id)] != nil
+	return pending && time.Now().Before(until) || s.byCredential[string(id)] != nil
 }
 
 // loginProof proves the identity of a verified login. Its Commit keeps
