@@ -1198,7 +1198,7 @@ func (s *Server) serverParams(baseURL string, revealed bool) map[string]any {
 	}
 	// ext:editors (apron's EXTENSIONS.md) needs no data of its own.
 	params["capabilities"] = append(params["capabilities"].([]string), "ext:editors")
-	// ext:remote (apron's extensions/ext_remote.md): ext.remote is the
+	// ext:remote (a draft in apron's recipes/trusted_federation.md): ext.remote is the
 	// server's, set on extensions' shadow users (Host.Shadow) and what
 	// they copy.
 	params["capabilities"] = append(params["capabilities"].([]string), "ext:remote")

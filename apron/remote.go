@@ -10,10 +10,10 @@ import (
 	"strings"
 )
 
-// remoteExt is the ext key ext:remote reserves (apron's
-// extensions/ext_remote.md): where a user, a message, or a room comes from,
-// when an extension copies another server's rooms, as in trusted
-// federation. The server owns it: clients never write it.
+// remoteExt is the ext key ext:remote reserves: where a user, a message,
+// or a room comes from, when an extension copies another server's rooms.
+// ext:remote is a draft extension in apron's
+// recipes/trusted_federation.md. The server owns it: clients never write it.
 const remoteExt = "remote"
 
 // shadowState marks a shadow user (Host.Shadow): the extension that owns

@@ -908,7 +908,7 @@ with its reply and the rest of its body. A save that the filters skipped
 because the grant or the mention arrived meanwhile is `denied`, to be sent
 again.
 
-The server offers [`ext:remote`](https://github.com/shazow/apron/blob/main/extensions/ext_remote.md):
+The server offers [`ext:remote`](https://github.com/shazow/apron/blob/main/recipes/trusted_federation.md#draft-extension-extremote):
 `ext.remote`, where a user, message, or room comes from, is the server's.
 It is dropped from what any client writes with `me`, `message`, and
 `room_set`, so a save keeps the stored value, and only an extension's
