@@ -154,6 +154,9 @@ type storedRoom struct {
 	Members     []string                `json:"members"`
 	Creator     string                  `json:"creator,omitzero"`
 	Reads       map[string]storedCursor `json:"reads,omitzero"`
+	// RecordBy and Remote are a thread's roomState.recordBy and remoteKey.
+	RecordBy map[string]string `json:"record_by,omitzero"`
+	Remote   string            `json:"remote,omitzero"`
 }
 
 type storedReaction struct {
@@ -424,6 +427,13 @@ func (s *Server) storedRoomLocked(r *roomState) storedRoom {
 		Creator:     r.creator,
 		Private:     r.private,
 		Active:      r.active,
+		Remote:      r.remoteKey,
+	}
+	for logID, userID := range r.recordBy {
+		if stored.RecordBy == nil {
+			stored.RecordBy = make(map[string]string)
+		}
+		stored.RecordBy[formatID(logID)] = userID
 	}
 	if r.parent != nil {
 		stored.Parent = r.parent.id
@@ -603,7 +613,18 @@ func (s *Server) restoreLocked() (map[string]bool, error) {
 		s.rooms[id] = &roomState{
 			id: id, record: decodeObject(stored.Record), recordLogID: stored.RecordLogID, createdID: stored.CreatedID,
 			latestID: stored.LatestID, creator: stored.Creator, private: stored.Private, active: stored.Active,
-			members: make(map[string]*userState), reads: make(map[string]readCursor),
+			members: make(map[string]*userState), reads: make(map[string]readCursor), remoteKey: stored.Remote,
+		}
+		for logID, userID := range stored.RecordBy {
+			if n, err := strconv.ParseInt(logID, 10, 64); err == nil {
+				if s.rooms[id].recordBy == nil {
+					s.rooms[id].recordBy = make(map[int64]string)
+				}
+				s.rooms[id].recordBy[n] = userID
+			}
+		}
+		if stored.Remote != "" {
+			s.remoteCopies[stored.Remote] = id
 		}
 	}
 	order := slices.SortedFunc(maps.Keys(s.rooms), func(a, b string) int {

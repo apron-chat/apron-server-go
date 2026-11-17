@@ -350,7 +350,7 @@ func (s *Server) mintLinkToken(ctx context.Context, link *userState, name string
 }
 
 // actAsMethods are the requests a link sends as a remote user.
-var actAsMethods = map[string]bool{"message": true, "reactions": true, "me": true, "room_leave": true}
+var actAsMethods = map[string]bool{"message": true, "reactions": true, "me": true, "room_leave": true, "room_set": true}
 
 // maxRemoteUserIDBytes bounds the remote user_id a link names.
 const maxRemoteUserIDBytes = 128
@@ -384,11 +384,13 @@ func (s *Server) actAs(c *client, req request, remoteID string) (any, bool, *Err
 		return nil, false, invalidParams("ext.remote.user_id must be a user_id of at most %d bytes, not a system identity's", maxRemoteUserIDBytes)
 	}
 	var target struct {
-		RoomID    *string `json:"room_id"`
-		MessageID *string `json:"message_id"`
-		Deleted   bool    `json:"deleted"`
-		Ext       struct {
+		RoomID       *string `json:"room_id"`
+		ParentRoomID *string `json:"parent_room_id"`
+		MessageID    *string `json:"message_id"`
+		Deleted      bool    `json:"deleted"`
+		Ext          struct {
 			Remote struct {
+				RoomID    string `json:"room_id"`
 				MessageID string `json:"message_id"`
 			} `json:"remote"`
 		} `json:"ext"`
@@ -457,14 +459,38 @@ func (s *Server) actAs(c *client, req request, remoteID string) (any, bool, *Err
 		rooms, write = append(rooms, *target.RoomID), false
 	case "me":
 		write = false
+	case "room_set":
+		// A link sets only threads of rooms it joined: it creates one under
+		// such a room, or saves one.
+		switch {
+		case target.RoomID != nil:
+			if r := s.rooms[*target.RoomID]; r != nil && r.parent == nil {
+				s.unlock()
+				return nil, false, invalidParams("A link saves only threads")
+			}
+			rooms = append(rooms, *target.RoomID)
+		case target.ParentRoomID != nil:
+			rooms = append(rooms, *target.ParentRoomID)
+			if target.Ext.Remote.RoomID != "" {
+				key = link.id + "\x00room:" + target.Ext.Remote.RoomID
+				if existing := s.remoteCopies[key]; existing != "" && s.rooms[existing] != nil {
+					s.unlock()
+					return map[string]any{"room_id": existing}, false, nil
+				}
+			}
+		default:
+			s.unlock()
+			return nil, false, invalidParams("A link creates only threads: give parent_room_id")
+		}
 	}
 	for _, roomID := range rooms {
 		r := s.rooms[roomID]
+		joined := linkRoomLocked(link, r)
 		switch {
-		case r == nil || !r.visibleTo(link):
+		case r == nil || joined == nil && !r.visibleTo(link):
 			s.unlock()
 			return nil, false, notJoined(invalidParams("Unknown room %q", roomID))
-		case r.members[link.id] == nil:
+		case joined == nil:
 			s.unlock()
 			return nil, false, notJoined(&Error{Code: CodeDenied, Message: "This link is not in that room, so its remote users may not write there"})
 		}
@@ -490,28 +516,63 @@ func (s *Server) actAs(c *client, req request, remoteID string) (any, bool, *Err
 	}
 	if write {
 		for _, roomID := range rooms {
+			// The remote user joins the room, and the threads on the way
+			// down from the room the link joined, so it can see it.
 			r := s.rooms[roomID]
-			if r.members[id] != nil {
-				continue
+			var chain []*roomState
+			for room := r; room != nil; room = room.parent {
+				chain = append(chain, room)
+				if room.members[link.id] != nil {
+					break
+				}
 			}
-			if shadow.removed[roomID] {
-				s.unlock()
-				return nil, false, &Error{Code: CodeDenied, Message: fmt.Sprintf("%s was removed from %s, so its link may not write there as it", id, r.title())}
+			for i := len(chain) - 1; i >= 0; i-- {
+				room := chain[i]
+				if room.members[id] != nil || room != r && !room.private {
+					continue
+				}
+				if shadow.removed[room.id] {
+					s.unlock()
+					return nil, false, &Error{Code: CodeDenied, Message: fmt.Sprintf("%s was removed from %s, so its link may not write there as it", id, room.title())}
+				}
+				s.joinLocked(shadow, room)
 			}
-			s.joinLocked(shadow, r)
 		}
 	}
 	s.unlock()
 
+	params := req.params
+	if req.method == "room_set" && target.ParentRoomID != nil && target.RoomID == nil {
+		// A thread of a private room is private unless it says otherwise,
+		// which here would show it only to the remote user: the copy of a
+		// thread is seen by whoever sees its parent.
+		if _, given := params["private"]; !given {
+			params = maps.Clone(params)
+			params["private"] = jsontext.Value("false")
+		}
+	}
 	bot := s.remoteBot(id)
-	raw, callErr := bot.Call(s.requestContext(c), req.method, req.params)
+	raw, callErr := bot.Call(s.requestContext(c), req.method, params)
 	if callErr != nil {
 		if e, ok := errors.AsType[*Error](callErr); ok {
 			return nil, false, e
 		}
 		return nil, false, s.remoteHost.protocolError(callErr)
 	}
-	if key != "" {
+	if key != "" && req.method == "room_set" {
+		if roomID, _ := decodeObject(raw)["room_id"].(string); roomID != "" {
+			s.mu.Lock()
+			if r := s.rooms[roomID]; r != nil {
+				r.remoteKey = key
+				s.remoteCopies[key] = roomID
+				s.touchRoom(r)
+			}
+			s.unlock()
+			if s.fed != nil {
+				s.fed.threadPaired(roomID, link.link.server, target.Ext.Remote.RoomID, *target.ParentRoomID)
+			}
+		}
+	} else if key != "" {
 		if messageID := decodeObject(raw)["message_id"]; messageID != nil {
 			s.mu.Lock()
 			if m := s.messages[messageID.(string)]; m != nil {
@@ -523,6 +584,17 @@ func (s *Server) actAs(c *client, req request, remoteID string) (any, bool, *Err
 		}
 	}
 	return raw, false, nil
+}
+
+// linkRoomLocked is the room a link joined that r is, or is a thread of,
+// in which the link acts (ext:remote), or nil.
+func linkRoomLocked(link *userState, r *roomState) *roomState {
+	for room := r; room != nil; room = room.parent {
+		if room.members[link.id] != nil {
+			return room
+		}
+	}
+	return nil
 }
 
 // notJoined marks a link's error for a room it has not joined, whatever

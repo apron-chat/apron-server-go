@@ -178,9 +178,36 @@ func (f *federation) inviteLink(roomID, token string) string {
 // pairState is one pair: the room on the remote server, and the log_id the
 // log was at when the pair was made, at or below which no record of the
 // room is sent.
+//
+// A thread of a paired room is paired too, with the thread on the remote
+// server (Parent names the room here it is a thread of): the pair starts
+// empty and ends with its parent's. Fallback marks a thread that the
+// remote server refused, whose messages go to the parent's room there, as
+// replies, and Room is then that room.
 type pairState struct {
-	Room  string `json:"room"`
-	Start int64  `json:"start"`
+	Room     string `json:"room"`
+	Start    int64  `json:"start"`
+	Parent   string `json:"parent,omitzero"`
+	Fallback bool   `json:"fallback,omitzero"`
+}
+
+// threadPaired pairs a thread here, which a remote server's link made or
+// this server's sender made there, with the thread there.
+func (f *federation) threadPaired(roomID, server, remoteRoom, parent string) {
+	f.setThreadPair(roomID, server, pairState{Room: remoteRoom, Start: f.h.LastLogID(), Parent: parent})
+}
+
+func (f *federation) setThreadPair(roomID, server string, pair pairState) {
+	f.mu.Lock()
+	if f.pairs[roomID] == nil {
+		f.pairs[roomID] = make(map[string]pairState)
+	}
+	f.pairs[roomID][server] = pair
+	f.mu.Unlock()
+	if err := f.persist(); err != nil {
+		f.h.logger.Error("keeping a thread's pair failed", "room", roomID, "error", err)
+	}
+	f.h.logger.Info("paired a thread", "room", roomID, "server", server, "remote_room", pair.Room, "fallback", pair.Fallback)
 }
 
 // persist writes the pairs, tokens, and stopped servers to the KV.
@@ -255,6 +282,21 @@ func (f *federation) dropPairs(roomID, server string, tell bool) error {
 			delete(f.pairs, room)
 		}
 	}
+	// A thread's pair ends with its parent's.
+	for changed := true; changed; {
+		changed = false
+		for room, remotes := range f.pairs {
+			for remote, pair := range remotes {
+				if pair.Parent != "" && f.pairs[pair.Parent][remote] == (pairState{}) {
+					delete(remotes, remote)
+					changed = true
+				}
+			}
+			if len(remotes) == 0 {
+				delete(f.pairs, room)
+			}
+		}
+	}
 	f.mu.Unlock()
 	err := f.persist()
 	for _, remote := range told {
@@ -278,12 +320,25 @@ func (f *federation) pairsWith(server string) map[string]pairState {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	link := s.links[server]
-	for room := range rooms {
-		if r := s.rooms[room]; link == nil || r == nil || r.members[link.id] == nil {
-			delete(rooms, room)
+	active := make(map[string]pairState)
+	for room, pair := range rooms {
+		if r := s.rooms[room]; pair.Parent == "" && link != nil && r != nil && r.members[link.id] != nil {
+			active[room] = pair
 		}
 	}
-	return rooms
+	// A thread's pair holds while its parent's does.
+	for changed := true; changed; {
+		changed = false
+		for room, pair := range rooms {
+			if _, done := active[room]; !done && pair.Parent != "" && s.rooms[room] != nil {
+				if _, ok := active[pair.Parent]; ok {
+					active[room] = pair
+					changed = true
+				}
+			}
+		}
+	}
+	return active
 }
 
 // pairRequest answers an ext:remote request: a link pairs a room it
@@ -482,7 +537,14 @@ func (f *federation) list() string {
 			if f.stopped[server] {
 				state = " (stopped: it refused the token)"
 			}
-			fmt.Fprintf(&b, "- %s with room %s of %s%s\n", room, f.pairs[room][server].Room, server, state)
+			pair := f.pairs[room][server]
+			switch {
+			case pair.Fallback:
+				state += fmt.Sprintf(" (a thread of %s, sent there as replies)", pair.Parent)
+			case pair.Parent != "":
+				state += fmt.Sprintf(" (a thread of %s)", pair.Parent)
+			}
+			fmt.Fprintf(&b, "- %s with room %s of %s%s\n", room, pair.Room, server, state)
 		}
 	}
 	f.mu.Unlock()
@@ -561,6 +623,8 @@ type sender struct {
 	wakeCh chan struct{}
 	// profiles are local users whose profile changed, guarded by f.mu.
 	profiles map[string]bool
+	// repaired is set when sending a record paired a thread.
+	repaired bool
 }
 
 // sender returns the remote server's sender, started if it was not.
@@ -657,7 +721,15 @@ func (sd *sender) run(ctx context.Context) {
 		var batch []sentRecord
 		for _, r := range s.records[i:min(len(s.records), i+eventBatch)] {
 			// A record of a room before its pair was made is not sent.
-			if slices.ContainsFunc(r.rooms, func(room string) bool { pair, ok := pairs[room]; return ok && r.id > pair.Start }) {
+			relevant := slices.ContainsFunc(r.rooms, func(room string) bool { pair, ok := pairs[room]; return ok && r.id > pair.Start })
+			if !relevant && r.kind == kindRoom {
+				// A new thread of a shared room.
+				if room := s.rooms[r.rooms[0]]; room != nil && room.parent != nil {
+					pair, ok := pairs[room.parent.id]
+					relevant = ok && r.id > pair.Start
+				}
+			}
+			if relevant {
 				batch = append(batch, sentRecord{r.id, r.kind, slices.Clone(r.rooms), slices.Clone(r.raw)})
 			} else {
 				batch = append(batch, sentRecord{id: r.id}) // not this server's: skipped
@@ -724,12 +796,13 @@ func (sd *sender) run(ctx context.Context) {
 				break
 			}
 			if r.raw != nil {
-				active := make(map[string]string)
+				active := make(map[string]pairState)
 				for room, pair := range pairs {
 					if r.id > pair.Start {
-						active[room] = pair.Room
+						active[room] = pair
 					}
 				}
+				sd.repaired = false
 				if sendErr = sd.send(ctx, conn, r, active); sendErr != nil {
 					break
 				}
@@ -739,6 +812,9 @@ func (sd *sender) run(ctx context.Context) {
 				if err := f.kv.Put(cursorKey, moved); err != nil {
 					return
 				}
+			}
+			if sd.repaired {
+				break // a thread was paired: read the rest with its pair
 			}
 		}
 		if moved != cursor {
@@ -983,7 +1059,7 @@ type sentMessage struct {
 }
 
 // send sends one record of a shared room.
-func (sd *sender) send(ctx context.Context, conn *remoteConn, r sentRecord, pairs map[string]string) error {
+func (sd *sender) send(ctx context.Context, conn *remoteConn, r sentRecord, pairs map[string]pairState) error {
 	switch r.kind {
 	case kindMessage:
 		var m sentMessage
@@ -995,11 +1071,13 @@ func (sd *sender) send(ctx context.Context, conn *remoteConn, r sentRecord, pair
 		return sd.reactions(ctx, conn, r, pairs)
 	case kindMembership:
 		return sd.membership(ctx, conn, r, pairs)
+	case kindRoom:
+		return sd.room(ctx, conn, r, pairs)
 	}
 	return nil
 }
 
-func (sd *sender) message(ctx context.Context, conn *remoteConn, r sentRecord, m sentMessage, pairs map[string]string) error {
+func (sd *sender) message(ctx context.Context, conn *remoteConn, r sentRecord, m sentMessage, pairs map[string]pairState) error {
 	if !sd.f.localAuthor(m.From.UserID) {
 		return nil
 	}
@@ -1011,7 +1089,8 @@ func (sd *sender) message(ctx context.Context, conn *remoteConn, r sentRecord, m
 			}
 		}
 	}
-	remoteRoom, paired := pairs[m.RoomID]
+	pair, paired := pairs[m.RoomID]
+	remoteRoom := pair.Room
 	copyID := sd.copyOf(m.MessageID)
 	act := map[string]any{"user_id": m.From.UserID}
 	switch {
@@ -1038,6 +1117,20 @@ func (sd *sender) message(ctx context.Context, conn *remoteConn, r sentRecord, m
 		params := map[string]any{"room_id": remoteRoom, "body": remoteBody(m.Body, mapped), "ext": map[string]any{"remote": act}}
 		if m.ReplyTo != nil {
 			if target := sd.target(m.ReplyTo.MessageID); target != "" {
+				params["reply_to"] = map[string]any{"message_id": target}
+			}
+		}
+		if pair.Fallback && params["reply_to"] == nil {
+			// The remote server refused the thread: its messages are
+			// replies, in the parent room there, to its first message.
+			var first string
+			if found, err := sd.f.kv.Get(sd.firstKey(m.RoomID), &first); err != nil {
+				return err
+			} else if !found {
+				if err := sd.f.kv.Put(sd.firstKey(m.RoomID), m.MessageID); err != nil {
+					return err
+				}
+			} else if target := sd.copyOf(first); first != m.MessageID && target != "" {
 				params["reply_to"] = map[string]any{"message_id": target}
 			}
 		}
@@ -1073,7 +1166,7 @@ func (sd *sender) message(ctx context.Context, conn *remoteConn, r sentRecord, m
 		if !ok {
 			return nil
 		}
-		params := map[string]any{"message_id": copyID, "room_id": from, "deleted": true, "ext": map[string]any{"remote": act}}
+		params := map[string]any{"message_id": copyID, "room_id": from.Room, "deleted": true, "ext": map[string]any{"remote": act}}
 		_, _, err := sd.call(ctx, conn, "delete", r.id, "message", params, movedFrom)
 		return err
 	}
@@ -1119,7 +1212,7 @@ func (sd *sender) mentions(ctx context.Context, conn *remoteConn, body map[strin
 	return mapped, nil
 }
 
-func (sd *sender) reactions(ctx context.Context, conn *remoteConn, r sentRecord, pairs map[string]string) error {
+func (sd *sender) reactions(ctx context.Context, conn *remoteConn, r sentRecord, pairs map[string]pairState) error {
 	var record struct {
 		MessageID string `json:"message_id"`
 		RoomID    string `json:"room_id"`
@@ -1162,7 +1255,7 @@ func (sd *sender) reactions(ctx context.Context, conn *remoteConn, r sentRecord,
 	return nil
 }
 
-func (sd *sender) membership(ctx context.Context, conn *remoteConn, r sentRecord, pairs map[string]string) error {
+func (sd *sender) membership(ctx context.Context, conn *remoteConn, r sentRecord, pairs map[string]pairState) error {
 	var record struct {
 		RoomID  string `json:"room_id"`
 		Members []struct {
@@ -1175,10 +1268,11 @@ func (sd *sender) membership(ctx context.Context, conn *remoteConn, r sentRecord
 	if json.Unmarshal(r.raw, &record) != nil {
 		return nil
 	}
-	remoteRoom, paired := pairs[record.RoomID]
-	if !paired {
-		return nil
+	pair, paired := pairs[record.RoomID]
+	if !paired || pair.Fallback {
+		return nil // a refused thread has no remote users to leave it
 	}
+	remoteRoom := pair.Room
 	s := sd.f.s
 	for _, member := range record.Members {
 		if member.Joined || !sd.f.localAuthor(member.User.UserID) {
@@ -1199,6 +1293,91 @@ func (sd *sender) membership(ctx context.Context, conn *remoteConn, r sentRecord
 		params := map[string]any{"room_id": remoteRoom, "ext": map[string]any{"remote": map[string]any{"user_id": member.User.UserID}}}
 		if _, _, err := sd.call(ctx, conn, "leave-"+member.User.UserID, r.id, "room_leave", params, record.RoomID); err != nil {
 			return err
+		}
+	}
+	return nil
+}
+
+func (sd *sender) firstKey(roomID string) string { return "first " + sd.server + " " + roomID }
+
+// room sends a room record of a thread of a shared room: its creation by a
+// local user is a room_set through the link under the paired room, which
+// pairs the two threads; a save of a paired thread's title or description
+// is a room_set of the thread there. Top-level rooms keep their own title.
+// A thread that the remote server refuses is sent as replies instead.
+func (sd *sender) room(ctx context.Context, conn *remoteConn, r sentRecord, pairs map[string]pairState) error {
+	var record struct {
+		RoomID       string `json:"room_id"`
+		PrevLogID    string `json:"prev_log_id"`
+		ParentRoomID string `json:"parent_room_id"`
+		Private      bool   `json:"private"`
+		Title        string `json:"title"`
+		Description  string `json:"description"`
+	}
+	if json.Unmarshal(r.raw, &record) != nil || record.ParentRoomID == "" {
+		return nil
+	}
+	s := sd.f.s
+	s.mu.RLock()
+	author := ""
+	if room := s.rooms[record.RoomID]; room != nil {
+		author = room.recordBy[r.id]
+	}
+	s.mu.RUnlock()
+	if author == "" || !sd.f.localAuthor(author) {
+		return nil // a save that a remote user made, or that is not known
+	}
+	act := map[string]any{"user_id": author}
+	if pair, ok := pairs[record.RoomID]; ok {
+		if pair.Fallback || pair.Parent == "" || record.PrevLogID == "" {
+			return nil
+		}
+		if _, err := sd.user(ctx, conn, author, "", r.id); err != nil {
+			return err
+		}
+		params := map[string]any{"room_id": pair.Room, "title": record.Title, "description": record.Description, "ext": map[string]any{"remote": act}}
+		_, _, err := sd.call(ctx, conn, "thread-save", r.id, "room_set", params, record.RoomID)
+		return err
+	}
+	parent, ok := pairs[record.ParentRoomID]
+	if !ok || record.PrevLogID != "" {
+		return nil
+	}
+	if record.Private {
+		// A private thread shows only to its members here, such as every
+		// thread of a private room: the other server would show its copy
+		// to the whole room, so it is not shared.
+		sd.f.h.logger.Info("a private thread is not shared", "room", record.RoomID, "server", sd.server)
+		return nil
+	}
+	sd.repaired = true
+	if parent.Fallback {
+		sd.f.setThreadPair(record.RoomID, sd.server, pairState{Room: parent.Room, Start: r.id, Parent: record.ParentRoomID, Fallback: true})
+		return nil
+	}
+	if _, err := sd.user(ctx, conn, author, "", r.id); err != nil {
+		return err
+	}
+	act["room_id"] = record.RoomID
+	params := map[string]any{"parent_room_id": parent.Room, "title": record.Title, "ext": map[string]any{"remote": act}}
+	if record.Description != "" {
+		params["description"] = record.Description
+	}
+	raw, ok, err := sd.call(ctx, conn, "thread", r.id, "room_set", params, record.ParentRoomID)
+	if err != nil {
+		return err
+	}
+	var result struct {
+		RoomID string `json:"room_id"`
+	}
+	switch {
+	case ok && json.Unmarshal(raw, &result) == nil && result.RoomID != "":
+		sd.f.setThreadPair(record.RoomID, sd.server, pairState{Room: result.RoomID, Start: r.id, Parent: record.ParentRoomID})
+	case !ok:
+		// Refused, but the parent's pair holds: its messages go to the
+		// parent's room there, as replies.
+		if _, still := sd.f.pairsWith(sd.server)[record.ParentRoomID]; still {
+			sd.f.setThreadPair(record.RoomID, sd.server, pairState{Room: parent.Room, Start: r.id, Parent: record.ParentRoomID, Fallback: true})
 		}
 	}
 	return nil

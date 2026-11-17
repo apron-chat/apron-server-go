@@ -1542,6 +1542,11 @@ func (s *Server) processFrame(c *client, payload []byte) {
 		if remoteID, present := remoteActor(req.params); present {
 			actAs = true
 			op = func(s *Server, c *client, req request) (any, bool, *Error) { return s.actAs(c, req, remoteID) }
+		} else if req.method == "room_set" {
+			// A link sets rooms only as a remote user, and only threads.
+			op = func(*Server, *client, request) (any, bool, *Error) {
+				return nil, false, &Error{Code: CodeDenied, Message: "A link sets only threads, as a remote user"}
+			}
 		}
 	}
 	if op == nil {

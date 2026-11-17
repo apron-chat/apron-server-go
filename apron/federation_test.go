@@ -150,7 +150,7 @@ func TestFederationSharesRooms(t *testing.T) {
 	// A's edit reaches B's copy; the duplicate create of a resend does not
 	// make another.
 	alice.request(t, "message", "m2", map[string]any{"room_id": roomA, "message_id": hello, "body": map[string]any{"text": "hello (edited)"}})
-	deadline := time.Now().Add(10 * time.Second)
+	deadline := time.Now().Add(20 * time.Second)
 	for wstestText(lastSnapshot(t, b.app, copyOnB["message_id"].(string))) != "hello (edited)" {
 		if time.Now().After(deadline) {
 			t.Fatal("the edit did not reach B")
@@ -171,13 +171,50 @@ func TestFederationSharesRooms(t *testing.T) {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
+	// A thread of the shared room is shared with it: created there through
+	// the link, then its messages and title both ways.
+	_, created := alice.request(t, "room_set", "t1", map[string]any{"parent_room_id": roomA, "title": "Deploy"})
+	threadA := created["room_id"].(string)
+	var threadB string
+	for threadB == "" {
+		b.app.mu.RLock()
+		for id, r := range b.app.rooms {
+			if r.parent != nil && r.parent.id == roomB && strings.Contains(string(encodeJSON(r.record["ext"])), threadA) {
+				threadB = id
+			}
+		}
+		b.app.mu.RUnlock()
+		if time.Now().After(deadline) {
+			t.Fatal("the thread did not reach B")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	inThread, _ := save(t, alice, "t2", map[string]any{"room_id": threadA, "body": map[string]any{"text": "in the thread"}})
+	if copied := b.waitCopy(t, threadB, inThread); copied["room_id"] != threadB {
+		t.Fatalf("thread message on B = %#v", copied)
+	}
+	fromB := b.call(t, "message", map[string]any{"room_id": threadB, "body": map[string]any{"text": "thread reply from B"}})
+	a.waitCopy(t, threadA, fromB["message_id"].(string))
+	alice.request(t, "room_set", "t3", map[string]any{"room_id": threadA, "title": "Deploy (renamed)"})
+	for {
+		b.app.mu.RLock()
+		title := b.app.rooms[threadB].title()
+		b.app.mu.RUnlock()
+		if title == "Deploy (renamed)" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the title did not reach B: %q", title)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
 	// B unshares: A hears of it, ends its pair, and its link for B leaves.
 	if notice := b.command(t, roomB, "/remote unshare"); !strings.Contains(notice, "no longer shared") {
 		t.Fatalf("unshare = %q", notice)
 	}
 	for {
 		joined, _ := a.remoteHostMember(roomA, b.self)
-		if !joined && !strings.Contains(a.command(t, roomA, "/remote list"), roomA+" with room") {
+		if list := a.command(t, roomA, "/remote list"); !joined && !strings.Contains(list, roomA+" with room") && !strings.Contains(list, threadA+" with room") {
 			break
 		}
 		if time.Now().After(deadline) {
@@ -247,6 +284,25 @@ func TestLinkRequests(t *testing.T) {
 	if frame := act("c3", "message", map[string]any{"room_id": elsewhere, "body": map[string]any{"text": "x"}, "ext": map[string]any{"remote": map[string]any{"user_id": "zed"}}}); frame["error"].(map[string]any)["code"] != float64(CodeDenied) ||
 		!reflectEqual(frame["error"].(map[string]any)["data"], map[string]any{"ext": map[string]any{"remote": "not_joined"}}) {
 		t.Fatalf("write elsewhere = %#v", frame)
+	}
+	// A link sets only threads of rooms it joined, as a remote user.
+	for id, params := range map[string]map[string]any{
+		"rs1": {"title": "mine"},
+		"rs2": {"title": "top", "ext": map[string]any{"remote": map[string]any{"user_id": "zed"}}},
+		"rs3": {"room_id": room, "title": "renamed", "ext": map[string]any{"remote": map[string]any{"user_id": "zed"}}},
+		"rs4": {"parent_room_id": elsewhere, "title": "t", "ext": map[string]any{"remote": map[string]any{"user_id": "zed"}}},
+	} {
+		if frame := act(id, "room_set", params); frame["error"] == nil {
+			t.Fatalf("%s: %#v", id, frame)
+		}
+	}
+	thread := map[string]any{"parent_room_id": room, "title": "far thread", "ext": map[string]any{"remote": map[string]any{"user_id": "zed", "room_id": "rt1"}}}
+	made := act("rs5", "room_set", thread)["result"].(map[string]any)["room_id"]
+	if again := act("rs6", "room_set", thread)["result"].(map[string]any)["room_id"]; again != made {
+		t.Fatalf("duplicate thread = %v, %v", again, made)
+	}
+	if frame := act("rs7", "message", map[string]any{"room_id": made, "body": map[string]any{"text": "in far thread"}, "ext": map[string]any{"remote": map[string]any{"user_id": "zed"}}}); frame["result"] == nil {
+		t.Fatalf("write in a thread = %#v", frame)
 	}
 	// The key of a copy outlives its deletion: a create sent again returns
 	// it, and a save restores it.

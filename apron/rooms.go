@@ -40,6 +40,12 @@ type roomState struct {
 	// creator is the user_id that created the room, empty for the seeded
 	// room; only the creator may /kick (§4.1).
 	creator string
+	// recordBy names who wrote each of the room's records with room_set,
+	// by log_id, for a sender of trusted federation, which sends only its
+	// own users' saves; remoteKey is set on a thread a link created
+	// (ext:remote): the link's user_id and the remote room_id.
+	recordBy  map[int64]string
+	remoteKey string
 	// reads holds each user's latest read cursor (§4.6).
 	reads map[string]readCursor
 }
@@ -575,6 +581,12 @@ func (s *Server) setRoom(c *client, req request) (any, bool, *Error) {
 	r := s.commitRoomLocked(roomID, parent, private, fields)
 	if !updating {
 		r.creator = u.id
+	}
+	if r.parent != nil {
+		if r.recordBy == nil {
+			r.recordBy = make(map[int64]string)
+		}
+		r.recordBy[r.recordLogID] = u.id
 	}
 	s.touchRoom(r)
 	// Room updates precede the result, so the room is known when it arrives.

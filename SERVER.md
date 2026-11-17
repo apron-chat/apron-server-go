@@ -2103,6 +2103,13 @@ The link's side (receiving):
   `denied`, both with `"data": {"ext": {"remote": "not_joined"}}`. A write joins the remote user to the room, also after it left;
   one that another user removed is `denied` until someone adds it. A `me`
   result's `you` is the remote user.
+- A link's `room_set`, as a remote user, creates a thread of a room the
+  link joined (`parent_room_id`), or saves such a thread's title and
+  description; anything else is refused, and a link's own `room_set` is
+  `denied`. The link acts in the threads of the rooms it joined, at any
+  depth. A thread it creates is not private, so whoever sees its parent
+  sees it, and is paired with the thread its `ext.remote.room_id` names; a
+  create sent again returns the same thread.
 - A create whose `ext.remote.message_id` is one the link created before,
   also moved or deleted since, is a duplicate: its result is that message's
   `message_id`, and nothing is logged. The key is the link and the remote
@@ -2130,6 +2137,14 @@ its `log_id`, what it is, and its params, so a resend is a duplicate:
   there (a local user's from the `me` result, a remote user's original);
   others are left in the text and out of `mentions`; embeds become a line
   of text naming them, with their link;
+- a thread a local user starts in a shared room is created there with a
+  `room_set` under the paired room, which pairs the two threads: the pair
+  starts empty, ends with its parent's, and its records are sent like any
+  shared room's; a save of its title or description is a `room_set` of the
+  thread there, as the user who saved it. Where the other server refuses
+  the thread, its messages go to the parent room there instead, as replies
+  to the thread's first message. A private thread, which only its members
+  see, such as any thread of a private room here, is not shared;
 - a user's reaction set goes to the copy, or the original of a copy of that
   server's message; a user's first record sends `me` with their name, as
   does each later rename, as soon as it happens; a leave of a user whose
