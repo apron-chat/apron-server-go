@@ -2074,9 +2074,9 @@ Admins run these in a room, and are answered with `~private` notices:
   signs in there with the invite's token and sends an `ext:remote` request
   with this server's own invite. When it is answered `{}`, the rooms are a
   pair.
-- `/remote unshare` takes every link out of the room (logged leaves), and
-  ends its pairs. The other server finds out at its next write there, and
-  ends its pair too.
+- `/remote unshare` takes every link out of the room (logged leaves), ends
+  its pairs, and tells each other server with an `ext:remote` request
+  without `link` (sent again until it is answered).
 - `/remote list` lists the links, the rooms they are in, and the pairs;
   `/remote revoke <address>` revokes the tokens of that server's link,
   which closes its connections, and ends every pair with the server.
@@ -2089,7 +2089,9 @@ The link's side (receiving):
   whose `server` must be the link's own, compared after normalization
   (lowercase scheme and host, port and path as written; only `ws:` and
   `wss:`), and keeps its token, never on a user object. Anyone else is
-  `denied`.
+  `denied`. Without `link`, it ends the pair of `room_id`, and the link
+  leaves the room. A pair starts where the log was when it was made: no
+  record of the room at or below that `log_id` is sent.
 - A link's `message`, `reactions`, `me`, or `room_leave` with
   `params.ext.remote.user_id` runs as the remote user
   `<user_id>@<host[:port]>`, made on first use (a [shadow user](#shadow-users)
@@ -2098,7 +2100,7 @@ The link's side (receiving):
   128 bytes, a system identity's, or has whitespace is `invalid_params`.
   The link must have joined the request's rooms: one it cannot see is
   `invalid_params` (`Unknown room`), one it can but has not joined is
-  `denied`. A write joins the remote user to the room, also after it left;
+  `denied`, both with `"data": {"ext": {"remote": "not_joined"}}`. A write joins the remote user to the room, also after it left;
   one that another user removed is `denied` until someone adds it. A `me`
   result's `you` is the remote user.
 - A create whose `ext.remote.message_id` is one the link created before,
@@ -2117,8 +2119,11 @@ its `log_id`, what it is, and its params, so a resend is a duplicate:
 
 - a new message, or one moved into the room, is a create with `ext.remote`
   `{"user_id", "room_id", "message_id"}`; an edit saves the copy with every
-  client field; a deletion, or a move out of the room, deletes the copy. An
-  edit or deletion of a message it never sent is not sent;
+  client field, and a move between two rooms shared with the server saves
+  the copy into the other room; a deletion, or a move out of the shared
+  rooms, deletes the copy. A create of a message that is not new, such as
+  one moved in, is followed by a save, which restores a copy deleted
+  before. An edit or deletion of a message it never sent is not sent;
 - `reply_to` is the copy of this server's message, or the original of a
   copy of that server's (`ext.remote.message_id`), or is dropped; each
   `@id` that `mentions` lists, outside code in Markdown, is the user's ID
@@ -2127,13 +2132,13 @@ its `log_id`, what it is, and its params, so a resend is a duplicate:
   of text naming them, with their link;
 - a user's reaction set goes to the copy, or the original of a copy of that
   server's message; a user's first record sends `me` with their name, as
-  does each later rename; a leave of a user whose records went there is a
-  `room_leave`.
+  does each later rename, as soon as it happens; a leave of a user whose
+  records went there is a `room_leave`, but not the leaves the server makes
+  when it retires a guest.
 
 Records of remote users (of any server), links, and system identities are
 never sent. A `retry_after` waits; a refused record is logged and skipped,
-and a refusal that says the link is no longer in the room (`denied`, or
-`invalid_params` for an unknown room) ends that pair. A `denied` sign-in
+and a refusal whose `data.ext.remote` is `not_joined` ends that pair. A `denied` sign-in
 stops sending to that server until an admin runs `/remote connect` again. A
 failed connection is tried again after a delay that doubles up to five
 minutes. Once there is nothing to send, the connection stays open for the

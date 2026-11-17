@@ -463,10 +463,10 @@ func (s *Server) actAs(c *client, req request, remoteID string) (any, bool, *Err
 		switch {
 		case r == nil || !r.visibleTo(link):
 			s.unlock()
-			return nil, false, invalidParams("Unknown room %q", roomID)
+			return nil, false, notJoined(invalidParams("Unknown room %q", roomID))
 		case r.members[link.id] == nil:
 			s.unlock()
-			return nil, false, &Error{Code: CodeDenied, Message: "This link is not in that room, so its remote users may not write there"}
+			return nil, false, notJoined(&Error{Code: CodeDenied, Message: "This link is not in that room, so its remote users may not write there"})
 		}
 	}
 	shadow := s.users[id]
@@ -523,6 +523,14 @@ func (s *Server) actAs(c *client, req request, remoteID string) (any, bool, *Err
 		}
 	}
 	return raw, false, nil
+}
+
+// notJoined marks a link's error for a room it has not joined, whatever
+// its code, so that its sender can tell that the pair ended from any other
+// refusal (ext:remote).
+func notJoined(e *Error) *Error {
+	e.Data = map[string]any{"ext": map[string]any{remoteExt: "not_joined"}}
+	return e
 }
 
 // remoteBot is the handle of a link's remote user, whose session runs its

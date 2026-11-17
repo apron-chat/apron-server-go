@@ -157,6 +157,42 @@ func TestFederationSharesRooms(t *testing.T) {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
+	// A rename reaches B without a record after it.
+	alice.request(t, "me", "n1", map[string]any{"name": "Alice R"})
+	for {
+		b.app.mu.RLock()
+		name := b.app.users[alice.userID+"@"+authorityA].name
+		b.app.mu.RUnlock()
+		if name == "Alice R" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the rename did not reach B: %q", name)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	// B unshares: A hears of it, ends its pair, and its link for B leaves.
+	if notice := b.command(t, roomB, "/remote unshare"); !strings.Contains(notice, "no longer shared") {
+		t.Fatalf("unshare = %q", notice)
+	}
+	for {
+		joined, _ := a.remoteHostMember(roomA, b.self)
+		if !joined && !strings.Contains(a.command(t, roomA, "/remote list"), roomA+" with room") {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("A did not end the pair")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+// remoteHostMember reports whether the link for a server is in a room.
+func (fed *federated) remoteHostMember(roomID, server string) (bool, bool) {
+	fed.app.mu.RLock()
+	link := fed.app.links[server]
+	fed.app.mu.RUnlock()
+	return fed.admin.host.Member(roomID, link.id)
 }
 
 func replyOfJSON(m map[string]any) string {
@@ -207,9 +243,20 @@ func TestLinkRequests(t *testing.T) {
 	if you := act("me1", "me", map[string]any{"name": "Zed", "ext": map[string]any{"remote": map[string]any{"user_id": "zed"}}})["result"].(map[string]any)["you"].(map[string]any); you["user_id"] != "zed@other.test:9000" || you["name"] != "Zed" {
 		t.Fatalf("me as zed = %#v", you)
 	}
-	// Not in a room the link has not joined.
-	if frame := act("c3", "message", map[string]any{"room_id": elsewhere, "body": map[string]any{"text": "x"}, "ext": map[string]any{"remote": map[string]any{"user_id": "zed"}}}); frame["error"].(map[string]any)["code"] != float64(CodeDenied) {
+	// Not in a room the link has not joined, which its error says.
+	if frame := act("c3", "message", map[string]any{"room_id": elsewhere, "body": map[string]any{"text": "x"}, "ext": map[string]any{"remote": map[string]any{"user_id": "zed"}}}); frame["error"].(map[string]any)["code"] != float64(CodeDenied) ||
+		!reflectEqual(frame["error"].(map[string]any)["data"], map[string]any{"ext": map[string]any{"remote": "not_joined"}}) {
 		t.Fatalf("write elsewhere = %#v", frame)
+	}
+	// The key of a copy outlives its deletion: a create sent again returns
+	// it, and a save restores it.
+	act("d1", "message", map[string]any{"room_id": room, "message_id": firstID, "deleted": true, "ext": map[string]any{"remote": map[string]any{"user_id": "zed"}}})
+	if again := act("c6", "message", create); again["result"].(map[string]any)["message_id"] != firstID {
+		t.Fatalf("create after the delete = %#v", again)
+	}
+	act("s1", "message", map[string]any{"room_id": room, "message_id": firstID, "body": map[string]any{"text": "from far"}, "ext": map[string]any{"remote": map[string]any{"user_id": "zed", "room_id": "r9", "message_id": "1700000000001"}}})
+	if restored := lastSnapshot(t, a.app, firstID.(string)); restored["deleted"] == true || wstestText(restored) != "from far" || remoteOfJSON(t, restored)["message_id"] != "1700000000001" {
+		t.Fatalf("restored = %#v", restored)
 	}
 	// A remote user that left is joined again; one that was removed is not.
 	act("l1", "room_leave", map[string]any{"room_id": room, "ext": map[string]any{"remote": map[string]any{"user_id": "zed"}}})
@@ -239,6 +286,16 @@ func TestLinkRequests(t *testing.T) {
 	}
 	if notice := a.command(t, room, "/remote list"); !strings.Contains(notice, room+" with room x of "+other) {
 		t.Fatalf("list = %q", notice)
+	}
+	// Without link, the request ends the pair, and the link leaves.
+	if frame := act("p5", "ext:remote", map[string]any{"room_id": room}); frame["result"] == nil {
+		t.Fatalf("unpairing = %#v", frame)
+	}
+	if notice := a.command(t, room, "/remote list"); strings.Contains(notice, room+" with room") {
+		t.Fatalf("list after unpairing = %q", notice)
+	}
+	if joined, _ := a.remoteHostMember(room, other); joined {
+		t.Fatal("the link stayed in the room")
 	}
 	guest := dialTestClient(t, a.http)
 	guest.expectError(t, "ext:remote", "g1", map[string]any{"room_id": room, "link": "https://link.apron.chat/#server=" + other + "&room=x&token=t"}, CodeDenied)

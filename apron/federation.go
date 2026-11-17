@@ -52,8 +52,11 @@ type federation struct {
 	save sync.Mutex
 	mu   sync.Mutex
 	// pairs maps each shared room here to the remote servers it is paired
-	// with, and the room there.
-	pairs map[string]map[string]string
+	// with, the room there, and where the log was when the pair was made.
+	pairs map[string]map[string]pairState
+	// ends are the rooms of each remote server whose pairs this server
+	// ended, which the sender tells that server about.
+	ends map[string][]string
 	// tokens are the newest token of each remote server's link for this
 	// server, and stopped the remote servers that refused it.
 	tokens  map[string]string
@@ -72,7 +75,7 @@ func newFederation(s *Server, config RemoteConfig) (*federation, error) {
 	}
 	return &federation{
 		s: s, self: self, linger: linger,
-		pairs: make(map[string]map[string]string), tokens: make(map[string]string),
+		pairs: make(map[string]map[string]pairState), tokens: make(map[string]string), ends: make(map[string][]string),
 		stopped: make(map[string]bool), senders: make(map[string]*sender),
 	}, nil
 }
@@ -81,7 +84,7 @@ func (f *federation) Name() string { return remoteExt }
 
 func (f *federation) Init(r *Registrar) error {
 	f.h, f.kv = r.Host, r.Store()
-	for key, into := range map[string]any{"pairs": &f.pairs, "tokens": &f.tokens, "stopped": &f.stopped} {
+	for key, into := range map[string]any{"pair-set": &f.pairs, "tokens": &f.tokens, "stopped": &f.stopped, "ends": &f.ends} {
 		if _, err := f.kv.Get(key, into); err != nil {
 			return err
 		}
@@ -92,7 +95,10 @@ func (f *federation) Init(r *Registrar) error {
 		}
 	}
 	if f.pairs == nil {
-		f.pairs = make(map[string]map[string]string)
+		f.pairs = make(map[string]map[string]pairState)
+	}
+	if f.ends == nil {
+		f.ends = make(map[string][]string)
 	}
 	if f.stopped == nil {
 		f.stopped = make(map[string]bool)
@@ -116,6 +122,9 @@ func (f *federation) Init(r *Registrar) error {
 		for server := range remotes {
 			servers = append(servers, server)
 		}
+	}
+	for server := range f.ends {
+		servers = append(servers, server)
 	}
 	f.mu.Unlock()
 	for _, server := range servers {
@@ -166,18 +175,30 @@ func (f *federation) inviteLink(roomID, token string) string {
 
 // ---- Pairs ----
 
+// pairState is one pair: the room on the remote server, and the log_id the
+// log was at when the pair was made, at or below which no record of the
+// room is sent.
+type pairState struct {
+	Room  string `json:"room"`
+	Start int64  `json:"start"`
+}
+
 // persist writes the pairs, tokens, and stopped servers to the KV.
 func (f *federation) persist() error {
 	f.save.Lock()
 	defer f.save.Unlock()
 	f.mu.Lock()
-	pairs := make(map[string]map[string]string, len(f.pairs))
+	pairs := make(map[string]map[string]pairState, len(f.pairs))
 	for room, remotes := range f.pairs {
 		pairs[room] = maps.Clone(remotes)
 	}
+	ends := make(map[string][]string, len(f.ends))
+	for server, rooms := range f.ends {
+		ends[server] = slices.Clone(rooms)
+	}
 	tokens, stopped := maps.Clone(f.tokens), maps.Clone(f.stopped)
 	f.mu.Unlock()
-	return errors.Join(f.kv.Put("pairs", pairs), f.kv.Put("tokens", tokens), f.kv.Put("stopped", stopped))
+	return errors.Join(f.kv.Put("pair-set", pairs), f.kv.Put("tokens", tokens), f.kv.Put("stopped", stopped), f.kv.Put("ends", ends))
 }
 
 // setPair pairs a room here with a room of a remote server, and keeps the
@@ -194,11 +215,13 @@ func (f *federation) setPair(roomID, server, remoteRoom, token string) error {
 			return err
 		}
 	}
+	start := f.h.LastLogID()
 	f.mu.Lock()
 	if f.pairs[roomID] == nil {
-		f.pairs[roomID] = make(map[string]string)
+		f.pairs[roomID] = make(map[string]pairState)
 	}
-	f.pairs[roomID][server] = remoteRoom
+	f.pairs[roomID][server] = pairState{Room: remoteRoom, Start: start}
+	f.ends[server] = slices.DeleteFunc(f.ends[server], func(room string) bool { return room == remoteRoom })
 	f.tokens[server] = token
 	delete(f.stopped, server)
 	f.mu.Unlock()
@@ -210,16 +233,22 @@ func (f *federation) setPair(roomID, server, remoteRoom, token string) error {
 }
 
 // dropPairs ends the pairs of a room (roomID set), of a remote server
-// (server set), or one pair (both).
-func (f *federation) dropPairs(roomID, server string) error {
+// (server set), or one pair (both). With tell, the sender tells each
+// remote server that the pair ended.
+func (f *federation) dropPairs(roomID, server string, tell bool) error {
 	f.mu.Lock()
+	var told []string
 	for room, remotes := range f.pairs {
 		if roomID != "" && room != roomID {
 			continue
 		}
-		for remote := range remotes {
+		for remote, pair := range remotes {
 			if server == "" || remote == server {
 				delete(remotes, remote)
+				if tell && !slices.Contains(f.ends[remote], pair.Room) {
+					f.ends[remote] = append(f.ends[remote], pair.Room)
+					told = append(told, remote)
+				}
 			}
 		}
 		if len(remotes) == 0 {
@@ -227,14 +256,18 @@ func (f *federation) dropPairs(roomID, server string) error {
 		}
 	}
 	f.mu.Unlock()
-	return f.persist()
+	err := f.persist()
+	for _, remote := range told {
+		f.sender(remote).wake()
+	}
+	return err
 }
 
 // pairsWith are the rooms here paired with a remote server whose link for
-// it has joined them, mapped to the rooms there.
-func (f *federation) pairsWith(server string) map[string]string {
+// it has joined them, with their pairs.
+func (f *federation) pairsWith(server string) map[string]pairState {
 	f.mu.Lock()
-	rooms := make(map[string]string)
+	rooms := make(map[string]pairState)
 	for room, remotes := range f.pairs {
 		if remote, ok := remotes[server]; ok {
 			rooms[room] = remote
@@ -254,16 +287,18 @@ func (f *federation) pairsWith(server string) map[string]string {
 }
 
 // pairRequest answers an ext:remote request: a link pairs a room it
-// joined with its server's room, and gives the way to send there.
+// joined with its server's room, and gives the way to send there; without
+// link, it ends the pair, and the link leaves the room.
 func (f *federation) pairRequest(c *client, req request) (any, bool, *Error) {
 	roomID, err := parseString(req.params, "room_id", true)
 	if err != nil {
 		return nil, false, err
 	}
-	link, err := parseString(req.params, "link", true)
+	link, err := parseString(req.params, "link", false)
 	if err != nil {
 		return nil, false, err
 	}
+	_, pairing := req.params["link"]
 	s := f.s
 	s.mu.RLock()
 	u := c.user
@@ -278,7 +313,16 @@ func (f *federation) pairRequest(c *client, req request) (any, bool, *Error) {
 	case bound == "":
 		return nil, false, &Error{Code: CodeDenied, Message: "Only a link pairs rooms"}
 	case !joined:
-		return nil, false, invalidParams("This link has not joined room %q", roomID)
+		return nil, false, notJoined(invalidParams("This link has not joined room %q", roomID))
+	case !pairing:
+		s.mu.Lock()
+		s.leaveLocked(u, r)
+		s.unlock()
+		if err := f.dropPairs(roomID, bound, false); err != nil {
+			return nil, false, f.h.protocolError(err)
+		}
+		f.h.logger.Info("a remote server ended a pair", "room", roomID, "server", bound)
+		return map[string]any{}, false, nil
 	}
 	server, room, token, parseErr := parseInvite(link)
 	switch {
@@ -406,7 +450,7 @@ func (f *federation) unshare(call *CommandCall) error {
 		}
 	}
 	s.unlock()
-	if err := f.dropPairs(call.Room.ID, ""); err != nil {
+	if err := f.dropPairs(call.Room.ID, "", true); err != nil {
 		return err
 	}
 	slices.Sort(servers)
@@ -438,7 +482,7 @@ func (f *federation) list() string {
 			if f.stopped[server] {
 				state = " (stopped: it refused the token)"
 			}
-			fmt.Fprintf(&b, "- %s with room %s of %s%s\n", room, f.pairs[room][server], server, state)
+			fmt.Fprintf(&b, "- %s with room %s of %s%s\n", room, f.pairs[room][server].Room, server, state)
 		}
 	}
 	f.mu.Unlock()
@@ -460,7 +504,7 @@ func (f *federation) revoke(call *CommandCall, address string) error {
 		s.revokeServicesOfLocked(link)
 	}
 	s.unlock()
-	if err := f.dropPairs("", server); err != nil {
+	if err := f.dropPairs("", server, false); err != nil {
 		return err
 	}
 	if link == nil {
@@ -586,9 +630,10 @@ func (sd *sender) run(ctx context.Context) {
 	for ctx.Err() == nil {
 		f.mu.Lock()
 		stopped := f.stopped[sd.server]
+		ends := slices.Clone(f.ends[sd.server])
 		f.mu.Unlock()
 		pairs := f.pairsWith(sd.server)
-		if stopped || len(pairs) == 0 {
+		if stopped || len(pairs) == 0 && len(ends) == 0 {
 			if conn != nil {
 				conn.close()
 				conn = nil
@@ -611,7 +656,8 @@ func (sd *sender) run(ctx context.Context) {
 		}
 		var batch []sentRecord
 		for _, r := range s.records[i:min(len(s.records), i+eventBatch)] {
-			if slices.ContainsFunc(r.rooms, func(room string) bool { _, ok := pairs[room]; return ok }) {
+			// A record of a room before its pair was made is not sent.
+			if slices.ContainsFunc(r.rooms, func(room string) bool { pair, ok := pairs[room]; return ok && r.id > pair.Start }) {
 				batch = append(batch, sentRecord{r.id, r.kind, slices.Clone(r.rooms), slices.Clone(r.raw)})
 			} else {
 				batch = append(batch, sentRecord{id: r.id}) // not this server's: skipped
@@ -624,7 +670,7 @@ func (sd *sender) run(ctx context.Context) {
 		clear(sd.profiles)
 		f.mu.Unlock()
 
-		pending := len(profiles) > 0 || slices.ContainsFunc(batch, func(r sentRecord) bool { return r.raw != nil })
+		pending := len(profiles) > 0 || len(ends) > 0 || slices.ContainsFunc(batch, func(r sentRecord) bool { return r.raw != nil })
 		if pending && conn == nil {
 			f.mu.Lock()
 			token := f.tokens[sd.server]
@@ -659,7 +705,15 @@ func (sd *sender) run(ctx context.Context) {
 			logger.Info("connected to the remote server to send")
 		}
 		var sendErr error
+		for _, room := range ends {
+			if sendErr = sd.end(ctx, conn, room); sendErr != nil {
+				break
+			}
+		}
 		for _, id := range profiles {
+			if sendErr != nil {
+				break
+			}
 			if sendErr = sd.profile(ctx, conn, id); sendErr != nil {
 				break
 			}
@@ -670,7 +724,13 @@ func (sd *sender) run(ctx context.Context) {
 				break
 			}
 			if r.raw != nil {
-				if sendErr = sd.send(ctx, conn, r, pairs); sendErr != nil {
+				active := make(map[string]string)
+				for room, pair := range pairs {
+					if r.id > pair.Start {
+						active[room] = pair.Room
+					}
+				}
+				if sendErr = sd.send(ctx, conn, r, active); sendErr != nil {
 					break
 				}
 			}
@@ -708,7 +768,7 @@ func (sd *sender) run(ctx context.Context) {
 			backoff = min(2*backoff, 5*time.Minute)
 			continue
 		}
-		if len(batch) > 0 || len(profiles) > 0 {
+		if len(batch) > 0 || len(profiles) > 0 || len(ends) > 0 {
 			continue // there may be more
 		}
 		// Nothing to send: linger, then close.
@@ -757,17 +817,46 @@ func (sd *sender) call(ctx context.Context, conn *remoteConn, op string, logID i
 			return result, err == nil, err
 		}
 		sd.f.h.logger.Warn("the remote server refused a record; skipping it", "server", sd.server, "log_id", logID, "method", method, "error", err)
-		// The protocol has no reason codes: a link that left a public room
-		// is told so (denied), and one that left a private room is told
-		// the room is unknown (invalid_params), as anyone else would be.
-		gone := e.Code == remoteCodeDenied && strings.Contains(e.Message, "not in that room") ||
-			e.Code == remoteCodeInvalidParams && method == "message" && params["message_id"] == nil && strings.Contains(strings.ToLower(e.Message), "unknown room")
-		if gone && roomID != "" {
+		if notJoinedError(e) && roomID != "" {
 			sd.f.h.logger.Warn("this server's link left the remote room: the pair ends", "server", sd.server, "room", roomID)
-			_ = sd.f.dropPairs(roomID, sd.server)
+			_ = sd.f.dropPairs(roomID, sd.server, false)
 		}
 		return nil, false, nil
 	}
+}
+
+// notJoinedError reports a link's error for a room it has not joined
+// (ext:remote): data.ext.remote is "not_joined", whatever the code.
+func notJoinedError(e *remoteError) bool {
+	var data struct {
+		Ext struct {
+			Remote string `json:"remote"`
+		} `json:"ext"`
+	}
+	return json.Unmarshal(e.Data, &data) == nil && data.Ext.Remote == "not_joined"
+}
+
+// end tells the remote server that this server ended the pair of its room,
+// with an ext:remote request without link; done when it answers either way.
+func (sd *sender) end(ctx context.Context, conn *remoteConn, room string) error {
+	params := map[string]any{"room_id": room}
+	_, err := conn.call(ctx, "end-"+room+"-"+strconv.FormatInt(time.Now().UnixNano(), 36), "ext:remote", params)
+	if _, refused := errors.AsType[*remoteError](err); err != nil && !refused {
+		return err
+	}
+	if err != nil {
+		sd.f.h.logger.Warn("the remote server refused the end of a pair", "server", sd.server, "room", room, "error", err)
+	} else {
+		sd.f.h.logger.Info("told the remote server that a pair ended", "server", sd.server, "room", room)
+	}
+	f := sd.f
+	f.mu.Lock()
+	f.ends[sd.server] = slices.DeleteFunc(f.ends[sd.server], func(r string) bool { return r == room })
+	if len(f.ends[sd.server]) == 0 {
+		delete(f.ends, sd.server)
+	}
+	f.mu.Unlock()
+	return f.persist()
 }
 
 // localAuthor reports whether a user is this server's own: not a remote
@@ -963,10 +1052,21 @@ func (sd *sender) message(ctx context.Context, conn *remoteConn, r sentRecord, m
 		var result struct {
 			MessageID string `json:"message_id"`
 		}
-		if json.Unmarshal(raw, &result) == nil && result.MessageID != "" {
-			return sd.f.kv.Put(sd.copyKey(m.MessageID), result.MessageID)
+		if json.Unmarshal(raw, &result) != nil || result.MessageID == "" {
+			return nil
 		}
-		return nil
+		if err := sd.f.kv.Put(sd.copyKey(m.MessageID), result.MessageID); err != nil {
+			return err
+		}
+		if m.MessageID == m.LogID {
+			return nil
+		}
+		// A create of a message that is not new, such as one moved into
+		// the room, may return a copy that exists, also one deleted since:
+		// a save gives it the message's current state, which restores it.
+		params["message_id"] = result.MessageID
+		_, _, err = sd.call(ctx, conn, "restore", r.id, "message", params, m.RoomID)
+		return err
 	case movedFrom != "" && copyID != "":
 		// A move out of a shared room deletes the copy.
 		from, ok := pairs[movedFrom]
@@ -1079,8 +1179,17 @@ func (sd *sender) membership(ctx context.Context, conn *remoteConn, r sentRecord
 	if !paired {
 		return nil
 	}
+	s := sd.f.s
 	for _, member := range record.Members {
 		if member.Joined || !sd.f.localAuthor(member.User.UserID) {
+			continue
+		}
+		// A leave the server made on its own, retiring a guest at its
+		// disconnect or at a restart, is not sent: the guest is gone.
+		s.mu.RLock()
+		retired := s.users[member.User.UserID] == nil
+		s.mu.RUnlock()
+		if retired {
 			continue
 		}
 		// Only a user whose records went there has a remote user to leave.
