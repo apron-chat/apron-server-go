@@ -264,6 +264,7 @@ func (s *Server) addMemberLocked(u *userState, r *roomState) jsontext.Value {
 	s.touchRoom(r)
 	s.touchUser(u.id)
 	delete(u.leftAt, r.id)
+	delete(u.removed, r.id)
 	membership := s.logMembershipLocked(u, r, true)
 	r.active[u.id] = r.latestID
 	s.deliverMembershipLocked(membership, r, u)
@@ -876,6 +877,14 @@ func (s *Server) leaveRoom(c *client, req request) (any, bool, *Error) {
 	if r.members[target.id] != nil {
 		if err := admitActionLocked(u); err != nil {
 			return nil, false, err
+		}
+		// A remote user that another user removed is not joined again by
+		// its link (ext:remote).
+		if target != u && target.shadow != nil {
+			if target.removed == nil {
+				target.removed = make(map[string]bool)
+			}
+			target.removed[r.id] = true
 		}
 	}
 	s.leaveLocked(target, r)

@@ -1,3 +1,9 @@
+// Superseded: aprond itself shares rooms with other Apron servers
+// (--remote.self and the /remote commands, in SERVER.md), each server
+// sending its own users' records to the other on demand, as the trusted
+// federation recipe now describes. This prototype, one bridge that reads
+// the other server's room, stays as an example of the extension API.
+//
 // Command federation is an Apron server with a room federated with a room
 // on another Apron server, both ways, through a link account there (the
 // ext:remote link primitive, trusted federation v2): one bridge, in this

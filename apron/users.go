@@ -61,6 +61,12 @@ type userState struct {
 	// shadow marks a shadow user, which stands for a user of a remote
 	// server (Host.Shadow); nil for a local user.
 	shadow *shadowState
+	// link marks a link (ext:remote): the account a remote server's sender
+	// signs in as, to write as that server's users here; nil for others.
+	link *linkState
+	// removed are the rooms another user removed this shadow user from,
+	// which its link may not write in as it again (ext:remote).
+	removed map[string]bool
 	// avatarEmbed is the hosted /avatar upload behind avatar, if any.
 	avatarEmbed *embedState
 	// writes are the user's writes that have not finished (embedState.author).
@@ -160,8 +166,11 @@ func (u *userState) from() map[string]any {
 		if u.name != "" {
 			u.fromValue["name"] = u.name
 		}
-		if u.shadow != nil {
+		switch {
+		case u.shadow != nil:
 			u.fromValue["ext"] = map[string]any{remoteExt: u.shadow.user()}
+		case u.link != nil:
+			u.fromValue["ext"] = map[string]any{remoteExt: map[string]any{"server": u.link.server}}
 		}
 	}
 	return u.fromValue
@@ -172,7 +181,7 @@ func (u *userState) from() map[string]any {
 // shadow user, so it persists across connections and restarts, rather than
 // being a guest.
 func (u *userState) account() bool {
-	return len(u.identities) > 0 || u.botOf != "" || u.shadow != nil
+	return len(u.identities) > 0 || u.botOf != "" || u.shadow != nil || u.link != nil
 }
 
 // hasRole reports whether the user holds a server role.
@@ -204,9 +213,12 @@ func (u *userState) profile() map[string]any {
 type dedupEntry struct {
 	// fingerprint is a hash of the request's method and canonical params.
 	fingerprint [32]byte
-	done        chan struct{}
-	result      any
-	err         *Error
+	// asIs marks a link's request that a remote user ran (ext:remote),
+	// whose result a duplicate gets as it was.
+	asIs   bool
+	done   chan struct{}
+	result any
+	err    *Error
 }
 
 // dedupCache keeps the most recent request IDs of one user. Guarded by s.mu.
@@ -645,6 +657,9 @@ func (s *Server) updateProfile(c *client, req request) (any, bool, *Error) {
 	result := map[string]any{"you": withRemoved(u.you(), removed)}
 	if !jsonEqual(before, u.profile()) || !jsonEqual(beforeYou, u.you()) {
 		s.notifyProfileLocked(u, c, cleared, removed...)
+		if s.fed != nil && hasName {
+			s.fed.profileChanged(u.id)
+		}
 	}
 	c.sendResult(req, result)
 	return result, true, nil
@@ -676,7 +691,7 @@ func (s *Server) grantRolesLocked(u *userState) bool {
 		for _, granted := range u.granted {
 			roles = append(roles, granted...)
 		}
-		if u.botOf != "" {
+		if u.botOf != "" || u.link != nil {
 			roles = append(roles, "bot")
 		}
 		slices.Sort(roles)

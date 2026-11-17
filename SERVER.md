@@ -2050,6 +2050,103 @@ that account allowed it there (§4.12.3). With metadata documents, an app
 can use only the redirect URIs its document lists, and another document is
 another client, whose consent names its host.
 
+## Trusted federation
+
+`--remote.self <address>`, this server's address as other Apron servers dial
+it (such as `wss://chat.example/ws`), turns on trusted federation
+([recipe](https://github.com/shazow/apron/blob/main/recipes/trusted_federation.md),
+with its draft `ext:remote`): rooms shared with other Apron servers. Each
+server writes the records of its own users in a shared room to the other
+server, through a link there, on demand; it never reads the other room.
+`--remote.linger` (default `30s`) is how long a sender keeps its connection
+once it has nothing to send.
+
+Admins run these in a room, and are answered with `~private` notices:
+
+- `/remote invite <address>` makes this server's link for that server, if
+  there is none (an account `link-<host>-<port>`, with role `bot` and
+  `ext.remote` `{"server": <address>}`, that signs in only with tokens),
+  joins it to the room, also a private one, and replies with an invite,
+  `https://link.apron.chat/#server=<self>&room=<room_id>&token=<token>`,
+  carrying a new token of the link (a service token, ten years; a link
+  holds ten, and an eleventh replaces the oldest).
+- `/remote connect <invite>` does the same for the invite's server, then
+  signs in there with the invite's token and sends an `ext:remote` request
+  with this server's own invite. When it is answered `{}`, the rooms are a
+  pair.
+- `/remote unshare` takes every link out of the room (logged leaves), and
+  ends its pairs. The other server finds out at its next write there, and
+  ends its pair too.
+- `/remote list` lists the links, the rooms they are in, and the pairs;
+  `/remote revoke <address>` revokes the tokens of that server's link,
+  which closes its connections, and ends every pair with the server.
+  Remote users and their messages stay.
+
+The link's side (receiving):
+
+- A link's `ext:remote` request, `{"room_id", "link"}`, pairs a room that
+  the link joined (otherwise `invalid_params`) with the room of `link`,
+  whose `server` must be the link's own, compared after normalization
+  (lowercase scheme and host, port and path as written; only `ws:` and
+  `wss:`), and keeps its token, never on a user object. Anyone else is
+  `denied`.
+- A link's `message`, `reactions`, `me`, or `room_leave` with
+  `params.ext.remote.user_id` runs as the remote user
+  `<user_id>@<host[:port]>`, made on first use (a [shadow user](#shadow-users)
+  with `ext.remote` `{"server", "user_id"}`), on a session of its own: its
+  checks and limits are that user's. A `user_id` that is empty, longer than
+  128 bytes, a system identity's, or has whitespace is `invalid_params`.
+  The link must have joined the request's rooms: one it cannot see is
+  `invalid_params` (`Unknown room`), one it can but has not joined is
+  `denied`. A write joins the remote user to the room, also after it left;
+  one that another user removed is `denied` until someone adds it. A `me`
+  result's `you` is the remote user.
+- A create whose `ext.remote.message_id` is one the link created before,
+  also moved or deleted since, is a duplicate: its result is that message's
+  `message_id`, and nothing is logged. The key is the link and the remote
+  `message_id`, kept with the message.
+
+The sending side keeps, for each remote server, its place in the log (the
+last record that server accepted, from when the first pair with it was made:
+older records are not sent), the `message_id` of each copy it made, and its
+users' `user_id`s there, in the store. When a user of this server writes in
+a shared room whose link is still in it, the sender connects to the other
+server, signs in with the newest token of that server's link, and sends the
+records from its place, one at a time, each with a request `id` made from
+its `log_id`, what it is, and its params, so a resend is a duplicate:
+
+- a new message, or one moved into the room, is a create with `ext.remote`
+  `{"user_id", "room_id", "message_id"}`; an edit saves the copy with every
+  client field; a deletion, or a move out of the room, deletes the copy. An
+  edit or deletion of a message it never sent is not sent;
+- `reply_to` is the copy of this server's message, or the original of a
+  copy of that server's (`ext.remote.message_id`), or is dropped; each
+  `@id` that `mentions` lists, outside code in Markdown, is the user's ID
+  there (a local user's from the `me` result, a remote user's original);
+  others are left in the text and out of `mentions`; embeds become a line
+  of text naming them, with their link;
+- a user's reaction set goes to the copy, or the original of a copy of that
+  server's message; a user's first record sends `me` with their name, as
+  does each later rename; a leave of a user whose records went there is a
+  `room_leave`.
+
+Records of remote users (of any server), links, and system identities are
+never sent. A `retry_after` waits; a refused record is logged and skipped,
+and a refusal that says the link is no longer in the room (`denied`, or
+`invalid_params` for an unknown room) ends that pair. A `denied` sign-in
+stops sending to that server until an admin runs `/remote connect` again. A
+failed connection is tried again after a delay that doubles up to five
+minutes. Once there is nothing to send, the connection stays open for the
+linger time, and then closes; what the link receives on it is ignored.
+
+A test harness signs in as an admin with `--admin-token-file <path>`: at
+each start, the server makes the account `admin` if there is none (roles
+`admin` and `bot`) and writes a service token for it to the file, which
+signs in with `{"scheme": "token", "token": "<the file's contents>"}`.
+Ordinary users are guests with a requested `user_id`, `{"scheme": "guest",
+"user_id": "alice", "name": "Alice"}`; the admin adds them to private rooms
+with `room_join` and their `user_id`.
+
 ## Extensions
 
 Package `apron` is the server as a library, and `aproncmd.Main` runs it with

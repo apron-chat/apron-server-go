@@ -87,7 +87,7 @@ func (s *Server) initExtensions(extensions []Extension) error {
 		switch {
 		case !extensionNamePattern.MatchString(name):
 			return fmt.Errorf("extension %q: a name is lowercase letters, digits, and dashes, starting with a letter", name)
-		case slices.Contains(reservedExtensionNames, name):
+		case slices.Contains(reservedExtensionNames, name) && extension != Extension(s.fed):
 			return fmt.Errorf("extension %q: the server implements ext:%s itself", name, name)
 		case names[name]:
 			return fmt.Errorf("extension %q is added twice", name)

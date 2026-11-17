@@ -1,13 +1,16 @@
 package apron
 
 import (
+	"context"
 	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"errors"
 	"fmt"
 	"maps"
 	"net/url"
+	"slices"
 	"strings"
+	"time"
 )
 
 // remoteExt is the ext key ext:remote reserves: where a user, a message,
@@ -247,4 +250,287 @@ func (stored *storedShadow) restore() *shadowState {
 		return nil
 	}
 	return &shadowState{owner: stored.Owner, server: stored.Server, remoteID: stored.User}
+}
+
+// ---- Links (ext:remote) ----
+
+// linkState marks a link: the account a remote server's sender signs in
+// as, bound to that server's address, to write as its users here.
+type linkState struct {
+	server string
+}
+
+type storedLink struct {
+	Server string `json:"server"`
+}
+
+func (l *linkState) stored() *storedLink {
+	if l == nil {
+		return nil
+	}
+	return &storedLink{Server: l.server}
+}
+
+func (stored *storedLink) restore() *linkState {
+	if stored == nil {
+		return nil
+	}
+	return &linkState{server: stored.Server}
+}
+
+// NormalizeAddress normalizes a server's address (PROTOCOL.md §1) as
+// links compare them: a ws: or wss: URL, with its scheme and host
+// lowercased, and its port and path as written.
+func NormalizeAddress(address string) (string, error) {
+	parsed, err := url.Parse(strings.TrimSpace(address))
+	if err != nil || parsed.Host == "" || parsed.User != nil || parsed.Opaque != "" || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return "", fmt.Errorf("%q is no server address, such as wss://chat.example/ws", address)
+	}
+	scheme := strings.ToLower(parsed.Scheme)
+	if scheme != "ws" && scheme != "wss" {
+		return "", fmt.Errorf("%q is no ws: or wss: address", address)
+	}
+	return scheme + "://" + strings.ToLower(parsed.Host) + parsed.EscapedPath(), nil
+}
+
+// linkLocked returns the link bound to a normalized server address, made
+// if there is none: a token-only account with role bot, whose ext.remote
+// names the server, with a user_id made from the server's authority.
+func (s *Server) linkLocked(server string) (*userState, error) {
+	if u := s.links[server]; u != nil {
+		return u, nil
+	}
+	authority, err := RemoteAuthority(server)
+	if err != nil {
+		return nil, err
+	}
+	base := "link-" + strings.NewReplacer(":", "-", "[", "", "]", "").Replace(authority)
+	if len(base) > 56 || !requestableUserID.MatchString(base) {
+		base = "link"
+	}
+	id := base
+	for n := 2; !s.claimUserIDLocked(id); n++ {
+		id = fmt.Sprintf("%s-%d", base, n)
+	}
+	u := newUserState(id, authority)
+	u.link = &linkState{server: server}
+	u.ext = extObject{remoteExt: encodeJSON(map[string]any{"server": server})}
+	s.users[id] = u
+	s.touchUser(id)
+	s.grantRolesLocked(u)
+	s.links[server] = u
+	return u, nil
+}
+
+// linkTokenLifetime is how long a token minted for a link signs in.
+const linkTokenLifetime = 10 * 365 * 24 * time.Hour
+
+// mintLinkToken issues a service token for a link, revoking its oldest
+// token first when it holds as many as a bot may.
+func (s *Server) mintLinkToken(ctx context.Context, link *userState, name string) (string, error) {
+	s.mu.Lock()
+	var held []*serviceToken
+	for _, t := range s.services {
+		if t.user == link {
+			held = append(held, t)
+		}
+	}
+	slices.SortFunc(held, func(a, b *serviceToken) int { return a.created.Compare(b.created) })
+	for len(held) >= maxServiceTokens {
+		for key, t := range s.services {
+			if t == held[0] {
+				s.revokeServiceLocked(key, "This link's token was replaced")
+			}
+		}
+		held = held[1:]
+	}
+	s.unlock()
+	token, err := s.issueServiceToken(ctx, link.id, ServiceTokenOptions{Name: name, Lifetime: linkTokenLifetime}, "", 0)
+	return token.Token, err
+}
+
+// actAsMethods are the requests a link sends as a remote user.
+var actAsMethods = map[string]bool{"message": true, "reactions": true, "me": true, "room_leave": true}
+
+// maxRemoteUserIDBytes bounds the remote user_id a link names.
+const maxRemoteUserIDBytes = 128
+
+// remoteActor reads params.ext.remote.user_id, and whether it is there.
+func remoteActor(params map[string]jsontext.Value) (string, bool) {
+	var ext struct {
+		Remote *struct {
+			UserID *jsontext.Value `json:"user_id"`
+		} `json:"remote"`
+	}
+	raw, ok := params["ext"]
+	if !ok || json.Unmarshal(raw, &ext) != nil || ext.Remote == nil || ext.Remote.UserID == nil {
+		return "", false
+	}
+	var id string
+	if json.Unmarshal(*ext.Remote.UserID, &id) != nil {
+		return "\x00", true // not a string: refused below
+	}
+	return id, true
+}
+
+// actAs runs a link's request as the remote user it names (ext:remote):
+// the link must have joined the request's rooms; the remote user is made
+// if there is none, and joined to the room it writes in, unless another
+// user removed it from there; a create of a message the link created
+// already answers with that message. The request then runs on the remote
+// user's own session, with the same checks as any of its requests.
+func (s *Server) actAs(c *client, req request, remoteID string) (any, bool, *Error) {
+	if remoteID == "" || len(remoteID) > maxRemoteUserIDBytes || !validID(remoteID) || strings.HasPrefix(remoteID, "~") {
+		return nil, false, invalidParams("ext.remote.user_id must be a user_id of at most %d bytes, not a system identity's", maxRemoteUserIDBytes)
+	}
+	var target struct {
+		RoomID    *string `json:"room_id"`
+		MessageID *string `json:"message_id"`
+		Deleted   bool    `json:"deleted"`
+		Ext       struct {
+			Remote struct {
+				MessageID string `json:"message_id"`
+			} `json:"remote"`
+		} `json:"ext"`
+	}
+	if err := json.Unmarshal(encodeJSON(req.params), &target); err != nil {
+		return nil, false, invalidParams("Invalid params: %v", err)
+	}
+	s.mu.Lock()
+	link := c.user
+	if link == nil || link.link == nil {
+		s.unlock()
+		return nil, false, &Error{Code: CodeDenied, Message: "Only a link acts as remote users"}
+	}
+	id, err := ShadowID(link.link.server, remoteID)
+	if err != nil {
+		s.unlock()
+		return nil, false, invalidParams("%v", err)
+	}
+	// The rooms the request is in: the link must have joined each, and the
+	// remote user joins the ones it writes in.
+	var rooms []string
+	write := true
+	key := ""
+	switch req.method {
+	case "message":
+		roomID := defaultRoomID
+		if target.RoomID != nil {
+			roomID = *target.RoomID
+		}
+		rooms = append(rooms, roomID)
+		if target.MessageID != nil {
+			m := s.messages[*target.MessageID]
+			if m == nil {
+				s.unlock()
+				return nil, false, invalidParams("Unknown message %q", *target.MessageID)
+			}
+			if target.Deleted {
+				rooms = []string{m.roomID}
+			} else if m.roomID != roomID {
+				rooms = append(rooms, m.roomID)
+			}
+		} else if target.Ext.Remote.MessageID != "" {
+			key = link.id + "\x00" + target.Ext.Remote.MessageID
+			if existing := s.remoteCopies[key]; existing != "" {
+				// A duplicate create (§1.2): the message the link wrote.
+				s.unlock()
+				return map[string]any{"message_id": existing}, false, nil
+			}
+		}
+	case "reactions":
+		var messageID string
+		if raw, ok := req.params["message_id"]; ok {
+			_ = json.Unmarshal(raw, &messageID)
+		}
+		m := s.messages[messageID]
+		if m == nil {
+			s.unlock()
+			return nil, false, invalidParams("Unknown message %q", messageID)
+		}
+		rooms = append(rooms, m.roomID)
+	case "room_leave":
+		if target.RoomID == nil {
+			s.unlock()
+			return nil, false, invalidParams("Missing room_id")
+		}
+		rooms, write = append(rooms, *target.RoomID), false
+	case "me":
+		write = false
+	}
+	for _, roomID := range rooms {
+		r := s.rooms[roomID]
+		switch {
+		case r == nil || !r.visibleTo(link):
+			s.unlock()
+			return nil, false, invalidParams("Unknown room %q", roomID)
+		case r.members[link.id] == nil:
+			s.unlock()
+			return nil, false, &Error{Code: CodeDenied, Message: "This link is not in that room, so its remote users may not write there"}
+		}
+	}
+	shadow := s.users[id]
+	switch {
+	case shadow == nil:
+		key := strings.ToLower(id)
+		if s.usedIDs[key] || s.roomNamedLocked(id) || s.grantedIDs[key] {
+			s.unlock()
+			return nil, false, &Error{Code: CodeDenied, Message: fmt.Sprintf("The user_id %s was used by someone else", id)}
+		}
+		s.usedIDs[key] = true
+		s.touchUsedID(key)
+		shadow = newUserState(id, "")
+		shadow.shadow = &shadowState{owner: remoteExt, server: link.link.server, remoteID: remoteID}
+		shadow.ext = extObject{remoteExt: encodeJSON(shadow.shadow.user())}
+		s.users[id] = shadow
+		s.touchUser(id)
+	case shadow.shadow == nil || shadow.shadow.owner != remoteExt:
+		s.unlock()
+		return nil, false, &Error{Code: CodeDenied, Message: fmt.Sprintf("The user_id %s is not this link's remote user", id)}
+	}
+	if write {
+		for _, roomID := range rooms {
+			r := s.rooms[roomID]
+			if r.members[id] != nil {
+				continue
+			}
+			if shadow.removed[roomID] {
+				s.unlock()
+				return nil, false, &Error{Code: CodeDenied, Message: fmt.Sprintf("%s was removed from %s, so its link may not write there as it", id, r.title())}
+			}
+			s.joinLocked(shadow, r)
+		}
+	}
+	s.unlock()
+
+	bot := s.remoteBot(id)
+	raw, callErr := bot.Call(s.requestContext(c), req.method, req.params)
+	if callErr != nil {
+		if e, ok := errors.AsType[*Error](callErr); ok {
+			return nil, false, e
+		}
+		return nil, false, s.remoteHost.protocolError(callErr)
+	}
+	if key != "" {
+		if messageID := decodeObject(raw)["message_id"]; messageID != nil {
+			s.mu.Lock()
+			if m := s.messages[messageID.(string)]; m != nil {
+				m.remoteKey = key
+				s.remoteCopies[key] = m.id
+				s.touchMessage(m)
+			}
+			s.unlock()
+		}
+	}
+	return raw, false, nil
+}
+
+// remoteBot is the handle of a link's remote user, whose session runs its
+// requests.
+func (s *Server) remoteBot(userID string) *Bot {
+	if b, ok := s.remoteBots.Load(userID); ok {
+		return b.(*Bot)
+	}
+	b, _ := s.remoteBots.LoadOrStore(userID, &Bot{s: s, host: s.remoteHost, userID: userID})
+	return b.(*Bot)
 }

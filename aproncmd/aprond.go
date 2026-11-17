@@ -54,6 +54,7 @@ type Options struct {
 	Description            string   `long:"description" description:"CommonMark saying in a few words what this server is about (server.description; default: the general room's description, up to 500 bytes); an admin's /server description overrides it"`
 	Avatar                 string   `long:"avatar" description:"Square icon of this server, at least 256 pixels wide (server.avatar): an https: URL or a small data:image URL; an admin's /server avatar overrides it"`
 	DisableGuests          bool     `long:"disable-guests" description:"Do not offer guest sign-in, so only accounts sign in: by passkey, email, or an extension's external sign-in"`
+	AdminTokenFile         string   `long:"admin-token-file" description:"Development and test harnesses: make the account admin, with roles admin and bot, and write a service token that signs in as it ({\"scheme\": \"token\"}) to this file at each start"`
 	Roles                  []string `long:"role" description:"Grant a role to an account as role=user_id, role=email, or role=scheme:subject, such as admin=ada; repeat for more. admin and moderator may remove others from rooms, and admin may replace and remove custom emoji and set the server's title, description, and avatar with /server"`
 
 	WebAuthn struct {
@@ -110,6 +111,11 @@ type Options struct {
 		VAPIDPrivateKey string `long:"vapid-private-key" description:"Web Push VAPID private key, the P-256 scalar in base64url as web-push tools print it (default: one generated at the first start and kept in the store)"`
 		VAPIDSubject    string `long:"vapid-subject" description:"Contact push services may use, a mailto: or https: URL, sent with Web Push (default: --public-url)"`
 	} `group:"Push" namespace:"push"`
+
+	Remote struct {
+		Self   string `long:"self" description:"This server's address as other Apron servers dial it, such as wss://chat.example/ws; turns on trusted federation: rooms shared with other servers with /remote (admins)"`
+		Linger string `long:"linger" default:"30s" description:"How long a connection to another server stays open once there is nothing to send to it"`
+	} `group:"Trusted federation" namespace:"remote"`
 
 	TLS struct {
 		Domains  []string `long:"domain" description:"Serve HTTPS with Let's Encrypt certificates for this domain; repeat for more. Replaces --addr with --tls.addr"`
@@ -241,6 +247,20 @@ func serverConfig(options Options) (apron.Config, error) {
 		}
 		config.Roles[role] = append(config.Roles[role], holder)
 	}
+	if options.AdminTokenFile != "" {
+		if config.Roles == nil {
+			config.Roles = make(map[string][]string)
+		}
+		config.Roles[apron.RoleAdmin] = append(config.Roles[apron.RoleAdmin], adminTokenUser)
+	}
+	config.Remote.Self = strings.TrimSpace(options.Remote.Self)
+	if options.Remote.Linger != "" {
+		linger, err := time.ParseDuration(options.Remote.Linger)
+		if err != nil || linger <= 0 {
+			return config, fmt.Errorf("invalid --remote.linger %q: use a duration, such as 30s", options.Remote.Linger)
+		}
+		config.Remote.Linger = linger
+	}
 	config.DisablePush = options.Push.Disable
 	if options.Push.AllowInsecure && (options.PublicURL != "" || len(options.TLS.Domains) > 0) {
 		return config, errors.New("--push.allow-insecure lets any client make the server POST to http and internal addresses; it is for tests and refused with --public-url or --tls.domain")
@@ -319,6 +339,9 @@ func Run(logger *slog.Logger, options Options, extensions ...apron.Extension) er
 	}
 	config.Logger = logger
 	config.Extensions = extensions
+	if options.AdminTokenFile != "" {
+		config.Extensions = append([]apron.Extension{&adminToken{path: options.AdminTokenFile}}, extensions...)
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	group, ctx := errgroup.WithContext(ctx)

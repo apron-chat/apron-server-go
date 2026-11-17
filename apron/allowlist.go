@@ -215,7 +215,7 @@ func (s *Server) guestsAllowedLocked() bool {
 // bot and shadow user always may; a guest never may on a restricted server.
 func (s *Server) admittedLocked(u *userState) bool {
 	switch {
-	case s.allowlist == nil, u.botOf != "", u.shadow != nil:
+	case s.allowlist == nil, u.botOf != "", u.shadow != nil, u.link != nil:
 		return true
 	case !u.account():
 		return false
@@ -230,7 +230,7 @@ func (s *Server) admittedLocked(u *userState) bool {
 // identity.
 func (s *Server) admittedWithLocked(u *userState, id authn.Identity) bool {
 	switch {
-	case s.allowlist == nil, u.botOf != "", u.shadow != nil, u.enrolled != nil && u.enrolled.admitted:
+	case s.allowlist == nil, u.botOf != "", u.shadow != nil, u.link != nil, u.enrolled != nil && u.enrolled.admitted:
 		return true
 	}
 	return s.allowlist.principals[principalOf(id)] || s.listedLocked(u)

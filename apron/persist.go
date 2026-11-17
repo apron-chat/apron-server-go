@@ -162,9 +162,12 @@ type storedReaction struct {
 }
 
 type storedMessage struct {
-	From      map[string]any            `json:"from"`
-	LogID     int64                     `json:"log_id"`
-	Owner     string                    `json:"owner"`
+	From  map[string]any `json:"from"`
+	LogID int64          `json:"log_id"`
+	Owner string         `json:"owner"`
+	// Remote is the key of a message a link created (ext:remote): its
+	// user_id and the remote message_id, for duplicate creates.
+	Remote    string                    `json:"remote,omitzero"`
 	RoomID    string                    `json:"room_id"`
 	Reactions map[string]storedReaction `json:"reactions,omitzero"`
 	Records   []int64                   `json:"records"`
@@ -209,6 +212,10 @@ type storedUser struct {
 	// Shadow marks a shadow user (Host.Shadow): its extension and the
 	// remote user it stands for.
 	Shadow *storedShadow `json:"shadow,omitzero"`
+	// Link marks a link (ext:remote) with the remote server it is bound
+	// to, and Removed lists the rooms another user removed a shadow from.
+	Link    *storedLink `json:"link,omitzero"`
+	Removed []string    `json:"removed,omitzero"`
 	// Enrolled is what the invitation that made the account left with it.
 	Enrolled *storedEnrollment `json:"enrolled,omitzero"`
 	// Scope is the rooms the account is limited to (scope.go).
@@ -431,7 +438,7 @@ func (s *Server) storedRoomLocked(r *roomState) storedRoom {
 }
 
 func storedMessageOf(m *messageState) storedMessage {
-	stored := storedMessage{From: m.from, LogID: m.logID, Owner: m.owner, RoomID: m.roomID}
+	stored := storedMessage{From: m.from, LogID: m.logID, Owner: m.owner, RoomID: m.roomID, Remote: m.remoteKey}
 	for _, record := range m.records {
 		stored.Records = append(stored.Records, record.id)
 	}
@@ -447,7 +454,7 @@ func storedMessageOf(m *messageState) storedMessage {
 func storedUserOf(u *userState) storedUser {
 	stored := storedUser{
 		Name: u.name, Avatar: u.avatar, Ext: u.ext, LeftAt: u.leftAt, Pings: u.pings, Seen: u.seen, Shown: u.status != statusOffline,
-		Bot: u.botOf, Shadow: u.shadow.stored(), Identities: u.identities, Records: u.records, Grants: u.granted,
+		Bot: u.botOf, Shadow: u.shadow.stored(), Link: u.link.stored(), Removed: slices.Sorted(maps.Keys(u.removed)), Identities: u.identities, Records: u.records, Grants: u.granted,
 		Email: u.identities[email.Name], External: u.identities[external.Name],
 		Passkey: u.records[passkey.Name], Granted: u.granted[external.Name],
 		Enrolled: u.enrolled.stored(), Scope: u.scope.stored(), Consents: u.consents,
@@ -627,7 +634,10 @@ func (s *Server) restoreLocked() (map[string]bool, error) {
 		if err := decode(entryMessage, id, raw, &stored); err != nil {
 			return nil, err
 		}
-		m := &messageState{id: id, from: stored.From, logID: stored.LogID, owner: stored.Owner, roomID: stored.RoomID, reactions: make(map[string]reactionSet)}
+		m := &messageState{id: id, from: stored.From, logID: stored.LogID, owner: stored.Owner, roomID: stored.RoomID, remoteKey: stored.Remote, reactions: make(map[string]reactionSet)}
+		if m.remoteKey != "" {
+			s.remoteCopies[m.remoteKey] = id
+		}
 		for userID, set := range stored.Reactions {
 			m.reactions[userID] = reactionSet{from: set.From, emojis: set.Emojis}
 		}
@@ -658,6 +668,16 @@ func (s *Server) restoreLocked() (map[string]bool, error) {
 		}
 		u.botOf = stored.Bot
 		u.shadow = stored.Shadow.restore()
+		u.link = stored.Link.restore()
+		for _, roomID := range stored.Removed {
+			if u.removed == nil {
+				u.removed = make(map[string]bool)
+			}
+			u.removed[roomID] = true
+		}
+		if u.link != nil {
+			s.links[u.link.server] = u
+		}
 		if err := s.restoreIdentitiesLocked(u, stored); err != nil {
 			return nil, fmt.Errorf("stored user %q: %w", id, err)
 		}

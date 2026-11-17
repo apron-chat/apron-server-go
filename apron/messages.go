@@ -35,6 +35,9 @@ type messageState struct {
 	// pushHeld is set while the push of a new message waits for its live
 	// append text to end (§4.8.5).
 	pushHeld bool
+	// remoteKey is set on a message a link created (ext:remote): the
+	// link's user_id and the remote message_id, joined by a NUL.
+	remoteKey string
 }
 
 // messageInfo is what unread counts (§4.9) read of a message's current

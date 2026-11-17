@@ -212,6 +212,9 @@ type Config struct {
 	// Extensions add features to the server (Extension), in order. Open
 	// calls their Init after restoring the state, and fails if one fails.
 	Extensions []Extension
+	// Remote turns on trusted federation: rooms shared with other Apron
+	// servers (RemoteConfig).
+	Remote RemoteConfig
 	// Logger receives the server's and the extensions' logs; nil uses
 	// slog.Default().
 	Logger *slog.Logger
@@ -558,6 +561,17 @@ type Server struct {
 	rooms    map[string]*roomState
 	messages map[string]*messageState
 	clients  map[*client]struct{}
+	// links are the links (ext:remote) by the address of the remote server
+	// each is bound to, and remoteCopies the messages links created, by
+	// their remoteKey, for duplicate creates. remoteHost owns the remote
+	// users that links write as, and remoteBots keeps their sessions.
+	links        map[string]*userState
+	remoteCopies map[string]string
+	remoteHost   *Host
+	remoteBots   sync.Map // user_id → *Bot
+	// fed is the federation of shared rooms (Config.Remote), nil without
+	// it.
+	fed *federation
 	// users holds every live identity: connected guests and passkey users.
 	users map[string]*userState
 	// usedIDs holds every user_id ever assigned, lowercased, so none is
@@ -733,10 +747,13 @@ func Open(config Config) (*Server, error) {
 		extData:        make(map[string]map[string]jsontext.Value),
 		recordsChanged: make(chan struct{}),
 		logger:         config.Logger,
+		links:          make(map[string]*userState),
+		remoteCopies:   make(map[string]string),
 	}
 	if s.logger == nil {
 		s.logger = slog.Default()
 	}
+	s.remoteHost = &Host{s: s, name: remoteExt, logger: s.logger.With("extension", remoteExt)}
 	s.extContext, s.extCancel = context.WithCancel(context.Background())
 	for role, holders := range config.Roles {
 		role = strings.ToLower(strings.TrimSpace(role))
@@ -813,7 +830,15 @@ func Open(config Config) (*Server, error) {
 	s.removeStaleUploads(files)
 	s.unlock()
 	go s.sweepPushes()
-	err = s.initExtensions(config.Extensions)
+	extensions := config.Extensions
+	if config.Remote.Self != "" {
+		if s.fed, err = newFederation(s, config.Remote); err == nil {
+			extensions = append([]Extension{s.fed}, extensions...)
+		}
+	}
+	if err == nil {
+		err = s.initExtensions(extensions)
+	}
 	if err == nil {
 		s.handler, err = s.buildHandler(s.routes)
 	}
@@ -1510,6 +1535,15 @@ func (s *Server) processFrame(c *client, payload []byte) {
 		return
 	}
 	op := s.ops[req.method]
+	// A link's request with ext.remote.user_id runs as that remote user
+	// (ext:remote).
+	actAs := false
+	if user.link != nil && actAsMethods[req.method] {
+		if remoteID, present := remoteActor(req.params); present {
+			actAs = true
+			op = func(s *Server, c *client, req request) (any, bool, *Error) { return s.actAs(c, req, remoteID) }
+		}
+	}
 	if op == nil {
 		s.unlock()
 		if req.hasID {
@@ -1539,6 +1573,8 @@ func (s *Server) processFrame(c *client, payload []byte) {
 			<-prior.done
 			if prior.err != nil {
 				c.sendError(req, prior.err)
+			} else if prior.asIs {
+				c.sendResult(req, prior.result)
 			} else {
 				s.mu.Lock()
 				result := s.currentResultLocked(user, req.method, prior.result)
@@ -1547,7 +1583,7 @@ func (s *Server) processFrame(c *client, payload []byte) {
 			}
 			return
 		}
-		entry = &dedupEntry{fingerprint: fingerprint, done: make(chan struct{})}
+		entry = &dedupEntry{fingerprint: fingerprint, done: make(chan struct{}), asIs: actAs}
 		user.dedup.put(req.id, entry)
 	}
 	s.unlock()
