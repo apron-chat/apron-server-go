@@ -533,7 +533,8 @@ func (s *Server) actAs(c *client, req request, remoteID string) (any, bool, *Err
 				}
 				if shadow.removed[room.id] {
 					s.unlock()
-					return nil, false, &Error{Code: CodeDenied, Message: fmt.Sprintf("%s was removed from %s, so its link may not write there as it", id, room.title())}
+					return nil, false, &Error{Code: CodeDenied, Message: fmt.Sprintf("%s was removed from %s, so its link may not write there as it", id, room.title()),
+					Data: map[string]any{"ext": map[string]any{remoteExt: "removed"}}}
 				}
 				s.joinLocked(shadow, room)
 			}

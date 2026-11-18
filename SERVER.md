@@ -2142,8 +2142,8 @@ its `log_id`, what it is, and its params, so a resend is a duplicate:
   starts empty, ends with its parent's, and its records are sent like any
   shared room's; a save of its title or description is a `room_set` of the
   thread there, as the user who saved it. Where the other server refuses
-  the thread, its messages go to the parent room there instead, as replies
-  to the thread's first message. A private thread, which only its members
+  the thread, it stays here: one `~room` notice in it says "This thread is
+  not shared with <host>.", and nothing more of it is sent. A private thread, which only its members
   see, such as any thread of a private room here, is not shared;
 - a user's reaction set goes to the copy, or the original of a copy of that
   server's message; a user's first record sends `me` with their name, as
@@ -2153,8 +2153,12 @@ its `log_id`, what it is, and its params, so a resend is a duplicate:
 
 Records of remote users (of any server), links, and system identities are
 never sent. A `retry_after` waits; a refused record is logged and skipped,
-and a refusal whose `data.ext.remote` is `not_joined` ends that pair. A `denied` sign-in
-stops sending to that server until an admin runs `/remote connect` again. A
+and a refusal whose `data.ext.remote` is `not_joined` ends that pair. A
+message refused because its author's remote user was removed from the room
+there (`data.ext.remote` `removed`, which this server's links are answered
+with, or a denial that says so) gets one `~private` notice to its author for
+each room: "Not sent to <host>: you were removed from this room there." A
+`denied` sign-in stops sending to that server until an admin runs `/remote connect` again. A
 failed connection is tried again after a delay that doubles up to five
 minutes. Once there is nothing to send, the connection stays open for the
 linger time, and then closes; what the link receives on it is ignored.

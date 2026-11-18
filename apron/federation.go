@@ -181,14 +181,13 @@ func (f *federation) inviteLink(roomID, token string) string {
 //
 // A thread of a paired room is paired too, with the thread on the remote
 // server (Parent names the room here it is a thread of): the pair starts
-// empty and ends with its parent's. Fallback marks a thread that the
-// remote server refused, whose messages go to the parent's room there, as
-// replies, and Room is then that room.
+// empty and ends with its parent's. Refused marks a thread that the remote
+// server refused: it stays here, and nothing of it is sent.
 type pairState struct {
-	Room     string `json:"room"`
-	Start    int64  `json:"start"`
-	Parent   string `json:"parent,omitzero"`
-	Fallback bool   `json:"fallback,omitzero"`
+	Room    string `json:"room"`
+	Start   int64  `json:"start"`
+	Parent  string `json:"parent,omitzero"`
+	Refused bool   `json:"refused,omitzero"`
 }
 
 // threadPaired pairs a thread here, which a remote server's link made or
@@ -207,7 +206,7 @@ func (f *federation) setThreadPair(roomID, server string, pair pairState) {
 	if err := f.persist(); err != nil {
 		f.h.logger.Error("keeping a thread's pair failed", "room", roomID, "error", err)
 	}
-	f.h.logger.Info("paired a thread", "room", roomID, "server", server, "remote_room", pair.Room, "fallback", pair.Fallback)
+	f.h.logger.Info("paired a thread", "room", roomID, "server", server, "remote_room", pair.Room, "refused", pair.Refused)
 }
 
 // persist writes the pairs, tokens, and stopped servers to the KV.
@@ -539,8 +538,8 @@ func (f *federation) list() string {
 			}
 			pair := f.pairs[room][server]
 			switch {
-			case pair.Fallback:
-				state += fmt.Sprintf(" (a thread of %s, sent there as replies)", pair.Parent)
+			case pair.Refused:
+				state += fmt.Sprintf(" (a thread of %s, which that server refused)", pair.Parent)
 			case pair.Parent != "":
 				state += fmt.Sprintf(" (a thread of %s)", pair.Parent)
 			}
@@ -721,12 +720,12 @@ func (sd *sender) run(ctx context.Context) {
 		var batch []sentRecord
 		for _, r := range s.records[i:min(len(s.records), i+eventBatch)] {
 			// A record of a room before its pair was made is not sent.
-			relevant := slices.ContainsFunc(r.rooms, func(room string) bool { pair, ok := pairs[room]; return ok && r.id > pair.Start })
+			relevant := slices.ContainsFunc(r.rooms, func(room string) bool { pair, ok := pairs[room]; return ok && !pair.Refused && r.id > pair.Start })
 			if !relevant && r.kind == kindRoom {
 				// A new thread of a shared room.
 				if room := s.rooms[r.rooms[0]]; room != nil && room.parent != nil {
 					pair, ok := pairs[room.parent.id]
-					relevant = ok && r.id > pair.Start
+					relevant = ok && !pair.Refused && r.id > pair.Start
 				}
 			}
 			if relevant {
@@ -798,7 +797,7 @@ func (sd *sender) run(ctx context.Context) {
 			if r.raw != nil {
 				active := make(map[string]pairState)
 				for room, pair := range pairs {
-					if r.id > pair.Start {
+					if r.id > pair.Start && !pair.Refused {
 						active[room] = pair
 					}
 				}
@@ -893,11 +892,55 @@ func (sd *sender) call(ctx context.Context, conn *remoteConn, op string, logID i
 			return result, err == nil, err
 		}
 		sd.f.h.logger.Warn("the remote server refused a record; skipping it", "server", sd.server, "log_id", logID, "method", method, "error", err)
+		if method == "message" && removedError(e) && roomID != "" {
+			sd.removedNotice(params, roomID)
+		}
 		if notJoinedError(e) && roomID != "" {
 			sd.f.h.logger.Warn("this server's link left the remote room: the pair ends", "server", sd.server, "room", roomID)
 			_ = sd.f.dropPairs(roomID, sd.server, false)
 		}
 		return nil, false, nil
+	}
+}
+
+// removedError reports a refusal because the remote user was removed from
+// the room there: data.ext.remote "removed", or, from a server that sends
+// no reason, a denial that says so.
+func removedError(e *remoteError) bool {
+	var data struct {
+		Ext struct {
+			Remote string `json:"remote"`
+		} `json:"ext"`
+	}
+	if json.Unmarshal(e.Data, &data) == nil && data.Ext.Remote != "" {
+		return data.Ext.Remote == "removed"
+	}
+	return e.Code == remoteCodeDenied && strings.Contains(e.Message, "removed from")
+}
+
+// removedNotice tells the author of a message that the remote server
+// refused because they were removed from the room there, once for each
+// room, with a ~private notice to their connections.
+func (sd *sender) removedNotice(params map[string]any, roomID string) {
+	ext, _ := params["ext"].(map[string]any)
+	act, _ := ext["remote"].(map[string]any)
+	author, _ := act["user_id"].(string)
+	if author == "" {
+		return
+	}
+	key := "removed " + sd.server + " " + roomID + " " + author
+	if found, err := sd.f.kv.Get(key, new(bool)); err != nil || found {
+		return
+	}
+	if err := sd.f.kv.Put(key, true); err != nil {
+		return
+	}
+	authority, _ := RemoteAuthority(sd.server)
+	s := sd.f.s
+	s.mu.Lock()
+	defer s.unlock()
+	if u := s.users[author]; u != nil {
+		u.send(privateNotice(roomID, "Not sent to "+authority+": you were removed from this room there."))
 	}
 }
 
@@ -1120,20 +1163,6 @@ func (sd *sender) message(ctx context.Context, conn *remoteConn, r sentRecord, m
 				params["reply_to"] = map[string]any{"message_id": target}
 			}
 		}
-		if pair.Fallback && params["reply_to"] == nil {
-			// The remote server refused the thread: its messages are
-			// replies, in the parent room there, to its first message.
-			var first string
-			if found, err := sd.f.kv.Get(sd.firstKey(m.RoomID), &first); err != nil {
-				return err
-			} else if !found {
-				if err := sd.f.kv.Put(sd.firstKey(m.RoomID), m.MessageID); err != nil {
-					return err
-				}
-			} else if target := sd.copyOf(first); first != m.MessageID && target != "" {
-				params["reply_to"] = map[string]any{"message_id": target}
-			}
-		}
 		op := "create"
 		if copyID != "" {
 			params["message_id"], op = copyID, "save"
@@ -1268,11 +1297,10 @@ func (sd *sender) membership(ctx context.Context, conn *remoteConn, r sentRecord
 	if json.Unmarshal(r.raw, &record) != nil {
 		return nil
 	}
-	pair, paired := pairs[record.RoomID]
-	if !paired || pair.Fallback {
-		return nil // a refused thread has no remote users to leave it
+	remoteRoom, paired := pairs[record.RoomID].Room, pairs[record.RoomID] != (pairState{})
+	if !paired {
+		return nil
 	}
-	remoteRoom := pair.Room
 	s := sd.f.s
 	for _, member := range record.Members {
 		if member.Joined || !sd.f.localAuthor(member.User.UserID) {
@@ -1298,13 +1326,12 @@ func (sd *sender) membership(ctx context.Context, conn *remoteConn, r sentRecord
 	return nil
 }
 
-func (sd *sender) firstKey(roomID string) string { return "first " + sd.server + " " + roomID }
-
 // room sends a room record of a thread of a shared room: its creation by a
 // local user is a room_set through the link under the paired room, which
 // pairs the two threads; a save of a paired thread's title or description
 // is a room_set of the thread there. Top-level rooms keep their own title.
-// A thread that the remote server refuses is sent as replies instead.
+// A thread that the remote server refuses stays here, which a ~room notice
+// in it says, and nothing more of it is sent.
 func (sd *sender) room(ctx context.Context, conn *remoteConn, r sentRecord, pairs map[string]pairState) error {
 	var record struct {
 		RoomID       string `json:"room_id"`
@@ -1329,7 +1356,7 @@ func (sd *sender) room(ctx context.Context, conn *remoteConn, r sentRecord, pair
 	}
 	act := map[string]any{"user_id": author}
 	if pair, ok := pairs[record.RoomID]; ok {
-		if pair.Fallback || pair.Parent == "" || record.PrevLogID == "" {
+		if pair.Refused || pair.Parent == "" || record.PrevLogID == "" {
 			return nil
 		}
 		if _, err := sd.user(ctx, conn, author, "", r.id); err != nil {
@@ -1340,7 +1367,7 @@ func (sd *sender) room(ctx context.Context, conn *remoteConn, r sentRecord, pair
 		return err
 	}
 	parent, ok := pairs[record.ParentRoomID]
-	if !ok || record.PrevLogID != "" {
+	if !ok || parent.Refused || record.PrevLogID != "" {
 		return nil
 	}
 	if record.Private {
@@ -1351,10 +1378,6 @@ func (sd *sender) room(ctx context.Context, conn *remoteConn, r sentRecord, pair
 		return nil
 	}
 	sd.repaired = true
-	if parent.Fallback {
-		sd.f.setThreadPair(record.RoomID, sd.server, pairState{Room: parent.Room, Start: r.id, Parent: record.ParentRoomID, Fallback: true})
-		return nil
-	}
 	if _, err := sd.user(ctx, conn, author, "", r.id); err != nil {
 		return err
 	}
@@ -1374,10 +1397,13 @@ func (sd *sender) room(ctx context.Context, conn *remoteConn, r sentRecord, pair
 	case ok && json.Unmarshal(raw, &result) == nil && result.RoomID != "":
 		sd.f.setThreadPair(record.RoomID, sd.server, pairState{Room: result.RoomID, Start: r.id, Parent: record.ParentRoomID})
 	case !ok:
-		// Refused, but the parent's pair holds: its messages go to the
-		// parent's room there, as replies.
+		// Refused, while the parent's pair holds: the thread stays here.
 		if _, still := sd.f.pairsWith(sd.server)[record.ParentRoomID]; still {
-			sd.f.setThreadPair(record.RoomID, sd.server, pairState{Room: parent.Room, Start: r.id, Parent: record.ParentRoomID, Fallback: true})
+			sd.f.setThreadPair(record.RoomID, sd.server, pairState{Start: r.id, Parent: record.ParentRoomID, Refused: true})
+			authority, _ := RemoteAuthority(sd.server)
+			if err := sd.f.h.RoomNotice(record.RoomID, "This thread is not shared with "+authority+"."); err != nil {
+				sd.f.h.logger.Warn("noting a refused thread failed", "room", record.RoomID, "error", err)
+			}
 		}
 	}
 	return nil

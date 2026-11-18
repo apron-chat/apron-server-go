@@ -2,6 +2,9 @@ package apron
 
 import (
 	"context"
+	"fmt"
+	"slices"
+	"sync"
 	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"net/http"
@@ -10,6 +13,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/coder/websocket"
 )
 
 // federated is a test server with trusted federation, and an admin bot
@@ -374,3 +379,166 @@ func TestLinkRequests(t *testing.T) {
 }
 
 func reflectEqual(a, b any) bool { return string(encodeJSON(a)) == string(encodeJSON(b)) }
+
+// fakeRemote is a remote server for the sender's tests: it signs the
+// sender in, answers me, refuses every thread, and refuses a message whose
+// text has "blocked" as one from a remote user removed from the room.
+type fakeRemote struct {
+	http *httptest.Server
+	mu   sync.Mutex
+	got  []map[string]any
+}
+
+func newFakeRemote(t *testing.T) *fakeRemote {
+	fake := &fakeRemote{}
+	fake.http = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ws, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer ws.CloseNow()
+		ctx := context.Background()
+		write := func(v any) { _ = ws.Write(ctx, websocket.MessageText, encodeJSON(v)) }
+		write(map[string]any{"method": "server", "params": map[string]any{"apron": 10, "auth": []string{"token"}, "capabilities": []string{"ext:remote"}}})
+		for n := 1; ; n++ {
+			_, data, err := ws.Read(ctx)
+			if err != nil {
+				return
+			}
+			var frame struct {
+				Method string         `json:"method"`
+				ID     string         `json:"id"`
+				Params map[string]any `json:"params"`
+			}
+			if json.Unmarshal(data, &frame) != nil || frame.ID == "" {
+				continue
+			}
+			fake.mu.Lock()
+			fake.got = append(fake.got, map[string]any{"method": frame.Method, "params": frame.Params})
+			fake.mu.Unlock()
+			reply := map[string]any{"id": frame.ID}
+			remote, _ := frame.Params["ext"].(map[string]any)
+			act, _ := remote["remote"].(map[string]any)
+			switch frame.Method {
+			case "auth":
+				reply["result"] = map[string]any{"you": map[string]any{"user_id": "link-a"}}
+			case "me":
+				reply["result"] = map[string]any{"you": map[string]any{"user_id": fmt.Sprint(act["user_id"], "@a")}}
+			case "room_set":
+				reply["error"] = map[string]any{"code": CodeInvalidParams, "message": "No threads in this room"}
+			case "message":
+				body, _ := frame.Params["body"].(map[string]any)
+				if text, _ := body["text"].(string); strings.Contains(text, "blocked") {
+					reply["error"] = map[string]any{"code": CodeDenied, "message": "This remote user was removed from that room", "data": map[string]any{"ext": map[string]any{"remote": "removed"}}}
+				} else {
+					reply["result"] = map[string]any{"message_id": fmt.Sprint(1700000000000 + n)}
+				}
+			default:
+				reply["result"] = map[string]any{}
+			}
+			write(reply)
+		}
+	}))
+	t.Cleanup(fake.http.Close)
+	return fake
+}
+
+func (fake *fakeRemote) address() string { return "ws" + strings.TrimPrefix(fake.http.URL, "http") + "/ws" }
+
+func (fake *fakeRemote) texts() []string {
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	var texts []string
+	for _, request := range fake.got {
+		params, _ := request["params"].(map[string]any)
+		if body, ok := params["body"].(map[string]any); ok {
+			texts = append(texts, fmt.Sprint(body["text"]))
+		}
+	}
+	return texts
+}
+
+func TestFederationRefusalNotices(t *testing.T) {
+	a, fake := startFederated(t), newFakeRemote(t)
+	host := strings.TrimPrefix(fake.http.URL, "http://")
+	room := a.call(t, "room_set", map[string]any{"title": "Ops"})["room_id"].(string)
+	invite := inviteInNotice.FindStringSubmatch(a.command(t, room, "/remote invite "+fake.address()))
+	_, _, token, err := parseInvite(invite[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The fake's sender pairs the room, as /remote connect there would.
+	link, _ := dialRaw(t, a.http)
+	link.result(t, "auth", "a1", map[string]any{"scheme": "token", "token": token})
+	link.drain(t)
+	link.result(t, "ext:remote", "p1", map[string]any{"room_id": room, "link": "https://link.apron.chat/#server=" + fake.address() + "&room=far&token=t"})
+
+	alice := dialTestClient(t, a.http)
+	joinRoom(t, alice, room)
+	waitSent := func(text string) {
+		t.Helper()
+		deadline := time.Now().Add(10 * time.Second)
+		for !slices.Contains(fake.texts(), text) {
+			if time.Now().After(deadline) {
+				t.Fatalf("%q not sent: %v", text, fake.texts())
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+	}
+	save(t, alice, "m1", map[string]any{"room_id": room, "body": map[string]any{"text": "hello"}})
+	waitSent("hello")
+
+	// A refused thread stays here, with one ~room notice, and nothing more
+	// of it is sent.
+	_, created := alice.request(t, "room_set", "t1", map[string]any{"parent_room_id": room, "title": "Local only"})
+	thread := created["room_id"].(string)
+	want := "This thread is not shared with " + host + "."
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		_, page := alice.request(t, "history", alice.nextID("h"), map[string]any{"room_id": thread, "limit": 50})
+		notices := 0
+		for _, value := range asList(page["messages"]) {
+			m := value.(map[string]any)
+			if m["from"].(map[string]any)["user_id"] == roomNoticeID && wstestText(m) == want {
+				notices++
+			}
+		}
+		if notices == 1 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("thread notices = %d: %#v", notices, page)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	alice.drain(t)
+	alice.request(t, "message", "m2", map[string]any{"room_id": thread, "body": map[string]any{"text": "in the local thread"}})
+	alice.request(t, "message", "m3", map[string]any{"room_id": room, "body": map[string]any{"text": "after the thread"}})
+	waitSent("after the thread")
+	if slices.Contains(fake.texts(), "in the local thread") {
+		t.Fatal("a message of a refused thread was sent")
+	}
+
+	// A message refused because its author was removed there: one ~private
+	// notice to the author for the room.
+	alice.drain(t)
+	alice.request(t, "message", "m4", map[string]any{"room_id": room, "body": map[string]any{"text": "blocked one"}})
+	notice := ""
+	for notice == "" {
+		frame := alice.read(t)
+		if params, _ := frame["params"].(map[string]any); frame["method"] == "message" && params["from"].(map[string]any)["user_id"] == privateNoticeID {
+			notice = wstestText(params)
+		}
+	}
+	if notice != "Not sent to "+host+": you were removed from this room there." {
+		t.Fatalf("notice = %q", notice)
+	}
+	alice.request(t, "message", "m5", map[string]any{"room_id": room, "body": map[string]any{"text": "blocked two"}})
+	alice.request(t, "message", "m6", map[string]any{"room_id": room, "body": map[string]any{"text": "fine again"}})
+	waitSent("fine again")
+	for _, frame := range alice.drain(t) {
+		if params, _ := frame["params"].(map[string]any); frame["method"] == "message" && params["from"].(map[string]any)["user_id"] == privateNoticeID {
+			t.Fatalf("a second notice: %#v", frame)
+		}
+	}
+}
