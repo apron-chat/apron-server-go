@@ -164,7 +164,10 @@ func (s *Server) saveMessage(c *client, req request) (any, bool, *Error) {
 		if current == nil {
 			return nil, false, invalidParams("Unknown message %q", messageID)
 		}
-		if current.owner != u.id {
+		// An admin or moderator may delete any message it can see, as it
+		// may remove people from rooms; editing stays the author's.
+		moderating := deleted && (u.hasRole(RoleAdmin) || u.hasRole(RoleModerator))
+		if current.owner != u.id && !moderating {
 			if deleted || !sharesText(current.snapshot(), u.id) {
 				return nil, false, &Error{Code: CodeDenied, Message: "Only the author may edit, move, or delete this message"}
 			}

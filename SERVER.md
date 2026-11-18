@@ -638,7 +638,9 @@ non-empty strings (`invalid_params` otherwise) and lists at most 256 users
 edits; server fields in requests are ignored, and unknown top-level keys are
 dropped (extension data belongs in `ext`, whose values are kept byte for
 byte).
-Edits, deletion, and moves require the creating identity. A missing
+Edits and moves require the creating identity, and so does deletion,
+except by a user with role `admin` or `moderator`, who may delete any
+message they can see. A missing
 `body.format` means `plain`. Posting to a room does not join it.
 
 Deletion is a save with `deleted: true` and yields a tombstone without `body`
