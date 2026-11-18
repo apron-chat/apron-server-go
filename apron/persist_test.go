@@ -9,6 +9,8 @@ import (
 	"net/url"
 	"path/filepath"
 	"reflect"
+	"runtime/pprof"
+	"strings"
 	"testing"
 	"time"
 
@@ -43,15 +45,27 @@ func startWith(t *testing.T, s store.Store, uploadDir string, configure func(*Co
 			return
 		}
 		stopped = true
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-		if err := app.Shutdown(ctx); err != nil {
-			t.Errorf("shutdown: %v", err)
-		}
+		shutdown(t, app)
 		httpServer.Close()
 	}
 	t.Cleanup(stop)
 	return app, httpServer, stop
+}
+
+// shutdown shuts app down and waits until it is done. Closing a SQLite
+// store checkpoints and syncs it, which a busy disk can hold up for seconds,
+// so a short deadline would fail a shutdown that is only slow, and leave its
+// store open for the test's next one. A shutdown not done in a minute is
+// stuck, and the goroutines' stacks show where.
+func shutdown(t *testing.T, app *Server) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	if err := app.Shutdown(ctx); err != nil {
+		var stacks strings.Builder
+		_ = pprof.Lookup("goroutine").WriteTo(&stacks, 1)
+		t.Errorf("shutdown: %v\n%s", err, stacks.String())
+	}
 }
 
 func TestStateSurvivesRestart(t *testing.T) {
