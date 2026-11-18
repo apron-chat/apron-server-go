@@ -439,8 +439,9 @@ func TestExternalMetadataAndTokenEndpoint(t *testing.T) {
 // A public client names itself at the token endpoint by client_id in the
 // body or by HTTP Basic with an empty password (RFC 6749 §2.3.1), as
 // golang.org/x/oauth2's default AuthStyleAutoDetect tries first. A request
-// refused before the code is looked up leaves it for another try; a
-// redemption attempt uses it up, however the client named itself.
+// refused before the code is looked up, another server's resource
+// included, leaves it for another try; a redemption attempt uses it up,
+// however the client named itself.
 func TestExternalTokenEndpointClientAuth(t *testing.T) {
 	identity := &Identity{Subject: "idp:6", Name: "Basil", UserID: "basil"}
 	_, httpServer := externalTestServer(t, identity)
@@ -514,6 +515,7 @@ func TestExternalTokenEndpointClientAuth(t *testing.T) {
 		{"no redirect_uri", func() url.Values { f := form(code, true); f.Del("redirect_uri"); return f }(), "", http.StatusBadRequest, "invalid_request"},
 		{"twice", func() url.Values { f := form(code, true); f.Add("redirect_uri", "https://evil.example/"); return f }(), "", http.StatusBadRequest, "invalid_request"},
 		{"grant type", func() url.Values { f := form(code, true); f.Set("grant_type", "refresh_token"); return f }(), "", http.StatusBadRequest, "unsupported_grant_type"},
+		{"another server's resource", func() url.Values { f := form(code, true); f.Set("resource", "https://other.example"); return f }(), "", http.StatusBadRequest, "invalid_target"},
 	} {
 		status, header, body := post(refusal.form, refusal.authorization)
 		if status != refusal.status || body["error"] != refusal.error {
@@ -523,7 +525,9 @@ func TestExternalTokenEndpointClientAuth(t *testing.T) {
 			t.Errorf("%s: no WWW-Authenticate", refusal.name)
 		}
 	}
-	status, _, body = post(form(code, false), basic(app.ClientID, ""))
+	afterRefusals := form(code, false)
+	afterRefusals.Set("resource", issuer)
+	status, _, body = post(afterRefusals, basic(app.ClientID, ""))
 	redeemed("after refusals", status, body)
 
 	// AuthStyleAutoDetect with a client secret configured: Basic is

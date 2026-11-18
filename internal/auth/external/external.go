@@ -415,8 +415,9 @@ func (s *Scheme) Cancel(w http.ResponseWriter, r *http.Request, id string) error
 // A public client names itself by client_id in the body, or by HTTP Basic
 // with an empty password (RFC 6749 §2.3.1), which some OAuth libraries
 // try first. A request refused before the code is looked up, as one that
-// is malformed or whose client_id differs between the two, leaves the code
-// for another try; any redemption attempt uses it up.
+// is malformed, whose client_id differs between the two, or whose resource
+// is not this server's, leaves the code for another try (ext:oauth); any
+// redemption attempt uses it up.
 func (s *Scheme) token(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, 16<<10)
 	cors(w)
@@ -458,12 +459,22 @@ func (s *Scheme) token(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	// A resource that names no server here is refused before the code is
+	// looked up: codes are only issued for this server's (§4.12.3).
+	resource := r.PostForm.Get("resource")
+	if resource != "" && !slices.Contains(oauth.Resources(oauth.Origin(s.core.BaseURL(r))), resource) {
+		refuse(http.StatusBadRequest, "invalid_target", "resource is not this server")
+		return
+	}
 	value, grant, err := s.codes.Redeem(r.PostForm.Get("code"), r.PostForm.Get("code_verifier"), r.PostForm.Get("redirect_uri"), clientID, time.Now())
 	if err != nil {
 		refuse(http.StatusBadRequest, "invalid_grant", "The code is invalid, used, or expired")
 		return
 	}
-	if resource := r.PostForm.Get("resource"); resource != "" && resource != grant.Resource {
+	// On http, Resources also names the https:// spelling of this server,
+	// which a code issued for the other one refuses after using it up, as
+	// a failed redemption may (§4.12.4).
+	if resource != "" && resource != grant.Resource {
 		refuse(http.StatusBadRequest, "invalid_target", "resource is not the one the code was issued for")
 		return
 	}
