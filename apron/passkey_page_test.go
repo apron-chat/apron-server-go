@@ -400,17 +400,80 @@ func TestPasskeyPageAdditionsFlood(t *testing.T) {
 	}
 }
 
-// A registration on the page makes a new account with the invitation the
-// finishing connection presents, as a registration in the client does.
-func TestPasskeyPageRegistration(t *testing.T) {
+// Where guests are allowed, a registration on the page makes a new account
+// without an invitation, as one in the client does: a begin on a connection
+// that is not signed in names the page with the name it asks for, and the
+// code finishes on any connection that is not signed in, a new one
+// included, with a token from a code. A signed-in connection may not
+// redeem it.
+func TestPasskeyPageFreshRegistration(t *testing.T) {
 	p := passkeyPageServer(t)
+	native, frame := dialRaw(t, p.http)
+	if signup := frame["params"].(map[string]any)["signup"]; !reflect.DeepEqual(signup, []any{"webauthn", "external", "guest"}) {
+		t.Fatalf("signup: %#v", signup)
+	}
+	begin := passkeyResult(t, passkeyCall(t, native, "b", "register", "begin", map[string]any{"name": "Ada"}))
+	if begin["external"].(map[string]any)["url"] != pageOrigin+"/passkey?action=register&name=Ada" || begin["public_key"] != nil {
+		t.Fatalf("begin = %#v", begin)
+	}
+	client := oauthtest.New(t, pageOrigin)
+	screen := p.open(t, client, begin)
+	if !strings.Contains(screen.Body, "wants to create an account for you on <strong>localhost:8080</strong>, with a new passkey.") {
+		t.Fatalf("registration screen = %s", screen.Body)
+	}
+	a := newTestAuthenticator(t)
+	status, answer := p.ceremony(t, client, screen, a, 0)
+	if status != http.StatusOK {
+		t.Fatalf("verify = %d %#v", status, answer)
+	}
+	guest, _ := dialRaw(t, p.http)
+	guestAuth(t, guest)
+	guest.expectError(t, "auth", "signed-in", finishWithCode(client, "register", returned(t, client, answer)), CodeDenied)
+
+	_, answer = p.ceremony(t, client, p.open(t, client, begin), a, 0)
+	fresh, _ := dialRaw(t, p.http)
+	_, result := fresh.request(t, "auth", "finish", finishWithCode(client, "register", returned(t, client, answer)))
+	you := result["you"].(map[string]any)
+	if you["name"] != "Ada" || !strings.HasPrefix(you["user_id"].(string), "user_") || result["token"] == nil {
+		t.Fatalf("registration = %#v", result)
+	}
+	expectJoinedDefault(t, fresh, you["user_id"].(string))
+	// Its token, from a code, resumes from any origin, and its passkey
+	// signs in to it.
+	elsewhere, _ := dialOrigin(t, p.http, "https://elsewhere.example")
+	if resumed := passkeyResult(t, passkeyCall(t, elsewhere, "resume", "token", "", map[string]any{"token": result["token"]})); resumed["you"].(map[string]any)["user_id"] != you["user_id"] {
+		t.Fatalf("resumed = %#v", resumed)
+	}
+	again, _ := dialRaw(t, p.http)
+	_, login := again.request(t, "auth", "login", finishWithCode(client, "login", p.loginCode(t, client, a)))
+	if login["you"].(map[string]any)["user_id"] != you["user_id"] {
+		t.Fatalf("login = %#v", login)
+	}
+}
+
+// Where a registration makes an account only of a guest, or with an
+// invitation, a registration on the page makes a new account with the
+// invitation the finishing connection presents, as a registration in the
+// client does.
+func TestPasskeyPageRegistration(t *testing.T) {
+	for name, configure := range map[string]func(*Config){
+		"guest first":    func(c *Config) { c.GuestFirstPasskeys = true },
+		"without guests": func(c *Config) { c.DisableGuests = true },
+	} {
+		t.Run(name, func(t *testing.T) { testPasskeyPageInvitedRegistration(t, configure) })
+	}
+}
+
+func testPasskeyPageInvitedRegistration(t *testing.T, configure func(*Config)) {
+	p := passkeyPageServer(t, configure)
 	invitation, err := p.host.Invite(context.Background(), InvitationOptions{Name: "Newcomer"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	native, _ := dialRaw(t, p.http)
-	// Without an invitation, nobody may register on this server.
-	passkeyDenied(t, passkeyCall(t, native, "none", "register", "begin", nil))
+	// Without an invitation, nobody may register on a connection that is
+	// not signed in.
+	native.expectError(t, "auth", "none", map[string]any{"scheme": "webauthn", "action": "register", "step": "begin"}, CodeDenied)
 	begin := passkeyResult(t, passkeyCall(t, native, "b", "register", "begin", map[string]any{"invitation": invitation.Token, "name": "Ada"}))
 	if begin["external"].(map[string]any)["url"] != pageOrigin+"/passkey?action=register&name=Ada" {
 		t.Fatalf("begin = %#v", begin)
@@ -481,7 +544,7 @@ func TestPasskeyPageRequests(t *testing.T) {
 // page. Anything less certain is the page's usual error, which signals
 // nothing.
 func TestPasskeyPageUnknownCredential(t *testing.T) {
-	p := passkeyPageServer(t, func(c *Config) { c.SignalUnknownPasskeys = true })
+	p := passkeyPageServer(t, func(c *Config) { c.SignalUnknownPasskeys, c.GuestFirstPasskeys = true, true })
 	client := oauthtest.New(t, pageOrigin)
 	login := func(a *testAuthenticator, rpID string, flags byte) map[string]any {
 		t.Helper()
@@ -536,7 +599,8 @@ func TestPasskeyPageUnknownCredential(t *testing.T) {
 	// while its code is live, and once a redemption has taken the code,
 	// until the server commits it, or the code's and a ceremony's
 	// lifetimes pass. A redemption refused after it took the code, for
-	// want of an invitation, stays in that window.
+	// want of an invitation where a registration makes an account only
+	// with one or of a guest, stays in that window.
 	invitation, err := p.host.Invite(context.Background(), InvitationOptions{Name: "Newcomer"})
 	if err != nil {
 		t.Fatal(err)

@@ -1,8 +1,13 @@
 // Package passkey is the WebAuthn sign-in scheme (PROTOCOL.md §4.10):
 // registering a passkey adds it to the connection's account, a guest's
-// making it an account, or, on a connection that presents an invitation
-// and is not signed in, makes a new account with it; logging in with one
-// signs in to its account.
+// making it an account, or, on a connection that is not signed in, makes a
+// new account with it: with an invitation the connection presents, or,
+// where anyone may sign in as a guest, without one (signsUp); logging in
+// with one signs in to its account. Server policy decides who can register
+// (§4.10), and where anyone may be a guest, signing in as one first would
+// add a round trip and no protection. GuestFirst keeps that step: a
+// registration then makes an account only of a signed-in guest, or with an
+// invitation.
 // The scheme keeps its credentials, which the server stores with each
 // account (authn.Restorer), and proves identities named by the passkey
 // user handle.
@@ -14,6 +19,7 @@ package passkey
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/aes"
 	"crypto/cipher"
@@ -58,6 +64,14 @@ type Scheme struct {
 	// the page's usual error. Set it before the server serves the page;
 	// apron.Config's SignalUnknownPasskeys says when it is safe.
 	SignalUnknown bool
+
+	// GuestFirst has a registration make an account only of a signed-in
+	// guest, or with an invitation, even where anyone may sign in as a
+	// guest: one on a connection that is not signed in, without an
+	// invitation, is refused, as on a server without guests. Set it before
+	// the server serves; apron.Config's GuestFirstPasskeys sets it, which
+	// also leaves webauthn out of server.signup (§3.2).
+	GuestFirst bool
 
 	// The passkey page's state: the pages people have open, the codes the
 	// page issued, and the verify budgets of its clients; and sealer, which
@@ -194,13 +208,17 @@ type ceremony struct {
 	handle []byte
 	rpID   string
 	origin string
-	// name is the display name a guest's registration asked for, applied
-	// when it finishes; empty for a login, or a passkey added to an
-	// account.
+	// name is the display name a guest's registration, or a new
+	// account's, asked for, applied when it finishes; empty for a login,
+	// or a passkey added to an account.
 	name string
-	// invitation is the invitation a registration that makes a new account
-	// presented; empty for one that adds to the connection's account.
+	// create is a registration that makes a new account, on a connection
+	// that is not signed in: with invitation, the invitation it presented,
+	// or, without one, where anyone may sign up (signsUp), with requested,
+	// the user_id its begin asked for.
+	create     bool
 	invitation string
+	requested  string
 	data       *webauthn.SessionData
 	expires    time.Time
 }
@@ -257,7 +275,7 @@ func (s *Scheme) begin(r *authn.Request, action string, local bool) (authn.Resul
 	// pending challenge can never be resumed after a new begin was
 	// attempted.
 	r.State.Store(nil)
-	if action == "register" && r.Account == nil && r.Invitation == nil {
+	if action == "register" && r.Account == nil && r.Invitation == nil && !s.signsUp(r) {
 		return nil, authn.Denied("Sign in as a guest, or present an invitation, before adding a passkey")
 	}
 	page, err := s.pageURL(r, action)
@@ -281,10 +299,14 @@ func (s *Scheme) begin(r *authn.Request, action string, local bool) (authn.Resul
 	if action == "register" {
 		account := r.Account
 		if account == nil {
-			// A new account, which the invitation makes when the
-			// registration finishes: nothing is made before.
-			account = &authn.Account{Name: r.Invitation.Name, Guest: true}
-			c.invitation = r.Invitation.ID
+			// A new account, which the registration makes when it
+			// finishes, with the invitation if it presents one: nothing
+			// is made before, no guest included.
+			account = &authn.Account{Guest: true}
+			c.create, c.requested = true, r.UserID
+			if r.Invitation != nil {
+				account.Name, c.invitation = r.Invitation.Name, r.Invitation.ID
+			}
 		}
 		c.userID = account.UserID
 		h := &holder{name: account.Name}
@@ -309,8 +331,9 @@ func (s *Scheme) begin(r *authn.Request, action string, local bool) (authn.Resul
 			h.Handle = []byte(rand.Text())
 		}
 		c.handle = h.Handle
-		// A guest becoming an account may ask for its name with the begin
-		// (§3.2); a passkey added to an account keeps the account's name.
+		// A guest becoming an account, or a new account, may ask for its
+		// name with the begin (§3.2); a passkey added to an account keeps
+		// the account's name.
 		if account.Guest {
 			c.name = r.Name
 			if c.name != "" {
@@ -377,8 +400,8 @@ func (s *Scheme) finish(r *authn.Request, action string) (authn.Result, error) {
 	if c.action != action || c.rpID != s.w.Config.RPID || c.origin != r.Origin || !r.Now.Before(c.expires) {
 		return nil, authn.Denied("Passkey challenge is missing or expired; try again")
 	}
-	if c.action == "register" && c.invitation != "" {
-		return s.finishInvited(r, c)
+	if c.action == "register" && c.create {
+		return s.finishNew(r, c)
 	}
 	if c.action == "register" {
 		return s.finishRegistration(r, c)
@@ -414,13 +437,18 @@ func (s *Scheme) finishRegistration(r *authn.Request, c *ceremony) (authn.Result
 	}}, nil
 }
 
-// finishInvited verifies a passkey registered with an invitation, which
-// signs in to a new account that the invitation makes. The connection must
-// still be signed in to no account, and present the same invitation, which
-// the server checks again, still unused, as it makes the account. A
-// registration that fails here leaves the invitation for another try.
-func (s *Scheme) finishInvited(r *authn.Request, c *ceremony) (authn.Result, error) {
-	if r.Account != nil || r.Invitation == nil || r.Invitation.ID != c.invitation {
+// finishNew verifies a passkey registered on a connection that is not
+// signed in, which signs in to a new account (signUp). The connection must
+// still be signed in to no account, and present the invitation its begin
+// presented, or none if that presented none; the server checks an
+// invitation again, still unused, as it makes the account. A registration
+// that fails here leaves the invitation for another try.
+func (s *Scheme) finishNew(r *authn.Request, c *ceremony) (authn.Result, error) {
+	presented := ""
+	if r.Invitation != nil {
+		presented = r.Invitation.ID
+	}
+	if r.Account != nil || presented != c.invitation || presented == "" && !s.signsUp(r) {
 		return nil, authn.Denied("Registration changed; try again")
 	}
 	raw, err := parseCredential(r.Params, c.action)
@@ -431,10 +459,31 @@ func (s *Scheme) finishInvited(r *authn.Request, c *ceremony) (authn.Result, err
 	if err != nil {
 		return nil, err
 	}
-	return &authn.SignIn{Create: true, Invitation: c.invitation, Proof: authn.Proof{
-		Subject: Subject(c.handle), Name: c.name, UserID: r.Invitation.UserID, Credential: CredentialID(credential.ID),
-		Commit: s.commitCredential(c.handle, credential),
-	}}, nil
+	return s.signUp(r, c.handle, credential, c.name, cmp.Or(c.requested, r.UserID), false), nil
+}
+
+// signsUp reports whether a registration on a connection that is not
+// signed in makes a new account without an invitation: where anyone may
+// sign in as a guest (authn.Request.Guests), unless GuestFirst.
+func (s *Scheme) signsUp(r *authn.Request) bool { return r.Guests && !s.GuestFirst }
+
+// signUp signs in to a new account with a verified passkey, on a
+// connection that is not signed in: one the request's invitation makes,
+// with the name asked for or the invitation's, and the invitation's
+// user_id; or, without one, one the server makes as for any new identity,
+// with the name and user_id asked for (requested), after the same checks
+// (§3.2). The token resumes from the connection's origin, or with
+// anyOrigin from any, as a token from a code does (§4.10.1).
+func (s *Scheme) signUp(r *authn.Request, handle []byte, credential *webauthn.Credential, name, requested string, anyOrigin bool) *authn.SignIn {
+	result := &authn.SignIn{Create: true, AnyOrigin: anyOrigin, Proof: authn.Proof{
+		Subject: Subject(handle), Name: name, UserID: requested, Credential: CredentialID(credential.ID),
+		Commit: s.commitCredential(handle, credential),
+	}}
+	if inv := r.Invitation; inv != nil {
+		result.Invitation = inv.ID
+		result.Name, result.UserID = cmp.Or(name, inv.Name), inv.UserID
+	}
+	return result
 }
 
 // verifyRegistration verifies a new credential for a user handle against

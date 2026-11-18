@@ -174,6 +174,16 @@ type Config struct {
 	// 2027-02-16. Turn on only where this server is the sole user of its RP
 	// ID.
 	SignalUnknownPasskeys bool
+	// GuestFirstPasskeys has a passkey registration make an account only
+	// of a signed-in guest, or with an invitation, and leaves webauthn out
+	// of server.signup, so clients sign in as a guest first (§3.2). By
+	// default, where guests are allowed, a registration on a connection
+	// that is not signed in makes a new account itself, with the checks of
+	// any new account: anyone may make one as a guest anyway, so the guest
+	// step adds a round trip and no protection. Without guests
+	// (DisableGuests, or sign-in an extension restricts), only an
+	// invitation makes one either way.
+	GuestFirstPasskeys bool
 	// OnStoreError, if set, is called once, on a goroutine of its own, with
 	// the first error the store returns. The server then
 	// writes nothing more and fails Sync (see Server.Sync); the program
@@ -774,6 +784,7 @@ func Open(config Config) (*Server, error) {
 	if config.WebAuthn != nil {
 		scheme := passkey.New(config.WebAuthn)
 		scheme.SignalUnknown = config.SignalUnknownPasskeys
+		scheme.GuestFirst = config.GuestFirstPasskeys
 		if err := s.addSchemeLocked(scheme); err != nil {
 			return fail(err)
 		}
@@ -1177,14 +1188,17 @@ func (s *Server) serverParams(baseURL string, revealed bool) map[string]any {
 	}
 	// signup (§3.2) lists the schemes that can create an account: every
 	// one but token, which only resumes one. Email, external sign-in, and
-	// guest start one. A passkey registration makes an account only of a
-	// guest, or with an invitation: without guests it is no way to sign
-	// up. An invitation does not put it back, since signup tells every
-	// client what it can do, and an invitation is a secret one person was
-	// given; an invited client registers anyway, as webauthn stays in
-	// auth.
+	// guest start one, and so does a passkey registration where guests are
+	// allowed, on a connection that is not signed in (§4.10). Without
+	// guests a registration makes an account only with an invitation, so
+	// webauthn is no way to sign up. An invitation does not put it back,
+	// since signup tells every client what it can do, and an invitation is
+	// a secret one person was given; an invited client registers anyway,
+	// as webauthn stays in auth. With GuestFirstPasskeys a registration
+	// makes an account only of a signed-in guest, so signup lists guest but
+	// not webauthn, which tells clients to sign in as a guest first.
 	signup := slices.DeleteFunc(slices.Clone(authSchemes), func(scheme string) bool {
-		return scheme == "token" || scheme == passkey.Name && !guests
+		return scheme == "token" || scheme == passkey.Name && (!guests || s.config.GuestFirstPasskeys)
 	})
 	params := map[string]any{
 		"apron":        10,

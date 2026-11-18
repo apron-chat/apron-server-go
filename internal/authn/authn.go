@@ -118,6 +118,12 @@ type Request struct {
 	// otherwise needs one to add to, such as a passkey registration. Nil
 	// when the request presents none.
 	Invitation *Invitation
+	// Guests reports that anyone may sign in to the server as a guest. A
+	// scheme may then make a new account without an invitation where it
+	// otherwise needs a guest's to add to, such as a passkey registration
+	// on a connection that is not signed in (SignIn.Create): signing in as
+	// a guest first would add a round trip, and no protection.
+	Guests bool
 }
 
 // Invitation is an invitation to make one account, as a scheme sees it.

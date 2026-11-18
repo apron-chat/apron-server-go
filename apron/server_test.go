@@ -136,9 +136,10 @@ func TestServerFrame(t *testing.T) {
 }
 
 // signup lists webauthn only where a registration can make an account
-// without a secret: a guest's. Without guests, by DisableGuests or a
-// restricted sign-in, a passkey only signs in, and an invited client
-// registers anyway, as webauthn stays in auth (§3.2).
+// without a secret: where guests are allowed, on a connection that is not
+// signed in. Without guests, by DisableGuests or a restricted sign-in, a
+// passkey only signs in, and an invited client registers anyway, as
+// webauthn stays in auth (§3.2).
 func TestSignupWithoutGuests(t *testing.T) {
 	for name, configure := range map[string]func(*Config){
 		"guests disabled": func(c *Config) { c.DisableGuests = true },
