@@ -57,12 +57,14 @@ Defaults:
   [extension](#extensions) offers it or `--external.issuer` names an
   authorization server, bearer-token resume, and `guest`
   unless `--disable-guests`; `server.signup` lists every one but `token`,
-  which only resumes an account: a guest who registers a passkey or adds an
-  address becomes an account, and an email or external sign-in with a new
-  address or identity creates one. Without guests (`--disable-guests`, or
-  sign-in an extension restricts), `signup` leaves out `webauthn` too, since
-  a passkey registration then makes an account only with an
-  [invitation](#invitations); with no other scheme it is `[]`
+  which only resumes an account, and `webauthn`, since a passkey
+  registration on a new connection makes no account: a guest who registers
+  a passkey or adds an address becomes an account, and an email or
+  external sign-in with a new address or identity creates one. An app signs
+  in as a guest, then adds its passkey. Without guests (`--disable-guests`,
+  or sign-in an extension restricts), a passkey registration makes an
+  account only with an [invitation](#invitations); with no other scheme
+  `signup` is `[]`
 - passkey RP ID: `localhost`; frontend origins: `http://localhost:5173` and
   `http://localhost:8080`
 - no `server.welcome`, `title`, or `avatar`, `description` the `general`
@@ -1622,10 +1624,9 @@ registration, in both steps:
 {"method": "auth", "id": "2", "params": {"scheme": "webauthn", "action": "register", "step": "finish", "challenge_id": "…", "invitation": "apron_invite_…", "credential": {}}}
 ```
 
-`server.signup` does not list `webauthn` on a server without guests,
-since only someone with an invitation can register there, and `signup` is
-what any client can do; an invited client registers all the same, as
-`webauthn` is in `server.auth`.
+`server.signup` does not list `webauthn`, since `signup` is what any
+client can do; an invited client registers all the same, as `webauthn` is
+in `server.auth`.
 
 The begin makes nothing: no guest, and no account. The finish verifies the
 passkey as any registration does, then checks the invitation again, and in

@@ -115,12 +115,13 @@ func TestServerFrame(t *testing.T) {
 		t.Fatal("Open accepted an avatar that is not an https: or data:image URL")
 	}
 
-	// A token only signs in, so signup lists the other schemes.
+	// A token only signs in, and a passkey registration only adds to a
+	// signed-in account, a guest's, so signup lists only guest.
 	config := DefaultConfig()
 	config.WebAuthn = testWebAuthn(t)
 	_, passkeys := newTestServer(t, config)
 	_, frame = dialRaw(t, passkeys)
-	if params := frame["params"].(map[string]any); !reflect.DeepEqual(params["auth"], []any{"webauthn", "token", "guest"}) || !reflect.DeepEqual(params["signup"], []any{"webauthn", "guest"}) {
+	if params := frame["params"].(map[string]any); !reflect.DeepEqual(params["auth"], []any{"webauthn", "token", "guest"}) || !reflect.DeepEqual(params["signup"], []any{"guest"}) {
 		t.Fatalf("passkey schemes: %#v", params)
 	}
 
@@ -135,10 +136,10 @@ func TestServerFrame(t *testing.T) {
 	c.expectError(t, "push_register", "p", map[string]any{"kind": "relay", "url": "https://relay.example/p"}, CodeUnsupported)
 }
 
-// signup lists webauthn only where a registration can make an account
-// without a secret: a guest's. Without guests, by DisableGuests or a
-// restricted sign-in, a passkey only signs in, and an invited client
-// registers anyway, as webauthn stays in auth (§3.2).
+// signup never lists webauthn, since a registration on a new connection
+// makes no account. Without guests, by DisableGuests or a restricted
+// sign-in, an invited client registers anyway, as webauthn stays in auth
+// (§3.2).
 func TestSignupWithoutGuests(t *testing.T) {
 	for name, configure := range map[string]func(*Config){
 		"guests disabled": func(c *Config) { c.DisableGuests = true },
