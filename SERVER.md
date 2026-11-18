@@ -1396,6 +1396,11 @@ Changing the RP ID creates a different credential scope.
 `--allow-any-origin` does not relax WebAuthn origin validation. The default
 `127.0.0.1` chat URL still supports guest chat; use `localhost` for passkeys.
 
+A native app runs the ceremony with the origin its platform writes in client
+data, such as `android:apk-key-hash:<base64url>` on Android. Listed with
+`--webauthn.origin`, that exact origin is also accepted as a connection's
+`Origin` without `--origin`, which can only match an origin with a host.
+
 A frontend whose host is the RP ID or under it works directly. A frontend
 elsewhere, such as the shared client at `https://web.apron.chat`, works once
 listed with `--webauthn.origin`: aprond serves every configured origin as

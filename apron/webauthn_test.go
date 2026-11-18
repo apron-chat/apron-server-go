@@ -1,6 +1,7 @@
 package apron
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -517,6 +518,42 @@ func TestPasskeyOriginRefusals(t *testing.T) {
 	}
 	if got, want := refusal(passkeyCall(t, none, "f", "login", "finish", map[string]any{"challenge_id": "x", "credential": map[string]any{}})), "This connection sent no Origin, which passkeys need"; got != want {
 		t.Errorf("finish without Origin: %q, want %q", got, want)
+	}
+}
+
+// A native app connects with the origin its platform writes in client
+// data, which has no host, once the RP accepts it (§4.10), and runs the
+// ceremony with it. Other origins, web ones the RP accepts among them,
+// still need an origin pattern.
+func TestNativeAppOrigin(t *testing.T) {
+	const android = "android:apk-key-hash:AbC-_123"
+	config := DefaultConfig()
+	w, err := webauthn.New(&webauthn.Config{RPID: "localhost", RPDisplayName: "Apron", RPOrigins: []string{testPasskeyOrigin, "https://web.example", android}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	config.WebAuthn = w
+	_, httpServer := newTestServer(t, config)
+	app, _ := dialOrigin(t, httpServer, android)
+	guestAuth(t, app)
+	a := newTestAuthenticator(t)
+	options := passkeyResult(t, passkeyCall(t, app, "rb", "register", "begin", nil))
+	passkeyResult(t, passkeyCall(t, app, "rf", "register", "finish", map[string]any{"credential": a.registration(t, options, android)}))
+	// The ceremony is bound to the app's origin: an assertion made on
+	// another origin the RP accepts fails.
+	app, _ = dialOrigin(t, httpServer, android)
+	options = passkeyResult(t, passkeyCall(t, app, "lb", "login", "begin", nil))
+	passkeyDenied(t, passkeyCall(t, app, "lf", "login", "finish", map[string]any{"credential": a.assertion(t, options, testPasskeyOrigin, "localhost", 0x05)}))
+	options = passkeyResult(t, passkeyCall(t, app, "lb", "login", "begin", nil))
+	passkeyResult(t, passkeyCall(t, app, "lf", "login", "finish", map[string]any{"credential": a.assertion(t, options, android, "localhost", 0x05)}))
+	for _, origin := range []string{"android:apk-key-hash:other", "android:apk-key-hash:abc-_123", "https://web.example", "https://evil.example", "null"} {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		ws, _, err := websocket.Dial(ctx, wsURL(httpServer), &websocket.DialOptions{HTTPHeader: http.Header{"Origin": {origin}}})
+		cancel()
+		if err == nil {
+			_ = ws.CloseNow()
+			t.Errorf("accepted Origin %q", origin)
+		}
 	}
 }
 
