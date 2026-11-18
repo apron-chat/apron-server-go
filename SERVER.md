@@ -1394,6 +1394,11 @@ Changing the RP ID creates a different credential scope.
 `--allow-any-origin` does not relax WebAuthn origin validation. The default
 `127.0.0.1` chat URL still supports guest chat; use `localhost` for passkeys.
 
+A native app runs the ceremony with the origin its platform writes in client
+data, such as `android:apk-key-hash:<base64url>` on Android. Listed with
+`--webauthn.origin`, that exact origin is also accepted as a connection's
+`Origin` without `--origin`, which can only match an origin with a host.
+
 A frontend whose host is the RP ID or under it works directly. A frontend
 elsewhere, such as the shared client at `https://web.apron.chat`, works once
 listed with `--webauthn.origin`: aprond serves every configured origin as
@@ -1459,13 +1464,16 @@ exchange with the code it returns. aprond offers the page while its own
 origin (`--public-url`, or the scheme and host a request arrives on) is one
 of the `--webauthn.origin`s: by default `http://localhost:8080`, so `make
 run` has it; a deployment lists its `--public-url` there, as the examples
-above do.
+above do. Without `--public-url`, the page's origin comes from the
+request's `Host`, including its port, and must be one of the
+`--webauthn.origin`s.
 
 - **Begin.** A begin step adds `"external": {"url": "https://chat.example/passkey?action=login"}`
   to `challenge_id` and `public_key`. A registration's is
-  `?action=register&name=…`, and one on a signed-in connection, guests
-  included, an addition: `?action=register&request=<handle>`, which names
-  that account for ten minutes. The handle is the account, sealed
+  `?action=register&name=…` (a space in the query is `%20`, not `+`), and
+  one on a signed-in connection, guests included, an addition:
+  `?action=register&request=<handle>`, which names that account for ten
+  minutes. The handle is the account, sealed
   (AES-GCM, with a key each aprond makes as it starts), so aprond keeps
   nothing for an addition, and no number of begins can fill a table that
   holds up anyone's ceremony; a handle opens the page until it expires, or
@@ -1474,7 +1482,8 @@ above do.
   `challenge_id` and `public_key` to a connection that can run the
   ceremony itself. A connection whose `Origin` is not a
   `--webauthn.origin` cannot, so its begin returns `external` alone;
-  without the page it is `denied`, as before.
+  without the page it is `denied`, with a message that names the origins
+  refused: the connection's `Origin`, and the page's.
 - **The page** takes the same authorization request as `/oauth/authorize`
   (PKCE `S256`, `state`, `resource` the server's origin), checks it the same
   way, showing any problem on the page, as it does a bad `action`, and has

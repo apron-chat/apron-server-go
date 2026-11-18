@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+	"github.com/go-webauthn/webauthn/protocol"
 	"github.com/go-webauthn/webauthn/webauthn"
 	"golang.org/x/time/rate"
 
@@ -978,6 +979,21 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	}
 }
 
+// nativeOrigin reports whether origin is a native app's, such as
+// android:apk-key-hash:…, that the RP accepts as a ceremony's origin: a
+// trusted app connects with it (§4.10). OriginPatterns match a host, and
+// such an origin has none, so they cannot accept it; a browser never sends
+// one.
+func (s *Server) nativeOrigin(origin string) bool {
+	if s.config.WebAuthn == nil || !protocol.IsKnownOpaqueOrigin(origin) {
+		return false
+	}
+	if parsed, err := url.Parse(origin); err != nil || parsed.Host != "" {
+		return false
+	}
+	return slices.Contains(s.config.WebAuthn.Config.RPOrigins, origin)
+}
+
 func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	if s.closed {
@@ -990,7 +1006,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	defer s.connections.Done()
 
 	options := &websocket.AcceptOptions{}
-	if s.config.AllowAnyOrigin {
+	if s.config.AllowAnyOrigin || s.nativeOrigin(r.Header.Get("Origin")) {
 		options.InsecureSkipVerify = true
 	} else {
 		options.OriginPatterns = s.config.OriginPatterns

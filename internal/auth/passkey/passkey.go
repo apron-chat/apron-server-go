@@ -23,6 +23,7 @@ import (
 	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"errors"
+	"fmt"
 	"net/http"
 	"slices"
 	"sync"
@@ -244,11 +245,30 @@ func (s *Scheme) Auth(_ context.Context, r *authn.Request) (authn.Result, error)
 			return s.redeem(r, action)
 		}
 		if !local {
-			return nil, authn.Denied("Frontend origin is not configured for passkeys")
+			return nil, s.refuseOrigin(r.Origin, "")
 		}
 		return s.finish(r, action)
 	}
 	return nil, authn.InvalidParams("Passkey step must be begin or finish")
+}
+
+// refuseOrigin refuses a connection that can run no passkey ceremony: its
+// origin is not one the RP accepts, nor is pageOrigin, the passkey page's,
+// when not empty. The refusal names both, so a client can tell which to
+// fix.
+func (s *Scheme) refuseOrigin(origin, pageOrigin string) error {
+	if s.core != nil {
+		s.core.Logger().Info("passkeys refused: the origin is not a --webauthn.origin", "origin", origin, "page_origin", pageOrigin)
+	}
+	switch {
+	case pageOrigin == "" && origin == "":
+		return authn.Denied("This connection sent no Origin, which passkeys need")
+	case pageOrigin == "":
+		return authn.Denied(fmt.Sprintf("Origin %.100q is not configured for passkeys", origin))
+	case origin == "":
+		return authn.Denied(fmt.Sprintf("This connection sent no Origin, and the passkey page's origin %.100q is not configured for passkeys", pageOrigin))
+	}
+	return authn.Denied(fmt.Sprintf("Neither Origin %.100q nor the passkey page's origin %.100q is configured for passkeys", origin, pageOrigin))
 }
 
 func (s *Scheme) begin(r *authn.Request, action string, local bool) (authn.Result, error) {
@@ -271,12 +291,22 @@ func (s *Scheme) begin(r *authn.Request, action string, local bool) (authn.Resul
 	}
 	if !local {
 		if page == "" {
-			return nil, authn.Denied("Frontend origin is not configured for passkeys")
+			pageOrigin := ""
+			if s.core != nil {
+				// The page's origin is not one the RP accepts either.
+				pageOrigin = oauth.Origin(r.BaseURL)
+			}
+			return nil, s.refuseOrigin(r.Origin, pageOrigin)
 		}
 		// Only the page can run the ceremony for this client.
 		return &authn.Reply{Result: map[string]any{"external": map[string]any{"url": page}}}, nil
 	}
 	c := &ceremony{challengeID: rand.Text(), action: action, rpID: s.w.Config.RPID, origin: r.Origin}
+	// The library binds a ceremony to an origin with a host only. An app's
+	// origin has none, such as android:apk-key-hash:…, so the scheme binds
+	// it after the begin, and the library compares it as a string when the
+	// ceremony finishes.
+	opaque := protocol.IsOpaqueOrigin(r.Origin)
 	var publicKey any
 	if action == "register" {
 		account := r.Account
@@ -327,26 +357,35 @@ func (s *Scheme) begin(r *authn.Request, action string, local bool) (authn.Resul
 		for _, credential := range h.Credentials {
 			exclusions = append(exclusions, credential.Descriptor())
 		}
-		creation, data, err := s.w.BeginRegistration(h,
-			webauthn.WithRegistrationOrigin(r.Origin),
+		options := []webauthn.RegistrationOption{
 			webauthn.WithResidentKeyRequirement(protocol.ResidentKeyRequirementRequired),
 			webauthn.WithAuthenticatorSelection(protocol.AuthenticatorSelection{
 				ResidentKey:      protocol.ResidentKeyRequirementRequired,
 				UserVerification: protocol.VerificationRequired,
-			}), webauthn.WithExclusions(exclusions))
+			}), webauthn.WithExclusions(exclusions),
+		}
+		if !opaque {
+			options = append(options, webauthn.WithRegistrationOrigin(r.Origin))
+		}
+		creation, data, err := s.w.BeginRegistration(h, options...)
 		if err != nil {
 			return nil, authn.Denied("Unable to begin passkey registration")
 		}
 		creation.Response.Timeout = int(ceremonyLifetime / time.Millisecond)
 		publicKey, c.data = creation.Response, data
 	} else {
-		assertion, data, err := s.w.BeginDiscoverableLogin(webauthn.WithLoginOrigin(r.Origin), webauthn.WithUserVerification(protocol.VerificationRequired))
+		options := []webauthn.LoginOption{webauthn.WithUserVerification(protocol.VerificationRequired)}
+		if !opaque {
+			options = append(options, webauthn.WithLoginOrigin(r.Origin))
+		}
+		assertion, data, err := s.w.BeginDiscoverableLogin(options...)
 		if err != nil {
 			return nil, authn.Denied("Unable to begin passkey sign-in")
 		}
 		assertion.Response.Timeout = int(ceremonyLifetime / time.Millisecond)
 		publicKey, c.data = assertion.Response, data
 	}
+	c.data.Origin = r.Origin
 	c.data.Expires = r.Now.Add(ceremonyLifetime)
 	c.expires = c.data.Expires
 	r.State.Store(c)

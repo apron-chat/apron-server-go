@@ -275,7 +275,7 @@ func (s *Scheme) pageURL(r *authn.Request, action string) (string, error) {
 			}
 		}
 	}
-	return origin + PagePath + "?" + query.Encode(), nil
+	return origin + PagePath + "?" + oauth.EncodeQuery(query), nil
 }
 
 func (s *Scheme) pageRoutes(mux *http.ServeMux) {
