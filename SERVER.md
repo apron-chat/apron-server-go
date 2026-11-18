@@ -41,7 +41,8 @@ Defaults:
 - `server` frame: `apron: 10`, `agent: "apron-go/10"`, and
   `capabilities`: `history`, `edit`, `rooms`, `reactions`, `activity`,
   `embed:upload`, `embed:append`, `embed:terminal`, `command`, `status`,
-  `ext`, `ext:editors`, `ext:remote` (see [Extension data](#extension-data)), `ext:oauth`
+  `ext`, `ext:editors` (see [Extension data](#extension-data)), `ext:remote`
+  with `--remote.self` (see [Trusted federation](#trusted-federation)), `ext:oauth`
   while `server.auth` lists `external` (see [External sign-in](#external-sign-in)),
   `ext:emoji`,
   with `server.ext.emoji.catalog_url` (see [Custom emoji](#custom-emoji);
@@ -911,15 +912,14 @@ because the grant or the mention arrived meanwhile is `denied`, to be sent
 again.
 
 The server offers [`ext:remote`](https://github.com/shazow/apron/blob/main/recipes/trusted_federation.md#draft-extension-extremote):
-`ext.remote`, where a user, message, or room comes from, is the server's.
-It is dropped from what any client writes with `me`, `message`, and
-`room_set`, so a save keeps the stored value, and only an extension's
-in-process sessions write it: its bot as written, and its
-[shadow users](#shadow-users) with `server`, and on a message `user_id`,
-set to the shadow's. A shadow's user object and the recorded `from` of its
-records (messages, reactions, memberships) carry
-`ext.remote` `{"server", "user_id"}`, so clients show where it is from in
-history too.
+`ext.remote`, where a user, message, or room comes from, is the server's,
+whether or not it advertises the capability. It is dropped from what any
+client writes with `me`, `message`, and `room_set`, so a save keeps the
+stored value. Only an extension's bot writes it, as written; a message that
+a [shadow user](#shadow-users) creates gets the shadow's
+`{"server", "user_id"}`. A shadow's user object and the recorded `from` of
+its records (messages, reactions, memberships) carry it too, so clients
+show where it is from in history.
 
 ## Commands
 
@@ -2057,113 +2057,89 @@ another client, whose consent names its host.
 `--remote.self <address>`, this server's address as other Apron servers dial
 it (such as `wss://chat.example/ws`), turns on trusted federation
 ([recipe](https://github.com/shazow/apron/blob/main/recipes/trusted_federation.md),
-with its draft `ext:remote`): rooms shared with other Apron servers. Each
-server writes the records of its own users in a shared room to the other
-server, through a link there, on demand; it never reads the other room.
-`--remote.linger` (default `30s`) is how long a sender keeps its connection
-once it has nothing to send.
+with its draft `ext:remote`): rooms that one server, the owner, hosts, and
+other servers mirror. Without it, the server advertises no `ext:remote`,
+has no `/remote` command, honors no link, and serves no wake route.
 
-Admins run these in a room, and are answered with `~private` notices:
+Admins run these, and are answered with `~private` notices:
 
-- `/remote invite <address>` makes this server's link for that server, if
-  there is none (an account `link-<host>-<port>`, with role `bot` and
-  `ext.remote` `{"server": <address>}`, that signs in only with tokens),
-  joins it to the room, also a private one, and replies with an invite,
-  `https://link.apron.chat/#server=<self>&room=<room_id>&token=<token>`,
-  carrying a new token of the link (a service token, ten years; a link
-  holds ten, and an eleventh replaces the oldest).
-- `/remote connect <invite>` does the same for the invite's server, then
-  signs in there with the invite's token and sends an `ext:remote` request
-  with this server's own invite. When it is answered `{}`, the rooms are a
-  pair.
-- `/remote unshare` takes every link out of the room (logged leaves), ends
-  its pairs, and tells each other server with an `ext:remote` request
-  without `link` (sent again until it is answered).
-- `/remote list` lists the links, the rooms they are in, and the pairs;
-  `/remote revoke <address>` revokes the tokens of that server's link,
-  which closes its connections, and ends every pair with the server.
-  Remote users and their messages stay.
+- `/remote invite <address>`, in a room of this server's, makes this
+  server's link for the mirror at that address, if there is none (an
+  account `link-<host>-<port>`, with role `bot` and `ext.remote`
+  `{"server": <address>}`, that signs in only with tokens), joins it to the
+  room and to its threads that every member sees, and replies with an
+  invite, `https://link.apron.chat/#server=<self>&room=<room_id>&token=<token>`,
+  carrying a new token of the link (a service token, ten years; a link holds
+  ten, and an eleventh replaces the oldest).
+- `/remote connect <invite>`, in any room, signs in to the invite's owner,
+  checks that the link is this server's, reads the room's record, and makes
+  a mirror room here: its title, `private` as the owner's room is, and
+  `ext.remote` `{"server", "room_id"}`, with the admin in it. It starts where
+  the owner's log is: older records are not copied.
+- `/remote unshare`, in a mirror room, makes the link leave the owner's room;
+  the mirror room keeps its copies and takes no more writes. In a room of
+  this server's, it takes every link out of it.
+- `/remote list` lists the links, their rooms, and the mirror rooms;
+  `/remote revoke <address>` revokes the tokens of that mirror's link, which
+  closes its connections. Remote users and their messages stay.
 
-The link's side (receiving):
+The owner's side:
 
-- A link's `ext:remote` request, `{"room_id", "link"}`, pairs a room that
-  the link joined (otherwise `invalid_params`) with the room of `link`,
-  whose `server` must be the link's own, compared after normalization
-  (lowercase scheme and host, port and path as written; only `ws:` and
-  `wss:`), and keeps its token, never on a user object. Anyone else is
-  `denied`. Without `link`, it ends the pair of `room_id`, and the link
-  leaves the room. A pair starts where the log was when it was made: no
-  record of the room at or below that `log_id` is sent.
-- A link's `message`, `reactions`, `me`, or `room_leave` with
-  `params.ext.remote.user_id` runs as the remote user
-  `<user_id>@<host[:port]>`, made on first use (a [shadow user](#shadow-users)
-  with `ext.remote` `{"server", "user_id"}`), on a session of its own: its
-  checks and limits are that user's. A `user_id` that is empty, longer than
-  128 bytes, a system identity's, or has whitespace is `invalid_params`.
-  The link must have joined the request's rooms: one it cannot see is
-  `invalid_params` (`Unknown room`), one it can but has not joined is
-  `denied`, both with `"data": {"ext": {"remote": "not_joined"}}`. A write joins the remote user to the room, also after it left;
-  one that another user removed is `denied` until someone adds it. A `me`
-  result's `you` is the remote user.
-- A link's `room_set`, as a remote user, creates a thread of a room the
-  link joined (`parent_room_id`), or saves such a thread's title and
-  description; anything else is refused, and a link's own `room_set` is
-  `denied`. The link acts in the threads of the rooms it joined, at any
-  depth. A thread it creates is not private, so whoever sees its parent
-  sees it, and is paired with the thread its `ext.remote.room_id` names; a
-  create sent again returns the same thread.
-- A create whose `ext.remote.message_id` is one the link created before,
-  also moved or deleted since, is a duplicate: its result is that message's
-  `message_id`, and nothing is logged. The key is the link and the remote
-  `message_id`, kept with the message.
+- A link's `message`, `reactions`, `me`, `room_leave`, or `room_set` with
+  `params.ext.remote.user_id` runs as the remote user `<user_id>@<host[:port]>`
+  of the link's server, made on first use (a [shadow user](#shadow-users)),
+  on a session of its own, with that user's checks and limits; its
+  messages' `ext.remote` is `{"server", "user_id"}`. A `user_id` that is
+  empty, longer than 128 bytes, a system identity's, or has whitespace is
+  `invalid_params`.
+- The link must have joined the request's room, or a room the room is a
+  thread of: one it cannot see is `invalid_params`, one it can but has not
+  joined `denied`, both with `"data": {"ext": {"remote": "not_joined"}}`.
+  A write joins the remote user to the room, also after it left; one that
+  another user removed is `denied` with `"data": {"ext": {"remote":
+  "removed"}}`. A `room_set` creates or saves only a thread of such a room,
+  which is not private unless it says so; a link's own `room_set` is
+  `denied`. A `me` result's `you` is the remote user.
+- The links of a room join each new thread of it that every member sees: one
+  that is not private. A thread of a private room is private unless it is
+  made with `"private": false`, so it is not mirrored.
+- A link's `push_register` with the wake scope `ext:remote`, a relay to a URL
+  on the link's own server (https, or http on a loopback host), is woken
+  with a POST of `{"push_id"?}` for every record of the link's rooms, at most
+  one every two seconds, also while it is connected.
+- Its admins and moderators delete any message, a remote user's too, which
+  every mirror then deletes.
 
-The sending side keeps, for each remote server, its place in the log (the
-last record that server accepted, from when the first pair with it was made:
-older records are not sent), the `message_id` of each copy it made, and its
-users' `user_id`s there, in the store. When a user of this server writes in
-a shared room whose link is still in it, the sender connects to the other
-server, signs in with the newest token of that server's link, and sends the
-records from its place, one at a time, each with a request `id` made from
-its `log_id`, what it is, and its params, so a resend is a duplicate:
+The mirror's side:
 
-- a new message, or one moved into the room, is a create with `ext.remote`
-  `{"user_id", "room_id", "message_id"}`; an edit saves the copy with every
-  client field, and a move between two rooms shared with the server saves
-  the copy into the other room; a deletion, or a move out of the shared
-  rooms, deletes the copy. A create of a message that is not new, such as
-  one moved in, is followed by a save, which restores a copy deleted
-  before. An edit or deletion of a message it never sent is not sent;
-- `reply_to` is the copy of this server's message, or the original of a
-  copy of that server's (`ext.remote.message_id`), or is dropped; each
-  `@id` that `mentions` lists, outside code in Markdown, is the user's ID
-  there (a local user's from the `me` result, a remote user's original);
-  others are left in the text and out of `mentions`; embeds become a line
-  of text naming them, with their link;
-- a thread a local user starts in a shared room is created there with a
-  `room_set` under the paired room, which pairs the two threads: the pair
-  starts empty, ends with its parent's, and its records are sent like any
-  shared room's; a save of its title or description is a `room_set` of the
-  thread there, as the user who saved it. Where the other server refuses
-  the thread, it stays here: one `~room` notice in it says "This thread is
-  not shared with <host>.", and nothing more of it is sent. A private thread, which only its members
-  see, such as any thread of a private room here, is not shared;
-- a user's reaction set goes to the copy, or the original of a copy of that
-  server's message; a user's first record sends `me` with their name, as
-  does each later rename, as soon as it happens; a leave of a user whose
-  records went there is a `room_leave`, but not the leaves the server makes
-  when it retires a guest.
-
-Records of remote users (of any server), links, and system identities are
-never sent. A `retry_after` waits; a refused record is logged and skipped,
-and a refusal whose `data.ext.remote` is `not_joined` ends that pair. A
-message refused because its author's remote user was removed from the room
-there (`data.ext.remote` `removed`, which this server's links are answered
-with, or a denial that says so) gets one `~private` notice to its author for
-each room: "Not sent to <host>: you were removed from this room there." A
-`denied` sign-in stops sending to that server until an admin runs `/remote connect` again. A
-failed connection is tried again after a delay that doubles up to five
-minutes. Once there is nothing to send, the connection stays open for the
-linger time, and then closes; what the link receives on it is ignored.
+- It reads each owner on one connection, as the owner's link: `history`
+  without `room_id` from its place in the owner's log, then live, and
+  writes, as the server, a copy of each record of a mirrored room, or of a
+  thread of one, which it makes the first time (not private). A copy's
+  `ext.remote` is the owner's `{"server", "room_id", "message_id"}`, and its
+  author this server's own user, for its users' remote users on the owner,
+  or a remote user of the server that the author's `ext.remote` names, or of
+  the owner. Replies, `mentions`, and `@id`s are mapped; embeds become a line
+  naming them. The owner's reactions replace the copy's; `user`
+  notifications and recorded names update remote users' names.
+- A user's `message`, `reactions`, or thread `room_set` in a mirror room or a
+  thread of one goes to the owner through the link, with the owner's IDs
+  and `ext.remote.user_id`, as request `<user_id>:<id>`, after a `me` with the
+  user's name the first time. Once the owner's result comes, after its
+  record, the user is answered with the copy's `message_id` or the thread's
+  `room_id`. The owner's error is the user's; an owner that cannot be
+  reached in ten seconds is `retry_after` 5. A rename of a user who wrote
+  there is a `me` to the owner. A message cannot move between a mirror room
+  and another room.
+- An admin's or moderator's delete of another's copy deletes it here only,
+  and the owner's later snapshots of it are not copied; nor are records of a
+  remote user that someone here removed from the room.
+- With `--remote.linger` above zero (`30s` by default), the connection
+  closes once nothing has come or been in flight for that long; the mirror
+  registers a wake push to `/remote/wake/<id>` here, and connects again when
+  it comes, when a user writes, and every five minutes. `0` stays connected.
+- When the owner says the link left a room (`room_update` `left`, or
+  `not_joined`), the mirror room stops taking writes.
 
 A test harness signs in as an admin with `--admin-token-file <path>`: at
 each start, the server makes the account `admin` if there is none (roles
@@ -2234,9 +2210,9 @@ rest of the server does:
 
 ### Shadow users
 
-An extension that copies another server's rooms into this one, as
-[`examples/federation`](examples/federation) does, speaks for that
-server's users through shadow users: `Host.Shadow(server, userID)` makes,
+An extension that copies another server's rooms into this one speaks for
+that server's users through shadow users, as trusted federation does for
+its remote users: `Host.Shadow(server, userID)` makes,
 or returns, the account `<userID>@<authority>`, where the authority is the
 host of the remote server's address, lowercased, and its port as written
 (`carol@b.example`, `carol@127.0.0.1:8787`). Such a `user_id` has an `@`,
@@ -2252,14 +2228,11 @@ extension may take it.
   the shadow's own: its messages are its own to edit and delete, and its
   reactions and profile its own. It writes messages and reactions only in
   rooms it is in (`denied` otherwise): one that left a room, or was
-  removed, stays out until a member adds it again, which `Host.Member`
-  tells an extension, so that it does not add it back by itself.
+  removed, stays out until a member adds it again.
 - The server sets its `ext.remote` `{"server", "user_id"}`, which its own
-  `me` cannot change. A message it creates carries the same, plus the
-  `room_id` and `message_id` (strings) that its request writes in
-  `ext.remote`, for the original's IDs; its saves keep them.
+  `me` cannot change, and a message it creates carries the same.
 - `Host.CreateRoom(roomID, options)` makes a public room with a chosen
-  `room_id`, such as the one an extension bridges, if there is none.
+  `room_id`, such as one an extension serves, if there is none.
 
 ### Room scopes
 

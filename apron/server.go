@@ -562,13 +562,11 @@ type Server struct {
 	messages map[string]*messageState
 	clients  map[*client]struct{}
 	// links are the links (ext:remote) by the address of the remote server
-	// each is bound to, and remoteCopies the messages links created, by
-	// their remoteKey, for duplicate creates. remoteHost owns the remote
-	// users that links write as, and remoteBots keeps their sessions.
-	links        map[string]*userState
-	remoteCopies map[string]string
-	remoteHost   *Host
-	remoteBots   sync.Map // user_id → *Bot
+	// each is bound to. remoteHost owns the remote users that links write
+	// as, and remoteBots keeps their sessions.
+	links      map[string]*userState
+	remoteHost *Host
+	remoteBots sync.Map // user_id → *Bot
 	// fed is the federation of shared rooms (Config.Remote), nil without
 	// it.
 	fed *federation
@@ -748,7 +746,6 @@ func Open(config Config) (*Server, error) {
 		recordsChanged: make(chan struct{}),
 		logger:         config.Logger,
 		links:          make(map[string]*userState),
-		remoteCopies:   make(map[string]string),
 	}
 	if s.logger == nil {
 		s.logger = slog.Default()
@@ -1223,10 +1220,10 @@ func (s *Server) serverParams(baseURL string, revealed bool) map[string]any {
 	}
 	// ext:editors (apron's EXTENSIONS.md) needs no data of its own.
 	params["capabilities"] = append(params["capabilities"].([]string), "ext:editors")
-	// ext:remote (a draft in apron's recipes/trusted_federation.md): ext.remote is the
-	// server's, set on extensions' shadow users (Host.Shadow) and what
-	// they copy.
-	params["capabilities"] = append(params["capabilities"].([]string), "ext:remote")
+	// ext:remote hook: trusted federation (federation.go).
+	if s.fed != nil {
+		params["capabilities"] = append(params["capabilities"].([]string), "ext:remote")
+	}
 	if slices.Contains(authSchemes, external.Name) {
 		// ext:oauth: external sign-in's OAuth extras (SERVER.md), the
 		// server's own authorization server metadata and token endpoint,
@@ -1535,10 +1532,11 @@ func (s *Server) processFrame(c *client, payload []byte) {
 		return
 	}
 	op := s.ops[req.method]
-	// A link's request with ext.remote.user_id runs as that remote user
-	// (ext:remote).
+	// ext:remote hook: a link's request with ext.remote.user_id runs as
+	// that remote user, and a user's request in a mirror room goes to the
+	// room's owner.
 	actAs := false
-	if user.link != nil && actAsMethods[req.method] {
+	if s.fed != nil && user.link != nil && actAsMethods[req.method] {
 		if remoteID, present := remoteActor(req.params); present {
 			actAs = true
 			op = func(s *Server, c *client, req request) (any, bool, *Error) { return s.actAs(c, req, remoteID) }
@@ -1547,6 +1545,10 @@ func (s *Server) processFrame(c *client, payload []byte) {
 			op = func(*Server, *client, request) (any, bool, *Error) {
 				return nil, false, &Error{Code: CodeDenied, Message: "A link sets only threads, as a remote user"}
 			}
+		}
+	} else if s.fed != nil && op != nil {
+		if forward := s.fed.forwardLocked(user, req); forward != nil {
+			op = forward
 		}
 	}
 	if op == nil {
@@ -1671,6 +1673,10 @@ func (s *Server) appendLocked(record *logRecord, rooms ...*roomState) {
 		s.touchRoom(r)
 	}
 	s.touchRecord(record)
+	// ext:remote hook: wake the links of the rooms.
+	if s.fed != nil {
+		s.fed.recordLocked(rooms)
+	}
 }
 
 var _ http.Handler = (*Server)(nil)

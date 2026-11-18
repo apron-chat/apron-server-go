@@ -50,6 +50,8 @@ var errRemoteDisconnected = errors.New("the connection to the remote server clos
 // frame is a frame the remote server sent: a notification (Method), or
 // the reply to a request (ID).
 type remoteFrame struct {
+	// Seq numbers the notifications in the order they arrived.
+	Seq    int64          `json:"-"`
 	Method string         `json:"method"`
 	ID     *string        `json:"id"`
 	Params jsontext.Value `json:"params"`
@@ -60,6 +62,9 @@ type remoteFrame struct {
 type remoteReply struct {
 	result jsontext.Value
 	err    *remoteError
+	// seq is the number of the last notification that came before the
+	// reply: the server sends a request's records before its result (§1).
+	seq int64
 }
 
 // remoteConn is one WebSocket connection to the remote server, as a client
@@ -77,15 +82,19 @@ type remoteConn struct {
 	mu      sync.Mutex
 	pending map[string]chan remoteReply // nil once closed
 
-	// server receives the server frames (§3.1).
+	// server receives the server frames (§3.1), and notes every other
+	// notification, in order, when it is not nil; seq counts them. A
+	// connection whose notes are not read falls behind and is closed.
 	server chan jsontext.Value
+	notes  chan remoteFrame
+	seq    int64
 	done   chan struct{}
 	// err is why the connection closed, once done is: a read error, or an
 	// error frame without id (§1.1).
 	err error
 }
 
-// Pacing of the frames a sender sends on a link's connection: a burst of
+// Pacing of the frames sent on a link's connection: a burst of
 // remoteSendBurst, then one each remoteSendEvery, pings included; and at
 // most remoteMaxInFlight requests waiting for a reply.
 const (
@@ -94,7 +103,12 @@ const (
 	remoteMaxInFlight = 4
 )
 
-func dialRemote(ctx context.Context, address string) (*remoteConn, error) {
+// remoteNoteQueue bounds the notifications waiting to be applied.
+const remoteNoteQueue = 4096
+
+// dialRemote connects to a server's address. With notes, the connection
+// queues its notifications for the caller.
+func dialRemote(ctx context.Context, address string, notes bool) (*remoteConn, error) {
 	ws, _, err := websocket.Dial(ctx, address, nil)
 	if err != nil {
 		return nil, err
@@ -104,6 +118,9 @@ func dialRemote(ctx context.Context, address string) (*remoteConn, error) {
 		ws: ws, pending: make(map[string]chan remoteReply),
 		pace: rate.NewLimiter(rate.Every(remoteSendEvery), remoteSendBurst), slots: make(chan struct{}, remoteMaxInFlight),
 		server: make(chan jsontext.Value, 4), done: make(chan struct{}),
+	}
+	if notes {
+		c.notes = make(chan remoteFrame, remoteNoteQueue)
 	}
 	go c.readLoop()
 	return c, nil
@@ -141,8 +158,17 @@ func (c *remoteConn) read() error {
 			}
 		case f.Method == "pong":
 		case f.Method != "":
-			// A link's connection receives its rooms' deliveries, which a
-			// sender ignores.
+			if c.notes != nil {
+				c.mu.Lock()
+				c.seq++
+				f.Seq = c.seq
+				c.mu.Unlock()
+				select {
+				case c.notes <- f:
+				default:
+					return errors.New("fell behind the remote server's notifications")
+				}
+			}
 		case f.ID == nil && f.Error != nil:
 			// An error that is no reply ends the connection (§1.1).
 			return f.Error
@@ -150,9 +176,10 @@ func (c *remoteConn) read() error {
 			c.mu.Lock()
 			ch := c.pending[*f.ID]
 			delete(c.pending, *f.ID)
+			seq := c.seq
 			c.mu.Unlock()
 			if ch != nil {
-				ch <- remoteReply{f.Result, f.Error}
+				ch <- remoteReply{f.Result, f.Error, seq}
 			}
 		}
 	}
@@ -162,34 +189,41 @@ func (c *remoteConn) read() error {
 // identifies the operation (§1.2): a retry of the same operation sends the
 // same id and params.
 func (c *remoteConn) call(ctx context.Context, id, method string, params any) (jsontext.Value, error) {
+	result, _, err := c.callSeq(ctx, id, method, params)
+	return result, err
+}
+
+// callSeq is call, which also returns the number of the last notification
+// that came before the reply.
+func (c *remoteConn) callSeq(ctx context.Context, id, method string, params any) (jsontext.Value, int64, error) {
 	request := map[string]any{"method": method, "id": id}
 	if params != nil {
 		request["params"] = params
 	}
 	payload, err := json.Marshal(request)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	select {
 	case c.slots <- struct{}{}:
 		defer func() { <-c.slots }()
 	case <-c.done:
-		return nil, errors.Join(errRemoteDisconnected, c.err)
+		return nil, 0, errors.Join(errRemoteDisconnected, c.err)
 	case <-ctx.Done():
-		return nil, ctx.Err()
+		return nil, 0, ctx.Err()
 	}
 	if err := c.pace.Wait(ctx); err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	ch := make(chan remoteReply, 1)
 	c.mu.Lock()
 	if c.pending == nil {
 		c.mu.Unlock()
-		return nil, errRemoteDisconnected
+		return nil, 0, errRemoteDisconnected
 	}
 	if c.pending[id] != nil {
 		c.mu.Unlock()
-		return nil, fmt.Errorf("request %s is already waiting", id)
+		return nil, 0, fmt.Errorf("request %s is already waiting", id)
 	}
 	c.pending[id] = ch
 	c.mu.Unlock()
@@ -199,25 +233,25 @@ func (c *remoteConn) call(ctx context.Context, id, method string, params any) (j
 			delete(c.pending, id)
 		}
 		c.mu.Unlock()
-		return nil, errors.Join(errRemoteDisconnected, err)
+		return nil, 0, errors.Join(errRemoteDisconnected, err)
 	}
 	select {
 	case r, ok := <-ch:
 		switch {
 		case !ok:
 			<-c.done
-			return nil, errors.Join(errRemoteDisconnected, c.err)
+			return nil, 0, errors.Join(errRemoteDisconnected, c.err)
 		case r.err != nil:
-			return nil, r.err
+			return nil, r.seq, r.err
 		}
-		return r.result, nil
+		return r.result, r.seq, nil
 	case <-ctx.Done():
 		c.mu.Lock()
 		if c.pending != nil {
 			delete(c.pending, id)
 		}
 		c.mu.Unlock()
-		return nil, ctx.Err()
+		return nil, 0, ctx.Err()
 	}
 }
 

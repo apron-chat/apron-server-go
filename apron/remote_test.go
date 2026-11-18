@@ -159,7 +159,8 @@ func TestShadowUsers(t *testing.T) {
 	if from["user_id"] != carol || from["name"] != "Carol" || !reflect.DeepEqual(remoteOfJSON(t, from), map[string]any{"server": testRemote, "user_id": "carol"}) {
 		t.Fatalf("from = %#v", from)
 	}
-	wantRemote := map[string]any{"server": testRemote, "user_id": "carol", "room_id": "r1", "message_id": "1724803599120"}
+	// The server sets it: what the session wrote is ignored.
+	wantRemote := map[string]any{"server": testRemote, "user_id": "carol"}
 	if !reflect.DeepEqual(remoteOfJSON(t, snapshot), wantRemote) {
 		t.Fatalf("message ext = %#v", snapshot["ext"])
 	}
@@ -248,8 +249,8 @@ func TestShadowUsers(t *testing.T) {
 	// A shadow that left a room writes there no more, until it is added
 	// again.
 	callAs(t, shadow, "room_leave", map[string]any{"room_id": "ops"})
-	if joined, left := host.Member("ops", carol); joined || !left {
-		t.Fatalf("Member after the leave = %v, %v", joined, left)
+	if member := app.rooms["ops"].members[carol] != nil; member {
+		t.Fatal("the shadow is still in the room")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -262,8 +263,8 @@ func TestShadowUsers(t *testing.T) {
 		}
 	}
 	callAs(t, bot, "room_join", map[string]any{"room_id": "ops", "user_id": carol})
-	if joined, left := host.Member("ops", carol); !joined || left {
-		t.Fatalf("Member after the add = %v, %v", joined, left)
+	if member := app.rooms["ops"].members[carol] != nil; !member {
+		t.Fatal("the shadow was not added")
 	}
 	callAs(t, shadow, "message", map[string]any{"room_id": "ops", "body": map[string]any{"text": "back"}})
 }

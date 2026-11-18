@@ -2,19 +2,15 @@ package apron
 
 import (
 	"context"
-	"fmt"
-	"slices"
-	"sync"
 	"encoding/json/jsontext"
 	"encoding/json/v2"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"regexp"
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/coder/websocket"
 )
 
 // federated is a test server with trusted federation, and an admin bot
@@ -27,7 +23,7 @@ type federated struct {
 	notices chan string
 }
 
-func startFederated(t *testing.T) *federated {
+func startFederated(t *testing.T, linger time.Duration) *federated {
 	t.Helper()
 	fed := &federated{notices: make(chan string, 64)}
 	var handler http.Handler
@@ -39,7 +35,7 @@ func startFederated(t *testing.T) *federated {
 		return err
 	}})
 	config.Roles = map[string][]string{RoleAdmin: {"admin"}}
-	config.Remote = RemoteConfig{Self: fed.self, Linger: 300 * time.Millisecond}
+	config.Remote = RemoteConfig{Self: fed.self, Linger: linger}
 	app, err := Open(config)
 	if err != nil {
 		t.Fatal(err)
@@ -120,131 +116,297 @@ func (fed *federated) waitCopy(t *testing.T, roomID, remoteID string) map[string
 	return nil
 }
 
-var inviteInNotice = regexp.MustCompile("`(https://link\\.apron\\.chat/#[^`]+)`")
+var (
+	inviteInNotice = regexp.MustCompile("`(https://link\\.apron\\.chat/#[^`]+)`")
+	mirrorInNotice = regexp.MustCompile("in room `([^`]+)`")
+)
 
-func TestFederationSharesRooms(t *testing.T) {
-	a, b := startFederated(t), startFederated(t)
-	roomA := a.call(t, "room_set", map[string]any{"title": "Ops"})["room_id"].(string)
-	roomB := b.call(t, "room_set", map[string]any{"title": "Ops B", "private": true})["room_id"].(string)
+// eventually retries check until it returns nil, or fails the test.
+func eventually(t *testing.T, what string, check func() error) {
+	t.Helper()
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		err := check()
+		if err == nil {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%s: %v", what, err)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
 
-	notice := a.command(t, roomA, "/remote invite "+b.self)
-	invite := inviteInNotice.FindStringSubmatch(notice)
+// snapshotOf is a message's current snapshot, decoded as clients see it.
+func snapshotOf(app *Server, messageID string) map[string]any {
+	app.mu.RLock()
+	defer app.mu.RUnlock()
+	m := app.messages[messageID]
+	if m == nil || len(m.records) == 0 {
+		return nil
+	}
+	var decoded map[string]any
+	_ = json.Unmarshal(encodeJSON(m.snapshot()), &decoded)
+	return decoded
+}
+
+// copyIn finds the copy in a room of an owner's message, by its ext.remote.
+func copyIn(app *Server, roomID, ownerID string) map[string]any {
+	app.mu.RLock()
+	var ids []string
+	for id, m := range app.messages {
+		if m.roomID == roomID {
+			ids = append(ids, id)
+		}
+	}
+	app.mu.RUnlock()
+	for _, id := range ids {
+		if m := snapshotOf(app, id); remoteExtOf(m)["message_id"] == ownerID {
+			return m
+		}
+	}
+	return nil
+}
+
+func remoteExtOf(object map[string]any) map[string]any {
+	ext, _ := object["ext"].(map[string]any)
+	remote, _ := ext["remote"].(map[string]any)
+	return remote
+}
+
+func authorityOf(address string) string {
+	authority, _ := RemoteAuthority(address)
+	return authority
+}
+
+// TestFederationOff: without Config.Remote nothing of it shows.
+func TestFederationOff(t *testing.T) {
+	_, httpServer := newTestServer(t, DefaultConfig())
+	c, frame := dialRaw(t, httpServer)
+	for _, capability := range frame["params"].(map[string]any)["capabilities"].([]any) {
+		if capability == "ext:remote" {
+			t.Fatal("ext:remote advertised")
+		}
+	}
+	guestAuth(t, c)
+	c.drain(t)
+	c.expectError(t, "command", "c1", map[string]any{"room_id": "general", "body": map[string]any{"text": "/remote list"}}, CodeInvalidParams)
+	_, posted := c.request(t, "message", "m1", map[string]any{"body": map[string]any{"text": "x"}, "ext": map[string]any{"remote": map[string]any{"user_id": "zed", "server": "ws://b.test/ws"}}})
+	_ = posted
+	for _, frame := range c.drain(t) {
+		if params, _ := frame["params"].(map[string]any); frame["method"] == "message" && params["ext"] != nil {
+			t.Fatalf("ext.remote kept: %#v", params)
+		}
+	}
+}
+
+// mirrored starts an owner, A, and a mirror, B, of a private room of A's.
+func mirrored(t *testing.T, linger time.Duration) (a, b *federated, ownerRoom, mirrorRoom string) {
+	t.Helper()
+	a, b = startFederated(t, linger), startFederated(t, linger)
+	ownerRoom = a.call(t, "room_set", map[string]any{"title": "Ops", "private": true})["room_id"].(string)
+	invite := inviteInNotice.FindStringSubmatch(a.command(t, ownerRoom, "/remote invite "+b.self))
 	if invite == nil {
-		t.Fatalf("invite notice = %q", notice)
+		t.Fatal("no invite")
 	}
-	if notice := b.command(t, roomB, "/remote connect "+invite[1]); !strings.HasPrefix(notice, "Connected") {
-		t.Fatalf("connect notice = %q", notice)
+	notice := b.command(t, "general", "/remote connect "+invite[1])
+	found := mirrorInNotice.FindStringSubmatch(notice)
+	if found == nil {
+		t.Fatalf("connect = %q", notice)
 	}
-	authorityA := strings.TrimSuffix(strings.TrimPrefix(a.self, "ws://"), "/ws")
-	authorityB := strings.TrimSuffix(strings.TrimPrefix(b.self, "ws://"), "/ws")
+	mirrorRoom = found[1]
+	b.app.mu.RLock()
+	r := b.app.rooms[mirrorRoom]
+	b.app.mu.RUnlock()
+	if r == nil || !r.private || r.title() != "Ops" || remoteExtOf(snapshotRoom(b.app, mirrorRoom))["room_id"] != ownerRoom {
+		t.Fatalf("mirror room = %#v", r)
+	}
+	return a, b, ownerRoom, mirrorRoom
+}
+
+func snapshotRoom(app *Server, roomID string) map[string]any {
+	app.mu.RLock()
+	defer app.mu.RUnlock()
+	var decoded map[string]any
+	_ = json.Unmarshal(encodeJSON(app.rooms[roomID].record), &decoded)
+	return decoded
+}
+
+func TestMirrorRoom(t *testing.T) {
+	a, b, ownerRoom, mirrorRoom := mirrored(t, 0)
+	authorityA, authorityB := authorityOf(a.self), authorityOf(b.self)
 
 	alice := dialTestClient(t, a.http)
-	joinRoom(t, alice, roomA)
-	hello, _ := save(t, alice, "m1", map[string]any{"room_id": roomA, "body": map[string]any{"text": "hello"}})
-	copyOnB := b.waitCopy(t, roomB, hello)
-	if from := copyOnB["from"].(map[string]any); from["user_id"] != alice.userID+"@"+authorityA {
-		t.Fatalf("copy on B from %#v", from)
-	}
-	// B's user answers the copy, mentioning Alice's remote user there.
-	bob := b.call(t, "message", map[string]any{"room_id": roomB, "reply_to": map[string]any{"message_id": copyOnB["message_id"]},
-		"body": map[string]any{"text": "@" + alice.userID + "@" + authorityA + " hi", "mentions": []any{alice.userID + "@" + authorityA}}})
-	copyOnA := a.waitCopy(t, roomA, bob["message_id"].(string))
-	if wstestText(copyOnA) != "@"+alice.userID+" hi" || replyOfJSON(copyOnA) != hello || copyOnA["from"].(map[string]any)["user_id"] != "admin@"+authorityB {
-		t.Fatalf("copy on A = %#v", copyOnA)
-	}
-	// A's edit reaches B's copy; the duplicate create of a resend does not
-	// make another.
-	alice.request(t, "message", "m2", map[string]any{"room_id": roomA, "message_id": hello, "body": map[string]any{"text": "hello (edited)"}})
-	deadline := time.Now().Add(20 * time.Second)
-	for wstestText(lastSnapshot(t, b.app, copyOnB["message_id"].(string))) != "hello (edited)" {
-		if time.Now().After(deadline) {
-			t.Fatal("the edit did not reach B")
+	a.call(t, "room_join", map[string]any{"room_id": ownerRoom, "user_id": alice.userID})
+	bob := dialTestClient(t, b.http)
+	b.call(t, "room_join", map[string]any{"room_id": mirrorRoom, "user_id": bob.userID})
+	alice.drain(t)
+	bob.drain(t)
+
+	// The owner's message is copied into the mirror room.
+	_, posted := alice.request(t, "message", "m1", map[string]any{"room_id": ownerRoom, "body": map[string]any{"text": "hello"}})
+	hello := posted["message_id"].(string)
+	var helloCopy map[string]any
+	eventually(t, "the copy", func() error {
+		if helloCopy = copyIn(b.app, mirrorRoom, hello); helloCopy == nil {
+			return fmt.Errorf("none")
 		}
-		time.Sleep(20 * time.Millisecond)
+		return nil
+	})
+	if from := helloCopy["from"].(map[string]any); from["user_id"] != alice.userID+"@"+authorityA || remoteExtOf(helloCopy)["server"] != a.self {
+		t.Fatalf("copy = %#v", helloCopy)
 	}
-	// A rename reaches B without a record after it.
-	alice.request(t, "me", "n1", map[string]any{"name": "Alice R"})
-	for {
+
+	// A mirror user's reply goes to the owner as its remote user, and is
+	// answered with its copy here.
+	mention := alice.userID + "@" + authorityA
+	_, replied := bob.request(t, "message", "m2", map[string]any{"room_id": mirrorRoom, "reply_to": map[string]any{"message_id": helloCopy["message_id"]},
+		"body": map[string]any{"text": "@" + mention + " hi", "mentions": []any{mention}}})
+	replyHere := replied["message_id"].(string)
+	mine := snapshotOf(b.app, replyHere)
+	if mine["from"].(map[string]any)["user_id"] != bob.userID || mine["reply_to"].(map[string]any)["message_id"] != helloCopy["message_id"] {
+		t.Fatalf("the copy of bob's reply = %#v", mine)
+	}
+	ownerReply := remoteExtOf(mine)["message_id"].(string)
+	onA := snapshotOf(a.app, ownerReply)
+	if onA["from"].(map[string]any)["user_id"] != bob.userID+"@"+authorityB || onA["reply_to"].(map[string]any)["message_id"] != hello ||
+		wstestText(onA) != "@"+alice.userID+" hi" {
+		t.Fatalf("bob's reply on the owner = %#v", onA)
+	}
+
+	// The author edits on each side; a reaction goes to the owner.
+	bob.request(t, "message", "m3", map[string]any{"room_id": mirrorRoom, "message_id": replyHere, "body": map[string]any{"text": "hi (edited)"}})
+	if wstestText(snapshotOf(a.app, ownerReply)) != "hi (edited)" || wstestText(snapshotOf(b.app, replyHere)) != "hi (edited)" {
+		t.Fatal("bob's edit")
+	}
+	alice.request(t, "message", "m4", map[string]any{"room_id": ownerRoom, "message_id": hello, "body": map[string]any{"text": "hello (edited)"}})
+	eventually(t, "alice's edit", func() error {
+		if text := wstestText(snapshotOf(b.app, helloCopy["message_id"].(string))); text != "hello (edited)" {
+			return fmt.Errorf("%q", text)
+		}
+		return nil
+	})
+	bob.request(t, "reactions", "r1", map[string]any{"message_id": helloCopy["message_id"], "emojis": []any{"👍"}})
+	a.app.mu.RLock()
+	set := a.app.messages[hello].reactions[bob.userID+"@"+authorityB].emojis
+	a.app.mu.RUnlock()
+	b.app.mu.RLock()
+	mirrorSet := b.app.messages[helloCopy["message_id"].(string)].reactions[bob.userID].emojis
+	b.app.mu.RUnlock()
+	if len(set) != 1 || len(mirrorSet) != 1 {
+		t.Fatalf("reactions: owner %v, mirror %v", set, mirrorSet)
+	}
+
+	// Threads, both ways.
+	// A thread of a private room here is private unless it says otherwise,
+	// and only a thread every member sees is mirrored.
+	_, made := alice.request(t, "room_set", "t1", map[string]any{"parent_room_id": ownerRoom, "title": "Deploy", "private": false})
+	ownerThread := made["room_id"].(string)
+	eventually(t, "the thread", func() error {
 		b.app.mu.RLock()
-		name := b.app.users[alice.userID+"@"+authorityA].name
-		b.app.mu.RUnlock()
-		if name == "Alice R" {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("the rename did not reach B: %q", name)
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	// A thread of the shared room is shared with it: created there through
-	// the link, then its messages and title both ways.
-	_, created := alice.request(t, "room_set", "t1", map[string]any{"parent_room_id": roomA, "title": "Deploy"})
-	threadA := created["room_id"].(string)
-	var threadB string
-	for threadB == "" {
-		b.app.mu.RLock()
-		for id, r := range b.app.rooms {
-			if r.parent != nil && r.parent.id == roomB && strings.Contains(string(encodeJSON(r.record["ext"])), threadA) {
-				threadB = id
+		defer b.app.mu.RUnlock()
+		for _, r := range b.app.rooms {
+			if r.parent != nil && r.parent.id == mirrorRoom && r.title() == "Deploy" {
+				return nil
 			}
 		}
-		b.app.mu.RUnlock()
-		if time.Now().After(deadline) {
-			t.Fatal("the thread did not reach B")
+		return fmt.Errorf("none")
+	})
+	_, madeHere := bob.request(t, "room_set", "t2", map[string]any{"parent_room_id": mirrorRoom, "title": "From B"})
+	threadHere := madeHere["room_id"].(string)
+	b.app.mu.RLock()
+	parent := b.app.rooms[threadHere].parent.id
+	b.app.mu.RUnlock()
+	if parent != mirrorRoom {
+		t.Fatalf("bob's thread is under %s", parent)
+	}
+	a.app.mu.RLock()
+	threadsOnA := len(a.app.rooms[ownerRoom].children)
+	a.app.mu.RUnlock()
+	if threadsOnA != 2 {
+		t.Fatalf("threads on the owner: %d", threadsOnA)
+	}
+	_ = ownerThread
+
+	// The owner's admin deletes bob's message: the copy is deleted too.
+	a.call(t, "message", map[string]any{"room_id": ownerRoom, "message_id": ownerReply, "deleted": true})
+	eventually(t, "the delete", func() error {
+		if snapshotOf(b.app, replyHere)["deleted"] != true {
+			return fmt.Errorf("not deleted")
 		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	inThread, _ := save(t, alice, "t2", map[string]any{"room_id": threadA, "body": map[string]any{"text": "in the thread"}})
-	if copied := b.waitCopy(t, threadB, inThread); copied["room_id"] != threadB {
-		t.Fatalf("thread message on B = %#v", copied)
-	}
-	fromB := b.call(t, "message", map[string]any{"room_id": threadB, "body": map[string]any{"text": "thread reply from B"}})
-	a.waitCopy(t, threadA, fromB["message_id"].(string))
-	alice.request(t, "room_set", "t3", map[string]any{"room_id": threadA, "title": "Deploy (renamed)"})
-	for {
+		return nil
+	})
+	// The mirror's admin hides a copy, which an owner's edit leaves hidden.
+	b.call(t, "message", map[string]any{"room_id": mirrorRoom, "message_id": helloCopy["message_id"], "deleted": true})
+	alice.request(t, "message", "m5", map[string]any{"room_id": ownerRoom, "message_id": hello, "body": map[string]any{"text": "hello again"}})
+	alice.request(t, "message", "m6", map[string]any{"room_id": ownerRoom, "body": map[string]any{"text": "later"}})
+	eventually(t, "the later message", func() error {
 		b.app.mu.RLock()
-		title := b.app.rooms[threadB].title()
-		b.app.mu.RUnlock()
-		if title == "Deploy (renamed)" {
-			break
+		defer b.app.mu.RUnlock()
+		for _, m := range b.app.messages {
+			if m.roomID == mirrorRoom && strings.Contains(string(encodeJSON(m.snapshot())), "later") {
+				return nil
+			}
 		}
-		if time.Now().After(deadline) {
-			t.Fatalf("the title did not reach B: %q", title)
-		}
-		time.Sleep(20 * time.Millisecond)
+		return fmt.Errorf("none")
+	})
+	if snapshotOf(b.app, helloCopy["message_id"].(string))["deleted"] != true {
+		t.Fatal("the hidden copy came back")
 	}
-	// B unshares: A hears of it, ends its pair, and its link for B leaves.
-	if notice := b.command(t, roomB, "/remote unshare"); !strings.Contains(notice, "no longer shared") {
+
+	// A rename reaches the owner without a message.
+	bob.request(t, "me", "n1", map[string]any{"name": "Robert"})
+	eventually(t, "the rename", func() error {
+		a.app.mu.RLock()
+		defer a.app.mu.RUnlock()
+		if name := a.app.users[bob.userID+"@"+authorityB].name; name != "Robert" {
+			return fmt.Errorf("%q", name)
+		}
+		return nil
+	})
+
+	// Unshared from the mirror: the link leaves, and writes are refused.
+	if notice := b.command(t, mirrorRoom, "/remote unshare"); !strings.Contains(notice, "no longer mirrored") {
 		t.Fatalf("unshare = %q", notice)
 	}
-	for {
-		joined, _ := a.remoteHostMember(roomA, b.self)
-		if list := a.command(t, roomA, "/remote list"); !joined && !strings.Contains(list, roomA+" with room") && !strings.Contains(list, threadA+" with room") {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("A did not end the pair")
-		}
-		time.Sleep(50 * time.Millisecond)
+	bob.expectError(t, "message", "m7", map[string]any{"room_id": mirrorRoom, "body": map[string]any{"text": "after"}}, CodeDenied)
+	a.app.mu.RLock()
+	linked := false
+	for _, link := range a.app.links {
+		linked = linked || a.app.rooms[ownerRoom].members[link.id] != nil
+	}
+	a.app.mu.RUnlock()
+	if linked {
+		t.Fatal("the link stayed in the owner's room")
 	}
 }
 
-// remoteHostMember reports whether the link for a server is in a room.
-func (fed *federated) remoteHostMember(roomID, server string) (bool, bool) {
-	fed.app.mu.RLock()
-	link := fed.app.links[server]
-	fed.app.mu.RUnlock()
-	return fed.admin.host.Member(roomID, link.id)
+// A mirror with a linger closes its connection, and the owner's wake push
+// brings it back.
+func TestMirrorWakes(t *testing.T) {
+	a, b, ownerRoom, mirrorRoom := mirrored(t, 200*time.Millisecond)
+	time.Sleep(time.Second)
+	b.app.fed.mu.Lock()
+	ms := b.app.fed.mirrors[a.self]
+	b.app.fed.mu.Unlock()
+	ms.mu.Lock()
+	connected := ms.conn != nil
+	ms.mu.Unlock()
+	if connected {
+		t.Fatal("the mirror stayed connected")
+	}
+	posted := a.call(t, "message", map[string]any{"room_id": ownerRoom, "body": map[string]any{"text": "wake up"}})
+	eventually(t, "the copy after the wake", func() error {
+		if copyIn(b.app, mirrorRoom, posted["message_id"].(string)) == nil {
+			return fmt.Errorf("none")
+		}
+		return nil
+	})
 }
 
-func replyOfJSON(m map[string]any) string {
-	ref, _ := m["reply_to"].(map[string]any)
-	id, _ := ref["message_id"].(string)
-	return id
-}
-
+// The owner's side: what a link may do as remote users.
 func TestLinkRequests(t *testing.T) {
-	a := startFederated(t)
+	a := startFederated(t, 0)
 	const other = "ws://other.test:9000/ws"
 	room := a.call(t, "room_set", map[string]any{"title": "Ops"})["room_id"].(string)
 	elsewhere := a.call(t, "room_set", map[string]any{"title": "Elsewhere"})["room_id"].(string)
@@ -253,11 +415,9 @@ func TestLinkRequests(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-
-	// The link signs in with the token, and is told where it is bound.
 	link, _ := dialRaw(t, a.http)
 	you := link.result(t, "auth", "a1", map[string]any{"scheme": "token", "token": token})["you"].(map[string]any)
-	if !reflectEqual(remoteOfJSON(t, you), map[string]any{"server": other}) || you["roles"].([]any)[0] != "bot" {
+	if remoteExtOf(you)["server"] != other || you["roles"].([]any)[0] != "bot" {
 		t.Fatalf("link you = %#v", you)
 	}
 	link.drain(t)
@@ -269,277 +429,70 @@ func TestLinkRequests(t *testing.T) {
 			}
 		}
 	}
-	// A create as a remote user, and its duplicate.
-	create := map[string]any{"room_id": room, "body": map[string]any{"text": "from far"}, "ext": map[string]any{"remote": map[string]any{"user_id": "zed", "room_id": "r9", "message_id": "1700000000001"}}}
-	first := act("c1", "message", create)
-	second := act("c2", "message", create)
-	firstID := first["result"].(map[string]any)["message_id"]
-	if second["result"].(map[string]any)["message_id"] != firstID {
-		t.Fatalf("duplicate create = %#v, first %#v", second, first)
+	reason := func(frame map[string]any) any {
+		failure, _ := frame["error"].(map[string]any)
+		data, _ := failure["data"].(map[string]any)
+		ext, _ := data["ext"].(map[string]any)
+		return ext["remote"]
 	}
-	snapshot := lastSnapshot(t, a.app, firstID.(string))
-	if snapshot["from"].(map[string]any)["user_id"] != "zed@other.test:9000" || !reflectEqual(remoteOfJSON(t, snapshot), map[string]any{"server": other, "user_id": "zed", "room_id": "r9", "message_id": "1700000000001"}) {
-		t.Fatalf("remote user's message = %#v", snapshot)
+	asZed := map[string]any{"remote": map[string]any{"user_id": "zed"}}
+	first := act("c1", "message", map[string]any{"room_id": room, "body": map[string]any{"text": "from far"}, "ext": map[string]any{"remote": map[string]any{"user_id": "zed", "room_id": "r9", "message_id": "1"}}})
+	id := first["result"].(map[string]any)["message_id"].(string)
+	if m := snapshotOf(a.app, id); m["from"].(map[string]any)["user_id"] != "zed@other.test:9000" || len(remoteExtOf(m)) != 2 || remoteExtOf(m)["user_id"] != "zed" {
+		t.Fatalf("remote user's message = %#v", m)
 	}
-	// me answers with the remote user.
-	if you := act("me1", "me", map[string]any{"name": "Zed", "ext": map[string]any{"remote": map[string]any{"user_id": "zed"}}})["result"].(map[string]any)["you"].(map[string]any); you["user_id"] != "zed@other.test:9000" || you["name"] != "Zed" {
+	if you := act("me1", "me", map[string]any{"name": "Zed", "ext": asZed})["result"].(map[string]any)["you"].(map[string]any); you["user_id"] != "zed@other.test:9000" || you["name"] != "Zed" {
 		t.Fatalf("me as zed = %#v", you)
 	}
-	// Not in a room the link has not joined, which its error says.
-	if frame := act("c3", "message", map[string]any{"room_id": elsewhere, "body": map[string]any{"text": "x"}, "ext": map[string]any{"remote": map[string]any{"user_id": "zed"}}}); frame["error"].(map[string]any)["code"] != float64(CodeDenied) ||
-		!reflectEqual(frame["error"].(map[string]any)["data"], map[string]any{"ext": map[string]any{"remote": "not_joined"}}) {
+	if frame := act("c2", "message", map[string]any{"room_id": elsewhere, "body": map[string]any{"text": "x"}, "ext": asZed}); reason(frame) != "not_joined" {
 		t.Fatalf("write elsewhere = %#v", frame)
 	}
-	// A link sets only threads of rooms it joined, as a remote user.
+	// A remote user that left is joined again; one that was removed is not.
+	act("l1", "room_leave", map[string]any{"room_id": room, "ext": asZed})
+	if frame := act("c3", "message", map[string]any{"room_id": room, "body": map[string]any{"text": "back"}, "ext": asZed}); frame["result"] == nil {
+		t.Fatalf("write after leaving = %#v", frame)
+	}
+	a.call(t, "room_leave", map[string]any{"room_id": room, "user_id": "zed@other.test:9000"})
+	if frame := act("c4", "message", map[string]any{"room_id": room, "body": map[string]any{"text": "again"}, "ext": asZed}); reason(frame) != "removed" {
+		t.Fatalf("write after removal = %#v", frame)
+	}
+	// A link sets only threads of its rooms, as a remote user; the thread is
+	// one every member of the room sees, which the link joins.
 	for id, params := range map[string]map[string]any{
-		"rs1": {"title": "mine"},
-		"rs2": {"title": "top", "ext": map[string]any{"remote": map[string]any{"user_id": "zed"}}},
-		"rs3": {"room_id": room, "title": "renamed", "ext": map[string]any{"remote": map[string]any{"user_id": "zed"}}},
-		"rs4": {"parent_room_id": elsewhere, "title": "t", "ext": map[string]any{"remote": map[string]any{"user_id": "zed"}}},
+		"s1": {"title": "mine"},
+		"s2": {"title": "top", "ext": map[string]any{"remote": map[string]any{"user_id": "yan"}}},
+		"s3": {"room_id": room, "title": "renamed", "ext": map[string]any{"remote": map[string]any{"user_id": "yan"}}},
+		"s4": {"parent_room_id": elsewhere, "title": "t", "ext": map[string]any{"remote": map[string]any{"user_id": "yan"}}},
 	} {
 		if frame := act(id, "room_set", params); frame["error"] == nil {
 			t.Fatalf("%s: %#v", id, frame)
 		}
 	}
-	thread := map[string]any{"parent_room_id": room, "title": "far thread", "ext": map[string]any{"remote": map[string]any{"user_id": "zed", "room_id": "rt1"}}}
-	made := act("rs5", "room_set", thread)["result"].(map[string]any)["room_id"]
-	if again := act("rs6", "room_set", thread)["result"].(map[string]any)["room_id"]; again != made {
-		t.Fatalf("duplicate thread = %v, %v", again, made)
+	made := act("s5", "room_set", map[string]any{"parent_room_id": room, "title": "far thread", "ext": map[string]any{"remote": map[string]any{"user_id": "yan"}}})
+	thread := made["result"].(map[string]any)["room_id"].(string)
+	a.app.mu.RLock()
+	r := a.app.rooms[thread]
+	linked := false
+	for _, l := range a.app.links {
+		linked = linked || r.members[l.id] != nil
 	}
-	if frame := act("rs7", "message", map[string]any{"room_id": made, "body": map[string]any{"text": "in far thread"}, "ext": map[string]any{"remote": map[string]any{"user_id": "zed"}}}); frame["result"] == nil {
-		t.Fatalf("write in a thread = %#v", frame)
+	a.app.mu.RUnlock()
+	if r.private || !linked {
+		t.Fatalf("the thread: private %v, link in it %v", r.private, linked)
 	}
-	// The key of a copy outlives its deletion: a create sent again returns
-	// it, and a save restores it.
-	act("d1", "message", map[string]any{"room_id": room, "message_id": firstID, "deleted": true, "ext": map[string]any{"remote": map[string]any{"user_id": "zed"}}})
-	if again := act("c6", "message", create); again["result"].(map[string]any)["message_id"] != firstID {
-		t.Fatalf("create after the delete = %#v", again)
-	}
-	act("s1", "message", map[string]any{"room_id": room, "message_id": firstID, "body": map[string]any{"text": "from far"}, "ext": map[string]any{"remote": map[string]any{"user_id": "zed", "room_id": "r9", "message_id": "1700000000001"}}})
-	if restored := lastSnapshot(t, a.app, firstID.(string)); restored["deleted"] == true || wstestText(restored) != "from far" || remoteOfJSON(t, restored)["message_id"] != "1700000000001" {
-		t.Fatalf("restored = %#v", restored)
-	}
-	// A remote user that left is joined again; one that was removed is not.
-	act("l1", "room_leave", map[string]any{"room_id": room, "ext": map[string]any{"remote": map[string]any{"user_id": "zed"}}})
-	if frame := act("c4", "message", map[string]any{"room_id": room, "body": map[string]any{"text": "back"}, "ext": map[string]any{"remote": map[string]any{"user_id": "zed"}}}); frame["result"] == nil {
-		t.Fatalf("write after leaving = %#v", frame)
-	}
-	a.call(t, "room_leave", map[string]any{"room_id": room, "user_id": "zed@other.test:9000"})
-	if frame := act("c5", "message", map[string]any{"room_id": room, "body": map[string]any{"text": "again"}, "ext": map[string]any{"remote": map[string]any{"user_id": "zed"}}}); frame["error"] == nil || frame["error"].(map[string]any)["code"] != float64(CodeDenied) ||
-		!reflectEqual(frame["error"].(map[string]any)["data"], map[string]any{"ext": map[string]any{"remote": "removed"}}) {
-		t.Fatalf("write after removal = %#v", frame)
-	}
-	// ext:remote pairs only a room the link joined, with a link of its own
-	// server; anyone else is denied.
-	for id, tc := range map[string]struct {
-		params map[string]any
-		code   int
-	}{
-		"p1": {map[string]any{"room_id": elsewhere, "link": "https://link.apron.chat/#server=" + other + "&room=x&token=t"}, CodeInvalidParams},
-		"p2": {map[string]any{"room_id": room, "link": "https://link.apron.chat/#server=ws://evil.test/ws&room=x&token=t"}, CodeInvalidParams},
-		"p3": {map[string]any{"room_id": room, "link": "not a link"}, CodeInvalidParams},
-	} {
-		if frame := act(id, "ext:remote", tc.params); frame["error"] == nil || frame["error"].(map[string]any)["code"] != float64(tc.code) {
+	// A wake push is a relay on the link's own server.
+	for id, url := range map[string]string{"w1": "https://evil.test/wake", "w2": "http://other.test:9000/wake"} {
+		if frame := act(id, "push_register", map[string]any{"kind": "relay", "url": url, "wake": []any{"ext:remote"}}); frame["error"] == nil {
 			t.Fatalf("%s: %#v", id, frame)
 		}
 	}
-	if frame := act("p4", "ext:remote", map[string]any{"room_id": room, "link": "https://link.apron.chat/#server=" + strings.ToUpper("ws://OTHER.test:9000") + "/ws&room=x&token=t"}); frame["result"] == nil {
-		t.Fatalf("pairing = %#v", frame)
+	if frame := act("w3", "push_register", map[string]any{"kind": "relay", "url": "https://other.test:9000/remote/wake/x", "token": "t", "wake": []any{"ext:remote"}}); frame["result"] == nil {
+		t.Fatalf("wake push = %#v", frame)
 	}
-	if notice := a.command(t, room, "/remote list"); !strings.Contains(notice, room+" with room x of "+other) {
-		t.Fatalf("list = %q", notice)
-	}
-	// Without link, the request ends the pair, and the link leaves.
-	if frame := act("p5", "ext:remote", map[string]any{"room_id": room}); frame["result"] == nil {
-		t.Fatalf("unpairing = %#v", frame)
-	}
-	if notice := a.command(t, room, "/remote list"); strings.Contains(notice, room+" with room") {
-		t.Fatalf("list after unpairing = %q", notice)
-	}
-	if joined, _ := a.remoteHostMember(room, other); joined {
-		t.Fatal("the link stayed in the room")
-	}
+	// Anyone else cannot act as a remote user.
 	guest := dialTestClient(t, a.http)
-	guest.expectError(t, "ext:remote", "g1", map[string]any{"room_id": room, "link": "https://link.apron.chat/#server=" + other + "&room=x&token=t"}, CodeDenied)
-	// A client cannot act as a remote user.
-	_, posted := guest.request(t, "message", "g2", map[string]any{"room_id": "general", "body": map[string]any{"text": "me"}, "ext": map[string]any{"remote": map[string]any{"user_id": "zed"}}})
-	if mine := lastSnapshot(t, a.app, posted["message_id"].(string)); mine["from"].(map[string]any)["user_id"] != guest.userID || mine["ext"] != nil {
-		t.Fatalf("a guest's message with ext.remote = %#v", mine)
-	}
-	// Revoking the link closes its connection.
-	if notice := a.command(t, room, "/remote revoke "+other); !strings.HasPrefix(notice, "Revoked") {
-		t.Fatalf("revoke = %q", notice)
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	for {
-		if _, _, err := link.ws.Read(ctx); err != nil {
-			break
-		}
-	}
-}
-
-func reflectEqual(a, b any) bool { return string(encodeJSON(a)) == string(encodeJSON(b)) }
-
-// fakeRemote is a remote server for the sender's tests: it signs the
-// sender in, answers me, refuses every thread, and refuses a message whose
-// text has "blocked" as one from a remote user removed from the room.
-type fakeRemote struct {
-	http *httptest.Server
-	mu   sync.Mutex
-	got  []map[string]any
-}
-
-func newFakeRemote(t *testing.T) *fakeRemote {
-	fake := &fakeRemote{}
-	fake.http = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		ws, err := websocket.Accept(w, r, nil)
-		if err != nil {
-			return
-		}
-		defer ws.CloseNow()
-		ctx := context.Background()
-		write := func(v any) { _ = ws.Write(ctx, websocket.MessageText, encodeJSON(v)) }
-		write(map[string]any{"method": "server", "params": map[string]any{"apron": 10, "auth": []string{"token"}, "capabilities": []string{"ext:remote"}}})
-		for n := 1; ; n++ {
-			_, data, err := ws.Read(ctx)
-			if err != nil {
-				return
-			}
-			var frame struct {
-				Method string         `json:"method"`
-				ID     string         `json:"id"`
-				Params map[string]any `json:"params"`
-			}
-			if json.Unmarshal(data, &frame) != nil || frame.ID == "" {
-				continue
-			}
-			fake.mu.Lock()
-			fake.got = append(fake.got, map[string]any{"method": frame.Method, "params": frame.Params})
-			fake.mu.Unlock()
-			reply := map[string]any{"id": frame.ID}
-			remote, _ := frame.Params["ext"].(map[string]any)
-			act, _ := remote["remote"].(map[string]any)
-			switch frame.Method {
-			case "auth":
-				reply["result"] = map[string]any{"you": map[string]any{"user_id": "link-a"}}
-			case "me":
-				reply["result"] = map[string]any{"you": map[string]any{"user_id": fmt.Sprint(act["user_id"], "@a")}}
-			case "room_set":
-				reply["error"] = map[string]any{"code": CodeInvalidParams, "message": "No threads in this room"}
-			case "message":
-				body, _ := frame.Params["body"].(map[string]any)
-				if text, _ := body["text"].(string); strings.Contains(text, "blocked") {
-					reply["error"] = map[string]any{"code": CodeDenied, "message": "This remote user was removed from that room", "data": map[string]any{"ext": map[string]any{"remote": "removed"}}}
-				} else {
-					reply["result"] = map[string]any{"message_id": fmt.Sprint(1700000000000 + n)}
-				}
-			default:
-				reply["result"] = map[string]any{}
-			}
-			write(reply)
-		}
-	}))
-	t.Cleanup(fake.http.Close)
-	return fake
-}
-
-func (fake *fakeRemote) address() string { return "ws" + strings.TrimPrefix(fake.http.URL, "http") + "/ws" }
-
-func (fake *fakeRemote) texts() []string {
-	fake.mu.Lock()
-	defer fake.mu.Unlock()
-	var texts []string
-	for _, request := range fake.got {
-		params, _ := request["params"].(map[string]any)
-		if body, ok := params["body"].(map[string]any); ok {
-			texts = append(texts, fmt.Sprint(body["text"]))
-		}
-	}
-	return texts
-}
-
-func TestFederationRefusalNotices(t *testing.T) {
-	a, fake := startFederated(t), newFakeRemote(t)
-	host := strings.TrimPrefix(fake.http.URL, "http://")
-	room := a.call(t, "room_set", map[string]any{"title": "Ops"})["room_id"].(string)
-	invite := inviteInNotice.FindStringSubmatch(a.command(t, room, "/remote invite "+fake.address()))
-	_, _, token, err := parseInvite(invite[1])
-	if err != nil {
-		t.Fatal(err)
-	}
-	// The fake's sender pairs the room, as /remote connect there would.
-	link, _ := dialRaw(t, a.http)
-	link.result(t, "auth", "a1", map[string]any{"scheme": "token", "token": token})
-	link.drain(t)
-	link.result(t, "ext:remote", "p1", map[string]any{"room_id": room, "link": "https://link.apron.chat/#server=" + fake.address() + "&room=far&token=t"})
-
-	alice := dialTestClient(t, a.http)
-	joinRoom(t, alice, room)
-	waitSent := func(text string) {
-		t.Helper()
-		deadline := time.Now().Add(10 * time.Second)
-		for !slices.Contains(fake.texts(), text) {
-			if time.Now().After(deadline) {
-				t.Fatalf("%q not sent: %v", text, fake.texts())
-			}
-			time.Sleep(20 * time.Millisecond)
-		}
-	}
-	save(t, alice, "m1", map[string]any{"room_id": room, "body": map[string]any{"text": "hello"}})
-	waitSent("hello")
-
-	// A refused thread stays here, with one ~room notice, and nothing more
-	// of it is sent.
-	_, created := alice.request(t, "room_set", "t1", map[string]any{"parent_room_id": room, "title": "Local only"})
-	thread := created["room_id"].(string)
-	want := "This thread is not shared with " + host + "."
-	deadline := time.Now().Add(10 * time.Second)
-	for {
-		_, page := alice.request(t, "history", alice.nextID("h"), map[string]any{"room_id": thread, "limit": 50})
-		notices := 0
-		for _, value := range asList(page["messages"]) {
-			m := value.(map[string]any)
-			if m["from"].(map[string]any)["user_id"] == roomNoticeID && wstestText(m) == want {
-				notices++
-			}
-		}
-		if notices == 1 {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("thread notices = %d: %#v", notices, page)
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	alice.drain(t)
-	alice.request(t, "message", "m2", map[string]any{"room_id": thread, "body": map[string]any{"text": "in the local thread"}})
-	alice.request(t, "message", "m3", map[string]any{"room_id": room, "body": map[string]any{"text": "after the thread"}})
-	waitSent("after the thread")
-	if slices.Contains(fake.texts(), "in the local thread") {
-		t.Fatal("a message of a refused thread was sent")
-	}
-
-	// A message refused because its author was removed there: one ~private
-	// notice to the author for the room.
-	alice.drain(t)
-	alice.request(t, "message", "m4", map[string]any{"room_id": room, "body": map[string]any{"text": "blocked one"}})
-	notice := ""
-	for notice == "" {
-		frame := alice.read(t)
-		if params, _ := frame["params"].(map[string]any); frame["method"] == "message" && params["from"].(map[string]any)["user_id"] == privateNoticeID {
-			notice = wstestText(params)
-		}
-	}
-	if notice != "Not sent to "+host+": you were removed from this room there." {
-		t.Fatalf("notice = %q", notice)
-	}
-	alice.request(t, "message", "m5", map[string]any{"room_id": room, "body": map[string]any{"text": "blocked two"}})
-	alice.request(t, "message", "m6", map[string]any{"room_id": room, "body": map[string]any{"text": "fine again"}})
-	waitSent("fine again")
-	for _, frame := range alice.drain(t) {
-		if params, _ := frame["params"].(map[string]any); frame["method"] == "message" && params["from"].(map[string]any)["user_id"] == privateNoticeID {
-			t.Fatalf("a second notice: %#v", frame)
-		}
+	_, posted := guest.request(t, "message", "g1", map[string]any{"body": map[string]any{"text": "me"}, "ext": asZed})
+	if m := snapshotOf(a.app, posted["message_id"].(string)); m["from"].(map[string]any)["user_id"] != guest.userID || m["ext"] != nil {
+		t.Fatalf("a guest's message with ext.remote = %#v", m)
 	}
 }

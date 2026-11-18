@@ -113,8 +113,8 @@ type Options struct {
 	} `group:"Push" namespace:"push"`
 
 	Remote struct {
-		Self   string `long:"self" description:"This server's address as other Apron servers dial it, such as wss://chat.example/ws; turns on trusted federation: rooms shared with other servers with /remote (admins)"`
-		Linger string `long:"linger" default:"30s" description:"How long a connection to another server stays open once there is nothing to send to it"`
+		Self   string `long:"self" description:"This server's address as other Apron servers dial it, such as wss://chat.example/ws; turns on trusted federation: rooms this server hosts for other servers' mirrors, and rooms it mirrors, with /remote (admins)"`
+		Linger string `long:"linger" default:"30s" description:"How long a mirror's connection to a room's owner stays open with nothing in flight, before the owner's wake push brings it back; 0 stays connected"`
 	} `group:"Trusted federation" namespace:"remote"`
 
 	TLS struct {
@@ -256,8 +256,8 @@ func serverConfig(options Options) (apron.Config, error) {
 	config.Remote.Self = strings.TrimSpace(options.Remote.Self)
 	if options.Remote.Linger != "" {
 		linger, err := time.ParseDuration(options.Remote.Linger)
-		if err != nil || linger <= 0 {
-			return config, fmt.Errorf("invalid --remote.linger %q: use a duration, such as 30s", options.Remote.Linger)
+		if err != nil || linger < 0 {
+			return config, fmt.Errorf("invalid --remote.linger %q: use a duration, such as 30s, or 0 to stay connected", options.Remote.Linger)
 		}
 		config.Remote.Linger = linger
 	}

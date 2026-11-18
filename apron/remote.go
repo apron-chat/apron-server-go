@@ -89,19 +89,16 @@ func ShadowID(server, remoteUserID string) (string, error) {
 // `from`. Unlike a bot it holds no roles, joins no room by itself (join it
 // with room_join, or have a member add it with room_join and its user_id),
 // writes messages and reactions only in rooms it is in, so one that left or
-// was removed (Host.Member) writes there no more until it is added again,
+// was removed writes there no more until it is added again,
 // shows as offline, cannot sign in from outside the process (it has no
 // credential, and Bot.IssueToken refuses it), and its owner may make it
 // at any time, not only during Init.
 //
 // The server sets the shadow's ext.remote to {"server": server, "user_id":
 // remoteUserID} (ext:remote), on its user object and on the `from` of its
-// records. A message a shadow's session creates gets ext.remote {"server",
-// "user_id"} too, and a session may add the remote message's "room_id" and
-// "message_id" (strings) by writing ext.remote, whose "server" and
-// "user_id" the server sets. Clients, the extension's bot, and the
-// shadow's own profile writes cannot change ext.remote (see the reserved
-// key in SERVER.md).
+// records, and on the messages its sessions create, whatever they write.
+// Clients and the shadow's own writes cannot change ext.remote (see the
+// reserved key in SERVER.md).
 //
 // Shadow fails for a user_id that someone else has, or ever had, such as
 // another extension's shadow, or the same remote user_id in another case.
@@ -161,62 +158,39 @@ const (
 
 // remoteExtWrite applies the reserved key ext.remote to what a request
 // writes to ext: it is dropped from every write but those of an
-// extension's sessions (Bot.Connect) to messages and rooms, so that no
-// client can claim that it comes from another server. A shadow's session
-// writes it with "server", and for a message "user_id", set to the
-// shadow's, keeping only the string "room_id" and "message_id" it writes,
-// and a message it creates gets the shadow's even when it writes none; an
-// empty value, which would clear the key, is dropped from its writes. An
-// extension's bot writes the key as it is. A write that is not an object
-// is invalid_params.
+// extension's bot (Bot.Connect), which writes it as it is, so that no
+// client can claim that it comes from another server. A message a shadow
+// user's session creates gets the shadow's {"server", "user_id"}, whatever
+// it writes, and its other writes keep what is stored. A bot's write that
+// is not an object is invalid_params.
 func (s *Server) remoteExtWrite(c *client, ext extObject, target remoteTarget, creating bool) (extObject, *Error) {
 	raw, has := ext[remoteExt]
 	_, session := c.conn.(sessionTransport)
-	if target == remoteOnUser || !session {
-		if has {
-			ext = maps.Clone(ext)
-			delete(ext, remoteExt)
+	var shadow *shadowState
+	if session {
+		s.mu.RLock()
+		shadow = c.user.shadow
+		s.mu.RUnlock()
+	}
+	switch {
+	case session && shadow == nil && target != remoteOnUser:
+		if has && !emptyJSON(raw) {
+			var written map[string]jsontext.Value
+			if json.Unmarshal(raw, &written) != nil || written == nil {
+				return nil, invalidParams("ext.remote must be an object")
+			}
 		}
 		return ext, nil
-	}
-	s.mu.RLock()
-	shadow := c.user.shadow
-	s.mu.RUnlock()
-	if shadow == nil {
-		return ext, nil
-	}
-	var written map[string]jsontext.Value
-	switch {
-	case has && emptyJSON(raw):
+	case has:
 		ext = maps.Clone(ext)
 		delete(ext, remoteExt)
-		if !creating || target != remoteOnMessage {
-			return ext, nil
+	}
+	if shadow != nil && target == remoteOnMessage && creating {
+		if ext == nil {
+			ext = make(extObject)
 		}
-	case has:
-		if json.Unmarshal(raw, &written) != nil || written == nil {
-			return nil, invalidParams("ext.remote must be an object")
-		}
-	case !creating || target != remoteOnMessage:
-		return ext, nil
+		ext[remoteExt] = encodeJSON(shadow.user())
 	}
-	value := map[string]any{"server": shadow.server}
-	fields := []string{"room_id"}
-	if target == remoteOnMessage {
-		value["user_id"] = shadow.remoteID
-		fields = append(fields, "message_id")
-	}
-	for _, field := range fields {
-		var id string
-		if json.Unmarshal(written[field], &id) == nil && id != "" {
-			value[field] = id
-		}
-	}
-	ext = maps.Clone(ext)
-	if ext == nil {
-		ext = make(extObject)
-	}
-	ext[remoteExt] = encodeJSON(value)
 	return ext, nil
 }
 
@@ -376,9 +350,9 @@ func remoteActor(params map[string]jsontext.Value) (string, bool) {
 // actAs runs a link's request as the remote user it names (ext:remote):
 // the link must have joined the request's rooms; the remote user is made
 // if there is none, and joined to the room it writes in, unless another
-// user removed it from there; a create of a message the link created
-// already answers with that message. The request then runs on the remote
-// user's own session, with the same checks as any of its requests.
+// user removed it from there. The request then runs on the remote user's
+// own session, with the same checks as any of its requests, and a thread
+// it creates is not private unless it says so.
 func (s *Server) actAs(c *client, req request, remoteID string) (any, bool, *Error) {
 	if remoteID == "" || len(remoteID) > maxRemoteUserIDBytes || !validID(remoteID) || strings.HasPrefix(remoteID, "~") {
 		return nil, false, invalidParams("ext.remote.user_id must be a user_id of at most %d bytes, not a system identity's", maxRemoteUserIDBytes)
@@ -388,12 +362,6 @@ func (s *Server) actAs(c *client, req request, remoteID string) (any, bool, *Err
 		ParentRoomID *string `json:"parent_room_id"`
 		MessageID    *string `json:"message_id"`
 		Deleted      bool    `json:"deleted"`
-		Ext          struct {
-			Remote struct {
-				RoomID    string `json:"room_id"`
-				MessageID string `json:"message_id"`
-			} `json:"remote"`
-		} `json:"ext"`
 	}
 	if err := json.Unmarshal(encodeJSON(req.params), &target); err != nil {
 		return nil, false, invalidParams("Invalid params: %v", err)
@@ -404,16 +372,15 @@ func (s *Server) actAs(c *client, req request, remoteID string) (any, bool, *Err
 		s.unlock()
 		return nil, false, &Error{Code: CodeDenied, Message: "Only a link acts as remote users"}
 	}
-	id, err := ShadowID(link.link.server, remoteID)
-	if err != nil {
+	id, idErr := ShadowID(link.link.server, remoteID)
+	if idErr != nil {
 		s.unlock()
-		return nil, false, invalidParams("%v", err)
+		return nil, false, invalidParams("%v", idErr)
 	}
 	// The rooms the request is in: the link must have joined each, and the
 	// remote user joins the ones it writes in.
 	var rooms []string
 	write := true
-	key := ""
 	switch req.method {
 	case "message":
 		roomID := defaultRoomID
@@ -431,13 +398,6 @@ func (s *Server) actAs(c *client, req request, remoteID string) (any, bool, *Err
 				rooms = []string{m.roomID}
 			} else if m.roomID != roomID {
 				rooms = append(rooms, m.roomID)
-			}
-		} else if target.Ext.Remote.MessageID != "" {
-			key = link.id + "\x00" + target.Ext.Remote.MessageID
-			if existing := s.remoteCopies[key]; existing != "" {
-				// A duplicate create (§1.2): the message the link wrote.
-				s.unlock()
-				return map[string]any{"message_id": existing}, false, nil
 			}
 		}
 	case "reactions":
@@ -471,13 +431,6 @@ func (s *Server) actAs(c *client, req request, remoteID string) (any, bool, *Err
 			rooms = append(rooms, *target.RoomID)
 		case target.ParentRoomID != nil:
 			rooms = append(rooms, *target.ParentRoomID)
-			if target.Ext.Remote.RoomID != "" {
-				key = link.id + "\x00room:" + target.Ext.Remote.RoomID
-				if existing := s.remoteCopies[key]; existing != "" && s.rooms[existing] != nil {
-					s.unlock()
-					return map[string]any{"room_id": existing}, false, nil
-				}
-			}
 		default:
 			s.unlock()
 			return nil, false, invalidParams("A link creates only threads: give parent_room_id")
@@ -495,24 +448,10 @@ func (s *Server) actAs(c *client, req request, remoteID string) (any, bool, *Err
 			return nil, false, notJoined(&Error{Code: CodeDenied, Message: "This link is not in that room, so its remote users may not write there"})
 		}
 	}
-	shadow := s.users[id]
-	switch {
-	case shadow == nil:
-		key := strings.ToLower(id)
-		if s.usedIDs[key] || s.roomNamedLocked(id) || s.grantedIDs[key] {
-			s.unlock()
-			return nil, false, &Error{Code: CodeDenied, Message: fmt.Sprintf("The user_id %s was used by someone else", id)}
-		}
-		s.usedIDs[key] = true
-		s.touchUsedID(key)
-		shadow = newUserState(id, "")
-		shadow.shadow = &shadowState{owner: remoteExt, server: link.link.server, remoteID: remoteID}
-		shadow.ext = extObject{remoteExt: encodeJSON(shadow.shadow.user())}
-		s.users[id] = shadow
-		s.touchUser(id)
-	case shadow.shadow == nil || shadow.shadow.owner != remoteExt:
+	shadow, err := s.remoteUserLocked(link.link.server, remoteID)
+	if err != nil {
 		s.unlock()
-		return nil, false, &Error{Code: CodeDenied, Message: fmt.Sprintf("The user_id %s is not this link's remote user", id)}
+		return nil, false, &Error{Code: CodeDenied, Message: err.Error()}
 	}
 	if write {
 		for _, roomID := range rooms {
@@ -534,7 +473,7 @@ func (s *Server) actAs(c *client, req request, remoteID string) (any, bool, *Err
 				if shadow.removed[room.id] {
 					s.unlock()
 					return nil, false, &Error{Code: CodeDenied, Message: fmt.Sprintf("%s was removed from %s, so its link may not write there as it", id, room.title()),
-					Data: map[string]any{"ext": map[string]any{remoteExt: "removed"}}}
+						Data: map[string]any{"ext": map[string]any{remoteExt: "removed"}}}
 				}
 				s.joinLocked(shadow, room)
 			}
@@ -560,31 +499,36 @@ func (s *Server) actAs(c *client, req request, remoteID string) (any, bool, *Err
 		}
 		return nil, false, s.remoteHost.protocolError(callErr)
 	}
-	if key != "" && req.method == "room_set" {
-		if roomID, _ := decodeObject(raw)["room_id"].(string); roomID != "" {
-			s.mu.Lock()
-			if r := s.rooms[roomID]; r != nil {
-				r.remoteKey = key
-				s.remoteCopies[key] = roomID
-				s.touchRoom(r)
-			}
-			s.unlock()
-			if s.fed != nil {
-				s.fed.threadPaired(roomID, link.link.server, target.Ext.Remote.RoomID, *target.ParentRoomID)
-			}
-		}
-	} else if key != "" {
-		if messageID := decodeObject(raw)["message_id"]; messageID != nil {
-			s.mu.Lock()
-			if m := s.messages[messageID.(string)]; m != nil {
-				m.remoteKey = key
-				s.remoteCopies[key] = m.id
-				s.touchMessage(m)
-			}
-			s.unlock()
-		}
-	}
 	return raw, false, nil
+}
+
+// remoteUserLocked returns the remote user (ext:remote) that stands for
+// user remoteID of the server at address server, made if there is none: a
+// shadow user of the server's own, whose ext.remote names its server and
+// user_id. Links write as these, and mirrors copy their records as them.
+func (s *Server) remoteUserLocked(server, remoteID string) (*userState, error) {
+	id, err := ShadowID(server, remoteID)
+	if err != nil {
+		return nil, err
+	}
+	u := s.users[id]
+	switch {
+	case u == nil:
+		key := strings.ToLower(id)
+		if s.usedIDs[key] || s.roomNamedLocked(id) || s.grantedIDs[key] {
+			return nil, fmt.Errorf("the user_id %s was used by someone else", id)
+		}
+		s.usedIDs[key] = true
+		s.touchUsedID(key)
+		u = newUserState(id, "")
+		u.shadow = &shadowState{owner: remoteExt, server: server, remoteID: remoteID}
+		u.ext = extObject{remoteExt: encodeJSON(u.shadow.user())}
+		s.users[id] = u
+		s.touchUser(id)
+	case u.shadow == nil || u.shadow.owner != remoteExt:
+		return nil, fmt.Errorf("the user_id %s is not a remote user's", id)
+	}
+	return u, nil
 }
 
 // linkRoomLocked is the room a link joined that r is, or is a thread of,

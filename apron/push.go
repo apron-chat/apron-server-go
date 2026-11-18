@@ -197,6 +197,12 @@ func (s *Server) removePushLocked(p *pushRegistration) {
 // users' registrations of the same url are their own. A user holds at most
 // maxPushesPerUser: another replaces the one least recently registered.
 func (s *Server) registerPush(c *client, req request) (any, bool, *Error) {
+	// ext:remote hook: a link's wake push.
+	if s.fed != nil {
+		if took, result, err := s.fed.registerWake(c, req); took {
+			return result, false, err
+		}
+	}
 	if c.service != [32]byte{} {
 		// A service token's client is a program, which push does not wake;
 		// a registration would outlive the token's revocation.
