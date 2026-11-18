@@ -297,7 +297,7 @@ func TestLivenessPing(t *testing.T) {
 	config := DefaultConfig()
 	config.PingInterval = 20 * time.Millisecond
 	config.PingTimeout = 200 * time.Millisecond
-	_, httpServer := newTestServer(t, config)
+	app, httpServer := newTestServer(t, config)
 	c, frame := dialRaw(t, httpServer)
 	if frame["params"].(map[string]any)["ping"] != float64(1) {
 		t.Fatalf("ping interval rounds up to one second: %#v", frame)
@@ -334,6 +334,16 @@ func TestLivenessPing(t *testing.T) {
 			break
 		}
 	}
+	// The server retires the closed connection's guest, whose leave of
+	// general would otherwise reach the next connection.
+	for app.mu.RLock(); app.users[c.userID] != nil; app.mu.RLock() {
+		app.mu.RUnlock()
+		if ctx.Err() != nil {
+			t.Fatal("the closed connection's guest was not retired")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	app.mu.RUnlock()
 	// One that never pinged stays open while it answers WebSocket pings.
 	quiet := dialTestClient(t, httpServer)
 	for deadline := time.Now().Add(500 * time.Millisecond); time.Now().Before(deadline); {
