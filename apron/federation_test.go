@@ -325,7 +325,8 @@ func TestLinkRequests(t *testing.T) {
 		t.Fatalf("write after leaving = %#v", frame)
 	}
 	a.call(t, "room_leave", map[string]any{"room_id": room, "user_id": "zed@other.test:9000"})
-	if frame := act("c5", "message", map[string]any{"room_id": room, "body": map[string]any{"text": "again"}, "ext": map[string]any{"remote": map[string]any{"user_id": "zed"}}}); frame["error"] == nil || frame["error"].(map[string]any)["code"] != float64(CodeDenied) {
+	if frame := act("c5", "message", map[string]any{"room_id": room, "body": map[string]any{"text": "again"}, "ext": map[string]any{"remote": map[string]any{"user_id": "zed"}}}); frame["error"] == nil || frame["error"].(map[string]any)["code"] != float64(CodeDenied) ||
+		!reflectEqual(frame["error"].(map[string]any)["data"], map[string]any{"ext": map[string]any{"remote": "removed"}}) {
 		t.Fatalf("write after removal = %#v", frame)
 	}
 	// ext:remote pairs only a room the link joined, with a link of its own
