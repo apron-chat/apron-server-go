@@ -440,6 +440,32 @@ func (ms *mirror) session(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	// The rooms the link has left since, such as while the mirror slept,
+	// are no longer shared: the link's history has none of their records.
+	if raw, err := conn.call(ctx, "rooms-"+randomID(), "room_list", map[string]any{"filter": "joined"}); err == nil {
+		var listed struct {
+			Joined []struct {
+				RoomID string `json:"room_id"`
+			} `json:"joined"`
+		}
+		if json.Unmarshal(raw, &listed) == nil {
+			joined := make(map[string]bool)
+			for _, room := range listed.Joined {
+				joined[room.RoomID] = true
+			}
+			var gone []string
+			f.mu.Lock()
+			for _, room := range f.rooms {
+				if room.Server == ms.server && room.Parent == "" && !room.Unshared && !joined[room.OwnerRoom] {
+					gone = append(gone, room.OwnerRoom)
+				}
+			}
+			f.mu.Unlock()
+			for _, ownerRoom := range gone {
+				f.markUnshared(ms.server, ownerRoom)
+			}
+		}
+	}
 	defer conn.close()
 	stop := context.AfterFunc(ctx, conn.close)
 	defer stop()

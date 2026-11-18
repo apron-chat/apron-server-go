@@ -402,6 +402,19 @@ func TestMirrorWakes(t *testing.T) {
 		}
 		return nil
 	})
+	// The owner unshares while the mirror sleeps: at its next connection,
+	// the mirror room stops taking writes.
+	time.Sleep(time.Second)
+	a.command(t, ownerRoom, "/remote unshare")
+	ms.wakeUp()
+	eventually(t, "the unshare", func() error {
+		b.app.fed.mu.Lock()
+		defer b.app.fed.mu.Unlock()
+		if !b.app.fed.rooms[mirrorRoom].Unshared {
+			return fmt.Errorf("still shared")
+		}
+		return nil
+	})
 }
 
 // The owner's side: what a link may do as remote users.
