@@ -940,13 +940,23 @@ func startLiveWrite(t *testing.T, app *Server, writeURL, first string) (*io.Pipe
 	}()
 	_, _ = pipe.Write([]byte(first))
 	token := writeURL[strings.LastIndex(writeURL, "/")+1:]
+	// The write has started once its first bytes arrived: an end before
+	// then would keep none of them.
 	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(5 * time.Millisecond) {
 		app.mu.RLock()
 		e := app.writes[token]
-		writing := e != nil && e.writing
+		var live *liveText
+		if e != nil && e.writing {
+			live = e.live
+		}
 		app.mu.RUnlock()
-		if writing {
-			return pipe, writerDone
+		if live != nil {
+			live.mu.Lock()
+			total := live.total
+			live.mu.Unlock()
+			if total >= int64(len(first)) {
+				return pipe, writerDone
+			}
 		}
 		if time.Now().After(deadline) {
 			t.Fatal("the live write never started")
