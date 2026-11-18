@@ -2101,6 +2101,8 @@ The owner's side:
   with a `user_id` is `invalid_params`. A `room_set` creates or saves only a thread of such a room,
   which is not private unless it says so; a link's own `room_set` is
   `denied`. A `me` result's `you` is the remote user.
+- When a link leaves a room, or is removed from it, its remote users leave
+  it too; they come back with their next write or join.
 - The links of a room join each new thread of it that every member sees: one
   that is not private. A thread of a private room is private unless it is
   made with `"private": false`, so it is not mirrored.
@@ -2139,7 +2141,9 @@ The mirror's side:
   and `ext.remote.user_id`, as request `<user_id>:<id>`, after a `me` with the
   user's name the first time. Once the owner's result comes, after its
   record, the user is answered with the copy's `message_id` or the thread's
-  `room_id`. The owner's error is the user's; an owner that cannot be
+  `room_id`, waiting for the record if it is read later, such as after a new
+  connection (up to a minute): a request the owner took is never answered
+  with an error that would have the user send it again. The owner's error is the user's; an owner that cannot be
   reached in ten seconds is `retry_after` 5. A rename of a user who wrote
   there is a `me` to the owner. A message cannot move between a mirror room
   and another room.

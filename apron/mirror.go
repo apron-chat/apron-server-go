@@ -1187,25 +1187,50 @@ func (f *federation) forward(c *client, req request, ms *mirror) (any, bool, *Er
 		return nil, false, err
 	}
 	ms.waitApplied(ctx, seq)
+	// The owner took the request: the user is answered with its copy,
+	// waiting for the owner's record, which comes before the result, but
+	// may be read later, such as after a new connection. An error now would
+	// make the user send it again.
 	result := decodeObject(raw)
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	var key string
+	var copies map[string]string
 	switch req.method {
 	case "message":
-		ownerID, _ := result["message_id"].(string)
-		if local := ms.copies[ownerID]; local != "" {
-			return map[string]any{"message_id": local}, false, nil
-		}
-		return nil, false, &Error{Code: CodeRetryAfter, Message: "The owner took the message; its copy has not arrived yet", Data: map[string]any{"retry_after": 5}}
+		key, copies = fmt.Sprint(result["message_id"]), ms.copies
 	case "room_set":
-		ownerRoom, _ := result["room_id"].(string)
-		if local := ms.local[ownerRoom]; local != "" {
-			return map[string]any{"room_id": local}, false, nil
-		}
-		return nil, false, &Error{Code: CodeRetryAfter, Message: "The owner made the thread; it has not arrived yet", Data: map[string]any{"retry_after": 5}}
+		key, copies = fmt.Sprint(result["room_id"]), ms.local
+	default:
+		return map[string]any{}, false, nil
 	}
-	return map[string]any{}, false, nil
+	deadline := time.Now().Add(mirrorCopyWait)
+	for {
+		ms.mu.Lock()
+		changed := ms.appliedCh
+		ms.mu.Unlock()
+		s.mu.RLock()
+		local := copies[key]
+		s.mu.RUnlock()
+		switch {
+		case local != "" && req.method == "message":
+			return map[string]any{"message_id": local}, false, nil
+		case local != "":
+			return map[string]any{"room_id": local}, false, nil
+		case time.Now().After(deadline):
+			f.h.logger.Error("the owner took a request whose record never came", "owner", ms.server, "method", req.method, "id", key)
+			return nil, false, internalError()
+		}
+		ms.wakeUp()
+		select {
+		case <-changed:
+		case <-time.After(100 * time.Millisecond):
+		case <-ctx.Done():
+			return nil, false, connectionClosing()
+		}
+	}
 }
+
+// mirrorCopyWait bounds how long an accepted request waits for its copy.
+const mirrorCopyWait = time.Minute
 
 // ownerParamsLocked maps a request in a mirror room to the owner's IDs, as
 // the user's remote user there.
@@ -1498,6 +1523,10 @@ func (ms *mirror) seed(ctx context.Context, conn *remoteConn) {
 // room, or a thread of one, for the owner. An ext:remote hook in
 // logMembershipLocked, called holding s.mu.
 func (f *federation) membershipChangedLocked(u *userState, r *roomState, joined bool) {
+	if u.link != nil && !joined {
+		f.linkLeftLocked(u, r)
+		return
+	}
 	if u.shadow != nil || u.link != nil {
 		return
 	}

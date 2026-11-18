@@ -9,8 +9,12 @@ import (
 	"net/http/httptest"
 	"regexp"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/coder/websocket"
 )
 
 // federated is a test server with trusted federation, and an admin bot
@@ -421,6 +425,12 @@ func TestMirrorRoom(t *testing.T) {
 	if linked {
 		t.Fatal("the link stayed in the owner's room")
 	}
+	// Its remote users went with it.
+	for id := range members(a.app, ownerRoom) {
+		if strings.HasSuffix(id, "@"+authorityB) {
+			t.Fatalf("%s stayed in the owner's room", id)
+		}
+	}
 }
 
 // A mirror with a linger closes its connection, and the owner's wake push
@@ -556,5 +566,82 @@ func TestLinkRequests(t *testing.T) {
 	_, posted := guest.request(t, "message", "g1", map[string]any{"body": map[string]any{"text": "me"}, "ext": asZed})
 	if m := snapshotOf(a.app, posted["message_id"].(string)); m["from"].(map[string]any)["user_id"] != guest.userID || m["ext"] != nil {
 		t.Fatalf("a guest's message with ext.remote = %#v", m)
+	}
+}
+
+// A mirror answers a request the owner took with the copy, also when the
+// owner's record comes after the result: here a fake owner sends it late.
+func TestMirrorAnswersWithTheCopy(t *testing.T) {
+	b := startFederated(t, 0)
+	var n atomic.Int64
+	owner := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ws, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer ws.CloseNow()
+		ctx := context.Background()
+		var mu sync.Mutex
+		write := func(v any) {
+			mu.Lock()
+			defer mu.Unlock()
+			_ = ws.Write(ctx, websocket.MessageText, encodeJSON(v))
+		}
+		write(map[string]any{"method": "server", "params": map[string]any{"apron": 10, "auth": []string{"token"}, "capabilities": []string{"ext:remote"}}})
+		for {
+			_, data, err := ws.Read(ctx)
+			if err != nil {
+				return
+			}
+			var frame struct {
+				Method string         `json:"method"`
+				ID     string         `json:"id"`
+				Params map[string]any `json:"params"`
+			}
+			if json.Unmarshal(data, &frame) != nil || frame.ID == "" {
+				continue
+			}
+			reply := map[string]any{"id": frame.ID, "result": map[string]any{}}
+			switch frame.Method {
+			case "auth":
+				reply["result"] = map[string]any{"you": map[string]any{"user_id": "link_1", "ext": map[string]any{"remote": map[string]any{"server": b.self}}}}
+			case "room_list":
+				reply["result"] = map[string]any{"joined": []any{map[string]any{"room_id": "ops", "title": "Ops", "latest_log_id": "100"}}}
+			case "me":
+				reply["result"] = map[string]any{"you": map[string]any{"user_id": "bob@b"}}
+			case "message":
+				id := fmt.Sprint(1000 + n.Add(1))
+				reply["result"] = map[string]any{"message_id": id}
+				body := frame.Params["body"]
+				ext, _ := frame.Params["ext"].(map[string]any)
+				act, _ := ext["remote"].(map[string]any)
+				author := fmt.Sprint(act["user_id"])
+				// The result first, and the record late.
+				go func() {
+					time.Sleep(300 * time.Millisecond)
+					write(map[string]any{"method": "message", "params": map[string]any{
+						"message_id": id, "log_id": id, "room_id": "ops", "body": body,
+						"from": map[string]any{"user_id": author + "@b", "ext": map[string]any{"remote": map[string]any{"server": b.self, "user_id": author}}},
+					}})
+				}()
+			}
+			write(reply)
+		}
+	}))
+	defer owner.Close()
+	address := "ws" + strings.TrimPrefix(owner.URL, "http") + "/ws"
+	notice := b.command(t, "general", "/remote connect https://link.apron.chat/#server="+address+"&room=ops&token=t")
+	found := mirrorInNotice.FindStringSubmatch(notice)
+	if found == nil {
+		t.Fatalf("connect = %q", notice)
+	}
+	mirrorRoom := found[1]
+	bob := dialTestClient(t, b.http)
+	b.call(t, "room_join", map[string]any{"room_id": mirrorRoom, "user_id": bob.userID})
+	bob.drain(t)
+	_, result := bob.request(t, "message", "m1", map[string]any{"room_id": mirrorRoom, "body": map[string]any{"text": "late record"}})
+	local, _ := result["message_id"].(string)
+	if m := snapshotOf(b.app, local); m == nil || wstestText(m) != "late record" || m["from"].(map[string]any)["user_id"] != bob.userID {
+		t.Fatalf("answered %#v, copy %#v", result, m)
 	}
 }
