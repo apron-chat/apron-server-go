@@ -243,6 +243,29 @@ func TestMirrorRoom(t *testing.T) {
 	alice.drain(t)
 	bob.drain(t)
 
+	// Both rooms list the same people: the owner's members join the mirror
+	// room as remote users, and the mirror's members the owner's room.
+	members := func(app *Server, roomID string) map[string]bool {
+		app.mu.RLock()
+		defer app.mu.RUnlock()
+		set := make(map[string]bool)
+		for id, u := range app.rooms[roomID].members {
+			if u.link == nil {
+				set[id] = true
+			}
+		}
+		return set
+	}
+	eventually(t, "the member lists", func() error {
+		onA, onB := members(a.app, ownerRoom), members(b.app, mirrorRoom)
+		want := map[string]bool{"admin": true, alice.userID: true, "admin@" + authorityB: true, bob.userID + "@" + authorityB: true}
+		wantB := map[string]bool{"admin": true, bob.userID: true, "admin@" + authorityA: true, alice.userID + "@" + authorityA: true}
+		if fmt.Sprint(onA) != fmt.Sprint(want) || fmt.Sprint(onB) != fmt.Sprint(wantB) {
+			return fmt.Errorf("owner %v, mirror %v", onA, onB)
+		}
+		return nil
+	})
+
 	// The owner's message is copied into the mirror room.
 	_, posted := alice.request(t, "message", "m1", map[string]any{"room_id": ownerRoom, "body": map[string]any{"text": "hello"}})
 	hello := posted["message_id"].(string)
@@ -365,10 +388,29 @@ func TestMirrorRoom(t *testing.T) {
 		return nil
 	})
 
+	// Leaves travel too.
+	carol := dialTestClient(t, b.http)
+	b.call(t, "room_join", map[string]any{"room_id": mirrorRoom, "user_id": carol.userID})
+	eventually(t, "carol on the owner", func() error {
+		if !members(a.app, ownerRoom)[carol.userID+"@"+authorityB] {
+			return fmt.Errorf("not there")
+		}
+		return nil
+	})
+	carol.request(t, "room_leave", "l1", map[string]any{"room_id": mirrorRoom})
+	alice.request(t, "room_leave", "l2", map[string]any{"room_id": ownerRoom})
+	eventually(t, "the leaves", func() error {
+		if members(a.app, ownerRoom)[carol.userID+"@"+authorityB] || members(b.app, mirrorRoom)[alice.userID+"@"+authorityA] {
+			return fmt.Errorf("owner %v, mirror %v", members(a.app, ownerRoom), members(b.app, mirrorRoom))
+		}
+		return nil
+	})
+
 	// Unshared from the mirror: the link leaves, and writes are refused.
 	if notice := b.command(t, mirrorRoom, "/remote unshare"); !strings.Contains(notice, "no longer mirrored") {
 		t.Fatalf("unshare = %q", notice)
 	}
+	bob.drain(t)
 	bob.expectError(t, "message", "m7", map[string]any{"room_id": mirrorRoom, "body": map[string]any{"text": "after"}}, CodeDenied)
 	a.app.mu.RLock()
 	linked := false
@@ -465,9 +507,16 @@ func TestLinkRequests(t *testing.T) {
 	if frame := act("c3", "message", map[string]any{"room_id": room, "body": map[string]any{"text": "back"}, "ext": asZed}); frame["result"] == nil {
 		t.Fatalf("write after leaving = %#v", frame)
 	}
+	act("l2", "room_leave", map[string]any{"room_id": room, "ext": asZed})
+	if frame := act("j1", "room_join", map[string]any{"room_id": room, "ext": asZed}); frame["result"] == nil {
+		t.Fatalf("join = %#v", frame)
+	}
 	a.call(t, "room_leave", map[string]any{"room_id": room, "user_id": "zed@other.test:9000"})
 	if frame := act("c4", "message", map[string]any{"room_id": room, "body": map[string]any{"text": "again"}, "ext": asZed}); reason(frame) != "removed" {
 		t.Fatalf("write after removal = %#v", frame)
+	}
+	if frame := act("j2", "room_join", map[string]any{"room_id": room, "ext": asZed}); reason(frame) != "removed" {
+		t.Fatalf("join after removal = %#v", frame)
 	}
 	// A link sets only threads of its rooms, as a remote user; the thread is
 	// one every member of the room sees, which the link joins.

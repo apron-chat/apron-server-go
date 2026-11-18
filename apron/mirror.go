@@ -65,6 +65,15 @@ type mirror struct {
 	// mirror's wake URL and its bearer token.
 	want               chan struct{}
 	wakeID, wakeSecret string
+	// memberships queues this server's users' joins and leaves of mirror
+	// rooms, which go to the owner in order.
+	memberships chan membershipChange
+}
+
+// membershipChange is a user's join or leave of an owner's room.
+type membershipChange struct {
+	userID, name, ownerRoom string
+	joined                  bool
 }
 
 // mirrorTimeout bounds how long a forwarded write waits for the owner.
@@ -79,6 +88,7 @@ func (f *federation) newMirror(server string) *mirror {
 		f: f, server: server, local: make(map[string]string), copies: make(map[string]string),
 		originals: make(map[string]string), users: make(map[string]string), hidden: make(map[string]bool),
 		ready: make(chan struct{}), appliedCh: make(chan struct{}), want: make(chan struct{}, 1),
+		memberships: make(chan membershipChange, 1024),
 	}
 }
 
@@ -168,6 +178,7 @@ func (f *federation) initMirrors(r *Registrar) error {
 
 func (ms *mirror) start(h *Host) {
 	h.Go(ms.run)
+	h.Go(ms.sendMemberships)
 	select {
 	case ms.want <- struct{}{}:
 	default:
@@ -516,6 +527,7 @@ func (ms *mirror) session(ctx context.Context) error {
 	close(ms.ready)
 	ms.mu.Unlock()
 	f.h.logger.Info("mirror connected", "owner", ms.server)
+	ms.seed(ctx, conn)
 	defer func() {
 		ms.mu.Lock()
 		ms.conn, ms.ready = nil, make(chan struct{})
@@ -630,15 +642,19 @@ func (ms *mirror) applyNote(note remoteFrame) {
 		ms.apply(mirrorRecord{kind: note.Method, raw: note.Params, logID: logIDOf(note.Params)})
 	case "room_update":
 		var update struct {
-			Joined  []jsontext.Value `json:"joined"`
-			Updated []jsontext.Value `json:"updated"`
-			Left    []struct {
+			Joined      []jsontext.Value `json:"joined"`
+			Updated     []jsontext.Value `json:"updated"`
+			Memberships []jsontext.Value `json:"memberships"`
+			Left        []struct {
 				RoomID string `json:"room_id"`
 			} `json:"left"`
 		}
 		_ = json.Unmarshal(note.Params, &update)
 		for _, raw := range append(update.Joined, update.Updated...) {
 			ms.apply(mirrorRecord{kind: "room", raw: raw, logID: logIDOf(raw)})
+		}
+		for _, raw := range update.Memberships {
+			ms.apply(mirrorRecord{kind: "membership", raw: raw, logID: logIDOf(raw)})
 		}
 		for _, left := range update.Left {
 			ms.f.s.mu.RLock()
@@ -682,6 +698,8 @@ func (ms *mirror) apply(record mirrorRecord) {
 			ms.messageLocked(value, record.logID)
 		case "reactions":
 			ms.reactionsLocked(value)
+		case "membership":
+			ms.membershipLocked(value, record.logID)
 		}
 		s.unlock()
 	}
@@ -718,7 +736,10 @@ func (ms *mirror) roomLocked(record map[string]any, logID int64) {
 	}
 	if local := s.rooms[ms.local[ownerRoom]]; local != nil {
 		if local.parent == nil {
-			return // a mirror room keeps its own title and description
+			// A mirror room keeps its own title and description, and is
+			// private exactly when the owner's room is.
+			ms.privateLocked(local, record["private"] == true)
+			return
 		}
 		current := maps.Clone(local.record)
 		if current["title"] == fields["title"] && current["description"] == fields["description"] {
@@ -1305,5 +1326,225 @@ func (f *federation) profileChanged(userID string) {
 				}
 			}
 		}(f.s.extContext)
+	}
+}
+
+// ---- Memberships ----
+
+// isLink reports a user object of a link: ext.remote names a server and no
+// user.
+func isLink(object map[string]any) bool {
+	ext, _ := object["ext"].(map[string]any)
+	remote, _ := ext[remoteExt].(map[string]any)
+	server, _ := remote["server"].(string)
+	user, _ := remote["user_id"].(string)
+	return server != "" && user == ""
+}
+
+// ownUser reports a user object of this server's user's remote user on the
+// owner, and returns that user's user_id here.
+func (ms *mirror) ownUser(object map[string]any) (string, bool) {
+	ext, _ := object["ext"].(map[string]any)
+	remote, _ := ext[remoteExt].(map[string]any)
+	server, _ := remote["server"].(string)
+	user, _ := remote["user_id"].(string)
+	normalized, err := NormalizeAddress(server)
+	return user, err == nil && normalized == ms.f.self && user != ""
+}
+
+// membershipLocked copies a membership record of the owner's: remote users
+// join and leave the mirror room as they did the owner's. Links are no
+// members here, and this server's own users' remote users stand for its
+// users, who are members already.
+func (ms *mirror) membershipLocked(record map[string]any, logID int64) {
+	s := ms.f.s
+	ownerRoom, _ := record["room_id"].(string)
+	r, ok := ms.roomFor(ownerRoom, logID)
+	if !ok {
+		return
+	}
+	for _, value := range asList(record["members"]) {
+		entry, _ := value.(map[string]any)
+		object, _ := entry["user"].(map[string]any)
+		if _, own := ms.ownUser(object); own || isLink(object) {
+			continue
+		}
+		u := ms.userLocked(object)
+		switch {
+		case u == nil || u.shadow == nil:
+		case entry["joined"] == true && !u.removed[r.id]:
+			s.joinLocked(u, r)
+		case entry["joined"] == false:
+			s.leaveLocked(u, r)
+		}
+	}
+}
+
+// privateLocked makes a mirror room private exactly when the owner's room
+// is. A room that stops being private shows to everyone; one that becomes
+// private only to its members.
+func (ms *mirror) privateLocked(r *roomState, private bool) {
+	s := ms.f.s
+	if r.private == private {
+		return
+	}
+	r.private = private
+	fields := make(map[string]any)
+	for _, key := range []string{"title", "description", "ext"} {
+		if value, ok := r.record[key]; ok {
+			fields[key] = value
+		}
+	}
+	s.commitRoomLocked(r.id, nil, private, fields)
+	s.touchRoom(r)
+	s.announceRoomLocked(r, nil)
+}
+
+// seed brings a mirror room's members in line with the owner's room, at
+// each connection: the owner's members join it as remote users, those who
+// left go, and this server's users' joins and leaves that did not reach
+// the owner go now. A room the owner lists only in part is not trimmed.
+func (ms *mirror) seed(ctx context.Context, conn *remoteConn) {
+	f, s := ms.f, ms.f.s
+	f.mu.Lock()
+	rooms := make(map[string]string)
+	for id, room := range f.rooms {
+		if room.Server == ms.server && room.Parent == "" && !room.Unshared {
+			rooms[id] = room.OwnerRoom
+		}
+	}
+	f.mu.Unlock()
+	for local, ownerRoom := range rooms {
+		raw, err := conn.call(ctx, "members-"+randomID(), "room_list", map[string]any{"room_id": ownerRoom, "members": true})
+		if err != nil {
+			continue
+		}
+		var listed struct {
+			Joined []struct {
+				RoomID  string           `json:"room_id"`
+				Private bool             `json:"private"`
+				Members []map[string]any `json:"members"`
+				Count   int              `json:"member_count"`
+			} `json:"joined"`
+			Users []map[string]any `json:"users"`
+		}
+		if json.Unmarshal(raw, &listed) != nil || len(listed.Joined) == 0 {
+			continue
+		}
+		owner := listed.Joined[0]
+		complete := owner.Count == 0 || owner.Count <= len(owner.Members)
+		objects := make(map[string]map[string]any)
+		for _, u := range listed.Users {
+			if id, _ := u["user_id"].(string); id != "" {
+				objects[id] = u
+			}
+		}
+		var changes []membershipChange
+		s.mu.Lock()
+		r := s.rooms[local]
+		if r == nil {
+			s.unlock()
+			continue
+		}
+		ms.privateLocked(r, owner.Private)
+		present := make(map[string]bool)
+		ownMembers := make(map[string]bool)
+		for _, member := range owner.Members {
+			id, _ := member["user_id"].(string)
+			object := objects[id]
+			if object == nil {
+				object = member
+			}
+			if own, ok := ms.ownUser(object); ok {
+				ownMembers[own] = true
+				continue
+			}
+			if isLink(object) {
+				continue
+			}
+			if u := ms.userLocked(object); u != nil && u.shadow != nil {
+				present[u.id] = true
+				if !u.removed[r.id] {
+					s.joinLocked(u, r)
+				}
+			}
+		}
+		for id, u := range r.members {
+			switch {
+			case u.link != nil:
+			case u.shadow != nil:
+				if complete && !present[id] && u.shadow.owner == remoteExt {
+					s.leaveLocked(u, r)
+				}
+			case !ownMembers[id]:
+				changes = append(changes, membershipChange{userID: id, name: u.name, ownerRoom: ownerRoom, joined: true})
+			}
+		}
+		if complete {
+			for id := range ownMembers {
+				if r.members[id] == nil {
+					changes = append(changes, membershipChange{userID: id, ownerRoom: ownerRoom, joined: false})
+				}
+			}
+		}
+		s.unlock()
+		for _, change := range changes {
+			ms.queueMembership(change)
+		}
+	}
+}
+
+// membershipChangedLocked queues a local user's join or leave of a mirror
+// room, or a thread of one, for the owner. An ext:remote hook in
+// logMembershipLocked, called holding s.mu.
+func (f *federation) membershipChangedLocked(u *userState, r *roomState, joined bool) {
+	if u.shadow != nil || u.link != nil {
+		return
+	}
+	f.mu.Lock()
+	room := f.rooms[r.id]
+	var ms *mirror
+	if room != nil && !room.Unshared {
+		ms = f.mirrors[room.Server]
+	}
+	f.mu.Unlock()
+	if ms != nil {
+		ms.queueMembership(membershipChange{userID: u.id, name: u.name, ownerRoom: room.OwnerRoom, joined: joined})
+	}
+}
+
+func (ms *mirror) queueMembership(change membershipChange) {
+	select {
+	case ms.memberships <- change:
+	default:
+		ms.f.h.logger.Warn("too many joins and leaves waiting for the owner; one is dropped", "owner", ms.server, "user_id", change.userID)
+	}
+}
+
+// sendMemberships sends the queued joins and leaves to the owner, in order,
+// as room_join and room_leave of the users' remote users.
+func (ms *mirror) sendMemberships(ctx context.Context) {
+	for {
+		select {
+		case change := <-ms.memberships:
+			method := "room_leave"
+			if change.joined {
+				method = "room_join"
+			}
+			if change.joined {
+				if _, err := ms.ownerUser(ctx, change.userID, change.name); err != nil {
+					ms.f.h.logger.Warn("a join did not reach the owner", "owner", ms.server, "user_id", change.userID, "error", err)
+					continue
+				}
+			} else if found, _ := ms.f.kv.Get("user "+ms.server+" "+change.userID, new(string)); !found {
+				continue // never on the owner
+			}
+			params := map[string]any{"room_id": change.ownerRoom, "ext": map[string]any{"remote": map[string]any{"user_id": change.userID}}}
+			if _, _, err := ms.call(ctx, change.userID+":"+method+"-"+randomID(), method, params); err != nil {
+				ms.f.h.logger.Warn("a membership did not reach the owner", "owner", ms.server, "user_id", change.userID, "method", method, "error", err)
+			}
+		case <-ctx.Done():
+			return
+		}
 	}
 }

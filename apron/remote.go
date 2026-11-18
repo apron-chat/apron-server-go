@@ -324,7 +324,7 @@ func (s *Server) mintLinkToken(ctx context.Context, link *userState, name string
 }
 
 // actAsMethods are the requests a link sends as a remote user.
-var actAsMethods = map[string]bool{"message": true, "reactions": true, "me": true, "room_leave": true, "room_set": true}
+var actAsMethods = map[string]bool{"message": true, "reactions": true, "me": true, "room_join": true, "room_leave": true, "room_set": true}
 
 // maxRemoteUserIDBytes bounds the remote user_id a link names.
 const maxRemoteUserIDBytes = 128
@@ -411,12 +411,18 @@ func (s *Server) actAs(c *client, req request, remoteID string) (any, bool, *Err
 			return nil, false, invalidParams("Unknown message %q", messageID)
 		}
 		rooms = append(rooms, m.roomID)
-	case "room_leave":
+	case "room_leave", "room_join":
 		if target.RoomID == nil {
 			s.unlock()
 			return nil, false, invalidParams("Missing room_id")
 		}
-		rooms, write = append(rooms, *target.RoomID), false
+		if _, other := req.params["user_id"]; other {
+			s.unlock()
+			return nil, false, invalidParams("A link joins or removes only its remote users, as themselves")
+		}
+		// A join is a write: it joins the remote user below, or is refused
+		// for one that another user removed.
+		rooms, write = append(rooms, *target.RoomID), req.method == "room_join"
 	case "me":
 		write = false
 	case "room_set":
@@ -480,6 +486,9 @@ func (s *Server) actAs(c *client, req request, remoteID string) (any, bool, *Err
 		}
 	}
 	s.unlock()
+	if req.method == "room_join" {
+		return map[string]any{}, false, nil // joined above
+	}
 
 	params := req.params
 	if req.method == "room_set" && target.ParentRoomID != nil && target.RoomID == nil {

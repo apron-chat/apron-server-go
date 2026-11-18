@@ -227,6 +227,11 @@ func roomUpdate(field string, records ...any) jsontext.Value {
 // in a room_update's memberships (§4.2.3). The record carries u as a
 // recorded object: user_id and name.
 func (s *Server) logMembershipLocked(u *userState, r *roomState, joined bool) jsontext.Value {
+	// ext:remote hook: a user's join or leave of a mirror room goes to the
+	// room's owner.
+	if s.fed != nil {
+		s.fed.membershipChangedLocked(u, r, joined)
+	}
 	logID := s.nextIDLocked()
 	record := newLogRecord(logID, kindMembership, map[string]any{
 		"log_id":  formatID(logID),

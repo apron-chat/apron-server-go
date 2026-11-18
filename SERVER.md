@@ -2085,8 +2085,8 @@ Admins run these, and are answered with `~private` notices:
 
 The owner's side:
 
-- A link's `message`, `reactions`, `me`, `room_leave`, or `room_set` with
-  `params.ext.remote.user_id` runs as the remote user `<user_id>@<host[:port]>`
+- A link's `message`, `reactions`, `me`, `room_join`, `room_leave`, or
+  `room_set` with `params.ext.remote.user_id` runs as the remote user `<user_id>@<host[:port]>`
   of the link's server, made on first use (a [shadow user](#shadow-users)),
   on a session of its own, with that user's checks and limits; its
   messages' `ext.remote` is `{"server", "user_id"}`. A `user_id` that is
@@ -2095,9 +2095,10 @@ The owner's side:
 - The link must have joined the request's room, or a room the room is a
   thread of: one it cannot see is `invalid_params`, one it can but has not
   joined `denied`, both with `"data": {"ext": {"remote": "not_joined"}}`.
-  A write joins the remote user to the room, also after it left; one that
-  another user removed is `denied` with `"data": {"ext": {"remote":
-  "removed"}}`. A `room_set` creates or saves only a thread of such a room,
+  A write or `room_join` joins the remote user to the room, also after it
+  left; one that another user removed is `denied` with
+  `"data": {"ext": {"remote": "removed"}}`. A `room_join` or `room_leave`
+  with a `user_id` is `invalid_params`. A `room_set` creates or saves only a thread of such a room,
   which is not private unless it says so; a link's own `room_set` is
   `denied`. A `me` result's `you` is the remote user.
 - The links of a room join each new thread of it that every member sees: one
@@ -2122,6 +2123,17 @@ The mirror's side:
   the owner. Replies, `mentions`, and `@id`s are mapped; embeds become a line
   naming them. The owner's reactions replace the copy's; `user`
   notifications and recorded names update remote users' names.
+- Memberships travel like messages. At each connection the mirror lists the
+  owner's room with its members: the owner's members join the mirror room as
+  remote users, remote users who left it leave (unless the owner lists only
+  some of its members), this server's members that the owner does not list
+  join it there, and those it lists that left here leave there. The owner's
+  membership records are then copied, but for links and this server's own
+  users' remote users; this server's users' joins and leaves of a mirror
+  room, or a thread of one, go to the owner as `room_join` and `room_leave`,
+  in order. A mirror room is private exactly when the owner's room is, also
+  when that changes (this server fixes `private` at a room's creation, so as
+  an owner it never changes it).
 - A user's `message`, `reactions`, or thread `room_set` in a mirror room or a
   thread of one goes to the owner through the link, with the owner's IDs
   and `ext.remote.user_id`, as request `<user_id>:<id>`, after a `me` with the
