@@ -493,6 +493,33 @@ func TestPasskeyRejectsInvalidProofs(t *testing.T) {
 	passkeyDenied(t, passkeyCall(t, wrongOrigin, "origin", "login", "begin", nil))
 }
 
+// A refusal for an origin the RP does not accept names the origin, and the
+// passkey page's, from the request's Host, when that is not accepted
+// either.
+func TestPasskeyOriginRefusals(t *testing.T) {
+	_, httpServer := passkeyTestServer(t)
+	page := httpServer.URL
+	refusal := func(frame map[string]any) string {
+		t.Helper()
+		passkeyDenied(t, frame)
+		return frame["error"].(map[string]any)["message"].(string)
+	}
+	wrongOrigin, _ := dialOrigin(t, httpServer, "http://localhost:9999")
+	if got, want := refusal(passkeyCall(t, wrongOrigin, "b", "login", "begin", nil)), `Neither Origin "http://localhost:9999" nor the passkey page's origin "`+page+`" is configured for passkeys`; got != want {
+		t.Errorf("begin: %q, want %q", got, want)
+	}
+	if got, want := refusal(passkeyCall(t, wrongOrigin, "f", "login", "finish", map[string]any{"challenge_id": "x", "credential": map[string]any{}})), `Origin "http://localhost:9999" is not configured for passkeys`; got != want {
+		t.Errorf("finish: %q, want %q", got, want)
+	}
+	none, _ := dialRaw(t, httpServer)
+	if got, want := refusal(passkeyCall(t, none, "b", "login", "begin", nil)), `This connection sent no Origin, and the passkey page's origin "`+page+`" is not configured for passkeys`; got != want {
+		t.Errorf("begin without Origin: %q, want %q", got, want)
+	}
+	if got, want := refusal(passkeyCall(t, none, "f", "login", "finish", map[string]any{"challenge_id": "x", "credential": map[string]any{}})), "This connection sent no Origin, which passkeys need"; got != want {
+		t.Errorf("finish without Origin: %q, want %q", got, want)
+	}
+}
+
 func TestPasskeyRejectsInvalidRegistration(t *testing.T) {
 	app, httpServer := passkeyTestServer(t)
 	c, _ := dialOrigin(t, httpServer, testPasskeyOrigin)

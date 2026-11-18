@@ -1461,7 +1461,9 @@ exchange with the code it returns. aprond offers the page while its own
 origin (`--public-url`, or the scheme and host a request arrives on) is one
 of the `--webauthn.origin`s: by default `http://localhost:8080`, so `make
 run` has it; a deployment lists its `--public-url` there, as the examples
-above do.
+above do. Without `--public-url`, the page's origin comes from the
+request's `Host`, including its port, and must be one of the
+`--webauthn.origin`s.
 
 - **Begin.** A begin step adds `"external": {"url": "https://chat.example/passkey?action=login"}`
   to `challenge_id` and `public_key`. A registration's is
@@ -1477,7 +1479,8 @@ above do.
   `challenge_id` and `public_key` to a connection that can run the
   ceremony itself. A connection whose `Origin` is not a
   `--webauthn.origin` cannot, so its begin returns `external` alone;
-  without the page it is `denied`, as before.
+  without the page it is `denied`, with a message that names the origins
+  refused: the connection's `Origin`, and the page's.
 - **The page** takes the same authorization request as `/oauth/authorize`
   (PKCE `S256`, `state`, `resource` the server's origin), checks it the same
   way, showing any problem on the page, as it does a bad `action`, and has

@@ -23,6 +23,7 @@ import (
 	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"errors"
+	"fmt"
 	"net/http"
 	"slices"
 	"sync"
@@ -244,11 +245,30 @@ func (s *Scheme) Auth(_ context.Context, r *authn.Request) (authn.Result, error)
 			return s.redeem(r, action)
 		}
 		if !local {
-			return nil, authn.Denied("Frontend origin is not configured for passkeys")
+			return nil, s.refuseOrigin(r.Origin, "")
 		}
 		return s.finish(r, action)
 	}
 	return nil, authn.InvalidParams("Passkey step must be begin or finish")
+}
+
+// refuseOrigin refuses a connection that can run no passkey ceremony: its
+// origin is not one the RP accepts, nor is pageOrigin, the passkey page's,
+// when not empty. The refusal names both, so a client can tell which to
+// fix.
+func (s *Scheme) refuseOrigin(origin, pageOrigin string) error {
+	if s.core != nil {
+		s.core.Logger().Info("passkeys refused: the origin is not a --webauthn.origin", "origin", origin, "page_origin", pageOrigin)
+	}
+	switch {
+	case pageOrigin == "" && origin == "":
+		return authn.Denied("This connection sent no Origin, which passkeys need")
+	case pageOrigin == "":
+		return authn.Denied(fmt.Sprintf("Origin %.100q is not configured for passkeys", origin))
+	case origin == "":
+		return authn.Denied(fmt.Sprintf("This connection sent no Origin, and the passkey page's origin %.100q is not configured for passkeys", pageOrigin))
+	}
+	return authn.Denied(fmt.Sprintf("Neither Origin %.100q nor the passkey page's origin %.100q is configured for passkeys", origin, pageOrigin))
 }
 
 func (s *Scheme) begin(r *authn.Request, action string, local bool) (authn.Result, error) {
@@ -271,7 +291,12 @@ func (s *Scheme) begin(r *authn.Request, action string, local bool) (authn.Resul
 	}
 	if !local {
 		if page == "" {
-			return nil, authn.Denied("Frontend origin is not configured for passkeys")
+			pageOrigin := ""
+			if s.core != nil {
+				// The page's origin is not one the RP accepts either.
+				pageOrigin = oauth.Origin(r.BaseURL)
+			}
+			return nil, s.refuseOrigin(r.Origin, pageOrigin)
 		}
 		// Only the page can run the ceremony for this client.
 		return &authn.Reply{Result: map[string]any{"external": map[string]any{"url": page}}}, nil
