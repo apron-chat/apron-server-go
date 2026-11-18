@@ -222,9 +222,10 @@ func TestExternalForeignIssuer(t *testing.T) {
 	}
 	external := c.result(t, "auth", "b", map[string]any{"scheme": "external"})["external"].(map[string]any)
 	page, _ := url.Parse(external["url"].(string))
-	// The URL names no client_id: the app names itself (§4.12.2).
+	// The URL names no client_id: the app names itself (§4.12.2). Its
+	// spaces are %20, which an app that encodes the query again keeps.
 	if external["issuer"] != issuer.URL || !strings.HasPrefix(page.String(), issuer.URL+"/authorize?") ||
-		page.Query().Has("client_id") || page.Query().Get("scope") != "openid profile" {
+		page.Query().Has("client_id") || page.Query().Get("scope") != "openid profile" || page.RawQuery != "scope=openid%20profile" {
 		t.Fatalf("external = %#v", external)
 	}
 	// The server serves no authorization server of its own.

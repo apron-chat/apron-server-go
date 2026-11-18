@@ -94,6 +94,14 @@ func Origin(base string) string {
 	return parsed.Scheme + "://" + parsed.Host
 }
 
+// EncodeQuery encodes query as url.Values.Encode does, but writes a space
+// as %20, not +, for a URL a client opens: some clients decode the query and
+// encode it again, and read + as itself. Encode already writes a + as %2B,
+// so every + it leaves is a space.
+func EncodeQuery(query url.Values) string {
+	return strings.ReplaceAll(query.Encode(), "+", "%20")
+}
+
 // Parse reads an authorization request from a page's query, for a server
 // whose origin is issuer.
 func Parse(query url.Values, issuer string) (*Request, *Problem) {

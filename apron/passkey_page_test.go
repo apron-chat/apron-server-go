@@ -441,6 +441,26 @@ func TestPasskeyPageRegistration(t *testing.T) {
 	}
 }
 
+// The page's URL writes a space as %20, not +, so a client that decodes
+// its query and encodes it again keeps the name; a + is %2B.
+func TestPasskeyPageURLEncoding(t *testing.T) {
+	p := passkeyPageServer(t)
+	invitation, err := p.host.Invite(context.Background(), InvitationOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	native, _ := dialRaw(t, p.http)
+	begin := passkeyResult(t, passkeyCall(t, native, "b", "register", "begin", map[string]any{"invitation": invitation.Token, "name": "Sim Passkey+1"}))
+	page := begin["external"].(map[string]any)["url"].(string)
+	if page != pageOrigin+"/passkey?action=register&name=Sim%20Passkey%2B1" {
+		t.Fatalf("url = %s", page)
+	}
+	parsed, err := url.Parse(page)
+	if err != nil || parsed.Query().Get("name") != "Sim Passkey+1" {
+		t.Fatalf("url = %s: %v", page, err)
+	}
+}
+
 // The page refuses what it must, on the page and never by redirecting: a
 // request without a valid redirect, a bad action or resource, and unknown
 // requests.

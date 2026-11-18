@@ -1465,9 +1465,10 @@ above do.
 
 - **Begin.** A begin step adds `"external": {"url": "https://chat.example/passkey?action=login"}`
   to `challenge_id` and `public_key`. A registration's is
-  `?action=register&name=…`, and one on a signed-in connection, guests
-  included, an addition: `?action=register&request=<handle>`, which names
-  that account for ten minutes. The handle is the account, sealed
+  `?action=register&name=…` (a space in the query is `%20`, not `+`), and
+  one on a signed-in connection, guests included, an addition:
+  `?action=register&request=<handle>`, which names that account for ten
+  minutes. The handle is the account, sealed
   (AES-GCM, with a key each aprond makes as it starts), so aprond keeps
   nothing for an addition, and no number of begins can fill a table that
   holds up anyone's ceremony; a handle opens the page until it expires, or
