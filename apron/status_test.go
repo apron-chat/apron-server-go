@@ -1620,7 +1620,7 @@ func TestSeenAfterCrash(t *testing.T) {
 	waitStored(t, path, back.userID, func(u storedUser) bool { return u.Shown && u.Seen == left })
 	waitStored(t, path, fresh.userID, func(u storedUser) bool { return u.Shown && u.Seen == 0 })
 	waitStored(t, path, hidden.userID, func(u storedUser) bool { return !u.Shown && u.Seen == seenMillis(t, hiddenSeen) })
-	waitStored(t, path, none.userID, func(u storedUser) bool { return u.Shown && u.Seen == 0 })
+	waitStored(t, path, none.userID, func(u storedUser) bool { return u.Shown && u.Seen == 0 && u.Status != nil && *u.Status == "" })
 	crashed := time.Now().UnixMilli()
 	_, httpServer, _ = startWithStore(t, open(), filepath.Join(dir, "uploads"))
 	restored := time.Now().UnixMilli()
