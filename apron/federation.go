@@ -235,13 +235,17 @@ func (f *federation) threadMadeLocked(r *roomState) {
 }
 
 // linkLeftLocked takes a link's remote users out of a room the link left
-// or was removed from: they wrote there only through it. They may be
+// or was removed from, and its threads: they wrote there only through it. They may be
 // joined again, by the link's next write or join.
 func (f *federation) linkLeftLocked(link *userState, r *roomState) {
 	for _, u := range slices.Collect(maps.Values(r.members)) {
 		if u.shadow != nil && u.shadow.owner == remoteExt && u.shadow.server == link.link.server {
 			f.s.leaveLocked(u, r)
 		}
+	}
+	// And its threads.
+	for _, thread := range r.children {
+		f.linkLeftLocked(link, thread)
 	}
 }
 

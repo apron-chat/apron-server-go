@@ -2102,7 +2102,7 @@ The owner's side:
   which is not private unless it says so; a link's own `room_set` is
   `denied`. A `me` result's `you` is the remote user.
 - When a link leaves a room, or is removed from it, its remote users leave
-  it too; they come back with their next write or join.
+  it and its threads too; they come back with their next write or join.
 - The links of a room join each new thread of it that every member sees: one
   that is not private. A thread of a private room is private unless it is
   made with `"private": false`, so it is not mirrored.
@@ -2125,25 +2125,24 @@ The mirror's side:
   the owner. Replies, `mentions`, and `@id`s are mapped; embeds become a line
   naming them. The owner's reactions replace the copy's; `user`
   notifications and recorded names update remote users' names.
-- Memberships travel like messages. At each connection the mirror lists the
-  owner's room with its members: the owner's members join the mirror room as
-  remote users, remote users who left it leave (unless the owner lists only
-  some of its members), this server's members that the owner does not list
-  join it there, and those it lists that left here leave there. The owner's
-  membership records are then copied, but for links and this server's own
-  users' remote users; this server's users' joins and leaves of a mirror
-  room, or a thread of one, go to the owner as `room_join` and `room_leave`,
-  in order. A mirror room is private exactly when the owner's room is, also
-  when that changes (this server fixes `private` at a room's creation, so as
-  an owner it never changes it).
+- Memberships travel like messages. When it makes the mirror room, the
+  mirror joins the owner's members to it as remote users, from the owner's
+  member list (a list cut short only adds). The owner's membership records
+  are then copied, also from `history` after a close, but for links and this
+  server's own users' remote users; this server's users' joins and leaves of
+  a mirror room, or a thread of one, go to the owner as `room_join` and
+  `room_leave`, in order. A mirror room is private exactly when the owner's
+  room was when it was made; when the owner's room later becomes private, a
+  public mirror room stops mirroring (this server fixes `private` at a room's
+  creation, so as an owner it never changes it).
 - A user's `message`, `reactions`, or thread `room_set` in a mirror room or a
   thread of one goes to the owner through the link, with the owner's IDs
   and `ext.remote.user_id`, as request `<user_id>:<id>`, after a `me` with the
   user's name the first time. Once the owner's result comes, after its
   record, the user is answered with the copy's `message_id` or the thread's
   `room_id`, waiting for the record if it is read later, such as after a new
-  connection (up to a minute): a request the owner took is never answered
-  with an error that would have the user send it again. The owner's error is the user's; an owner that cannot be
+  connection, for up to a minute; then it is `retry_after`, which is safe:
+  the user's resend has the same request `id`, a duplicate for the owner. The owner's error is the user's; an owner that cannot be
   reached in ten seconds is `retry_after` 5. A rename of a user who wrote
   there is a `me` to the owner. A message cannot move between a mirror room
   and another room.
