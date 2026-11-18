@@ -37,6 +37,9 @@ func TestServerConfigForCustomRunner(t *testing.T) {
 	if config.SignalUnknownPasskeys {
 		t.Fatal("the passkey page signals unknown passkeys without --webauthn.signal-unknown")
 	}
+	if config.GuestFirstPasskeys {
+		t.Fatal("a passkey registration needs a guest first without --webauthn.guest-first")
+	}
 	if config.Store != nil {
 		t.Fatal("configuration conversion must not open a store")
 	}
@@ -78,5 +81,20 @@ func TestServerConfigSignalsUnknownPasskeysWhenAsked(t *testing.T) {
 	}
 	if !config.SignalUnknownPasskeys {
 		t.Fatal("--webauthn.signal-unknown did not reach the server's config")
+	}
+}
+
+func TestServerConfigPasskeysGuestFirstWhenAsked(t *testing.T) {
+	var options aproncmd.Options
+	parser := flags.NewParser(&options, flags.None)
+	if _, err := parser.ParseArgs([]string{"--webauthn.guest-first"}); err != nil {
+		t.Fatal(err)
+	}
+	config, err := aproncmd.ServerConfig(options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !config.GuestFirstPasskeys {
+		t.Fatal("--webauthn.guest-first did not reach the server's config")
 	}
 }

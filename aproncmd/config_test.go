@@ -42,6 +42,7 @@ messages-per-minute = 30
 [webauthn]
 rp-id = "chat.example"
 origin = ["https://chat.example"]
+guest-first = true
 
 [upload]
 max-mb = 5
@@ -53,7 +54,7 @@ max-mb = 5
 	if options.Addr != "127.0.0.1:9999" || options.Upload.MaxMB != 7 {
 		t.Fatalf("command line overridden: addr %q, max-mb %d", options.Addr, options.Upload.MaxMB)
 	}
-	if options.PublicURL != "https://chat.example" || options.MessagesPerMinute != 30 || options.WebAuthn.RPID != "chat.example" {
+	if options.PublicURL != "https://chat.example" || options.MessagesPerMinute != 30 || options.WebAuthn.RPID != "chat.example" || !options.WebAuthn.GuestFirst {
 		t.Fatalf("file settings not applied: %+v", options)
 	}
 	if !reflect.DeepEqual(options.WebAuthn.Origins, []string{"https://chat.example"}) {
@@ -74,7 +75,7 @@ func TestConfigFileRejectsUnknownSettings(t *testing.T) {
 }
 
 func TestPrintedConfigLoadsBack(t *testing.T) {
-	options, parser := parse(t, "--origin", "https://a.example", "--origin", "https://b.example", "--push.disable", "--tls.domain", "chat.example")
+	options, parser := parse(t, "--origin", "https://a.example", "--origin", "https://b.example", "--push.disable", "--tls.domain", "chat.example", "--webauthn.guest-first")
 	var printed bytes.Buffer
 	if err := printConfig(&printed, parser); err != nil {
 		t.Fatal(err)

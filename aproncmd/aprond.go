@@ -60,6 +60,7 @@ type Options struct {
 		RPID             string   `long:"rp-id" default:"localhost" description:"Passkey relying party domain; empty disables passkeys"`
 		Origins          []string `long:"origin" default:"http://localhost:5173" default:"http://localhost:8080" description:"Exact frontend origin for passkeys; repeat for more"`
 		AddWithoutReauth bool     `long:"add-without-reauth" description:"Let a connection add a passkey to an account that has one without a passkey sign-in in the last five minutes; a stolen session token could then take the account over"`
+		GuestFirst       bool     `long:"guest-first" description:"A passkey registration makes an account only for a signed-in guest or with an invitation, and server.signup leaves out webauthn, so clients sign in as a guest first; off, a registration on a connection that is not signed in makes one wherever guests are allowed"`
 		// FIXME: keep off until Apple fixes https://bugs.webkit.org/show_bug.cgi?id=302624
 		// and https://bugs.webkit.org/show_bug.cgi?id=322267
 		// (signalUnknownCredential can delete other accounts' passkeys on
@@ -306,6 +307,7 @@ func serverConfig(options Options) (apron.Config, error) {
 		}
 		config.AddCredentialWithoutReauth = options.WebAuthn.AddWithoutReauth
 		config.SignalUnknownPasskeys = options.WebAuthn.SignalUnknown
+		config.GuestFirstPasskeys = options.WebAuthn.GuestFirst
 	}
 	return config, nil
 }
