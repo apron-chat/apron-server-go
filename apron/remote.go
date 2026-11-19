@@ -159,8 +159,9 @@ func normalizeAddress(address string) (string, error) {
 // linkLocked returns the link bound to a normalized server address, made
 // if there is none: a token-only account with role bot, whose ext.remote
 // names the server, with a user_id made from the server's authority.
-func (s *Server) linkLocked(server string) (*userState, error) {
-	if u := s.links[server]; u != nil {
+func (f *federation) linkLocked(server string) (*userState, error) {
+	s := f.s
+	if u := f.links[server]; u != nil {
 		return u, nil
 	}
 	authority, err := remoteAuthority(server)
@@ -181,7 +182,7 @@ func (s *Server) linkLocked(server string) (*userState, error) {
 	s.users[id] = u
 	s.touchUser(id)
 	s.grantRolesLocked(u)
-	s.links[server] = u
+	f.links[server] = u
 	return u, nil
 }
 
@@ -242,7 +243,8 @@ func remoteActor(params map[string]jsontext.Value) (string, bool) {
 // user removed it from there. The request then runs on the remote user's
 // own session, with the same checks as any of its requests, and a thread
 // it creates is not private unless it says so.
-func (s *Server) actAs(c *client, req request, remoteID string) (any, bool, *Error) {
+func (f *federation) actAs(c *client, req request, remoteID string) (any, bool, *Error) {
+	s := f.s
 	if remoteID == "" || len(remoteID) > maxRemoteUserIDBytes || !validID(remoteID) || strings.HasPrefix(remoteID, "~") {
 		return nil, false, invalidParams("ext.remote.user_id must be a user_id of at most %d bytes, not a system identity's", maxRemoteUserIDBytes)
 	}
@@ -389,13 +391,13 @@ func (s *Server) actAs(c *client, req request, remoteID string) (any, bool, *Err
 			params["private"] = jsontext.Value("false")
 		}
 	}
-	bot := s.remoteBot(id)
+	bot := f.remoteBot(id)
 	raw, callErr := bot.Call(s.requestContext(c), req.method, params)
 	if callErr != nil {
 		if e, ok := errors.AsType[*Error](callErr); ok {
 			return nil, false, e
 		}
-		return nil, false, s.remoteHost.protocolError(callErr)
+		return nil, false, f.h.protocolError(callErr)
 	}
 	return raw, false, nil
 }
@@ -450,10 +452,10 @@ func notJoined(e *Error) *Error {
 
 // remoteBot is the handle of a link's remote user, whose session runs its
 // requests.
-func (s *Server) remoteBot(userID string) *Bot {
-	if b, ok := s.remoteBots.Load(userID); ok {
+func (f *federation) remoteBot(userID string) *Bot {
+	if b, ok := f.bots.Load(userID); ok {
 		return b.(*Bot)
 	}
-	b, _ := s.remoteBots.LoadOrStore(userID, &Bot{s: s, host: s.remoteHost, userID: userID})
+	b, _ := f.bots.LoadOrStore(userID, &Bot{s: f.s, host: f.h, userID: userID})
 	return b.(*Bot)
 }

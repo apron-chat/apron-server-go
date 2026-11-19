@@ -51,6 +51,11 @@ type federation struct {
 	// origin of self, where owners send wake pushes.
 	selfAuthority, wakeBase string
 	client                  *http.Client
+	// links are this server's links (remote.go), by the address of the
+	// remote server each is bound to, guarded by s.mu; bots are the
+	// handles of the remote users that links write as, by user_id.
+	links map[string]*userState
+	bots  sync.Map
 
 	mu sync.Mutex
 	// mirrors are the owners this server mirrors rooms of, by address, and
@@ -72,11 +77,19 @@ func newFederation(s *Server, config RemoteConfig) (*federation, error) {
 	if strings.HasPrefix(self, "ws://") {
 		base = "http://" + authority
 	}
-	return &federation{
+	f := &federation{
 		s: s, self: self, linger: max(config.Linger, 0), selfAuthority: authority, wakeBase: base,
-		client:  &http.Client{Timeout: 10 * time.Second},
+		client: &http.Client{Timeout: 10 * time.Second}, links: make(map[string]*userState),
 		mirrors: make(map[string]*mirror), rooms: make(map[string]*mirrorRoom), wakes: make(map[string]*linkWake),
-	}, nil
+	}
+	s.mu.RLock()
+	for _, u := range s.users {
+		if u.link != nil {
+			f.links[u.link.server] = u
+		}
+	}
+	s.mu.RUnlock()
+	return f, nil
 }
 
 func (f *federation) Name() string { return remoteExt }
@@ -189,7 +202,7 @@ func (f *federation) invite(ctx context.Context, call *CommandCall, address stri
 		s.unlock()
 		return InvalidParams("A mirror room is shared by its owner, not here")
 	}
-	link, linkErr := s.linkLocked(server)
+	link, linkErr := f.linkLocked(server)
 	if linkErr != nil {
 		s.unlock()
 		return InvalidParams(linkErr.Error())
@@ -223,7 +236,7 @@ func (f *federation) threadMadeLocked(r *roomState) {
 	if r.parent == nil || r.private {
 		return
 	}
-	for _, link := range f.s.links {
+	for _, link := range f.links {
 		if r.parent.members[link.id] != nil {
 			f.s.joinLocked(link, r)
 		}
@@ -260,7 +273,7 @@ func (f *federation) unshare(ctx context.Context, call *CommandCall) error {
 	r := s.rooms[call.Room.ID]
 	var servers []string
 	if r != nil {
-		for server, link := range s.links {
+		for server, link := range f.links {
 			if s.leaveLocked(link, r) {
 				servers = append(servers, server)
 			}
@@ -282,8 +295,8 @@ func (f *federation) list() string {
 	var b strings.Builder
 	b.WriteString("This server is " + f.self + ".\n\nLinks of mirrors of this server's rooms:\n")
 	s.mu.RLock()
-	for _, server := range slices.Sorted(maps.Keys(s.links)) {
-		link := s.links[server]
+	for _, server := range slices.Sorted(maps.Keys(f.links)) {
+		link := f.links[server]
 		rooms := slices.Sorted(maps.Keys(link.joined))
 		fmt.Fprintf(&b, "- %s for %s, in %s\n", link.id, server, strings.Join(rooms, ", "))
 	}
@@ -314,7 +327,7 @@ func (f *federation) revoke(call *CommandCall, address string) error {
 	}
 	s := f.s
 	s.mu.Lock()
-	link := s.links[server]
+	link := f.links[server]
 	if link != nil {
 		s.revokeServicesOfLocked(link)
 	}
@@ -396,10 +409,7 @@ func (f *federation) saveWakes() error {
 // recordLocked wakes the links of the rooms a record is in. ext:remote
 // hook in appendLocked.
 func (f *federation) recordLocked(rooms []*roomState) {
-	if len(f.s.links) == 0 {
-		return
-	}
-	for _, link := range f.s.links {
+	for _, link := range f.links {
 		if slices.ContainsFunc(rooms, func(r *roomState) bool { return r.members[link.id] != nil }) {
 			f.wake(link.id)
 		}

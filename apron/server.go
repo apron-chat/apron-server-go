@@ -572,12 +572,6 @@ type Server struct {
 	rooms    map[string]*roomState
 	messages map[string]*messageState
 	clients  map[*client]struct{}
-	// links are the links (ext:remote) by the address of the remote server
-	// each is bound to. remoteHost owns the remote users that links write
-	// as, and remoteBots keeps their sessions.
-	links      map[string]*userState
-	remoteHost *Host
-	remoteBots sync.Map // user_id → *Bot
 	// fed is the federation of shared rooms (Config.Remote), nil without
 	// it.
 	fed *federation
@@ -756,12 +750,10 @@ func Open(config Config) (*Server, error) {
 		extData:        make(map[string]map[string]jsontext.Value),
 		recordsChanged: make(chan struct{}),
 		logger:         config.Logger,
-		links:          make(map[string]*userState),
 	}
 	if s.logger == nil {
 		s.logger = slog.Default()
 	}
-	s.remoteHost = &Host{s: s, name: remoteExt, logger: s.logger.With("extension", remoteExt)}
 	s.extContext, s.extCancel = context.WithCancel(context.Background())
 	for role, holders := range config.Roles {
 		role = strings.ToLower(strings.TrimSpace(role))
@@ -1569,7 +1561,7 @@ func (s *Server) processFrame(c *client, payload []byte) {
 	if s.fed != nil && user.link != nil && actAsMethods[req.method] {
 		if remoteID, present := remoteActor(req.params); present {
 			actAs = true
-			op = func(s *Server, c *client, req request) (any, bool, *Error) { return s.actAs(c, req, remoteID) }
+			op = func(s *Server, c *client, req request) (any, bool, *Error) { return s.fed.actAs(c, req, remoteID) }
 		} else if req.method == "room_set" {
 			// A link sets rooms only as a remote user, and only threads.
 			op = func(*Server, *client, request) (any, bool, *Error) {

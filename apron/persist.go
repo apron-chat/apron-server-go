@@ -670,9 +670,6 @@ func (s *Server) restoreLocked() (map[string]bool, error) {
 			}
 			u.removed[roomID] = true
 		}
-		if u.link != nil {
-			s.links[u.link.server] = u
-		}
 		if err := s.restoreIdentitiesLocked(u, stored); err != nil {
 			return nil, fmt.Errorf("stored user %q: %w", id, err)
 		}

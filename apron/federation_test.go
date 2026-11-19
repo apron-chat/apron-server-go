@@ -399,7 +399,7 @@ func TestMirrorRoom(t *testing.T) {
 	bob.expectError(t, "message", "m7", map[string]any{"room_id": mirrorRoom, "body": map[string]any{"text": "after"}}, CodeDenied)
 	a.app.mu.RLock()
 	linked := false
-	for _, link := range a.app.links {
+	for _, link := range a.app.fed.links {
 		linked = linked || a.app.rooms[ownerRoom].members[link.id] != nil
 	}
 	a.app.mu.RUnlock()
@@ -526,7 +526,7 @@ func TestLinkRequests(t *testing.T) {
 	a.app.mu.RLock()
 	r := a.app.rooms[thread]
 	linked := false
-	for _, l := range a.app.links {
+	for _, l := range a.app.fed.links {
 		linked = linked || r.members[l.id] != nil
 	}
 	a.app.mu.RUnlock()
