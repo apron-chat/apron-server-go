@@ -359,8 +359,7 @@ func (f *federation) markUnshared(server, ownerRoom string) {
 
 // youResult is the `you` of a link's sign-in.
 type youResult struct {
-	UserID string `json:"user_id"`
-	Ext    struct {
+	Ext struct {
 		Remote struct {
 			Server string `json:"server"`
 		} `json:"remote"`

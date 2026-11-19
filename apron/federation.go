@@ -10,7 +10,6 @@ import (
 	"net/http"
 	"net/url"
 	"slices"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -39,9 +38,6 @@ type RemoteConfig struct {
 	// wake push; zero stays connected.
 	Linger time.Duration
 }
-
-// DefaultRemoteLinger is the --remote.linger of aprond.
-const DefaultRemoteLinger = 30 * time.Second
 
 // federation is trusted federation. It runs as an extension of the server's
 // own, named remote, whose KV keeps what it needs across restarts.
@@ -450,5 +446,3 @@ func (f *federation) postWake(ctx context.Context, w linkWake) {
 
 // randomID is an opaque random identifier.
 func randomID() string { return strings.ToLower(rand.Text()) }
-
-func formatSeconds(d time.Duration) string { return strconv.Itoa(int(d / time.Second)) }

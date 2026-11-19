@@ -22,26 +22,8 @@ type remoteError struct {
 
 func (e *remoteError) Error() string { return fmt.Sprintf("error %d: %s", e.Code, e.Message) }
 
-// Error codes the bridge acts on (§1.1).
-const (
-	remoteCodeInvalidParams = -32602
-	remoteCodeDenied        = -32001
-	remoteCodeRetryAfter    = -32002
-)
-
-// retryAfter is the delay a retry_after error asks for, 0 for another
-// error.
-func remoteRetryAfter(err error) time.Duration {
-	e, ok := errors.AsType[*remoteError](err)
-	if !ok || e.Code != remoteCodeRetryAfter {
-		return 0
-	}
-	var data struct {
-		RetryAfter float64 `json:"retry_after"`
-	}
-	_ = json.Unmarshal(e.Data, &data)
-	return max(time.Second, time.Duration(data.RetryAfter*float64(time.Second)))
-}
+// remoteCodeDenied is the owner's denied (§1.1), which the mirror acts on.
+const remoteCodeDenied = -32001
 
 // errRemoteDisconnected is the error of a request whose connection closed before
 // its reply came.
