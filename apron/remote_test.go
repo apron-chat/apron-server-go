@@ -49,3 +49,14 @@ func wstestText(snapshot map[string]any) string {
 	text, _ := body["text"].(string)
 	return text
 }
+
+// An embed is not copied: a line names it, with its link when it has one.
+func TestRemoteBodyEmbeds(t *testing.T) {
+	body := remoteBody(map[string]any{"text": "see", "embeds": []any{
+		map[string]any{"kind": "upload", "title": "plan.pdf"},
+		map[string]any{"kind": "og", "og": map[string]any{"title": "Docs", "url": "https://docs.example/"}},
+	}}, nil)
+	if want := "see\n[plan.pdf, not mirrored]\n[Docs: https://docs.example/]"; body["text"] != want {
+		t.Fatalf("text = %q, want %q", body["text"], want)
+	}
+}

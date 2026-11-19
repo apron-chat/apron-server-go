@@ -137,7 +137,7 @@ func embedFallback(embed map[string]any) string {
 	if link != "" {
 		return fmt.Sprintf("[%s: %s]", title, link)
 	}
-	return fmt.Sprintf("[%s, not bridged]", title)
+	return fmt.Sprintf("[%s, not mirrored]", title)
 }
 
 func firstStringOf(values ...any) string {
