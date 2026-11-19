@@ -582,9 +582,7 @@ func (s *Server) updateProfile(c *client, req request) (any, bool, *Error) {
 		return nil, false, err
 	}
 	// ext.remote is the server's (ext:remote).
-	if extWrite, err = s.remoteExtWrite(c, extWrite, remoteOnUser, false); err != nil {
-		return nil, false, err
-	}
+	extWrite = s.remoteExtWrite(c, extWrite, false)
 	status, err := parseString(req.params, "status", false)
 	if err != nil {
 		return nil, false, err

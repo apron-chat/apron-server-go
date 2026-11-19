@@ -71,51 +71,28 @@ func (sh *shadowState) user() map[string]any {
 	return map[string]any{"server": sh.server, "user_id": sh.remoteID}
 }
 
-// remoteTarget is what a write of ext.remote is to.
-type remoteTarget int
-
-const (
-	remoteOnUser remoteTarget = iota
-	remoteOnMessage
-	remoteOnRoom
-)
-
-// remoteExtWrite applies the reserved key ext.remote to what a request
-// writes to ext: it is dropped from every write but those of an
-// extension's bot (Bot.Connect), which writes it as it is, so that no
-// client can claim that it comes from another server. A message a shadow
-// user's session creates gets the shadow's {"server", "user_id"}, whatever
-// it writes, and its other writes keep what is stored. A bot's write that
-// is not an object is invalid_params.
-func (s *Server) remoteExtWrite(c *client, ext extObject, target remoteTarget, creating bool) (extObject, *Error) {
-	raw, has := ext[remoteExt]
-	_, session := c.conn.(sessionTransport)
-	var shadow *shadowState
-	if session {
-		s.mu.RLock()
-		shadow = c.user.shadow
-		s.mu.RUnlock()
-	}
-	switch {
-	case session && shadow == nil && target != remoteOnUser:
-		if has && !emptyJSON(raw) {
-			var written map[string]jsontext.Value
-			if json.Unmarshal(raw, &written) != nil || written == nil {
-				return nil, invalidParams("ext.remote must be an object")
-			}
-		}
-		return ext, nil
-	case has:
+// remoteExtWrite drops the reserved key ext.remote from what a request
+// writes to ext, so that no client can claim that it comes from another
+// server; a save keeps what is stored. A message that a remote user
+// creates gets the remote user's {"server", "user_id"}.
+func (s *Server) remoteExtWrite(c *client, ext extObject, creating bool) extObject {
+	if _, has := ext[remoteExt]; has {
 		ext = maps.Clone(ext)
 		delete(ext, remoteExt)
 	}
-	if shadow != nil && target == remoteOnMessage && creating {
+	if !creating {
+		return ext
+	}
+	s.mu.RLock()
+	shadow := c.user.shadow
+	s.mu.RUnlock()
+	if shadow != nil {
 		if ext == nil {
 			ext = make(extObject)
 		}
 		ext[remoteExt] = encodeJSON(shadow.user())
 	}
-	return ext, nil
+	return ext
 }
 
 // storedShadow is a remote user's shadowState in the store.

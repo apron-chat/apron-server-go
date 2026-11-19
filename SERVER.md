@@ -926,12 +926,12 @@ again.
 The server offers [`ext:remote`](https://github.com/shazow/apron/blob/main/recipes/trusted_federation.md#draft-extension-extremote):
 `ext.remote`, where a user, message, or room comes from, is the server's,
 whether or not it advertises the capability. It is dropped from what any
-client writes with `me`, `message`, and `room_set`, so a save keeps the
-stored value. Only an extension's bot writes it, as written; a message that
-a remote user ([Trusted federation](#trusted-federation)) creates gets the
-remote user's `{"server", "user_id"}`. A remote user's user object and the
-recorded `from` of its records (messages, reactions, memberships) carry it
-too, so clients show where it is from in history.
+client or extension writes with `me`, `message`, and `room_set`, so a save
+keeps the stored value. A message that a remote user
+([Trusted federation](#trusted-federation)) creates gets the remote user's
+`{"server", "user_id"}`. A remote user's user object and the recorded
+`from` of its records (messages, reactions, memberships) carry it too, so
+clients show where it is from in history.
 
 ## Commands
 
