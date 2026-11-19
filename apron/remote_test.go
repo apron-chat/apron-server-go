@@ -16,13 +16,13 @@ func TestShadowIDs(t *testing.T) {
 		{"ws://[::1]:8081/ws", "Dave", "Dave@[::1]:8081"},
 		{"wss://b.example/ws", "dave@c.example", "dave@c.example@b.example"},
 	} {
-		if got, err := ShadowID(tc.server, tc.user); err != nil || got != tc.want {
-			t.Errorf("ShadowID(%q, %q) = %q, %v; want %q", tc.server, tc.user, got, err, tc.want)
+		if got, err := shadowID(tc.server, tc.user); err != nil || got != tc.want {
+			t.Errorf("shadowID(%q, %q) = %q, %v; want %q", tc.server, tc.user, got, err, tc.want)
 		}
 	}
 	for _, bad := range [][2]string{{"b.example", "carol"}, {"wss:///ws", "carol"}, {"wss://u@b.example/ws", "carol"}, {testRemote, ""}, {testRemote, "~server"}, {testRemote, "a b"}} {
-		if id, err := ShadowID(bad[0], bad[1]); err == nil {
-			t.Errorf("ShadowID(%q, %q) = %q, want an error", bad[0], bad[1], id)
+		if id, err := shadowID(bad[0], bad[1]); err == nil {
+			t.Errorf("shadowID(%q, %q) = %q, want an error", bad[0], bad[1], id)
 		}
 	}
 }

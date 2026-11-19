@@ -30,11 +30,11 @@ type shadowState struct {
 // maxShadowIDBytes bounds a remote user's user_id.
 const maxShadowIDBytes = 256
 
-// RemoteAuthority is the authority of a server's address (PROTOCOL.md §1),
+// remoteAuthority is the authority of a server's address (PROTOCOL.md §1),
 // as remote users' IDs carry it: its host, lowercased, and its port if the
 // address has one, such as "b.example" for wss://b.example/ws and
 // "127.0.0.1:8787" for ws://127.0.0.1:8787/ws.
-func RemoteAuthority(server string) (string, error) {
+func remoteAuthority(server string) (string, error) {
 	parsed, err := url.Parse(server)
 	if err != nil || parsed.Scheme == "" || parsed.Host == "" || parsed.User != nil || parsed.Opaque != "" {
 		return "", fmt.Errorf("apron: %q is no server address, such as wss://chat.example/ws", server)
@@ -46,12 +46,12 @@ func RemoteAuthority(server string) (string, error) {
 	return authority, nil
 }
 
-// ShadowID is the user_id of the remote user that stands for user
+// shadowID is the user_id of the remote user that stands for user
 // remoteUserID of the server at address server: `<remoteUserID>@<authority>`
-// (RemoteAuthority), such as carol@b.example. remoteUserID is any user_id
+// (remoteAuthority), such as carol@b.example. remoteUserID is any user_id
 // (PROTOCOL.md §2.4) but a system identity's (~).
-func ShadowID(server, remoteUserID string) (string, error) {
-	authority, err := RemoteAuthority(server)
+func shadowID(server, remoteUserID string) (string, error) {
+	authority, err := remoteAuthority(server)
 	if err != nil {
 		return "", err
 	}
@@ -141,10 +141,10 @@ func (stored *storedLink) restore() *linkState {
 	return &linkState{server: stored.Server}
 }
 
-// NormalizeAddress normalizes a server's address (PROTOCOL.md §1) as
+// normalizeAddress normalizes a server's address (PROTOCOL.md §1) as
 // links compare them: a ws: or wss: URL, with its scheme and host
 // lowercased, and its port and path as written.
-func NormalizeAddress(address string) (string, error) {
+func normalizeAddress(address string) (string, error) {
 	parsed, err := url.Parse(strings.TrimSpace(address))
 	if err != nil || parsed.Host == "" || parsed.User != nil || parsed.Opaque != "" || parsed.RawQuery != "" || parsed.Fragment != "" {
 		return "", fmt.Errorf("%q is no server address, such as wss://chat.example/ws", address)
@@ -163,7 +163,7 @@ func (s *Server) linkLocked(server string) (*userState, error) {
 	if u := s.links[server]; u != nil {
 		return u, nil
 	}
-	authority, err := RemoteAuthority(server)
+	authority, err := remoteAuthority(server)
 	if err != nil {
 		return nil, err
 	}
@@ -261,7 +261,7 @@ func (s *Server) actAs(c *client, req request, remoteID string) (any, bool, *Err
 		s.unlock()
 		return nil, false, &Error{Code: CodeDenied, Message: "Only a link acts as remote users"}
 	}
-	id, idErr := ShadowID(link.link.server, remoteID)
+	id, idErr := shadowID(link.link.server, remoteID)
 	if idErr != nil {
 		s.unlock()
 		return nil, false, invalidParams("%v", idErr)
@@ -405,7 +405,7 @@ func (s *Server) actAs(c *client, req request, remoteID string) (any, bool, *Err
 // an account whose ext.remote names its server and user_id. Links write as
 // these, and mirrors copy their records as them.
 func (s *Server) remoteUserLocked(server, remoteID string) (*userState, error) {
-	id, err := ShadowID(server, remoteID)
+	id, err := shadowID(server, remoteID)
 	if err != nil {
 		return nil, err
 	}

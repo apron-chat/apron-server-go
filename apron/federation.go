@@ -47,7 +47,7 @@ type federation struct {
 	kv     KV
 	self   string
 	linger time.Duration
-	// selfAuthority is RemoteAuthority(self), and wakeBase the http(s)
+	// selfAuthority is remoteAuthority(self), and wakeBase the http(s)
 	// origin of self, where owners send wake pushes.
 	selfAuthority, wakeBase string
 	client                  *http.Client
@@ -63,11 +63,11 @@ type federation struct {
 }
 
 func newFederation(s *Server, config RemoteConfig) (*federation, error) {
-	self, err := NormalizeAddress(config.Self)
+	self, err := normalizeAddress(config.Self)
 	if err != nil {
 		return nil, fmt.Errorf("Config.Remote.Self: %w", err)
 	}
-	authority, _ := RemoteAuthority(self)
+	authority, _ := remoteAuthority(self)
 	base := "https://" + authority
 	if strings.HasPrefix(self, "ws://") {
 		base = "http://" + authority
@@ -138,7 +138,7 @@ func parseInvite(link string) (server, room, token string, err error) {
 	if server == "" || room == "" || token == "" {
 		return "", "", "", errors.New("the invite needs server, room, and token")
 	}
-	if server, err = NormalizeAddress(server); err != nil {
+	if server, err = normalizeAddress(server); err != nil {
 		return "", "", "", err
 	}
 	return server, room, token, nil
@@ -175,7 +175,7 @@ func (f *federation) command(ctx context.Context, call *CommandCall) (map[string
 // and to the room's threads that every member can see, and replies with an
 // invite that carries a new token of the link.
 func (f *federation) invite(ctx context.Context, call *CommandCall, address string) error {
-	server, err := NormalizeAddress(address)
+	server, err := normalizeAddress(address)
 	switch {
 	case err != nil:
 		return InvalidParams("Usage: /remote invite <address>, such as wss://chat.example/ws: " + err.Error())
@@ -308,7 +308,7 @@ func (f *federation) list() string {
 // revoke revokes the tokens of the link for a mirror server, which closes
 // its connections. Its remote users stay.
 func (f *federation) revoke(call *CommandCall, address string) error {
-	server, err := NormalizeAddress(address)
+	server, err := normalizeAddress(address)
 	if err != nil {
 		return InvalidParams("Usage: /remote revoke <address>: " + err.Error())
 	}
@@ -363,7 +363,7 @@ func (f *federation) registerWake(c *client, req request) (bool, any, *Error) {
 		return false, nil, nil
 	}
 	parsed, err := url.Parse(params.URL)
-	authority, _ := RemoteAuthority(link.server)
+	authority, _ := remoteAuthority(link.server)
 	switch {
 	case params.Kind != "relay":
 		return true, nil, invalidParams("A link's wake push is a relay")

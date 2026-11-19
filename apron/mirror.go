@@ -164,7 +164,7 @@ func (f *federation) initMirrors(r *Registrar) error {
 		for server, ms := range f.mirrors {
 			if u.shadow.server == server {
 				ms.users[u.shadow.remoteID] = id
-			} else if ownerID, err := ShadowID(u.shadow.server, u.shadow.remoteID); err == nil {
+			} else if ownerID, err := shadowID(u.shadow.server, u.shadow.remoteID); err == nil {
 				ms.users[ownerID] = id
 			}
 		}
@@ -223,7 +223,7 @@ func (f *federation) connect(ctx context.Context, call *CommandCall, invite stri
 		return nil
 	}
 	defer conn.close()
-	if bound, _ := NormalizeAddress(you.Ext.Remote.Server); bound != f.self {
+	if bound, _ := normalizeAddress(you.Ext.Remote.Server); bound != f.self {
 		call.Notice(fmt.Sprintf("That invite is for %s, not for this server (%s)", cmp.Or(you.Ext.Remote.Server, "no server"), f.self))
 		return nil
 	}
@@ -308,7 +308,7 @@ func (f *federation) connect(ctx context.Context, call *CommandCall, invite stri
 	} else {
 		ms.wakeUp()
 	}
-	authority, _ := RemoteAuthority(server)
+	authority, _ := remoteAuthority(server)
 	call.Notice(fmt.Sprintf("Mirroring %s from %s in room `%s`.", title, authority, r.id))
 	return nil
 }
@@ -808,7 +808,7 @@ func (ms *mirror) userLocked(object map[string]any) *userState {
 	remote, _ := ext[remoteExt].(map[string]any)
 	server, _ := remote["server"].(string)
 	remoteID, _ := remote["user_id"].(string)
-	if normalized, err := NormalizeAddress(server); err == nil && normalized == ms.f.self && remoteID != "" {
+	if normalized, err := normalizeAddress(server); err == nil && normalized == ms.f.self && remoteID != "" {
 		ms.users[ownerID] = remoteID
 		if u := s.users[remoteID]; u != nil {
 			return u
@@ -818,7 +818,7 @@ func (ms *mirror) userLocked(object map[string]any) *userState {
 	}
 	if server == "" || remoteID == "" {
 		server, remoteID = ms.server, ownerID
-	} else if normalized, err := NormalizeAddress(server); err == nil {
+	} else if normalized, err := normalizeAddress(server); err == nil {
 		server = normalized
 	}
 	u, err := s.remoteUserLocked(server, remoteID)
@@ -841,7 +841,7 @@ func (ms *mirror) localUserID(ownerID string) string {
 	if id := ms.users[ownerID]; id != "" {
 		return id
 	}
-	id, err := ShadowID(ms.server, ownerID)
+	id, err := shadowID(ms.server, ownerID)
 	if err != nil {
 		return ownerID
 	}
@@ -1347,7 +1347,7 @@ func (ms *mirror) ownerUserIDLocked(localID string) string {
 		if u.shadow.server == ms.server {
 			return u.shadow.remoteID
 		}
-		if id, err := ShadowID(u.shadow.server, u.shadow.remoteID); err == nil {
+		if id, err := shadowID(u.shadow.server, u.shadow.remoteID); err == nil {
 			return id
 		}
 	}
@@ -1401,7 +1401,7 @@ func (ms *mirror) ownUser(object map[string]any) (string, bool) {
 	remote, _ := ext[remoteExt].(map[string]any)
 	server, _ := remote["server"].(string)
 	user, _ := remote["user_id"].(string)
-	normalized, err := NormalizeAddress(server)
+	normalized, err := normalizeAddress(server)
 	return user, err == nil && normalized == ms.f.self && user != ""
 }
 

@@ -160,7 +160,7 @@ func remoteExtOf(object map[string]any) map[string]any {
 }
 
 func authorityOf(address string) string {
-	authority, _ := RemoteAuthority(address)
+	authority, _ := remoteAuthority(address)
 	return authority
 }
 
