@@ -176,12 +176,18 @@ func TestFederationOff(t *testing.T) {
 	guestAuth(t, c)
 	c.drain(t)
 	c.expectError(t, "command", "c1", map[string]any{"room_id": "general", "body": map[string]any{"text": "/remote list"}}, CodeInvalidParams)
-	_, posted := c.request(t, "message", "m1", map[string]any{"body": map[string]any{"text": "x"}, "ext": map[string]any{"remote": map[string]any{"user_id": "zed", "server": "ws://b.test/ws"}}})
-	_ = posted
-	for _, frame := range c.drain(t) {
-		if params, _ := frame["params"].(map[string]any); frame["method"] == "message" && params["ext"] != nil {
-			t.Fatalf("ext.remote kept: %#v", params)
+	// The message's record comes before its result.
+	before, _ := c.request(t, "message", "m1", map[string]any{"body": map[string]any{"text": "x"}, "ext": map[string]any{"remote": map[string]any{"user_id": "zed", "server": "ws://b.test/ws"}}})
+	seen := false
+	for _, frame := range before {
+		if params, _ := frame["params"].(map[string]any); frame["method"] == "message" {
+			if seen = true; params["ext"] != nil {
+				t.Fatalf("ext.remote kept: %#v", params)
+			}
 		}
+	}
+	if !seen {
+		t.Fatal("no message record")
 	}
 }
 
@@ -308,8 +314,7 @@ func TestMirrorRoom(t *testing.T) {
 	// Threads, both ways.
 	// A thread of a private room here is private unless it says otherwise,
 	// and only a thread every member sees is mirrored.
-	_, made := alice.request(t, "room_set", "t1", map[string]any{"parent_room_id": ownerRoom, "title": "Deploy", "private": false})
-	ownerThread := made["room_id"].(string)
+	alice.request(t, "room_set", "t1", map[string]any{"parent_room_id": ownerRoom, "title": "Deploy", "private": false})
 	eventually(t, "the thread", func() error {
 		b.app.mu.RLock()
 		defer b.app.mu.RUnlock()
@@ -334,7 +339,6 @@ func TestMirrorRoom(t *testing.T) {
 	if threadsOnA != 2 {
 		t.Fatalf("threads on the owner: %d", threadsOnA)
 	}
-	_ = ownerThread
 
 	// The owner's admin deletes bob's message: the copy is deleted too.
 	a.call(t, "message", map[string]any{"room_id": ownerRoom, "message_id": ownerReply, "deleted": true})

@@ -260,10 +260,6 @@ func (f *federation) actAs(c *client, req request, remoteID string) (any, bool, 
 	}
 	s.mu.Lock()
 	link := c.user
-	if link == nil || link.link == nil {
-		s.unlock()
-		return nil, false, &Error{Code: CodeDenied, Message: "Only a link acts as remote users"}
-	}
 	id, idErr := shadowID(link.link.server, remoteID)
 	if idErr != nil {
 		s.unlock()
