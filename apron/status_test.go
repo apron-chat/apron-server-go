@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strconv"
 	"sync/atomic"
 	"testing"
@@ -1533,35 +1534,44 @@ func TestListingsCarrySeen(t *testing.T) {
 	check("room_list by user_id", members, listed["users"].([]any))
 }
 
-// waitStored waits until the SQLite store at path, which a running server
-// writes in the background, holds a user entry for userID that want
-// accepts, and returns it.
-func waitStored(t *testing.T, path, userID string, want func(storedUser) bool) storedUser {
+// expectStored waits until app has written every change it made so far to
+// its store (Server.Sync), then requires the SQLite store at path to hold a
+// user entry for userID that want accepts, and returns it.
+func expectStored(t *testing.T, app *Server, path, userID string, want func(storedUser) bool) storedUser {
 	t.Helper()
-	for deadline := time.Now().Add(2 * time.Second); ; time.Sleep(5 * time.Millisecond) {
-		s, err := store.OpenSQLite(path)
-		if err != nil {
-			t.Fatal(err)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	if err := app.Sync(ctx); err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+	s, err := store.OpenSQLite(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stored storedUser
+	found := false
+	err = s.Load(func(e store.Entry) error {
+		if e.Kind != entryUser || e.ID != userID {
+			return nil
 		}
-		var stored storedUser
-		found := false
-		err = s.Load(func(e store.Entry) error {
-			if e.Kind != entryUser || e.ID != userID {
-				return nil
-			}
-			found = true
-			return json.Unmarshal(e.Value, &stored)
-		})
-		_ = s.Close()
-		if err != nil {
-			t.Fatal(err)
-		}
-		if found && want(stored) {
-			return stored
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("stored %s = %#v (found %v)", userID, stored, found)
-		}
+		found = true
+		return json.Unmarshal(e.Value, &stored)
+	})
+	_ = s.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !found || !want(stored) {
+		t.Fatalf("stored %s = %#v (found %v)", userID, stored, found)
+	}
+	return stored
+}
+
+// waitPastMillis waits until the clock is past the Unix millisecond ms, so
+// that a time taken next is a later millisecond.
+func waitPastMillis(ms int64) {
+	for time.Now().UnixMilli() <= ms {
+		runtime.Gosched()
 	}
 }
 
@@ -1603,7 +1613,7 @@ func TestSeenAfterCrash(t *testing.T) {
 
 	_ = back.ws.Close(websocket.StatusNormalClosure, "bye")
 	left := seenMillis(t, expectStatus(t, a, back.userID, "offline"))
-	time.Sleep(2 * time.Millisecond)
+	waitPastMillis(left)
 	back = resume(t, httpServer, token, back.userID)
 	expectStatus(t, a, back.userID, "online")
 	returned := time.Now().UnixMilli()
@@ -1617,12 +1627,12 @@ func TestSeenAfterCrash(t *testing.T) {
 
 	// The store has all of it, and the server crashes: it goes on running,
 	// unseen, while another starts on the same file.
-	waitStored(t, path, back.userID, func(u storedUser) bool { return u.Shown && u.Seen == left })
-	waitStored(t, path, fresh.userID, func(u storedUser) bool { return u.Shown && u.Seen == 0 })
-	waitStored(t, path, hidden.userID, func(u storedUser) bool { return !u.Shown && u.Seen == seenMillis(t, hiddenSeen) })
-	waitStored(t, path, none.userID, func(u storedUser) bool { return u.Shown && u.Seen == 0 && u.Status != nil && *u.Status == "" })
+	expectStored(t, app, path, back.userID, func(u storedUser) bool { return u.Shown && u.Seen == left })
+	expectStored(t, app, path, fresh.userID, func(u storedUser) bool { return u.Shown && u.Seen == 0 })
+	expectStored(t, app, path, hidden.userID, func(u storedUser) bool { return !u.Shown && u.Seen == seenMillis(t, hiddenSeen) })
+	expectStored(t, app, path, none.userID, func(u storedUser) bool { return u.Shown && u.Seen == 0 && u.Status != nil && *u.Status == "" })
 	crashed := time.Now().UnixMilli()
-	_, httpServer, _ = startWithStore(t, open(), filepath.Join(dir, "uploads"))
+	restarted, httpServer, _ := startWithStore(t, open(), filepath.Join(dir, "uploads"))
 	restored := time.Now().UnixMilli()
 	g := dialTestClient(t, httpServer)
 	g.drain(t)
@@ -1631,7 +1641,7 @@ func TestSeenAfterCrash(t *testing.T) {
 		seen, _ := user["seen"].(string)
 		expectSeenBetween(t, id+" after a crash", seen, max(crashed, returned), restored)
 		expectListedSeen(t, g, id, "offline", seen)
-		waitStored(t, path, id, func(u storedUser) bool { return !u.Shown && u.Seen == seenMillis(t, seen) })
+		expectStored(t, restarted, path, id, func(u storedUser) bool { return !u.Shown && u.Seen == seenMillis(t, seen) })
 	}
 	expectListedSeen(t, g, hidden.userID, "offline", hiddenSeen)
 	expectListedSeen(t, g, none.userID, "", "")

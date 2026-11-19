@@ -58,12 +58,15 @@ Defaults:
   [extension](#extensions) offers it or `--external.issuer` names an
   authorization server, bearer-token resume, and `guest`
   unless `--disable-guests`; `server.signup` lists every one but `token`,
-  which only resumes an account: a guest who registers a passkey or adds an
-  address becomes an account, and an email or external sign-in with a new
-  address or identity creates one. Without guests (`--disable-guests`, or
-  sign-in an extension restricts), `signup` leaves out `webauthn` too, since
-  a passkey registration then makes an account only with an
-  [invitation](#invitations); with no other scheme it is `[]`
+  which only resumes an account: a passkey registration on a connection
+  that is not signed in creates one, as does an email or external sign-in
+  with a new address or identity, and a guest who registers a passkey or
+  adds an address becomes an account. Without guests (`--disable-guests`,
+  or sign-in an extension restricts), `signup` leaves out `webauthn` too,
+  since a passkey registration then makes an account only with an
+  [invitation](#invitations); with no other scheme it is `[]`. So does
+  `--webauthn.guest-first`, with which a registration makes an account only
+  of a signed-in guest, or with an invitation
 - passkey RP ID: `localhost`; frontend origins: `http://localhost:5173` and
   `http://localhost:8080`
 - no `server.welcome`, `title`, or `avatar`, `description` the `general`
@@ -168,6 +171,14 @@ Flags (`aprond --help` lists them all):
   account that has one without a recent passkey sign-in, which a stolen
   session token could then use to take the account over; see
   [Managing passkeys](#managing-passkeys).
+  `--webauthn.guest-first` (`Config.GuestFirstPasskeys`, off by default)
+  has a passkey registration make an account only of a signed-in guest, or
+  with an invitation, and leaves `webauthn` out of `server.signup`, so
+  clients sign in as a guest first. Off, where guests are allowed, a
+  registration on a connection that is not signed in makes a new account
+  itself, in the client or on the [passkey page](#the-passkey-page): anyone
+  may make one as a guest anyway, so the guest step adds a round trip and
+  no protection. See [Invitations](#invitations).
   `--webauthn.signal-unknown` (`Config.SignalUnknownPasskeys`, off by
   default) has the passkey page say a passkey is for no account here and
   ask the browser to hide it; off, that is the page's usual error, which
@@ -378,12 +389,13 @@ assigned, ignoring case, and is not granted a role (`--role`); otherwise the
 guest gets the next unused `guest_<n>`. So no user is ever given a
 `user_id` starting with `~`, which are the system identities `~room` and
 `~private` ([Commands](#commands)). The `guest_` namespace belongs to the
-guest counter, and `user_` to that of email accounts: a request such as
-`guest_7`, `GUEST_7`, `guest_07` or `guest_x` is refused rather than taking a
-number out of sequence or impersonating a counter-assigned guest. Every guest
-`auth` takes exactly one counter value unless its requested ID is honored, so
-the latest guest number is roughly how many guests the server has admitted
-(the counter is kept in the store). No `user_id` is ever reissued.
+guest counter, and `user_` to that of accounts made without a guest (by
+email, a passkey registration, an invitation, or external sign-in): a
+request such as `guest_7`, `GUEST_7`, `guest_07` or `guest_x` is refused
+rather than taking a number out of sequence or impersonating a
+counter-assigned guest. Every guest `auth` takes exactly one counter value
+unless its requested ID is honored, so the latest guest number is roughly
+how many guests the server has admitted (the counter is kept in the store). No `user_id` is ever reissued.
 
 Accounts are users who signed in with a passkey, an email address, or an
 extension's external sign-in, and extensions' bots ([Extensions](#extensions));
@@ -1407,6 +1419,11 @@ Changing the RP ID creates a different credential scope.
 `--allow-any-origin` does not relax WebAuthn origin validation. The default
 `127.0.0.1` chat URL still supports guest chat; use `localhost` for passkeys.
 
+A native app runs the ceremony with the origin its platform writes in client
+data, such as `android:apk-key-hash:<base64url>` on Android. Listed with
+`--webauthn.origin`, that exact origin is also accepted as a connection's
+`Origin` without `--origin`, which can only match an origin with a host.
+
 A frontend whose host is the RP ID or under it works directly. A frontend
 elsewhere, such as the shared client at `https://web.apron.chat`, works once
 listed with `--webauthn.origin`: aprond serves every configured origin as
@@ -1441,6 +1458,21 @@ requests are not cached for replay.
 User presence and verification are required; login updates the credential's
 signature counter and flags and rejects a clone warning.
 
+A registration on a signed-in connection, a guest's included, adds the
+passkey to its account, which a guest becomes an account by. Where guests
+are allowed, one on a connection that is not signed in makes a new account
+as it finishes, without a guest to start from (server policy decides who
+can register,
+[PROTOCOL.md §4.10](https://github.com/shazow/apron/blob/main/PROTOCOL.md#410-webauthn-authentication)),
+since anyone could sign in as a guest first: the begin makes nothing, and
+the finish makes the account as for a new email address, with the `name`
+and `user_id` the begin asked for, else the finish's (a `user_id` by the
+guests' rules, or else `user_<n>`), and joins it to `general` after the
+result.
+Without guests, or with `--webauthn.guest-first`, such a registration is
+`denied` ("Sign in as a guest, or present an invitation, before adding a
+passkey") unless it presents an [invitation](#invitations).
+
 Successful registration or login, like an [email sign-in](#email-sign-in),
 returns an opaque bearer token for `scheme: "token"` on later connections
 ([PROTOCOL.md §3.2](https://github.com/shazow/apron/blob/main/PROTOCOL.md#32-authentication)).
@@ -1472,13 +1504,16 @@ exchange with the code it returns. aprond offers the page while its own
 origin (`--public-url`, or the scheme and host a request arrives on) is one
 of the `--webauthn.origin`s: by default `http://localhost:8080`, so `make
 run` has it; a deployment lists its `--public-url` there, as the examples
-above do.
+above do. Without `--public-url`, the page's origin comes from the
+request's `Host`, including its port, and must be one of the
+`--webauthn.origin`s.
 
 - **Begin.** A begin step adds `"external": {"url": "https://chat.example/passkey?action=login"}`
   to `challenge_id` and `public_key`. A registration's is
-  `?action=register&name=…`, and one on a signed-in connection, guests
-  included, an addition: `?action=register&request=<handle>`, which names
-  that account for ten minutes. The handle is the account, sealed
+  `?action=register&name=…` (a space in the query is `%20`, not `+`), and
+  one on a signed-in connection, guests included, an addition:
+  `?action=register&request=<handle>`, which names that account for ten
+  minutes. The handle is the account, sealed
   (AES-GCM, with a key each aprond makes as it starts), so aprond keeps
   nothing for an addition, and no number of begins can fill a table that
   holds up anyone's ceremony; a handle opens the page until it expires, or
@@ -1487,7 +1522,8 @@ above do.
   `challenge_id` and `public_key` to a connection that can run the
   ceremony itself. A connection whose `Origin` is not a
   `--webauthn.origin` cannot, so its begin returns `external` alone;
-  without the page it is `denied`, as before.
+  without the page it is `denied`, with a message that names the origins
+  refused: the connection's `Origin`, and the page's.
 - **The page** takes the same authorization request as `/oauth/authorize`
   (PKCE `S256`, `state`, `resource` the server's origin), checks it the same
   way, showing any problem on the page, as it does a bad `action`, and has
@@ -1548,9 +1584,12 @@ above do.
   `action`, on any connection: a login's code signs in to the passkey's
   account (`{you, token}`); an addition's adds the passkey to the account
   that began it, only on a connection signed in to it (`{you, token}`, as
-  in the client); and a new account's registration needs what one in the
-  client needs, an [invitation](#invitations) presented with the finish on
-  a connection that is not signed in. A code from the page finishes only
+  in the client); and a new account's registration makes the account as
+  one in the client does, on any connection that is not signed in, a new
+  one included: where guests are allowed, by itself, with the `name` the
+  finish asks for or else the begin's; without guests, or with
+  `--webauthn.guest-first`, only with an [invitation](#invitations)
+  presented with the finish. A code from the page finishes only
   `webauthn` with its own action, works once, and lasts five minutes. The
   token, a token from a code, is bound to no origin: it resumes from any
   origin, or with none, unlike one from a ceremony in the client.
@@ -1619,7 +1658,11 @@ included; each returns once its change is stored.
 
 An invitation makes one account without a guest to start from, as a
 server without guests, or whose sign-in an extension restricts, needs for
-its first account and each one after. The program that embeds the server
+its first account and each one after, and as one with
+`--webauthn.guest-first` needs for an account that does not start as a
+guest. Where guests are allowed, a registration makes an account without
+one ([Passkeys](#passkeys)); presenting one there still makes the account
+with what the invitation gives. The program that embeds the server
 makes one with `Server.Invite`, and an extension with `Host.Invite`; the
 [private example](examples/private) offers it to admins as `/invite`. It
 returns a token, `apron_invite_<random>`, once the invitation is stored, and
@@ -1638,7 +1681,9 @@ registration, in both steps:
 `server.signup` does not list `webauthn` on a server without guests,
 since only someone with an invitation can register there, and `signup` is
 what any client can do; an invited client registers all the same, as
-`webauthn` is in `server.auth`.
+`webauthn` is in `server.auth`. With `--webauthn.guest-first` it lists
+`guest` but not `webauthn`, so a client signs in as a guest before it
+registers.
 
 The begin makes nothing: no guest, and no account. The finish verifies the
 passkey as any registration does, then checks the invitation again, and in
@@ -1669,7 +1714,7 @@ over the same WebSocket; no HTTP authentication endpoints are needed.
 
 | `params.action` and `params.step` | Other parameters | Result |
 | --- | --- | --- |
-| `action: "register", step: "begin"` | None; current connection must be authenticated, or present an invitation | `{challenge_id, public_key, external?}` creation options |
+| `action: "register", step: "begin"` | None; on a connection that is not signed in, optionally `name` and `user_id`, and an invitation without guests or with `--webauthn.guest-first` | `{challenge_id, public_key, external?}` creation options |
 | `action: "register", step: "finish"` | `challenge_id`, `credential`: browser credential JSON | `{you, token}` |
 | `action: "login", step: "begin"` | None | `{challenge_id, public_key, external?}` discoverable request options |
 | `action: "login", step: "finish"` | `challenge_id`, `credential`: browser credential JSON | `{you, token}` |

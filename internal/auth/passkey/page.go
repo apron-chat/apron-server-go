@@ -38,9 +38,13 @@ import (
 //
 // A code from this page finishes only webauthn, with the action of its
 // begin: the page keeps codes of its own. A login's code signs in to the
-// passkey's account; a registration's makes a new account, as an invitation
-// does; and an addition's, begun on a signed-in connection, adds the
-// passkey to that account, only on a connection signed in to it.
+// passkey's account; a registration's makes a new account, on any
+// connection that is not signed in, as a registration in the client does:
+// with an invitation it presents, or, where anyone may sign in as a guest,
+// without one (signsUp); and an addition's, begun on a signed-in
+// connection, adds the passkey to that account, only on a connection signed
+// in to it. The server applies its policy for new accounts as the code is
+// redeemed (§4.10.1).
 //
 // With SignalUnknown, a login with a passkey that no account has, nor may
 // yet have, such as one made on the page whose code was never redeemed,
@@ -269,13 +273,19 @@ func (s *Scheme) pageURL(r *authn.Request, action string) (string, error) {
 				return "", authn.Internal("Unable to begin passkey registration")
 			}
 			query.Set("request", request)
-		case r.Invitation != nil:
-			if name := cmp.Or(r.Name, r.Invitation.Name); name != "" {
+		default:
+			// A new account's: the name it asks for, else its
+			// invitation's.
+			name := r.Name
+			if r.Invitation != nil {
+				name = cmp.Or(name, r.Invitation.Name)
+			}
+			if name != "" {
 				query.Set("name", name)
 			}
 		}
 	}
-	return origin + PagePath + "?" + query.Encode(), nil
+	return origin + PagePath + "?" + oauth.EncodeQuery(query), nil
 }
 
 func (s *Scheme) pageRoutes(mux *http.ServeMux) {
@@ -586,11 +596,13 @@ func (s *Scheme) sameOrigin(raw []byte, origin string) bool {
 }
 
 // redeem finishes a webauthn exchange with a code from the page, on any
-// connection: a login signs in, a new account's registration makes the
-// account with the connection's invitation, and an addition adds the
-// passkey to the account that began it, only on a connection signed in to
-// it. Unlike a ceremony in the client's, the token resumes from any origin:
-// it is a token from a code.
+// connection: a login signs in; a new account's registration makes the
+// account on a connection that is not signed in, as one in the client does
+// (signUp): with the connection's invitation, or, where anyone may sign in
+// as a guest, without one; and an addition adds the passkey to the account
+// that began it, only on a connection signed in to it. Unlike a ceremony in
+// the client's, the token resumes from any origin: it is a token from a
+// code.
 func (s *Scheme) redeem(r *authn.Request, action string) (authn.Result, error) {
 	var p [4]string
 	for i, name := range []string{"code", "code_verifier", "redirect_uri", "client_id"} {
@@ -627,18 +639,15 @@ func (s *Scheme) redeem(r *authn.Request, action string) (authn.Result, error) {
 			Commit: s.commitCredential(g.handle, g.credential),
 		}}, nil
 	}
-	// A new account, which an invitation makes on this server, as a
-	// registration in the client does.
+	// A new account, which the server makes as for a registration in the
+	// client.
 	if r.Account != nil {
 		return nil, authn.Denied("This passkey is for a new account; finish on a connection that is not signed in")
 	}
-	if r.Invitation == nil {
+	if r.Invitation == nil && !s.signsUp(r) {
 		return nil, authn.Denied("Present an invitation to make an account with this passkey")
 	}
-	return &authn.SignIn{Create: true, Invitation: r.Invitation.ID, AnyOrigin: true, Proof: authn.Proof{
-		Subject: Subject(g.handle), Name: cmp.Or(r.Name, g.name, r.Invitation.Name), UserID: r.Invitation.UserID,
-		Credential: CredentialID(g.credential.ID), Commit: s.commitCredential(g.handle, g.credential),
-	}}, nil
+	return s.signUp(r, g.handle, g.credential, cmp.Or(r.Name, g.name), r.UserID, true), nil
 }
 
 func pageJSON(w http.ResponseWriter, status int, value any) {

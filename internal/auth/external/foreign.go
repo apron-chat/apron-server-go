@@ -137,7 +137,7 @@ func (f *Foreign) Auth(ctx context.Context, r *authn.Request) (authn.Result, err
 	if f.scope != "" {
 		query.Set("scope", f.scope)
 	}
-	page.RawQuery = query.Encode()
+	page.RawQuery = oauth.EncodeQuery(query)
 	return &authn.Reply{Result: map[string]any{"external": map[string]any{"url": page.String(), "issuer": f.issuer}}}, nil
 }
 

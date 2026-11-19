@@ -1,6 +1,7 @@
 package apron
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -8,6 +9,7 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json/v2"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -17,6 +19,7 @@ import (
 	"time"
 
 	"github.com/apron-chat/apron-server-go/internal/auth/passkey"
+	"github.com/apron-chat/apron-server-go/store"
 	"github.com/coder/websocket"
 	"github.com/fxamacker/cbor/v2"
 	"github.com/go-webauthn/webauthn/webauthn"
@@ -383,6 +386,138 @@ func TestRegistrationTakesRequestedName(t *testing.T) {
 	}
 }
 
+// Where guests are allowed, a registration on a connection that is not
+// signed in makes a new account as it finishes (§4.10), as an invitation
+// does, without signing in as a guest first: the begin makes nothing, and
+// the finish makes the account with the name and user_id the begin asked
+// for, by the rules of any new account, joins it to the default room, and
+// signs in with a token. The account is stored, and its passkey signs in to
+// it after a restart. A guest's registration still makes the guest an
+// account.
+func TestFreshRegistrationMakesAnAccount(t *testing.T) {
+	kept := store.NewMemory()
+	configure := func(config *Config) { config.Roles = map[string][]string{"admin": {"granted"}} }
+	app, httpServer, stop := startWith(t, kept, t.TempDir(), configure)
+	c, frame := dialOrigin(t, httpServer, testPasskeyOrigin)
+	if params := frame["params"].(map[string]any); !reflect.DeepEqual(params["signup"], []any{"webauthn", "guest"}) {
+		t.Fatalf("signup: %#v", params["signup"])
+	}
+	options := passkeyResult(t, passkeyCall(t, c, "begin", "register", "begin", map[string]any{"name": "  Ada   Lovelace ", "user_id": "ada"}))
+	if user := passkeyPublicKey(t, options)["user"].(map[string]any); user["name"] != "Ada Lovelace" || user["displayName"] != "Ada Lovelace" {
+		t.Fatalf("passkey not labelled with the normalized requested name: %#v", user)
+	}
+	app.mu.RLock()
+	users := len(app.users)
+	app.mu.RUnlock()
+	if users != 0 {
+		t.Fatal("the begin made a user")
+	}
+	// A finish presenting an invitation the begin did not is another
+	// registration, and uses the ceremony up.
+	invitation, err := app.Invite(context.Background(), InvitationOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := newTestAuthenticator(t)
+	passkeyDenied(t, passkeyCall(t, c, "changed", "register", "finish", map[string]any{"invitation": invitation.Token, "credential": a.registration(t, options, testPasskeyOrigin)}))
+	options = passkeyResult(t, passkeyCall(t, c, "begin-again", "register", "begin", map[string]any{"name": "  Ada   Lovelace ", "user_id": "ada"}))
+	result := passkeyResult(t, passkeyCall(t, c, "finish", "register", "finish", map[string]any{"credential": a.registration(t, options, testPasskeyOrigin)}))
+	you := result["you"].(map[string]any)
+	if you["user_id"] != "ada" || you["name"] != "Ada Lovelace" || result["token"] == nil || !reflect.DeepEqual(you["roles"], []any{}) {
+		t.Fatalf("new account: %#v", result)
+	}
+	expectJoinedDefault(t, c, "ada")
+	if len(app.Invitations()) != 1 {
+		t.Fatal("a registration without an invitation used one")
+	}
+
+	// A user_id the server would not assign, or that is taken, or granted
+	// a role, gets user_<n>, as any new account does.
+	for i, requested := range []string{"guest_7", "ada", "granted"} {
+		other, _ := dialOrigin(t, httpServer, testPasskeyOrigin)
+		options := passkeyResult(t, passkeyCall(t, other, "begin", "register", "begin", map[string]any{"user_id": requested}))
+		result := passkeyResult(t, passkeyCall(t, other, "finish", "register", "finish", map[string]any{"credential": newTestAuthenticator(t).registration(t, options, testPasskeyOrigin)}))
+		if id := result["you"].(map[string]any)["user_id"]; id != fmt.Sprintf("user_%d", i+1) {
+			t.Fatalf("requested %q, assigned %v", requested, id)
+		}
+	}
+
+	// The token resumes from the ceremony's origin.
+	resumed, _ := dialOrigin(t, httpServer, testPasskeyOrigin)
+	if you := passkeyResult(t, passkeyCall(t, resumed, "resume", "token", "", map[string]any{"token": result["token"]}))["you"].(map[string]any); you["user_id"] != "ada" {
+		t.Fatalf("resumed as %#v", you)
+	}
+
+	// A guest's registration still adds the passkey to the guest, which
+	// becomes an account.
+	guest, _ := dialOrigin(t, httpServer, testPasskeyOrigin)
+	registerTestPasskey(t, guest, newTestAuthenticator(t))
+
+	// The account outlives a restart, and its passkey signs in to it.
+	if err := app.Sync(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	stop()
+	_, httpServer, _ = startWith(t, kept, t.TempDir(), configure)
+	again, _ := dialOrigin(t, httpServer, testPasskeyOrigin)
+	if you := loginTestPasskey(t, again, a)["you"].(map[string]any); you["user_id"] != "ada" || you["name"] != "Ada Lovelace" {
+		t.Fatalf("signed in after a restart as %#v", you)
+	}
+}
+
+// Without guests, a registration makes an account only with an invitation:
+// on a connection that is not signed in, a registration without one is
+// refused, as before.
+func TestFreshRegistrationWithoutGuests(t *testing.T) {
+	config := DefaultConfig()
+	config.WebAuthn = testWebAuthn(t)
+	config.DisableGuests = true
+	app, httpServer := newTestServer(t, config)
+	c, _ := dialOrigin(t, httpServer, testPasskeyOrigin)
+	passkeyDenied(t, passkeyCall(t, c, "bare", "register", "begin", map[string]any{"name": "Ada"}))
+	invitation, err := app.Invite(context.Background(), InvitationOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := newTestAuthenticator(t)
+	options := passkeyResult(t, passkeyCall(t, c, "begin", "register", "begin", map[string]any{"invitation": invitation.Token, "name": "Ada"}))
+	// A finish without the invitation is another registration.
+	passkeyDenied(t, passkeyCall(t, c, "without", "register", "finish", map[string]any{"credential": a.registration(t, options, testPasskeyOrigin)}))
+	result := passkeyResult(t, registerInvited(t, c, a, invitation.Token, map[string]any{"name": "Ada"}))
+	if you := result["you"].(map[string]any); you["name"] != "Ada" || result["token"] == nil {
+		t.Fatalf("invited account: %#v", result)
+	}
+}
+
+// With GuestFirstPasskeys, a registration makes an account only of a
+// signed-in guest, or with an invitation, even where guests are allowed:
+// signup lists guest but not webauthn, which stays in auth, so clients sign
+// in as a guest first, and a registration on a connection that is not
+// signed in is refused, saying so.
+func TestGuestFirstPasskeys(t *testing.T) {
+	config := DefaultConfig()
+	config.WebAuthn = testWebAuthn(t)
+	config.GuestFirstPasskeys = true
+	app, httpServer := newTestServer(t, config)
+	c, frame := dialOrigin(t, httpServer, testPasskeyOrigin)
+	if params := frame["params"].(map[string]any); !reflect.DeepEqual(params["auth"], []any{"webauthn", "token", "guest"}) || !reflect.DeepEqual(params["signup"], []any{"guest"}) {
+		t.Fatalf("auth: %#v, signup: %#v", params["auth"], params["signup"])
+	}
+	refusal := passkeyCall(t, c, "bare", "register", "begin", map[string]any{"name": "Ada"})
+	passkeyDenied(t, refusal)
+	if message := refusal["error"].(map[string]any)["message"]; message != "Sign in as a guest, or present an invitation, before adding a passkey" {
+		t.Fatalf("refusal: %#v", refusal)
+	}
+	// A guest registers, and so does an invited connection.
+	registerTestPasskey(t, c, newTestAuthenticator(t))
+	invitation, err := app.Invite(context.Background(), InvitationOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	invited, _ := dialOrigin(t, httpServer, testPasskeyOrigin)
+	passkeyResult(t, registerInvited(t, invited, newTestAuthenticator(t), invitation.Token, nil))
+}
+
 func TestAddingPasskeyPreservesStoredName(t *testing.T) {
 	for _, renameDuringRegistration := range []bool{false, true} {
 		name := "rename before registration"
@@ -488,9 +623,71 @@ func TestPasskeyRejectsInvalidProofs(t *testing.T) {
 	}
 	app.mu.Unlock()
 	passkeyDenied(t, passkeyCall(t, c, "expired", "login", "finish", map[string]any{"credential": a.assertion(t, options, testPasskeyOrigin, "localhost", 0x05)}))
-	passkeyDenied(t, passkeyCall(t, other, "unauth-register", "register", "begin", nil))
 	wrongOrigin, _ := dialOrigin(t, httpServer, "http://localhost:9999")
 	passkeyDenied(t, passkeyCall(t, wrongOrigin, "origin", "login", "begin", nil))
+}
+
+// A refusal for an origin the RP does not accept names the origin, and the
+// passkey page's, from the request's Host, when that is not accepted
+// either.
+func TestPasskeyOriginRefusals(t *testing.T) {
+	_, httpServer := passkeyTestServer(t)
+	page := httpServer.URL
+	refusal := func(frame map[string]any) string {
+		t.Helper()
+		passkeyDenied(t, frame)
+		return frame["error"].(map[string]any)["message"].(string)
+	}
+	wrongOrigin, _ := dialOrigin(t, httpServer, "http://localhost:9999")
+	if got, want := refusal(passkeyCall(t, wrongOrigin, "b", "login", "begin", nil)), `Neither Origin "http://localhost:9999" nor the passkey page's origin "`+page+`" is configured for passkeys`; got != want {
+		t.Errorf("begin: %q, want %q", got, want)
+	}
+	if got, want := refusal(passkeyCall(t, wrongOrigin, "f", "login", "finish", map[string]any{"challenge_id": "x", "credential": map[string]any{}})), `Origin "http://localhost:9999" is not configured for passkeys`; got != want {
+		t.Errorf("finish: %q, want %q", got, want)
+	}
+	none, _ := dialRaw(t, httpServer)
+	if got, want := refusal(passkeyCall(t, none, "b", "login", "begin", nil)), `This connection sent no Origin, and the passkey page's origin "`+page+`" is not configured for passkeys`; got != want {
+		t.Errorf("begin without Origin: %q, want %q", got, want)
+	}
+	if got, want := refusal(passkeyCall(t, none, "f", "login", "finish", map[string]any{"challenge_id": "x", "credential": map[string]any{}})), "This connection sent no Origin, which passkeys need"; got != want {
+		t.Errorf("finish without Origin: %q, want %q", got, want)
+	}
+}
+
+// A native app connects with the origin its platform writes in client
+// data, which has no host, once the RP accepts it (§4.10), and runs the
+// ceremony with it. Other origins, web ones the RP accepts among them,
+// still need an origin pattern.
+func TestNativeAppOrigin(t *testing.T) {
+	const android = "android:apk-key-hash:AbC-_123"
+	config := DefaultConfig()
+	w, err := webauthn.New(&webauthn.Config{RPID: "localhost", RPDisplayName: "Apron", RPOrigins: []string{testPasskeyOrigin, "https://web.example", android}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	config.WebAuthn = w
+	_, httpServer := newTestServer(t, config)
+	app, _ := dialOrigin(t, httpServer, android)
+	guestAuth(t, app)
+	a := newTestAuthenticator(t)
+	options := passkeyResult(t, passkeyCall(t, app, "rb", "register", "begin", nil))
+	passkeyResult(t, passkeyCall(t, app, "rf", "register", "finish", map[string]any{"credential": a.registration(t, options, android)}))
+	// The ceremony is bound to the app's origin: an assertion made on
+	// another origin the RP accepts fails.
+	app, _ = dialOrigin(t, httpServer, android)
+	options = passkeyResult(t, passkeyCall(t, app, "lb", "login", "begin", nil))
+	passkeyDenied(t, passkeyCall(t, app, "lf", "login", "finish", map[string]any{"credential": a.assertion(t, options, testPasskeyOrigin, "localhost", 0x05)}))
+	options = passkeyResult(t, passkeyCall(t, app, "lb", "login", "begin", nil))
+	passkeyResult(t, passkeyCall(t, app, "lf", "login", "finish", map[string]any{"credential": a.assertion(t, options, android, "localhost", 0x05)}))
+	for _, origin := range []string{"android:apk-key-hash:other", "android:apk-key-hash:abc-_123", "https://web.example", "https://evil.example", "null"} {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		ws, _, err := websocket.Dial(ctx, wsURL(httpServer), &websocket.DialOptions{HTTPHeader: http.Header{"Origin": {origin}}})
+		cancel()
+		if err == nil {
+			_ = ws.CloseNow()
+			t.Errorf("accepted Origin %q", origin)
+		}
+	}
 }
 
 func TestPasskeyRejectsInvalidRegistration(t *testing.T) {

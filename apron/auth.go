@@ -316,7 +316,8 @@ func (s *Server) authRequestLocked(c *client, req request, scheme authn.Scheme, 
 	r := &authn.Request{
 		Params: maps.Clone(req.params), Name: normalizeName(name), UserID: requested,
 		Origin: c.origin, BaseURL: c.baseURL, ClientKey: c.clientKey, Now: now,
-		Conn: &schemeConn{s: s, c: c, scheme: scheme, name: name, userID: requested, now: now},
+		Conn:   &schemeConn{s: s, c: c, scheme: scheme, name: name, userID: requested, now: now},
+		Guests: s.guestsAllowedLocked(),
 	}
 	if c.user != nil {
 		r.Account = &authn.Account{
