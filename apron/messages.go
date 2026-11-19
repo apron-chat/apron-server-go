@@ -193,8 +193,8 @@ func (s *Server) saveMessage(c *client, req request) (any, bool, *Error) {
 		}
 		from = current.from
 	}
-	// A shadow user writes only in rooms it is in: one that left or was
-	// removed stays out until a member adds it again (ext:remote).
+	// ext:remote hook: a remote user writes only in rooms it is in, which
+	// its link's write joins it to, unless another user removed it.
 	if u.shadow != nil && (destination.members[u.id] == nil || current != nil && s.rooms[current.roomID].members[u.id] == nil) {
 		return nil, false, &Error{Code: CodeDenied, Message: "A remote user writes only in rooms it is in"}
 	}
@@ -590,6 +590,7 @@ func (s *Server) react(c *client, req request) (any, bool, *Error) {
 	if m == nil {
 		return nil, false, invalidParams("Unknown message %q", messageID)
 	}
+	// ext:remote hook: as in saveMessage.
 	if u.shadow != nil && s.rooms[m.roomID].members[u.id] == nil {
 		return nil, false, &Error{Code: CodeDenied, Message: "A remote user writes only in rooms it is in"}
 	}

@@ -928,10 +928,10 @@ The server offers [`ext:remote`](https://github.com/shazow/apron/blob/main/recip
 whether or not it advertises the capability. It is dropped from what any
 client writes with `me`, `message`, and `room_set`, so a save keeps the
 stored value. Only an extension's bot writes it, as written; a message that
-a [shadow user](#shadow-users) creates gets the shadow's
-`{"server", "user_id"}`. A shadow's user object and the recorded `from` of
-its records (messages, reactions, memberships) carry it too, so clients
-show where it is from in history.
+a remote user ([Trusted federation](#trusted-federation)) creates gets the
+remote user's `{"server", "user_id"}`. A remote user's user object and the
+recorded `from` of its records (messages, reactions, memberships) carry it
+too, so clients show where it is from in history.
 
 ## Commands
 
@@ -2132,9 +2132,11 @@ The owner's side:
 
 - A link's `message`, `reactions`, `me`, `room_join`, `room_leave`, or
   `room_set` with `params.ext.remote.user_id` runs as the remote user `<user_id>@<host[:port]>`
-  of the link's server, made on first use (a [shadow user](#shadow-users)),
-  on a session of its own, with that user's checks and limits; its
-  messages' `ext.remote` is `{"server", "user_id"}`. A `user_id` that is
+  of the link's server, made on first use, on a session of its own, with
+  that user's checks and limits; its messages' `ext.remote` is
+  `{"server", "user_id"}`. A remote user is an account, kept across
+  restarts, that holds no roles, has no credential, and shows as
+  `offline`. A `user_id` that is
   empty, longer than 128 bytes, a system identity's, or has whitespace is
   `invalid_params`.
 - The link must have joined the request's room, or a room the room is a
@@ -2267,32 +2269,6 @@ rest of the server does:
   every room's. A deletion's tombstone is an event; the records it redacts
   are not sent again. A room is public to an extension, such as for a web
   page, when it is not private and guests may sign in.
-
-### Shadow users
-
-An extension that copies another server's rooms into this one speaks for
-that server's users through shadow users, as trusted federation does for
-its remote users: `Host.Shadow(server, userID)` makes,
-or returns, the account `<userID>@<authority>`, where the authority is the
-host of the remote server's address, lowercased, and its port as written
-(`carol@b.example`, `carol@127.0.0.1:8787`). Such a `user_id` has an `@`,
-so nobody can request it, and once made it is the shadow's for good:
-the same arguments return the same account at any later start, and no other
-extension may take it.
-
-- It is an account, kept across restarts, that holds no roles, joins no
-  room by itself (a member adds it with `room_join` and its `user_id`), and
-  shows as `offline`. It has no credential, and no service token: only
-  its extension's in-process sessions (the returned `Bot`) sign in as it.
-- Its requests are a client's, with the same checks and limits, which are
-  the shadow's own: its messages are its own to edit and delete, and its
-  reactions and profile its own. It writes messages and reactions only in
-  rooms it is in (`denied` otherwise): one that left a room, or was
-  removed, stays out until a member adds it again.
-- The server sets its `ext.remote` `{"server", "user_id"}`, which its own
-  `me` cannot change, and a message it creates carries the same.
-- `Host.CreateRoom(roomID, options)` makes a public room with a chosen
-  `room_id`, such as one an extension serves, if there is none.
 
 ### Room scopes
 

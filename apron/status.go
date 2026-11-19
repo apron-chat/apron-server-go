@@ -422,8 +422,8 @@ func (u *userState) attended() bool {
 }
 
 // shownStatus is the user's shown status, from the chosen status and the
-// presence (§4.5.1). A shadow user (Host.Shadow) shows as offline: its
-// sessions are its extension's, not a person's.
+// presence (§4.5.1). A remote user (ext:remote) shows as offline: its
+// sessions are the server's, run for its link, not a person's.
 func (u *userState) shownStatus() string {
 	if u.shadow != nil {
 		return statusOffline

@@ -101,25 +101,6 @@ func (fed *federated) call(t *testing.T, method string, params map[string]any) m
 	return callAs(t, fed.admin, method, params)
 }
 
-// waitCopy waits for a message in a room whose ext.remote.message_id is
-// remoteID, and returns it.
-func (fed *federated) waitCopy(t *testing.T, roomID, remoteID string) map[string]any {
-	t.Helper()
-	deadline := time.Now().Add(15 * time.Second)
-	for time.Now().Before(deadline) {
-		page := fed.call(t, "history", map[string]any{"room_id": roomID, "limit": 500})
-		for _, value := range asList(page["messages"]) {
-			m := value.(map[string]any)
-			if remote := remoteOfJSON(t, m); remote != nil && remote["message_id"] == remoteID {
-				return m
-			}
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	t.Fatalf("no copy of %s in %s", remoteID, roomID)
-	return nil
-}
-
 var (
 	inviteInNotice = regexp.MustCompile("`(https://link\\.apron\\.chat/#[^`]+)`")
 	mirrorInNotice = regexp.MustCompile("in room `([^`]+)`")
@@ -566,6 +547,19 @@ func TestLinkRequests(t *testing.T) {
 	_, posted := guest.request(t, "message", "g1", map[string]any{"body": map[string]any{"text": "me"}, "ext": asZed})
 	if m := snapshotOf(a.app, posted["message_id"].(string)); m["from"].(map[string]any)["user_id"] != guest.userID || m["ext"] != nil {
 		t.Fatalf("a guest's message with ext.remote = %#v", m)
+	}
+	// Nor write ext.remote on itself or a room.
+	if you := guest.result(t, "me", "g2", map[string]any{"ext": asZed})["you"].(map[string]any); you["ext"] != nil {
+		t.Fatalf("a guest wrote its own ext.remote: %#v", you)
+	}
+	guest.request(t, "room_set", "g3", map[string]any{"room_id": room, "title": "Ops", "ext": map[string]any{"remote": map[string]any{"server": other}}})
+	a.app.mu.RLock()
+	roomExt := a.app.rooms[room].record["ext"]
+	// A remote user shows as offline, though its session is connected.
+	status := a.app.users["zed@other.test:9000"].status
+	a.app.mu.RUnlock()
+	if roomExt != nil || status != statusOffline {
+		t.Fatalf("room ext %#v, remote user's status %q", roomExt, status)
 	}
 }
 

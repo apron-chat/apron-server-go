@@ -212,7 +212,8 @@ func (s *Server) guestsAllowedLocked() bool {
 
 // admittedLocked reports whether the account may sign in: always, unless
 // sign-in is restricted, and then when the list names it. An extension's
-// bot and shadow user always may; a guest never may on a restricted server.
+// bot, and a link and its remote users (ext:remote), always may; a guest
+// never may on a restricted server.
 func (s *Server) admittedLocked(u *userState) bool {
 	switch {
 	case s.allowlist == nil, u.botOf != "", u.shadow != nil, u.link != nil:

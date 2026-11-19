@@ -158,7 +158,7 @@ func (f *federation) initMirrors(r *Registrar) error {
 		}
 	}
 	for id, u := range s.users {
-		if u.shadow == nil || u.shadow.owner != remoteExt {
+		if u.shadow == nil {
 			continue
 		}
 		for server, ms := range f.mirrors {

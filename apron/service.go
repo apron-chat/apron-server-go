@@ -163,10 +163,6 @@ func (s *Server) issueServiceToken(ctx context.Context, userID string, options S
 		s.unlock()
 		return ServiceToken{}, errors.New("apron: no such user")
 	}
-	if u.shadow != nil {
-		s.unlock()
-		return ServiceToken{}, errShadowToken
-	}
 	// The limit counts the token being replaced as gone, and is checked
 	// before anything changes.
 	held, replacing := 0, false

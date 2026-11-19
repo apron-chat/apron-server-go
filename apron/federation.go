@@ -239,7 +239,7 @@ func (f *federation) threadMadeLocked(r *roomState) {
 // joined again, by the link's next write or join.
 func (f *federation) linkLeftLocked(link *userState, r *roomState) {
 	for _, u := range slices.Collect(maps.Values(r.members)) {
-		if u.shadow != nil && u.shadow.owner == remoteExt && u.shadow.server == link.link.server {
+		if u.shadow != nil && u.shadow.server == link.link.server {
 			f.s.leaveLocked(u, r)
 		}
 	}

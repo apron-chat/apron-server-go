@@ -58,13 +58,13 @@ type userState struct {
 	// botOf names the Extension whose bot the account is (Registrar.Bot),
 	// which holds the "bot" role (§3.3.4).
 	botOf string
-	// shadow marks a shadow user, which stands for a user of a remote
-	// server (Host.Shadow); nil for a local user.
+	// shadow marks a remote user (ext:remote), which stands for a user of a
+	// remote server; nil for a local user.
 	shadow *shadowState
 	// link marks a link (ext:remote): the account a remote server's sender
 	// signs in as, to write as that server's users here; nil for others.
 	link *linkState
-	// removed are the rooms another user removed this shadow user from,
+	// removed are the rooms another user removed this remote user from,
 	// which its link may not write in as it again (ext:remote).
 	removed map[string]bool
 	// avatarEmbed is the hosted /avatar upload behind avatar, if any.
@@ -155,10 +155,9 @@ func newUserState(id, name string) *userState {
 
 // from is the recorded user object carried in logged records (a message's
 // or reaction's from, a membership's user): user_id and name, and for a
-// shadow user its ext.remote (ext:remote), so that clients show where it is
-// from in history too. Avatars and other ext travel only in current objects
-// (§3.3, §4.8.6). Every
-// record by the user shares the returned map until the name changes, so it
+// remote user or a link its ext.remote (ext:remote), so that clients show
+// where it is from in history too. Avatars and other ext travel only in
+// current objects (§3.3, §4.8.6). Every record by the user shares the returned map until the name changes, so it
 // must not be modified.
 func (u *userState) from() map[string]any {
 	if u.fromValue == nil {
@@ -177,8 +176,8 @@ func (u *userState) from() map[string]any {
 }
 
 // account reports whether the user signed in with a credential (a passkey,
-// an email address, or an external identity) or is an Extension's bot or
-// shadow user, so it persists across connections and restarts, rather than
+// an email address, or an external identity) or is an Extension's bot, a
+// remote user, or a link, so it persists across connections and restarts, rather than
 // being a guest.
 func (u *userState) account() bool {
 	return len(u.identities) > 0 || u.botOf != "" || u.shadow != nil || u.link != nil
@@ -673,7 +672,7 @@ func jsonEqual(a, b any) bool {
 // grantRolesLocked sets the roles an account holds: those Config.Roles
 // grants it, by its user_id or an identity, those its identities grant it
 // (authn.Proof.Roles), and "bot" for a bot, and reports whether they
-// changed. Guests and shadow users hold no roles, so a granted user_id taken by a guest
+// changed. Guests and remote users hold no roles, so a granted user_id taken by a guest
 // grants nothing until it is an account; assignUserIDLocked never hands out
 // a granted user_id that was never used.
 func (s *Server) grantRolesLocked(u *userState) bool {

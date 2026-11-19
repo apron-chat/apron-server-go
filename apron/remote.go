@@ -14,32 +14,24 @@ import (
 )
 
 // remoteExt is the ext key ext:remote reserves: where a user, a message,
-// or a room comes from, when an extension copies another server's rooms.
-// ext:remote is a draft extension in apron's
-// recipes/trusted_federation.md. The server owns it: clients never write it.
+// or a room comes from, in trusted federation (federation.go). ext:remote
+// is a draft extension in apron's recipes/trusted_federation.md. The server
+// owns it: clients never write it.
 const remoteExt = "remote"
 
-// shadowState marks a shadow user (Host.Shadow): the extension that owns
-// it, and the user of a remote server it stands for.
+// shadowState marks a remote user (ext:remote): the user of a remote
+// server that it stands for, which links write as and mirrors copy records
+// as.
 type shadowState struct {
-	owner    string
 	server   string
 	remoteID string
 }
 
-// RemoteUser is the user of another server that a shadow user stands for
-// (Host.Shadow).
-type RemoteUser struct {
-	// Server is the remote server's address (PROTOCOL.md §1), and UserID
-	// the user's user_id there.
-	Server, UserID string
-}
-
-// maxShadowIDBytes bounds a shadow's user_id.
+// maxShadowIDBytes bounds a remote user's user_id.
 const maxShadowIDBytes = 256
 
 // RemoteAuthority is the authority of a server's address (PROTOCOL.md §1),
-// as shadow users' IDs carry it: its host, lowercased, and its port if the
+// as remote users' IDs carry it: its host, lowercased, and its port if the
 // address has one, such as "b.example" for wss://b.example/ws and
 // "127.0.0.1:8787" for ws://127.0.0.1:8787/ws.
 func RemoteAuthority(server string) (string, error) {
@@ -54,7 +46,7 @@ func RemoteAuthority(server string) (string, error) {
 	return authority, nil
 }
 
-// ShadowID is the user_id of the shadow user (Host.Shadow) of user
+// ShadowID is the user_id of the remote user that stands for user
 // remoteUserID of the server at address server: `<remoteUserID>@<authority>`
 // (RemoteAuthority), such as carol@b.example. remoteUserID is any user_id
 // (PROTOCOL.md §2.4) but a system identity's (~).
@@ -73,75 +65,7 @@ func ShadowID(server, remoteUserID string) (string, error) {
 	return id, nil
 }
 
-// Shadow makes, or returns, the extension's shadow user of user
-// remoteUserID of the remote server at address server, such as a user of
-// another Apron server whose rooms the extension copies into this one
-// (trusted federation). Its user_id is ShadowID's, `<remoteUserID>@<authority>`,
-// which no person or bot can request, since requested user_ids have no
-// "@" (§3.3), and which is the shadow's forever: Shadow with the same
-// arguments, from any start of the server, returns the same account.
-//
-// A shadow is an account, kept across restarts, that the extension speaks
-// through with the returned Bot, as with its bot (Registrar.Bot): its
-// sessions (Bot.Connect, Bot.Call, Bot.Post, ...) send ordinary requests as
-// the shadow, with the same checks and limits as a client's, so messages,
-// edits, deletions, reactions, and joins are the shadow's own, with it as
-// `from`. Unlike a bot it holds no roles, joins no room by itself (join it
-// with room_join, or have a member add it with room_join and its user_id),
-// writes messages and reactions only in rooms it is in, so one that left or
-// was removed writes there no more until it is added again,
-// shows as offline, cannot sign in from outside the process (it has no
-// credential, and Bot.IssueToken refuses it), and its owner may make it
-// at any time, not only during Init.
-//
-// The server sets the shadow's ext.remote to {"server": server, "user_id":
-// remoteUserID} (ext:remote), on its user object and on the `from` of its
-// records, and on the messages its sessions create, whatever they write.
-// Clients and the shadow's own writes cannot change ext.remote (see the
-// reserved key in SERVER.md).
-//
-// Shadow fails for a user_id that someone else has, or ever had, such as
-// another extension's shadow, or the same remote user_id in another case.
-// The first address given is the one kept: a later call with another
-// address of the same authority returns the same shadow.
-func (h *Host) Shadow(server, remoteUserID string) (*Bot, error) {
-	id, err := ShadowID(server, remoteUserID)
-	if err != nil {
-		return nil, err
-	}
-	s := h.s
-	s.mu.Lock()
-	u := s.users[id]
-	switch {
-	case s.closed:
-		s.unlock()
-		return nil, ErrServerClosed
-	case u != nil && u.shadow != nil && u.shadow.owner == h.name:
-	case u != nil && u.shadow != nil:
-		s.unlock()
-		return nil, fmt.Errorf("apron: user_id %q is extension %s's shadow", id, u.shadow.owner)
-	case u != nil:
-		s.unlock()
-		return nil, fmt.Errorf("apron: user_id %q belongs to someone who is not a shadow", id)
-	default:
-		key := strings.ToLower(id)
-		if s.usedIDs[key] || s.roomNamedLocked(id) || s.grantedIDs[key] {
-			s.unlock()
-			return nil, fmt.Errorf("apron: user_id %q was used by someone else", id)
-		}
-		s.usedIDs[key] = true
-		s.touchUsedID(key)
-		u = newUserState(id, "")
-		u.shadow = &shadowState{owner: h.name, server: server, remoteID: remoteUserID}
-		u.ext = extObject{remoteExt: encodeJSON(u.shadow.user())}
-		s.users[id] = u
-		s.touchUser(id)
-	}
-	s.unlock()
-	return &Bot{s: s, host: h, userID: id}, nil
-}
-
-// user is the shadow's ext.remote on its user object and its records'
+// user is the remote user's ext.remote on its user object and its records'
 // `from`.
 func (sh *shadowState) user() map[string]any {
 	return map[string]any{"server": sh.server, "user_id": sh.remoteID}
@@ -194,20 +118,8 @@ func (s *Server) remoteExtWrite(c *client, ext extObject, target remoteTarget, c
 	return ext, nil
 }
 
-// remoteOf is the remote user a user stands for, nil for a local one.
-func remoteOf(u *userState) *RemoteUser {
-	if u == nil || u.shadow == nil {
-		return nil
-	}
-	return &RemoteUser{Server: u.shadow.server, UserID: u.shadow.remoteID}
-}
-
-// errShadowToken refuses a service token for a shadow.
-var errShadowToken = errors.New("apron: a shadow user signs in only through its extension's sessions")
-
-// storedShadow is a shadow's shadowState in the store.
+// storedShadow is a remote user's shadowState in the store.
 type storedShadow struct {
-	Owner  string `json:"owner"`
 	Server string `json:"server"`
 	User   string `json:"user"`
 }
@@ -216,14 +128,14 @@ func (sh *shadowState) stored() *storedShadow {
 	if sh == nil {
 		return nil
 	}
-	return &storedShadow{Owner: sh.owner, Server: sh.server, User: sh.remoteID}
+	return &storedShadow{Server: sh.server, User: sh.remoteID}
 }
 
 func (stored *storedShadow) restore() *shadowState {
 	if stored == nil {
 		return nil
 	}
-	return &shadowState{owner: stored.Owner, server: stored.Server, remoteID: stored.User}
+	return &shadowState{server: stored.Server, remoteID: stored.User}
 }
 
 // ---- Links (ext:remote) ----
@@ -512,9 +424,9 @@ func (s *Server) actAs(c *client, req request, remoteID string) (any, bool, *Err
 }
 
 // remoteUserLocked returns the remote user (ext:remote) that stands for
-// user remoteID of the server at address server, made if there is none: a
-// shadow user of the server's own, whose ext.remote names its server and
-// user_id. Links write as these, and mirrors copy their records as them.
+// user remoteID of the server at address server, made if there is none:
+// an account whose ext.remote names its server and user_id. Links write as
+// these, and mirrors copy their records as them.
 func (s *Server) remoteUserLocked(server, remoteID string) (*userState, error) {
 	id, err := ShadowID(server, remoteID)
 	if err != nil {
@@ -530,11 +442,11 @@ func (s *Server) remoteUserLocked(server, remoteID string) (*userState, error) {
 		s.usedIDs[key] = true
 		s.touchUsedID(key)
 		u = newUserState(id, "")
-		u.shadow = &shadowState{owner: remoteExt, server: server, remoteID: remoteID}
+		u.shadow = &shadowState{server: server, remoteID: remoteID}
 		u.ext = extObject{remoteExt: encodeJSON(u.shadow.user())}
 		s.users[id] = u
 		s.touchUser(id)
-	case u.shadow == nil || u.shadow.owner != remoteExt:
+	case u.shadow == nil:
 		return nil, fmt.Errorf("the user_id %s is not a remote user's", id)
 	}
 	return u, nil

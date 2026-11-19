@@ -32,9 +32,8 @@ var (
 	ErrReentrant = errors.New("apron: the session is waiting on this call; use another session")
 )
 
-// Bot is an account an extension owns and speaks through: its bot, which
-// holds the "bot" role (§3.3.4), or one of its shadow users (Host.Shadow),
-// and never a person's or another extension's. Its
+// Bot is an account an extension owns and speaks through: it holds the
+// "bot" role (§3.3.4), and is never a person's or another extension's. Its
 // requests (Post, Join, History, Call, StreamAppend, StreamTerminal) go
 // through a connection of its own, made again if the server closed it, so
 // they get the same checks, limits, delivery, and push as a client's. A
@@ -262,8 +261,10 @@ func (b *Bot) Connect(options SessionOptions) (*Session, error) {
 	switch {
 	case s.closed:
 		return nil, ErrServerClosed
-	case u == nil || u.botOf != b.host.name && (u.shadow == nil || u.shadow.owner != b.host.name):
-		return nil, fmt.Errorf("apron: %s is not extension %s's bot or shadow", b.userID, b.host.name)
+	// ext:remote hook: the remote users that links write as are the
+	// server's own extension's.
+	case u == nil || u.botOf != b.host.name && (u.shadow == nil || b.host.name != remoteExt):
+		return nil, fmt.Errorf("apron: %s is not extension %s's bot", b.userID, b.host.name)
 	}
 	c.baseURL = s.sessionBaseURLLocked()
 	// The session's goroutines are extension work, which Shutdown waits for.

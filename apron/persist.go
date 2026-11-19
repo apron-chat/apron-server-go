@@ -209,11 +209,11 @@ type storedUser struct {
 	// the account is (Registrar.Bot).
 	Created int64  `json:"created,omitzero"`
 	Bot     string `json:"bot,omitzero"`
-	// Shadow marks a shadow user (Host.Shadow): its extension and the
-	// remote user it stands for.
+	// Shadow marks a remote user (ext:remote): the remote server and the
+	// user_id there it stands for.
 	Shadow *storedShadow `json:"shadow,omitzero"`
 	// Link marks a link (ext:remote) with the remote server it is bound
-	// to, and Removed lists the rooms another user removed a shadow from.
+	// to, and Removed lists the rooms another user removed a remote user from.
 	Link    *storedLink `json:"link,omitzero"`
 	Removed []string    `json:"removed,omitzero"`
 	// Enrolled is what the invitation that made the account left with it.
