@@ -162,12 +162,9 @@ type storedReaction struct {
 }
 
 type storedMessage struct {
-	From  map[string]any `json:"from"`
-	LogID int64          `json:"log_id"`
-	Owner string         `json:"owner"`
-	// Remote is the key of a message a link created (ext:remote): its
-	// user_id and the remote message_id, for duplicate creates.
-	Remote    string                    `json:"remote,omitzero"`
+	From      map[string]any            `json:"from"`
+	LogID     int64                     `json:"log_id"`
+	Owner     string                    `json:"owner"`
 	RoomID    string                    `json:"room_id"`
 	Reactions map[string]storedReaction `json:"reactions,omitzero"`
 	Records   []int64                   `json:"records"`
@@ -213,7 +210,8 @@ type storedUser struct {
 	// user_id there it stands for.
 	Shadow *storedShadow `json:"shadow,omitzero"`
 	// Link marks a link (ext:remote) with the remote server it is bound
-	// to, and Removed lists the rooms another user removed a remote user from.
+	// to, and Removed lists the rooms another user removed a remote user
+	// from.
 	Link    *storedLink `json:"link,omitzero"`
 	Removed []string    `json:"removed,omitzero"`
 	// Enrolled is what the invitation that made the account left with it.
