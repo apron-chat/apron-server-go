@@ -61,8 +61,9 @@ type userState struct {
 	// shadow marks a remote user (ext:remote), which stands for a user of a
 	// remote server; nil for a local user.
 	shadow *shadowState
-	// link marks a link (ext:remote): the account a remote server's sender
-	// signs in as, to write as that server's users here; nil for others.
+	// link marks a link (ext:remote): the account a mirror server signs in
+	// as, to read shared rooms and write as that server's users here; nil
+	// for others.
 	link *linkState
 	// removed are the rooms another user removed this remote user from,
 	// which its link may not write in as it again (ext:remote).
@@ -654,6 +655,7 @@ func (s *Server) updateProfile(c *client, req request) (any, bool, *Error) {
 	result := map[string]any{"you": withRemoved(u.you(), removed)}
 	if !jsonEqual(before, u.profile()) || !jsonEqual(beforeYou, u.you()) {
 		s.notifyProfileLocked(u, c, cleared, removed...)
+		// ext:remote hook: a new name goes to the owners of mirror rooms.
 		if s.fed != nil && hasName {
 			s.fed.profileChanged(u.id)
 		}

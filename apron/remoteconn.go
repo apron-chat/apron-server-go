@@ -29,7 +29,7 @@ const remoteCodeDenied = -32001
 // its reply came.
 var errRemoteDisconnected = errors.New("the connection to the remote server closed")
 
-// frame is a frame the remote server sent: a notification (Method), or
+// remoteFrame is a frame the remote server sent: a notification (Method), or
 // the reply to a request (ID).
 type remoteFrame struct {
 	// Seq numbers the notifications in the order they arrived.
@@ -54,7 +54,7 @@ type remoteReply struct {
 // go to notes in order. Its methods are safe for concurrent use.
 type remoteConn struct {
 	ws *websocket.Conn
-	// pace spaces the frames the bridge sends, and slots bounds its
+	// pace spaces the frames the mirror sends, and slots bounds its
 	// requests waiting for a reply: servers limit both per connection
 	// (the Cloudflare server closes one past 60 frames a minute, or 8
 	// requests in flight).

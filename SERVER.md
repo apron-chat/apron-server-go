@@ -2131,23 +2131,22 @@ Admins run these, and are answered with `~private` notices:
 The owner's side:
 
 - A link's `message`, `reactions`, `me`, `room_join`, `room_leave`, or
-  `room_set` with `params.ext.remote.user_id` runs as the remote user `<user_id>@<host[:port]>`
-  of the link's server, made on first use, on a session of its own, with
-  that user's checks and limits; its messages' `ext.remote` is
-  `{"server", "user_id"}`. A remote user is an account, kept across
-  restarts, that holds no roles, has no credential, and shows as
-  `offline`. A `user_id` that is
-  empty, longer than 128 bytes, a system identity's, or has whitespace is
-  `invalid_params`.
+  `room_set` with `params.ext.remote.user_id` runs as the remote user
+  `<user_id>@<host[:port]>` of the link's server, made on first use, on a
+  session of its own, with that user's checks and limits; its messages'
+  `ext.remote` is `{"server", "user_id"}`. A remote user is an account,
+  kept across restarts, that holds no roles, has no credential, and shows
+  as `offline`. A `user_id` that is empty, longer than 128 bytes, a system
+  identity's, or has whitespace is `invalid_params`.
 - The link must have joined the request's room, or a room the room is a
   thread of: one it cannot see is `invalid_params`, one it can but has not
   joined `denied`, both with `"data": {"ext": {"remote": "not_joined"}}`.
   A write or `room_join` joins the remote user to the room, also after it
   left; one that another user removed is `denied` with
   `"data": {"ext": {"remote": "removed"}}`. A `room_join` or `room_leave`
-  with a `user_id` is `invalid_params`. A `room_set` creates or saves only a thread of such a room,
-  which is not private unless it says so; a link's own `room_set` is
-  `denied`. A `me` result's `you` is the remote user.
+  with a `user_id` is `invalid_params`. A `room_set` creates or saves only
+  a thread of such a room, which is not private unless it says so; a
+  link's own `room_set` is `denied`. A `me` result's `you` is the remote user.
 - When a link leaves a room, or is removed from it, its remote users leave
   it and its threads too; they come back with their next write or join.
 - The links of a room join each new thread of it that every member sees: one
@@ -2189,10 +2188,11 @@ The mirror's side:
   record, the user is answered with the copy's `message_id` or the thread's
   `room_id`, waiting for the record if it is read later, such as after a new
   connection, for up to a minute; then it is `retry_after`, which is safe:
-  the user's resend has the same request `id`, a duplicate for the owner. The owner's error is the user's; an owner that cannot be
-  reached in ten seconds is `retry_after` 5. A rename of a user who wrote
-  there is a `me` to the owner. A message cannot move between a mirror room
-  and another room.
+  the user's resend has the same request `id`, a duplicate for the owner.
+  The owner's error is the user's; an owner that cannot be reached in ten
+  seconds is `retry_after` 5. A rename of a user who wrote there is a `me`
+  to the owner. A message cannot move between a mirror room and another
+  room.
 - An admin's or moderator's delete of another's copy deletes it here only,
   and the owner's later snapshots of it are not copied; nor are records of a
   remote user that someone here removed from the room.

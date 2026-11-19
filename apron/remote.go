@@ -117,8 +117,9 @@ func (stored *storedShadow) restore() *shadowState {
 
 // ---- Links (ext:remote) ----
 
-// linkState marks a link: the account a remote server's sender signs in
-// as, bound to that server's address, to write as its users here.
+// linkState marks a link: the account a mirror server signs in as, bound
+// to that server's address, to read the rooms shared with it and write as
+// its users here.
 type linkState struct {
 	server string
 }
@@ -443,8 +444,8 @@ func linkRoomLocked(link *userState, r *roomState) *roomState {
 }
 
 // notJoined marks a link's error for a room it has not joined, whatever
-// its code, so that its sender can tell that the pair ended from any other
-// refusal (ext:remote).
+// its code, so that the mirror can tell that the room is no longer shared
+// from any other refusal (ext:remote).
 func notJoined(e *Error) *Error {
 	e.Data = map[string]any{"ext": map[string]any{remoteExt: "not_joined"}}
 	return e
