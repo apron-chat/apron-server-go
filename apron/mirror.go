@@ -1205,9 +1205,7 @@ func (f *federation) forward(c *client, req request, ms *mirror) (any, bool, *Er
 	if err != nil {
 		if data, _ := err.Data.(map[string]any); data != nil {
 			if ext, _ := data["ext"].(map[string]any); ext != nil && ext["remote"] == "not_joined" {
-				if _, room := f.mirroredRoomLocked(fmt.Sprint(req.params["room_id"])); room != nil {
-					f.markUnshared(room.Server, room.OwnerRoom)
-				}
+				f.linkLeft(req)
 			}
 		}
 		return nil, false, err
@@ -1254,6 +1252,40 @@ func (f *federation) forward(c *client, req request, ms *mirror) (any, bool, *Er
 		case <-ctx.Done():
 			return nil, false, connectionClosing()
 		}
+	}
+}
+
+// linkLeft stops the mirror room of a request that the owner refused with
+// not_joined: the link is no longer in the owner's room. The request's room
+// is its room_id or parent_room_id, or its message's room; a thread's
+// mirror room is the one it is a thread of.
+func (f *federation) linkLeft(req request) {
+	var target struct {
+		RoomID       string `json:"room_id"`
+		ParentRoomID string `json:"parent_room_id"`
+		MessageID    string `json:"message_id"`
+	}
+	_ = json.Unmarshal(encodeJSON(req.params), &target)
+	roomID := cmp.Or(target.RoomID, target.ParentRoomID)
+	if roomID == "" {
+		f.s.mu.RLock()
+		if m := f.s.messages[target.MessageID]; m != nil {
+			roomID = m.roomID
+		}
+		f.s.mu.RUnlock()
+	}
+	f.mu.Lock()
+	room := f.rooms[roomID]
+	for room != nil && room.Parent != "" {
+		room = f.rooms[room.Parent]
+	}
+	var server, ownerRoom string
+	if room != nil {
+		server, ownerRoom = room.Server, room.OwnerRoom
+	}
+	f.mu.Unlock()
+	if room != nil {
+		f.markUnshared(server, ownerRoom)
 	}
 }
 

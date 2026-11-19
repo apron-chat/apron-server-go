@@ -567,11 +567,11 @@ func TestLinkRequests(t *testing.T) {
 	}
 }
 
-// A mirror answers a request the owner took with the copy, also when the
-// owner's record comes after the result: here a fake owner sends it late.
-func TestMirrorAnswersWithTheCopy(t *testing.T) {
-	b := startFederated(t, 0)
-	var n atomic.Int64
+// fakeOwner is an owner that serves room ops to b's link, and answers each
+// message request with what message returns: the reply's result or error.
+// write sends a frame to the mirror.
+func fakeOwner(t *testing.T, b *federated, message func(params map[string]any, write func(any)) map[string]any) (address string) {
+	t.Helper()
 	owner := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ws, err := websocket.Accept(w, r, nil)
 		if err != nil {
@@ -608,26 +608,20 @@ func TestMirrorAnswersWithTheCopy(t *testing.T) {
 			case "me":
 				reply["result"] = map[string]any{"you": map[string]any{"user_id": "bob@b"}}
 			case "message":
-				id := fmt.Sprint(1000 + n.Add(1))
-				reply["result"] = map[string]any{"message_id": id}
-				body := frame.Params["body"]
-				ext, _ := frame.Params["ext"].(map[string]any)
-				act, _ := ext["remote"].(map[string]any)
-				author := fmt.Sprint(act["user_id"])
-				// The result first, and the record late.
-				go func() {
-					time.Sleep(300 * time.Millisecond)
-					write(map[string]any{"method": "message", "params": map[string]any{
-						"message_id": id, "log_id": id, "room_id": "ops", "body": body,
-						"from": map[string]any{"user_id": author + "@b", "ext": map[string]any{"remote": map[string]any{"server": b.self, "user_id": author}}},
-					}})
-				}()
+				reply = message(frame.Params, write)
+				reply["id"] = frame.ID
 			}
 			write(reply)
 		}
 	}))
-	defer owner.Close()
-	address := "ws" + strings.TrimPrefix(owner.URL, "http") + "/ws"
+	t.Cleanup(owner.Close)
+	return "ws" + strings.TrimPrefix(owner.URL, "http") + "/ws"
+}
+
+// connectFake mirrors room ops of a fake owner in b, and returns the mirror
+// room and a member of it.
+func connectFake(t *testing.T, b *federated, address string) (string, *testClient) {
+	t.Helper()
 	notice := b.command(t, "general", "/remote connect https://link.apron.chat/#server="+address+"&room=ops&token=t")
 	found := mirrorInNotice.FindStringSubmatch(notice)
 	if found == nil {
@@ -637,9 +631,51 @@ func TestMirrorAnswersWithTheCopy(t *testing.T) {
 	bob := dialTestClient(t, b.http)
 	b.call(t, "room_join", map[string]any{"room_id": mirrorRoom, "user_id": bob.userID})
 	bob.drain(t)
+	return mirrorRoom, bob
+}
+
+// A mirror answers a request the owner took with the copy, also when the
+// owner's record comes after the result: here a fake owner sends it late.
+func TestMirrorAnswersWithTheCopy(t *testing.T) {
+	b := startFederated(t, 0)
+	var n atomic.Int64
+	address := fakeOwner(t, b, func(params map[string]any, write func(any)) map[string]any {
+		id := fmt.Sprint(1000 + n.Add(1))
+		body := params["body"]
+		ext, _ := params["ext"].(map[string]any)
+		act, _ := ext["remote"].(map[string]any)
+		author := fmt.Sprint(act["user_id"])
+		// The result first, and the record late.
+		go func() {
+			time.Sleep(300 * time.Millisecond)
+			write(map[string]any{"method": "message", "params": map[string]any{
+				"message_id": id, "log_id": id, "room_id": "ops", "body": body,
+				"from": map[string]any{"user_id": author + "@b", "ext": map[string]any{"remote": map[string]any{"server": b.self, "user_id": author}}},
+			}})
+		}()
+		return map[string]any{"result": map[string]any{"message_id": id}}
+	})
+	mirrorRoom, bob := connectFake(t, b, address)
 	_, result := bob.request(t, "message", "m1", map[string]any{"room_id": mirrorRoom, "body": map[string]any{"text": "late record"}})
 	local, _ := result["message_id"].(string)
 	if m := snapshotOf(b.app, local); m == nil || wstestText(m) != "late record" || m["from"].(map[string]any)["user_id"] != bob.userID {
 		t.Fatalf("answered %#v, copy %#v", result, m)
+	}
+}
+
+// An owner's not_joined refusal stops the mirror room: the link is no
+// longer in the owner's room.
+func TestMirrorNotJoined(t *testing.T) {
+	b := startFederated(t, 0)
+	address := fakeOwner(t, b, func(map[string]any, func(any)) map[string]any {
+		return map[string]any{"error": map[string]any{"code": CodeDenied, "message": "not joined", "data": map[string]any{"ext": map[string]any{"remote": "not_joined"}}}}
+	})
+	mirrorRoom, bob := connectFake(t, b, address)
+	bob.expectError(t, "message", "m1", map[string]any{"room_id": mirrorRoom, "body": map[string]any{"text": "hello?"}}, CodeDenied)
+	b.app.fed.mu.Lock()
+	unshared := b.app.fed.rooms[mirrorRoom].Unshared
+	b.app.fed.mu.Unlock()
+	if !unshared {
+		t.Fatal("the mirror room is still shared")
 	}
 }
