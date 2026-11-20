@@ -918,10 +918,19 @@ func (ms *mirror) userLocked(object map[string]any) *userState {
 }
 
 // localUserID is the user_id here of a user_id of the owner's, for
-// mentions: one seen before, else the owner's own user's remote user.
+// mentions: one seen before, else by its form (ext:remote): one that ends
+// in @ and this server's host is that user here, one with another @ is a
+// third server's user as it is, and any other is the owner's own user's
+// remote user.
 func (ms *mirror) localUserID(ownerID string) string {
 	if id := ms.users[ownerID]; id != "" {
 		return id
+	}
+	if local, ok := strings.CutSuffix(ownerID, "@"+ms.f.selfAuthority); ok && local != "" {
+		return local
+	}
+	if strings.Contains(ownerID, "@") {
+		return ownerID
 	}
 	id, err := shadowID(ms.server, ownerID)
 	if err != nil {

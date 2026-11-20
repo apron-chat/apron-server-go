@@ -80,3 +80,19 @@ func TestWithServer(t *testing.T) {
 		}
 	}
 }
+
+// A mirror maps an owner's user_id that it has not seen by its form.
+func TestMirrorUnseenUserIDs(t *testing.T) {
+	ms := &mirror{f: &federation{selfAuthority: "b.example"}, server: "wss://a.example/ws", users: map[string]string{"seen": "seen@a.example"}}
+	for ownerID, want := range map[string]string{
+		"seen":                     "seen@a.example",
+		"carol":                    "carol@a.example",
+		"bob@b.example":            "bob",
+		"dave@c.example":           "dave@c.example",
+		"erin@c.example@a.example": "erin@c.example@a.example",
+	} {
+		if got := ms.localUserID(ownerID); got != want {
+			t.Errorf("localUserID(%q) = %q, want %q", ownerID, got, want)
+		}
+	}
+}
