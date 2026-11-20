@@ -27,7 +27,8 @@ import (
 // mirrorRoom is a mirror room, or a thread of one, here: the owner's
 // address and room, the room here it is a thread of, if any, where the
 // owner's log was when it was made (no older record is copied), and whether
-// the owner stopped sharing it.
+// the owner stopped sharing it. Unshared, the only field that changes, is
+// guarded by f.mu.
 type mirrorRoom struct {
 	Server    string `json:"server"`
 	OwnerRoom string `json:"owner_room"`
@@ -879,8 +880,9 @@ func (ms *mirror) roomFor(ownerRoom string, logID int64) (*roomState, bool) {
 	id := ms.local[ownerRoom]
 	f.mu.Lock()
 	room := f.rooms[id]
+	shared := room != nil && !room.Unshared
 	f.mu.Unlock()
-	if room == nil || room.Unshared || logID <= room.Start {
+	if !shared || logID <= room.Start {
 		return nil, false
 	}
 	return s.rooms[id], s.rooms[id] != nil
@@ -943,8 +945,9 @@ func (ms *mirror) threadLocked(ownerRoom, parent string, fields map[string]any) 
 	localParent := s.rooms[ms.local[parent]]
 	f.mu.Lock()
 	parentRoom := f.rooms[ms.local[parent]]
+	shared := parentRoom != nil && !parentRoom.Unshared
 	f.mu.Unlock()
-	if localParent == nil || parentRoom == nil || parentRoom.Unshared {
+	if localParent == nil || !shared {
 		return nil
 	}
 	fields["ext"] = extObject{remoteExt: encodeJSON(map[string]any{"server": ms.server, "room_id": ownerRoom})}
@@ -1622,11 +1625,12 @@ func (ms *mirror) ownerParamsLocked(req request, userID string) (map[string]any,
 	ownerRoom := func(local string) (string, *Error) {
 		f.mu.Lock()
 		room := f.rooms[local]
+		unshared := room != nil && room.Unshared
 		f.mu.Unlock()
 		switch {
 		case room == nil:
 			return "", invalidParams("Unknown room %q", local)
-		case room.Unshared:
+		case unshared:
 			return "", &Error{Code: CodeDenied, Message: "This room is no longer shared; it takes no more writes"}
 		}
 		return room.OwnerRoom, nil
