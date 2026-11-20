@@ -1467,3 +1467,60 @@ func TestLinkLeaveIsNoRemoval(t *testing.T) {
 		t.Fatal("the remote users did not join again")
 	}
 }
+
+// A link acts only in rooms it has joined, threads included: never in a
+// thread that not every member of its room sees, nor in one it left.
+func TestLinkNotInThread(t *testing.T) {
+	a := startFederated(t, 0)
+	room := a.call(t, "room_set", map[string]any{"title": "Ops", "private": true})["room_id"].(string)
+	act := linkOf(t, a, room, "ws://other.test:9000/ws")
+	// A thread of a private room is private unless it says otherwise: the
+	// link is not joined to it.
+	secret := a.call(t, "room_set", map[string]any{"parent_room_id": room, "title": "Secret"})["room_id"].(string)
+	inSecret := a.call(t, "message", map[string]any{"room_id": secret, "body": map[string]any{"text": "psst"}})["message_id"].(string)
+	// A thread every member sees, which the owner's admin took the link out of.
+	open := a.call(t, "room_set", map[string]any{"parent_room_id": room, "title": "Open", "private": false})["room_id"].(string)
+	var link string
+	a.app.mu.RLock()
+	for _, l := range a.app.fed.links {
+		link = l.id
+	}
+	joinedOpen := a.app.rooms[open].members[link] != nil
+	a.app.mu.RUnlock()
+	if !joinedOpen {
+		t.Fatal("the link is not in the open thread")
+	}
+	a.call(t, "room_leave", map[string]any{"room_id": open, "user_id": link})
+	asZed := map[string]any{"remote": map[string]any{"user_id": "zed"}}
+	for thread, code := range map[string]float64{secret: CodeInvalidParams, open: CodeDenied} {
+		for id, request := range map[string]struct {
+			method string
+			params map[string]any
+		}{
+			"message":  {"message", map[string]any{"room_id": thread, "body": map[string]any{"text": "x"}, "ext": asZed}},
+			"join":     {"room_join", map[string]any{"room_id": thread, "ext": asZed}},
+			"leave":    {"room_leave", map[string]any{"room_id": thread, "ext": asZed}},
+			"save":     {"room_set", map[string]any{"room_id": thread, "title": "Mine", "ext": asZed}},
+			"create":   {"room_set", map[string]any{"parent_room_id": thread, "title": "Below", "ext": asZed}},
+			"reaction": {"reactions", map[string]any{"message_id": inSecret, "emojis": []any{"👍"}, "ext": asZed}},
+		} {
+			wantCode := code
+			if id == "reaction" {
+				wantCode = CodeInvalidParams // the message is in the secret thread
+			}
+			frame := act(thread+id, request.method, request.params)
+			if _, got, reason := errorOf(frame); got != wantCode || reason != "not_joined" {
+				t.Errorf("%s in %s: %#v, want %v with not_joined", id, thread, frame, wantCode)
+			}
+		}
+	}
+	a.app.mu.RLock()
+	defer a.app.mu.RUnlock()
+	zed := a.app.users["zed@other.test:9000"]
+	if zed != nil && (zed.joined[secret] != nil || zed.joined[open] != nil) {
+		t.Fatal("the remote user joined a thread the link is not in")
+	}
+	if len(a.app.rooms[secret].children)+len(a.app.rooms[open].children) != 0 || a.app.rooms[secret].title() != "Secret" {
+		t.Fatal("a thread the link is not in was set")
+	}
+}

@@ -2145,9 +2145,10 @@ The owner's side:
   kept across restarts, that holds no roles, has no credential, and shows
   as `offline`. A `user_id` that is empty, longer than 128 bytes, a system
   identity's, or has whitespace is `invalid_params`.
-- The link must have joined the request's room, or a room the room is a
-  thread of: one it cannot see is `invalid_params`, one it can but has not
-  joined `denied`, both with `"data": {"ext": {"remote": "not_joined"}}`.
+- The link must have joined the request's room, threads included, so never
+  a thread that not every member of its room sees: one it cannot see is
+  `invalid_params`, one it can but has not joined `denied`, both with
+  `"data": {"ext": {"remote": "not_joined"}}`.
   A write or `room_join` joins the remote user to the room, and to the
   private rooms that it is a thread of, also after it left; one that
   another user removed from any of them is `denied` with

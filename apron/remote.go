@@ -332,13 +332,16 @@ func (f *federation) actAs(c *client, req request, remoteID string) (any, bool, 
 		}
 	}
 	for _, roomID := range rooms {
+		// The link acts only where it is a member, threads included: never
+		// in a thread that not every member of its room can see, which the
+		// link was not joined to.
 		r := s.rooms[roomID]
-		joined := linkRoomLocked(link, r)
+		joined := r != nil && r.members[link.id] != nil
 		switch {
-		case r == nil || joined == nil && !r.visibleTo(link):
+		case r == nil || !joined && !r.visibleTo(link):
 			s.unlock()
 			return nil, false, notJoined(invalidParams("Unknown room %q", roomID))
-		case joined == nil:
+		case !joined:
 			s.unlock()
 			return nil, false, notJoined(&Error{Code: CodeDenied, Message: "This link is not in that room, so its remote users may not write there"})
 		}
@@ -429,17 +432,6 @@ func (s *Server) remoteUserLocked(server, remoteID string) (*userState, error) {
 		return nil, fmt.Errorf("the user_id %s is not a remote user's", id)
 	}
 	return u, nil
-}
-
-// linkRoomLocked is the room a link joined that r is, or is a thread of,
-// in which the link acts (ext:remote), or nil.
-func linkRoomLocked(link *userState, r *roomState) *roomState {
-	for room := r; room != nil; room = room.parent {
-		if room.members[link.id] != nil {
-			return room
-		}
-	}
-	return nil
 }
 
 // notJoined marks a link's error for a room it has not joined, whatever
