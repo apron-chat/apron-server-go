@@ -211,6 +211,24 @@ func TestFederationOff(t *testing.T) {
 	}
 }
 
+// refusedAfterNotes sends a request that must fail with code, skipping
+// the notifications that come before its reply, such as a mirror thread's.
+func refusedAfterNotes(t *testing.T, c *testClient, method, id string, params map[string]any, code int) {
+	t.Helper()
+	c.write(t, map[string]any{"method": method, "id": id, "params": params})
+	for {
+		frame := c.read(t)
+		if frame["id"] == nil {
+			continue
+		}
+		failure, _ := frame["error"].(map[string]any)
+		if frame["id"] != id || failure == nil || failure["code"] != float64(code) {
+			t.Fatalf("%s reply = %#v, want error %d", method, frame, code)
+		}
+		return
+	}
+}
+
 // mirrored starts an owner, A, and a mirror, B, of a private room of A's.
 func mirrored(t *testing.T, linger time.Duration) (a, b *federated, ownerRoom, mirrorRoom string) {
 	t.Helper()
@@ -754,7 +772,7 @@ func TestMirrorNotJoined(t *testing.T) {
 		return map[string]any{"error": map[string]any{"code": CodeDenied, "message": "not joined", "data": map[string]any{"ext": map[string]any{"remote": "not_joined"}}}}, true
 	})
 	mirrorRoom, bob := connectFake(t, b, address)
-	bob.expectError(t, "message", "m1", map[string]any{"room_id": mirrorRoom, "body": map[string]any{"text": "hello?"}}, CodeDenied)
+	refusedAfterNotes(t, bob, "message", "m1", map[string]any{"room_id": mirrorRoom, "body": map[string]any{"text": "hello?"}}, CodeDenied)
 	b.app.fed.mu.Lock()
 	unshared := b.app.fed.rooms[mirrorRoom].Unshared
 	b.app.fed.mu.Unlock()
@@ -899,7 +917,7 @@ func TestMirrorLinkLeaveRecord(t *testing.T) {
 		return map[string]any{"error": map[string]any{"code": CodeDenied, "message": "no"}}, true
 	})
 	mirrorRoom, bob := connectFake(t, b, address)
-	bob.expectError(t, "message", "m1", map[string]any{"room_id": mirrorRoom, "body": map[string]any{"text": "hello?"}}, CodeDenied)
+	refusedAfterNotes(t, bob, "message", "m1", map[string]any{"room_id": mirrorRoom, "body": map[string]any{"text": "hello?"}}, CodeDenied)
 	eventually(t, "the unshare", func() error {
 		b.app.fed.mu.Lock()
 		defer b.app.fed.mu.Unlock()
@@ -972,7 +990,7 @@ func TestMirrorThreadMembers(t *testing.T) {
 		return map[string]any{"error": map[string]any{"code": CodeDenied, "message": "no"}}, true
 	})
 	mirrorRoom, bob := connectFake(t, b, address)
-	bob.expectError(t, "message", "m1", map[string]any{"room_id": mirrorRoom, "body": map[string]any{"text": "go"}}, CodeDenied)
+	refusedAfterNotes(t, bob, "message", "m1", map[string]any{"room_id": mirrorRoom, "body": map[string]any{"text": "go"}}, CodeDenied)
 	carol := "carol@" + authorityOf(address)
 	eventually(t, "the thread's members", func() error {
 		b.app.mu.RLock()
@@ -1005,7 +1023,7 @@ func TestMirrorUserObjectsWithoutRemote(t *testing.T) {
 	})
 	mirrorRoom, bob := connectFake(t, b, address)
 	bobOnOwner = bob.userID + "@" + authorityOf(b.self)
-	bob.expectError(t, "message", "m1", map[string]any{"room_id": mirrorRoom, "body": map[string]any{"text": "go"}}, CodeDenied)
+	refusedAfterNotes(t, bob, "message", "m1", map[string]any{"room_id": mirrorRoom, "body": map[string]any{"text": "go"}}, CodeDenied)
 	zed := "zed@" + authorityOf(address)
 	eventually(t, "the owner's user", func() error {
 		b.app.mu.RLock()
