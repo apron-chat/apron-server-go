@@ -589,8 +589,8 @@ func TestRoomSetCreatesAndEditsRoomsAndThreads(t *testing.T) {
 	}
 	observer.expectQuiet(t)
 
-	// Edits replace every client field except parent_room_id, and reach the
-	// room's members and, for a thread, the parent's.
+	// Edits merge into the client fields, parent_room_id aside, and reach
+	// the room's members and, for a thread, the parent's.
 	ext := map[string]any{"app": map[string]any{"pinned": true}}
 	sameID, updated := saveRoom(t, c, "update", map[string]any{"room_id": thread, "parent_room_id": "ignored", "title": "Renamed", "ext": ext})
 	if observed := roomUpdated(t, observer, "updated"); !reflect.DeepEqual(observed, updated) {
@@ -599,7 +599,7 @@ func TestRoomSetCreatesAndEditsRoomsAndThreads(t *testing.T) {
 	if sameID != thread || updated["parent_room_id"] != "general" || updated["title"] != "Renamed" || !reflect.DeepEqual(updated["ext"], ext) {
 		t.Fatalf("thread update: %#v", updated)
 	}
-	if _, kept := updated["description"]; kept || updated["history_log_id"] != thread || updated["latest_log_id"] != updated["log_id"] {
+	if updated["description"] != "Deploy status\n*second* line" || updated["history_log_id"] != thread || updated["latest_log_id"] != updated["log_id"] {
 		t.Fatalf("thread update fields: %#v", updated)
 	}
 	// A new top-level room joins only its creator.
@@ -608,9 +608,9 @@ func TestRoomSetCreatesAndEditsRoomsAndThreads(t *testing.T) {
 	if _, isThread := topRecord["parent_room_id"]; isThread || topRecord["title"] != "Ops" {
 		t.Fatalf("top-level room: %#v", topRecord)
 	}
-	_, cleared := saveRoom(t, observer, "clear", map[string]any{"room_id": top})
+	_, cleared := saveRoom(t, observer, "clear", map[string]any{"room_id": top, "title": ""})
 	if _, present := cleared["title"]; present {
-		t.Fatalf("omitted title was retained on a top-level room: %#v", cleared)
+		t.Fatalf("an empty title was kept on a top-level room: %#v", cleared)
 	}
 	// An editor who has not joined the room still receives the update.
 	_, renamed := saveRoom(t, c, "rename-top", map[string]any{"room_id": top, "title": "Ops 2"})

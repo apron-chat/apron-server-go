@@ -533,6 +533,14 @@ func (s *Server) setRoom(c *client, req request) (any, bool, *Error) {
 		}
 		parent = existing.parent
 		keptExt = extOf(existing.record["ext"])
+		// The fields merge into the room's (§4.2.4, §3.3.1): one that the
+		// request leaves out stays, and an empty one clears it.
+		if _, given := req.params["title"]; !given {
+			title, _ = existing.record["title"].(string)
+		}
+		if _, given := req.params["description"]; !given {
+			description, _ = existing.record["description"].(string)
+		}
 	} else if parentID != "" {
 		if parent = s.visibleRoomLocked(u, parentID); parent == nil {
 			return nil, false, invalidParams("Unknown parent room %q", parentID)
@@ -546,7 +554,7 @@ func (s *Server) setRoom(c *client, req request) (any, bool, *Error) {
 		}
 	}
 	// ext merges into the room's (§4.12), and the limit applies to the
-	// result; other client fields are replaced (§4.2.4).
+	// result.
 	ext := mergeExt(keptExt, extWrite)
 	if encodedSize(ext) > maxRoomExtBytes {
 		return nil, false, &Error{Code: CodeTooLarge, Message: fmt.Sprintf("The room's ext would be over %d bytes", maxRoomExtBytes)}

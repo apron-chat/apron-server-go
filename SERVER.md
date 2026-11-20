@@ -608,9 +608,10 @@ account's join to `general`, and a guest's leaves when it is retired.
   `members` and `users`, and `latest_log_id` already the membership's) and
   the membership, then the result. A new thread that is not private goes to the parent's other members
   as `room_update` `updated`, without joining them. With `room_id` it
-  replaces every client field except `parent_room_id` and `private`, which
-  are fixed at creation and kept, and `ext`, which merges as `me`'s does
-  (§4.12); other omitted fields are cleared. The merged `ext` is at most
+  merges into the room's client fields (§4.2.4): a field it carries
+  replaces the room's, an empty one (`""`) clears it, and one it leaves
+  out stays; `parent_room_id` and `private` are fixed at creation and
+  kept, and `ext` merges as `me`'s does (§4.12). The merged `ext` is at most
   16 KiB of JSON, or the request is `too_large`. The edit goes as
   `room_update` `updated` to the room's members, to the parent's members for
   a thread that is not private, and to the editor. Both return

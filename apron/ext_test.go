@@ -134,8 +134,8 @@ func TestConcurrentSavesOfDifferentExtKeysBothSurvive(t *testing.T) {
 	}
 }
 
-// room_set replaces the client fields of a room, but merges ext (§4.2.4,
-// §4.12); the limit applies to the merged ext.
+// room_set merges into the client fields of a room, ext one level deep
+// (§4.2.4, §4.12); the limit applies to the merged ext.
 func TestRoomSetMergesExt(t *testing.T) {
 	_, httpServer := newTestServer(t, DefaultConfig())
 	a := dialTestClient(t, httpServer)
@@ -152,7 +152,7 @@ func TestRoomSetMergesExt(t *testing.T) {
 		t.Fatalf("merged ext: %#v", merged["ext"])
 	}
 	_, cleared := saveRoom(t, a, "clear", map[string]any{"room_id": roomID, "ext": map[string]any{"irc": "", "matrix": map[string]any{}}})
-	if _, has := cleared["ext"]; has || cleared["title"] != nil {
+	if _, has := cleared["ext"]; has || cleared["title"] != "Ops 2" {
 		t.Fatalf("cleared: %#v", cleared)
 	}
 	half := strings.Repeat("x", maxRoomExtBytes/2)
@@ -178,5 +178,23 @@ func TestProfileExtLimitAppliesToTheMergedExt(t *testing.T) {
 	app.mu.RUnlock()
 	if raw != bigNumber {
 		t.Fatalf("stored ext value %s, want %s", raw, bigNumber)
+	}
+}
+
+// room_set with room_id merges its fields into the room's (§4.2.4, §3.3.1):
+// a field it carries replaces the room's, an empty one clears it, and one
+// it leaves out stays.
+func TestRoomSetMergesFields(t *testing.T) {
+	_, httpServer := newTestServer(t, DefaultConfig())
+	a := dialTestClient(t, httpServer)
+	roomID, _ := saveRoom(t, a, "create", map[string]any{"title": "Ops", "description": "Deploys"})
+	if _, described := saveRoom(t, a, "describe", map[string]any{"room_id": roomID, "description": "Deploys and outages"}); described["title"] != "Ops" || described["description"] != "Deploys and outages" {
+		t.Fatalf("a description alone: %#v", described)
+	}
+	if _, renamed := saveRoom(t, a, "rename", map[string]any{"room_id": roomID, "title": "Ops 2"}); renamed["title"] != "Ops 2" || renamed["description"] != "Deploys and outages" {
+		t.Fatalf("a title alone: %#v", renamed)
+	}
+	if _, cleared := saveRoom(t, a, "clear", map[string]any{"room_id": roomID, "description": ""}); cleared["title"] != "Ops 2" || cleared["description"] != nil {
+		t.Fatalf("a cleared description: %#v", cleared)
 	}
 }
