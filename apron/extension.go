@@ -730,6 +730,13 @@ func (kv KV) put(key string, value any) error {
 	s := kv.h.s
 	s.mu.Lock()
 	defer s.unlock()
+	return kv.setLocked(key, raw)
+}
+
+// setLocked keeps raw under key, holding s.mu: for the server's own
+// extensions, whose hooks run under it (ext:remote).
+func (kv KV) setLocked(key string, raw jsontext.Value) error {
+	s := kv.h.s
 	if s.storeClosed {
 		return ErrServerClosed
 	}

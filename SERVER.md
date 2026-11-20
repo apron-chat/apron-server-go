@@ -2179,10 +2179,14 @@ The mirror's side:
   are then copied, also from `history` after a close, but for links and this
   server's own users' remote users; this server's users' joins and leaves of
   a mirror room, or a thread of one, go to the owner as `room_join` and
-  `room_leave`, in order. A mirror room is private exactly when the owner's
-  room was when it was made; when the owner's room later becomes private, a
-  public mirror room stops mirroring (this server fixes `private` at a room's
-  creation, so as an owner it never changes it).
+  `room_leave`, in order, from a queue kept across restarts: one that the
+  owner did not answer, such as when the connection closed, is sent again
+  on the next connection (or after 30 seconds), and a newer change of the
+  same user and room replaces an older one. A mirror room is private
+  exactly when the owner's room was when it was made; when the owner's room
+  later becomes private, a public mirror room stops mirroring (this server
+  fixes `private` at a room's creation, so as an owner it never changes
+  it).
 - A user's `message`, `reactions`, or thread `room_set` in a mirror room or a
   thread of one goes to the owner through the link, with the owner's IDs
   and `ext.remote.user_id`, as request `<user_id>:<id>`, after a `me` with the

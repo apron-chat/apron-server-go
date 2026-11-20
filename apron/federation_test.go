@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -609,10 +610,11 @@ func TestLinkRequests(t *testing.T) {
 	}
 }
 
-// fakeOwner is an owner that serves room ops to b's link, and answers each
-// message request with what message returns: the reply's result or error.
-// write sends a frame to the mirror.
-func fakeOwner(t *testing.T, b *federated, message func(params map[string]any, write func(any)) map[string]any) (address string) {
+// fakeOwner is an owner that serves room ops to b's link. It answers a
+// request that handle takes with the reply's result or error that handle
+// returns, or closes the connection for a nil reply. write sends a frame
+// to the mirror.
+func fakeOwner(t *testing.T, b *federated, handle func(method string, params map[string]any, write func(any)) (reply map[string]any, took bool)) (address string) {
 	t.Helper()
 	owner := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ws, err := websocket.Accept(w, r, nil)
@@ -642,6 +644,14 @@ func fakeOwner(t *testing.T, b *federated, message func(params map[string]any, w
 				continue
 			}
 			reply := map[string]any{"id": frame.ID, "result": map[string]any{}}
+			if handled, took := handle(frame.Method, frame.Params, write); took {
+				if handled == nil {
+					return
+				}
+				handled["id"] = frame.ID
+				write(handled)
+				continue
+			}
 			switch frame.Method {
 			case "auth":
 				reply["result"] = map[string]any{"you": map[string]any{"user_id": "link_1", "ext": map[string]any{"remote": map[string]any{"server": b.self}}}}
@@ -649,9 +659,6 @@ func fakeOwner(t *testing.T, b *federated, message func(params map[string]any, w
 				reply["result"] = map[string]any{"joined": []any{map[string]any{"room_id": "ops", "title": "Ops", "latest_log_id": "100"}}}
 			case "me":
 				reply["result"] = map[string]any{"you": map[string]any{"user_id": "bob@b"}}
-			case "message":
-				reply = message(frame.Params, write)
-				reply["id"] = frame.ID
 			}
 			write(reply)
 		}
@@ -681,7 +688,10 @@ func connectFake(t *testing.T, b *federated, address string) (string, *testClien
 func TestMirrorAnswersWithTheCopy(t *testing.T) {
 	b := startFederated(t, 0)
 	var n atomic.Int64
-	address := fakeOwner(t, b, func(params map[string]any, write func(any)) map[string]any {
+	address := fakeOwner(t, b, func(method string, params map[string]any, write func(any)) (map[string]any, bool) {
+		if method != "message" {
+			return nil, false
+		}
 		id := fmt.Sprint(1000 + n.Add(1))
 		body := params["body"]
 		ext, _ := params["ext"].(map[string]any)
@@ -695,7 +705,7 @@ func TestMirrorAnswersWithTheCopy(t *testing.T) {
 				"from": map[string]any{"user_id": author + "@b", "ext": map[string]any{"remote": map[string]any{"server": b.self, "user_id": author}}},
 			}})
 		}()
-		return map[string]any{"result": map[string]any{"message_id": id}}
+		return map[string]any{"result": map[string]any{"message_id": id}}, true
 	})
 	mirrorRoom, bob := connectFake(t, b, address)
 	_, result := bob.request(t, "message", "m1", map[string]any{"room_id": mirrorRoom, "body": map[string]any{"text": "late record"}})
@@ -709,8 +719,11 @@ func TestMirrorAnswersWithTheCopy(t *testing.T) {
 // longer in the owner's room.
 func TestMirrorNotJoined(t *testing.T) {
 	b := startFederated(t, 0)
-	address := fakeOwner(t, b, func(map[string]any, func(any)) map[string]any {
-		return map[string]any{"error": map[string]any{"code": CodeDenied, "message": "not joined", "data": map[string]any{"ext": map[string]any{"remote": "not_joined"}}}}
+	address := fakeOwner(t, b, func(method string, _ map[string]any, _ func(any)) (map[string]any, bool) {
+		if method != "message" {
+			return nil, false
+		}
+		return map[string]any{"error": map[string]any{"code": CodeDenied, "message": "not joined", "data": map[string]any{"ext": map[string]any{"remote": "not_joined"}}}}, true
 	})
 	mirrorRoom, bob := connectFake(t, b, address)
 	bob.expectError(t, "message", "m1", map[string]any{"room_id": mirrorRoom, "body": map[string]any{"text": "hello?"}}, CodeDenied)
@@ -719,5 +732,63 @@ func TestMirrorNotJoined(t *testing.T) {
 	b.app.fed.mu.Unlock()
 	if !unshared {
 		t.Fatal("the mirror room is still shared")
+	}
+}
+
+// A join or leave that the owner did not answer stays queued, kept in the
+// KV, and goes on the next connection; a newer change of the same user and
+// room replaces an older one.
+func TestMirrorResendsMemberships(t *testing.T) {
+	b := startFederated(t, 0)
+	var dropping atomic.Bool
+	dropping.Store(true)
+	var mu sync.Mutex
+	got := make(map[string]string) // user_id → method
+	address := fakeOwner(t, b, func(method string, params map[string]any, _ func(any)) (map[string]any, bool) {
+		if method != "room_join" && method != "room_leave" {
+			return nil, false
+		}
+		if dropping.Load() {
+			return nil, true // the connection closes before the answer
+		}
+		mu.Lock()
+		got[fmt.Sprint(remoteExtOf(params)["user_id"])] = method
+		mu.Unlock()
+		return map[string]any{"result": map[string]any{}}, true
+	})
+	mirrorRoom, bob := connectFake(t, b, address)
+	carol := dialTestClient(t, b.http)
+	b.call(t, "room_join", map[string]any{"room_id": mirrorRoom, "user_id": carol.userID})
+	carol.request(t, "room_leave", "l1", map[string]any{"room_id": mirrorRoom})
+	server, _ := normalizeAddress(address)
+	queued := func() []membershipChange {
+		var changes []membershipChange
+		_, _ = b.app.fed.kv.Get("memberships "+server, &changes)
+		return changes
+	}
+	eventually(t, "the kept queue", func() error {
+		var users []string
+		for _, change := range queued() {
+			users = append(users, fmt.Sprintf("%s:%v", change.UserID, change.Joined))
+		}
+		if want := []string{"admin:true", bob.userID + ":true", carol.userID + ":false"}; !slices.Equal(users, want) {
+			return fmt.Errorf("%v, want %v", users, want)
+		}
+		return nil
+	})
+	dropping.Store(false)
+	eventually(t, "the joins on the owner", func() error {
+		mu.Lock()
+		defer mu.Unlock()
+		if got["admin"] != "room_join" || got[bob.userID] != "room_join" || len(queued()) != 0 {
+			return fmt.Errorf("owner %v, queue %v", got, queued())
+		}
+		return nil
+	})
+	// Carol never reached the owner: her leave needs no request.
+	mu.Lock()
+	defer mu.Unlock()
+	if _, sent := got[carol.userID]; sent {
+		t.Fatalf("carol's change was sent: %v", got)
 	}
 }

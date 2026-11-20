@@ -65,15 +65,22 @@ type mirror struct {
 	// mirror's wake URL and its bearer token.
 	want               chan struct{}
 	wakeID, wakeSecret string
-	// memberships queues this server's users' joins and leaves of mirror
-	// rooms, which go to the owner in order.
-	memberships chan membershipChange
+	// memberships are this server's users' joins and leaves of mirror
+	// rooms that the owner has not answered, which go to it in order, kept
+	// in the KV under "memberships <server>"; guarded by s.mu. sendDue
+	// asks sendMemberships to send them.
+	memberships []membershipChange
+	sendDue     chan struct{}
 }
 
-// membershipChange is a user's join or leave of an owner's room.
+// membershipChange is a user's join or leave of an owner's room. ID makes
+// its request id, the same when it is sent again.
 type membershipChange struct {
-	userID, name, ownerRoom string
-	joined                  bool
+	ID        string `json:"id"`
+	UserID    string `json:"user_id"`
+	Name      string `json:"name,omitzero"`
+	OwnerRoom string `json:"room"`
+	Joined    bool   `json:"joined"`
 }
 
 // mirrorTimeout bounds how long a forwarded write waits for the owner.
@@ -88,7 +95,7 @@ func (f *federation) newMirror(server string) *mirror {
 		f: f, server: server, local: make(map[string]string), copies: make(map[string]string),
 		originals: make(map[string]string), users: make(map[string]string), hidden: make(map[string]bool),
 		ready: make(chan struct{}), appliedCh: make(chan struct{}), want: make(chan struct{}, 1),
-		memberships: make(chan membershipChange, 1024),
+		sendDue: make(chan struct{}, 1),
 	}
 }
 
@@ -124,6 +131,7 @@ func (f *federation) initMirrors(r *Registrar) error {
 		_, _ = f.kv.Get("cursor "+server, &ms.cursor)
 		var hidden []string
 		_, _ = f.kv.Get("hidden "+server, &hidden)
+		_, _ = f.kv.Get("memberships "+server, &ms.memberships)
 		for _, id := range hidden {
 			ms.hidden[id] = true
 		}
@@ -179,10 +187,8 @@ func (f *federation) initMirrors(r *Registrar) error {
 func (ms *mirror) start(h *Host) {
 	h.Go(ms.run)
 	h.Go(ms.sendMemberships)
-	select {
-	case ms.want <- struct{}{}:
-	default:
-	}
+	ms.wakeUp()
+	ms.sendMembershipsNow()
 }
 
 // saveRooms keeps the mirror rooms and the tokens.
@@ -559,6 +565,7 @@ func (ms *mirror) session(ctx context.Context) error {
 	close(ms.ready)
 	ms.mu.Unlock()
 	f.h.logger.Info("mirror connected", "owner", ms.server)
+	ms.sendMembershipsNow()
 	defer func() {
 		ms.mu.Lock()
 		ms.conn, ms.ready = nil, make(chan struct{})
@@ -1559,42 +1566,94 @@ func (f *federation) membershipChangedLocked(u *userState, r *roomState, joined 
 	}
 	f.mu.Unlock()
 	if ms != nil {
-		ms.queueMembership(membershipChange{userID: u.id, name: u.name, ownerRoom: room.OwnerRoom, joined: joined})
+		ms.queueMembershipLocked(membershipChange{ID: randomID(), UserID: u.id, Name: u.name, OwnerRoom: room.OwnerRoom, Joined: joined})
 	}
 }
 
-func (ms *mirror) queueMembership(change membershipChange) {
+// queueMembershipLocked queues a join or leave for the owner, in place of
+// one of the same user and room that has not gone yet, and keeps the
+// queue. Called holding s.mu.
+func (ms *mirror) queueMembershipLocked(change membershipChange) {
+	ms.memberships = slices.DeleteFunc(ms.memberships, func(queued membershipChange) bool {
+		return queued.UserID == change.UserID && queued.OwnerRoom == change.OwnerRoom
+	})
+	ms.memberships = append(ms.memberships, change)
+	ms.saveMembershipsLocked()
+	ms.sendMembershipsNow()
+}
+
+func (ms *mirror) saveMembershipsLocked() {
+	if err := ms.f.kv.setLocked("memberships "+ms.server, encodeJSON(ms.memberships)); err != nil {
+		ms.f.h.logger.Warn("the joins and leaves for the owner were not kept", "owner", ms.server, "error", err)
+	}
+}
+
+// sendMembershipsNow asks sendMemberships to send the queue.
+func (ms *mirror) sendMembershipsNow() {
 	select {
-	case ms.memberships <- change:
+	case ms.sendDue <- struct{}{}:
 	default:
-		ms.f.h.logger.Warn("too many joins and leaves waiting for the owner; one is dropped", "owner", ms.server, "user_id", change.userID)
 	}
 }
 
 // sendMemberships sends the queued joins and leaves to the owner, in order,
-// as room_join and room_leave of the users' remote users.
+// as room_join and room_leave of the users' remote users, when asked: on a
+// change, and on each connection. One that the owner did not answer stays
+// queued, with those after it, until the next connection or membershipRetry.
 func (ms *mirror) sendMemberships(ctx context.Context) {
+	s := ms.f.s
 	for {
 		select {
-		case change := <-ms.memberships:
-			method := "room_leave"
-			if change.joined {
-				method = "room_join"
-			}
-			if change.joined {
-				if _, err := ms.ownerUser(ctx, change.userID, change.name); err != nil {
-					ms.f.h.logger.Warn("a join did not reach the owner", "owner", ms.server, "user_id", change.userID, "error", err)
-					continue
-				}
-			} else if found, _ := ms.f.kv.Get("user "+ms.server+" "+change.userID, new(string)); !found {
-				continue // never on the owner
-			}
-			params := map[string]any{"room_id": change.ownerRoom, "ext": map[string]any{"remote": map[string]any{"user_id": change.userID}}}
-			if _, _, err := ms.call(ctx, change.userID+":"+method+"-"+randomID(), method, params); err != nil {
-				ms.f.h.logger.Warn("a membership did not reach the owner", "owner", ms.server, "user_id", change.userID, "method", method, "error", err)
-			}
+		case <-ms.sendDue:
 		case <-ctx.Done():
 			return
 		}
+		for {
+			s.mu.RLock()
+			if len(ms.memberships) == 0 {
+				s.mu.RUnlock()
+				break
+			}
+			change := ms.memberships[0]
+			s.mu.RUnlock()
+			if !ms.sendMembership(ctx, change) {
+				// Again on the next connection, or after a while, such as
+				// after the owner's retry_after.
+				time.AfterFunc(membershipRetry, ms.sendMembershipsNow)
+				break
+			}
+			s.mu.Lock()
+			if i := slices.Index(ms.memberships, change); i >= 0 {
+				ms.memberships = slices.Delete(ms.memberships, i, i+1)
+				ms.saveMembershipsLocked()
+			}
+			s.unlock()
+		}
 	}
+}
+
+// membershipRetry is when a join or leave that got no answer is sent again,
+// if no connection came first.
+const membershipRetry = 30 * time.Second
+
+// sendMembership sends one join or leave, and reports whether the owner
+// answered it: a refusal is an answer, and the change is dropped.
+func (ms *mirror) sendMembership(ctx context.Context, change membershipChange) bool {
+	logger := ms.f.h.logger.With("owner", ms.server, "user_id", change.UserID)
+	method := "room_leave"
+	if change.Joined {
+		method = "room_join"
+		if _, err := ms.ownerUser(ctx, change.UserID, change.Name); err != nil {
+			logger.Warn("a join did not reach the owner", "error", err)
+			return err.Code != CodeRetryAfter
+		}
+	} else if found, _ := ms.f.kv.Get("user "+ms.server+" "+change.UserID, new(string)); !found {
+		return true // never on the owner
+	}
+	params := map[string]any{"room_id": change.OwnerRoom, "ext": map[string]any{"remote": map[string]any{"user_id": change.UserID}}}
+	if _, _, err := ms.call(ctx, change.UserID+":"+method+"-"+change.ID, method, params); err != nil {
+		logger.Warn("a membership did not reach the owner", "method", method, "error", err)
+		return err.Code != CodeRetryAfter
+	}
+	return true
 }
