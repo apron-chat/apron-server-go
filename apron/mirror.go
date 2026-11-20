@@ -1650,6 +1650,9 @@ func (ms *mirror) ownerParamsLocked(req request, userID string) (map[string]any,
 			params[key] = id
 		}
 	}
+	if req.method == "room_set" {
+		delete(params, "private") // the owner ignores it from a link
+	}
 	if req.method == "message" {
 		if _, has := params["room_id"]; !has {
 			id, err := ownerRoom(defaultRoomID)

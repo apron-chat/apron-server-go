@@ -596,7 +596,7 @@ func TestLinkRequests(t *testing.T) {
 			t.Fatalf("%s: %#v", id, frame)
 		}
 	}
-	made := act("s5", "room_set", map[string]any{"parent_room_id": room, "title": "far thread", "ext": map[string]any{"remote": map[string]any{"user_id": "yan"}}})
+	made := act("s5", "room_set", map[string]any{"parent_room_id": room, "title": "far thread", "private": true, "ext": map[string]any{"remote": map[string]any{"user_id": "yan"}}})
 	thread := made["result"].(map[string]any)["room_id"].(string)
 	a.app.mu.RLock()
 	r := a.app.rooms[thread]

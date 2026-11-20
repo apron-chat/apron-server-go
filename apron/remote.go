@@ -379,12 +379,13 @@ func (f *federation) actAs(c *client, req request, remoteID string) (any, bool, 
 	}
 
 	params := req.params
-	if req.method == "room_set" && target.ParentRoomID != nil && target.RoomID == nil {
-		// A thread of a private room is private unless it says otherwise,
-		// which here would show it only to the remote user: the copy of a
-		// thread is seen by whoever sees its parent.
-		if _, given := params["private"]; !given {
-			params = maps.Clone(params)
+	if req.method == "room_set" {
+		// A link's private is ignored: a thread that a remote user creates
+		// is seen by whoever sees its parent, as its mirror thread is, and
+		// not private as a thread of a private room would be by default.
+		params = maps.Clone(params)
+		delete(params, "private")
+		if target.RoomID == nil {
 			params["private"] = jsontext.Value("false")
 		}
 	}
