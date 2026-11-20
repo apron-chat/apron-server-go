@@ -1524,3 +1524,95 @@ func TestLinkNotInThread(t *testing.T) {
 		t.Fatal("a thread the link is not in was set")
 	}
 }
+
+// When the link leaves one thread of a shared room, only that mirror thread,
+// and its threads, stop taking writes: the mirror room and its other threads
+// keep working.
+func TestMirrorThreadStops(t *testing.T) {
+	a, b, ownerRoom, mirrorRoom := mirrored(t, 0)
+	gone := a.call(t, "room_set", map[string]any{"parent_room_id": ownerRoom, "title": "Gone", "private": false})["room_id"].(string)
+	below := a.call(t, "room_set", map[string]any{"parent_room_id": gone, "title": "Below", "private": false})["room_id"].(string)
+	kept := a.call(t, "room_set", map[string]any{"parent_room_id": ownerRoom, "title": "Kept", "private": false})["room_id"].(string)
+	local := make(map[string]string)
+	eventually(t, "the mirror threads", func() error {
+		for _, thread := range []string{gone, below, kept} {
+			r := mirrorThreadOf(b, thread)
+			if r == nil {
+				return fmt.Errorf("no mirror thread of %s", thread)
+			}
+			local[thread] = r.id
+		}
+		return nil
+	})
+	bob := dialTestClient(t, b.http)
+	b.call(t, "room_join", map[string]any{"room_id": mirrorRoom, "user_id": bob.userID})
+	var link string
+	a.app.mu.RLock()
+	for _, l := range a.app.fed.links {
+		link = l.id
+	}
+	a.app.mu.RUnlock()
+	a.call(t, "room_leave", map[string]any{"room_id": gone, "user_id": link})
+	stopped := func() map[string]bool {
+		b.app.fed.mu.Lock()
+		defer b.app.fed.mu.Unlock()
+		return map[string]bool{"room": b.app.fed.rooms[mirrorRoom].Unshared, "gone": b.app.fed.rooms[local[gone]].Unshared,
+			"below": b.app.fed.rooms[local[below]].Unshared, "kept": b.app.fed.rooms[local[kept]].Unshared}
+	}
+	eventually(t, "the thread's stop", func() error {
+		if got := stopped(); !got["gone"] || !got["below"] {
+			return fmt.Errorf("%v", got)
+		}
+		return nil
+	})
+	if got := stopped(); got["room"] || got["kept"] {
+		t.Fatalf("more stopped than the thread: %v", got)
+	}
+	bob.drain(t)
+	for i, roomID := range []string{mirrorRoom, local[kept]} {
+		if frame := replyAfterNotes(t, bob, "message", fmt.Sprint("ok", i), map[string]any{"room_id": roomID, "body": map[string]any{"text": "still shared"}}); frame["result"] == nil {
+			t.Fatalf("a write in %s = %#v", roomID, frame)
+		}
+	}
+	for i, roomID := range []string{local[gone], local[below]} {
+		if _, code, _ := errorOf(replyAfterNotes(t, bob, "message", fmt.Sprint("no", i), map[string]any{"room_id": roomID, "body": map[string]any{"text": "x"}})); code != float64(CodeDenied) {
+			t.Fatalf("a write in the stopped thread %s: %v", roomID, code)
+		}
+	}
+}
+
+// An owner's not_joined for a request in a thread stops only that mirror
+// thread.
+func TestMirrorThreadNotJoined(t *testing.T) {
+	b := startFederated(t, 0)
+	address := fakeOwner(t, b, func(method string, params map[string]any, write func(any)) (map[string]any, bool) {
+		if method != "message" {
+			return nil, false
+		}
+		if params["room_id"] == "t1" {
+			return map[string]any{"error": map[string]any{"code": CodeDenied, "message": "not joined", "data": map[string]any{"ext": map[string]any{"remote": "not_joined"}}}}, true
+		}
+		thread := map[string]any{"room_id": "t1", "log_id": "300", "parent_room_id": "ops", "title": "Deploy", "latest_log_id": "300",
+			"members": []any{map[string]any{"user_id": "link_1"}}}
+		write(map[string]any{"method": "room_update", "params": map[string]any{"joined": []any{thread}, "users": []any{
+			map[string]any{"user_id": "link_1", "ext": map[string]any{"remote": map[string]any{"server": b.self}}},
+		}}})
+		return map[string]any{"error": map[string]any{"code": CodeDenied, "message": "no"}}, true
+	})
+	mirrorRoom, bob := connectFake(t, b, address)
+	refusedAfterNotes(t, bob, "message", "m1", map[string]any{"room_id": mirrorRoom, "body": map[string]any{"text": "go"}}, CodeDenied)
+	var thread *roomState
+	eventually(t, "the mirror thread", func() error {
+		if thread = mirrorThreadOf(b, "t1"); thread == nil {
+			return fmt.Errorf("none")
+		}
+		return nil
+	})
+	refusedAfterNotes(t, bob, "message", "m2", map[string]any{"room_id": thread.id, "body": map[string]any{"text": "here?"}}, CodeDenied)
+	b.app.fed.mu.Lock()
+	room, inThread := b.app.fed.rooms[mirrorRoom].Unshared, b.app.fed.rooms[thread.id].Unshared
+	b.app.fed.mu.Unlock()
+	if room || !inThread {
+		t.Fatalf("stopped: the mirror room %v, the thread %v", room, inThread)
+	}
+}

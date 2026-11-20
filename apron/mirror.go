@@ -376,27 +376,32 @@ func (f *federation) unmirror(ctx context.Context, call *CommandCall, room *mirr
 	return nil
 }
 
-// markUnshared stops a mirror room, and its threads, whose owner no longer
-// shares it.
+// markUnshared stops the mirror room or thread of an owner's room or
+// thread that the link is no longer in, and its threads: they keep their
+// copies and take no more writes. A thread's stop leaves the mirror room
+// and its other threads as they are.
 func (f *federation) markUnshared(server, ownerRoom string) {
 	f.mu.Lock()
-	var top string
+	stopped := make(map[string]bool)
 	for id, room := range f.rooms {
-		if room.Server == server && room.OwnerRoom == ownerRoom && room.Parent == "" {
-			top = id
+		if room.Server == server && room.OwnerRoom == ownerRoom && !room.Unshared {
+			stopped[id] = true
 		}
 	}
-	for changed := top != ""; changed; {
+	var ids []string
+	for changed := len(stopped) > 0; changed; {
 		changed = false
 		for id, room := range f.rooms {
-			if !room.Unshared && room.Server == server && (id == top || room.Parent != "" && f.rooms[room.Parent] != nil && f.rooms[room.Parent].Unshared) {
-				room.Unshared, changed = true, true
+			if !room.Unshared && room.Server == server && (stopped[id] || room.Parent != "" && stopped[room.Parent]) {
+				room.Unshared, stopped[id], changed = true, true, true
+				ids = append(ids, id)
 			}
 		}
 	}
 	f.mu.Unlock()
-	if top != "" {
-		f.h.logger.Info("a mirror room is no longer shared", "room", top, "server", server)
+	if len(ids) > 0 {
+		slices.Sort(ids)
+		f.h.logger.Info("a mirror room or thread is no longer shared", "rooms", ids, "server", server, "owner_room", ownerRoom)
 		_ = f.saveRooms()
 	}
 }
@@ -521,8 +526,9 @@ func (ms *mirror) session(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	// The rooms the link has left since, such as while the mirror slept,
-	// are no longer shared: the link's history has none of their records.
+	// The rooms and threads the link has left since, such as while the
+	// mirror slept, are no longer shared: the link's history has none of
+	// their records.
 	// The threads it has joined that have no mirror thread get one.
 	if listed, users, err := listJoined(ctx, conn); err == nil {
 		joined := make(map[string]bool)
@@ -532,7 +538,7 @@ func (ms *mirror) session(ctx context.Context) error {
 		var gone []string
 		f.mu.Lock()
 		for _, room := range f.rooms {
-			if room.Server == ms.server && room.Parent == "" && !room.Unshared && !joined[room.OwnerRoom] {
+			if room.Server == ms.server && !room.Unshared && !joined[room.OwnerRoom] {
 				gone = append(gone, room.OwnerRoom)
 			}
 		}
@@ -1603,10 +1609,10 @@ func (f *federation) forward(c *client, req request, ms *mirror) (any, bool, *Er
 	}
 }
 
-// linkLeft stops the mirror room of a request that the owner refused with
-// not_joined: the link is no longer in the owner's room. The request's room
-// is its room_id or parent_room_id, or its message's room; a thread's
-// mirror room is the one it is a thread of.
+// linkLeft stops the mirror room or thread of a request that the owner
+// refused with not_joined: the link is no longer in the owner's room or
+// thread. The request's room is its room_id or parent_room_id, or its
+// message's room; a thread's stop leaves its mirror room as it is.
 func (f *federation) linkLeft(req request) {
 	var target struct {
 		RoomID       string `json:"room_id"`
@@ -1624,9 +1630,6 @@ func (f *federation) linkLeft(req request) {
 	}
 	f.mu.Lock()
 	room := f.rooms[roomID]
-	for room != nil && room.Parent != "" {
-		room = f.rooms[room.Parent]
-	}
 	var server, ownerRoom string
 	if room != nil {
 		server, ownerRoom = room.Server, room.OwnerRoom
