@@ -315,19 +315,20 @@ func (f *federation) actAs(c *client, req request, remoteID string) (any, bool, 
 		write = false
 	case "room_set":
 		// A link sets only threads of rooms it joined: it creates one under
-		// such a room, or saves one.
+		// such a room, or saves one. Anything else is denied; a room it
+		// cannot see is unknown, below.
 		switch {
 		case target.RoomID != nil:
-			if r := s.rooms[*target.RoomID]; r != nil && r.parent == nil {
+			if r := s.rooms[*target.RoomID]; r != nil && r.parent == nil && r.visibleTo(link) {
 				s.unlock()
-				return nil, false, invalidParams("A link saves only threads")
+				return nil, false, &Error{Code: CodeDenied, Message: "A link saves only threads"}
 			}
 			rooms = append(rooms, *target.RoomID)
 		case target.ParentRoomID != nil:
 			rooms = append(rooms, *target.ParentRoomID)
 		default:
 			s.unlock()
-			return nil, false, invalidParams("A link creates only threads: give parent_room_id")
+			return nil, false, &Error{Code: CodeDenied, Message: "A link creates only threads: give parent_room_id"}
 		}
 	}
 	for _, roomID := range rooms {

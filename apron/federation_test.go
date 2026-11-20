@@ -1141,3 +1141,92 @@ func TestMirrorHistoryBound(t *testing.T) {
 		return nil
 	})
 }
+
+// linkOf signs in as a's link for server, invited to room, and returns a
+// function that sends a request as it and returns its reply.
+func linkOf(t *testing.T, a *federated, room, server string) func(id, method string, params map[string]any) map[string]any {
+	t.Helper()
+	invite := inviteInNotice.FindStringSubmatch(a.command(t, room, "/remote invite "+server))
+	_, _, token, err := parseInvite(invite[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	link, _ := dialRaw(t, a.http)
+	link.result(t, "auth", "a1", map[string]any{"scheme": "token", "token": token})
+	link.drain(t)
+	return func(id, method string, params map[string]any) map[string]any {
+		link.write(t, map[string]any{"method": method, "id": id, "params": params})
+		for {
+			if frame := link.read(t); frame["id"] == id {
+				return frame
+			}
+		}
+	}
+}
+
+// errorOf is a reply's error, its code, and its data.ext.remote.
+func errorOf(frame map[string]any) (failure map[string]any, code any, reason any) {
+	failure, _ = frame["error"].(map[string]any)
+	data, _ := failure["data"].(map[string]any)
+	ext, _ := data["ext"].(map[string]any)
+	return failure, failure["code"], ext["remote"]
+}
+
+// A link's room_set creates or saves a thread of a room it joined, as a
+// remote user, and nothing else: anything else is denied, and a room it
+// cannot see unknown. The thread a remote user creates is one every member
+// of the room sees, whatever private says.
+func TestLinkRoomSet(t *testing.T) {
+	a := startFederated(t, 0)
+	const other = "ws://other.test:9000/ws"
+	room := a.call(t, "room_set", map[string]any{"title": "Ops", "private": true})["room_id"].(string)
+	elsewhere := a.call(t, "room_set", map[string]any{"title": "Elsewhere"})["room_id"].(string)
+	hidden := a.call(t, "room_set", map[string]any{"title": "Hidden", "private": true})["room_id"].(string)
+	member := dialTestClient(t, a.http)
+	a.call(t, "room_join", map[string]any{"room_id": room, "user_id": member.userID})
+	act := linkOf(t, a, room, other)
+	asYan := map[string]any{"remote": map[string]any{"user_id": "yan"}}
+	for _, tc := range []struct {
+		id     string
+		params map[string]any
+		code   float64
+		reason any
+	}{
+		// The link's own room_set, of anything.
+		{"own1", map[string]any{"title": "mine"}, CodeDenied, nil},
+		{"own2", map[string]any{"parent_room_id": room, "title": "mine"}, CodeDenied, nil},
+		// No thread: neither room_id nor parent_room_id, or a room that is
+		// no thread, joined or not.
+		{"top", map[string]any{"title": "top", "ext": asYan}, CodeDenied, nil},
+		{"save", map[string]any{"room_id": room, "title": "renamed", "ext": asYan}, CodeDenied, nil},
+		{"other", map[string]any{"room_id": elsewhere, "title": "renamed", "ext": asYan}, CodeDenied, nil},
+		// A thread of a room the link has not joined.
+		{"under", map[string]any{"parent_room_id": elsewhere, "title": "t", "ext": asYan}, CodeDenied, "not_joined"},
+		{"unseen", map[string]any{"room_id": hidden, "title": "t", "ext": asYan}, CodeInvalidParams, "not_joined"},
+		{"unseen2", map[string]any{"parent_room_id": hidden, "title": "t", "ext": asYan}, CodeInvalidParams, "not_joined"},
+	} {
+		frame := act(tc.id, "room_set", tc.params)
+		if _, code, reason := errorOf(frame); code != tc.code || reason != tc.reason {
+			t.Errorf("%s: %#v, want error %v with %v", tc.id, frame, tc.code, tc.reason)
+		}
+	}
+	a.app.mu.RLock()
+	titles := []string{a.app.rooms[room].title(), a.app.rooms[elsewhere].title(), a.app.rooms[hidden].title()}
+	a.app.mu.RUnlock()
+	if !slices.Equal(titles, []string{"Ops", "Elsewhere", "Hidden"}) {
+		t.Fatalf("titles %v", titles)
+	}
+	// A thread of a private room, asked private: every member sees it.
+	made := act("make", "room_set", map[string]any{"parent_room_id": room, "title": "far thread", "private": true, "ext": asYan})
+	thread, _ := made["result"].(map[string]any)["room_id"].(string)
+	saved := act("resave", "room_set", map[string]any{"room_id": thread, "title": "far thread 2", "private": true, "ext": asYan})
+	if saved["result"] == nil {
+		t.Fatalf("a save of the thread = %#v", saved)
+	}
+	a.app.mu.RLock()
+	defer a.app.mu.RUnlock()
+	r := a.app.rooms[thread]
+	if r == nil || r.private || r.title() != "far thread 2" || r.members[member.userID] != nil || !r.visibleTo(a.app.users[member.userID]) {
+		t.Fatalf("the thread %#v is not one every member of the room sees", r)
+	}
+}

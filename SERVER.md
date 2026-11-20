@@ -2152,8 +2152,11 @@ The owner's side:
   left; one that another user removed is `denied` with
   `"data": {"ext": {"remote": "removed"}}`. A `room_join` or `room_leave`
   with a `user_id` is `invalid_params`. A `room_set` creates or saves only
-  a thread of such a room, which is not private, whatever `private` it
-  carries (a mirror forwards none); a link's own `room_set` is `denied`. A `me` result's `you` is the remote user.
+  a thread of such a room, which is not private, so every member of the
+  room sees it, whatever `private` it carries (a mirror forwards none); any
+  other `room_set` from a link, without `room_id` or `parent_room_id`, of a
+  room that is no thread, or the link's own, is `denied`. A `me` result's
+  `you` is the remote user.
 - When a link leaves a room, or is removed from it, its remote users leave
   it and its threads too; they come back with their next write or join.
 - The links of a room join each new thread of it that every member sees: one
