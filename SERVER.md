@@ -1974,7 +1974,8 @@ server.
   no secret here.
 - **Refusals keep the code.** A request refused before the code is looked
   up does not use it up: one not form-encoded, with a parameter twice,
-  another `grant_type`, the client refusals above, or without `code`,
+  another `grant_type`, the client refusals above, a `resource` that is
+  not this server's (`invalid_target`), or without `code`,
   `code_verifier`, `redirect_uri`, or a `client_id`. A redemption attempt
   uses it up, right or wrong, however the app named itself.
 - `/.well-known/oauth-authorization-server` is the server's metadata
