@@ -2148,8 +2148,9 @@ The owner's side:
 - The link must have joined the request's room, or a room the room is a
   thread of: one it cannot see is `invalid_params`, one it can but has not
   joined `denied`, both with `"data": {"ext": {"remote": "not_joined"}}`.
-  A write or `room_join` joins the remote user to the room, also after it
-  left; one that another user removed is `denied` with
+  A write or `room_join` joins the remote user to the room, and to the
+  private rooms that it is a thread of, also after it left; one that
+  another user removed from any of them is `denied` with
   `"data": {"ext": {"remote": "removed"}}`. A `room_join` or `room_leave`
   with a `user_id` is `invalid_params`. A `room_set` creates or saves only
   a thread of such a room, which is not private, so every member of the

@@ -350,14 +350,15 @@ func (f *federation) actAs(c *client, req request, remoteID string) (any, bool, 
 	}
 	if write {
 		for _, roomID := range rooms {
-			// The remote user joins the room, and the threads on the way
-			// down from the room the link joined, so it can see it.
+			// The remote user joins the room, and the private rooms on the
+			// way down to it from the outermost room the link joined, so it
+			// can see it: a thread's link is in its room too, which the
+			// remote user may have left with the link.
 			r := s.rooms[roomID]
-			var chain []*roomState
+			var up, chain []*roomState
 			for room := r; room != nil; room = room.parent {
-				chain = append(chain, room)
-				if room.members[link.id] != nil {
-					break
+				if up = append(up, room); room.members[link.id] != nil {
+					chain = up
 				}
 			}
 			for i := len(chain) - 1; i >= 0; i-- {

@@ -1409,3 +1409,61 @@ func TestWakePushCoversRecords(t *testing.T) {
 	// And a record after that push gets one of its own.
 	covered(post("fourth"))
 }
+
+// When a link leaves a room, or is removed from it, its remote users leave
+// the room and its threads, but are not removed: they join again with their
+// next write or room_join, once the link is back.
+func TestLinkLeaveIsNoRemoval(t *testing.T) {
+	a := startFederated(t, 0)
+	const other = "ws://other.test:9000/ws"
+	room := a.call(t, "room_set", map[string]any{"title": "Ops", "private": true})["room_id"].(string)
+	act := linkOf(t, a, room, other)
+	asZed := map[string]any{"remote": map[string]any{"user_id": "zed"}}
+	asYan := map[string]any{"remote": map[string]any{"user_id": "yan"}}
+	thread, _ := act("t1", "room_set", map[string]any{"parent_room_id": room, "title": "Far", "ext": asZed})["result"].(map[string]any)["room_id"].(string)
+	act("c1", "message", map[string]any{"room_id": room, "body": map[string]any{"text": "hi"}, "ext": asYan})
+	act("c2", "message", map[string]any{"room_id": thread, "body": map[string]any{"text": "hi"}, "ext": asYan})
+	zed, yan := "zed@other.test:9000", "yan@other.test:9000"
+	in := func(user, roomID string) bool {
+		a.app.mu.RLock()
+		defer a.app.mu.RUnlock()
+		return a.app.rooms[roomID].members[user] != nil
+	}
+	if !in(zed, room) || !in(zed, thread) || !in(yan, room) || !in(yan, thread) {
+		t.Fatal("the remote users are not in the room and its thread")
+	}
+	var link string
+	a.app.mu.RLock()
+	for _, l := range a.app.fed.links {
+		link = l.id
+	}
+	a.app.mu.RUnlock()
+	// The owner's admin removes the link, then shares the room again.
+	a.call(t, "room_leave", map[string]any{"room_id": room, "user_id": link})
+	for _, user := range []string{zed, yan} {
+		for _, roomID := range []string{room, thread} {
+			if in(user, roomID) {
+				t.Fatalf("%s stayed in %s", user, roomID)
+			}
+		}
+	}
+	a.app.mu.RLock()
+	removed := len(a.app.users[zed].removed) + len(a.app.users[yan].removed)
+	a.app.mu.RUnlock()
+	if removed != 0 {
+		t.Fatal("the link's removal removed its remote users")
+	}
+	if _, _, reason := errorOf(act("c3", "message", map[string]any{"room_id": room, "body": map[string]any{"text": "x"}, "ext": asYan})); reason != "not_joined" {
+		t.Fatalf("a write without the link: %v", reason)
+	}
+	a.command(t, room, "/remote invite "+other)
+	if frame := act("c4", "message", map[string]any{"room_id": thread, "body": map[string]any{"text": "back"}, "ext": asYan}); frame["result"] == nil {
+		t.Fatalf("a write after the link came back = %#v", frame)
+	}
+	if frame := act("j1", "room_join", map[string]any{"room_id": thread, "ext": asZed}); frame["result"] == nil {
+		t.Fatalf("a join after the link came back = %#v", frame)
+	}
+	if !in(yan, room) || !in(yan, thread) || !in(zed, thread) {
+		t.Fatal("the remote users did not join again")
+	}
+}
