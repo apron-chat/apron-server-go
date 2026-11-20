@@ -2210,8 +2210,9 @@ The mirror's side:
   the user's resend has the same request `id`, a duplicate for the owner.
   The owner's error is the user's; an owner that cannot be reached in ten
   seconds is `retry_after` 5. A rename of a user who wrote there is a `me`
-  to the owner. A message cannot move between a mirror room and another
-  room.
+  to the owner with only the `name`, queued with the joins and leaves, so
+  one made while the connection is closed goes on the next. A message
+  cannot move between a mirror room and another room.
 - An admin's or moderator's delete of another's copy deletes it here only,
   and the owner's later snapshots of it are not copied; nor are records of a
   remote user that someone here removed from the room.

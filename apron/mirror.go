@@ -79,14 +79,16 @@ type mirror struct {
 	holding map[string][]mirrorRecord
 }
 
-// membershipChange is a user's join or leave of an owner's room. ID makes
-// its request id, the same when it is sent again.
+// membershipChange is a user's join or leave of an owner's room, or with
+// Profile a change of the user's name. ID makes its request id, the same
+// when it is sent again.
 type membershipChange struct {
 	ID        string `json:"id"`
 	UserID    string `json:"user_id"`
 	Name      string `json:"name,omitzero"`
-	OwnerRoom string `json:"room"`
-	Joined    bool   `json:"joined"`
+	OwnerRoom string `json:"room,omitzero"`
+	Joined    bool   `json:"joined,omitzero"`
+	Profile   bool   `json:"profile,omitzero"`
 }
 
 // mirrorTimeout bounds how long a forwarded write waits for the owner.
@@ -1396,14 +1398,14 @@ func (ms *mirror) ownerUser(ctx context.Context, userID, name string) (string, *
 	if found, _ := f.kv.Get(key, &ownerID); found {
 		return ownerID, nil
 	}
-	return ms.sendProfile(ctx, userID, name)
+	return ms.sendProfile(ctx, userID+":me-"+randomID(), userID, name)
 }
 
-// sendProfile sends a user's name to the owner, as the user's remote user
-// there, and keeps the user's user_id on the owner.
-func (ms *mirror) sendProfile(ctx context.Context, userID, name string) (string, *Error) {
+// sendProfile sends a user's name to the owner, as request id, as the
+// user's remote user there, and keeps the user's user_id on the owner.
+func (ms *mirror) sendProfile(ctx context.Context, id, userID, name string) (string, *Error) {
 	f := ms.f
-	raw, _, err := ms.call(ctx, userID+":me-"+randomID(), "me", map[string]any{"name": name, "ext": map[string]any{"remote": map[string]any{"user_id": userID}}})
+	raw, _, err := ms.call(ctx, id, "me", map[string]any{"name": name, "ext": map[string]any{"remote": map[string]any{"user_id": userID}}})
 	if err != nil {
 		return "", err
 	}
@@ -1706,8 +1708,10 @@ func (ms *mirror) ownerUserIDLocked(localID string) string {
 	return localID + "@" + f.selfAuthority
 }
 
-// profileChanged sends a local user's new name to the owners that the user
-// wrote to. An ext:remote hook in updateProfile, called holding s.mu.
+// profileChanged queues a local user's new name for the owners, with the
+// joins and leaves, so that one made while a connection is closed goes on
+// the next; it goes to an owner that the user has reached. An ext:remote
+// hook in updateProfile, called holding s.mu.
 func (f *federation) profileChanged(userID string) {
 	f.mu.Lock()
 	mirrors := slices.Collect(maps.Values(f.mirrors))
@@ -1717,15 +1721,7 @@ func (f *federation) profileChanged(userID string) {
 		name = u.name
 	}
 	for _, ms := range mirrors {
-		// Not Host.Go, which takes s.mu, held here.
-		go func(ctx context.Context) {
-			var ownerID string
-			if found, _ := f.kv.Get("user "+ms.server+" "+userID, &ownerID); found {
-				if _, err := ms.sendProfile(ctx, userID, name); err != nil {
-					f.h.logger.Warn("sending a profile to the owner failed", "owner", ms.server, "user_id", userID, "error", err)
-				}
-			}
-		}(f.s.extContext)
+		ms.queueMembershipLocked(membershipChange{ID: randomID(), UserID: userID, Name: name, Profile: true})
 	}
 }
 
@@ -1825,7 +1821,7 @@ func (f *federation) membershipChangedLocked(u *userState, r *roomState, joined 
 // queue. Called holding s.mu.
 func (ms *mirror) queueMembershipLocked(change membershipChange) {
 	ms.memberships = slices.DeleteFunc(ms.memberships, func(queued membershipChange) bool {
-		return queued.UserID == change.UserID && queued.OwnerRoom == change.OwnerRoom
+		return queued.UserID == change.UserID && queued.OwnerRoom == change.OwnerRoom && queued.Profile == change.Profile
 	})
 	ms.memberships = append(ms.memberships, change)
 	ms.saveMembershipsLocked()
@@ -1890,6 +1886,17 @@ const membershipRetry = 30 * time.Second
 // answered it: a refusal is an answer, and the change is dropped.
 func (ms *mirror) sendMembership(ctx context.Context, change membershipChange) bool {
 	logger := ms.f.h.logger.With("owner", ms.server, "user_id", change.UserID)
+	known, _ := ms.f.kv.Get("user "+ms.server+" "+change.UserID, new(string))
+	if change.Profile {
+		if !known {
+			return true // never on the owner: its first write sends the name
+		}
+		if _, err := ms.sendProfile(ctx, change.UserID+":me-"+change.ID, change.UserID, change.Name); err != nil {
+			logger.Warn("a new name did not reach the owner", "error", err)
+			return err.Code != CodeRetryAfter
+		}
+		return true
+	}
 	method := "room_leave"
 	if change.Joined {
 		method = "room_join"
@@ -1897,7 +1904,7 @@ func (ms *mirror) sendMembership(ctx context.Context, change membershipChange) b
 			logger.Warn("a join did not reach the owner", "error", err)
 			return err.Code != CodeRetryAfter
 		}
-	} else if found, _ := ms.f.kv.Get("user "+ms.server+" "+change.UserID, new(string)); !found {
+	} else if !known {
 		return true // never on the owner
 	}
 	params := map[string]any{"room_id": change.OwnerRoom, "ext": map[string]any{"remote": map[string]any{"user_id": change.UserID}}}

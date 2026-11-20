@@ -763,9 +763,9 @@ func TestMirrorNotJoined(t *testing.T) {
 	}
 }
 
-// A join or leave that the owner did not answer stays queued, kept in the
-// KV, and goes on the next connection; a newer change of the same user and
-// room replaces an older one.
+// A join, leave, or rename that the owner did not answer stays queued,
+// kept in the KV, and goes on the next connection; a newer change of the
+// same user and room replaces an older one.
 func TestMirrorResendsMemberships(t *testing.T) {
 	b := startFederated(t, 0)
 	var dropping atomic.Bool
@@ -773,21 +773,27 @@ func TestMirrorResendsMemberships(t *testing.T) {
 	var mu sync.Mutex
 	got := make(map[string]string) // user_id → method
 	address := fakeOwner(t, b, func(method string, params map[string]any, _ func(any)) (map[string]any, bool) {
-		if method != "room_join" && method != "room_leave" {
+		if method != "room_join" && method != "room_leave" && method != "me" {
 			return nil, false
 		}
 		if dropping.Load() {
 			return nil, true // the connection closes before the answer
 		}
+		user := fmt.Sprint(remoteExtOf(params)["user_id"])
 		mu.Lock()
-		got[fmt.Sprint(remoteExtOf(params)["user_id"])] = method
-		mu.Unlock()
+		defer mu.Unlock()
+		if method == "me" {
+			got["name of "+user] = fmt.Sprint(params["name"])
+			return map[string]any{"result": map[string]any{"you": map[string]any{"user_id": user + "@b"}}}, true
+		}
+		got[user] = method
 		return map[string]any{"result": map[string]any{}}, true
 	})
 	mirrorRoom, bob := connectFake(t, b, address)
 	carol := dialTestClient(t, b.http)
 	b.call(t, "room_join", map[string]any{"room_id": mirrorRoom, "user_id": carol.userID})
 	carol.request(t, "room_leave", "l1", map[string]any{"room_id": mirrorRoom})
+	bob.request(t, "me", "n1", map[string]any{"name": "Robert"})
 	server, _ := normalizeAddress(address)
 	queued := func() []membershipChange {
 		var changes []membershipChange
@@ -797,9 +803,9 @@ func TestMirrorResendsMemberships(t *testing.T) {
 	eventually(t, "the kept queue", func() error {
 		var users []string
 		for _, change := range queued() {
-			users = append(users, fmt.Sprintf("%s:%v", change.UserID, change.Joined))
+			users = append(users, fmt.Sprintf("%s:%v:%v", change.UserID, change.Joined, change.Profile))
 		}
-		if want := []string{"admin:true", bob.userID + ":true", carol.userID + ":false"}; !slices.Equal(users, want) {
+		if want := []string{"admin:true:false", bob.userID + ":true:false", carol.userID + ":false:false", bob.userID + ":false:true"}; !slices.Equal(users, want) {
 			return fmt.Errorf("%v, want %v", users, want)
 		}
 		return nil
@@ -808,7 +814,7 @@ func TestMirrorResendsMemberships(t *testing.T) {
 	eventually(t, "the joins on the owner", func() error {
 		mu.Lock()
 		defer mu.Unlock()
-		if got["admin"] != "room_join" || got[bob.userID] != "room_join" || len(queued()) != 0 {
+		if got["admin"] != "room_join" || got[bob.userID] != "room_join" || got["name of "+bob.userID] != "Robert" || len(queued()) != 0 {
 			return fmt.Errorf("owner %v, queue %v", got, queued())
 		}
 		return nil
