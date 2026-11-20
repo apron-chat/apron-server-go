@@ -2167,7 +2167,9 @@ The owner's side:
   `token` to a URL on the link's own server (https, or http on a loopback
   host), is woken with a POST of `{"push_id"?}`, with the token as a bearer
   token, `TTL` and `Urgency: low`, for every record of the link's rooms, at
-  most one every two seconds, also while it is connected; one without a
+  most one every two seconds, also while it is connected: a push covers
+  every record before it, and a record after a push gets another, so none
+  waits for the mirror's next read; one without a
   `token` is `invalid_params`, and one whose URL answers 404 or 410 is
   removed.
 - Its admins and moderators delete any message, a remote user's too, which
@@ -2181,21 +2183,26 @@ The mirror's side:
   between), then live, and
   writes, as the server, a copy of each record of a mirrored room, or of a
   thread of one, which it makes the first time (not private), with the
-  members of the owner's `room_update` or `room_list` as its first
-  members. A copy's
+  members of the owner's `room_update` `joined` or `room_list` as its first
+  members, also when an `updated` record made it before; each later record
+  of the owner's thread sets its title and description, while a mirror
+  room keeps its own. A copy's
   `ext.remote` is the owner's `{"server", "room_id", "message_id"}` (the
   mirror also keeps the original's `message_id` apart, which a tombstone
   loses, so an owner's restore reaches the same copy), and its
   author this server's own user, for its users' remote users on the owner,
   or a remote user of the server that the author's `ext.remote` names, or of
-  the owner. Replies, `mentions`, and `@id`s are mapped; links without
-  `server` get the owner's; embeds become a line naming them. The owner's reactions replace the copy's; `user`
+  the owner. Replies, `mentions`, and `@id`s are mapped (to the owner, a
+  user here that has no ID there yet as `<user_id>@<host[:port]>`), and
+  links without `server` get the owner's, both outside Markdown code; embeds become a line naming them. The owner's reactions replace the copy's; `user`
   notifications and recorded names update remote users' names.
 - Memberships travel like messages. When it makes the mirror room, the
   mirror joins the owner's members to it as remote users, from the owner's
   member list (a list cut short only adds). The owner's membership records
   are then copied, also from `history` after a close, but for links and this
-  server's own users' remote users; this server's users' joins and leaves of
+  server's own users' remote users (so the owner's removal of a user of this
+  server is not copied: the user stays, and its next write gets the owner's
+  `removed`); this server's users' joins and leaves of
   a mirror room, or a thread of one, go to the owner as `room_join` and
   `room_leave`, in order, from a queue kept across restarts: one that the
   owner did not answer, such as when the connection closed, is sent again
@@ -2214,7 +2221,8 @@ The mirror's side:
   `room_id`, waiting for the record if it is read later, such as after a new
   connection, for up to a minute; then it is `retry_after`, which is safe:
   the user's resend has the same request `id`, a duplicate for the owner.
-  The owner's error is the user's; an owner that cannot be reached in ten
+  The owner's error is the user's, with its `code`, `message`, and `data`;
+  an owner that cannot be reached in ten
   seconds is `retry_after` 5. A rename of a user who wrote there is a `me`
   to the owner with only the `name`, queued with the joins and leaves, so
   one made while the connection is closed goes on the next. A message
@@ -2224,8 +2232,9 @@ The mirror's side:
   remote user that someone here removed from the room.
 - With `--remote.linger` above zero (`30s` by default), the connection
   closes once nothing has come or been in flight for that long; the mirror
-  registers a wake push to `/remote/wake/<id>` here, and connects again when
-  it comes, when a user writes, and every five minutes. `0` stays connected.
+  registers a wake push to `/remote/wake/<id>` here on each connection, and
+  connects again when it comes, when a user writes, and every five minutes.
+  `0` stays connected, and registers none.
 - When the owner says the link left a room (`room_update` `left`, a
   membership record of the link's leave, `not_joined`, or a connection's
   `room_list` without the room), the mirror room stops taking writes.
