@@ -73,6 +73,10 @@ type mirror struct {
 	// asks sendMemberships to send them.
 	memberships []membershipChange
 	sendDue     chan struct{}
+	// holding holds, by owner's room, the records of a mirror room that
+	// /remote connect just made while it reads the earlier ones again
+	// (catchUp); guarded by s.mu.
+	holding map[string][]mirrorRecord
 }
 
 // membershipChange is a user's join or leave of an owner's room. ID makes
@@ -97,7 +101,7 @@ func (f *federation) newMirror(server string) *mirror {
 		f: f, server: server, local: make(map[string]string), copies: make(map[string]string),
 		originals: make(map[string]string), users: make(map[string]string), hidden: make(map[string]bool),
 		ready: make(chan struct{}), appliedCh: make(chan struct{}), want: make(chan struct{}, 1),
-		sendDue: make(chan struct{}, 1),
+		sendDue: make(chan struct{}, 1), holding: make(map[string][]mirrorRecord),
 	}
 }
 
@@ -297,7 +301,20 @@ func (f *federation) connect(ctx context.Context, call *CommandCall, invite stri
 	// leaves come as records. A listing the owner cut short only adds.
 	ms.seedMembersLocked(r, owner.Members, usersByID(listed.Users), false)
 	ms.threadsLocked(threads, threadUsers)
+	// The mirror may have read records of the room after its start
+	// already, before the mirror room was here to take them: they are read
+	// again, and the room's next ones held until then.
+	ms.mu.Lock()
+	through := ms.cursor
+	ms.mu.Unlock()
+	catchUp := !made && through > start
+	if catchUp {
+		ms.holding[ownerRoom] = nil
+	}
 	s.unlock()
+	if catchUp {
+		ms.catchUp(ctx, ownerRoom, start, through)
+	}
 
 	ms.mu.Lock()
 	ms.token = token
@@ -542,32 +559,17 @@ func (ms *mirror) session(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		var page struct {
-			Rooms       []jsontext.Value `json:"rooms"`
-			Messages    []jsontext.Value `json:"messages"`
-			Reactions   []jsontext.Value `json:"reactions"`
-			Memberships []jsontext.Value `json:"memberships"`
-			LastLogID   string           `json:"last_log_id"`
-			More        bool             `json:"more"`
-		}
-		if err := json.Unmarshal(raw, &page); err != nil {
+		records, last, more, err := historyRecords(raw)
+		if err != nil {
 			return err
 		}
-		var records []mirrorRecord
-		for kind, list := range map[string][]jsontext.Value{"room": page.Rooms, "message": page.Messages, "reactions": page.Reactions, "membership": page.Memberships} {
-			for _, raw := range list {
-				records = append(records, mirrorRecord{kind: kind, raw: raw, logID: logIDOf(raw)})
-			}
-		}
-		slices.SortStableFunc(records, func(a, b mirrorRecord) int { return cmp.Compare(a.logID, b.logID) })
 		for _, record := range records {
 			ms.apply(record)
 		}
-		last, _ := strconv.ParseInt(page.LastLogID, 10, 64)
 		if last > 0 {
 			ms.advance(last)
 		}
-		if !page.More || last == 0 {
+		if !more || last == 0 {
 			break
 		}
 		after = last + 1
@@ -623,12 +625,15 @@ func (ms *mirror) session(ctx context.Context) error {
 func (ms *mirror) registerWake(ctx context.Context, conn *remoteConn) error {
 	f := ms.f
 	ms.mu.Lock()
-	if ms.wakeID == "" {
+	made := ms.wakeID == ""
+	if made {
 		ms.wakeID, ms.wakeSecret = randomID(), randomID()
-		_ = f.kv.Put("wake "+ms.server, struct{ ID, Secret string }{ms.wakeID, ms.wakeSecret})
 	}
 	id, secret := ms.wakeID, ms.wakeSecret
 	ms.mu.Unlock()
+	if made {
+		_ = f.kv.Put("wake "+ms.server, struct{ ID, Secret string }{id, secret})
+	}
 	_, err := conn.call(ctx, "wake-"+randomID(), "push_register", map[string]any{
 		"kind": "relay", "url": f.wakeBase + "/remote/wake/" + id, "token": secret, "wake": []string{"ext:remote"},
 	})
@@ -732,33 +737,136 @@ func (ms *mirror) applyNote(note remoteFrame) {
 }
 
 // apply writes the copy of one record of the owner's log, and moves the
-// cursor past it. A thread's record is applied whatever its log_id, since
-// the link can be joined to a thread made before.
+// cursor past it, both under s.mu, so that /remote connect sees exactly
+// which records were read. A thread's record is applied whatever its
+// log_id, since the link can be joined to a thread made before. A record
+// of a room whose mirror room is being caught up is held for it.
 func (ms *mirror) apply(record mirrorRecord) {
+	s := ms.f.s
+	s.mu.Lock()
 	ms.mu.Lock()
 	cursor := ms.cursor
 	ms.mu.Unlock()
 	if record.logID <= cursor && record.kind != "room" {
+		s.unlock()
 		return
 	}
-	s := ms.f.s
-	value := decodeObject(record.raw)
-	if value != nil {
-		s.mu.Lock()
-		switch record.kind {
-		case "room":
-			ms.roomLocked(value, record.logID, record.users)
-		case "message":
-			ms.messageLocked(value, record.logID)
-		case "reactions":
-			ms.reactionsLocked(value)
-		case "membership":
-			ms.membershipLocked(value, record.logID)
+	if value := decodeObject(record.raw); value != nil {
+		if held, holding := ms.holding[ms.topRoomLocked(value)]; holding {
+			ms.holding[ms.topRoomLocked(value)] = append(held, record)
+		} else {
+			ms.applyLocked(record, value)
 		}
-		s.unlock()
 	}
-	if record.logID > cursor {
-		ms.advance(record.logID)
+	moved := record.logID > cursor
+	if moved {
+		ms.mu.Lock()
+		ms.cursor = max(ms.cursor, record.logID)
+		ms.mu.Unlock()
+	}
+	s.unlock()
+	if moved {
+		_ = ms.f.kv.Put("cursor "+ms.server, record.logID)
+	}
+}
+
+// historyRecords reads the records of a history page in log_id order
+// across its arrays, so that a thread exists before its messages, and its
+// last_log_id and more.
+func historyRecords(raw jsontext.Value) ([]mirrorRecord, int64, bool, error) {
+	var page struct {
+		Rooms       []jsontext.Value `json:"rooms"`
+		Messages    []jsontext.Value `json:"messages"`
+		Reactions   []jsontext.Value `json:"reactions"`
+		Memberships []jsontext.Value `json:"memberships"`
+		LastLogID   string           `json:"last_log_id"`
+		More        bool             `json:"more"`
+	}
+	if err := json.Unmarshal(raw, &page); err != nil {
+		return nil, 0, false, err
+	}
+	var records []mirrorRecord
+	for kind, list := range map[string][]jsontext.Value{"room": page.Rooms, "message": page.Messages, "reactions": page.Reactions, "membership": page.Memberships} {
+		for _, raw := range list {
+			records = append(records, mirrorRecord{kind: kind, raw: raw, logID: logIDOf(raw)})
+		}
+	}
+	slices.SortStableFunc(records, func(a, b mirrorRecord) int { return cmp.Compare(a.logID, b.logID) })
+	last, _ := strconv.ParseInt(page.LastLogID, 10, 64)
+	return records, last, page.More, nil
+}
+
+// applyLocked writes the copy of a record.
+func (ms *mirror) applyLocked(record mirrorRecord, value map[string]any) {
+	switch record.kind {
+	case "room":
+		ms.roomLocked(value, record.logID, record.users)
+	case "message":
+		ms.messageLocked(value, record.logID)
+	case "reactions":
+		ms.reactionsLocked(value)
+	case "membership":
+		ms.membershipLocked(value, record.logID)
+	}
+}
+
+// topRoomLocked is the owner's room whose mirror room a record's room is,
+// or is a thread of, if it is mirrored here; a new thread's record is of
+// its parent's.
+func (ms *mirror) topRoomLocked(record map[string]any) string {
+	f := ms.f
+	id := ms.local[fmt.Sprint(record["room_id"])]
+	if id == "" {
+		parent, _ := record["parent_room_id"].(string)
+		id = ms.local[parent]
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	room := f.rooms[id]
+	for room != nil && room.Parent != "" {
+		room = f.rooms[room.Parent]
+	}
+	if room == nil {
+		return ""
+	}
+	return room.OwnerRoom
+}
+
+// catchUp reads again, for a mirror room just made, the records of its
+// owner's room after its start that the mirror read before the room
+// existed, up to through, and applies them, then those held for it
+// meanwhile, and stops holding. A record that cannot be read is lost.
+func (ms *mirror) catchUp(ctx context.Context, ownerRoom string, start, through int64) {
+	var records []mirrorRecord
+	for after := start + 1; after <= through; {
+		raw, _, callErr := ms.call(ctx, "catchup-"+randomID(), "history", map[string]any{"after": strconv.FormatInt(after, 10), "limit": 500})
+		if callErr != nil {
+			ms.f.h.logger.Warn("the records of a new mirror room were not read again", "owner", ms.server, "room", ownerRoom, "error", callErr)
+			break
+		}
+		page, last, more, err := historyRecords(raw)
+		if err != nil {
+			break
+		}
+		for _, record := range page {
+			if record.logID <= through {
+				records = append(records, record)
+			}
+		}
+		if !more || last == 0 {
+			break
+		}
+		after = last + 1
+	}
+	s := ms.f.s
+	s.mu.Lock()
+	defer s.unlock()
+	records = append(records, ms.holding[ownerRoom]...)
+	delete(ms.holding, ownerRoom)
+	for _, record := range records {
+		if value := decodeObject(record.raw); value != nil && (record.logID > through || ms.topRoomLocked(value) == ownerRoom) {
+			ms.applyLocked(record, value)
+		}
 	}
 }
 

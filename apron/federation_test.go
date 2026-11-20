@@ -1030,3 +1030,65 @@ func TestMirrorConnectTwice(t *testing.T) {
 		t.Fatalf("a second connect: %v", err)
 	}
 }
+
+// A record of a newly connected room that the open connection brought
+// before the mirror room existed is read again, once.
+func TestMirrorCatchesUpANewRoom(t *testing.T) {
+	b := startFederated(t, 0)
+	var mu sync.Mutex
+	var live func(any)
+	message := func(id, text string) map[string]any {
+		return map[string]any{"method": "message", "params": map[string]any{
+			"message_id": id, "log_id": id, "room_id": "ops2", "from": map[string]any{"user_id": "carol"}, "body": map[string]any{"text": text},
+		}}
+	}
+	address := fakeOwner(t, b, func(method string, params map[string]any, write func(any)) (map[string]any, bool) {
+		switch {
+		case method == "history" && params["after"] == "101":
+			mu.Lock()
+			live = write
+			mu.Unlock()
+		case method == "history" && params["after"] == "501":
+			return map[string]any{"result": map[string]any{"messages": []any{message("501", "early")["params"]}, "last_log_id": "501"}}, true
+		case method == "room_list" && params["room_id"] == "ops2":
+			// The room's first record reaches the open connection first.
+			mu.Lock()
+			live(message("501", "early"))
+			mu.Unlock()
+			time.Sleep(200 * time.Millisecond)
+			return map[string]any{"result": map[string]any{"joined": []any{map[string]any{"room_id": "ops2", "title": "Ops 2", "latest_log_id": "500"}}}}, true
+		}
+		return nil, false
+	})
+	connectFake(t, b, address)
+	eventually(t, "the open connection", func() error {
+		mu.Lock()
+		defer mu.Unlock()
+		if live == nil {
+			return fmt.Errorf("not yet")
+		}
+		return nil
+	})
+	notice := b.command(t, "general", "/remote connect https://link.apron.chat/#server="+address+"&room=ops2&token=t")
+	found := mirrorInNotice.FindStringSubmatch(notice)
+	if found == nil {
+		t.Fatalf("connect = %q", notice)
+	}
+	mu.Lock()
+	live(message("502", "later"))
+	mu.Unlock()
+	eventually(t, "the copies", func() error {
+		b.app.mu.RLock()
+		defer b.app.mu.RUnlock()
+		texts := make(map[string]int)
+		for _, m := range b.app.messages {
+			if m.roomID == found[1] {
+				texts[wstestText(m.snapshot())]++
+			}
+		}
+		if texts["early"] != 1 || texts["later"] != 1 || len(texts) != 2 {
+			return fmt.Errorf("%v", texts)
+		}
+		return nil
+	})
+}
