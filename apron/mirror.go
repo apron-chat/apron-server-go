@@ -883,21 +883,10 @@ func (ms *mirror) seedMembersLocked(r *roomState, members []map[string]any, user
 		if isLink(object) {
 			continue
 		}
-		if _, hasExt := object["ext"]; !hasExt && ms.users[id] == "" {
-			// Not seen, and no object: by its form.
-			if local, isOwn := strings.CutSuffix(id, "@"+ms.f.selfAuthority); isOwn {
-				object = map[string]any{"user_id": id, "ext": map[string]any{remoteExt: map[string]any{"server": ms.f.self, "user_id": local}}}
-			} else if strings.Contains(id, "@") {
-				continue
-			}
-		}
-		if localID, isOwn := ms.ownUser(object); isOwn {
-			if u := s.users[localID]; own && u != nil {
-				s.joinLocked(u, r)
-			}
-			continue
-		}
-		if u := ms.userLocked(object); u != nil && u.shadow != nil {
+		switch u := ms.userLocked(object); {
+		case u == nil || s.users[u.id] != u:
+			// Unknown, or a guest of this server's that left.
+		case u.shadow != nil || own:
 			s.joinLocked(u, r)
 		}
 	}
@@ -945,6 +934,22 @@ func (ms *mirror) userLocked(object map[string]any) *userState {
 	remote, _ := ext[remoteExt].(map[string]any)
 	server, _ := remote["server"].(string)
 	remoteID, _ := remote["user_id"].(string)
+	if server == "" || remoteID == "" {
+		// Without remote, by its user_id's form (ext:remote): this
+		// server's user, another server's user seen before, or the
+		// owner's own user. No remote user is made for an ID with an @.
+		switch local, own := strings.CutSuffix(ownerID, "@"+ms.f.selfAuthority); {
+		case own && local != "":
+			server, remoteID = ms.f.self, local
+		case strings.Contains(ownerID, "@"):
+			if u := s.users[ms.users[ownerID]]; u != nil && u.shadow != nil {
+				return ms.renamedLocked(u, object)
+			}
+			return nil
+		default:
+			server, remoteID = ms.server, ownerID
+		}
+	}
 	if normalized, err := normalizeAddress(server); err == nil && normalized == ms.f.self && remoteID != "" {
 		ms.users[ownerID] = remoteID
 		if u := s.users[remoteID]; u != nil {
@@ -952,10 +957,7 @@ func (ms *mirror) userLocked(object map[string]any) *userState {
 		}
 		// A guest that left: its copy keeps its user_id.
 		return &userState{id: remoteID, fromValue: map[string]any{"user_id": remoteID}}
-	}
-	if server == "" || remoteID == "" {
-		server, remoteID = ms.server, ownerID
-	} else if normalized, err := normalizeAddress(server); err == nil {
+	} else if err == nil {
 		server = normalized
 	}
 	u, err := s.remoteUserLocked(server, remoteID)
@@ -963,6 +965,13 @@ func (ms *mirror) userLocked(object map[string]any) *userState {
 		return nil
 	}
 	ms.users[ownerID] = u.id
+	return ms.renamedLocked(u, object)
+}
+
+// renamedLocked keeps the name of a user object of the owner's on the
+// remote user that stands for it.
+func (ms *mirror) renamedLocked(u *userState, object map[string]any) *userState {
+	s := ms.f.s
 	if name, ok := object["name"].(string); ok && normalizeName(name) != u.name && u.shadow != nil {
 		u.name = normalizeName(name)
 		u.fromValue = nil

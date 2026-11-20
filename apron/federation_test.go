@@ -960,3 +960,38 @@ func TestMirrorThreadMembers(t *testing.T) {
 		return fmt.Errorf("no thread")
 	})
 }
+
+// A user object of the owner's without remote is known by its user_id's
+// form: no remote user is made for an ID that has an @.
+func TestMirrorUserObjectsWithoutRemote(t *testing.T) {
+	b := startFederated(t, 0)
+	var bobOnOwner string
+	address := fakeOwner(t, b, func(method string, _ map[string]any, write func(any)) (map[string]any, bool) {
+		if method != "message" {
+			return nil, false
+		}
+		for _, id := range []string{bobOnOwner, "x@c.example", "zed"} {
+			write(map[string]any{"method": "user", "params": map[string]any{"new": map[string]any{"user_id": id, "name": "Renamed " + id}}})
+		}
+		return map[string]any{"error": map[string]any{"code": CodeDenied, "message": "no"}}, true
+	})
+	mirrorRoom, bob := connectFake(t, b, address)
+	bobOnOwner = bob.userID + "@" + authorityOf(b.self)
+	bob.expectError(t, "message", "m1", map[string]any{"room_id": mirrorRoom, "body": map[string]any{"text": "go"}}, CodeDenied)
+	zed := "zed@" + authorityOf(address)
+	eventually(t, "the owner's user", func() error {
+		b.app.mu.RLock()
+		defer b.app.mu.RUnlock()
+		if u := b.app.users[zed]; u == nil || u.name != "Renamed zed" {
+			return fmt.Errorf("no %s", zed)
+		}
+		return nil
+	})
+	b.app.mu.RLock()
+	defer b.app.mu.RUnlock()
+	for id := range b.app.users {
+		if strings.Count(id, "@") > 1 {
+			t.Errorf("a remote user %s", id)
+		}
+	}
+}
