@@ -1230,3 +1230,182 @@ func TestLinkRoomSet(t *testing.T) {
 		t.Fatalf("the thread %#v is not one every member of the room sees", r)
 	}
 }
+
+// replyAfterNotes sends a request and returns its reply, skipping the
+// notifications that come before it.
+func replyAfterNotes(t *testing.T, c *testClient, method, id string, params map[string]any) map[string]any {
+	t.Helper()
+	c.write(t, map[string]any{"method": method, "id": id, "params": params})
+	for {
+		if frame := c.read(t); frame["id"] == id {
+			return frame
+		}
+	}
+}
+
+// mirrorThreadOf is the mirror thread here of an owner's thread.
+func mirrorThreadOf(b *federated, ownerThread string) *roomState {
+	b.app.fed.mu.Lock()
+	var id string
+	for local, room := range b.app.fed.rooms {
+		if room.OwnerRoom == ownerThread && room.Parent != "" {
+			id = local
+		}
+	}
+	b.app.fed.mu.Unlock()
+	b.app.mu.RLock()
+	defer b.app.mu.RUnlock()
+	return b.app.rooms[id]
+}
+
+// Each later record of the owner's thread sets the mirror thread's title
+// and description; the mirror room keeps its own.
+func TestMirrorThreadTitles(t *testing.T) {
+	a, b, ownerRoom, mirrorRoom := mirrored(t, 0)
+	thread := a.call(t, "room_set", map[string]any{"parent_room_id": ownerRoom, "title": "Deploy", "description": "Monday", "private": false})["room_id"].(string)
+	titled := func(title, description string) func() error {
+		return func() error {
+			r := mirrorThreadOf(b, thread)
+			if r == nil {
+				return fmt.Errorf("no mirror thread")
+			}
+			b.app.mu.RLock()
+			defer b.app.mu.RUnlock()
+			if r.title() != title || r.record["description"] != description {
+				return fmt.Errorf("title %q, description %v", r.title(), r.record["description"])
+			}
+			return nil
+		}
+	}
+	eventually(t, "the mirror thread", titled("Deploy", "Monday"))
+	a.call(t, "room_set", map[string]any{"room_id": thread, "title": "Deploy v2", "description": "Tuesday"})
+	eventually(t, "the thread's new title", titled("Deploy v2", "Tuesday"))
+	// The owner's room changes, then its thread: the mirror room keeps its
+	// title and description, while the thread follows.
+	a.call(t, "room_set", map[string]any{"room_id": ownerRoom, "title": "Ops renamed", "description": "Elsewhere"})
+	a.call(t, "room_set", map[string]any{"room_id": thread, "title": "Deploy v3", "description": "Wednesday"})
+	eventually(t, "the thread's third title", titled("Deploy v3", "Wednesday"))
+	b.app.mu.RLock()
+	r := b.app.rooms[mirrorRoom]
+	title, description := r.title(), r.record["description"]
+	b.app.mu.RUnlock()
+	if title != "Ops" || description != "Deploys" {
+		t.Fatalf("the mirror room took the owner's change: %q, %v", title, description)
+	}
+}
+
+// The owner's removal of a mirror's own user is not copied into the mirror
+// room: the user stays, and its next write gets the owner's error, with its
+// code, message, and data.
+func TestMirrorOwnerRemovesMirrorUser(t *testing.T) {
+	a, b, ownerRoom, mirrorRoom := mirrored(t, 0)
+	bob := dialTestClient(t, b.http)
+	b.call(t, "room_join", map[string]any{"room_id": mirrorRoom, "user_id": bob.userID})
+	bobOnA := bob.userID + "@" + authorityOf(b.self)
+	eventually(t, "bob on the owner", func() error {
+		a.app.mu.RLock()
+		defer a.app.mu.RUnlock()
+		if a.app.rooms[ownerRoom].members[bobOnA] == nil {
+			return fmt.Errorf("not there")
+		}
+		return nil
+	})
+	a.call(t, "room_leave", map[string]any{"room_id": ownerRoom, "user_id": bobOnA})
+	// A later record of the owner's: the removal's came before it.
+	later := a.call(t, "message", map[string]any{"room_id": ownerRoom, "body": map[string]any{"text": "after the removal"}})["message_id"].(string)
+	eventually(t, "the later copy", func() error {
+		if copyIn(b.app, mirrorRoom, later) == nil {
+			return fmt.Errorf("none")
+		}
+		return nil
+	})
+	b.app.mu.RLock()
+	stayed := b.app.rooms[mirrorRoom].members[bob.userID] != nil
+	b.app.mu.RUnlock()
+	if !stayed {
+		t.Fatal("the owner's removal of bob was copied")
+	}
+	bob.drain(t)
+	frame := replyAfterNotes(t, bob, "message", "m1", map[string]any{"room_id": mirrorRoom, "body": map[string]any{"text": "still here?"}})
+	failure, code, reason := errorOf(frame)
+	if code != float64(CodeDenied) || reason != "removed" || !strings.Contains(fmt.Sprint(failure["message"]), bobOnA+" was removed") {
+		t.Fatalf("bob's write = %#v", frame)
+	}
+	// Still in the mirror room, which is still shared.
+	b.app.fed.mu.Lock()
+	unshared := b.app.fed.rooms[mirrorRoom].Unshared
+	b.app.fed.mu.Unlock()
+	if unshared {
+		t.Fatal("the removal stopped the mirror room")
+	}
+}
+
+// The owner's error reaches the mirror's user as it is: code, message, and
+// data.
+func TestMirrorPassesOwnerErrors(t *testing.T) {
+	b := startFederated(t, 0)
+	data := map[string]any{"limit": float64(3), "ext": map[string]any{"remote": "removed", "other": []any{"x"}}}
+	address := fakeOwner(t, b, func(method string, _ map[string]any, _ func(any)) (map[string]any, bool) {
+		if method != "message" {
+			return nil, false
+		}
+		return map[string]any{"error": map[string]any{"code": CodeTooLarge, "message": "The owner says no", "data": data}}, true
+	})
+	mirrorRoom, bob := connectFake(t, b, address)
+	frame := replyAfterNotes(t, bob, "message", "m1", map[string]any{"room_id": mirrorRoom, "body": map[string]any{"text": "hello?"}})
+	failure, code, _ := errorOf(frame)
+	if code != float64(CodeTooLarge) || failure["message"] != "The owner says no" || fmt.Sprint(failure["data"]) != fmt.Sprint(data) {
+		t.Fatalf("bob's error = %#v", frame)
+	}
+}
+
+// A wake push covers every record committed before it is sent, and a
+// record after it gets another push: none waits for the mirror's poll.
+func TestWakePushCoversRecords(t *testing.T) {
+	a := startFederated(t, 0)
+	room := a.call(t, "room_set", map[string]any{"title": "Ops"})["room_id"].(string)
+	// Each push carries the messages of the room when it arrived.
+	pushes := make(chan map[string]bool, 16)
+	relay := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen := make(map[string]bool)
+		a.app.mu.RLock()
+		for id, m := range a.app.messages {
+			if m.roomID == room {
+				seen[id] = true
+			}
+		}
+		a.app.mu.RUnlock()
+		pushes <- seen
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer relay.Close()
+	act := linkOf(t, a, room, "ws://"+strings.TrimPrefix(relay.URL, "http://")+"/ws")
+	if frame := act("w1", "push_register", map[string]any{"kind": "relay", "url": relay.URL + "/remote/wake/x", "token": "secret", "wake": []any{"ext:remote"}}); frame["result"] == nil {
+		t.Fatalf("register = %#v", frame)
+	}
+	post := func(text string) string {
+		return a.call(t, "message", map[string]any{"room_id": room, "body": map[string]any{"text": text}})["message_id"].(string)
+	}
+	// covered waits for a push that covers a record.
+	covered := func(id string) {
+		t.Helper()
+		deadline := time.After(10 * time.Second)
+		for {
+			select {
+			case seen := <-pushes:
+				if seen[id] {
+					return
+				}
+			case <-deadline:
+				t.Fatalf("no push covers %s", id)
+			}
+		}
+	}
+	covered(post("first"))
+	// Records right after a push, while the next waits: one push after
+	// them covers them all.
+	post("second")
+	covered(post("third"))
+	// And a record after that push gets one of its own.
+	covered(post("fourth"))
+}

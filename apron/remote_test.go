@@ -3,6 +3,7 @@ package apron
 import (
 	"context"
 	"encoding/json/v2"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -106,5 +107,42 @@ func TestOwnerRequestID(t *testing.T) {
 	long := "bob:" + strings.Repeat("x", 200)
 	if id := ownerRequestID(long); len(id) > maxOwnerRequestIDBytes || id != ownerRequestID(long) || id == ownerRequestID(long+"y") {
 		t.Fatalf("a long id = %q", id)
+	}
+}
+
+// A mirror's user that has no ID on the owner yet is mentioned there as
+// its remote user ID, <user_id>@<mirror host>; one seen there by its ID.
+func TestOwnerMentionOfUnseenUser(t *testing.T) {
+	s := &Server{users: map[string]*userState{"bob": {id: "bob"}, "carol": {id: "carol"}}}
+	ms := &mirror{f: &federation{s: s, selfAuthority: "b.example:8787"}, server: "wss://a.example/ws", users: map[string]string{"bob@b.example:8787": "bob"}}
+	mapped := map[string]string{}
+	for _, id := range []string{"bob", "carol"} {
+		mapped[id] = ms.ownerUserIDLocked(id)
+	}
+	if mapped["carol"] != "carol@b.example:8787" || mapped["bob"] != "bob@b.example:8787" {
+		t.Fatalf("mapped %v", mapped)
+	}
+	body := remoteBody(map[string]any{"text": "@carol and `@carol`, @bob", "format": "markdown", "mentions": []any{"carol", "bob"}}, mapped)
+	if body["text"] != "@carol@b.example:8787 and `@carol`, @bob@b.example:8787" || fmt.Sprint(body["mentions"]) != "[carol@b.example:8787 bob@b.example:8787]" {
+		t.Fatalf("body %v", body)
+	}
+}
+
+// Mentions and links in copied text are rewritten only outside code spans
+// and fenced blocks of Markdown.
+func TestRemoteTextOutsideCode(t *testing.T) {
+	const owner = "wss://a.example/ws"
+	text := "apron:?room=ops\n```\napron:?room=ops @carol\n```\n`apron:?room=x` @carol ``a ` @carol``"
+	if got, want := withServer(text, true, owner), "apron:?server=wss://a.example/ws&room=ops\n```\napron:?room=ops @carol\n```\n`apron:?room=x` @carol ``a ` @carol``"; got != want {
+		t.Errorf("withServer = %q, want %q", got, want)
+	}
+	mentions := map[string]bool{"carol": true}
+	mapUser := func(id string) string { return id + "@a.example" }
+	if got, want := rewriteMentions(text, true, mentions, mapUser), "apron:?room=ops\n```\napron:?room=ops @carol\n```\n`apron:?room=x` @carol@a.example ``a ` @carol``"; got != want {
+		t.Errorf("rewriteMentions = %q, want %q", got, want)
+	}
+	// Plain text has no code.
+	if got := rewriteMentions("`@carol`", false, mentions, mapUser); got != "`@carol@a.example`" {
+		t.Errorf("plain rewriteMentions = %q", got)
 	}
 }
