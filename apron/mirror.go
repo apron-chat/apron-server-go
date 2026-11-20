@@ -1530,10 +1530,20 @@ func (ms *mirror) ownUser(object map[string]any) (string, bool) {
 	return user, err == nil && normalized == ms.f.self && user != ""
 }
 
+// boundHere reports a user object of a link bound to this server.
+func (ms *mirror) boundHere(object map[string]any) bool {
+	ext, _ := object["ext"].(map[string]any)
+	remote, _ := ext[remoteExt].(map[string]any)
+	server, _ := remote["server"].(string)
+	normalized, err := normalizeAddress(server)
+	return err == nil && normalized == ms.f.self
+}
+
 // membershipLocked copies a membership record of the owner's: remote users
 // join and leave the mirror room as they did the owner's. Links are no
 // members here, and this server's own users' remote users stand for its
-// users, who are members already.
+// users, who are members already. A leave of this server's link stops the
+// mirror room.
 func (ms *mirror) membershipLocked(record map[string]any, logID int64) {
 	s := ms.f.s
 	ownerRoom, _ := record["room_id"].(string)
@@ -1544,7 +1554,14 @@ func (ms *mirror) membershipLocked(record map[string]any, logID int64) {
 	for _, value := range asList(record["members"]) {
 		entry, _ := value.(map[string]any)
 		object, _ := entry["user"].(map[string]any)
-		if _, own := ms.ownUser(object); own || isLink(object) {
+		if isLink(object) {
+			// This server's link left: the room is no longer shared.
+			if entry["joined"] == false && ms.boundHere(object) {
+				go ms.f.markUnshared(ms.server, ownerRoom) // it takes s.mu, held here
+			}
+			continue
+		}
+		if _, own := ms.ownUser(object); own {
 			continue
 		}
 		u := ms.userLocked(object)

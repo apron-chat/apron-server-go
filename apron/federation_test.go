@@ -828,3 +828,29 @@ func TestWakePush(t *testing.T) {
 		t.Fatal("no wake push")
 	}
 }
+
+// A membership record of the link's own leave stops the mirror room.
+func TestMirrorLinkLeaveRecord(t *testing.T) {
+	b := startFederated(t, 0)
+	address := fakeOwner(t, b, func(method string, _ map[string]any, write func(any)) (map[string]any, bool) {
+		if method != "message" {
+			return nil, false
+		}
+		write(map[string]any{"method": "room_update", "params": map[string]any{"memberships": []any{map[string]any{
+			"log_id": "200", "room_id": "ops", "members": []any{map[string]any{
+				"user": map[string]any{"user_id": "link_1", "ext": map[string]any{"remote": map[string]any{"server": b.self}}}, "joined": false,
+			}},
+		}}}})
+		return map[string]any{"error": map[string]any{"code": CodeDenied, "message": "no"}}, true
+	})
+	mirrorRoom, bob := connectFake(t, b, address)
+	bob.expectError(t, "message", "m1", map[string]any{"room_id": mirrorRoom, "body": map[string]any{"text": "hello?"}}, CodeDenied)
+	eventually(t, "the unshare", func() error {
+		b.app.fed.mu.Lock()
+		defer b.app.fed.mu.Unlock()
+		if !b.app.fed.rooms[mirrorRoom].Unshared {
+			return fmt.Errorf("still shared")
+		}
+		return nil
+	})
+}

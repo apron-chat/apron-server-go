@@ -2208,8 +2208,9 @@ The mirror's side:
   closes once nothing has come or been in flight for that long; the mirror
   registers a wake push to `/remote/wake/<id>` here, and connects again when
   it comes, when a user writes, and every five minutes. `0` stays connected.
-- When the owner says the link left a room (`room_update` `left`, or
-  `not_joined`), the mirror room stops taking writes.
+- When the owner says the link left a room (`room_update` `left`, a
+  membership record of the link's leave, `not_joined`, or a connection's
+  `room_list` without the room), the mirror room stops taking writes.
 
 A test harness signs in as an admin with `--admin-token-file <path>`: at
 each start, the server makes the account `admin` if there is none (roles
