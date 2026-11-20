@@ -2118,9 +2118,11 @@ Admins run these, and are answered with `~private` notices:
   ten, and an eleventh replaces the oldest).
 - `/remote connect <invite>`, in any room, signs in to the invite's owner,
   checks that the link is this server's, reads the room's record, and makes
-  a mirror room here: its title, `private` as the owner's room is, and
-  `ext.remote` `{"server", "room_id"}`, with the admin in it. It starts where
-  the owner's log is: older records are not copied.
+  a mirror room here: its title and description, `private` as the owner's
+  room is, and `ext.remote` `{"server", "room_id"}`, with the admin in it,
+  and a mirror thread for each thread of the room that the link has joined
+  (also on each later connection, for one that has none). It starts at the
+  room's `latest_log_id`: older records are not copied, in its threads too.
 - `/remote unshare`, in a mirror room, makes the link leave the owner's room;
   the mirror room keeps its copies and takes no more writes. In a room of
   this server's, it takes every link out of it.

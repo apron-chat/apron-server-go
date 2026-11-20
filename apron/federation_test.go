@@ -195,7 +195,20 @@ func TestFederationOff(t *testing.T) {
 func mirrored(t *testing.T, linger time.Duration) (a, b *federated, ownerRoom, mirrorRoom string) {
 	t.Helper()
 	a, b = startFederated(t, linger), startFederated(t, linger)
-	ownerRoom = a.call(t, "room_set", map[string]any{"title": "Ops", "private": true})["room_id"].(string)
+	ownerRoom = a.call(t, "room_set", map[string]any{"title": "Ops", "description": "Deploys", "private": true})["room_id"].(string)
+	mirrorRoom = share(t, a, b, ownerRoom)
+	b.app.mu.RLock()
+	r := b.app.rooms[mirrorRoom]
+	b.app.mu.RUnlock()
+	if r == nil || !r.private || r.title() != "Ops" || r.record["description"] != "Deploys" || remoteExtOf(snapshotRoom(b.app, mirrorRoom))["room_id"] != ownerRoom {
+		t.Fatalf("mirror room = %#v", r)
+	}
+	return a, b, ownerRoom, mirrorRoom
+}
+
+// share invites b to a's room, connects it, and returns the mirror room.
+func share(t *testing.T, a, b *federated, ownerRoom string) string {
+	t.Helper()
 	invite := inviteInNotice.FindStringSubmatch(a.command(t, ownerRoom, "/remote invite "+b.self))
 	if invite == nil {
 		t.Fatal("no invite")
@@ -205,14 +218,7 @@ func mirrored(t *testing.T, linger time.Duration) (a, b *federated, ownerRoom, m
 	if found == nil {
 		t.Fatalf("connect = %q", notice)
 	}
-	mirrorRoom = found[1]
-	b.app.mu.RLock()
-	r := b.app.rooms[mirrorRoom]
-	b.app.mu.RUnlock()
-	if r == nil || !r.private || r.title() != "Ops" || remoteExtOf(snapshotRoom(b.app, mirrorRoom))["room_id"] != ownerRoom {
-		t.Fatalf("mirror room = %#v", r)
-	}
-	return a, b, ownerRoom, mirrorRoom
+	return found[1]
 }
 
 func snapshotRoom(app *Server, roomID string) map[string]any {
@@ -452,6 +458,42 @@ func TestMirrorWakes(t *testing.T) {
 		}
 		return nil
 	})
+}
+
+// A thread that existed before the room was shared gets a mirror thread
+// at connect, which copies its records from the mirror room's start.
+func TestMirrorExistingThreads(t *testing.T) {
+	a, b := startFederated(t, 0), startFederated(t, 0)
+	ownerRoom := a.call(t, "room_set", map[string]any{"title": "Ops"})["room_id"].(string)
+	thread := a.call(t, "room_set", map[string]any{"parent_room_id": ownerRoom, "title": "Old thread", "description": "From before"})["room_id"].(string)
+	nested := a.call(t, "room_set", map[string]any{"parent_room_id": thread, "title": "Nested"})["room_id"].(string)
+	before := a.call(t, "message", map[string]any{"room_id": thread, "body": map[string]any{"text": "before"}})["message_id"].(string)
+	mirrorRoom := share(t, a, b, ownerRoom)
+	mirrorThread := func(parent, title string) *roomState {
+		b.app.mu.RLock()
+		defer b.app.mu.RUnlock()
+		for _, r := range b.app.rooms {
+			if r.parent != nil && r.parent.id == parent && r.title() == title {
+				return r
+			}
+		}
+		return nil
+	}
+	local := mirrorThread(mirrorRoom, "Old thread")
+	if local == nil || local.record["description"] != "From before" || mirrorThread(local.id, "Nested") == nil {
+		t.Fatalf("mirror thread %#v", local)
+	}
+	after := a.call(t, "message", map[string]any{"room_id": thread, "body": map[string]any{"text": "after"}})["message_id"].(string)
+	inNested := a.call(t, "message", map[string]any{"room_id": nested, "body": map[string]any{"text": "nested"}})["message_id"].(string)
+	eventually(t, "the copies", func() error {
+		if copyIn(b.app, local.id, after) == nil || copyIn(b.app, mirrorThread(local.id, "Nested").id, inNested) == nil {
+			return fmt.Errorf("none")
+		}
+		return nil
+	})
+	if copyIn(b.app, local.id, before) != nil {
+		t.Fatal("a record from before the start was copied")
+	}
 }
 
 // The owner's side: what a link may do as remote users.
