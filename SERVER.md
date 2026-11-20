@@ -2154,10 +2154,12 @@ The owner's side:
 - The links of a room join each new thread of it that every member sees: one
   that is not private. A thread of a private room is private unless it is
   made with `"private": false`, so it is not mirrored.
-- A link's `push_register` with the wake scope `ext:remote`, a relay to a URL
-  on the link's own server (https, or http on a loopback host), is woken
-  with a POST of `{"push_id"?}` for every record of the link's rooms, at most
-  one every two seconds, also while it is connected.
+- A link's `push_register` with the wake scope `ext:remote`, a relay with a
+  `token` to a URL on the link's own server (https, or http on a loopback
+  host), is woken with a POST of `{"push_id"?}`, with the token as a bearer
+  token, `TTL` and `Urgency: low`, for every record of the link's rooms, at
+  most one every two seconds, also while it is connected; one without a
+  `token` is `invalid_params`.
 - Its admins and moderators delete any message, a remote user's too, which
   every mirror then deletes.
 

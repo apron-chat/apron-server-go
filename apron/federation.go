@@ -358,7 +358,8 @@ type linkWake struct {
 const wakeEvery = 2 * time.Second
 
 // registerWake takes a link's push_register with the wake scope ext:remote:
-// a relay URL on the link's own server, https or, on a loopback host, http.
+// a relay with a token, to a URL on the link's own server, https or, on a
+// loopback host, http.
 // ext:remote hook in registerPush; it reports whether it took the request.
 func (f *federation) registerWake(c *client, req request) (bool, any, *Error) {
 	f.s.mu.RLock()
@@ -380,6 +381,8 @@ func (f *federation) registerWake(c *client, req request) (bool, any, *Error) {
 	switch {
 	case params.Kind != "relay":
 		return true, nil, invalidParams("A link's wake push is a relay")
+	case params.Token == "":
+		return true, nil, invalidParams("A link's wake push has a token")
 	case err != nil || strings.ToLower(parsed.Host) != authority:
 		return true, nil, invalidParams("A link's wake URL is on its own server, %s", authority)
 	case parsed.Scheme != "https" && !(parsed.Scheme == "http" && loopbackHost(parsed.Hostname())):
@@ -443,9 +446,10 @@ func (f *federation) postWake(ctx context.Context, w linkWake) {
 		return
 	}
 	request.Header.Set("Content-Type", "application/json")
-	if w.Token != "" {
-		request.Header.Set("Authorization", "Bearer "+w.Token)
-	}
+	request.Header.Set("Authorization", "Bearer "+w.Token)
+	// §4.9.2: a push without message is low.
+	request.Header.Set("TTL", pushTTL)
+	request.Header.Set("Urgency", "low")
 	response, err := f.client.Do(request)
 	if err != nil {
 		f.h.logger.Debug("a wake push failed", "url", w.URL, "error", err)

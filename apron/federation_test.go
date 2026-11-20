@@ -792,3 +792,39 @@ func TestMirrorResendsMemberships(t *testing.T) {
 		t.Fatalf("carol's change was sent: %v", got)
 	}
 }
+
+// A link's wake push is a relay with a token, on the link's own server,
+// and is sent with the bearer token and §4.9.2's TTL and Urgency.
+func TestWakePush(t *testing.T) {
+	a := startFederated(t, 0)
+	pushes := make(chan *http.Request, 8)
+	relay := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		pushes <- r
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer relay.Close()
+	host := strings.TrimPrefix(relay.URL, "http://")
+	room := a.call(t, "room_set", map[string]any{"title": "Ops"})["room_id"].(string)
+	invite := inviteInNotice.FindStringSubmatch(a.command(t, room, "/remote invite ws://"+host+"/ws"))
+	_, _, token, err := parseInvite(invite[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	link, _ := dialRaw(t, a.http)
+	link.result(t, "auth", "a1", map[string]any{"scheme": "token", "token": token})
+	link.drain(t)
+	register := map[string]any{"kind": "relay", "url": relay.URL + "/remote/wake/x", "wake": []any{"ext:remote"}}
+	link.expectError(t, "push_register", "w1", register, CodeInvalidParams)
+	register["token"] = "secret"
+	link.result(t, "push_register", "w2", register)
+	a.call(t, "message", map[string]any{"room_id": room, "body": map[string]any{"text": "wake"}})
+	select {
+	case push := <-pushes:
+		if push.Method != http.MethodPost || push.Header.Get("Authorization") != "Bearer secret" || push.Header.Get("TTL") != "86400" ||
+			push.Header.Get("Urgency") != "low" || push.Header.Get("Content-Type") != "application/json" {
+			t.Fatalf("push %s %v", push.Method, push.Header)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("no wake push")
+	}
+}
