@@ -76,11 +76,12 @@ type remoteConn struct {
 	err error
 }
 
-// Pacing of the frames sent on a link's connection: a burst of
+// Pacing of the frames sent on a link's connection, as the recipe suggests
+// (at most 10 frames a second, and 4 requests at once): a burst of
 // remoteSendBurst, then one each remoteSendEvery, pings included; and at
 // most remoteMaxInFlight requests waiting for a reply.
 const (
-	remoteSendBurst   = 20
+	remoteSendBurst   = 10
 	remoteSendEvery   = 100 * time.Millisecond
 	remoteMaxInFlight = 4
 )
