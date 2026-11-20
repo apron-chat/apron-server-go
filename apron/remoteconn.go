@@ -55,9 +55,9 @@ type remoteReply struct {
 type remoteConn struct {
 	ws *websocket.Conn
 	// pace spaces the frames the mirror sends, and slots bounds its
-	// requests waiting for a reply: servers limit both per connection
-	// (the Cloudflare server closes one past 60 frames a minute, or 8
-	// requests in flight).
+	// requests waiting for a reply: owners limit both per connection, and
+	// allow a link at least the recipe's 10 frames a second and 4 requests
+	// at once.
 	pace  *rate.Limiter
 	slots chan struct{}
 
