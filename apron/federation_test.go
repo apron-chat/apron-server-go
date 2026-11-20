@@ -825,8 +825,13 @@ func TestMirrorResendsMemberships(t *testing.T) {
 func TestWakePush(t *testing.T) {
 	a := startFederated(t, 0)
 	pushes := make(chan *http.Request, 8)
+	var gone atomic.Bool
 	relay := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		pushes <- r
+		if gone.Load() {
+			w.WriteHeader(http.StatusGone)
+			return
+		}
 		w.WriteHeader(http.StatusNoContent)
 	}))
 	defer relay.Close()
@@ -854,6 +859,22 @@ func TestWakePush(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("no wake push")
 	}
+	// A URL that answers 410 is gone: its registration is removed.
+	gone.Store(true)
+	a.call(t, "message", map[string]any{"room_id": room, "body": map[string]any{"text": "wake again"}})
+	select {
+	case <-pushes:
+	case <-time.After(10 * time.Second):
+		t.Fatal("no second wake push")
+	}
+	eventually(t, "the removal", func() error {
+		a.app.fed.mu.Lock()
+		defer a.app.fed.mu.Unlock()
+		if len(a.app.fed.wakes) != 0 {
+			return fmt.Errorf("%d registrations", len(a.app.fed.wakes))
+		}
+		return nil
+	})
 }
 
 // A membership record of the link's own leave stops the mirror room.

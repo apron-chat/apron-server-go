@@ -432,11 +432,13 @@ func (f *federation) wake(linkID string) {
 		w.timer, w.last = nil, time.Now()
 		target := *w
 		f.mu.Unlock()
-		f.h.Go(func(ctx context.Context) { f.postWake(ctx, target) })
+		f.h.Go(func(ctx context.Context) { f.postWake(ctx, linkID, target) })
 	})
 }
 
-func (f *federation) postWake(ctx context.Context, w linkWake) {
+// postWake sends a wake push. A URL that answers 404 or 410 is gone
+// (§4.9.1): the registration is removed.
+func (f *federation) postWake(ctx context.Context, linkID string, w linkWake) {
 	payload := map[string]any{}
 	if w.PushID != "" {
 		payload["push_id"] = w.PushID
@@ -456,6 +458,19 @@ func (f *federation) postWake(ctx context.Context, w linkWake) {
 		return
 	}
 	response.Body.Close()
+	if response.StatusCode == http.StatusNotFound || response.StatusCode == http.StatusGone {
+		f.mu.Lock()
+		current := f.wakes[linkID]
+		gone := current != nil && current.URL == w.URL && current.Token == w.Token
+		if gone {
+			delete(f.wakes, linkID)
+		}
+		f.mu.Unlock()
+		if gone {
+			f.h.logger.Info("a link's wake URL is gone; its registration is removed", "link", linkID, "status", response.StatusCode)
+			_ = f.saveWakes()
+		}
+	}
 }
 
 // randomID is an opaque random identifier.

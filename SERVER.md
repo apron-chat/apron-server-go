@@ -2160,7 +2160,8 @@ The owner's side:
   host), is woken with a POST of `{"push_id"?}`, with the token as a bearer
   token, `TTL` and `Urgency: low`, for every record of the link's rooms, at
   most one every two seconds, also while it is connected; one without a
-  `token` is `invalid_params`.
+  `token` is `invalid_params`, and one whose URL answers 404 or 410 is
+  removed.
 - Its admins and moderators delete any message, a remote user's too, which
   every mirror then deletes.
 
