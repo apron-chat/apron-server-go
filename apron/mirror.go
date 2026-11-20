@@ -146,23 +146,21 @@ func (f *federation) initMirrors(r *Registrar) error {
 			ms.wakeID, ms.wakeSecret = wake.ID, wake.Secret
 		}
 	}
-	// The copies name their originals in ext.remote; remote users their
-	// users on the owner.
+	// The copies' originals are kept apart from their ext, which a
+	// tombstone drops; remote users name their users on the owner.
+	originals := make(map[string]string)
+	for _, key := range f.kv.Keys("copy ") {
+		var ownerID string
+		if found, _ := f.kv.Get(key, &ownerID); found {
+			originals[strings.TrimPrefix(key, "copy ")] = ownerID
+		}
+	}
 	s.mu.RLock()
-	for id, m := range s.messages {
-		room := f.rooms[m.roomID]
-		if room == nil || len(m.records) == 0 {
-			continue
-		}
-		var ext struct {
-			Remote struct {
-				Server    string `json:"server"`
-				MessageID string `json:"message_id"`
-			} `json:"remote"`
-		}
-		_ = json.Unmarshal(encodeJSON(m.snapshot()["ext"]), &ext)
-		if ms := f.mirrors[room.Server]; ms != nil && ext.Remote.Server == room.Server && ext.Remote.MessageID != "" {
-			ms.copies[ext.Remote.MessageID], ms.originals[id] = id, ext.Remote.MessageID
+	for id, ownerID := range originals {
+		if m := s.messages[id]; m != nil && f.rooms[m.roomID] != nil {
+			if ms := f.mirrors[f.rooms[m.roomID].Server]; ms != nil {
+				ms.copies[ownerID], ms.originals[id] = id, ownerID
+			}
 		}
 	}
 	for id, u := range s.users {
@@ -978,6 +976,9 @@ func (ms *mirror) messageLocked(record map[string]any, logID int64) {
 		m = &messageState{id: localID, from: author.from(), owner: author.id, reactions: make(map[string]reactionSet)}
 		s.messages[localID] = m
 		ms.copies[ownerID], ms.originals[localID] = localID, ownerID
+		if err := ms.f.kv.setLocked("copy "+localID, encodeJSON(ownerID)); err != nil {
+			ms.f.h.logger.Warn("a copy's original was not kept", "message_id", localID, "error", err)
+		}
 	} else {
 		previous = m.snapshot()
 	}

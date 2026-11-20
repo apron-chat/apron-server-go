@@ -5,6 +5,7 @@ import (
 	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"regexp"
@@ -15,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/apron-chat/apron-server-go/store"
 	"github.com/coder/websocket"
 )
 
@@ -26,13 +28,26 @@ type federated struct {
 	self    string
 	admin   *Bot
 	notices chan string
+	// stop shuts it down, once.
+	stop func()
 }
 
 func startFederated(t *testing.T, linger time.Duration) *federated {
 	t.Helper()
+	return startFederatedWith(t, linger, nil, nil)
+}
+
+// startFederatedWith starts a federated server on listener, if not nil,
+// such as the address of one that stopped, and with a store.
+func startFederatedWith(t *testing.T, linger time.Duration, listener net.Listener, st store.Store) *federated {
+	t.Helper()
 	fed := &federated{notices: make(chan string, 64)}
 	var handler http.Handler
 	fed.http = httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { handler.ServeHTTP(w, r) }))
+	if listener != nil {
+		fed.http.Listener.Close()
+		fed.http.Listener = listener
+	}
 	fed.self = "ws://" + fed.http.Listener.Addr().String() + "/ws"
 	config := extensionConfig(testExtension{"tadmin", func(r *Registrar) error {
 		var err error
@@ -41,13 +56,14 @@ func startFederated(t *testing.T, linger time.Duration) *federated {
 	}})
 	config.Roles = map[string][]string{RoleAdmin: {"admin"}}
 	config.Remote = RemoteConfig{Self: fed.self, Linger: linger}
+	config.Store = st
 	app, err := Open(config)
 	if err != nil {
 		t.Fatal(err)
 	}
 	fed.app, handler = app, app.Handler()
 	fed.http.Start()
-	t.Cleanup(func() {
+	fed.stop = sync.OnceFunc(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		if err := app.Shutdown(ctx); err != nil {
@@ -55,6 +71,7 @@ func startFederated(t *testing.T, linger time.Duration) *federated {
 		}
 		fed.http.Close()
 	})
+	t.Cleanup(fed.stop)
 	return fed
 }
 
@@ -853,4 +870,47 @@ func TestMirrorLinkLeaveRecord(t *testing.T) {
 		}
 		return nil
 	})
+}
+
+// A copy keeps its original apart from its ext: after a restart, an
+// owner's restore of a deleted message reaches the same copy.
+func TestMirrorRestoreAfterRestart(t *testing.T) {
+	memory := store.NewMemory()
+	a := startFederated(t, 0)
+	b := startFederatedWith(t, 0, nil, memory)
+	ownerRoom := a.call(t, "room_set", map[string]any{"title": "Ops"})["room_id"].(string)
+	mirrorRoom := share(t, a, b, ownerRoom)
+	id := a.call(t, "message", map[string]any{"room_id": ownerRoom, "body": map[string]any{"text": "oops"}})["message_id"].(string)
+	var copyID string
+	eventually(t, "the copy", func() error {
+		if m := copyIn(b.app, mirrorRoom, id); m != nil {
+			copyID = m["message_id"].(string)
+			return nil
+		}
+		return fmt.Errorf("none")
+	})
+	a.call(t, "message", map[string]any{"room_id": ownerRoom, "message_id": id, "deleted": true})
+	eventually(t, "the delete", func() error {
+		if snapshotOf(b.app, copyID)["deleted"] != true {
+			return fmt.Errorf("not deleted")
+		}
+		return nil
+	})
+	address := b.http.Listener.Addr().String()
+	b.stop()
+	listener, err := net.Listen("tcp", address)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b = startFederatedWith(t, 0, listener, memory)
+	a.call(t, "message", map[string]any{"room_id": ownerRoom, "message_id": id, "body": map[string]any{"text": "restored"}})
+	eventually(t, "the restore", func() error {
+		if text := wstestText(snapshotOf(b.app, copyID)); text != "restored" {
+			return fmt.Errorf("%q", text)
+		}
+		return nil
+	})
+	if m := copyIn(b.app, mirrorRoom, id); m == nil || m["message_id"] != copyID {
+		t.Fatalf("copy %#v, want %s", m, copyID)
+	}
 }

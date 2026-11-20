@@ -2169,7 +2169,9 @@ The mirror's side:
   without `room_id` from its place in the owner's log, then live, and
   writes, as the server, a copy of each record of a mirrored room, or of a
   thread of one, which it makes the first time (not private). A copy's
-  `ext.remote` is the owner's `{"server", "room_id", "message_id"}`, and its
+  `ext.remote` is the owner's `{"server", "room_id", "message_id"}` (the
+  mirror also keeps the original's `message_id` apart, which a tombstone
+  loses, so an owner's restore reaches the same copy), and its
   author this server's own user, for its users' remote users on the owner,
   or a remote user of the server that the author's `ext.remote` names, or of
   the owner. Replies, `mentions`, and `@id`s are mapped; links without
