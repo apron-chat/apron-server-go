@@ -3,6 +3,7 @@ package apron
 import (
 	"context"
 	"encoding/json/v2"
+	"strings"
 	"testing"
 	"time"
 )
@@ -94,5 +95,16 @@ func TestMirrorUnseenUserIDs(t *testing.T) {
 		if got := ms.localUserID(ownerID); got != want {
 			t.Errorf("localUserID(%q) = %q, want %q", ownerID, got, want)
 		}
+	}
+}
+
+// A mirror keeps its request ids within 128 bytes, the same for a resend.
+func TestOwnerRequestID(t *testing.T) {
+	if id := ownerRequestID("bob:c1"); id != "bob:c1" {
+		t.Fatalf("a short id = %q", id)
+	}
+	long := "bob:" + strings.Repeat("x", 200)
+	if id := ownerRequestID(long); len(id) > maxOwnerRequestIDBytes || id != ownerRequestID(long) || id == ownerRequestID(long+"y") {
+		t.Fatalf("a long id = %q", id)
 	}
 }

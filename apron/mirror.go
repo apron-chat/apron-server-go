@@ -3,6 +3,8 @@ package apron
 import (
 	"cmp"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"errors"
@@ -1286,6 +1288,7 @@ func (ms *mirror) sendProfile(ctx context.Context, userID, name string) (string,
 // result with the number of the last notification before it. Errors are
 // the owner's, or retry_after when the owner cannot be reached.
 func (ms *mirror) call(ctx context.Context, id, method string, params map[string]any) (jsontext.Value, int64, *Error) {
+	id = ownerRequestID(id)
 	ctx, cancel := context.WithTimeout(ctx, mirrorTimeout)
 	defer cancel()
 	unreachable := &Error{Code: CodeRetryAfter, Message: "The room's owner cannot be reached; try again later", Data: map[string]any{"retry_after": 5}}
@@ -1322,6 +1325,20 @@ func (ms *mirror) call(ctx context.Context, id, method string, params map[string
 		return nil, 0, unreachable
 	}
 	return raw, seq, nil
+}
+
+// maxOwnerRequestIDBytes bounds the request ids that a mirror sends.
+const maxOwnerRequestIDBytes = 128
+
+// ownerRequestID keeps a request id within maxOwnerRequestIDBytes, as the
+// recipe has it: a longer one, such as <user_id>:<id> of a long id, is sent
+// as a hash of it, which a resend repeats.
+func ownerRequestID(id string) string {
+	if len(id) <= maxOwnerRequestIDBytes {
+		return id
+	}
+	sum := sha256.Sum256([]byte(id))
+	return "h:" + hex.EncodeToString(sum[:])
 }
 
 // waitApplied waits until the notifications up to seq are applied.

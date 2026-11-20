@@ -2196,7 +2196,8 @@ The mirror's side:
   it).
 - A user's `message`, `reactions`, or thread `room_set` in a mirror room or a
   thread of one goes to the owner through the link, with the owner's IDs
-  and `ext.remote.user_id`, as request `<user_id>:<id>`, after a `me` with the
+  and `ext.remote.user_id`, as request `<user_id>:<id>` (over 128 bytes,
+  `h:` and its SHA-256 in hex), after a `me` with the
   user's name the first time. Once the owner's result comes, after its
   record, the user is answered with the copy's `message_id` or the thread's
   `room_id`, waiting for the record if it is read later, such as after a new
