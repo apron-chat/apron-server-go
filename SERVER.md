@@ -2124,6 +2124,8 @@ Admins run these, and are answered with `~private` notices:
   and a mirror thread for each thread of the room that the link has joined
   (also on each later connection, for one that has none). It starts at the
   room's `latest_log_id`: older records are not copied, in its threads too.
+  A room that is mirrored here already, and still shared, is
+  `invalid_params`.
 - `/remote unshare`, in a mirror room, makes the link leave the owner's room;
   the mirror room keeps its copies and takes no more writes. In a room of
   this server's, it takes every link out of it.

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json/jsontext"
 	"encoding/json/v2"
+	"errors"
 	"fmt"
 	"maps"
 	"net"
@@ -1014,5 +1015,18 @@ func TestMirrorUserObjectsWithoutRemote(t *testing.T) {
 		if strings.Count(id, "@") > 1 {
 			t.Errorf("a remote user %s", id)
 		}
+	}
+}
+
+// A second /remote connect of a room that is mirrored here already is
+// refused.
+func TestMirrorConnectTwice(t *testing.T) {
+	a, b, ownerRoom, mirrorRoom := mirrored(t, 0)
+	invite := inviteInNotice.FindStringSubmatch(a.command(t, ownerRoom, "/remote invite "+b.self))
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	_, err := b.admin.Call(ctx, "command", map[string]any{"room_id": "general", "body": map[string]any{"text": "/remote connect " + invite[1]}})
+	if e, ok := errors.AsType[*Error](err); !ok || e.Code != CodeInvalidParams || !strings.Contains(e.Message, mirrorRoom) {
+		t.Fatalf("a second connect: %v", err)
 	}
 }

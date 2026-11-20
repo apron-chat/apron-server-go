@@ -221,6 +221,13 @@ func (f *federation) connect(ctx context.Context, call *CommandCall, invite stri
 	case server == f.self:
 		return InvalidParams("That invite is this server's own")
 	}
+	s := f.s
+	s.mu.RLock()
+	mirrored := f.mirrorRoomOfLocked(server, ownerRoom)
+	s.mu.RUnlock()
+	if mirrored != "" {
+		return alreadyMirrored(ownerRoom, mirrored)
+	}
 	dialCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	conn, you, err := f.dial(dialCtx, server, token, false)
@@ -264,8 +271,11 @@ func (f *federation) connect(ctx context.Context, call *CommandCall, invite stri
 		return nil
 	}
 
-	s := f.s
 	s.mu.Lock()
+	if mirrored := f.mirrorRoomOfLocked(server, ownerRoom); mirrored != "" {
+		s.unlock()
+		return alreadyMirrored(ownerRoom, mirrored)
+	}
 	fields := map[string]any{"title": title, "ext": extObject{remoteExt: encodeJSON(map[string]any{"server": server, "room_id": ownerRoom})}}
 	if owner.Description != "" {
 		fields["description"] = owner.Description
@@ -307,6 +317,26 @@ func (f *federation) connect(ctx context.Context, call *CommandCall, invite stri
 	authority, _ := remoteAuthority(server)
 	call.Notice(fmt.Sprintf("Mirroring %s from %s in room `%s`.", title, authority, r.id))
 	return nil
+}
+
+// mirrorRoomOfLocked is the mirror room here of an owner's room that is
+// still shared, if any. Called holding s.mu.
+func (f *federation) mirrorRoomOfLocked(server, ownerRoom string) string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	ms := f.mirrors[server]
+	if ms == nil {
+		return ""
+	}
+	id := ms.local[ownerRoom]
+	if room := f.rooms[id]; room != nil && room.Parent == "" && !room.Unshared {
+		return id
+	}
+	return ""
+}
+
+func alreadyMirrored(ownerRoom, mirrorRoom string) error {
+	return InvalidParams(fmt.Sprintf("Room %s of that server is mirrored here already, in room `%s`", ownerRoom, mirrorRoom))
 }
 
 // unmirror makes the link leave the owner's room, and stops the mirror
