@@ -60,3 +60,23 @@ func TestRemoteBodyEmbeds(t *testing.T) {
 		t.Fatalf("text = %q, want %q", body["text"], want)
 	}
 }
+
+// A link without server in a copy's text gets the owner's.
+func TestWithServer(t *testing.T) {
+	const owner = "wss://a.example/ws"
+	for _, tc := range []struct {
+		text     string
+		markdown bool
+		want     string
+	}{
+		{"see apron:?room=ops&message=1 now", false, "see apron:?server=wss://a.example/ws&room=ops&message=1 now"},
+		{"[ops](https://link.apron.chat/#room=ops)", true, "[ops](https://link.apron.chat/#server=wss://a.example/ws&room=ops)"},
+		{"<https://link.apron.chat/#server=wss://c.example/ws&room=x>", false, "<https://link.apron.chat/#server=wss://c.example/ws&room=x>"},
+		{"`apron:?room=ops` apron:?room=ops", true, "`apron:?room=ops` apron:?server=wss://a.example/ws&room=ops"},
+		{"no links", false, "no links"},
+	} {
+		if got := withServer(tc.text, tc.markdown, owner); got != tc.want {
+			t.Errorf("withServer(%q) = %q, want %q", tc.text, got, tc.want)
+		}
+	}
+}

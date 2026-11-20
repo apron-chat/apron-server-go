@@ -148,3 +148,65 @@ func firstStringOf(values ...any) string {
 	}
 	return "attachment"
 }
+
+// linkPrefixes start the links of Appendix A.4.
+var linkPrefixes = []string{"https://link.apron.chat/#", "apron:?"}
+
+// withServer adds server to each link in text (Appendix A.4) that has no
+// server key: such a link in content from a server refers to that server,
+// so a copy on another server names it. Code in Markdown stays as it is.
+func withServer(text string, markdown bool, server string) string {
+	if !strings.Contains(text, "apron") {
+		return text
+	}
+	var out strings.Builder
+	for i := 0; i < len(text); {
+		if markdown && text[i] == '`' {
+			n := len(text[i:]) - len(strings.TrimLeft(text[i:], "`"))
+			end := closingTicks(text, i+n, n)
+			if end < 0 {
+				end = i + n
+			}
+			out.WriteString(text[i:end])
+			i = end
+			continue
+		}
+		prefix := ""
+		for _, p := range linkPrefixes {
+			if strings.HasPrefix(text[i:], p) {
+				prefix = p
+			}
+		}
+		if prefix == "" {
+			out.WriteByte(text[i])
+			i++
+			continue
+		}
+		start := i + len(prefix)
+		end := start
+		for end < len(text) && !strings.ContainsRune(" \t\r\n<>\"'`)]", rune(text[end])) {
+			end++
+		}
+		query := text[start:end]
+		out.WriteString(prefix)
+		if !hasKey(query, "server") {
+			out.WriteString("server=" + linkValue(server))
+			if query != "" {
+				out.WriteString("&")
+			}
+		}
+		out.WriteString(query)
+		i = end
+	}
+	return out.String()
+}
+
+// hasKey reports whether a link's pairs have key.
+func hasKey(query, key string) bool {
+	for pair := range strings.SplitSeq(query, "&") {
+		if name, _, _ := strings.Cut(pair, "="); name == key {
+			return true
+		}
+	}
+	return false
+}

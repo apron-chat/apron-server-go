@@ -983,7 +983,9 @@ func (ms *mirror) messageLocked(record map[string]any, logID int64) {
 				mapped[id] = ms.localUserID(id)
 			}
 		}
-		snapshot["body"] = remoteBody(body, mapped)
+		copied := remoteBody(body, mapped)
+		copied["text"] = withServer(copied["text"].(string), copied["format"] == "markdown", ms.server)
+		snapshot["body"] = copied
 		if ref, ok := record["reply_to"].(map[string]any); ok {
 			if target := ms.copies[fmt.Sprint(ref["message_id"])]; target != "" && target != localID {
 				snapshot["reply_to"] = map[string]any{"message_id": target}

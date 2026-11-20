@@ -2170,8 +2170,8 @@ The mirror's side:
   `ext.remote` is the owner's `{"server", "room_id", "message_id"}`, and its
   author this server's own user, for its users' remote users on the owner,
   or a remote user of the server that the author's `ext.remote` names, or of
-  the owner. Replies, `mentions`, and `@id`s are mapped; embeds become a line
-  naming them. The owner's reactions replace the copy's; `user`
+  the owner. Replies, `mentions`, and `@id`s are mapped; links without
+  `server` get the owner's; embeds become a line naming them. The owner's reactions replace the copy's; `user`
   notifications and recorded names update remote users' names.
 - Memberships travel like messages. When it makes the mirror room, the
   mirror joins the owner's members to it as remote users, from the owner's
