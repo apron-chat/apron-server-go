@@ -2152,7 +2152,7 @@ The owner's side:
 - When a link leaves a room, or is removed from it, its remote users leave
   it and its threads too; they come back with their next write or join.
 - The links of a room join each new thread of it that every member sees: one
-  that is not private. A thread of a private room is private unless it is
+  that is not private, after its creator and before the result. A thread of a private room is private unless it is
   made with `"private": false`, so it is not mirrored.
 - A link's `push_register` with the wake scope `ext:remote`, a relay with a
   `token` to a URL on the link's own server (https, or http on a loopback
@@ -2168,7 +2168,9 @@ The mirror's side:
 - It reads each owner on one connection, as the owner's link: `history`
   without `room_id` from its place in the owner's log, then live, and
   writes, as the server, a copy of each record of a mirrored room, or of a
-  thread of one, which it makes the first time (not private). A copy's
+  thread of one, which it makes the first time (not private), with the
+  members of the owner's `room_update` or `room_list` as its first
+  members. A copy's
   `ext.remote` is the owner's `{"server", "room_id", "message_id"}` (the
   mirror also keeps the original's `message_id` apart, which a tombstone
   loses, so an owner's restore reaches the same copy), and its

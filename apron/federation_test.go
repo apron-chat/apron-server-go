@@ -339,11 +339,16 @@ func TestMirrorRoom(t *testing.T) {
 	// A thread of a private room here is private unless it says otherwise,
 	// and only a thread every member sees is mirrored.
 	alice.request(t, "room_set", "t1", map[string]any{"parent_room_id": ownerRoom, "title": "Deploy", "private": false})
+	// A mirror thread's first members are those of the owner's
+	// room_update: its creator joined before the link.
 	eventually(t, "the thread", func() error {
 		b.app.mu.RLock()
 		defer b.app.mu.RUnlock()
 		for _, r := range b.app.rooms {
 			if r.parent != nil && r.parent.id == mirrorRoom && r.title() == "Deploy" {
+				if r.members[alice.userID+"@"+authorityA] == nil {
+					return fmt.Errorf("the creator is not in the mirror thread")
+				}
 				return nil
 			}
 		}
@@ -352,6 +357,10 @@ func TestMirrorRoom(t *testing.T) {
 	_, madeHere := bob.request(t, "room_set", "t2", map[string]any{"parent_room_id": mirrorRoom, "title": "From B"})
 	threadHere := madeHere["room_id"].(string)
 	b.app.mu.RLock()
+	if b.app.rooms[threadHere].members[bob.userID] == nil {
+		b.app.mu.RUnlock()
+		t.Fatal("bob is not in his mirror thread")
+	}
 	parent := b.app.rooms[threadHere].parent.id
 	b.app.mu.RUnlock()
 	if parent != mirrorRoom {

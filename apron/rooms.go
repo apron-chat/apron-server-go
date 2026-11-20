@@ -577,10 +577,6 @@ func (s *Server) setRoom(c *client, req request) (any, bool, *Error) {
 	r := s.commitRoomLocked(roomID, parent, private, fields)
 	if !updating {
 		r.creator = u.id
-		// ext:remote hook: the links of the parent join a new thread.
-		if s.fed != nil {
-			s.fed.threadMadeLocked(r)
-		}
 	}
 	s.touchRoom(r)
 	// Room updates precede the result, so the room is known when it arrives.
@@ -598,6 +594,11 @@ func (s *Server) setRoom(c *client, req request) (any, bool, *Error) {
 		membership := s.logMembershipLocked(u, r, true)
 		r.active[u.id] = r.latestID
 		u.send(s.joinedUpdateLocked(r, membership))
+		// ext:remote hook: the links of the parent join a new thread,
+		// after its creator, before the result.
+		if s.fed != nil {
+			s.fed.threadMadeLocked(r)
+		}
 		// A private thread's record goes only to its own members.
 		if parent != nil && !r.private {
 			frame := roomUpdate("updated", s.roomParamsLocked(r))

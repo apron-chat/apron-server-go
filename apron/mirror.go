@@ -256,7 +256,7 @@ func (f *federation) connect(ctx context.Context, call *CommandCall, invite stri
 	title := cmp.Or(owner.Title, ownerRoom)
 	// The room's threads that the link has joined get mirror threads now:
 	// their records are older than the mirror room's start.
-	threads, err := listJoined(dialCtx, conn)
+	threads, threadUsers, err := listJoined(dialCtx, conn)
 	if err != nil {
 		call.Notice(fmt.Sprintf("%s did not list the link's rooms: %v", server, err))
 		return nil
@@ -283,26 +283,8 @@ func (f *federation) connect(ctx context.Context, call *CommandCall, invite stri
 	}
 	// The owner's members join it as remote users, once: later joins and
 	// leaves come as records. A listing the owner cut short only adds.
-	objects := make(map[string]map[string]any)
-	for _, u := range listed.Users {
-		if id, _ := u["user_id"].(string); id != "" {
-			objects[id] = u
-		}
-	}
-	for _, member := range owner.Members {
-		id, _ := member["user_id"].(string)
-		object := objects[id]
-		if object == nil {
-			object = member
-		}
-		if _, own := ms.ownUser(object); own || isLink(object) {
-			continue
-		}
-		if u := ms.userLocked(object); u != nil && u.shadow != nil {
-			s.joinLocked(u, r)
-		}
-	}
-	ms.threadsLocked(threads)
+	ms.seedMembersLocked(r, owner.Members, usersByID(listed.Users), false)
+	ms.threadsLocked(threads, threadUsers)
 	s.unlock()
 
 	ms.mu.Lock()
@@ -490,7 +472,7 @@ func (ms *mirror) session(ctx context.Context) error {
 	// The rooms the link has left since, such as while the mirror slept,
 	// are no longer shared: the link's history has none of their records.
 	// The threads it has joined that have no mirror thread get one.
-	if listed, err := listJoined(ctx, conn); err == nil {
+	if listed, users, err := listJoined(ctx, conn); err == nil {
 		joined := make(map[string]bool)
 		for _, room := range listed {
 			joined[room.RoomID] = true
@@ -507,7 +489,7 @@ func (ms *mirror) session(ctx context.Context) error {
 			f.markUnshared(ms.server, ownerRoom)
 		}
 		f.s.mu.Lock()
-		made := ms.threadsLocked(listed)
+		made := ms.threadsLocked(listed, users)
 		f.s.unlock()
 		if made {
 			_ = f.saveRooms()
@@ -669,6 +651,8 @@ type mirrorRecord struct {
 	kind  string
 	raw   jsontext.Value
 	logID int64
+	// users are the user objects that came with a room record, by user_id.
+	users map[string]map[string]any
 }
 
 // applyNote applies a notification of the link's connection.
@@ -681,13 +665,15 @@ func (ms *mirror) applyNote(note remoteFrame) {
 			Joined      []jsontext.Value `json:"joined"`
 			Updated     []jsontext.Value `json:"updated"`
 			Memberships []jsontext.Value `json:"memberships"`
+			Users       []map[string]any `json:"users"`
 			Left        []struct {
 				RoomID string `json:"room_id"`
 			} `json:"left"`
 		}
 		_ = json.Unmarshal(note.Params, &update)
+		users := usersByID(update.Users)
 		for _, raw := range append(update.Joined, update.Updated...) {
-			ms.apply(mirrorRecord{kind: "room", raw: raw, logID: logIDOf(raw)})
+			ms.apply(mirrorRecord{kind: "room", raw: raw, logID: logIDOf(raw), users: users})
 		}
 		for _, raw := range update.Memberships {
 			ms.apply(mirrorRecord{kind: "membership", raw: raw, logID: logIDOf(raw)})
@@ -729,7 +715,7 @@ func (ms *mirror) apply(record mirrorRecord) {
 		s.mu.Lock()
 		switch record.kind {
 		case "room":
-			ms.roomLocked(value, record.logID)
+			ms.roomLocked(value, record.logID, record.users)
 		case "message":
 			ms.messageLocked(value, record.logID)
 		case "reactions":
@@ -760,7 +746,7 @@ func (ms *mirror) roomFor(ownerRoom string, logID int64) (*roomState, bool) {
 
 // roomLocked makes the thread here of a thread of a mirrored room, the
 // first time, and keeps its title and description.
-func (ms *mirror) roomLocked(record map[string]any, logID int64) {
+func (ms *mirror) roomLocked(record map[string]any, logID int64, users map[string]map[string]any) {
 	f, s := ms.f, ms.f.s
 	ownerRoom, _ := record["room_id"].(string)
 	parent, _ := record["parent_room_id"].(string)
@@ -794,8 +780,10 @@ func (ms *mirror) roomLocked(record map[string]any, logID int64) {
 		return
 	}
 	if _, ok := ms.roomFor(parent, logID); ok {
-		ms.threadLocked(ownerRoom, parent, fields)
-		go f.saveRooms() // it takes s.mu, held here
+		if r := ms.threadLocked(ownerRoom, parent, fields); r != nil {
+			ms.seedMembersLocked(r, asMaps(record["members"]), users, true)
+			go f.saveRooms() // it takes s.mu, held here
+		}
 	}
 }
 
@@ -803,14 +791,14 @@ func (ms *mirror) roomLocked(record map[string]any, logID int64) {
 // mirror room or thread of its parent, with the title and description in
 // fields. It starts where the mirror room it is in does. It reports whether
 // it made one: not when the parent is not mirrored, or no longer shared.
-func (ms *mirror) threadLocked(ownerRoom, parent string, fields map[string]any) bool {
+func (ms *mirror) threadLocked(ownerRoom, parent string, fields map[string]any) *roomState {
 	f, s := ms.f, ms.f.s
 	localParent := s.rooms[ms.local[parent]]
 	f.mu.Lock()
 	parentRoom := f.rooms[ms.local[parent]]
 	f.mu.Unlock()
 	if localParent == nil || parentRoom == nil || parentRoom.Unshared {
-		return false
+		return nil
 	}
 	fields["ext"] = extObject{remoteExt: encodeJSON(map[string]any{"server": ms.server, "room_id": ownerRoom})}
 	// Not private, so whoever sees the mirror room sees its threads.
@@ -821,37 +809,100 @@ func (ms *mirror) threadLocked(ownerRoom, parent string, fields map[string]any) 
 	f.rooms[r.id] = &mirrorRoom{Server: ms.server, OwnerRoom: ownerRoom, Parent: localParent.id, Start: parentRoom.Start}
 	f.mu.Unlock()
 	s.announceRoomLocked(r, nil)
-	return true
+	return r
 }
 
 // listedRoom is a room record of the owner's room_list.
 type listedRoom struct {
-	RoomID       string `json:"room_id"`
-	ParentRoomID string `json:"parent_room_id"`
-	Title        string `json:"title"`
-	Description  string `json:"description"`
+	RoomID       string           `json:"room_id"`
+	ParentRoomID string           `json:"parent_room_id"`
+	Title        string           `json:"title"`
+	Description  string           `json:"description"`
+	Members      []map[string]any `json:"members"`
 }
 
 // listJoined lists the rooms and threads that the link has joined.
-func listJoined(ctx context.Context, conn *remoteConn) ([]listedRoom, error) {
-	raw, err := conn.call(ctx, "rooms-"+randomID(), "room_list", map[string]any{"filter": "joined"})
+// listJoined lists the rooms and threads that the link has joined, with
+// their members, and the members' user objects by user_id.
+func listJoined(ctx context.Context, conn *remoteConn) ([]listedRoom, map[string]map[string]any, error) {
+	raw, err := conn.call(ctx, "rooms-"+randomID(), "room_list", map[string]any{"filter": "joined", "members": true})
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	var listed struct {
-		Joined []listedRoom `json:"joined"`
+		Joined []listedRoom     `json:"joined"`
+		Users  []map[string]any `json:"users"`
 	}
 	if err := json.Unmarshal(raw, &listed); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return listed.Joined, nil
+	return listed.Joined, usersByID(listed.Users), nil
+}
+
+// usersByID indexes user objects by their user_id.
+func usersByID(objects []map[string]any) map[string]map[string]any {
+	users := make(map[string]map[string]any, len(objects))
+	for _, u := range objects {
+		if id, _ := u["user_id"].(string); id != "" {
+			users[id] = u
+		}
+	}
+	return users
+}
+
+// asMaps is the objects of a JSON array.
+func asMaps(value any) []map[string]any {
+	var objects []map[string]any
+	for _, item := range asList(value) {
+		if object, ok := item.(map[string]any); ok {
+			objects = append(objects, object)
+		}
+	}
+	return objects
+}
+
+// seedMembersLocked joins the first members of a new mirror room or
+// thread, from the members of the owner's room record, with their user
+// objects where they came: the owner's and other servers' users as remote
+// users, and, with own, this server's users whose remote users they are.
+// Links are no members here. A member without its user object is known
+// by its user_id's form.
+func (ms *mirror) seedMembersLocked(r *roomState, members []map[string]any, users map[string]map[string]any, own bool) {
+	s := ms.f.s
+	for _, member := range members {
+		id, _ := member["user_id"].(string)
+		object := users[id]
+		if object == nil {
+			object = member
+		}
+		if isLink(object) {
+			continue
+		}
+		if _, hasExt := object["ext"]; !hasExt && ms.users[id] == "" {
+			// Not seen, and no object: by its form.
+			if local, isOwn := strings.CutSuffix(id, "@"+ms.f.selfAuthority); isOwn {
+				object = map[string]any{"user_id": id, "ext": map[string]any{remoteExt: map[string]any{"server": ms.f.self, "user_id": local}}}
+			} else if strings.Contains(id, "@") {
+				continue
+			}
+		}
+		if localID, isOwn := ms.ownUser(object); isOwn {
+			if u := s.users[localID]; own && u != nil {
+				s.joinLocked(u, r)
+			}
+			continue
+		}
+		if u := ms.userLocked(object); u != nil && u.shadow != nil {
+			s.joinLocked(u, r)
+		}
+	}
 }
 
 // threadsLocked makes the mirror threads of the owner's threads that the
 // link has joined, as listed, that have none: threads that existed when
 // their room was connected, whose records are older than its start. It
 // reports whether it made one.
-func (ms *mirror) threadsLocked(joined []listedRoom) bool {
+func (ms *mirror) threadsLocked(joined []listedRoom, users map[string]map[string]any) bool {
 	made := false
 	for changed := true; changed; {
 		changed = false
@@ -865,7 +916,8 @@ func (ms *mirror) threadsLocked(joined []listedRoom) bool {
 					fields[key] = value
 				}
 			}
-			if ms.threadLocked(room.RoomID, room.ParentRoomID, fields) {
+			if r := ms.threadLocked(room.RoomID, room.ParentRoomID, fields); r != nil {
+				ms.seedMembersLocked(r, room.Members, users, true)
 				changed, made = true, true
 			}
 		}
