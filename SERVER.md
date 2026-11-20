@@ -2172,7 +2172,9 @@ The owner's side:
 The mirror's side:
 
 - It reads each owner on one connection, as the owner's link: `history`
-  without `room_id` from its place in the owner's log, then live, and
+  without `room_id` from its place in the owner's log (or from the owner's
+  lower bound of history, when that has passed it, losing the records in
+  between), then live, and
   writes, as the server, a copy of each record of a mirrored room, or of a
   thread of one, which it makes the first time (not private), with the
   members of the owner's `room_update` or `room_list` as its first

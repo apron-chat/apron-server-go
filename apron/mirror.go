@@ -566,6 +566,13 @@ func (ms *mirror) session(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
+		// The owner no longer has what is before its lower bound
+		// (§4.3.3): the mirror reads from there, and the records in
+		// between are lost.
+		if bound := historyBound(raw); bound-1 >= after {
+			f.h.logger.Warn("the owner's history starts after the mirror's place; records in between are lost", "owner", ms.server, "after", after, "bound", bound)
+			ms.advance(bound - 1)
+		}
 		for _, record := range records {
 			ms.apply(record)
 		}
@@ -797,6 +804,27 @@ func historyRecords(raw jsontext.Value) ([]mirrorRecord, int64, bool, error) {
 	slices.SortStableFunc(records, func(a, b mirrorRecord) int { return cmp.Compare(a.logID, b.logID) })
 	last, _ := strconv.ParseInt(page.LastLogID, 10, 64)
 	return records, last, page.More, nil
+}
+
+// historyBound is the effective lower bound of a history page's log
+// (§4.3.3): its history_log_id, or latest_log_id + 1 when that is null.
+func historyBound(raw jsontext.Value) int64 {
+	var page struct {
+		History *string `json:"history_log_id"`
+		Latest  string  `json:"latest_log_id"`
+	}
+	if json.Unmarshal(raw, &page) != nil {
+		return 0
+	}
+	if page.History == nil {
+		latest, err := strconv.ParseInt(page.Latest, 10, 64)
+		if err != nil {
+			return 0
+		}
+		return latest + 1
+	}
+	bound, _ := strconv.ParseInt(*page.History, 10, 64)
+	return bound
 }
 
 // applyLocked writes the copy of a record.

@@ -1098,3 +1098,28 @@ func TestMirrorCatchesUpANewRoom(t *testing.T) {
 		return nil
 	})
 }
+
+// When the owner's history starts after the mirror's place, the mirror
+// reads from there.
+func TestMirrorHistoryBound(t *testing.T) {
+	b := startFederated(t, 0)
+	address := fakeOwner(t, b, func(method string, params map[string]any, _ func(any)) (map[string]any, bool) {
+		if method != "history" || params["after"] != "101" {
+			return nil, false
+		}
+		return map[string]any{"result": map[string]any{"history_log_id": "300", "latest_log_id": "350"}}, true
+	})
+	connectFake(t, b, address)
+	server, _ := normalizeAddress(address)
+	eventually(t, "the cursor", func() error {
+		b.app.fed.mu.Lock()
+		ms := b.app.fed.mirrors[server]
+		b.app.fed.mu.Unlock()
+		ms.mu.Lock()
+		defer ms.mu.Unlock()
+		if ms.cursor != 299 {
+			return fmt.Errorf("cursor %d", ms.cursor)
+		}
+		return nil
+	})
+}
