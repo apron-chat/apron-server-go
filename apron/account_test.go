@@ -3,6 +3,7 @@ package apron
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 )
@@ -215,4 +216,35 @@ func TestSigningOutRemovesWhatTheSessionsMade(t *testing.T) {
 	expectClosed(t, laptop)
 	again, _ := dialRaw(t, httpServer)
 	again.expectError(t, "auth", "again", map[string]any{"scheme": "token", "token": deviceToken}, CodeDenied)
+}
+
+// A failure is settled before it is answered: a retry of the same request
+// id that its reply prompts, here from a connection that can make the
+// change, runs again rather than sharing the failure still in flight.
+func TestRetryAfterAFailureRunsAgain(t *testing.T) {
+	_, httpServer := passkeyTestServer(t)
+	a := newTestAuthenticator(t)
+	first, _ := dialOrigin(t, httpServer, testPasskeyOrigin)
+	token := registerTestPasskey(t, first, a)["token"].(string)
+	first.drain(t)
+	resumed, _ := dialOrigin(t, httpServer, testPasskeyOrigin)
+	passkeyResult(t, passkeyCall(t, resumed, "resume", "token", "", map[string]any{"token": token}))
+	resumed.drain(t)
+	for i := range 30 {
+		id := fmt.Sprint("remove-", i)
+		params := map[string]any{"id": "no-such-passkey"}
+		// The resumed connection has not reauthenticated; the first has.
+		if frame := resumed.call(t, "account.credential_remove", id, params); errorData(frame)["reauthenticate"] != true {
+			t.Fatalf("the resumed connection: %#v", frame)
+		}
+		if frame := first.call(t, "account.credential_remove", id, params); errorData(frame)["reauthenticate"] != nil || frame["error"] == nil {
+			t.Fatalf("the retry shared the first failure: %#v", frame)
+		}
+	}
+}
+
+func errorData(frame map[string]any) map[string]any {
+	failure, _ := frame["error"].(map[string]any)
+	data, _ := failure["data"].(map[string]any)
+	return data
 }

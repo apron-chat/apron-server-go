@@ -1618,13 +1618,10 @@ func (s *Server) processFrame(c *client, payload []byte) {
 	s.unlock()
 
 	result, replied, err := op(s, c, req)
-	if req.hasID && !replied {
-		if err != nil {
-			c.sendError(req, err)
-		} else {
-			c.sendResult(req, result)
-		}
-	}
+	// The outcome is settled before the reply goes: a client that retries
+	// as soon as a failure reaches it, such as after it reauthenticated,
+	// runs the request again, rather than meeting the failed one still in
+	// flight.
 	if entry != nil {
 		s.mu.Lock()
 		entry.result, entry.err = result, err
@@ -1636,6 +1633,13 @@ func (s *Server) processFrame(c *client, payload []byte) {
 		}
 		close(entry.done)
 		s.unlock()
+	}
+	if req.hasID && !replied {
+		if err != nil {
+			c.sendError(req, err)
+		} else {
+			c.sendResult(req, result)
+		}
 	}
 }
 
