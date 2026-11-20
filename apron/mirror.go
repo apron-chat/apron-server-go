@@ -766,6 +766,11 @@ func (ms *mirror) roomLocked(record map[string]any, logID int64, users map[strin
 			}
 			return
 		}
+		// A thread's record with members is the link's join: its first
+		// members, also when an updated record made the thread before it.
+		if members := asMaps(record["members"]); len(members) > 0 {
+			ms.seedMembersLocked(local, members, users, true)
+		}
 		current := maps.Clone(local.record)
 		if current["title"] == fields["title"] && current["description"] == fields["description"] {
 			return

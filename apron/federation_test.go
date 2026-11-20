@@ -5,6 +5,7 @@ import (
 	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"fmt"
+	"maps"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -922,4 +923,40 @@ func TestMirrorRestoreAfterRestart(t *testing.T) {
 	if m := copyIn(b.app, mirrorRoom, id); m == nil || m["message_id"] != copyID {
 		t.Fatalf("copy %#v, want %s", m, copyID)
 	}
+}
+
+// A mirror thread's first members come with the link's join, also when the
+// thread's updated record came first.
+func TestMirrorThreadMembers(t *testing.T) {
+	b := startFederated(t, 0)
+	address := fakeOwner(t, b, func(method string, _ map[string]any, write func(any)) (map[string]any, bool) {
+		if method != "message" {
+			return nil, false
+		}
+		thread := map[string]any{"room_id": "t1", "log_id": "300", "parent_room_id": "ops", "title": "Deploy", "latest_log_id": "301"}
+		write(map[string]any{"method": "room_update", "params": map[string]any{"updated": []any{thread}}})
+		joined := maps.Clone(thread)
+		joined["members"] = []any{map[string]any{"user_id": "carol"}, map[string]any{"user_id": "link_1"}}
+		write(map[string]any{"method": "room_update", "params": map[string]any{"joined": []any{joined}, "users": []any{
+			map[string]any{"user_id": "carol", "name": "Carol"},
+			map[string]any{"user_id": "link_1", "ext": map[string]any{"remote": map[string]any{"server": b.self}}},
+		}}})
+		return map[string]any{"error": map[string]any{"code": CodeDenied, "message": "no"}}, true
+	})
+	mirrorRoom, bob := connectFake(t, b, address)
+	bob.expectError(t, "message", "m1", map[string]any{"room_id": mirrorRoom, "body": map[string]any{"text": "go"}}, CodeDenied)
+	carol := "carol@" + authorityOf(address)
+	eventually(t, "the thread's members", func() error {
+		b.app.mu.RLock()
+		defer b.app.mu.RUnlock()
+		for _, r := range b.app.rooms {
+			if r.parent != nil && r.parent.id == mirrorRoom {
+				if r.members[carol] == nil || len(r.members) != 1 {
+					return fmt.Errorf("members %v", slices.Collect(maps.Keys(r.members)))
+				}
+				return nil
+			}
+		}
+		return fmt.Errorf("no thread")
+	})
 }
