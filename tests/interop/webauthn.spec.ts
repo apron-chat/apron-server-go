@@ -66,17 +66,20 @@ test('passkeys preserve identity and edit ownership through sign-out, login, and
 		hasUserVerification: true, isUserVerified: true, automaticPresenceSimulation: true
 	} });
 	await openChat(page);
-	const message = `passkey-${Date.now()}`;
-	await sendMessage(page, message);
-	const messageId = await (await waitForMessage(page, message)).getAttribute('data-message-id');
-	const savedMessage = page.locator(`article[data-message-id="${messageId}"]`);
-	const identity = await identityOf(page);
-	// Creating an account registers a passkey for the current identity.
+	const guestIdentity = await identityOf(page);
+	// Creating an account registers a passkey, under a user_id of the account's own (PROTOCOL.md §3.3.3).
 	await registerPasskey(page);
 	const { credentials } = await cdp.send('WebAuthn.getCredentials', { authenticatorId });
 	expect(credentials).toHaveLength(1);
 	expect(credentials[0].isResidentCredential).toBe(true);
-	expect(await identityOf(page)).toBe(identity);
+	const identity = await identityOf(page);
+	expect(identity).not.toBe(guestIdentity);
+	expect(identity).not.toMatch(/^guest_/);
+	// The account's own message stays editable through sign-out, login, and reconnect.
+	const message = `passkey-${Date.now()}`;
+	await sendMessage(page, message);
+	const messageId = await (await waitForMessage(page, message)).getAttribute('data-message-id');
+	const savedMessage = page.locator(`article[data-message-id="${messageId}"]`);
 	await signOut(page);
 	expect(await identityOf(page)).not.toBe(identity);
 	// Signing in with that passkey brings the identity back.
@@ -116,8 +119,8 @@ test('a rejected passkey verification leaves the guest usable and allows retry',
 		hasUserVerification: true, isUserVerified: true, automaticPresenceSimulation: true
 	} });
 	await openChat(page);
-	const identity = await identityOf(page);
 	await registerPasskey(page);
+	const identity = await identityOf(page);
 	await signOut(page);
 	const guest = await identityOf(page);
 	expect(guest).not.toBe(identity);
