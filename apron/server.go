@@ -774,7 +774,7 @@ func Open(config Config) (*Server, error) {
 		if role == "" {
 			return fail(errors.New("Config.Roles grants an empty role"))
 		}
-		if access.Mode == AccessLobby && (role == lobbyWaiting || role == lobbyInvited) {
+		if access.Mode == AccessLobby && (role == lobbyWaiting || role == lobbyWelcomed) {
 			return fail(fmt.Errorf("Config.Roles grants %q, which in lobby mode only the server gives", role))
 		}
 		for _, holder := range holders {
@@ -1314,23 +1314,11 @@ func (s *Server) serverParams(baseURL string, revealed, lobbyView bool) map[stri
 			params[field] = value
 		}
 	}
-	settings := map[string]any{}
 	if s.config.MaxPrivateRooms > 0 {
-		settings["private_rooms"] = s.config.MaxPrivateRooms
-	}
-	if s.access.lobby != "" {
-		// ext:permissions says, in `you`, who is limited to the Lobby and
-		// who may invite them in (access.go).
-		params["capabilities"] = append(params["capabilities"].([]string), "ext:permissions")
-		if revealed {
-			settings["lobby"] = map[string]any{"room_id": s.access.lobby, "open": !s.access.closed}
-		}
-	}
-	if len(settings) > 0 {
 		// ext:settings (apron's EXTENSIONS.md): read_cursors is absent,
 		// so true, since the server keeps read_message_id (§4.6).
 		params["capabilities"] = append(params["capabilities"].([]string), "ext:settings")
-		ext["settings"] = settings
+		ext["settings"] = map[string]any{"private_rooms": s.config.MaxPrivateRooms}
 	}
 	// Each extension that advertises (Host.Advertise) adds its capability,
 	// ext:<name>, and its data under its name in ext (EXTENSIONS.md).

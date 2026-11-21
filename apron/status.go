@@ -452,15 +452,6 @@ func (u *userState) you() map[string]any {
 	profile := u.profile()
 	profile["status"] = u.chosen
 	delete(profile, "seen")
-	// In lobby mode, ext:permissions says what the user may do there.
-	if permissions := u.permissions(); permissions != nil {
-		ext := maps.Clone(extOf(profile["ext"]))
-		if ext == nil {
-			ext = make(extObject, 1)
-		}
-		ext["permissions"] = permissions
-		profile["ext"] = ext
-	}
 	return profile
 }
 

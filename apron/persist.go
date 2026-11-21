@@ -212,7 +212,7 @@ type storedUser struct {
 	// Scope is the rooms the account is limited to (scope.go).
 	Scope *storedScope `json:"scope,omitzero"`
 	// Waiting marks an account that signed itself up in lobby mode, and
-	// has not been invited in (access.go).
+	// has not been welcomed in (access.go).
 	Waiting bool `json:"waiting,omitzero"`
 	// Consents are the hosts of apps the account allowed on the external
 	// sign-in page, with when, in Unix milliseconds (consents.go).

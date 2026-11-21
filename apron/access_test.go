@@ -59,7 +59,24 @@ func expectJoined(t *testing.T, c *testClient, roomID, userID string) {
 	checkMembership(t, membershipOf(t, frame), roomID, userID, true)
 }
 
-// permissionsOf is a user object's ext.permissions.
+// expectAdmitted reads the room_update that tells a restricted user made a
+// member of its rooms: general in joined, with its membership, and in
+// updated the other top-level rooms it sees now and has not joined.
+func expectAdmitted(t *testing.T, c *testClient, updated []string) {
+	t.Helper()
+	update := notificationParams(t, c.read(t), "room_update")
+	joined, _ := update["joined"].([]any)
+	if len(joined) != 1 || joined[0].(map[string]any)["room_id"] != "general" || !slices.Contains(memberIDs(joined[0].(map[string]any)), c.userID) || update["users"] == nil {
+		t.Fatalf("room_update %#v, want general joined", update)
+	}
+	checkMembership(t, update["memberships"].([]any)[0].(map[string]any), "general", c.userID, true)
+	if got := roomIDs(t, update["updated"]); !reflect.DeepEqual(got, updated) {
+		t.Fatalf("updated %v, want %v", got, updated)
+	}
+}
+
+// permissionsOf is a user object's ext.permissions, which this server
+// never sends.
 func permissionsOf(user map[string]any) map[string]any {
 	ext, _ := user["ext"].(map[string]any)
 	permissions, _ := ext["permissions"].(map[string]any)
@@ -93,12 +110,10 @@ func TestLobbyServerFrame(t *testing.T) {
 	_, frame := dialRaw(t, httpServer)
 	params := frame["params"].(map[string]any)
 	capabilities := params["capabilities"].([]any)
-	if !slices.Contains(capabilities, any("ext:permissions")) || !slices.Contains(capabilities, any("ext:settings")) {
-		t.Fatalf("capabilities %v", capabilities)
-	}
-	lobby := params["ext"].(map[string]any)["settings"].(map[string]any)["lobby"]
-	if !reflect.DeepEqual(lobby, map[string]any{"room_id": "lobby", "open": true}) {
-		t.Fatalf("ext.settings.lobby = %#v", lobby)
+	// Lobby mode changes nothing in the protocol: no ext:permissions or
+	// ext:settings.
+	if ext, _ := params["ext"].(map[string]any); slices.Contains(capabilities, any("ext:permissions")) || slices.Contains(capabilities, any("ext:settings")) || ext["settings"] != nil {
+		t.Fatalf("capabilities %v, ext %#v", capabilities, params["ext"])
 	}
 	if !reflect.DeepEqual(params["auth"], []any{"email", "token", "guest"}) || !reflect.DeepEqual(params["signup"], []any{"email", "guest"}) {
 		t.Fatalf("auth %v, signup %v", params["auth"], params["signup"])
@@ -156,19 +171,19 @@ func TestLobbyVisibility(t *testing.T) {
 	ada.drain(t)
 
 	guest, guestAuth := lobbyGuest(t, httpServer)
-	if you := guestAuth["you"].(map[string]any); !reflect.DeepEqual(permissionsOf(you), map[string]any{"lobby": "waiting"}) || you["roles"] != nil {
+	if you := guestAuth["you"].(map[string]any); permissionsOf(you) != nil || you["roles"] != nil {
 		t.Fatalf("a guest's you: %#v", you)
 	}
 	waiting, waitingAuth := emailSignUp(t, httpServer, mailbox, "wes@example.com", "wes", "lobby")
-	if you := waitingAuth["you"].(map[string]any); !reflect.DeepEqual(permissionsOf(you), map[string]any{"lobby": "waiting"}) || !reflect.DeepEqual(rolesOf(you), []any{"waiting"}) {
+	if you := waitingAuth["you"].(map[string]any); permissionsOf(you) != nil || !reflect.DeepEqual(rolesOf(you), []any{"waiting"}) {
 		t.Fatalf("a waiting account's you: %#v", you)
 	}
 	if !app.Waiting("wes") || !app.Waiting(guest.userID) || app.Waiting("ada") {
 		t.Fatal("Waiting disagrees")
 	}
 	ada.drain(t)
-	// The admin may invite, and is not limited.
-	if you := ada.result(t, "me", "me", map[string]any{})["you"].(map[string]any); !reflect.DeepEqual(permissionsOf(you), map[string]any{"invite": true}) {
+	// The admin is not limited, and has no ext.permissions.
+	if you := ada.result(t, "me", "me", map[string]any{})["you"].(map[string]any); permissionsOf(you) != nil {
 		t.Fatalf("the admin's you: %#v", you)
 	}
 	guest.drain(t)
@@ -207,14 +222,14 @@ func TestLobbyVisibility(t *testing.T) {
 			"new private":     {"room_set", map[string]any{"private": true}},
 			"add someone":     {"room_join", map[string]any{"room_id": "lobby", "user_id": "ada"}},
 			"emoji":           {"command", map[string]any{"room_id": "lobby", "body": map[string]any{"text": "/emoji add :wave:", "embeds": []any{map[string]any{"kind": "upload", "content_type": "image/png", "size": 10}}}}},
-			"invite":          {"command", map[string]any{"room_id": "lobby", "body": map[string]any{"text": "/invite ada"}}},
+			"welcome":         {"command", map[string]any{"room_id": "lobby", "body": map[string]any{"text": "/welcome ada"}}},
 			"toggle":          {"command", map[string]any{"room_id": "lobby", "body": map[string]any{"text": "/toggle lobby"}}},
 			"read elsewhere":  {"activity", map[string]any{"room_id": "lobby", "read_message_id": inGeneral}},
 			"history in room": {"history", map[string]any{"room_id": "general", "after": inGeneral, "before": inGeneral}},
 		} {
 			want := CodeInvalidParams
 			switch name {
-			case "lobby edit", "lobby thread", "new room", "new private", "add someone", "emoji", "invite", "toggle":
+			case "lobby edit", "lobby thread", "new room", "new private", "add someone", "emoji", "welcome", "toggle":
 				want = CodeDenied
 			case "read elsewhere":
 				// activity is never answered (§4.6).
@@ -254,59 +269,64 @@ func TestLobbyVisibility(t *testing.T) {
 	}
 }
 
-// /invite lets a guest in once it signs up, and a waiting account at once.
+// /welcome lets a guest in once it signs up, and a waiting account at once.
 func TestLobbyInvite(t *testing.T) {
 	app, mailbox, httpServer := lobbyServer(t)
 	ada, _ := emailSignUp(t, httpServer, mailbox, "ada@example.com", "ada", "general")
 	joinRoom(t, ada, "lobby")
+	// Rooms a member sees: other, but not the private room, nor general's
+	// thread, which room_list lists only by its parent.
+	other, _ := saveRoom(t, ada, "other", map[string]any{"title": "Other"})
+	saveRoom(t, ada, "private", map[string]any{"title": "Secret", "private": true})
+	saveRoom(t, ada, "thread", map[string]any{"parent_room_id": "general", "description": "Side talk"})
 	ada.drain(t)
 	guest, _ := lobbyGuest(t, httpServer)
 	expectMembership(t, ada, "lobby", guest.userID, true)
 
-	// /help lists /invite and /toggle to admins and moderators only.
+	// /help lists /welcome and /toggle to admins and moderators only.
 	before, _ := commandIn(t, ada, "general", "/help")
-	if text := noticeText(t, before[0]); !strings.Contains(text, "`/invite <user_id>`") || !strings.Contains(text, "`/toggle [lobby]`") {
+	if text := noticeText(t, before[0]); !strings.Contains(text, "`/welcome <user_id>`") || !strings.Contains(text, "`/toggle [lobby]`") {
 		t.Fatalf("an admin's /help: %q", text)
 	}
 	guest.drain(t)
 	before, _ = commandIn(t, guest, "lobby", "/help")
-	if text := noticeText(t, before[0]); strings.Contains(text, "/invite ") || strings.Contains(text, "/toggle") {
+	if text := noticeText(t, before[0]); strings.Contains(text, "/welcome ") || strings.Contains(text, "/toggle") {
 		t.Fatalf("a guest's /help: %q", text)
 	}
 
 	// Unknown users, and members, change nothing.
-	_, reply := commandIn(t, ada, "general", "/invite nobody")
+	_, reply := commandIn(t, ada, "general", "/welcome nobody")
 	if errorCode(reply) != CodeInvalidParams {
-		t.Fatalf("/invite nobody = %#v", reply)
+		t.Fatalf("/welcome nobody = %#v", reply)
 	}
-	if _, reply := commandIn(t, ada, "general", "/invite"); errorCode(reply) != CodeInvalidParams {
-		t.Fatalf("/invite = %#v", reply)
+	if _, reply := commandIn(t, ada, "general", "/welcome"); errorCode(reply) != CodeInvalidParams {
+		t.Fatalf("/welcome = %#v", reply)
 	}
-	if before, reply := commandIn(t, ada, "general", "/invite @ada"); errorCode(reply) != 0 || len(before) != 1 || !strings.Contains(noticeText(t, before[0]), "already a member") {
-		t.Fatalf("/invite @ada = %#v after %#v", reply, before)
+	if before, reply := commandIn(t, ada, "general", "/welcome @ada"); errorCode(reply) != 0 || len(before) != 1 || !strings.Contains(noticeText(t, before[0]), "already a member") {
+		t.Fatalf("/welcome @ada = %#v after %#v", reply, before)
 	}
 
-	// The guest is invited: its you, then a notice; those in the Lobby see
-	// its role; the inviter a notice before the result.
-	before, reply = commandIn(t, ada, "general", "/invite @"+guest.userID)
+	// The guest is welcomed: its you, then a notice; those in the Lobby see
+	// its role; the welcomer a notice before the result.
+	before, reply = commandIn(t, ada, "general", "/welcome @"+guest.userID)
 	if errorCode(reply) != 0 || len(before) != 2 {
-		t.Fatalf("/invite guest = %#v after %#v", reply, before)
+		t.Fatalf("/welcome guest = %#v after %#v", reply, before)
 	}
-	if user := notificationParams(t, before[0], "user")["new"].(map[string]any); !reflect.DeepEqual(rolesOf(user), []any{"invited"}) || permissionsOf(user) != nil {
-		t.Fatalf("others see the invited guest as %#v", user)
+	if user := notificationParams(t, before[0], "user")["new"].(map[string]any); !reflect.DeepEqual(rolesOf(user), []any{"welcomed"}) || permissionsOf(user) != nil {
+		t.Fatalf("others see the welcomed guest as %#v", user)
 	}
-	if text := noticeText(t, before[1]); !strings.Contains(text, "is invited") {
-		t.Fatalf("the inviter's notice %q", text)
+	if text := noticeText(t, before[1]); !strings.Contains(text, "is welcomed") {
+		t.Fatalf("the welcomer's notice %q", text)
 	}
 	you := notificationParams(t, guest.read(t), "user")["you"].(map[string]any)
-	if !reflect.DeepEqual(permissionsOf(you), map[string]any{"lobby": "invited"}) || !reflect.DeepEqual(rolesOf(you), []any{"invited"}) {
-		t.Fatalf("the invited guest's you: %#v", you)
+	if permissionsOf(you) != nil || !reflect.DeepEqual(rolesOf(you), []any{"welcomed"}) {
+		t.Fatalf("the welcomed guest's you: %#v", you)
 	}
-	if text := noticeText(t, guest.read(t)); !strings.HasPrefix(text, "@ada invited you. Add a way to sign in to finish joining") {
-		t.Fatalf("the invited guest's notice %q", text)
+	if text := noticeText(t, guest.read(t)); !strings.HasPrefix(text, "@ada welcomed you. Add a way to sign in to finish joining") {
+		t.Fatalf("the welcomed guest's notice %q", text)
 	}
 	if app.Waiting(guest.userID) {
-		t.Fatal("an invited guest is waiting")
+		t.Fatal("a welcomed guest is waiting")
 	}
 	// It is still limited to the Lobby.
 	guest.expectError(t, "history", "general", map[string]any{"room_id": "general"}, CodeInvalidParams)
@@ -315,74 +335,74 @@ func TestLobbyInvite(t *testing.T) {
 	propose(t, guest, "gus@example.com")
 	_, result := approve(t, guest, mailbox.receive(t).Code, nil)
 	if you := result["you"].(map[string]any); you["user_id"] != guest.userID || permissionsOf(you) != nil || !reflect.DeepEqual(rolesOf(you), []any{}) {
-		t.Fatalf("the invited guest signed up as %#v", you)
+		t.Fatalf("the welcomed guest signed up as %#v", you)
 	}
-	expectJoined(t, guest, "general", guest.userID)
+	expectAdmitted(t, guest, []string{other})
 	historyPage(t, guest, "general", map[string]any{})
 	if app.Waiting(guest.userID) {
 		t.Fatal("the member is waiting")
 	}
 
-	// A guest that signs up uninvited waits; inviting it lets it in at once.
-	other, _ := lobbyGuest(t, httpServer)
-	propose(t, other, "otto@example.com")
-	_, result = approve(t, other, mailbox.receive(t).Code, nil)
-	if you := result["you"].(map[string]any); !reflect.DeepEqual(permissionsOf(you), map[string]any{"lobby": "waiting"}) || !reflect.DeepEqual(rolesOf(you), []any{"waiting"}) {
-		t.Fatalf("an uninvited guest signed up as %#v", you)
+	// A guest that signs up unwelcomed waits; welcoming it lets it in at once.
+	otto, _ := lobbyGuest(t, httpServer)
+	propose(t, otto, "otto@example.com")
+	_, result = approve(t, otto, mailbox.receive(t).Code, nil)
+	if you := result["you"].(map[string]any); permissionsOf(you) != nil || !reflect.DeepEqual(rolesOf(you), []any{"waiting"}) {
+		t.Fatalf("an unwelcomed guest signed up as %#v", you)
 	}
-	if !app.Waiting(other.userID) {
+	if !app.Waiting(otto.userID) {
 		t.Fatal("the waiting account is not waiting")
 	}
-	other.drain(t)
+	otto.drain(t)
 	ada.drain(t)
-	before, reply = commandIn(t, ada, "general", "/invite "+other.userID)
+	before, reply = commandIn(t, ada, "general", "/welcome "+otto.userID)
 	if errorCode(reply) != 0 || !strings.Contains(noticeText(t, before[len(before)-1]), "is in") {
-		t.Fatalf("/invite waiting = %#v after %#v", reply, before)
+		t.Fatalf("/welcome waiting = %#v after %#v", reply, before)
 	}
-	frame := other.read(t)
+	frame := otto.read(t)
 	you = notificationParams(t, frame, "user")["you"].(map[string]any)
-	if ext, _ := you["ext"].(map[string]any); !reflect.DeepEqual(ext["permissions"], map[string]any{}) || !reflect.DeepEqual(rolesOf(you), []any{}) {
+	if permissionsOf(you) != nil || !reflect.DeepEqual(rolesOf(you), []any{}) {
 		t.Fatalf("the admitted account's you: %#v", you)
 	}
-	expectJoined(t, other, "general", other.userID)
-	if text := noticeText(t, other.read(t)); text != "@ada invited you in." {
+	expectAdmitted(t, otto, []string{other})
+	if text := noticeText(t, otto.read(t)); text != "@ada welcomed you in." {
 		t.Fatalf("the admitted account's notice %q", text)
 	}
-	if app.Waiting(other.userID) {
+	if app.Waiting(otto.userID) {
 		t.Fatal("the admitted account still waits")
 	}
 }
 
-// An invited guest that leaves before signing up is gone, and so is its
+// A welcomed guest that leaves before signing up is gone, and so is its
 // invitation.
 func TestLobbyInvitedGuestLeaves(t *testing.T) {
 	_, mailbox, httpServer := lobbyServer(t)
 	mo, _ := emailSignUp(t, httpServer, mailbox, "mo@example.com", "mo", "general")
 	guest, _ := lobbyGuest(t, httpServer)
-	if _, reply := commandIn(t, mo, "general", "/invite "+guest.userID); errorCode(reply) != 0 {
-		t.Fatalf("a moderator's /invite = %#v", reply)
+	if _, reply := commandIn(t, mo, "general", "/welcome "+guest.userID); errorCode(reply) != 0 {
+		t.Fatalf("a moderator's /welcome = %#v", reply)
 	}
 	_ = guest.ws.Close(websocket.StatusNormalClosure, "bye")
 	deadline := time.Now().Add(5 * time.Second)
 	for {
-		_, reply := commandIn(t, mo, "general", "/invite "+guest.userID)
+		_, reply := commandIn(t, mo, "general", "/welcome "+guest.userID)
 		if errorCode(reply) == CodeInvalidParams {
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("/invite of a departed guest = %#v", reply)
+			t.Fatalf("/welcome of a departed guest = %#v", reply)
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	// A new guest is no one invited.
+	// A new guest is no one welcomed.
 	_, result := lobbyGuest(t, httpServer)
-	if permissions := permissionsOf(result["you"].(map[string]any)); !reflect.DeepEqual(permissions, map[string]any{"lobby": "waiting"}) {
-		t.Fatalf("a new guest's permissions %#v", permissions)
+	if you := result["you"].(map[string]any); you["roles"] != nil {
+		t.Fatalf("a new guest is %#v", you)
 	}
 }
 
 // A passkey registration on a new connection makes a waiting account, and
-// an invited guest's passkey a member.
+// a welcomed guest's passkey a member.
 func TestLobbyPasskeySignUp(t *testing.T) {
 	config := DefaultConfig()
 	config.WebAuthn = testWebAuthn(t)
@@ -411,7 +431,7 @@ func TestLobbyPasskeySignUp(t *testing.T) {
 	options = passkeyResult(t, passkeyCall(t, guest, "begin2", "register", "begin", nil))
 	result = passkeyResult(t, passkeyCall(t, guest, "finish2", "register", "finish", map[string]any{"credential": newTestAuthenticator(t).registration(t, options, testPasskeyOrigin)}))
 	if you := result["you"].(map[string]any); you["user_id"] != guest.userID || permissionsOf(you) != nil || !reflect.DeepEqual(rolesOf(you), []any{}) {
-		t.Fatalf("an invited guest's passkey: %#v", you)
+		t.Fatalf("a welcomed guest's passkey: %#v", you)
 	}
 	expectJoined(t, guest, "general", guest.userID)
 	if err := app.Admit(context.Background(), "nobody"); err == nil {
@@ -420,7 +440,7 @@ func TestLobbyPasskeySignUp(t *testing.T) {
 }
 
 // A waiting account resumes as waiting, with its session token or a device
-// token, and stays so across a restart until it is invited.
+// token, and stays so across a restart until it is welcomed.
 func TestLobbyWaitingAccountResumes(t *testing.T) {
 	memory := store.NewMemory()
 	mailbox := make(testMailbox, 16)
@@ -443,7 +463,7 @@ func TestLobbyWaitingAccountResumes(t *testing.T) {
 	for _, token := range []any{signedIn["token"], device} {
 		c, _ := dialRaw(t, httpServer)
 		you := c.result(t, "auth", "resume", map[string]any{"scheme": "token", "token": token})["you"].(map[string]any)
-		if you["user_id"] != "wes" || !reflect.DeepEqual(permissionsOf(you), map[string]any{"lobby": "waiting"}) || !reflect.DeepEqual(rolesOf(you), []any{"waiting"}) {
+		if you["user_id"] != "wes" || permissionsOf(you) != nil || !reflect.DeepEqual(rolesOf(you), []any{"waiting"}) {
 			t.Fatalf("resumed as %#v", you)
 		}
 		c.expectError(t, "history", "general", map[string]any{"room_id": "general"}, CodeInvalidParams)
@@ -480,8 +500,8 @@ func TestLobbyToggle(t *testing.T) {
 	if errorCode(reply) != 0 || len(before) != 2 {
 		t.Fatalf("/toggle lobby = %#v after %#v", reply, before)
 	}
-	if settings := notificationParams(t, before[0], "server")["ext"].(map[string]any)["settings"].(map[string]any); !reflect.DeepEqual(settings["lobby"], map[string]any{"room_id": "lobby", "open": false}) {
-		t.Fatalf("the admin's server frame: %#v", settings)
+	if params := notificationParams(t, before[0], "server"); slices.Contains(params["auth"].([]any), any("guest")) {
+		t.Fatalf("the admin's server frame: %#v", params)
 	}
 	if text := noticeText(t, before[1]); !strings.HasPrefix(text, "The Public Lobby is closed") {
 		t.Fatalf("the admin's notice %q", text)
@@ -517,13 +537,11 @@ func TestLobbyToggle(t *testing.T) {
 		// A waiting account still signs in, to the Lobby.
 		c, _ := dialRaw(t, httpServer)
 		you := c.result(t, "auth", "resume", map[string]any{"scheme": "token", "token": waiting["token"]})["you"].(map[string]any)
-		if !reflect.DeepEqual(permissionsOf(you), map[string]any{"lobby": "waiting"}) {
+		if permissionsOf(you) != nil {
 			t.Fatalf("a waiting account while closed: %#v", you)
 		}
-		frame = notificationParams(t, c.read(t), "server")
-		if lobby := frame["ext"].(map[string]any)["settings"].(map[string]any)["lobby"]; !reflect.DeepEqual(lobby, map[string]any{"room_id": "lobby", "open": false}) {
-			t.Fatalf("a waiting account's server frame %#v", frame)
-		}
+		// The whole server frame follows the sign-in.
+		notificationParams(t, c.read(t), "server")
 		historyPage(t, c, "lobby", map[string]any{})
 	}
 	checkClosed(httpServer)

@@ -73,11 +73,11 @@ type userState struct {
 	scope *roomScope
 	// access is the server's access mode (access.go). waiting marks an
 	// account that signed itself up in lobby mode, which sees only the
-	// Lobby until someone invites it in, and invited a guest someone
-	// invited, whose sign-up makes it a member; only waiting is stored.
-	access  *accessState
-	waiting bool
-	invited bool
+	// Lobby until someone welcomes it in, and welcomed a guest someone
+	// welcomed, whose sign-up makes it a member; only waiting is stored.
+	access   *accessState
+	waiting  bool
+	welcomed bool
 	// consents are the https redirect URIs of apps the account allowed on
 	// the external sign-in page, with when, in Unix milliseconds
 	// (consents.go).
@@ -191,19 +191,12 @@ func (u *userState) profile() map[string]any {
 	}
 	// An account's roles are always sent, [] when it has none, so a role
 	// taken away clears the one a client kept (§3.3); guests hold none,
-	// but an invited guest shows as such (access.go).
+	// but a welcomed guest shows as such (access.go).
 	if roles := u.displayRoles(); len(roles) > 0 || u.account() {
 		value["roles"] = append([]string{}, roles...)
 	}
 	if len(u.ext) > 0 {
 		value["ext"] = maps.Clone(u.ext)
-		if u.access != nil && u.access.lobby != "" {
-			// ext.permissions is the server's, and only in `you`.
-			delete(value["ext"].(extObject), "permissions")
-			if len(value["ext"].(extObject)) == 0 {
-				delete(value, "ext")
-			}
-		}
 	}
 	return value
 }
@@ -578,10 +571,6 @@ func (s *Server) updateProfile(c *client, req request) (any, bool, *Error) {
 	extWrite, hasExt, err := parseExt(req.params, "ext")
 	if err != nil {
 		return nil, false, err
-	}
-	if s.access.lobby != "" {
-		// ext.permissions is the server's to say (ext:permissions).
-		delete(extWrite, "permissions")
 	}
 	status, err := parseString(req.params, "status", false)
 	if err != nil {

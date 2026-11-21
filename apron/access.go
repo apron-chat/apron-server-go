@@ -1,6 +1,7 @@
 package apron
 
 import (
+	"cmp"
 	"context"
 	"encoding/json/jsontext"
 	"encoding/json/v2"
@@ -18,7 +19,7 @@ import (
 // default, where anyone may sign in as a guest and see every room that is
 // not private; private, where only accounts sign in (the old
 // DisableGuests); or lobby, where newcomers see one room, the Lobby, and
-// its threads until an admin or moderator invites them in.
+// its threads until an admin or moderator welcomes them in.
 //
 // In lobby mode the users limited to the Lobby, restricted users, are
 // guests and waiting accounts: accounts that signed themselves up there,
@@ -38,7 +39,7 @@ const (
 	AccessPublic AccessMode = "public"
 	// AccessLobby lets anyone sign in as a guest, or sign up, and see the
 	// Lobby (Access.LobbyRoom) and its threads, until an admin or moderator
-	// invites them in with /invite.
+	// welcomes them in with /welcome.
 	AccessLobby AccessMode = "lobby"
 	// AccessPrivate offers no guests: only accounts sign in.
 	AccessPrivate AccessMode = "private"
@@ -102,16 +103,15 @@ type accessState struct {
 	closed bool
 }
 
-// Lobby states, which ext.permissions.lobby carries and which show as a
-// role beside the user's name.
+// Lobby states, which show as a role beside the user's name.
 const (
-	lobbyWaiting = "waiting"
-	lobbyInvited = "invited"
+	lobbyWaiting  = "waiting"
+	lobbyWelcomed = "welcomed"
 )
 
 // lobbyState is how lobby mode limits u: "waiting" for a guest, or an
-// account that signed itself up, until someone invites it in; "invited"
-// for a guest that was invited, which becomes a member once it adds a way
+// account that signed itself up, until someone welcomes it in; "welcomed"
+// for a guest that was welcomed, which becomes a member once it adds a way
 // to sign in; and "" for everyone else, everyone in the other modes
 // included. Admins, moderators, and bots are never limited, so a server
 // that starts in lobby mode can grant its first admin with Config.Roles.
@@ -120,8 +120,8 @@ func (u *userState) lobbyState() string {
 		return ""
 	}
 	switch {
-	case !u.account() && u.invited:
-		return lobbyInvited
+	case !u.account() && u.welcomed:
+		return lobbyWelcomed
 	case !u.account(), u.waiting:
 		return lobbyWaiting
 	}
@@ -134,9 +134,9 @@ func (u *userState) restricted() bool { return u.lobbyState() != "" }
 // moderates reports a user with the admin or moderator role.
 func (u *userState) moderates() bool { return u.hasRole("admin") || u.hasRole("moderator") }
 
-// mayInvite reports whether u may run /invite: an admin or moderator in
-// lobby mode.
-func (u *userState) mayInvite() bool {
+// mayWelcome reports whether u may run /welcome and /toggle: an admin or
+// moderator in lobby mode.
+func (u *userState) mayWelcome() bool {
 	return u.access != nil && u.access.lobby != "" && u.botOf == "" && u.moderates()
 }
 
@@ -158,8 +158,8 @@ func (u *userState) allows(r *roomState) bool {
 }
 
 // displayRoles are the roles u's user objects carry: those it holds, and
-// in lobby mode "waiting" for a waiting account and "invited" for an
-// invited guest, which no grant gives and nothing counts as a role.
+// in lobby mode "waiting" for a waiting account and "welcomed" for a
+// welcomed guest, which no grant gives and nothing counts as a role.
 func (u *userState) displayRoles() []string {
 	state := u.lobbyState()
 	if state == "" || state == lobbyWaiting && !u.account() {
@@ -168,26 +168,6 @@ func (u *userState) displayRoles() []string {
 	roles := append(slices.Clone(u.roles), state)
 	slices.Sort(roles)
 	return slices.Compact(roles)
-}
-
-// permissions is you.ext.permissions in lobby mode (ext:permissions): lobby
-// for a restricted user, invite for one who may invite; nil when neither,
-// or in the other modes.
-func (u *userState) permissions() jsontext.Value {
-	if u.access == nil || u.access.lobby == "" {
-		return nil
-	}
-	permissions := map[string]any{}
-	if state := u.lobbyState(); state != "" {
-		permissions["lobby"] = state
-	}
-	if u.mayInvite() {
-		permissions["invite"] = true
-	}
-	if len(permissions) == 0 {
-		return nil
-	}
-	return encodeJSON(permissions)
 }
 
 // newUserLocked is a new user of this server, which sees its access mode.
@@ -258,10 +238,10 @@ func (s *Server) confineLocked(u *userState) {
 
 // restrictedRefusal refuses a restricted user what is not for the Lobby.
 func restrictedRefusal(what string) *Error {
-	return &Error{Code: CodeDenied, Message: "In the Public Lobby you may not " + what + " until an admin or moderator invites you in"}
+	return &Error{Code: CodeDenied, Message: "In the Public Lobby you may not " + what + " until an admin or moderator welcomes you in"}
 }
 
-// signUpHintLocked says how an invited guest finishes joining: with the
+// signUpHintLocked says how a welcomed guest finishes joining: with the
 // ways this server lets a guest add a sign-in.
 func (s *Server) signUpHintLocked() string {
 	switch {
@@ -273,68 +253,75 @@ func (s *Server) signUpHintLocked() string {
 	return "Ask for an invite link"
 }
 
-// inviteLocked lets target in on by's word (/invite, Server.Admit): a
-// connected guest becomes invited, and a waiting account a member at once.
-// It returns what to tell the inviter.
-func (s *Server) inviteLocked(target *userState, by string) (string, *Error) {
-	inviter := "An admin"
+// welcomeLocked lets target in on by's word (/welcome, Server.Admit): a
+// connected guest becomes welcomed, and a waiting account a member at
+// once. It returns what to tell whoever welcomed it.
+func (s *Server) welcomeLocked(target *userState, by string) string {
+	welcomer := "An admin"
 	if by != "" {
-		inviter = "@" + by
+		welcomer = "@" + by
 	}
 	switch target.lobbyState() {
 	case "":
-		return fmt.Sprintf("@%s is already a member.", target.id), nil
-	case lobbyInvited:
-		return fmt.Sprintf("@%s is invited already; they become a member once they sign up, unless they leave first.", target.id), nil
+		return fmt.Sprintf("@%s is already a member.", target.id)
+	case lobbyWelcomed:
+		return fmt.Sprintf("@%s is welcomed already; they become a member once they sign up, unless they leave first.", target.id)
 	}
 	lobby := s.lobbyRoomLocked()
 	if !target.account() {
-		// The guest stays in the Lobby, now invited; its next sign-up makes
-		// it a member (addProvenLocked).
-		target.invited = true
-		s.notifyAccessLocked(target, nil, true)
+		// The guest stays in the Lobby, now welcomed; its next sign-up
+		// makes it a member (addProvenLocked).
+		target.welcomed = true
+		s.notifyProfileLocked(target, nil, nil)
 		hint := s.signUpHintLocked()
-		target.send(privateNotice(lobby.id, fmt.Sprintf("%s invited you. %s to finish joining; until you do, closing this page ends your visit.", inviter, hint)))
-		return fmt.Sprintf("@%s is invited: they become a member once they sign up, unless they leave first.", target.id), nil
+		target.send(privateNotice(lobby.id, fmt.Sprintf("%s welcomed you. %s to finish joining; until you do, closing this page ends your visit.", welcomer, hint)))
+		return fmt.Sprintf("@%s is welcomed: they become a member once they sign up, unless they leave first.", target.id)
 	}
-	s.admitWaitingLocked(target, inviter)
-	return fmt.Sprintf("@%s is in: they are a member now.", target.id), nil
-}
-
-// admitWaitingLocked makes a waiting account a member: its marker is
-// cleared, its connections get `you` without the waiting role and
-// ext.permissions.lobby, then its join to the default room and a notice
-// saying who invited it, and those who share the Lobby with it `user` new.
-func (s *Server) admitWaitingLocked(u *userState, inviter string) {
+	u := target
 	u.waiting = false
 	s.touchUser(u.id)
-	s.notifyAccessLocked(u, nil, true)
+	s.notifyProfileLocked(u, nil, nil)
 	s.viewChangedLocked(u)
-	s.joinDefaultRoomLocked(u)
-	lobby := s.lobbyRoomLocked()
-	u.send(privateNotice(lobby.id, inviter+" invited you in."))
+	s.admitToRoomsLocked(u)
+	u.send(privateNotice(lobby.id, welcomer+" welcomed you in."))
+	return fmt.Sprintf("@%s is in: they are a member now.", target.id)
 }
 
-// notifyAccessLocked sends u's changed standing, its roles and permissions,
-// as a profile change (notifyProfileLocked): `you` to its connections other
-// than except, and `new` to those who share a room with it. hadPermissions
-// says its `you` carried ext.permissions before, which a `you` without
-// them clears.
-func (s *Server) notifyAccessLocked(u *userState, except *client, hadPermissions bool) {
-	s.publishLocked(u)
-	you := u.you()
-	if hadPermissions && u.permissions() == nil {
-		you = withCleared(you, extObject{"permissions": jsontext.Value("{}")})
+// admitToRoomsLocked shows a restricted user that became a member the
+// rooms it may see now: it joins the default room, and its connections
+// get one room_update with the default room in joined, its members and
+// the membership, and in updated the records of the other rooms room_list
+// would list it as not joined, which clients add to what they know.
+func (s *Server) admitToRoomsLocked(u *userState) {
+	r := s.defaultRoomLocked(u)
+	params := map[string]any{}
+	if membership := s.addMemberLocked(u, r); membership != nil {
+		record := s.roomParamsLocked(r)
+		params["joined"] = []any{record}
+		params["users"] = profiles(s.addMembersLocked(record, r))
+		params["memberships"] = []any{membership}
 	}
-	frame := notification("user", map[string]any{"you": you})
-	for c := range u.clients {
-		if c != except {
-			c.enqueue(frame)
+	var others []*roomState
+	for _, room := range s.rooms {
+		if room.parent == nil && u.joined[room.id] == nil && room.visibleTo(u) {
+			others = append(others, room)
 		}
 	}
-	others := notification("user", map[string]any{"new": u.profile()})
-	for _, other := range s.sharersLocked(u) {
-		other.send(others)
+	slices.SortFunc(others, func(a, b *roomState) int {
+		return cmp.Or(cmp.Compare(b.latestID, a.latestID), cmp.Compare(b.createdID, a.createdID))
+	})
+	if len(others) > maxListedRooms {
+		others = others[:maxListedRooms]
+	}
+	if len(others) > 0 {
+		updated := make([]any, len(others))
+		for i, room := range others {
+			updated[i] = s.roomParamsLocked(room)
+		}
+		params["updated"] = updated
+	}
+	if len(params) > 0 {
+		u.send(notification("room_update", params))
 	}
 }
 
@@ -355,9 +342,9 @@ func (s *Server) viewChangedLocked(u *userState) {
 	}
 }
 
-// Admit lets a user in from the Lobby in lobby mode, as /invite does: a
+// Admit lets a user in from the Lobby in lobby mode, as /welcome does: a
 // waiting account becomes a member at once, and a connected guest becomes
-// invited, a member once it signs up. It returns once that is stored.
+// welcomed, a member once it signs up. It returns once that is stored.
 // It is an error in another mode, or for a user that does not exist; a
 // member is left as it is.
 func (s *Server) Admit(ctx context.Context, userID string) error {
@@ -371,10 +358,7 @@ func (s *Server) Admit(ctx context.Context, userID string) error {
 		s.unlock()
 		return errors.New("apron: no such user")
 	}
-	if _, err := s.inviteLocked(u, ""); err != nil {
-		s.unlock()
-		return err
-	}
+	s.welcomeLocked(u, "")
 	f := s.newFenceLocked()
 	s.unlock()
 	return waitFence(ctx, f)
@@ -384,7 +368,7 @@ func (s *Server) Admit(ctx context.Context, userID string) error {
 func (h *Host) Admit(ctx context.Context, userID string) error { return h.s.Admit(ctx, userID) }
 
 // Waiting reports whether the user is limited to the Lobby, waiting to be
-// invited in: a guest or an account that signed itself up in lobby mode.
+// welcomed in: a guest or an account that signed itself up in lobby mode.
 // It is false in the other modes.
 func (s *Server) Waiting(userID string) bool {
 	s.mu.RLock()
@@ -404,13 +388,13 @@ func (s *Server) LobbyOpen() bool {
 	return s.access.lobby != "" && !s.access.closed
 }
 
-// inviteCommand is /invite <user_id>, for admins and moderators in lobby
-// mode: it lets a connected guest or a waiting account in (inviteLocked),
+// welcomeCommand is /welcome <user_id>, for admins and moderators in lobby
+// mode: it lets a connected guest or a waiting account in (welcomeLocked),
 // and tells the sender what happened in a ~private notice before the
 // result.
-func (s *Server) inviteCommand(c *client, r *roomState, body map[string]any, args, _ string) (map[string]any, *Error) {
-	if !c.user.mayInvite() {
-		return nil, &Error{Code: CodeDenied, Message: "Only admins and moderators can invite people in"}
+func (s *Server) welcomeCommand(c *client, r *roomState, body map[string]any, args, _ string) (map[string]any, *Error) {
+	if !c.user.mayWelcome() {
+		return nil, &Error{Code: CodeDenied, Message: "Only admins and moderators can welcome people in"}
 	}
 	id, _, _ := strings.Cut(args, " ")
 	id = strings.TrimPrefix(id, "@")
@@ -420,16 +404,13 @@ func (s *Server) inviteCommand(c *client, r *roomState, body map[string]any, arg
 		}
 	}
 	if id == "" {
-		return nil, invalidParams("Usage: /invite <user_id>")
+		return nil, invalidParams("Usage: /welcome <user_id>")
 	}
 	target := s.users[id]
 	if target == nil || target.retired {
 		return nil, invalidParams("Unknown user %q", id)
 	}
-	text, err := s.inviteLocked(target, c.user.id)
-	if err != nil {
-		return nil, err
-	}
+	text := s.welcomeLocked(target, c.user.id)
 	c.enqueue(privateNotice(r.id, text))
 	return map[string]any{}, nil
 }
@@ -438,7 +419,7 @@ func (s *Server) inviteCommand(c *client, r *roomState, body map[string]any, arg
 // alone it shows the toggles, and /toggle lobby closes the Lobby to
 // newcomers or opens it again.
 func (s *Server) toggleCommand(c *client, r *roomState, _ map[string]any, args, _ string) (map[string]any, *Error) {
-	if !c.user.mayInvite() {
+	if !c.user.mayWelcome() {
 		return nil, &Error{Code: CodeDenied, Message: "Only admins and moderators can open and close the Public Lobby"}
 	}
 	state := func() string {
@@ -458,7 +439,7 @@ func (s *Server) toggleCommand(c *client, r *roomState, _ map[string]any, args, 
 	s.setLobbyClosedLocked(!s.access.closed)
 	text := "The Public Lobby is open again: anyone may come in as a guest or sign up, and see what it holds, what was posted while it was closed included."
 	if s.access.closed {
-		text = "The Public Lobby is closed: no new guests or sign-ups, and its guests were let go. Waiting accounts still see it, and can still be invited. Whatever is posted in it is public again once it opens."
+		text = "The Public Lobby is closed: no new guests or sign-ups, and its guests were let go. Waiting accounts still see it, and can still be welcomed. Whatever is posted in it is public again once it opens."
 	}
 	c.enqueue(privateNotice(r.id, text))
 	return map[string]any{}, nil
