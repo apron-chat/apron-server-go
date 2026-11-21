@@ -621,14 +621,10 @@ func TestAdditionsAreNotSignIns(t *testing.T) {
 	expectMembership(t, other, "general", c.userID, true)
 	watching(c)
 	c.drain(t)
-	frames := c.status(t, map[string]any{"mute": true})
-	if len(frames) != 1 {
-		t.Fatalf("mute echo: %#v", frames)
-	}
-	checkMute(t, frames[0], "", true)
 
-	// A passkey registration adds the passkey: its result, and nothing
-	// after it.
+	// A guest's passkey registration makes a separate account, which is a
+	// sign-in: after its result, the account's join to general, the room
+	// the guest was in.
 	authenticator := newTestAuthenticator(t)
 	options := passkeyResult(t, passkeyCall(t, c, "register-begin", "register", "begin", nil))
 	registered := passkeyResult(t, passkeyCall(t, c, "register-finish", "register", "finish", map[string]any{"credential": authenticator.registration(t, options, testPasskeyOrigin)}))
@@ -636,11 +632,17 @@ func TestAdditionsAreNotSignIns(t *testing.T) {
 	if id, _ := registered["you"].(map[string]any)["user_id"].(string); id == c.userID || strings.HasPrefix(id, "guest_") || registered["token"] == nil {
 		t.Fatalf("passkey registration: %#v", registered)
 	}
+	expectJoinedDefault(t, c, registered["you"].(map[string]any)["user_id"].(string))
 	if frames := c.drain(t); len(frames) != 0 {
 		t.Fatalf("frames after a passkey registration: %#v", frames)
 	}
+	frames := c.status(t, map[string]any{"mute": true})
+	if len(frames) != 1 {
+		t.Fatalf("mute echo: %#v", frames)
+	}
+	checkMute(t, frames[0], "", true)
 
-	// Nor is an address added to the account.
+	// An address added to the account is no sign-in.
 	propose(t, c, "added@example.com")
 	message := mailbox.receive(t)
 	if !message.Add {
@@ -1042,7 +1044,9 @@ func TestSignInToExistingAccountIsADeparture(t *testing.T) {
 	// nothing.
 	expectMembership(t, observer, "general", newcomer.guestID, true)
 	expectStatus(t, observer, newcomer.guestID, "online")
-	expectRenamed(t, observer, newcomer)
+	expectMembership(t, observer, "general", newcomer.guestID, false)
+	expectMembership(t, observer, "general", newcomer.userID, true)
+	expectStatus(t, observer, newcomer.userID, "online")
 	observer.expectQuiet(t)
 
 	for _, status := range []string{"online", "invisible", ""} {

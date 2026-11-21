@@ -408,46 +408,25 @@ func (s *Server) addProvenLocked(c *client, req request, scheme authn.Scheme, pr
 	if err != nil {
 		return nil, err
 	}
-	becomesAccount := !account.account()
-	lobbyBefore := account.lobbyState()
-	// A guest becomes an account under a user_id of its own, which others
-	// learn of with `old` (§3.3.3).
-	var old map[string]any
-	if becomesAccount {
-		old = s.renameGuestLocked(account, proof.UserID)
+	if wasGuest {
+		return s.guestSignUpLocked(c, req, scheme, proof, id, record, session, anyOrigin)
 	}
 	s.setIdentityLocked(account, id, record)
-	name := normalizeName(proof.Name)
-	renamed := becomesAccount && name != "" && name != account.name
-	if renamed {
-		account.name = name
-		account.fromValue = nil
-	}
 	s.setGrantLocked(account, id.Scheme, proof.Roles)
-	// An account takes the roles its user_id or new identity is granted.
-	changed := s.grantRolesLocked(account) || renamed
-	// In lobby mode a guest that signs up becomes a waiting account, or a
-	// member when someone welcomed it, which then joins the default room
-	// and learns of the other rooms it sees after the result (access.go).
-	if becomesAccount && s.access.lobby != "" {
-		account.waiting = !account.welcomed && !account.moderates()
-		account.welcomed = false
-		changed = true
-	}
+	// An account takes the roles its new identity is granted.
+	lobbyBefore := account.lobbyState()
+	changed := s.grantRolesLocked(account)
 	promoted := lobbyBefore != "" && !account.restricted()
 	// The result carries the account as `you`, so its own connection is
 	// told no more.
-	switch {
-	case old != nil:
-		s.notifyRenamedLocked(account, old, c)
-	case changed:
+	if changed {
 		s.notifyProfileLocked(account, c, nil)
 	}
 	if session {
 		now := time.Now()
 		result, err := s.signInLocked(c, req, account, now, false, false, anyOrigin)
 		if err == nil {
-			s.provedLocked(c, scheme, proof, now, wasGuest)
+			s.provedLocked(c, scheme, proof, now, false)
 			if promoted {
 				s.viewChangedLocked(account)
 				s.admitToRoomsLocked(account)
@@ -455,11 +434,71 @@ func (s *Server) addProvenLocked(c *client, req request, scheme authn.Scheme, pr
 		}
 		return result, err
 	}
-	s.provedLocked(c, scheme, proof, time.Now(), wasGuest)
+	s.provedLocked(c, scheme, proof, time.Now(), false)
 	result := map[string]any{"you": account.you()}
 	c.sendResult(req, result)
 	if promoted {
 		s.viewChangedLocked(account)
+		s.admitToRoomsLocked(account)
+	}
+	return result, nil
+}
+
+// guestSignUpLocked makes a new account of an identity a guest's
+// connection proved: a separate user, decoupled from the guest's history
+// (PROTOCOL.md §3.3.3), with a user_id of its own, the one the proof asked
+// for, else user_<n>. It is announced as a guest's connection signing in to
+// an existing account is, without `old`: the guest departs, retired with
+// its leaves, and keeps what it posted, its reactions, read cursors, and
+// rooms it created, and the account arrives with its own status. The
+// account takes the guest's name, chosen status, and ext, and joins, as
+// itself, the rooms the guest was in, so the person keeps their place; in
+// lobby mode a waiting account stays in the Lobby, and a welcomed guest's
+// account, a member, also joins the default room (admitToRoomsLocked). The
+// guest's other connections, if any, become the account's too.
+func (s *Server) guestSignUpLocked(c *client, req request, scheme authn.Scheme, proof authn.Proof, id authn.Identity, record jsontext.Value, session, anyOrigin bool) (any, *Error) {
+	guest := c.user
+	rooms := slices.SortedFunc(maps.Values(guest.joined), func(a, b *roomState) int {
+		return cmp.Compare(a.createdID, b.createdID)
+	})
+	account := s.newUserLocked(s.assignAccountIDLocked(proof.UserID), cmp.Or(normalizeName(proof.Name), guest.name))
+	account.chosen, account.ext = guest.chosen, maps.Clone(guest.ext)
+	if guest.avatarEmbed == nil {
+		// A hosted avatar is the guest's upload, which goes with it.
+		account.avatar = guest.avatar
+	}
+	s.users[account.id] = account
+	s.touchUser(account.id)
+	s.setIdentityLocked(account, id, record)
+	s.setGrantLocked(account, id.Scheme, proof.Roles)
+	s.grantRolesLocked(account)
+	// In lobby mode the account waits in the Lobby, unless someone welcomed
+	// the guest or a role makes it an admin or moderator (access.go).
+	account.waiting = s.access.lobby != "" && !guest.welcomed && !account.moderates()
+	for other := range guest.clients {
+		if other != c {
+			s.attachLocked(other, account)
+			other.enqueue(notification("user", map[string]any{"you": account.you()}))
+		}
+	}
+	now := time.Now()
+	var result any
+	if session {
+		var err *Error
+		if result, err = s.signInLocked(c, req, account, now, true, false, anyOrigin); err != nil {
+			return nil, err
+		}
+	} else {
+		result = s.switchUserLocked(c, req, account, nil, true, false)
+	}
+	s.provedLocked(c, scheme, proof, now, true)
+	for _, r := range rooms {
+		s.joinLocked(account, r)
+	}
+	switch {
+	case account.restricted():
+		s.confineLocked(account)
+	case s.access.lobby != "":
 		s.admitToRoomsLocked(account)
 	}
 	return result, nil

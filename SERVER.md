@@ -496,24 +496,28 @@ members, the signing-in connection among them after its `auth` result
 connection ([Status](#status)), so an invisible account, or one without a status,
 shows others nothing new.
 
-A guest that becomes an account, with a passkey registration, an email
-addition, or an external sign-in on its connection, in any mode, does so
-under a `user_id` of its own (§3.3.3), picked as for a new account: the
-one the request asked for (a passkey begin's `user_id`, the proposal's or
-approval's for an email addition, or the external sign-in's, else the
-extension's or issuer's suggestion), by the rules of requested ones,
-else `user_<n>`. A guest whose own `user_id` was honored at sign-in, one
-outside the `guest_` namespace, keeps it. The guest's `user_id` is retired
-and never reissued. The registering connection's result carries the new
-`you`, the account's other connections get `user` with `you`, and
-everyone who shares a room with it gets `user` with `new`, the account,
-and `old`, the guest's recorded object. What the guest held moves to the
-account, as a rename would: its memberships, read cursors, the messages it
-may edit and delete, its reactions, the rooms it created (so it may still
-`/kick` there), its push registrations, and the custom emoji it added.
-Logged records keep the guest's `user_id` in `from` and in memberships, as
-§3.3.3 says; clients relabel them through `old`. Extensions see the same
-records, and `Host.User` no longer finds the guest's `user_id`.
+A guest that signs up on its connection, with a passkey registration, an
+email addition, or an external sign-in, in any mode, makes a new account:
+a separate user, decoupled from the guest's history, with a `user_id` of
+its own picked as for any new account: the one the request asked for (a
+passkey begin's `user_id`, the proposal's or approval's for an email
+addition, or the external sign-in's, else the extension's or issuer's
+suggestion), by the rules of requested ones, else `user_<n>`. It is
+announced as a guest's connection signing in to an existing account is
+(§3.3.3), never with `old`: the registering connection's result carries
+the account as `you`, a sign-in like any other (§3.2), and the guest
+departs, retired with a logged leave for each room it was in. The guest's
+`user_id` is never reissued, and what it posted, its reactions, read
+cursors, and the rooms it created stay the guest's, as for any departed
+guest: the account cannot edit or delete the guest's messages. The
+account takes the guest's name (unless the sign-up names another), chosen
+status, `ext`, and an avatar given as a URL, and joins, as itself, the
+rooms the guest was in, so the person keeps their place: after the
+result its connection gets `room_update` `joined` for each, and their
+members the memberships. The guest's other connections, if it had any,
+become the account's too, with `user` `you`. A future rename may carry
+the history over instead
+([shazow/apron#137](https://github.com/shazow/apron/issues/137)).
 
 ## Rooms, threads, and membership
 
@@ -766,11 +770,10 @@ In lobby mode an account someone signs up for themselves is a waiting
 account: one a passkey registration makes on a connection that is not
 signed in, in the client or on the [passkey page](#the-passkey-page); one
 a new email address or external identity makes; and a guest that adds a
-passkey, an address, or an external identity and was not welcomed, under a
-`user_id` of its own, as any guest that becomes an account
-([Identity and profiles](#identity-and-profiles)): those in the Lobby get
-`user` with `new` and `old`, and the waiting mark goes with the new
-`user_id`. The store marks it as waiting, and
+passkey, an address, or an external identity and was not welcomed, which
+makes a separate account as any guest's sign-up does
+([Identity and profiles](#identity-and-profiles)): the guest leaves the
+Lobby, and the waiting account joins it. The store marks it as waiting, and
 every sign-in finds it so: a passkey, a session token's resume, a device
 or service token, email, external sign-in, and the passkey page's code.
 An invitation's account is a member, and so is an account whose roles make
@@ -801,12 +804,11 @@ Several mentions, with a reply or without, or no user at all, are
   Add a passkey to finish joining; until you do, closing this page ends
   your visit." ("Add a way to sign in" on a server without passkeys). It
   is still restricted. When it adds a passkey, an address, or an external
-  identity, it becomes a member under a `user_id` of its own
+  identity, that makes a separate account, a member
   ([Identity and profiles](#identity-and-profiles)): the result's `you`
-  has the new `user_id` and no `welcomed` role, those who share a room
-  with it get `user` with `new` and `old`, and after the result its
-  connections get the `room_update` below, which names the new
-  `user_id`. If it
+  is the account, with no `welcomed` role; the guest leaves the Lobby, and
+  after the result the account joins it, then gets the `room_update`
+  below. If it
   disconnects first, the welcome goes with it; if it signs in to another
   account, that account is what it is.
 - **A waiting account** becomes a member at once: the waiting mark is
@@ -1742,8 +1744,9 @@ receives `retry_after` (`data.retry_after: 5`) before it closes; over
 Open the frontend at **http://localhost:5173** during development, or
 **http://localhost:8080** when serving a static build. Use the profile panel's
 **Add passkey** button to attach a discoverable, user-verified credential to your
-current identity, which becomes an account under a `user_id` of its own,
-keeping ownership of messages you already sent. **Sign in
+current identity, which makes an account under a `user_id` of its own
+that takes your place in the guest's rooms; what you posted as a guest
+stays the guest's ([Identity and profiles](#identity-and-profiles)). **Sign in
 with passkey** restores the identity selected in your browser's passkey picker.
 You can add up to ten credentials to an identity. Guest chat remains available.
 
@@ -1805,9 +1808,9 @@ User presence and verification are required; login updates the credential's
 signature counter and flags and rejects a clone warning.
 
 A registration on a signed-in connection, a guest's included, adds the
-passkey to its account, which a guest becomes an account by, under the
-`user_id` its begin asked for, else `user_<n>`
-([Identity and profiles](#identity-and-profiles)). Where guests
+passkey to its account; a guest's makes a separate account, under the
+`user_id` its begin asked for, else `user_<n>`, which signs in and joins
+the guest's rooms ([Identity and profiles](#identity-and-profiles)). Where guests
 are allowed, one on a connection that is not signed in makes a new account
 as it finishes, without a guest to start from (server policy decides who
 can register,
@@ -2165,10 +2168,11 @@ code only in an app connected to it (§4.11.2). A sender of its own
   proposal stays. It is sent only when the address could be added: no account
   holds it, which is never moved, and the proposing account has no address
   yet; otherwise the proposal still answers `{}`, and its tokens, never
-  sent, are `denied`. Approving adds the address to the proposing account, which a
-  guest becomes an account by, under a `user_id` of its own, keeping its
-rooms and messages ([Identity and profiles](#identity-and-profiles)),
-  and returns the account as `you`, with its roles; the account's other
+  sent, are `denied`. Approving adds the address to the proposing account,
+  and returns it as `you`, with its roles; on a guest's connection it
+  makes a separate account instead, a sign-in to it, which joins the
+  guest's rooms ([Identity and profiles](#identity-and-profiles)), and
+  returns that account as `you`; the account's other
   connections get a `user` notification when its roles change. A guest that
   added an address signs in with it later.
 

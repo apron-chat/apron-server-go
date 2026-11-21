@@ -334,9 +334,9 @@ func TestLobbyInvite(t *testing.T) {
 	// It is still limited to the Lobby.
 	guest.expectError(t, "history", "general", map[string]any{"room_id": "general"}, CodeInvalidParams)
 
-	// It adds an address: a member, under a user_id of its own (§3.3.3),
-	// which joins general after the result; who shares the Lobby with it
-	// learns of the new user_id with `old`.
+	// It adds an address: a member, a separate account with a user_id of
+	// its own (§3.3.3), which joins general after the result; who shares
+	// the Lobby with it sees the guest leave and the account join.
 	ada.drain(t)
 	propose(t, guest, "gus@example.com")
 	_, result := approve(t, guest, mailbox.receive(t).Code, nil)
@@ -344,7 +344,10 @@ func TestLobbyInvite(t *testing.T) {
 		t.Fatalf("the welcomed guest signed up as %#v", you)
 	}
 	guest.guestID, guest.userID = guest.userID, result["you"].(map[string]any)["user_id"].(string)
-	expectRenamed(t, ada, guest)
+	// The guest leaves, and its account, a separate user, joins the Lobby,
+	// then general, with the other rooms it sees now.
+	expectSwitched(t, ada, guest, "lobby")
+	expectJoined(t, guest, "lobby", guest.userID)
 	expectAdmitted(t, guest, []string{other})
 	historyPage(t, guest, "general", map[string]any{})
 	if app.Waiting(guest.userID) {
@@ -493,6 +496,8 @@ func TestLobbyPasskeySignUp(t *testing.T) {
 		t.Fatalf("a welcomed guest's passkey: %#v", you)
 	}
 	guest.userID = result["you"].(map[string]any)["user_id"].(string)
+	// The account joins the Lobby, the guest's room, then general.
+	expectJoined(t, guest, "lobby", guest.userID)
 	expectJoined(t, guest, "general", guest.userID)
 	if err := app.Admit(context.Background(), "nobody"); err == nil {
 		t.Fatal("Admit of nobody succeeded")
@@ -1341,12 +1346,13 @@ func TestPasskeySignUpRefusals(t *testing.T) {
 	}
 }
 
-// A guest that becomes an account does so under a user_id of its own
-// (§3.3.3), by any scheme: the one it asked for, else user_<n>. Who shares
-// a room with it gets `user` with `new` and `old`; what the guest held
-// moves with it, its messages, reactions, rooms, and the rooms it made;
-// and the guest's user_id is never given out again.
-func TestGuestBecomesAnAccountUnderItsOwnID(t *testing.T) {
+// A guest that signs up, by any scheme, makes an account: a separate user
+// with a user_id of its own, the one it asked for, else user_<n>,
+// decoupled from the guest's history (§3.3.3). The guest departs, as one
+// that signs in to an existing account does, and the account joins the
+// rooms the guest was in as itself; no `user` carries `old`. What the
+// guest posted stays the guest's, and its user_id is never given out again.
+func TestGuestSignUpMakesASeparateAccount(t *testing.T) {
 	identity := &Identity{Subject: "idp:1", Name: "Ext", UserID: "extuser"}
 	config := extensionConfig(ssoExtension(identity))
 	config.WebAuthn = testWebAuthn(t)
@@ -1379,50 +1385,63 @@ func TestGuestBecomesAnAccountUnderItsOwnID(t *testing.T) {
 	for _, scheme := range []string{"passkey", "email", "external"} {
 		c, _ := dialOrigin(t, httpServer, testPasskeyOrigin)
 		guestAuth(t, c)
+		c.request(t, "me", c.nextID("name"), map[string]any{"name": "Gus"})
 		expectMembership(t, watcher, "general", c.userID, true)
-		// What the guest holds: a message, a reaction, a private room it
-		// made, with the watcher in it.
+		// The guest posts, and makes a private room with the watcher in it.
 		room, _ := saveRoom(t, c, c.nextID("room"), map[string]any{"title": "Mine", "private": true})
 		c.request(t, "room_join", c.nextID("add"), map[string]any{"room_id": room, "user_id": watcher.userID})
 		message, _ := save(t, c, c.nextID("hello"), map[string]any{"room_id": room, "body": map[string]any{"text": "hello"}})
-		c.request(t, "reactions", c.nextID("react"), map[string]any{"message_id": message, "emojis": []any{"👍"}})
 		c.drain(t)
 		watcher.drain(t)
 
 		result := signUp[scheme](c)
 		you := result["you"].(map[string]any)
 		id, _ := you["user_id"].(string)
-		if !want[scheme](id) {
+		if !want[scheme](id) || you["name"] != "Gus" {
 			t.Fatalf("%s: the account is %#v", scheme, you)
 		}
 		c.guestID, c.userID = c.userID, id
-		expectRenamed(t, watcher, c)
-
-		// The guest's id is retired for good, and what it held is the
-		// account's.
+		// The watcher sees the guest leave and the account join, and no
+		// `old`.
+		var left, joined []string
+		for _, frame := range watcher.drain(t) {
+			params, _ := frame["params"].(map[string]any)
+			if _, has := params["old"]; has {
+				t.Fatalf("%s: a user_id change was announced: %#v", scheme, frame)
+			}
+			for _, record := range asList(params["memberships"]) {
+				for _, member := range asList(record.(map[string]any)["members"]) {
+					entry := member.(map[string]any)
+					who := entry["user"].(map[string]any)["user_id"].(string)
+					switch {
+					case who == c.guestID && entry["joined"] == false:
+						left = append(left, record.(map[string]any)["room_id"].(string))
+					case who == id && entry["joined"] == true:
+						joined = append(joined, record.(map[string]any)["room_id"].(string))
+					}
+				}
+			}
+		}
+		if !reflect.DeepEqual(left, []string{"general", room}) || !reflect.DeepEqual(joined, []string{"general", room}) {
+			t.Fatalf("%s: the guest left %v, the account joined %v", scheme, left, joined)
+		}
+		// The guest's id is retired for good, and its message is its own:
+		// the account may not edit it.
 		app.mu.RLock()
 		_, live := app.users[c.guestID]
 		used := app.usedIDs[strings.ToLower(c.guestID)]
+		owner := app.messages[message].owner
 		app.mu.RUnlock()
-		if live || !used {
-			t.Fatalf("%s: the guest's id is live %v, used %v", scheme, live, used)
+		if live || !used || owner != c.guestID {
+			t.Fatalf("%s: the guest's id is live %v, used %v; the message is %s's", scheme, live, used, owner)
 		}
 		c.drain(t)
-		save(t, c, c.nextID("edit"), map[string]any{"message_id": message, "room_id": room, "body": map[string]any{"text": "still mine"}})
-		watcher.drain(t)
-		update := react(t, c, c.nextID("react"), message, "🎉")
-		if sets := update["reactions"].([]any); len(sets) != 1 || sets[0].(map[string]any)["from"].(map[string]any)["user_id"] != id {
-			t.Fatalf("%s: the reaction sets after a change: %#v", scheme, update)
-		}
+		c.expectError(t, "message", c.nextID("edit"), map[string]any{"message_id": message, "room_id": room, "body": map[string]any{"text": "mine?"}}, CodeDenied)
+		// The account is in the guest's rooms, as itself.
 		list := listRooms(t, c, map[string]any{"room_id": room, "members": true})
 		if members := memberIDs(list["joined"].([]any)[0].(map[string]any)); !slices.Contains(members, id) || slices.Contains(members, c.guestID) {
 			t.Fatalf("%s: the room's members %v", scheme, members)
 		}
-		// The room's creator may still remove people from it.
-		if _, kicked := c.request(t, "command", c.nextID("kick"), map[string]any{"room_id": room, "body": map[string]any{"text": "/kick @" + watcher.userID, "mentions": []any{watcher.userID}}}); kicked == nil {
-			t.Fatalf("%s: /kick in its room failed", scheme)
-		}
 		watcher.drain(t)
-		c.drain(t)
 	}
 }

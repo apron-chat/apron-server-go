@@ -349,10 +349,10 @@ func TestEmailAdditions(t *testing.T) {
 	stranger := dialTestClient(t, httpServer)
 	stranger.expectError(t, "auth", "link-other-account", map[string]any{"scheme": "email", "token": linkToken(t, message)}, CodeDenied)
 	victim.drain(t)
-	// Approving adds the address to the guest, which becomes an account
-	// under a user_id of its own (§3.3.3), keeping its messages and rooms,
-	// with the roles its address was granted: it replies with the account
-	// as you (§4.11.3), with its new roles.
+	// Approving makes an account of the address, a separate user with a
+	// user_id of its own (§3.3.3) and the roles its address was granted,
+	// which replies as you (§4.11.3) and then joins the guest's rooms as
+	// itself. What the guest posted stays the guest's.
 	before, result := approve(t, victim, message.Code, nil)
 	if len(before) != 0 || result["you"] == nil || result["token"] != nil {
 		t.Fatalf("approving an addition: %#v after %#v", result, before)
@@ -361,7 +361,12 @@ func TestEmailAdditions(t *testing.T) {
 		t.Fatalf("profile after the addition: %#v", you)
 	}
 	victim.userID = result["you"].(map[string]any)["user_id"].(string)
-	save(t, victim, "edit", map[string]any{"message_id": secret, "room_id": diary, "body": map[string]any{"text": "still mine"}})
+	expectJoinedDefault(t, victim, victim.userID)
+	if record := joinedRecord(t, victim.read(t), victim.userID); record["room_id"] != diary {
+		t.Fatalf("the account joined %#v, want the diary", record)
+	}
+	victim.expectError(t, "message", "edit", map[string]any{"message_id": secret, "room_id": diary, "body": map[string]any{"text": "still mine"}}, CodeDenied)
+	historyPage(t, victim, diary, map[string]any{})
 	// An account holds one address.
 	propose(t, victim, "second@example.com")
 	victim.expectError(t, "auth", "second", map[string]any{"scheme": "email", "token": pendingCode(t, app, victim.userID)}, CodeDenied)
@@ -893,10 +898,12 @@ func TestEmailAccountsPersist(t *testing.T) {
 		t.Fatalf("sign-in: %#v", result)
 	}
 	guest := dialTestClient(t, httpServer)
-	id, _ := save(t, guest, "hello", map[string]any{"body": map[string]any{"text": "hello"}})
+	guestMessage, _ := save(t, guest, "hello", map[string]any{"body": map[string]any{"text": "hello"}})
 	propose(t, guest, "bob@example.com")
 	_, added := approve(t, guest, mailbox.receive(t).Code, nil)
 	guest.userID = added["you"].(map[string]any)["user_id"].(string)
+	guest.drain(t)
+	id, _ := save(t, guest, "account", map[string]any{"body": map[string]any{"text": "the account's"}})
 	stop()
 
 	_, httpServer, _ = startWith(t, kept, t.TempDir(), configure)
@@ -912,6 +919,8 @@ func TestEmailAccountsPersist(t *testing.T) {
 	}
 	back.drain(t)
 	save(t, back, "edit", map[string]any{"message_id": id, "body": map[string]any{"text": "edited"}})
+	// What the guest posted is the guest's.
+	back.expectError(t, "message", "guest-edit", map[string]any{"message_id": guestMessage, "body": map[string]any{"text": "edited"}}, CodeDenied)
 }
 
 func TestNormalizeEmail(t *testing.T) {

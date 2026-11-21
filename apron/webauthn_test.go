@@ -181,24 +181,20 @@ func (a *testAuthenticator) assertion(t *testing.T, options map[string]any, orig
 }
 
 // expectRegistered reads, on a watcher who shares general with c, the join
-// of the guest c was, then its new user_id as an account: `user` with `new`
-// and `old` (§3.3.3).
+// of the guest c was, then its departure and the join of the account it
+// made, a separate user (§3.3.3).
 func expectRegistered(t *testing.T, watcher, c *testClient) {
 	t.Helper()
 	expectMembership(t, watcher, "general", c.guestID, true)
-	expectRenamed(t, watcher, c)
+	expectSwitched(t, watcher, c, "general")
 }
 
-// expectRenamed reads `user` with c's account as `new` and the guest it was
-// as `old`.
-func expectRenamed(t *testing.T, watcher, c *testClient) {
+// expectSwitched reads the guest c was leaving roomID, then c's account
+// joining it, with no `user` carrying `old` between them.
+func expectSwitched(t *testing.T, watcher, c *testClient, roomID string) {
 	t.Helper()
-	params := notificationParams(t, watcher.read(t), "user")
-	newer, _ := params["new"].(map[string]any)
-	older, _ := params["old"].(map[string]any)
-	if newer["user_id"] != c.userID || older["user_id"] != c.guestID {
-		t.Fatalf("user = %#v, want new %s and old %s", params, c.userID, c.guestID)
-	}
+	expectMembership(t, watcher, roomID, c.guestID, false)
+	expectMembership(t, watcher, roomID, c.userID, true)
 }
 
 func registerTestPasskey(t *testing.T, c *testClient, a *testAuthenticator) map[string]any {
@@ -211,11 +207,13 @@ func registerTestPasskey(t *testing.T, c *testClient, a *testAuthenticator) map[
 		t.Fatalf("registration did not require resident key and user verification: %#v", publicKey)
 	}
 	result := passkeyResult(t, passkeyCall(t, c, "register-end", "register", "finish", map[string]any{"credential": a.registration(t, options, testPasskeyOrigin)}))
-	// The guest becomes an account under a user_id of its own (§3.3.3).
+	// The guest makes an account, a separate user with a user_id of its
+	// own (§3.3.3), which joins the guest's room after the result.
 	if id, _ := result["you"].(map[string]any)["user_id"].(string); id == guest || strings.HasPrefix(id, "guest_") {
 		t.Fatalf("registration kept the guest's user_id: %#v", result)
 	}
 	c.guestID, c.userID = c.userID, result["you"].(map[string]any)["user_id"].(string)
+	expectJoinedDefault(t, c, c.userID)
 	return result
 }
 
