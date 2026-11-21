@@ -215,7 +215,7 @@ func TestLobbyVisibility(t *testing.T) {
 			"edit":            {"room_set", map[string]any{"room_id": "general", "title": "Mine"}},
 			"new thread":      {"room_set", map[string]any{"parent_room_id": "general"}},
 			"post":            {"message", map[string]any{"room_id": "general", "body": map[string]any{"text": "hi"}}},
-			"reply":           {"message", map[string]any{"room_id": "lobby", "reply_to": inGeneral, "body": map[string]any{"text": "hi"}}},
+			"reply":           {"message", map[string]any{"room_id": "lobby", "reply_to": map[string]any{"message_id": inGeneral}, "body": map[string]any{"text": "hi"}}},
 			"react":           {"reactions", map[string]any{"message_id": inGeneral, "emojis": []any{"👍"}}},
 			"command":         {"command", map[string]any{"room_id": "general", "body": map[string]any{"text": "/help"}}},
 			"lobby edit":      {"room_set", map[string]any{"room_id": "lobby", "title": "Mine"}},
@@ -287,7 +287,7 @@ func TestLobbyInvite(t *testing.T) {
 
 	// /help lists /welcome and /toggle to admins and moderators only.
 	before, _ := commandIn(t, ada, "general", "/help")
-	if text := noticeText(t, before[0]); !strings.Contains(text, "`/welcome <user_id>`") || !strings.Contains(text, "`/toggle [lobby]`") {
+	if text := noticeText(t, before[0]); !strings.Contains(text, "`/welcome <user_id>`") || !strings.Contains(text, "`/toggle [lobby [open|close]]`") {
 		t.Fatalf("an admin's /help: %q", text)
 	}
 	guest.drain(t)
@@ -543,7 +543,13 @@ func TestLobbyToggle(t *testing.T) {
 	}
 	ada.drain(t)
 
-	before, reply := commandIn(t, ada, "general", "/toggle lobby")
+	if before, reply := commandIn(t, ada, "general", "/toggle lobby open"); errorCode(reply) != 0 || noticeText(t, before[0]) != "The Public Lobby is open already." {
+		t.Fatalf("/toggle lobby open = %#v after %#v", reply, before)
+	}
+	if _, reply := commandIn(t, ada, "general", "/toggle lobby shut"); errorCode(reply) != CodeInvalidParams {
+		t.Fatalf("/toggle lobby shut = %#v", reply)
+	}
+	before, reply := commandIn(t, ada, "general", "/toggle lobby close")
 	if errorCode(reply) != 0 || len(before) != 2 {
 		t.Fatalf("/toggle lobby = %#v after %#v", reply, before)
 	}
@@ -555,6 +561,10 @@ func TestLobbyToggle(t *testing.T) {
 	}
 	if text := noticeText(t, guest.read(t)); text != "The Public Lobby is closed" {
 		t.Fatalf("the guest's notice %q", text)
+	}
+	// Then the error about the connection as a whole (§1.1), without id.
+	if frame := guest.read(t); !reflect.DeepEqual(frame, map[string]any{"error": map[string]any{"code": float64(CodeDenied), "message": "The Public Lobby is closed. Ask for an invite link."}}) {
+		t.Fatalf("the guest's error %#v", frame)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	_, _, err := guest.ws.Read(ctx)
@@ -601,6 +611,9 @@ func TestLobbyToggle(t *testing.T) {
 	propose(t, ada, "ada@example.com")
 	signInByEmail(t, ada, mailbox.receive(t).Code, nil)
 	ada.drain(t)
+	if before, reply := commandIn(t, ada, "general", "/toggle lobby close"); errorCode(reply) != 0 || noticeText(t, before[0]) != "The Public Lobby is closed already." {
+		t.Fatalf("/toggle lobby close when closed = %#v after %#v", reply, before)
+	}
 	if before, reply := commandIn(t, ada, "general", "/toggle lobby"); errorCode(reply) != 0 || !strings.HasPrefix(noticeText(t, before[len(before)-1]), "The Public Lobby is open again") {
 		t.Fatalf("/toggle lobby = %#v after %#v", reply, before)
 	}
@@ -702,7 +715,7 @@ func TestAccessModeSwitches(t *testing.T) {
 	}
 }
 
-// Private mode is what DisableGuests was.
+// Private mode, like DisableGuests, offers no guests.
 func TestPrivateMode(t *testing.T) {
 	for _, configure := range []func(*Config){
 		func(config *Config) { config.Access.Mode = AccessPrivate },
@@ -987,5 +1000,321 @@ func TestPrivateModeWelcome(t *testing.T) {
 	historyPage(t, wes, "general", map[string]any{})
 	if joined := roomIDs(t, listRooms(t, wes, map[string]any{})["joined"]); !slices.Contains(joined, "general") {
 		t.Fatalf("wes joined %v", joined)
+	}
+}
+
+// /welcome's target: the one mention, whatever the text; else the one word
+// typed; else the author of the message it replies to. Several mentions,
+// or no target, are invalid_params, and a guest that left is named so.
+func TestLobbyWelcomeTarget(t *testing.T) {
+	_, mailbox, httpServer := lobbyServer(t)
+	ada, _ := emailSignUp(t, httpServer, mailbox, "ada@example.com", "ada", "general")
+	joinRoom(t, ada, "lobby")
+	first, _ := lobbyGuest(t, httpServer)
+	second, _ := lobbyGuest(t, httpServer)
+	third, _ := lobbyGuest(t, httpServer)
+	first.drain(t)
+	_, posted := first.request(t, "message", first.nextID("intro"), map[string]any{"room_id": "lobby", "body": map[string]any{"text": "Hi"}})
+	intro := posted["message_id"].(string)
+	ada.drain(t)
+	welcome := func(params map[string]any) (string, int) {
+		t.Helper()
+		params["room_id"] = "lobby"
+		id := ada.nextID("welcome")
+		ada.write(t, map[string]any{"method": "command", "id": id, "params": params})
+		var notices []string
+		for {
+			frame := ada.read(t)
+			if frame["id"] == id {
+				if code := errorCode(frame); code != 0 {
+					return frame["error"].(map[string]any)["message"].(string), code
+				}
+				return notices[len(notices)-1], 0
+			}
+			if params, _ := frame["params"].(map[string]any); frame["method"] == "message" && params["from"].(map[string]any)["user_id"] == privateNoticeID {
+				notices = append(notices, noticeText(t, frame))
+			}
+		}
+	}
+	// The mention wins over the typed word.
+	if text, code := welcome(map[string]any{"body": map[string]any{"text": "/welcome @" + second.userID, "mentions": []any{first.userID}}}); code != 0 || !strings.Contains(text, "@"+first.userID+" is welcomed") {
+		t.Fatalf("mention over the typed word: %q %d", text, code)
+	}
+	// The typed word wins over the reply.
+	if text, code := welcome(map[string]any{"reply_to": map[string]any{"message_id": intro}, "body": map[string]any{"text": "/welcome " + second.userID}}); code != 0 || !strings.Contains(text, "@"+second.userID+" is welcomed") {
+		t.Fatalf("typed word over the reply: %q %d", text, code)
+	}
+	// The reply's author, without either.
+	if text, code := welcome(map[string]any{"reply_to": map[string]any{"message_id": intro}, "body": map[string]any{"text": "/welcome"}}); code != 0 || !strings.Contains(text, "@"+first.userID+" is welcomed already") {
+		t.Fatalf("reply: %q %d", text, code)
+	}
+	// Several mentions, with or without a reply, and nothing at all.
+	for name, params := range map[string]map[string]any{
+		"mentions":            {"body": map[string]any{"text": "/welcome @a @b", "mentions": []any{first.userID, third.userID}}},
+		"mentions with reply": {"reply_to": map[string]any{"message_id": intro}, "body": map[string]any{"text": "/welcome", "mentions": []any{first.userID, third.userID}}},
+		"nothing":             {"body": map[string]any{"text": "/welcome"}},
+	} {
+		if text, code := welcome(params); code != CodeInvalidParams {
+			t.Errorf("%s: %q %d", name, text, code)
+		}
+	}
+	// A guest that left is named as one.
+	_ = third.ws.Close(websocket.StatusNormalClosure, "bye")
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		text, code := welcome(map[string]any{"body": map[string]any{"text": "/welcome " + third.userID}})
+		if code == CodeInvalidParams {
+			if text != "No guest "+third.userID+" is connected; send them an invite link instead" {
+				t.Fatalf("a departed guest: %q", text)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("/welcome of a departed guest: %q %d", text, code)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if text, code := welcome(map[string]any{"body": map[string]any{"text": "/welcome nobody"}}); code != CodeInvalidParams || text != `Unknown user "nobody"` {
+		t.Fatalf("nobody: %q %d", text, code)
+	}
+}
+
+// The Lobby's edge is like a private room's: nothing logged in the Lobby
+// names a room outside it. A move either way, and a reply in the Lobby to a
+// message outside it, are denied; a reply outside it to a Lobby message is
+// not, since members see the Lobby.
+func TestLobbyEdge(t *testing.T) {
+	_, mailbox, httpServer := lobbyServer(t)
+	ada, _ := emailSignUp(t, httpServer, mailbox, "ada@example.com", "ada", "general")
+	joinRoom(t, ada, "lobby")
+	thread, _ := saveRoom(t, ada, "thread", map[string]any{"parent_room_id": "lobby", "description": "Intros"})
+	inLobby, _ := save(t, ada, "in-lobby", map[string]any{"room_id": "lobby", "body": map[string]any{"text": "lobby"}})
+	inGeneral, _ := save(t, ada, "in-general", map[string]any{"room_id": "general", "body": map[string]any{"text": "general"}})
+	ada.drain(t)
+	for name, params := range map[string]map[string]any{
+		"move out":           {"message_id": inLobby, "room_id": "general", "body": map[string]any{"text": "lobby"}},
+		"move in":            {"message_id": inGeneral, "room_id": "lobby", "body": map[string]any{"text": "general"}},
+		"move to its thread": {"message_id": inGeneral, "room_id": thread, "body": map[string]any{"text": "general"}},
+		"reply":              {"room_id": "lobby", "reply_to": map[string]any{"message_id": inGeneral}, "body": map[string]any{"text": "re"}},
+		"reply in thread":    {"room_id": thread, "reply_to": map[string]any{"message_id": inGeneral}, "body": map[string]any{"text": "re"}},
+	} {
+		if frame := ada.call(t, "message", ada.nextID(name), params); errorCode(frame) != CodeDenied {
+			t.Errorf("%s = %#v", name, frame)
+		}
+	}
+	if frame := ada.call(t, "command", ada.nextID("append"), map[string]any{"room_id": "lobby", "reply_to": map[string]any{"message_id": inGeneral}, "body": map[string]any{"text": "/embed-append hi"}}); errorCode(frame) != CodeDenied {
+		t.Errorf("/embed-append reply = %#v", frame)
+	}
+	// Within the Lobby, and replies from outside into it, as before.
+	if _, result := ada.request(t, "message", ada.nextID("into thread"), map[string]any{"message_id": inLobby, "room_id": thread, "body": map[string]any{"text": "lobby"}}); result["message_id"] != inLobby {
+		t.Fatalf("a move within the Lobby: %#v", result)
+	}
+	if _, result := ada.request(t, "message", ada.nextID("reply out"), map[string]any{"room_id": "general", "reply_to": map[string]any{"message_id": inLobby}, "body": map[string]any{"text": "re"}}); result["message_id"] == nil {
+		t.Fatalf("a reply in general to the Lobby: %#v", result)
+	}
+}
+
+// In private mode the operator's word lets in a waiting account left from
+// lobby mode: a --role grant or an allowlist entry naming it clears its
+// mark, and it signs in as a member, in general.
+func TestPrivateModeAdmitsNamedWaitingAccounts(t *testing.T) {
+	for name, configure := range map[string]func(*Config){
+		"role": func(config *Config) {
+			config.Roles = map[string][]string{"staff": {"wes@example.com"}}
+		},
+		"allowlist": func(config *Config) {
+			config.Extensions = []Extension{testExtension{"private", func(r *Registrar) error {
+				p, err := ParsePrincipal("wes@example.com")
+				if err != nil {
+					return err
+				}
+				return r.RestrictSignIn().Allow(p)
+			}}}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			memory := store.NewMemory()
+			mailbox := make(testMailbox, 16)
+			_, httpServer, stop := startWith(t, memory, t.TempDir(), func(config *Config) {
+				config.Access.Mode = AccessLobby
+				config.EmailSender = mailbox
+				config.WebAuthn = nil
+			})
+			emailSignUp(t, httpServer, mailbox, "wes@example.com", "wes", "lobby")
+			stop()
+
+			app, httpServer, _ := startWith(t, memory, t.TempDir(), func(config *Config) {
+				config.Access.Mode = AccessPrivate
+				config.EmailSender = mailbox
+				config.WebAuthn = nil
+				configure(config)
+			})
+			if app.Waiting("wes") {
+				t.Fatal("wes still waits")
+			}
+			ageSends(app, "wes@example.com", time.Minute)
+			wes, _ := dialRaw(t, httpServer)
+			propose(t, wes, "wes@example.com")
+			_, result := signInByEmail(t, wes, mailbox.receive(t).Code, nil)
+			if you := result["you"].(map[string]any); you["user_id"] != "wes" || slices.Contains(rolesOf(you), any("waiting")) {
+				t.Fatalf("wes signed in as %#v", you)
+			}
+			wes.drain(t)
+			if joined := roomIDs(t, listRooms(t, wes, map[string]any{})["joined"]); !slices.Contains(joined, "general") {
+				t.Fatalf("wes joined %v", joined)
+			}
+		})
+	}
+}
+
+// A waiting account is never in no room: one the Lobby's move, or its own
+// leave while the server was public, took out of every room joins the
+// Lobby at the next start in lobby mode.
+func TestLobbyWaitingAccountsAreNeverRoomless(t *testing.T) {
+	memory := store.NewMemory()
+	mailbox := make(testMailbox, 16)
+	start := func(mode AccessMode, lobby string) (*Server, *httptest.Server, func()) {
+		return startWith(t, memory, t.TempDir(), func(config *Config) {
+			config.Access = Access{Mode: mode, LobbyRoom: lobby}
+			config.EmailSender = mailbox
+			config.WebAuthn = nil
+		})
+	}
+	joinedBy := func(httpServer *httptest.Server, token any) []string {
+		t.Helper()
+		c, _ := dialRaw(t, httpServer)
+		c.result(t, "auth", "resume", map[string]any{"scheme": "token", "token": token})
+		c.drain(t)
+		return roomIDs(t, listRooms(t, c, map[string]any{})["joined"])
+	}
+	_, httpServer, stop := start(AccessLobby, "lobby")
+	_, wes := emailSignUp(t, httpServer, mailbox, "wes@example.com", "wes", "lobby")
+	stop()
+
+	// The Lobby is another room now.
+	_, httpServer, stop = start(AccessLobby, "hall")
+	if joined := joinedBy(httpServer, wes["token"]); !reflect.DeepEqual(joined, []string{"hall"}) {
+		t.Fatalf("after the Lobby moved, wes joined %v", joined)
+	}
+	stop()
+
+	// It leaves the Lobby while the server is public.
+	_, httpServer, stop = start(AccessPublic, "")
+	c, _ := dialRaw(t, httpServer)
+	c.result(t, "auth", "resume", map[string]any{"scheme": "token", "token": wes["token"]})
+	c.userID = "wes"
+	c.drain(t)
+	leaveRoom(t, c, "hall")
+	stop()
+	_, httpServer, _ = start(AccessLobby, "hall")
+	if joined := joinedBy(httpServer, wes["token"]); !reflect.DeepEqual(joined, []string{"hall"}) {
+		t.Fatalf("after leaving the Lobby, wes joined %v", joined)
+	}
+}
+
+// A waiting account that was a member while the server was public keeps
+// none of a member's powers once back in lobby mode: the rooms it made
+// and joined are gone from its sight, so it kicks, edits, and posts in
+// none, and it welcomes, toggles, and touches custom emoji no more.
+func TestLobbyAfterAPublicSpell(t *testing.T) {
+	memory := store.NewMemory()
+	mailbox := make(testMailbox, 16)
+	start := func(mode AccessMode) (*Server, *httptest.Server, func()) {
+		return startWith(t, memory, t.TempDir(), func(config *Config) {
+			config.Access.Mode = mode
+			config.EmailSender = mailbox
+			config.WebAuthn = nil
+		})
+	}
+	resume := func(httpServer *httptest.Server, token any) *testClient {
+		t.Helper()
+		c, _ := dialRaw(t, httpServer)
+		c.result(t, "auth", "resume", map[string]any{"scheme": "token", "token": token})
+		c.userID = "wes"
+		c.drain(t)
+		return c
+	}
+	_, httpServer, stop := start(AccessLobby)
+	_, wes := emailSignUp(t, httpServer, mailbox, "wes@example.com", "wes", "lobby")
+	stop()
+
+	_, httpServer, stop = start(AccessPublic)
+	c := resume(httpServer, wes["token"])
+	mine, _ := saveRoom(t, c, "mine", map[string]any{"title": "Wes's"})
+	joinRoom(t, c, "general")
+	stop()
+
+	app, httpServer, _ := start(AccessLobby)
+	c = resume(httpServer, wes["token"])
+	if joined := roomIDs(t, listRooms(t, c, map[string]any{})["joined"]); !reflect.DeepEqual(joined, []string{"lobby"}) {
+		t.Fatalf("wes joined %v", joined)
+	}
+	for name, request := range map[string]struct {
+		method string
+		params map[string]any
+		code   int
+	}{
+		"history of its room": {"history", map[string]any{"room_id": mine}, CodeInvalidParams},
+		"edit its room":       {"room_set", map[string]any{"room_id": mine, "title": "Mine"}, CodeInvalidParams},
+		"kick in its room":    {"command", map[string]any{"room_id": mine, "body": map[string]any{"text": "/kick @ada", "mentions": []any{"ada"}}}, CodeInvalidParams},
+		"post in general":     {"message", map[string]any{"room_id": "general", "body": map[string]any{"text": "hi"}}, CodeInvalidParams},
+		"welcome":             {"command", map[string]any{"room_id": "lobby", "body": map[string]any{"text": "/welcome wes"}}, CodeDenied},
+		"toggle":              {"command", map[string]any{"room_id": "lobby", "body": map[string]any{"text": "/toggle lobby"}}, CodeDenied},
+		"emoji remove":        {"command", map[string]any{"room_id": "lobby", "body": map[string]any{"text": "/emoji remove :wave:"}}, CodeDenied},
+		"new room":            {"room_set", map[string]any{"title": "Another"}, CodeDenied},
+	} {
+		if frame := c.call(t, request.method, c.nextID(name), request.params); errorCode(frame) != request.code {
+			t.Errorf("%s = %#v, want %d", name, frame, request.code)
+		}
+	}
+	if !app.Waiting("wes") {
+		t.Fatal("wes does not wait")
+	}
+}
+
+// waiting and welcomed are the server's: no invitation or identity grants
+// them as stored roles.
+func TestServerRolesAreNotGranted(t *testing.T) {
+	app, httpServer := externalTestServer(t, &Identity{Subject: "idp:1", Name: "Ext", UserID: "ext", Roles: []string{"Welcomed", "staff", "waiting"}})
+	if _, err := app.Invite(context.Background(), InvitationOptions{Roles: []string{"Waiting"}}); err == nil {
+		t.Fatal("an invitation granted waiting")
+	}
+	c, _ := dialRaw(t, httpServer)
+	page := c.result(t, "auth", "begin", map[string]any{"scheme": "external"})["external"].(map[string]any)["url"].(string)
+	client := oauthtest.New(t, httpServer.URL)
+	result := c.result(t, "auth", "finish", redemption(client, externalCode(t, client, page, httpServer.URL)))
+	if roles := rolesOf(result["you"].(map[string]any)); !reflect.DeepEqual(roles, []any{"staff"}) {
+		t.Fatalf("roles %v", roles)
+	}
+}
+
+// A passkey registration without an invitation, on a server without
+// guests, is refused in words that fit why.
+func TestPasskeySignUpRefusals(t *testing.T) {
+	for want, configure := range map[string]func(*Config){
+		"This server is invite-only; ask for an invite link":                             func(c *Config) { c.Access.Mode = AccessPrivate },
+		"The Public Lobby is closed; ask for an invite link":                             func(c *Config) { c.Access.Mode = AccessLobby },
+		"Make an account another way, or present an invitation, before adding a passkey": func(c *Config) { c.DisableGuests = true },
+		"Only those this server lets in may make an account; ask for an invite link": func(c *Config) {
+			c.Extensions = []Extension{testExtension{"private", func(r *Registrar) error {
+				r.RestrictSignIn()
+				return nil
+			}}}
+		},
+	} {
+		config := DefaultConfig()
+		config.WebAuthn = testWebAuthn(t)
+		configure(&config)
+		app, httpServer := newTestServer(t, config)
+		if config.Access.Mode == AccessLobby {
+			app.mu.Lock()
+			app.setLobbyClosedLocked(true)
+			app.unlock()
+		}
+		c, _ := dialOrigin(t, httpServer, testPasskeyOrigin)
+		refusal := passkeyCall(t, c, "begin", "register", "begin", nil)
+		if message := refusal["error"].(map[string]any)["message"]; errorCode(refusal) != CodeDenied || message != want {
+			t.Errorf("refusal %#v, want %q", refusal, want)
+		}
 	}
 }

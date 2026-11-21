@@ -318,10 +318,15 @@ func TestAccessOptions(t *testing.T) {
 	if config, err = serverConfig(*options); err != nil || config.Access != (apron.Access{Mode: apron.AccessLobby, LobbyRoom: "hello"}) {
 		t.Fatalf("lobby access %#v, %v", config.Access, err)
 	}
-	// --disable-guests is private mode, and refused with lobby mode.
+	// --disable-guests stays what it was, alone or with private mode, and
+	// is refused with lobby mode.
 	options, _ = parse(t, "--disable-guests")
-	if config, err = serverConfig(*options); err != nil || config.Access.Mode != apron.AccessPrivate || !config.DisableGuests {
+	if config, err = serverConfig(*options); err != nil || config.Access.Mode != apron.AccessPublic || !config.DisableGuests {
 		t.Fatalf("--disable-guests: %#v, %v", config.Access, err)
+	}
+	options, _ = parse(t, "--disable-guests", "--access.mode", "private")
+	if config, err = serverConfig(*options); err != nil || config.Access.Mode != apron.AccessPrivate || !config.DisableGuests {
+		t.Fatalf("--disable-guests with private mode: %#v, %v", config.Access, err)
 	}
 	options, _ = parse(t, "--disable-guests", "--access.mode", "lobby")
 	if _, err = serverConfig(*options); err == nil {

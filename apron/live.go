@@ -154,7 +154,7 @@ func (s *Server) postPendingLocked(e *embedState) bool {
 		"from":       from,
 		"body":       body,
 	}
-	if target := s.visibleMessageLocked(u, p.replyTo); target != nil && !r.revealsTo(s.rooms[target.roomID]) {
+	if target := s.visibleMessageLocked(u, p.replyTo); target != nil && !s.revealsLocked(r, s.rooms[target.roomID]) {
 		snapshot["reply_to"] = map[string]any{"message_id": p.replyTo}
 	}
 	m := &messageState{id: messageID, from: from, owner: u.id, reactions: make(map[string]reactionSet)}
@@ -740,7 +740,7 @@ func (s *Server) liveCommand(c *client, r *roomState, body map[string]any, kind,
 		return nil, invalidParams("/embed-%s takes no embeds: it makes its own", kind)
 	}
 	if replyTo != "" {
-		if target := s.visibleMessageLocked(c.user, replyTo); target != nil && r.revealsTo(s.rooms[target.roomID]) {
+		if target := s.visibleMessageLocked(c.user, replyTo); target != nil && s.revealsLocked(r, s.rooms[target.roomID]) {
 			return nil, &Error{Code: CodeDenied, Message: "A reply cannot quote a message that fewer people can see"}
 		}
 	}

@@ -672,7 +672,8 @@ func (s *Server) grantRolesLocked(u *userState) bool {
 			}
 		}
 		for _, granted := range u.granted {
-			roles = append(roles, granted...)
+			// Grants stored before the lobby's roles were the server's.
+			roles = append(roles, slices.DeleteFunc(slices.Clone(granted), serverRole)...)
 		}
 		if u.botOf != "" {
 			roles = append(roles, "bot")

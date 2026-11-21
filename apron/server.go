@@ -227,10 +227,9 @@ type Config struct {
 	// slog.Default().
 	Logger *slog.Logger
 	// DisableGuests stops offering guest sign-in (§3.2), so only accounts
-	// sign in: by passkey, email, or an extension's external sign-in.
-	//
-	// Deprecated: it is Access.Mode AccessPrivate, which it sets; with
-	// AccessLobby, Open refuses it.
+	// sign in: by passkey, email, or an extension's external sign-in, which
+	// still make new accounts as without it. Open refuses it with
+	// AccessLobby; AccessPrivate has no guests, and no sign-up, anyway.
 	DisableGuests bool
 	// Access is who may see what before being admitted: public, the
 	// default, lobby, or private (access.go, SERVER.md Access modes).

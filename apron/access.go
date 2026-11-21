@@ -13,12 +13,12 @@ import (
 	"github.com/coder/websocket"
 
 	"github.com/apron-chat/apron-server-go/internal/auth/passkey"
+	"github.com/apron-chat/apron-server-go/internal/authn"
 )
 
 // Access modes (SERVER.md, Access modes). A server is public, the
 // default, where anyone may sign in as a guest and see every room that is
-// not private; private, where only accounts sign in (the old
-// DisableGuests); or lobby, where newcomers see one room, the Lobby, and
+// not private; private, where nobody signs themselves up; or lobby, where newcomers see one room, the Lobby, and
 // its threads until an admin or moderator welcomes them in.
 //
 // In lobby mode the users limited to the Lobby, restricted users, are
@@ -58,8 +58,7 @@ const lobbyTitle = "Public Lobby"
 
 // Access is the server's access mode (Config.Access).
 type Access struct {
-	// Mode is public, lobby, or private; empty is public, unless
-	// Config.DisableGuests, which makes it private.
+	// Mode is public, lobby, or private; empty is public.
 	Mode AccessMode
 	// LobbyRoom is the Lobby's room_id in lobby mode, DefaultLobbyRoom when
 	// empty. The server creates it, titled "Public Lobby", unless a room
@@ -67,22 +66,18 @@ type Access struct {
 	LobbyRoom string
 }
 
-// normalized checks the access configuration and fills in its defaults,
-// with DisableGuests, the deprecated way to say private.
+// normalized checks the access configuration and fills in its defaults.
+// DisableGuests goes with public mode, where it is what it always was (no
+// guests, and sign-up open to every scheme), and with private mode, which
+// has no guests anyway; lobby mode is for guests.
 func (a Access) normalized(disableGuests bool) (Access, error) {
 	switch a.Mode {
 	case "":
 		a.Mode = AccessPublic
-		if disableGuests {
-			a.Mode = AccessPrivate
-		}
 	case AccessPublic, AccessPrivate:
-		if disableGuests {
-			a.Mode = AccessPrivate
-		}
 	case AccessLobby:
 		if disableGuests {
-			return a, errors.New("Config.DisableGuests (--disable-guests) is access mode private, which cannot be combined with access mode lobby")
+			return a, errors.New("Config.DisableGuests (--disable-guests) offers no guests, which lobby mode is for: use one or the other")
 		}
 	default:
 		return a, fmt.Errorf("unknown access mode %q: use public, lobby, or private", a.Mode)
@@ -116,6 +111,10 @@ const (
 	lobbyWelcomed = "welcomed"
 )
 
+// serverRole reports a role only the server gives, computed in lobby mode,
+// which no invitation or identity may grant as a stored role.
+func serverRole(role string) bool { return role == lobbyWaiting || role == lobbyWelcomed }
+
 // lobbyState is how lobby mode limits u: "waiting" for a guest, or an
 // account that signed itself up, until someone welcomes it in; "welcomed"
 // for a guest that was welcomed, which becomes a member once it adds a way
@@ -147,6 +146,43 @@ func (u *userState) mayWelcome() bool {
 	return u.access != nil && (u.access.lobby != "" || u.access.private) && u.botOf == "" && u.moderates()
 }
 
+// vouchedLocked reports whether the operator names an account: an
+// extension's allowlist, or Config.Roles granting it a role.
+func (s *Server) vouchedLocked(u *userState) bool {
+	if s.allowlist != nil && s.listedLocked(u) {
+		return true
+	}
+	holders := []Principal{UserID(u.id)}
+	for scheme, subject := range u.identities {
+		holders = append(holders, principalOf(authn.Identity{Scheme: scheme, Subject: subject}))
+	}
+	for _, granted := range s.roleHolders {
+		if slices.ContainsFunc(granted, func(p Principal) bool { return slices.Contains(holders, p) }) {
+			return true
+		}
+	}
+	return false
+}
+
+// admitVouchedLocked lets in, in private mode, the waiting accounts lobby
+// mode left that the operator names (vouchedLocked).
+func (s *Server) admitVouchedLocked() {
+	for _, u := range s.users {
+		if u.leftWaiting() && s.vouchedLocked(u) {
+			s.admitWaitingLocked(u)
+		}
+	}
+}
+
+// admitWaitingLocked makes a waiting account left from lobby mode a
+// member, in private mode: its mark is cleared, and it joins the default
+// room.
+func (s *Server) admitWaitingLocked(u *userState) {
+	u.waiting = false
+	s.touchUser(u.id)
+	s.admitToRoomsLocked(u)
+}
+
 // leftWaiting reports a waiting account in private mode: one that signed
 // itself up in lobby mode, and may not sign in until it is welcomed.
 func (u *userState) leftWaiting() bool {
@@ -159,15 +195,35 @@ func (u *userState) allows(r *roomState) bool {
 	if !u.scope.allows(r) {
 		return false
 	}
-	if !u.restricted() {
-		return true
-	}
-	for room := r; room != nil; room = room.parent {
-		if room.id == u.access.lobby {
+	return !u.restricted() || inLobby(r, u.access.lobby)
+}
+
+// inLobby reports whether r is the Lobby, named lobby, or one of its
+// threads at any depth.
+func inLobby(r *roomState, lobby string) bool {
+	for room := r; room != nil && lobby != ""; room = room.parent {
+		if room.id == lobby {
 			return true
 		}
 	}
 	return false
+}
+
+// revealsLocked reports whether a record in r, such as a move snapshot or
+// a reply, would name to someone a room they cannot see: to (revealsTo)
+// as private rooms go, and in lobby mode a room outside the Lobby named in
+// it, which restricted users see.
+func (s *Server) revealsLocked(r, to *roomState) bool {
+	lobby := s.access.lobby
+	return inLobby(r, lobby) && !inLobby(to, lobby) || r.revealsTo(to)
+}
+
+// crossesLobbyLocked reports whether a and b lie on either side of the
+// Lobby's edge in lobby mode: a move between them would take a message out
+// of restricted users' sight, or show them where it was.
+func (s *Server) crossesLobbyLocked(a, b *roomState) bool {
+	lobby := s.access.lobby
+	return inLobby(a, lobby) != inLobby(b, lobby)
 }
 
 // displayRoles are the roles u's user objects carry: those it holds, and
@@ -243,10 +299,36 @@ func (s *Server) openLobbyLocked() error {
 // confineLocked takes a restricted user out of the rooms it may no longer
 // see, as a scope does (scope.go), such as a waiting account that joined
 // other rooms while the server was public.
+//
+// It then joins the Lobby, the one room a restricted user sees, so that it
+// is never in no room at all, as when the Lobby's room_id changed between
+// restarts, or it left the Lobby while the server was public.
 func (s *Server) confineLocked(u *userState) {
-	if u.restricted() {
-		s.applyScopeLocked(u)
+	if !u.restricted() {
+		return
 	}
+	s.applyScopeLocked(u)
+	if lobby := s.lobbyRoomLocked(); lobby != nil && u.account() {
+		s.joinLocked(u, lobby)
+	}
+}
+
+// noSignUpLocked says why a passkey registration makes a new account only
+// with an invitation, on a server without guests: the Lobby is closed, the
+// server is private, an allowlist names who may sign in, or there are no
+// guests to start from (DisableGuests). Empty where guests are allowed.
+func (s *Server) noSignUpLocked() string {
+	switch {
+	case s.guestsAllowedLocked():
+		return ""
+	case s.access.lobby != "" && s.access.closed:
+		return "The Public Lobby is closed; ask for an invite link"
+	case s.access.private:
+		return inviteOnly().Message
+	case s.allowlist != nil:
+		return "Only those this server lets in may make an account; ask for an invite link"
+	}
+	return "Make an account another way, or present an invitation, before adding a passkey"
 }
 
 // restrictedRefusal refuses a restricted user what is not for the Lobby.
@@ -277,9 +359,7 @@ func (s *Server) welcomeLocked(target *userState, by string) string {
 	if target.leftWaiting() {
 		// Private mode has no Lobby: the account, signed out at start,
 		// signs in as a member from now on, in general.
-		target.waiting = false
-		s.touchUser(target.id)
-		s.admitToRoomsLocked(target)
+		s.admitWaitingLocked(target)
 		return fmt.Sprintf("@%s is in: they may sign in as a member now.", target.id)
 	}
 	switch target.lobbyState() {
@@ -363,9 +443,11 @@ func (s *Server) viewChangedLocked(u *userState) {
 	}
 }
 
-// Admit lets a user in from the Lobby in lobby mode, as /welcome does: a
-// waiting account becomes a member at once, and a connected guest becomes
-// welcomed, a member once it signs up. It returns once that is stored.
+// Admit lets a user in, as /welcome does: in lobby mode a waiting account
+// becomes a member at once, and a connected guest becomes welcomed, a
+// member once it signs up; in private mode a waiting account left from
+// lobby mode signs in as a member from then on. It returns once that is
+// stored.
 // It is an error in another mode, or for a user that does not exist; a
 // member is left as it is.
 func (s *Server) Admit(ctx context.Context, userID string) error {
@@ -418,29 +500,35 @@ func (s *Server) welcomeCommand(c *client, r *roomState, body map[string]any, ar
 	if !c.user.mayWelcome() {
 		return nil, &Error{Code: CodeDenied, Message: "Only admins and moderators can welcome people in"}
 	}
-	// Whom: the user_id typed as the one word after the command (an
-	// autocompleted @ included), else the one user mentioned (as when a
-	// client's mention text is a display name of several words), else the
-	// author of the message it replies to.
+	// Whom: the one user the command mentions, whatever its text says (a
+	// client's mention text may be a display name); else the user_id typed
+	// as the one word after the command, an autocompleted @ included; else
+	// the author of the message it replies to. Several mentions name no one.
 	var id string
-	if words := strings.Fields(args); len(words) == 1 {
-		id = strings.TrimPrefix(words[0], "@")
-	}
-	if id == "" {
-		if targets := mentions(body); len(targets) == 1 {
-			id = targets[0]
-		}
-	}
-	if id == "" && replyTo != "" {
-		if m := s.visibleMessageLocked(c.user, replyTo); m != nil {
-			id = m.owner
+	switch targets := mentions(body); {
+	case len(targets) > 1:
+		return nil, invalidParams("/welcome lets in one person at a time; mention just one")
+	case len(targets) == 1:
+		id = targets[0]
+	default:
+		if words := strings.Fields(args); len(words) == 1 {
+			id = strings.TrimPrefix(words[0], "@")
+		} else if replyTo != "" {
+			if m := s.visibleMessageLocked(c.user, replyTo); m != nil {
+				id = m.owner
+			}
 		}
 	}
 	if id == "" {
 		return nil, invalidParams("Usage: /welcome <user_id>, or /welcome in reply to their message")
 	}
 	target := s.users[id]
-	if target == nil || target.retired {
+	switch {
+	case (target == nil || target.retired) && s.usedIDs[strings.ToLower(id)]:
+		// Accounts are never retired: whoever had the user_id was a guest,
+		// who is gone, and so is anything a welcome could give it.
+		return nil, invalidParams("No guest %s is connected; send them an invite link instead", id)
+	case target == nil || target.retired:
 		return nil, invalidParams("Unknown user %q", id)
 	}
 	text := s.welcomeLocked(target, c.user.id)
@@ -461,15 +549,30 @@ func (s *Server) toggleCommand(c *client, r *roomState, _ map[string]any, args, 
 		}
 		return "open"
 	}
-	switch strings.ToLower(strings.TrimSpace(args)) {
-	case "":
-		c.enqueue(privateNotice(r.id, "- `lobby`: "+state()+"; `/toggle lobby` "+map[bool]string{true: "opens", false: "closes"}[s.access.closed]+" it"))
+	words := strings.Fields(strings.ToLower(args))
+	if len(words) == 0 {
+		c.enqueue(privateNotice(r.id, "- `lobby`: "+state()+"; `/toggle lobby` "+map[bool]string{true: "opens", false: "closes"}[s.access.closed]+" it, and `/toggle lobby open` or `close` says which"))
 		return map[string]any{}, nil
-	case "lobby":
-	default:
-		return nil, invalidParams("Usage: /toggle lobby")
 	}
-	s.setLobbyClosedLocked(!s.access.closed)
+	if words[0] != "lobby" || len(words) > 2 {
+		return nil, invalidParams("Usage: /toggle lobby [open|close]")
+	}
+	closed := !s.access.closed
+	if len(words) == 2 {
+		switch words[1] {
+		case "open":
+			closed = false
+		case "close", "closed":
+			closed = true
+		default:
+			return nil, invalidParams("Usage: /toggle lobby [open|close]")
+		}
+	}
+	if closed == s.access.closed {
+		c.enqueue(privateNotice(r.id, "The Public Lobby is "+state()+" already."))
+		return map[string]any{}, nil
+	}
+	s.setLobbyClosedLocked(closed)
 	text := "The Public Lobby is open again: anyone may come in as a guest or sign up, and see what it holds, what was posted while it was closed included."
 	if s.access.closed {
 		text = "The Public Lobby is closed: no new guests or sign-ups, and its guests were let go. Waiting accounts still see it, and can still be welcomed. Whatever is posted in it is public again once it opens."
@@ -478,9 +581,15 @@ func (s *Server) toggleCommand(c *client, r *roomState, _ map[string]any, args, 
 	return map[string]any{}, nil
 }
 
+// lobbyClosedError is the error about the connection as a whole (§1.1)
+// that each guest gets when the Lobby closes: denied, which clients do not
+// reconnect after.
+var lobbyClosedError = &Error{Code: CodeDenied, Message: "The Public Lobby is closed. Ask for an invite link."}
+
 // setLobbyClosedLocked closes the Lobby to newcomers, or opens it: closing
-// sends each guest a notice and closes its connection with 1008 (policy
-// violation); either way every connection gets a new server frame.
+// sends each guest a notice and the error lobbyClosedError, without id,
+// and closes its connection with 1008 (policy violation); either way every
+// connection gets a new server frame.
 func (s *Server) setLobbyClosedLocked(closed bool) {
 	if s.access.closed == closed {
 		return
@@ -491,7 +600,7 @@ func (s *Server) setLobbyClosedLocked(closed bool) {
 		lobby := s.lobbyRoomLocked()
 		for c := range s.clients {
 			if u := c.user; u != nil && !u.account() {
-				c.closeWithStatus(websocket.StatusPolicyViolation, "The Public Lobby is closed", privateNotice(lobby.id, "The Public Lobby is closed"))
+				c.closeWithStatus(websocket.StatusPolicyViolation, "The Public Lobby is closed", privateNotice(lobby.id, "The Public Lobby is closed"), errorResponse(nil, lobbyClosedError))
 			}
 		}
 	}

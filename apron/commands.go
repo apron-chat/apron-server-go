@@ -365,7 +365,7 @@ func lobbyCommands() []serverCommand {
 		{
 			name: "toggle",
 			forms: []commandForm{{
-				name: "toggle", group: groupRole, hint: "[lobby]", description: "show the toggles, or close the Public Lobby to newcomers or open it again",
+				name: "toggle", group: groupRole, hint: "[lobby [open|close]]", description: "show the toggles, or close the Public Lobby to newcomers or open it again; without open or close, flip it",
 				may: func(_ *Server, c *client, _ *roomState) bool { return c.user.mayWelcome() },
 			}},
 			run: (*Server).toggleCommand,

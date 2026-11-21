@@ -179,6 +179,9 @@ func (s *Server) invite(ctx context.Context, by string, options InvitationOption
 	if options.UserID != "" && !requestable(options.UserID) {
 		return Invitation{}, fmt.Errorf("apron: %q is no user_id an account can ask for", options.UserID)
 	}
+	if i := slices.IndexFunc(normalizeRoles(options.Roles), serverRole); i >= 0 {
+		return Invitation{}, fmt.Errorf("apron: an invitation may not grant %q, a role only the server gives", normalizeRoles(options.Roles)[i])
+	}
 	if len(options.Rooms) > maxInvitationRooms {
 		return Invitation{}, fmt.Errorf("apron: an invitation joins at most %d rooms", maxInvitationRooms)
 	}

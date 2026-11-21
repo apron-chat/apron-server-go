@@ -319,7 +319,7 @@ func (s *Server) authRequestLocked(c *client, req request, scheme authn.Scheme, 
 		Params: maps.Clone(req.params), Name: normalizeName(name), UserID: requested,
 		Origin: c.origin, BaseURL: c.baseURL, ClientKey: c.clientKey, Now: now,
 		Conn:   &schemeConn{s: s, c: c, scheme: scheme, name: name, userID: requested, now: now},
-		Guests: s.guestsAllowedLocked(),
+		Guests: s.guestsAllowedLocked(), NoSignUp: s.noSignUpLocked(),
 	}
 	if c.user != nil {
 		r.Account = &authn.Account{
@@ -548,7 +548,8 @@ func (s *Server) setIdentityLocked(u *userState, id authn.Identity, record jsont
 // setGrantLocked sets the roles an account's identity of scheme grants it,
 // and reports whether they changed; grantRolesLocked then applies them.
 func (s *Server) setGrantLocked(u *userState, scheme string, roles []string) bool {
-	roles = normalizeRoles(roles)
+	// The lobby's roles are the server's, whatever an identity says.
+	roles = slices.DeleteFunc(normalizeRoles(roles), serverRole)
 	if slices.Equal(u.granted[scheme], roles) {
 		return false
 	}

@@ -172,6 +172,7 @@ func (a *Allowlist) Allow(principals ...Principal) error {
 	for _, p := range principals {
 		s.allowlist.principals[p] = true
 	}
+	s.admitVouchedLocked()
 	return nil
 }
 
@@ -215,7 +216,7 @@ func (s *Server) guestsAllowedLocked() bool {
 // guestsConfiguredLocked reports whether the configuration has guests, even
 // while the Lobby is closed.
 func (s *Server) guestsConfiguredLocked() bool {
-	return s.config.Access.Mode != AccessPrivate && s.allowlist == nil
+	return !s.config.DisableGuests && s.config.Access.Mode != AccessPrivate && s.allowlist == nil
 }
 
 // admittedLocked reports whether the account may sign in: always, unless
@@ -224,7 +225,7 @@ func (s *Server) guestsConfiguredLocked() bool {
 // a waiting account, which signed itself up in lobby mode, may not.
 func (s *Server) admittedLocked(u *userState) bool {
 	switch {
-	case u.leftWaiting():
+	case u.leftWaiting() && !s.vouchedLocked(u):
 		return false
 	case s.allowlist == nil, u.botOf != "":
 		return true
@@ -263,9 +264,13 @@ func (s *Server) listedLocked(u *userState) bool {
 }
 
 // admitLocked refuses a sign-in to an account the list does not name, or
-// to a waiting account in private mode.
+// to a waiting account in private mode, which the operator's word lets in
+// as a member instead.
 func (s *Server) admitLocked(u *userState) *Error {
 	if s.admittedLocked(u) {
+		if u.leftWaiting() {
+			s.admitWaitingLocked(u)
+		}
 		return nil
 	}
 	if s.config.Access.Mode == AccessPrivate && u.waiting {
@@ -323,7 +328,8 @@ func (s *Server) startSignIn() error {
 	}
 	// In private mode waiting accounts, from lobby mode, are signed out:
 	// their sessions and push registrations go, and what they posted and
-	// their profiles stay.
+	// their profiles stay. Those the operator names are let in instead.
+	s.admitVouchedLocked()
 	if s.allowlist != nil || s.config.Access.Mode == AccessPrivate {
 		for _, u := range s.users {
 			if u.account() && !s.admittedLocked(u) {

@@ -645,8 +645,8 @@ func (s *Scheme) redeem(r *authn.Request, action string) (authn.Result, error) {
 		return nil, authn.Denied("This passkey is for a new account; finish on a connection that is not signed in")
 	}
 	if r.Invitation == nil && !s.signsUp(r) {
-		if !r.Guests {
-			return nil, authn.Denied(InviteOnly)
+		if !r.Guests && r.NoSignUp != "" {
+			return nil, authn.Denied(r.NoSignUp)
 		}
 		return nil, authn.Denied("Present an invitation to make an account with this passkey")
 	}
