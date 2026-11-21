@@ -399,6 +399,15 @@ func TestLobbyWelcomeByReply(t *testing.T) {
 	if before, reply := commandIn(t, ada, "lobby", "/welcome @"+guest.userID+" "); errorCode(reply) != 0 || !strings.Contains(noticeText(t, before[len(before)-1]), "welcomed already") {
 		t.Fatalf("/welcome @user = %#v after %#v", reply, before)
 	}
+	// A mention whose text is a display name of several words: the mention.
+	before, _ = ada.request(t, "command", ada.nextID("command"), map[string]any{"room_id": "lobby", "body": map[string]any{"text": "/welcome @Guest Gus", "mentions": []any{guest.userID}}})
+	if !strings.Contains(noticeText(t, before[len(before)-1]), "@"+guest.userID+" is welcomed already") {
+		t.Fatalf("/welcome with a mention: %#v", before)
+	}
+	// Several words and no mention: no one.
+	if _, reply := commandIn(t, ada, "lobby", "/welcome Guest Gus"); errorCode(reply) != CodeInvalidParams {
+		t.Fatalf("/welcome of several words = %#v", reply)
+	}
 	// A reply to one's own message names oneself, a member already.
 	_, own := ada.request(t, "message", ada.nextID("hello"), map[string]any{"room_id": "lobby", "body": map[string]any{"text": "Welcome, all"}})
 	mine := own["message_id"].(string)

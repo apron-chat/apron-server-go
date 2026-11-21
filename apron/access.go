@@ -396,10 +396,14 @@ func (s *Server) welcomeCommand(c *client, r *roomState, body map[string]any, ar
 	if !c.user.mayWelcome() {
 		return nil, &Error{Code: CodeDenied, Message: "Only admins and moderators can welcome people in"}
 	}
-	// Whom: the user_id typed (an autocompleted @ included), else the one
-	// user mentioned, else the author of the message it replies to.
-	id, _, _ := strings.Cut(strings.TrimSpace(args), " ")
-	id = strings.TrimPrefix(id, "@")
+	// Whom: the user_id typed as the one word after the command (an
+	// autocompleted @ included), else the one user mentioned (as when a
+	// client's mention text is a display name of several words), else the
+	// author of the message it replies to.
+	var id string
+	if words := strings.Fields(args); len(words) == 1 {
+		id = strings.TrimPrefix(words[0], "@")
+	}
 	if id == "" {
 		if targets := mentions(body); len(targets) == 1 {
 			id = targets[0]

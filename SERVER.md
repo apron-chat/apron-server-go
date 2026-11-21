@@ -740,8 +740,9 @@ waits.
 ### Welcoming
 
 `/welcome <user_id>`, in any room, for admins and moderators (`denied`
-otherwise, and not listed in their `/help`), takes a `user_id` with or
-without a leading `@` (as autocompletion leaves it), or one mention, or,
+otherwise, and not listed in their `/help`), takes a `user_id`, as the one
+word after the command, with or without a leading `@` (as autocompletion
+leaves it), or else one mention (whatever text it has), or,
 with neither, the author of the message the command replies to
 (`reply_to`), so replying `/welcome` to someone's introduction welcomes
 them:
