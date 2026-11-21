@@ -392,19 +392,26 @@ func (s *Server) LobbyOpen() bool {
 // mode: it lets a connected guest or a waiting account in (welcomeLocked),
 // and tells the sender what happened in a ~private notice before the
 // result.
-func (s *Server) welcomeCommand(c *client, r *roomState, body map[string]any, args, _ string) (map[string]any, *Error) {
+func (s *Server) welcomeCommand(c *client, r *roomState, body map[string]any, args, replyTo string) (map[string]any, *Error) {
 	if !c.user.mayWelcome() {
 		return nil, &Error{Code: CodeDenied, Message: "Only admins and moderators can welcome people in"}
 	}
-	id, _, _ := strings.Cut(args, " ")
+	// Whom: the user_id typed (an autocompleted @ included), else the one
+	// user mentioned, else the author of the message it replies to.
+	id, _, _ := strings.Cut(strings.TrimSpace(args), " ")
 	id = strings.TrimPrefix(id, "@")
 	if id == "" {
 		if targets := mentions(body); len(targets) == 1 {
 			id = targets[0]
 		}
 	}
+	if id == "" && replyTo != "" {
+		if m := s.visibleMessageLocked(c.user, replyTo); m != nil {
+			id = m.owner
+		}
+	}
 	if id == "" {
-		return nil, invalidParams("Usage: /welcome <user_id>")
+		return nil, invalidParams("Usage: /welcome <user_id>, or /welcome in reply to their message")
 	}
 	target := s.users[id]
 	if target == nil || target.retired {

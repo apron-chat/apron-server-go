@@ -373,6 +373,42 @@ func TestLobbyInvite(t *testing.T) {
 	}
 }
 
+// /welcome takes its user as typed with an autocompleted @, or from the
+// message it replies to.
+func TestLobbyWelcomeByReply(t *testing.T) {
+	_, mailbox, httpServer := lobbyServer(t)
+	ada, _ := emailSignUp(t, httpServer, mailbox, "ada@example.com", "ada", "general")
+	joinRoom(t, ada, "lobby")
+	guest, _ := lobbyGuest(t, httpServer)
+	ada.drain(t)
+	guest.drain(t)
+
+	// The guest introduces itself; an admin replies to it with /welcome.
+	_, posted := guest.request(t, "message", guest.nextID("intro"), map[string]any{"room_id": "lobby", "body": map[string]any{"text": "Hi, I'm Gus"}})
+	intro, _ := posted["message_id"].(string)
+	if intro == "" {
+		t.Fatalf("the introduction = %#v", posted)
+	}
+	ada.drain(t)
+	id := ada.nextID("command")
+	before, _ := ada.request(t, "command", id, map[string]any{"room_id": "lobby", "reply_to": map[string]any{"message_id": intro}, "body": map[string]any{"text": "/welcome"}})
+	if len(before) == 0 || !strings.Contains(noticeText(t, before[len(before)-1]), "@"+guest.userID+" is welcomed") {
+		t.Fatalf("/welcome in reply: %#v", before)
+	}
+	// Typed with the @ autocompletion leaves, and a trailing space: the same user, already welcomed.
+	if before, reply := commandIn(t, ada, "lobby", "/welcome @"+guest.userID+" "); errorCode(reply) != 0 || !strings.Contains(noticeText(t, before[len(before)-1]), "welcomed already") {
+		t.Fatalf("/welcome @user = %#v after %#v", reply, before)
+	}
+	// A reply to one's own message names oneself, a member already.
+	_, own := ada.request(t, "message", ada.nextID("hello"), map[string]any{"room_id": "lobby", "body": map[string]any{"text": "Welcome, all"}})
+	mine := own["message_id"].(string)
+	ada.drain(t)
+	before, _ = ada.request(t, "command", ada.nextID("command"), map[string]any{"room_id": "lobby", "reply_to": map[string]any{"message_id": mine}, "body": map[string]any{"text": "/welcome"}})
+	if !strings.Contains(noticeText(t, before[len(before)-1]), "already a member") {
+		t.Fatalf("/welcome in reply to oneself: %#v", before)
+	}
+}
+
 // A welcomed guest that leaves before signing up is gone, and so is its
 // invitation.
 func TestLobbyInvitedGuestLeaves(t *testing.T) {
