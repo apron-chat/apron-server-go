@@ -357,6 +357,30 @@ func (s *Server) finishUsable(usable usableCommands) []commandForm {
 	return forms
 }
 
+// lobbyCommands are the commands of lobby mode (access.go), which follow
+// the core commands in /help and ext:command_list.
+func lobbyCommands() []serverCommand {
+	mayInvite := func(_ *Server, c *client, _ *roomState) bool { return c.user.mayInvite() }
+	return []serverCommand{
+		{
+			name: "invite",
+			forms: []commandForm{{
+				name: "invite", group: groupRole, hint: "<user_id>", description: "let someone in from the Public Lobby: a waiting account becomes a member at once, and a guest once they sign up",
+				may: mayInvite,
+			}},
+			run: (*Server).inviteCommand,
+		},
+		{
+			name: "toggle",
+			forms: []commandForm{{
+				name: "toggle", group: groupRole, hint: "[lobby]", description: "show the toggles, or close the Public Lobby to newcomers or open it again",
+				may: mayInvite,
+			}},
+			run: (*Server).toggleCommand,
+		},
+	}
+}
+
 // command runs a `command` request (§4.1). It takes the params of a new
 // message and is never logged, broadcast, or saved: body.text is the command
 // line, and mentions, reply_to, and embeds are arguments that notify no one.
@@ -377,7 +401,7 @@ func (s *Server) command(c *client, req request) (any, bool, *Error) {
 		return nil, false, err
 	}
 	if _, has := req.params["room_id"]; !has {
-		roomID = defaultRoomID
+		roomID = s.defaultRoomFor(c)
 	}
 	replyID, hasReply, err := parseMessageRef(req.params, "reply_to")
 	if err != nil {
@@ -580,6 +604,9 @@ func (s *Server) avatarCommand(c *client, _ *roomState, body map[string]any, _, 
 	embeds := asList(body["embeds"])
 	if len(embeds) != 1 || embeds[0].(map[string]any)["kind"] != "upload" {
 		return nil, invalidParams("/avatar takes exactly one upload embed: attach an image")
+	}
+	if c.user.restricted() && !c.user.account() {
+		return nil, restrictedRefusal("set an avatar as a guest")
 	}
 	if err := s.admitPostLocked(c.user); err != nil {
 		return nil, err

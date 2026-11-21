@@ -1,6 +1,7 @@
 package apron
 
 import (
+	"bytes"
 	"cmp"
 	"encoding/json/jsontext"
 	"fmt"
@@ -70,6 +71,13 @@ type userState struct {
 	enrolled *enrollment
 	// scope limits the rooms the account may see, nil for none (scope.go).
 	scope *roomScope
+	// access is the server's access mode (access.go). waiting marks an
+	// account that signed itself up in lobby mode, which sees only the
+	// Lobby until someone invites it in, and invited a guest someone
+	// invited, whose sign-up makes it a member; only waiting is stored.
+	access  *accessState
+	waiting bool
+	invited bool
 	// consents are the https redirect URIs of apps the account allowed on
 	// the external sign-in page, with when, in Unix milliseconds
 	// (consents.go).
@@ -182,12 +190,20 @@ func (u *userState) profile() map[string]any {
 		value["avatar"] = u.avatar
 	}
 	// An account's roles are always sent, [] when it has none, so a role
-	// taken away clears the one a client kept (§3.3); guests hold none.
-	if len(u.roles) > 0 || u.account() {
-		value["roles"] = append([]string{}, u.roles...)
+	// taken away clears the one a client kept (§3.3); guests hold none,
+	// but an invited guest shows as such (access.go).
+	if roles := u.displayRoles(); len(roles) > 0 || u.account() {
+		value["roles"] = append([]string{}, roles...)
 	}
 	if len(u.ext) > 0 {
 		value["ext"] = maps.Clone(u.ext)
+		if u.access != nil && u.access.lobby != "" {
+			// ext.permissions is the server's, and only in `you`.
+			delete(value["ext"].(extObject), "permissions")
+			if len(value["ext"].(extObject)) == 0 {
+				delete(value, "ext")
+			}
+		}
 	}
 	return value
 }
@@ -355,9 +371,11 @@ func (s *Server) switchUserLocked(c *client, req request, user *userState, extra
 	maps.Copy(result, extra)
 	c.sendResult(req, result)
 	// A connection that got only what signing in needs gets the whole
-	// server frame now (§3.1).
-	if !s.revealedLocked(c) {
-		c.enqueue(notification("server", s.serverParams(c.baseURL, true)))
+	// server frame now (§3.1), and so, in lobby mode, does one whose user
+	// sees another part of the server than before.
+	if frame := s.serverFrameForLocked(c.baseURL, user); !s.revealedLocked(c) ||
+		s.access.lobby != "" && !bytes.Equal(frame, s.serverFrameLocked(c)) {
+		c.enqueue(frame)
 	}
 	s.attachLocked(c, user)
 	if joinDefault {
@@ -561,6 +579,10 @@ func (s *Server) updateProfile(c *client, req request) (any, bool, *Error) {
 	if err != nil {
 		return nil, false, err
 	}
+	if s.access.lobby != "" {
+		// ext.permissions is the server's to say (ext:permissions).
+		delete(extWrite, "permissions")
+	}
 	status, err := parseString(req.params, "status", false)
 	if err != nil {
 		return nil, false, err
@@ -673,5 +695,8 @@ func (s *Server) grantRolesLocked(u *userState) bool {
 		return false
 	}
 	u.roles = roles
+	// A waiting account that lost the role that let it past the Lobby
+	// sees only the Lobby again (access.go).
+	s.confineLocked(u)
 	return true
 }

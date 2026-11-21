@@ -332,6 +332,10 @@ func (s *Server) emojiCommand(c *client, _ *roomState, body map[string]any, args
 	// The form's word matches exactly, as command names do.
 	switch action {
 	case "add":
+		if u.restricted() {
+			// Custom emoji show to everyone, past the Lobby.
+			return nil, restrictedRefusal("add custom emoji")
+		}
 		embeds := asList(body["embeds"])
 		if len(embeds) != 1 || embeds[0].(map[string]any)["kind"] != "upload" {
 			return nil, invalidParams("/emoji add takes exactly one upload embed: attach an image")

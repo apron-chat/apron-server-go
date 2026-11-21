@@ -691,9 +691,10 @@ func (h *Host) Visible(u User, roomID string) bool {
 }
 
 // Public reports whether anyone may see the room, without an account: it
-// is not restricted, and the server lets guests in (Config.DisableGuests,
+// is not restricted, and the server lets guests in (Config.Access,
 // Registrar.RestrictSignIn), so that whoever is not signed in could see it
-// by signing in as a guest.
+// by signing in as a guest. In lobby mode that is only the Lobby and its
+// threads, while the Lobby is open.
 // An extension that shows messages to people who are not signed in, such as
 // on the web, shows only those of public rooms.
 func (h *Host) Public(roomID string) bool {
@@ -702,6 +703,15 @@ func (h *Host) Public(roomID string) bool {
 	r := h.s.rooms[roomID]
 	if r == nil || !h.s.guestsAllowedLocked() {
 		return false
+	}
+	if lobby := h.s.access.lobby; lobby != "" {
+		in := false
+		for room := r; room != nil; room = room.parent {
+			in = in || room.id == lobby
+		}
+		if !in {
+			return false
+		}
 	}
 	everyone, _ := r.audience()
 	return everyone

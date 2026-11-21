@@ -81,7 +81,7 @@ func (s *Server) saveMessage(c *client, req request) (any, bool, *Error) {
 		return nil, false, err
 	}
 	if _, has := req.params["room_id"]; !has {
-		roomID = defaultRoomID
+		roomID = s.defaultRoomFor(c)
 	}
 	messageID, err := parseString(req.params, "message_id", false)
 	if err != nil {

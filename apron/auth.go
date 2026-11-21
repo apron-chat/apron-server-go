@@ -193,6 +193,8 @@ func (s *Server) authenticate(c *client, req request) (any, *Error) {
 	// unsupported (§3.2), whatever else the request holds.
 	scheme := s.schemeLocked(name)
 	switch {
+	case name == "guest" && s.guestsConfiguredLocked() && !s.guestsAllowedLocked():
+		err = &Error{Code: CodeUnsupported, Message: "The Public Lobby is closed; sign in with an account"}
 	case name == "guest" && !s.guestsAllowedLocked():
 		err = &Error{Code: CodeUnsupported, Message: "This server has no guests; sign in with an account"}
 	case name == "token" && len(s.schemes) == 0 && !presentsServiceToken(req):
@@ -303,7 +305,7 @@ func (s *Server) authenticateGuestLocked(c *client, req request) (any, *Error) {
 		c.sendResult(req, result)
 		return result, nil
 	}
-	user := newUserState(s.assignUserIDLocked(requested), normalizeName(name))
+	user := s.newUserLocked(s.assignUserIDLocked(requested), normalizeName(name))
 	s.users[user.id] = user
 	s.touchUser(user.id)
 	// A new guest joins the default room, so their room list is not empty.
@@ -407,6 +409,7 @@ func (s *Server) addProvenLocked(c *client, req request, scheme authn.Scheme, pr
 		return nil, err
 	}
 	becomesAccount := !account.account()
+	lobbyBefore, hadPermissions := account.lobbyState(), account.permissions() != nil
 	s.setIdentityLocked(account, id, record)
 	name := normalizeName(proof.Name)
 	renamed := becomesAccount && name != "" && name != account.name
@@ -417,22 +420,44 @@ func (s *Server) addProvenLocked(c *client, req request, scheme authn.Scheme, pr
 	s.setGrantLocked(account, id.Scheme, proof.Roles)
 	// An account takes the roles its user_id or new identity is granted.
 	changed := s.grantRolesLocked(account) || renamed
+	// In lobby mode a guest that signs up becomes a waiting account, or a
+	// member when someone invited it, which then joins the default room
+	// after the result (access.go).
+	promoted := false
+	if becomesAccount && s.access.lobby != "" {
+		promoted = account.invited
+		account.invited = false
+		account.waiting = !promoted && !account.moderates()
+		promoted = promoted && !account.restricted()
+		changed = true
+	}
 	// The result carries the account as `you`, so its own connection is
 	// told no more.
-	if changed {
+	switch {
+	case changed && s.access.lobby != "":
+		s.notifyAccessLocked(account, c, hadPermissions)
+	case changed:
 		s.notifyProfileLocked(account, c, nil)
 	}
+	promoted = promoted || lobbyBefore != "" && !account.restricted()
 	if session {
 		now := time.Now()
-		result, err := s.signInLocked(c, req, account, now, false, false, anyOrigin)
+		result, err := s.signInLocked(c, req, account, now, false, promoted, anyOrigin)
 		if err == nil {
 			s.provedLocked(c, scheme, proof, now, wasGuest)
+			if promoted {
+				s.viewChangedLocked(account)
+			}
 		}
 		return result, err
 	}
 	s.provedLocked(c, scheme, proof, time.Now(), wasGuest)
 	result := map[string]any{"you": account.you()}
 	c.sendResult(req, result)
+	if promoted {
+		s.joinDefaultRoomLocked(account)
+		s.viewChangedLocked(account)
+	}
 	return result, nil
 }
 
@@ -479,11 +504,15 @@ func (s *Server) provenAccountLocked(scheme authn.Scheme, proof authn.Proof, cre
 		if err != nil {
 			return nil, false, err
 		}
-		user := newUserState(s.assignAccountIDLocked(proof.UserID), normalizeName(proof.Name))
+		user := s.newUserLocked(s.assignAccountIDLocked(proof.UserID), normalizeName(proof.Name))
 		s.users[user.id] = user
 		s.setIdentityLocked(user, id, record)
 		s.setGrantLocked(user, id.Scheme, proof.Roles)
 		s.grantRolesLocked(user)
+		// In lobby mode an account someone signs up for themselves waits
+		// in the Lobby to be invited in, unless a role makes it an admin or
+		// moderator (access.go).
+		user.waiting = s.access.lobby != "" && !user.moderates()
 		return user, true, nil
 	}
 	if err := s.admitLocked(owner); err != nil {
