@@ -83,19 +83,19 @@ func (p *Private) Init(r *apron.Registrar) error {
 	admin := func(u apron.User, _ apron.Room) bool { return u.HasRole(apron.RoleAdmin) }
 	r.Command(apron.Command{
 		Name: "allow", Usage: "/allow <address|user:id|external:subject>", Help: "let someone sign in",
-		Available: admin, Run: p.allow,
+		Group: "admin", Available: admin, Run: p.allow,
 	})
 	r.Command(apron.Command{
 		Name: "disallow", Usage: "/disallow <address|user:id|external:subject>", Help: "sign someone out, and keep them out",
-		Available: admin, Run: p.disallow,
+		Group: "admin", Available: admin, Run: p.disallow,
 	})
 	r.Command(apron.Command{
 		Name: "allowed", Help: "list who may sign in",
-		Available: admin, Run: p.list,
+		Group: "admin", Available: admin, Run: p.list,
 	})
 	r.Command(apron.Command{
-		Name: "invite", Usage: "/invite [user_id]", Help: "invite one person to make an account with a passkey",
-		Available: admin, Run: p.invite,
+		Name: "invite", Usage: "/invite [<user_id>]", Help: "invite one person to make an account with a passkey",
+		Group: "admin", Available: admin, Run: p.invite,
 	})
 	return nil
 }
@@ -153,7 +153,7 @@ func (p *Private) invite(ctx context.Context, call *apron.CommandCall) (map[stri
 	userID := strings.TrimSpace(call.Args)
 	invitation, err := p.host.Invite(ctx, apron.InvitationOptions{UserID: userID})
 	if err != nil && userID != "" {
-		return nil, apron.InvalidParams("Usage: /invite [user_id]")
+		return nil, apron.InvalidParams("Usage: /invite [<user_id>]")
 	}
 	if err != nil {
 		return nil, err

@@ -145,6 +145,26 @@ func TestExtensionRegistrationErrors(t *testing.T) {
 		"init fails":       func(*Registrar) error { return errors.New("no config") },
 		"command no Run":   func(r *Registrar) error { r.Command(Command{Name: "x"}); return nil },
 		"bad command name": func(r *Registrar) error { r.Command(Command{Name: "Bad Name", Run: run}); return nil },
+		// Usage starts with /name: the rest is its hint (ext:command_list).
+		"usage without the name": func(r *Registrar) error { r.Command(Command{Name: "x", Usage: "<text>", Run: run}); return nil },
+		"usage of another name":  func(r *Registrar) error { r.Command(Command{Name: "x", Usage: "/xy <text>", Run: run}); return nil },
+		"unknown field": func(r *Registrar) error {
+			r.Command(Command{Name: "x", Uses: []string{"room_id", "embeds"}, Run: run})
+			return nil
+		},
+		"field used twice": func(r *Registrar) error {
+			r.Command(Command{Name: "x", Uses: []string{"reply_to", "reply_to"}, Run: run})
+			return nil
+		},
+		"required, not used": func(r *Registrar) error {
+			r.Command(Command{Name: "x", Uses: []string{"reply_to"}, Requires: []string{"body.embeds"}, Run: run})
+			return nil
+		},
+		"room_id required": func(r *Registrar) error {
+			r.Command(Command{Name: "x", Uses: []string{"room_id"}, Requires: []string{"room_id"}, Run: run})
+			return nil
+		},
+		"unknown group": func(r *Registrar) error { r.Command(Command{Name: "x", Group: "moderator", Run: run}); return nil },
 		"follow twice": func(r *Registrar) error {
 			follow := func(context.Context, Event) error { return nil }
 			r.Follow(follow)

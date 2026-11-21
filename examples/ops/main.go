@@ -83,6 +83,9 @@ func (o *Ops) Init(r *apron.Registrar) error {
 	r.Handle("POST /ops/github", http.HandlerFunc(o.webhook))
 	r.Command(apron.Command{
 		Name: "deploy", Usage: "/deploy <service>", Help: "deploy a service and stream its output here",
+		// It streams into the room it runs in, replying to what it replies to.
+		Uses:      []string{"room_id", "reply_to"},
+		Group:     "role",
 		Available: func(u apron.User, _ apron.Room) bool { return u.HasRole(RoleDeployer) || u.HasRole(apron.RoleAdmin) },
 		Run:       o.deploy,
 	})

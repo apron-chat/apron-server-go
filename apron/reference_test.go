@@ -1109,8 +1109,8 @@ func TestCommands(t *testing.T) {
 		}
 		return body["text"].(string)
 	}
-	if text := help(a, ops); !strings.Contains(text, "`/help`") || !strings.Contains(text, "`/avatar`") || !strings.Contains(text, "`/kick @user [reason]`") ||
-		!strings.Contains(text, "`/embed-terminal [title]`") || !strings.Contains(text, "`/embed-append [markdown]`") {
+	if text := help(a, ops); !strings.Contains(text, "`/help`") || !strings.Contains(text, "`/avatar`") || !strings.Contains(text, "`/kick @user [<reason>]`") ||
+		!strings.Contains(text, "`/embed-terminal [<title>]`") || !strings.Contains(text, "`/embed-append [<markdown>]`") {
 		t.Fatalf("creator's help: %q", text)
 	}
 	if text := help(b, ""); strings.Contains(text, "/kick") || !strings.Contains(text, "/avatar") {

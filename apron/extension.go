@@ -15,6 +15,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+	"unicode"
 
 	"github.com/apron-chat/apron-server-go/internal/auth/email"
 )
@@ -189,10 +190,30 @@ type Command struct {
 	// dashes. It may not be a command the server has.
 	Name string
 	// Usage and Help describe the command in /help, such as
-	// "/weather <city>" and "show the forecast".
+	// "/weather <city>" and "show the forecast". Usage starts with the
+	// slash and Name; what follows is the command's hint in
+	// ext:command_list (apron's extensions/ext_command_list.md), such as
+	// "<city>", which follows its suggested convention: <value>, [optional],
+	// a|b, repeats..., and @user for a mention. Help is its description,
+	// "run /<name>" when empty.
 	Usage, Help string
-	// Available reports whether u may run the command in r, and hides it
-	// from /help otherwise. nil makes it available to everyone.
+	// Uses are the fields of the `command` request, besides body.text,
+	// that change what the command does, as ext:command_list lists them:
+	// "room_id" when it acts on the room it runs in (CommandCall.Room),
+	// and the arguments it reads, "reply_to", "body.mentions", and
+	// "body.embeds". Requires are those of Uses that the command fails
+	// without; never "room_id", since a command without it runs in the
+	// default room.
+	Uses, Requires []string
+	// Group says who may use the command, for display in ext:command_list:
+	// "all", "guest", "member", "room", "role", or "admin", from the widest
+	// to the narrowest; "" leaves it out. It changes nothing about who may
+	// use it, which is Available's.
+	Group string
+	// Available reports whether u may run the command in r. /help lists
+	// the command where it is available, and ext:command_list for a user
+	// it is available to in at least one room the user can see, asking
+	// about each in turn until one is. nil makes it available to everyone.
 	Available func(u User, r Room) bool
 	// Run runs the command. Its replies are notices (CommandCall.Notice,
 	// Host.RoomNotice) and the effects of what it does; the result, {} for
@@ -251,12 +272,28 @@ func (r *Registrar) Command(command Command) {
 				return fmt.Errorf("command /%s exists already", command.Name)
 			}
 		}
-		usage := command.Usage
-		if usage == "" {
-			usage = "/" + command.Name
+		hint, ok := strings.CutPrefix(command.Usage, "/"+command.Name)
+		if command.Usage != "" && (!ok || hint != "" && !unicode.IsSpace(rune(hint[0]))) {
+			return fmt.Errorf("command /%s: its Usage %q does not start with /%s", command.Name, command.Usage, command.Name)
 		}
+		if err := checkCommandFields(command.Uses, command.Requires); err != nil {
+			return fmt.Errorf("command /%s: %w", command.Name, err)
+		}
+		if command.Group != "" && !slices.Contains(commandGroups, command.Group) {
+			return fmt.Errorf("command /%s: group %q is none of %s", command.Name, command.Group, strings.Join(commandGroups, ", "))
+		}
+		// ext:command_list's description is never empty.
+		description := strings.TrimSpace(command.Help)
+		if description == "" {
+			description = "run /" + command.Name
+		}
+		command.Uses, command.Requires = slices.Clone(command.Uses), slices.Clone(command.Requires)
 		r.s.commands = append(r.s.commands, serverCommand{
-			name: command.Name, usage: usage, help: command.Help,
+			name: command.Name,
+			forms: []commandForm{{
+				name: command.Name, group: command.Group, hint: strings.TrimSpace(hint), description: description,
+				uses: command.Uses, requires: command.Requires,
+			}},
 			extension: &extensionCommand{host: r.Host, command: command},
 		})
 		return nil
