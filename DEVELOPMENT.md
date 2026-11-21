@@ -90,7 +90,8 @@ persistent passkeys and rolling history; its passkey registration creates a new
 identity instead of upgrading guest ownership as the Go example does.
 
 The example starts with a guest identity. Use **Add passkey** in the profile
-editor's Sign-in row to retain that identity and its message ownership, and
+editor's Sign-in row to make it an account, under a new user_id that keeps
+its message ownership, and
 **Sign in with passkey** to return to it (or choose Passkey on the connect
 screen). Passkey and email sessions resume with their bearer token after a
 disconnect or a reload. Guest reconnects receive a new identity.
@@ -102,8 +103,9 @@ The Go server also offers email sign-in, off unless `--email.enable` is set.
 To try it without sending email, run
 `go run ./cmd/aprond --email.enable --email.sender log`, which writes each
 code, and a sign-in link when `--email.link-url` is set, to the server's log.
-Adding an address while signed in as a guest keeps the guest's identity, as
-adding a passkey does; see [SERVER.md](SERVER.md#email-sign-in). `--welcome` sets the text
+Adding an address while signed in as a guest makes the guest an account,
+under a user_id of its own that keeps its messages and rooms, as adding a
+passkey does; see [SERVER.md](SERVER.md#email-sign-in). `--welcome` sets the text
 the sign-in screen shows, and `--role admin=<user_id, email, or scheme:subject>` grants a
 role, shown as a badge, that may remove people from any room.
 

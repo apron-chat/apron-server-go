@@ -9,6 +9,7 @@ import (
 	"reflect"
 	"runtime"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -150,7 +151,7 @@ func TestStatusValuesAndDerivation(t *testing.T) {
 	a := dialTestClient(t, httpServer)
 	b, _ := dialOrigin(t, httpServer, testPasskeyOrigin)
 	registered := registerTestPasskey(t, b, newTestAuthenticator(t))
-	expectMembership(t, a, "general", b.userID, true)
+	expectRegistered(t, a, b)
 	watching(a, b)
 	b.drain(t)
 	a.drain(t)
@@ -277,7 +278,7 @@ func TestDNDOnlyWhileConnected(t *testing.T) {
 	b, _ := dialOrigin(t, httpServer, testPasskeyOrigin)
 	registered := registerTestPasskey(t, b, newTestAuthenticator(t))
 	token := registered["token"]
-	expectMembership(t, a, "general", b.userID, true)
+	expectRegistered(t, a, b)
 	watching(a)
 	b.drain(t)
 	a.drain(t)
@@ -331,7 +332,7 @@ func TestInvisiblePrivacy(t *testing.T) {
 	a := dialTestClient(t, httpServer)
 	b, _ := dialOrigin(t, httpServer, testPasskeyOrigin)
 	registered := registerTestPasskey(t, b, newTestAuthenticator(t))
-	expectMembership(t, a, "general", b.userID, true)
+	expectRegistered(t, a, b)
 	watching(a)
 	a.drain(t)
 	for _, status := range []string{"invisible", ""} {
@@ -411,7 +412,7 @@ func TestMuteEchoToAllConnections(t *testing.T) {
 	second, _ := dialOrigin(t, httpServer, testPasskeyOrigin)
 	second.result(t, "auth", "resume", map[string]any{"scheme": "token", "token": registered["token"]})
 	second.userID = first.userID
-	expectMembership(t, observer, "general", first.userID, true)
+	expectRegistered(t, observer, first)
 	watching(observer)
 	first.drain(t)
 	second.drain(t)
@@ -631,7 +632,8 @@ func TestAdditionsAreNotSignIns(t *testing.T) {
 	authenticator := newTestAuthenticator(t)
 	options := passkeyResult(t, passkeyCall(t, c, "register-begin", "register", "begin", nil))
 	registered := passkeyResult(t, passkeyCall(t, c, "register-finish", "register", "finish", map[string]any{"credential": authenticator.registration(t, options, testPasskeyOrigin)}))
-	if registered["you"].(map[string]any)["user_id"] != c.userID || registered["token"] == nil {
+	// The guest becomes an account under a user_id of its own (§3.3.3).
+	if id, _ := registered["you"].(map[string]any)["user_id"].(string); id == c.userID || strings.HasPrefix(id, "guest_") || registered["token"] == nil {
 		t.Fatalf("passkey registration: %#v", registered)
 	}
 	if frames := c.drain(t); len(frames) != 0 {
@@ -1024,20 +1026,23 @@ func TestRoomMutesAreBounded(t *testing.T) {
 // leaves reach the room's members as when it disconnects, and the account
 // then shows through its own status, so an invisible account, or one
 // without a status, shows nothing new, and others never learn it
-// connected. A guest that becomes a new account keeps its user_id, so
-// others are told of no change at all.
+// connected. A guest that becomes a new account takes a user_id of its
+// own, which others learn of with `old` (§3.3.3).
 func TestSignInToExistingAccountIsADeparture(t *testing.T) {
 	app, httpServer := passkeyTestServer(t)
 	observer := dialTestClient(t, httpServer)
 	watching(observer)
 	observer.drain(t)
 
-	// A guest that registers a passkey becomes an account in place.
+	// A guest that registers a passkey becomes an account, under a user_id
+	// of its own.
 	newcomer, _ := dialOrigin(t, httpServer, testPasskeyOrigin)
 	registerTestPasskey(t, newcomer, newTestAuthenticator(t))
-	// The guest's join, with its status, and then nothing.
-	expectMembership(t, observer, "general", newcomer.userID, true)
-	expectStatus(t, observer, newcomer.userID, "online")
+	// The guest's join, with its status, then the new user_id, and then
+	// nothing.
+	expectMembership(t, observer, "general", newcomer.guestID, true)
+	expectStatus(t, observer, newcomer.guestID, "online")
+	expectRenamed(t, observer, newcomer)
 	observer.expectQuiet(t)
 
 	for _, status := range []string{"online", "invisible", ""} {
@@ -1168,7 +1173,7 @@ func TestSeenOnDisconnect(t *testing.T) {
 	b, _ := dialOrigin(t, httpServer, testPasskeyOrigin)
 	registered := registerTestPasskey(t, b, newTestAuthenticator(t))
 	token, userID := registered["token"], b.userID
-	expectMembership(t, a, "general", userID, true)
+	expectRegistered(t, a, b)
 	watching(a)
 	a.drain(t)
 	b.drain(t)
@@ -1232,7 +1237,7 @@ func TestSeenWithInvisible(t *testing.T) {
 	b, _ := dialOrigin(t, httpServer, testPasskeyOrigin)
 	registered := registerTestPasskey(t, b, newTestAuthenticator(t))
 	token, userID := registered["token"], b.userID
-	expectMembership(t, a, "general", userID, true)
+	expectRegistered(t, a, b)
 	watching(a)
 	a.drain(t)
 	b.drain(t)
@@ -1303,7 +1308,7 @@ func TestSeenSurvivesRestart(t *testing.T) {
 	b, _ := dialOrigin(t, httpServer, testPasskeyOrigin)
 	registered := registerTestPasskey(t, b, newTestAuthenticator(t))
 	userID := b.userID
-	expectMembership(t, a, "general", userID, true)
+	expectRegistered(t, a, b)
 	addAccount(t, app, "never", a, b)
 	watching(a)
 	a.drain(t)
@@ -1365,7 +1370,7 @@ func TestCoalescedOfflineCarriesSeen(t *testing.T) {
 	b, _ := dialOrigin(t, httpServer, testPasskeyOrigin)
 	registerTestPasskey(t, b, newTestAuthenticator(t))
 	userID := b.userID
-	expectMembership(t, a, "general", userID, true)
+	expectRegistered(t, a, b)
 	watching(a)
 	a.drain(t)
 	// b's first status, online when it signed in, took one of the burst.
@@ -1396,7 +1401,7 @@ func TestHiddenFlapKeepsSeen(t *testing.T) {
 	b, _ := dialOrigin(t, httpServer, testPasskeyOrigin)
 	token := registerTestPasskey(t, b, newTestAuthenticator(t))["token"]
 	userID := b.userID
-	expectMembership(t, a, "general", userID, true)
+	expectRegistered(t, a, b)
 	watching(a)
 	a.drain(t)
 	// b has one change of its burst left, which refills no more.
@@ -1437,7 +1442,7 @@ func TestSeenOnlyWithTheLastConnection(t *testing.T) {
 	b, _ := dialOrigin(t, httpServer, testPasskeyOrigin)
 	token := registerTestPasskey(t, b, newTestAuthenticator(t))["token"]
 	userID := b.userID
-	expectMembership(t, a, "general", userID, true)
+	expectRegistered(t, a, b)
 	watching(a)
 	a.drain(t)
 	_ = b.ws.Close(websocket.StatusNormalClosure, "bye")
@@ -1473,10 +1478,10 @@ func TestSeenWhenTheLastConnectionSignsInElsewhere(t *testing.T) {
 	a := dialTestClient(t, httpServer)
 	b, _ := dialOrigin(t, httpServer, testPasskeyOrigin)
 	registerTestPasskey(t, b, newTestAuthenticator(t))
-	expectMembership(t, a, "general", b.userID, true)
+	expectRegistered(t, a, b)
 	c, _ := dialOrigin(t, httpServer, testPasskeyOrigin)
 	other := registerTestPasskey(t, c, newTestAuthenticator(t))
-	expectMembership(t, a, "general", c.userID, true)
+	expectRegistered(t, a, c)
 	watching(a)
 	a.drain(t)
 	_ = c.ws.Close(websocket.StatusNormalClosure, "bye")
@@ -1502,7 +1507,7 @@ func TestListingsCarrySeen(t *testing.T) {
 	b, _ := dialOrigin(t, httpServer, testPasskeyOrigin)
 	registerTestPasskey(t, b, newTestAuthenticator(t))
 	userID := b.userID
-	expectMembership(t, a, "general", userID, true)
+	expectRegistered(t, a, b)
 	room, _ := saveRoom(t, b, "room", map[string]any{"title": "Room"})
 	watching(a)
 	a.drain(t)
@@ -1598,7 +1603,7 @@ func TestSeenAfterCrash(t *testing.T) {
 	signUp := func() (*testClient, any) {
 		c, _ := dialOrigin(t, httpServer, testPasskeyOrigin)
 		token := registerTestPasskey(t, c, newTestAuthenticator(t))["token"]
-		expectMembership(t, a, "general", c.userID, true)
+		expectRegistered(t, a, c)
 		return c, token
 	}
 	back, token := signUp()

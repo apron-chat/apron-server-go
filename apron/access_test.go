@@ -333,12 +333,17 @@ func TestLobbyInvite(t *testing.T) {
 	// It is still limited to the Lobby.
 	guest.expectError(t, "history", "general", map[string]any{"room_id": "general"}, CodeInvalidParams)
 
-	// It adds an address: a member, which joins general after the result.
+	// It adds an address: a member, under a user_id of its own (§3.3.3),
+	// which joins general after the result; who shares the Lobby with it
+	// learns of the new user_id with `old`.
+	ada.drain(t)
 	propose(t, guest, "gus@example.com")
 	_, result := approve(t, guest, mailbox.receive(t).Code, nil)
-	if you := result["you"].(map[string]any); you["user_id"] != guest.userID || permissionsOf(you) != nil || !reflect.DeepEqual(rolesOf(you), []any{}) {
+	if you := result["you"].(map[string]any); you["user_id"] == guest.userID || strings.HasPrefix(you["user_id"].(string), "guest_") || permissionsOf(you) != nil || !reflect.DeepEqual(rolesOf(you), []any{}) {
 		t.Fatalf("the welcomed guest signed up as %#v", you)
 	}
+	guest.guestID, guest.userID = guest.userID, result["you"].(map[string]any)["user_id"].(string)
+	expectRenamed(t, ada, guest)
 	expectAdmitted(t, guest, []string{other})
 	historyPage(t, guest, "general", map[string]any{})
 	if app.Waiting(guest.userID) {
@@ -349,9 +354,11 @@ func TestLobbyInvite(t *testing.T) {
 	otto, _ := lobbyGuest(t, httpServer)
 	propose(t, otto, "otto@example.com")
 	_, result = approve(t, otto, mailbox.receive(t).Code, nil)
-	if you := result["you"].(map[string]any); permissionsOf(you) != nil || !reflect.DeepEqual(rolesOf(you), []any{"waiting"}) {
+	if you := result["you"].(map[string]any); you["user_id"] == otto.userID || permissionsOf(you) != nil || !reflect.DeepEqual(rolesOf(you), []any{"waiting"}) {
 		t.Fatalf("an unwelcomed guest signed up as %#v", you)
 	}
+	ottoGuest := otto.userID
+	otto.userID = result["you"].(map[string]any)["user_id"].(string)
 	if !app.Waiting(otto.userID) {
 		t.Fatal("the waiting account is not waiting")
 	}
@@ -372,6 +379,10 @@ func TestLobbyInvite(t *testing.T) {
 	}
 	if app.Waiting(otto.userID) {
 		t.Fatal("the admitted account still waits")
+	}
+	// The guest's user_id is the guest's for good.
+	if _, reply := commandIn(t, ada, "general", "/welcome "+ottoGuest); errorCode(reply) != CodeInvalidParams {
+		t.Fatalf("/welcome of the guest otto was = %#v", reply)
 	}
 }
 
@@ -477,9 +488,10 @@ func TestLobbyPasskeySignUp(t *testing.T) {
 	guest.drain(t)
 	options = passkeyResult(t, passkeyCall(t, guest, "begin2", "register", "begin", nil))
 	result = passkeyResult(t, passkeyCall(t, guest, "finish2", "register", "finish", map[string]any{"credential": newTestAuthenticator(t).registration(t, options, testPasskeyOrigin)}))
-	if you := result["you"].(map[string]any); you["user_id"] != guest.userID || permissionsOf(you) != nil || !reflect.DeepEqual(rolesOf(you), []any{}) {
+	if you := result["you"].(map[string]any); you["user_id"] == guest.userID || permissionsOf(you) != nil || !reflect.DeepEqual(rolesOf(you), []any{}) {
 		t.Fatalf("a welcomed guest's passkey: %#v", you)
 	}
+	guest.userID = result["you"].(map[string]any)["user_id"].(string)
 	expectJoined(t, guest, "general", guest.userID)
 	if err := app.Admit(context.Background(), "nobody"); err == nil {
 		t.Fatal("Admit of nobody succeeded")
@@ -1316,5 +1328,91 @@ func TestPasskeySignUpRefusals(t *testing.T) {
 		if message := refusal["error"].(map[string]any)["message"]; errorCode(refusal) != CodeDenied || message != want {
 			t.Errorf("refusal %#v, want %q", refusal, want)
 		}
+	}
+}
+
+// A guest that becomes an account does so under a user_id of its own
+// (§3.3.3), by any scheme: the one it asked for, else user_<n>. Who shares
+// a room with it gets `user` with `new` and `old`; what the guest held
+// moves with it, its messages, reactions, rooms, and the rooms it made;
+// and the guest's user_id is never given out again.
+func TestGuestBecomesAnAccountUnderItsOwnID(t *testing.T) {
+	identity := &Identity{Subject: "idp:1", Name: "Ext", UserID: "extuser"}
+	config := extensionConfig(ssoExtension(identity))
+	config.WebAuthn = testWebAuthn(t)
+	mailbox := make(testMailbox, 16)
+	config.EmailSender = mailbox
+	app, httpServer := newTestServer(t, config)
+	watcher := dialTestClient(t, httpServer)
+
+	signUp := map[string]func(c *testClient) map[string]any{
+		"passkey": func(c *testClient) map[string]any {
+			options := passkeyResult(t, passkeyCall(t, c, "begin", "register", "begin", map[string]any{"user_id": "pat"}))
+			return passkeyResult(t, passkeyCall(t, c, "finish", "register", "finish", map[string]any{"credential": newTestAuthenticator(t).registration(t, options, testPasskeyOrigin)}))
+		},
+		"email": func(c *testClient) map[string]any {
+			propose(t, c, "eve@example.com")
+			_, result := approve(t, c, mailbox.receive(t).Code, nil)
+			return result
+		},
+		"external": func(c *testClient) map[string]any {
+			client := oauthtest.New(t, httpServer.URL)
+			_, result := c.request(t, "auth", "external", redemption(client, externalCode(t, client, httpServer.URL+"/oauth/authorize", httpServer.URL)))
+			return result
+		},
+	}
+	want := map[string]func(string) bool{
+		"passkey":  func(id string) bool { return id == "pat" },
+		"email":    func(id string) bool { return strings.HasPrefix(id, "user_") },
+		"external": func(id string) bool { return id == "extuser" },
+	}
+	for _, scheme := range []string{"passkey", "email", "external"} {
+		c, _ := dialOrigin(t, httpServer, testPasskeyOrigin)
+		guestAuth(t, c)
+		expectMembership(t, watcher, "general", c.userID, true)
+		// What the guest holds: a message, a reaction, a private room it
+		// made, with the watcher in it.
+		room, _ := saveRoom(t, c, c.nextID("room"), map[string]any{"title": "Mine", "private": true})
+		c.request(t, "room_join", c.nextID("add"), map[string]any{"room_id": room, "user_id": watcher.userID})
+		message, _ := save(t, c, c.nextID("hello"), map[string]any{"room_id": room, "body": map[string]any{"text": "hello"}})
+		c.request(t, "reactions", c.nextID("react"), map[string]any{"message_id": message, "emojis": []any{"👍"}})
+		c.drain(t)
+		watcher.drain(t)
+
+		result := signUp[scheme](c)
+		you := result["you"].(map[string]any)
+		id, _ := you["user_id"].(string)
+		if !want[scheme](id) {
+			t.Fatalf("%s: the account is %#v", scheme, you)
+		}
+		c.guestID, c.userID = c.userID, id
+		expectRenamed(t, watcher, c)
+
+		// The guest's id is retired for good, and what it held is the
+		// account's.
+		app.mu.RLock()
+		_, live := app.users[c.guestID]
+		used := app.usedIDs[strings.ToLower(c.guestID)]
+		app.mu.RUnlock()
+		if live || !used {
+			t.Fatalf("%s: the guest's id is live %v, used %v", scheme, live, used)
+		}
+		c.drain(t)
+		save(t, c, c.nextID("edit"), map[string]any{"message_id": message, "room_id": room, "body": map[string]any{"text": "still mine"}})
+		watcher.drain(t)
+		update := react(t, c, c.nextID("react"), message, "🎉")
+		if sets := update["reactions"].([]any); len(sets) != 1 || sets[0].(map[string]any)["from"].(map[string]any)["user_id"] != id {
+			t.Fatalf("%s: the reaction sets after a change: %#v", scheme, update)
+		}
+		list := listRooms(t, c, map[string]any{"room_id": room, "members": true})
+		if members := memberIDs(list["joined"].([]any)[0].(map[string]any)); !slices.Contains(members, id) || slices.Contains(members, c.guestID) {
+			t.Fatalf("%s: the room's members %v", scheme, members)
+		}
+		// The room's creator may still remove people from it.
+		if _, kicked := c.request(t, "command", c.nextID("kick"), map[string]any{"room_id": room, "body": map[string]any{"text": "/kick @" + watcher.userID, "mentions": []any{watcher.userID}}}); kicked == nil {
+			t.Fatalf("%s: /kick in its room failed", scheme)
+		}
+		watcher.drain(t)
+		c.drain(t)
 	}
 }

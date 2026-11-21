@@ -350,15 +350,17 @@ func TestEmailAdditions(t *testing.T) {
 	stranger.expectError(t, "auth", "link-other-account", map[string]any{"scheme": "email", "token": linkToken(t, message)}, CodeDenied)
 	victim.drain(t)
 	// Approving adds the address to the guest, which becomes an account
-	// keeping its messages, with the roles its address was granted: it
-	// replies with the account as you (§4.11.3), with its new roles.
+	// under a user_id of its own (§3.3.3), keeping its messages and rooms,
+	// with the roles its address was granted: it replies with the account
+	// as you (§4.11.3), with its new roles.
 	before, result := approve(t, victim, message.Code, nil)
 	if len(before) != 0 || result["you"] == nil || result["token"] != nil {
 		t.Fatalf("approving an addition: %#v after %#v", result, before)
 	}
-	if you := result["you"].(map[string]any); !reflect.DeepEqual(you["roles"], []any{"admin"}) {
+	if you := result["you"].(map[string]any); !reflect.DeepEqual(you["roles"], []any{"admin"}) || you["user_id"] == victim.userID || strings.HasPrefix(you["user_id"].(string), "guest_") {
 		t.Fatalf("profile after the addition: %#v", you)
 	}
+	victim.userID = result["you"].(map[string]any)["user_id"].(string)
 	save(t, victim, "edit", map[string]any{"message_id": secret, "room_id": diary, "body": map[string]any{"text": "still mine"}})
 	// An account holds one address.
 	propose(t, victim, "second@example.com")
@@ -893,7 +895,8 @@ func TestEmailAccountsPersist(t *testing.T) {
 	guest := dialTestClient(t, httpServer)
 	id, _ := save(t, guest, "hello", map[string]any{"body": map[string]any{"text": "hello"}})
 	propose(t, guest, "bob@example.com")
-	approve(t, guest, mailbox.receive(t).Code, nil)
+	_, added := approve(t, guest, mailbox.receive(t).Code, nil)
+	guest.userID = added["you"].(map[string]any)["user_id"].(string)
 	stop()
 
 	_, httpServer, _ = startWith(t, kept, t.TempDir(), configure)

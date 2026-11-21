@@ -690,3 +690,106 @@ func (s *Server) grantRolesLocked(u *userState) bool {
 	s.confineLocked(u)
 	return true
 }
+
+// renameGuestLocked gives a guest that becomes an account a user_id of
+// its own (§3.3.3), as a new account would get: the requested one if it
+// may have it, else user_<n>. A guest that asked for a user_id of its own
+// at sign-in keeps it; only a counter-assigned guest_<n> is replaced. What
+// the guest held moves with it, as a rename would: the rooms it is in, its
+// read cursors, the messages it may edit and delete, its reactions, the
+// rooms it created, its push registrations, and the custom emoji it added.
+// Logged records keep the guest's user_id (§3.3.3); clients follow `old`.
+// The guest's user_id stays used, and is never given to anyone else. It
+// returns the guest's recorded object for `old`, nil when nothing changed.
+func (s *Server) renameGuestLocked(u *userState, requested string) map[string]any {
+	if u.account() || !strings.HasPrefix(strings.ToLower(u.id), guestIDPrefix) {
+		return nil
+	}
+	old := u.from()
+	oldID, newID := u.id, s.assignAccountIDLocked(requested)
+	delete(s.users, oldID)
+	s.touchUser(oldID)
+	u.id, u.fromValue = newID, nil
+	s.users[newID] = u
+	s.touchUser(newID)
+	for _, r := range s.rooms {
+		changed := false
+		if member := r.members[oldID]; member != nil {
+			delete(r.members, oldID)
+			r.members[newID] = member
+			changed = true
+		}
+		if active, ok := r.active[oldID]; ok {
+			delete(r.active, oldID)
+			r.active[newID] = active
+			changed = true
+		}
+		if cursor, ok := r.reads[oldID]; ok {
+			delete(r.reads, oldID)
+			r.reads[newID] = cursor
+			changed = true
+		}
+		if r.creator == oldID {
+			r.creator, changed = newID, true
+		}
+		if changed {
+			s.touchRoom(r)
+		}
+	}
+	for _, m := range s.messages {
+		changed := false
+		if m.owner == oldID {
+			m.owner, changed = newID, true
+		}
+		if set, ok := m.reactions[oldID]; ok {
+			delete(m.reactions, oldID)
+			m.reactions[newID] = set
+			changed = true
+		}
+		if changed {
+			s.touchMessage(m)
+		}
+	}
+	for _, p := range slices.Collect(maps.Values(u.pushes)) {
+		key := pushKey(oldID, p.url)
+		if s.pushes[key] == p {
+			delete(s.pushes, key)
+			s.touchPush(key)
+		}
+		p.userID = newID
+		s.addPushLocked(u, p)
+	}
+	for _, emoji := range s.emoji {
+		if emoji.by == oldID {
+			emoji.by = newID
+			s.dirty.emoji = true
+		}
+	}
+	for id, e := range s.embeds {
+		if e.emojiBy == oldID {
+			e.emojiBy = newID
+			s.touchEmbed(id)
+		}
+		if e.avatarFor == u {
+			s.touchEmbed(id)
+		}
+	}
+	return old
+}
+
+// notifyRenamedLocked announces a guest's new user_id (§3.3.3): `you` to
+// its connections other than except, and `user` with `new` and `old` to
+// those who share a room with it.
+func (s *Server) notifyRenamedLocked(u *userState, old map[string]any, except *client) {
+	s.publishLocked(u)
+	you := notification("user", map[string]any{"you": u.you()})
+	for c := range u.clients {
+		if c != except {
+			c.enqueue(you)
+		}
+	}
+	others := notification("user", map[string]any{"new": u.profile(), "old": old})
+	for _, other := range s.sharersLocked(u) {
+		other.send(others)
+	}
+}

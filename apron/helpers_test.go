@@ -24,8 +24,9 @@ type testClient struct {
 	passkeyChallenge string
 	// requests numbers the request IDs the helpers generate.
 	requests int
-	// userID is the identity the guest was assigned at auth.
-	userID string
+	// userID is the identity the guest was assigned at auth, or the
+	// account it became; guestID is the guest's then (§3.3.3).
+	userID, guestID string
 	// statuses keeps the bare status announcements of others (§4.5),
 	// `user` `{new: {user_id, status, seen?}}`, which read otherwise skips: they
 	// follow every connection, idle change, and join, and only the status

@@ -325,7 +325,9 @@ func TestPasskeyPageAddition(t *testing.T) {
 	_, screen = add()
 	_, answer = p.ceremony(t, client, screen, b, 0)
 	_, result := guest.request(t, "auth", "finish", finishWithCode(client, "register", returned(t, client, answer)))
-	if you := result["you"].(map[string]any); you["user_id"] != guestID || you["name"] != "Grace" || result["token"] == nil {
+	accountID, _ := result["you"].(map[string]any)["user_id"].(string)
+	// Under a user_id of its own (§3.3.3).
+	if you := result["you"].(map[string]any); you["user_id"] == guestID || strings.HasPrefix(you["user_id"].(string), "guest_") || you["name"] != "Grace" || result["token"] == nil {
 		t.Fatalf("addition = %#v", result)
 	}
 	// Its request names the account sealed, which nobody can alter.
@@ -341,7 +343,7 @@ func TestPasskeyPageAddition(t *testing.T) {
 	// The passkey signs in, on the page too.
 	code = p.loginCode(t, client, b)
 	fresh, _ := dialRaw(t, p.http)
-	if _, result := fresh.request(t, "auth", "login", finishWithCode(client, "login", code)); result["you"].(map[string]any)["user_id"] != guestID {
+	if _, result := fresh.request(t, "auth", "login", finishWithCode(client, "login", code)); result["you"].(map[string]any)["user_id"] != accountID {
 		t.Fatalf("login = %#v", result)
 	}
 }
@@ -395,7 +397,7 @@ func TestPasskeyPageAdditionsFlood(t *testing.T) {
 		t.Fatalf("verify = %d %#v", status, answer)
 	}
 	native.drain(t)
-	if _, result := native.request(t, "auth", "finish", finishWithCode(client, "register", returned(t, client, answer))); result["you"].(map[string]any)["user_id"] != nativeID {
+	if _, result := native.request(t, "auth", "finish", finishWithCode(client, "register", returned(t, client, answer))); result["you"].(map[string]any)["user_id"] == nativeID || result["you"] == nil {
 		t.Fatalf("addition after the flood = %#v", result)
 	}
 }

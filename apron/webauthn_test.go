@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -179,6 +180,27 @@ func (a *testAuthenticator) assertion(t *testing.T, options map[string]any, orig
 	}
 }
 
+// expectRegistered reads, on a watcher who shares general with c, the join
+// of the guest c was, then its new user_id as an account: `user` with `new`
+// and `old` (§3.3.3).
+func expectRegistered(t *testing.T, watcher, c *testClient) {
+	t.Helper()
+	expectMembership(t, watcher, "general", c.guestID, true)
+	expectRenamed(t, watcher, c)
+}
+
+// expectRenamed reads `user` with c's account as `new` and the guest it was
+// as `old`.
+func expectRenamed(t *testing.T, watcher, c *testClient) {
+	t.Helper()
+	params := notificationParams(t, watcher.read(t), "user")
+	newer, _ := params["new"].(map[string]any)
+	older, _ := params["old"].(map[string]any)
+	if newer["user_id"] != c.userID || older["user_id"] != c.guestID {
+		t.Fatalf("user = %#v, want new %s and old %s", params, c.userID, c.guestID)
+	}
+}
+
 func registerTestPasskey(t *testing.T, c *testClient, a *testAuthenticator) map[string]any {
 	t.Helper()
 	guest := guestAuth(t, c)["you"].(map[string]any)["user_id"]
@@ -189,9 +211,11 @@ func registerTestPasskey(t *testing.T, c *testClient, a *testAuthenticator) map[
 		t.Fatalf("registration did not require resident key and user verification: %#v", publicKey)
 	}
 	result := passkeyResult(t, passkeyCall(t, c, "register-end", "register", "finish", map[string]any{"credential": a.registration(t, options, testPasskeyOrigin)}))
-	if result["you"].(map[string]any)["user_id"] != guest {
-		t.Fatal("registration changed guest identity")
+	// The guest becomes an account under a user_id of its own (§3.3.3).
+	if id, _ := result["you"].(map[string]any)["user_id"].(string); id == guest || strings.HasPrefix(id, "guest_") {
+		t.Fatalf("registration kept the guest's user_id: %#v", result)
 	}
+	c.guestID, c.userID = c.userID, result["you"].(map[string]any)["user_id"].(string)
 	return result
 }
 
@@ -357,15 +381,17 @@ func TestRegistrationTakesRequestedName(t *testing.T) {
 	if userOf(abandoned)["name"] != "Abandoned" {
 		t.Fatalf("passkey not labelled with the requested name: %#v", userOf(abandoned))
 	}
-	options := passkeyResult(t, passkeyCall(t, c, "begin", "register", "begin", map[string]any{"name": "  Ada   Lovelace "}))
+	options := passkeyResult(t, passkeyCall(t, c, "begin", "register", "begin", map[string]any{"name": "  Ada   Lovelace ", "user_id": "ada"}))
 	if user := userOf(options); user["name"] != "Ada Lovelace" || user["displayName"] != "Ada Lovelace" {
 		t.Fatalf("passkey not labelled with the normalized requested name: %#v", user)
 	}
 	a := newTestAuthenticator(t)
 	result := passkeyResult(t, passkeyCall(t, c, "finish", "register", "finish", map[string]any{"credential": a.registration(t, options, testPasskeyOrigin)}))
 	you := result["you"].(map[string]any)
-	if you["user_id"] != guest["user_id"] || you["name"] != "Ada Lovelace" {
-		t.Fatalf("registration did not keep the guest's identity with the requested name: %#v", you)
+	// The guest becomes an account under the user_id its begin asked for
+	// (§3.3.3), with the requested name.
+	if you["user_id"] != "ada" || you["user_id"] == guest["user_id"] || you["name"] != "Ada Lovelace" {
+		t.Fatalf("registration did not take the requested user_id and name: %#v", you)
 	}
 
 	// Adding a passkey to an account keeps the account's name, whatever is asked.

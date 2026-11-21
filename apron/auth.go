@@ -410,6 +410,12 @@ func (s *Server) addProvenLocked(c *client, req request, scheme authn.Scheme, pr
 	}
 	becomesAccount := !account.account()
 	lobbyBefore := account.lobbyState()
+	// A guest becomes an account under a user_id of its own, which others
+	// learn of with `old` (§3.3.3).
+	var old map[string]any
+	if becomesAccount {
+		old = s.renameGuestLocked(account, proof.UserID)
+	}
 	s.setIdentityLocked(account, id, record)
 	name := normalizeName(proof.Name)
 	renamed := becomesAccount && name != "" && name != account.name
@@ -431,7 +437,10 @@ func (s *Server) addProvenLocked(c *client, req request, scheme authn.Scheme, pr
 	promoted := lobbyBefore != "" && !account.restricted()
 	// The result carries the account as `you`, so its own connection is
 	// told no more.
-	if changed {
+	switch {
+	case old != nil:
+		s.notifyRenamedLocked(account, old, c)
+	case changed:
 		s.notifyProfileLocked(account, c, nil)
 	}
 	if session {
@@ -588,8 +597,12 @@ func (s *Server) approveLocked(c *client, req request, token, state, name, reque
 			return nil, &Error{Code: CodeDenied, Message: "Open this link where the account that asked for it is signed in"}
 		}
 		s.dropProposalLocked(p)
-		// An addition names nobody: the account keeps its name.
+		// An addition names nobody: the account keeps its name. A guest
+		// asks for the user_id it becomes an account under (§3.3.3).
 		proof.Name, proof.UserID = "", ""
+		if !c.user.account() {
+			proof.UserID = cmp.Or(requested, p.userID)
+		}
 		return s.addProvenLocked(c, req, p.scheme, proof, false, false)
 	}
 	// A sign-in authenticates a connection that is not signed in; the

@@ -136,8 +136,10 @@ func (s *Scheme) redeem(r *authn.Request) (authn.Result, error) {
 	proof := value.(authn.Proof)
 	if r.Account != nil {
 		// An addition names nobody: the account keeps its name. A guest
-		// that becomes an account gets a token to come back with.
-		proof.Name, proof.UserID = "", ""
+		// that becomes an account gets a token to come back with, and a
+		// user_id of its own: the one requested, else the extension's
+		// suggestion.
+		proof.Name, proof.UserID = "", guestUserID(r, proof.UserID)
 		return &authn.Add{Proof: proof, Session: r.Account.Guest, AnyOrigin: true}, nil
 	}
 	// A new account takes the name and user_id the connection requested,
@@ -524,4 +526,14 @@ func hostOf(base string) string {
 		return parsed.Host
 	}
 	return base
+}
+
+// guestUserID is the user_id an addition asks for: for a guest, which
+// becomes an account under a user_id of its own, the one the request
+// asked for, else suggested; for an account, none.
+func guestUserID(r *authn.Request, suggested string) string {
+	if r.Account == nil || !r.Account.Guest {
+		return ""
+	}
+	return cmp.Or(r.UserID, suggested)
 }

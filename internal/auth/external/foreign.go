@@ -150,7 +150,7 @@ func (f *Foreign) signIn(ctx context.Context, r *authn.Request, token string) (a
 		return nil, err
 	}
 	if r.Account != nil {
-		proof.Name, proof.UserID = "", ""
+		proof.Name, proof.UserID = "", guestUserID(r, proof.UserID)
 		return &authn.Add{Proof: proof, Session: r.Account.Guest, AnyOrigin: true}, nil
 	}
 	proof.Name, proof.UserID = cmp.Or(r.Name, proof.Name), cmp.Or(r.UserID, proof.UserID)
