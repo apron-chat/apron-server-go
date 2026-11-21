@@ -54,7 +54,7 @@ the server log instead of sending them.
 
 Anyone may chat as a guest by default. `--access.mode lobby` shows
 newcomers only a Public Lobby, where they introduce themselves until an
-admin or moderator lets them in with `/invite <user_id>`, and
+admin or moderator lets them in with `/welcome <user_id>`, and
 `--access.mode private` offers no guests at all; see
 [Access modes](SERVER.md#access-modes).
 

@@ -49,9 +49,7 @@ Defaults:
   not on a connection whose URLs would be plain `http:` on a host other than
   a loopback one), and, while `--max-private-rooms` bounds private rooms,
   `ext:settings`, with `server.ext.settings.private_rooms` the bound
-  (below); in lobby mode `ext:permissions` and `ext:settings` with
-  `server.ext.settings.lobby` (see [Access modes](#access-modes));
-  `server.push`: kinds `relay` and `webpush` (with the server's
+  (below); `server.push`: kinds `relay` and `webpush` (with the server's
   VAPID `key`) and `wake`: `mentions`, `replies`, `private`, `joined`,
   `badge`; `server.status`: `dnd`, `invisible`; `server.ping`: 30 seconds
 - seeded default room: `general` (title `General`); in lobby mode also the
@@ -428,7 +426,7 @@ rooms, and `admin` may replace and remove any
 [custom emoji](#custom-emoji) and set the server's title, description, and
 avatar with [`/server`](#commands). Role names are lowercased, so `--role Admin=ada` grants `admin`.
 Guests hold no roles. In lobby mode the server adds a role of its own that
-nothing grants: `waiting` on a waiting account and `invited` on an invited
+nothing grants: `waiting` on a waiting account and `welcomed` on a welcomed
 guest ([Access modes](#access-modes)), which no `--role` may grant there. A `user_id` granted a role but never used is reserved:
 no guest or new account is given it, so nobody can claim it and then add a
 passkey or address to inherit the role. So a grant by `user_id` applies to
@@ -654,8 +652,8 @@ admin or moderator lets them in:
   and see every room that is not private, as the rest of this document
   describes.
 - **`lobby`**: newcomers see one room, the **Lobby**, and its threads.
-  They introduce themselves there, and an admin or moderator invites them
-  in with `/invite`. Until then the rest of the server answers as if it
+  They introduce themselves there, and an admin or moderator welcomes
+  them in with `/welcome`. Until then the rest of the server answers as if it
   did not exist.
 - **`private`**: no guests; only accounts sign in, as `--disable-guests`,
   now its deprecated alias, did. Before a connection signs in, its
@@ -713,10 +711,12 @@ The `server` frame of a connection that is not signed in, or is signed in
 as a restricted user, takes its `description`, when no `--description` or
 `/server description` sets one, from the Lobby's description rather than
 `general`'s; a sign-in that changes which one applies is followed by a new
-`server` frame, and so is an edit of the Lobby's description. In lobby
-mode the frame lists capability `ext:permissions` and, for every signed-in
-connection and for others while the Lobby is open, `ext:settings` with
-`server.ext.settings.lobby`: `{"room_id": "lobby", "open": true}`.
+`server` frame, and so is an edit of the Lobby's description. Lobby mode
+adds nothing to the protocol: no capability or `ext` key says that a user
+is restricted, or that the Lobby is open. Restricted users learn where they
+stand from the Lobby's description, which clients show as the server's,
+and from `~private` notices; clients learn which rooms they see from
+`room_list` and `room_update` as always.
 
 ### Waiting accounts
 
@@ -724,55 +724,54 @@ In lobby mode an account someone signs up for themselves is a waiting
 account: one a passkey registration makes on a connection that is not
 signed in, in the client or on the [passkey page](#the-passkey-page); one
 a new email address or external identity makes; and a guest that adds a
-passkey, an address, or an external identity and was not invited. It
+passkey, an address, or an external identity and was not welcomed. It
 keeps the guest's `user_id`, as always. The store marks it as waiting, and
 every sign-in finds it so: a passkey, a session token's resume, a device
 or service token, email, external sign-in, and the passkey page's code.
 An invitation's account is a member, and so is an account whose roles make
 it an admin or moderator.
 
-A restricted user's `you` carries `ext.permissions.lobby`: `"waiting"` for
-a guest or a waiting account, `"invited"` for an invited guest. Its user
-objects carry a role the server computes, which no grant gives and the
-store does not keep: `waiting` on a waiting account, and `invited` on an
-invited guest; a guest that is not invited has none, as before. An admin's
-or moderator's `you` carries `ext.permissions.invite: true`. The server
-ignores `ext.permissions` in a `me` request, and never sends a user's own
-`ext.permissions` to anyone else. Waiting accounts are never retired, like
-any account. `Server.Waiting` and `Host.Waiting` report whether a user
+User objects carry a role the server computes, which no grant gives and
+the store does not keep: `waiting` on a waiting account, and `welcomed` on
+a welcomed guest; a guest that is not welcomed has none, as before. Waiting
+accounts are never retired, like any account. `Server.Waiting` and `Host.Waiting` report whether a user
 waits.
 
-### Inviting
+### Welcoming
 
-`/invite <user_id>`, in any room, for admins and moderators (`denied`
+`/welcome <user_id>`, in any room, for admins and moderators (`denied`
 otherwise, and not listed in their `/help`), takes a `user_id` with or
 without a leading `@`, or one mention:
 
-- **A connected guest** becomes invited, for as long as it is connected:
-  its connections get `user` with `you`, carrying `roles: ["invited"]` and
-  `ext.permissions.lobby: "invited"`, and those who share a room with it
-  `user` `new` with the role; then its connections get a `~private` notice
-  in the Lobby, "@ada invited you. Add a passkey to finish joining; until
-  you do, closing this page ends your visit." ("Add a way to sign in" on a
-  server without passkeys). It is still restricted. When it adds a
-  passkey, an address, or an external identity, it becomes a member in
-  place, with the same `user_id`: the result's `you` has no `invited` role
-  and no `ext.permissions`, others get `user` `new`, and it joins `general`
-  after the result, keeping the Lobby. If it disconnects first, the
-  invitation goes with it; if it signs in to another account, that
-  account is what it is.
+- **A connected guest** becomes welcomed, for as long as it is connected:
+  its connections get `user` with `you`, carrying `roles: ["welcomed"]`,
+  and those who share a room with it `user` `new` with the role; then its
+  connections get a `~private` notice in the Lobby, "@ada welcomed you.
+  Add a passkey to finish joining; until you do, closing this page ends
+  your visit." ("Add a way to sign in" on a server without passkeys). It
+  is still restricted. When it adds a passkey, an address, or an external
+  identity, it becomes a member in place, with the same `user_id`: the
+  result's `you` has no `welcomed` role, others get `user` `new`, and
+  after the result its connections get the `room_update` below. If it
+  disconnects first, the welcome goes with it; if it signs in to another
+  account, that account is what it is.
 - **A waiting account** becomes a member at once: the waiting mark is
   cleared in the store; its connections get `user` with `you`, without
-  the `waiting` role and with `ext.permissions` `{}`, which clears
-  `lobby`, while those who share a room with it get `user` `new`; then
-  `room_update` `joined` for `general` with the membership, and a
-  `~private` notice in the Lobby, "@ada invited you in." Clients list
-  their rooms again when `ext.permissions.lobby` goes away; nothing needs
-  to reconnect.
+  the `waiting` role, while those who share a room with it get `user`
+  `new`; then the `room_update` below, and a `~private` notice in the
+  Lobby, "@ada welcomed you in." Nothing needs to reconnect.
 - **A member** is left as it is.
 - **An unknown or departed user** is `invalid_params`.
 
-The inviter gets a `~private` notice in the command's room saying which
+A restricted user that becomes a member joins `general`, and keeps the
+Lobby. Its connections get one `room_update` that shows it the rooms it
+sees now: `general` in `joined`, with its `members`, `users`, and the
+membership, and in `updated` the records of the other rooms an unfiltered
+`room_list` would list as `not_joined` (the visible top-level rooms it has
+not joined, at most the 200 most recently active), which clients add as
+rooms not joined. Threads it may now see are listed with their parent, as
+always.
+The welcomer gets a `~private` notice in the command's room saying which
 of these happened, before the `{}` result. `Server.Admit` and
 `Host.Admit` do the same for a program or extension, and return once the
 change is stored.
@@ -785,16 +784,16 @@ closed is kept in the store across restarts. While it is closed:
 
 - A connection that is not signed in gets the frame private mode sends:
   no `guest` in `auth`, `signup` `[]`, no description taken from a room,
-  and no `ext.settings.lobby`. A guest `auth` is `unsupported` ("The
+  as in private mode. A guest `auth` is `unsupported` ("The
   Public Lobby is closed"), and nobody may make an account but with an
   [invitation](#invitations): a code is mailed to no new address, and
   neither a passkey registration nor external sign-in makes one. Accounts
   sign in as before.
-- Each connected guest, invited or not, gets a `~private` notice in the
+- Each connected guest, welcomed or not, gets a `~private` notice in the
   Lobby, "The Public Lobby is closed", and its connection closes with
   status 1008 (policy violation).
-- Waiting accounts still sign in, see the Lobby, and can be invited.
-- Members still see the Lobby; `ext.settings.lobby.open` is `false`.
+- Waiting accounts still sign in, see the Lobby, and can be welcomed.
+- Members still see the Lobby.
 
 Each change sends every connection a new `server` frame, then the sender
 a `~private` notice. Opening the Lobby makes all of its history public
@@ -808,8 +807,7 @@ marks and whether the Lobby is closed:
 - **public to lobby**: existing accounts are members, and the Lobby is
   created.
 - **lobby to public**: waiting accounts sign in as members (the mark is
-  kept, and ignored), the Lobby stays an ordinary public room, and
-  `ext.settings.lobby` is no longer sent. Back in lobby mode the marks
+  kept, and ignored), and the Lobby stays an ordinary public room. Back in lobby mode the marks
   apply again, and those accounts leave any other rooms they joined.
 - **lobby to private**: waiting accounts may not sign in (`denied`, "This
   server is invite-only; ask for an invite link"), and are signed out at
@@ -1231,7 +1229,7 @@ effects and `~private` replies arrive before its result. Commands:
   and then a logged `~room` message (`from: {user_id: "~room", name: <room title>}`),
   such as `@guest_3 was removed by @guest_1: spamming`. The reason is the first line
   of the rest of the text, at most 200 characters.
-- `/invite <user_id>` and `/toggle [lobby]` exist only in lobby mode, for
+- `/welcome <user_id>` and `/toggle [lobby]` exist only in lobby mode, for
   admins and moderators: the first lets someone in from the Lobby, and the
   second closes the Lobby to newcomers or opens it again; see
   [Access modes](#access-modes).
@@ -1893,7 +1891,7 @@ one ([Passkeys](#passkeys)); presenting one there still makes the account
 with what the invitation gives. The program that embeds the server
 makes one with `Server.Invite`, and an extension with `Host.Invite`; the
 [private example](examples/private) offers it to admins as `/invite-code`
-(core `/invite <user_id>` is lobby mode's; see [Access modes](#access-modes)). It
+(`/invite-code`, as on apron-server-cloudflare). It
 returns a token, `apron_invite_<random>`, once the invitation is stored, and
 the server keeps only the token's SHA-256. An invitation lasts seven days
 unless its `Lifetime` says otherwise; `Invitations` lists those
