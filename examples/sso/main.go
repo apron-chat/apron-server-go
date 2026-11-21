@@ -13,7 +13,7 @@
 // callback URL https://chat.example/sso/callback, then run:
 //
 //	go run ./examples/sso --public-url https://chat.example \
-//	  --origin https://chat.example --disable-guests \
+//	  --origin https://chat.example --access.mode private \
 //	  --sso.base-url https://chat.example \
 //	  --sso.client-id ... --sso.client-secret ... \
 //	  --sso.org my-team --sso.admin octocat

@@ -5,7 +5,7 @@
 // connections that are not signed in learn only how to sign in. Admins
 // manage the list from the chat with /allow, /disallow, and /allowed, and
 // taking someone off it signs them out everywhere, as does a restart
-// without their --private.allow entry. /invite makes an invitation, which
+// without their --private.allow entry. /invite-code makes an invitation, which
 // lets one new person make an account with a passkey, without an address
 // on the list; /disallow user:<user_id> takes that back too.
 //
@@ -94,7 +94,7 @@ func (p *Private) Init(r *apron.Registrar) error {
 		Group: "admin", Available: admin, Run: p.list,
 	})
 	r.Command(apron.Command{
-		Name: "invite", Usage: "/invite [<user_id>]", Help: "invite one person to make an account with a passkey",
+		Name: "invite-code", Usage: "/invite-code [<user_id>]", Help: "invite one person to make an account with a passkey",
 		Group: "admin", Available: admin, Run: p.invite,
 	})
 	return nil
@@ -153,7 +153,7 @@ func (p *Private) invite(ctx context.Context, call *apron.CommandCall) (map[stri
 	userID := strings.TrimSpace(call.Args)
 	invitation, err := p.host.Invite(ctx, apron.InvitationOptions{UserID: userID})
 	if err != nil && userID != "" {
-		return nil, apron.InvalidParams("Usage: /invite [<user_id>]")
+		return nil, apron.InvalidParams("Usage: /invite-code [<user_id>]")
 	}
 	if err != nil {
 		return nil, err
