@@ -263,8 +263,20 @@ func TestLobbyInvite(t *testing.T) {
 	guest, _ := lobbyGuest(t, httpServer)
 	expectMembership(t, ada, "lobby", guest.userID, true)
 
+	// /help lists /invite and /toggle to admins and moderators only.
+	before, _ := commandIn(t, ada, "general", "/help")
+	if text := noticeText(t, before[0]); !strings.Contains(text, "`/invite <user_id>`") || !strings.Contains(text, "`/toggle [lobby]`") {
+		t.Fatalf("an admin's /help: %q", text)
+	}
+	guest.drain(t)
+	before, _ = commandIn(t, guest, "lobby", "/help")
+	if text := noticeText(t, before[0]); strings.Contains(text, "/invite ") || strings.Contains(text, "/toggle") {
+		t.Fatalf("a guest's /help: %q", text)
+	}
+
 	// Unknown users, and members, change nothing.
-	if _, reply := commandIn(t, ada, "general", "/invite nobody"); errorCode(reply) != CodeInvalidParams {
+	_, reply := commandIn(t, ada, "general", "/invite nobody")
+	if errorCode(reply) != CodeInvalidParams {
 		t.Fatalf("/invite nobody = %#v", reply)
 	}
 	if _, reply := commandIn(t, ada, "general", "/invite"); errorCode(reply) != CodeInvalidParams {
@@ -276,7 +288,7 @@ func TestLobbyInvite(t *testing.T) {
 
 	// The guest is invited: its you, then a notice; those in the Lobby see
 	// its role; the inviter a notice before the result.
-	before, reply := commandIn(t, ada, "general", "/invite @"+guest.userID)
+	before, reply = commandIn(t, ada, "general", "/invite @"+guest.userID)
 	if errorCode(reply) != 0 || len(before) != 2 {
 		t.Fatalf("/invite guest = %#v after %#v", reply, before)
 	}
