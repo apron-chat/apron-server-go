@@ -9,6 +9,12 @@
 // with their GitHub identity; the page then asks them to allow the app,
 // naming it, and returns to it with a code.
 //
+// Who may make an account is the extension's to say, not each person's:
+// it restricts sign-in to an allowlist (RestrictSignIn), so there are no
+// guests, and puts on it each GitHub identity that passes its check,
+// keeping the list in its store. So it also works in private mode, where
+// nobody signs themselves up.
+//
 // Register an OAuth app at https://github.com/settings/developers with the
 // callback URL https://chat.example/sso/callback, then run:
 //
@@ -48,7 +54,9 @@ type SSO struct {
 	}
 	host   *apron.Host
 	signIn *apron.ExternalSignIn
-	client *http.Client
+	// members is who passed the check, as the server's allowlist.
+	members *apron.Allowlist
+	client  *http.Client
 	// github is where GitHub's sign-in pages and API are, which tests
 	// replace.
 	github struct{ web, api string }
@@ -68,9 +76,25 @@ func (s *SSO) Init(r *apron.Registrar) error {
 		s.github.web, s.github.api = "https://github.com", "https://api.github.com"
 	}
 	s.signIn = r.ExternalSignIn(s.start)
+	s.members = r.RestrictSignIn()
+	var members []apron.Principal
+	for _, key := range r.Store().Keys(memberKeys) {
+		principal, err := apron.ParsePrincipal(strings.TrimPrefix(key, memberKeys))
+		if err != nil {
+			return fmt.Errorf("stored member %q: %w", key, err)
+		}
+		members = append(members, principal)
+	}
+	if err := s.members.Allow(members...); err != nil {
+		return err
+	}
 	r.Handle("GET /sso/callback", http.HandlerFunc(s.finish))
 	return nil
 }
+
+// memberKeys starts the store's keys of the identities that passed the
+// check.
+const memberKeys = "member:"
 
 // start sends the person to GitHub. The sign-in's ID is unguessable and
 // works once, so it serves as OAuth's state.
@@ -100,6 +124,19 @@ func (s *SSO) finish(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		s.host.Logger().Warn("GitHub sign-in refused", "error", err)
 		http.Error(w, "Sign-in failed: "+err.Error(), http.StatusForbidden)
+		return
+	}
+	// The identity passed: it may sign in, and make its account.
+	member, err := apron.ParsePrincipal("external:" + identity.Subject)
+	if err == nil {
+		err = s.host.Store().Put(memberKeys+member.String(), true)
+	}
+	if err == nil {
+		err = s.members.Allow(member)
+	}
+	if err != nil {
+		s.host.Logger().Error("cannot let in a member", "error", err)
+		http.Error(w, "Sign-in failed", http.StatusInternalServerError)
 		return
 	}
 	if err := s.signIn.Complete(w, r, signIn, identity); err != nil {

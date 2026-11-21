@@ -9,7 +9,7 @@ file sets in a table of that name (`[sso]`). Run one with
 
 | Example | What it shows |
 |---------|---------------|
-| [`sso`](sso) | External sign-in with GitHub for the members of one organization, with admins by login, behind the server's own OAuth sign-in page: `ExternalSignIn`, `Complete`, `Cancel`, `Handle`. |
+| [`sso`](sso) | External sign-in with GitHub for the members of one organization, with admins by login, behind the server's own OAuth sign-in page, letting each member in with an allowlist it keeps: `ExternalSignIn`, `Complete`, `Cancel`, `Handle`, `RestrictSignIn`, `Store`. |
 | [`moderation`](moderation) | No links from new accounts or guests, masked words, and a moderators' `/slowmode`: `FilterMessage`, `OnEvent`, `Command`, `Store`, `RoomNotice`. |
 | [`assistant`](assistant) | A bot that answers its mentions, streaming the reply from a command such as a local model: `Bot`, `OnEvent`, `Visible`, `History`, `StreamAppend`, `Go`. |
 | [`ops`](ops) | Signed GitHub webhooks posted to a room, and `/deploy` streaming a terminal for people with the `deployer` role: `Handle`, `Bot.Post`, `StreamTerminal`. |
