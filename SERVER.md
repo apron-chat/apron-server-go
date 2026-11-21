@@ -67,7 +67,9 @@ Defaults:
   adds an address becomes an account. Without guests (private mode,
   or sign-in an extension restricts), `signup` leaves out `webauthn` too,
   since a passkey registration then makes an account only with an
-  [invitation](#invitations); with no other scheme it is `[]`. So does
+  [invitation](#invitations); with no other scheme it is `[]`. In private
+  mode without an allowlist it is `[]` whatever the schemes, since none
+  makes an account by itself there ([Access modes](#access-modes)). So does
   `--webauthn.guest-first`, with which a registration makes an account only
   of a signed-in guest, or with an invitation
 - passkey RP ID: `localhost`; frontend origins: `http://localhost:5173` and
@@ -655,13 +657,10 @@ admin or moderator lets them in:
   They introduce themselves there, and an admin or moderator welcomes
   them in with `/welcome`. Until then the rest of the server answers as if it
   did not exist.
-- **`private`**: no guests; only accounts sign in, as `--disable-guests`,
-  now its deprecated alias, did. Before a connection signs in, its
-  `server` frame holds only what signing in needs (see
-  [Extensions](#extensions)). [Invitations](#invitations) are how new
-  people get an account without an address of their own on an allowlist;
-  email and external sign-in still make accounts as they do without
-  guests.
+- **`private`**: no guests, and nobody makes an account by themselves:
+  only accounts sign in. `--disable-guests` is its deprecated alias.
+  Before a connection signs in, its `server` frame holds only what signing
+  in needs (see [Extensions](#extensions)). See [Private mode](#private-mode).
 
 [Invitations](#invitations) work in every mode, and make members.
 
@@ -803,6 +802,48 @@ Each change sends every connection a new `server` frame, then the sender
 a `~private` notice. Opening the Lobby makes all of its history public
 again, what members posted while it was closed included.
 
+### Private mode
+
+In private mode an account is made only on someone else's word:
+
+- **Refused**: every way to sign oneself up. A passkey registration on a
+  connection that is not signed in, in the client or on the
+  [passkey page](#the-passkey-page), is `denied` ("This server is
+  invite-only; ask for an invite link"), without an invitation. An email
+  sign-in for an address no account has mails no code, and the proposal's
+  answer reads the same as for an address an account has, as it does for an
+  address an allowlist leaves out, so it tells nobody who has an account.
+  An external sign-in for an identity no account has is refused on the
+  sign-in page ("You can't sign in … with this account"), and a code for
+  one is `denied` with the same message as a passkey's. Email and external
+  sign-in carry no invitation, so they make no new account here.
+- **Allowed**: an [invitation](#invitations) presented with a passkey
+  registration (`Server.Invite`, `Host.Invite`, or the private example's
+  `/invite-code`); an identity the operator names, which is not
+  self-directed: one an extension's allowlist (`RestrictSignIn`) names, as
+  in the [private example](examples/private)'s `/allow`, and one
+  `--role` (`Config.Roles`) grants a role, by address or `scheme:subject`,
+  so a new server gets its first admin; and `/welcome` of a waiting account
+  left from lobby mode (below).
+- Every existing member signs in by any scheme, a session, device, or
+  service token included, and adds a passkey, an address, or an external
+  identity to their own account as anywhere.
+
+`server.signup` lists only what any client could use: `[]` without an
+allowlist, since an invitation is a secret one person was given (it uses
+`webauthn`, which stays in `server.auth`); with an allowlist, the schemes an
+allowlisted identity may sign up with, such as `email`, as on any server
+whose sign-in an extension restricts, and never `webauthn`.
+
+`/welcome <user_id>` exists in private mode too, for admins and
+moderators, only to let in the waiting accounts an earlier lobby mode left:
+it clears the mark, joins the account to `general`, and from then on it
+signs in as a member; it was signed out at start, so it has no connection
+to tell. Guests do not exist there, and nothing makes new waiting accounts.
+Its target rules are lobby mode's: a member is left as it is, and an
+unknown user is `invalid_params`. `Server.Waiting` reports such an account,
+and `Server.Admit` admits it.
+
 ### Switching modes
 
 The mode is read at start; the store keeps nothing of it but the waiting
@@ -817,7 +858,8 @@ marks and whether the Lobby is closed:
   server is invite-only; ask for an invite link"), and are signed out at
   start: their session, device, and service tokens and push registrations
   are forgotten, while what they posted, their profiles, and their marks
-  stay.
+  stay, until `/welcome` lets one in. An admin or moderator by `--role`
+  is never waiting.
 - **private to either**: nothing to migrate.
 
 ## Messages
@@ -1235,8 +1277,9 @@ effects and `~private` replies arrive before its result. Commands:
   of the rest of the text, at most 200 characters.
 - `/welcome <user_id>` and `/toggle [lobby]` exist only in lobby mode, for
   admins and moderators: the first lets someone in from the Lobby, and the
-  second closes the Lobby to newcomers or opens it again; see
-  [Access modes](#access-modes).
+  second closes the Lobby to newcomers or opens it again; `/welcome` also
+  exists in private mode, to let in waiting accounts left from lobby mode.
+  See [Access modes](#access-modes).
 - `/invite-device <name>`, as on apron-server-cloudflare, gives an account
   (a passkey or email user; a guest is `denied`) a bearer token that signs
   it in on another device. The name is 1 to 32 letters, digits, `_`, `.`
@@ -1894,8 +1937,10 @@ guest. Where guests are allowed, a registration makes an account without
 one ([Passkeys](#passkeys)); presenting one there still makes the account
 with what the invitation gives. The program that embeds the server
 makes one with `Server.Invite`, and an extension with `Host.Invite`; the
-[private example](examples/private) offers it to admins as `/invite-code`
-(`/invite-code`, as on apron-server-cloudflare). It
+[private example](examples/private) offers it to admins as `/invite-code`,
+the name apron-server-cloudflare gives its own. In
+[private mode](#private-mode) an invitation is the only way a person
+makes their own account, apart from an allowlist or a role naming them. It
 returns a token, `apron_invite_<random>`, once the invitation is stored, and
 the server keeps only the token's SHA-256. An invitation lasts seven days
 unless its `Lifetime` says otherwise; `Invitations` lists those
@@ -2461,7 +2506,7 @@ embedding program's or extension's own policy must fit in:
 
 | Path | Who may | Checked |
 | --- | --- | --- |
-| Sign-in, every scheme, token resume, device and service tokens | the allowlist, if any, or an invitation's admission; in private mode not a waiting account; in lobby mode no new account while the Lobby is closed | at each sign-in and resume; removal from the list signs the account out |
+| Sign-in, every scheme, token resume, device and service tokens | the allowlist, if any, or an invitation's admission; in private mode not a waiting account, and a new account only with an invitation, or for an identity the allowlist names or a role is granted; in lobby mode no new account while the Lobby is closed | at each sign-in and resume; removal from the list signs the account out |
 | `history`, `room_list`, thread cards, `room_update` | who can see the room: private membership, then scope, then in lobby mode the Lobby for guests and waiting accounts | per request and per delivery |
 | `message`, `reactions`, `room_join`, `room_set`, commands | who can see the room; a scope makes no rooms; in lobby mode guests and waiting accounts make none, and only admins and moderators edit the Lobby | per request |
 | Upload and live text writes (HTTP `PUT`, `LiveWriter`) | the write's author, while they may sign in and see the room | when the write starts, when an upload finishes, and at once when the author is signed out, leaves a private room, or is scoped out |

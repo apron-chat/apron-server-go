@@ -55,7 +55,9 @@ the server log instead of sending them.
 Anyone may chat as a guest by default. `--access.mode lobby` shows
 newcomers only a Public Lobby, where they introduce themselves until an
 admin or moderator lets them in with `/welcome <user_id>`, and
-`--access.mode private` offers no guests at all; see
+`--access.mode private` offers no guests, and lets nobody sign
+themselves up: an account comes from an invitation, an allowlist, or a
+`--role` grant; see
 [Access modes](SERVER.md#access-modes).
 
 External sign-in, such as with GitHub or an OpenID Connect provider, is an
