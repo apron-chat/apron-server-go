@@ -745,7 +745,7 @@ granting the role to an email address or identity that then signs up, or
 to the `user_id` of an account made with a passkey. Bots are never
 restricted either.
 
-Extensions cannot register `/welcome` or `/toggle` in lobby mode, nor
+Extensions cannot register `/welcome` or `/lobby` in lobby mode, nor
 `/welcome` in private mode, where the server has its own; in public mode
 both names are free.
 
@@ -833,10 +833,12 @@ change is stored.
 
 ### Closing the Lobby
 
-`/toggle lobby close` and `/toggle lobby open`, for admins and moderators,
-close the Lobby to newcomers and open it again; closing a closed Lobby, or
-opening an open one, says so and changes nothing. `/toggle lobby` alone
-flips it, and `/toggle` alone shows whether it is open. Whether it is
+`/lobby close` and `/lobby open`, in lobby mode only, for admins and
+moderators (`denied` otherwise, and not listed in their `/help`), close
+the Lobby to newcomers and open it again; closing a closed Lobby, or
+opening an open one, says so ("The Public Lobby is closed already.") and
+changes nothing. `/lobby` alone shows whether it is open; anything else
+after it is `invalid_params`. There is no `/toggle`. Whether it is
 closed is kept in the store across restarts. While it is closed:
 
 - A connection that is not signed in gets the frame private mode sends:
@@ -1344,9 +1346,10 @@ effects and `~private` replies arrive before its result. Commands:
   and then a logged `~room` message (`from: {user_id: "~room", name: <room title>}`),
   such as `@guest_3 was removed by @guest_1: spamming`. The reason is the first line
   of the rest of the text, at most 200 characters.
-- `/welcome <user_id>` and `/toggle [lobby [open|close]]` exist only in lobby mode, for
-  admins and moderators: the first lets someone in from the Lobby, and the
-  second closes the Lobby to newcomers or opens it again; `/welcome` also
+- `/welcome <user_id>` and `/lobby [open|close]` exist only in lobby mode,
+  for admins and moderators: the first lets someone in from the Lobby, and
+  the second shows whether the Lobby is open, or opens or closes it to
+  newcomers; `/welcome` also
   exists in private mode, to let in waiting accounts left from lobby mode.
   See [Access modes](#access-modes).
 - `/invite-device <name>`, as on apron-server-cloudflare, gives an account

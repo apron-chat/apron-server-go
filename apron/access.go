@@ -97,7 +97,7 @@ type accessState struct {
 	// lobby is the Lobby's room_id in lobby mode, and empty in the other
 	// modes. It does not change once the server is open.
 	lobby string
-	// closed reports that the Lobby is closed to newcomers (/toggle lobby).
+	// closed reports that the Lobby is closed to newcomers (/lobby).
 	// Guarded by s.mu.
 	closed bool
 	// private reports private mode, where /welcome admits the waiting
@@ -140,7 +140,7 @@ func (u *userState) restricted() bool { return u.lobbyState() != "" }
 // moderates reports a user with the admin or moderator role.
 func (u *userState) moderates() bool { return u.hasRole("admin") || u.hasRole("moderator") }
 
-// mayWelcome reports whether u may run /welcome and /toggle: an admin or
+// mayWelcome reports whether u may run /welcome and /lobby: an admin or
 // moderator in lobby mode, or /welcome in private mode.
 func (u *userState) mayWelcome() bool {
 	return u.access != nil && (u.access.lobby != "" || u.access.private) && u.botOf == "" && u.moderates()
@@ -536,10 +536,10 @@ func (s *Server) welcomeCommand(c *client, r *roomState, body map[string]any, ar
 	return map[string]any{}, nil
 }
 
-// toggleCommand is /toggle, for admins and moderators in lobby mode:
-// alone it shows the toggles, and /toggle lobby closes the Lobby to
-// newcomers or opens it again.
-func (s *Server) toggleCommand(c *client, r *roomState, _ map[string]any, args, _ string) (map[string]any, *Error) {
+// lobbyCommand is /lobby, for admins and moderators in lobby mode: alone
+// it shows whether the Lobby is open, and /lobby open and /lobby close
+// open it to newcomers or close it, saying so when it is that already.
+func (s *Server) lobbyCommand(c *client, r *roomState, _ map[string]any, args, _ string) (map[string]any, *Error) {
 	if !c.user.mayWelcome() {
 		return nil, &Error{Code: CodeDenied, Message: "Only admins and moderators can open and close the Public Lobby"}
 	}
@@ -549,24 +549,17 @@ func (s *Server) toggleCommand(c *client, r *roomState, _ map[string]any, args, 
 		}
 		return "open"
 	}
-	words := strings.Fields(strings.ToLower(args))
-	if len(words) == 0 {
-		c.enqueue(privateNotice(r.id, "- `lobby`: "+state()+"; `/toggle lobby` "+map[bool]string{true: "opens", false: "closes"}[s.access.closed]+" it, and `/toggle lobby open` or `close` says which"))
+	var closed bool
+	switch words := strings.Fields(strings.ToLower(args)); {
+	case len(words) == 0:
+		c.enqueue(privateNotice(r.id, "The Public Lobby is "+state()+"; `/lobby open` and `/lobby close` open and close it to newcomers."))
 		return map[string]any{}, nil
-	}
-	if words[0] != "lobby" || len(words) > 2 {
-		return nil, invalidParams("Usage: /toggle lobby [open|close]")
-	}
-	closed := !s.access.closed
-	if len(words) == 2 {
-		switch words[1] {
-		case "open":
-			closed = false
-		case "close", "closed":
-			closed = true
-		default:
-			return nil, invalidParams("Usage: /toggle lobby [open|close]")
-		}
+	case len(words) == 1 && words[0] == "open":
+		closed = false
+	case len(words) == 1 && words[0] == "close":
+		closed = true
+	default:
+		return nil, invalidParams("Usage: /lobby [open|close]")
 	}
 	if closed == s.access.closed {
 		c.enqueue(privateNotice(r.id, "The Public Lobby is "+state()+" already."))
@@ -607,7 +600,7 @@ func (s *Server) setLobbyClosedLocked(closed bool) {
 	s.announceServerLocked()
 }
 
-// storedLobby is the Lobby's state, as /toggle lobby leaves it.
+// storedLobby is the Lobby's state, as /lobby leaves it.
 type storedLobby struct {
 	Closed bool `json:"closed,omitzero"`
 }

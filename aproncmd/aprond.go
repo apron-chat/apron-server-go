@@ -57,7 +57,7 @@ type Options struct {
 	Roles                  []string `long:"role" description:"Grant a role to an account as role=user_id, role=email, or role=scheme:subject, such as admin=ada; repeat for more. admin and moderator may remove others from rooms, and admin may replace and remove custom emoji and set the server's title, description, and avatar with /server"`
 
 	Access struct {
-		Mode      string `long:"mode" default:"public" choice:"public" choice:"lobby" choice:"private" description:"Who may see what before being admitted: public lets anyone in as a guest; lobby shows newcomers, guests and those who sign themselves up, only the Lobby room until an admin or moderator welcomes them in with /welcome; private offers no guests, and makes accounts only with an invitation, or for an identity an allowlist or --role names"`
+		Mode      string `long:"mode" default:"public" choice:"public" choice:"lobby" choice:"private" description:"Who may see what before being admitted: public lets anyone in as a guest; lobby shows newcomers, guests and those who sign themselves up, only the Lobby room until an admin or moderator welcomes them in with /welcome (and /lobby open or close lets newcomers in or not); private offers no guests, and makes accounts only with an invitation, or for an identity an allowlist or --role names"`
 		LobbyRoom string `long:"lobby-room" default:"lobby" description:"The Lobby's room_id in lobby mode; the server creates it, titled Public Lobby, unless a room with that room_id exists, which becomes the Lobby as it is"`
 	} `group:"Access" namespace:"access"`
 

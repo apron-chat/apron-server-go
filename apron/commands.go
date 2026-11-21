@@ -363,12 +363,12 @@ func lobbyCommands() []serverCommand {
 	return []serverCommand{
 		welcomeCommand("let someone in from the Public Lobby: a waiting account becomes a member at once, and a guest once they sign up"),
 		{
-			name: "toggle",
+			name: "lobby",
 			forms: []commandForm{{
-				name: "toggle", group: groupRole, hint: "[lobby [open|close]]", description: "show the toggles, or close the Public Lobby to newcomers or open it again; without open or close, flip it",
+				name: "lobby", group: groupRole, hint: "[open|close]", description: "show whether the Public Lobby is open, or open or close it to newcomers",
 				may: func(_ *Server, c *client, _ *roomState) bool { return c.user.mayWelcome() },
 			}},
-			run: (*Server).toggleCommand,
+			run: (*Server).lobbyCommand,
 		},
 	}
 }

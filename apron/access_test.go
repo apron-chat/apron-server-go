@@ -225,13 +225,13 @@ func TestLobbyVisibility(t *testing.T) {
 			"add someone":     {"room_join", map[string]any{"room_id": "lobby", "user_id": "ada"}},
 			"emoji":           {"command", map[string]any{"room_id": "lobby", "body": map[string]any{"text": "/emoji add :wave:", "embeds": []any{map[string]any{"kind": "upload", "content_type": "image/png", "size": 10}}}}},
 			"welcome":         {"command", map[string]any{"room_id": "lobby", "body": map[string]any{"text": "/welcome ada"}}},
-			"toggle":          {"command", map[string]any{"room_id": "lobby", "body": map[string]any{"text": "/toggle lobby"}}},
+			"lobby":           {"command", map[string]any{"room_id": "lobby", "body": map[string]any{"text": "/lobby close"}}},
 			"read elsewhere":  {"activity", map[string]any{"room_id": "lobby", "read_message_id": inGeneral}},
 			"history in room": {"history", map[string]any{"room_id": "general", "after": inGeneral, "before": inGeneral}},
 		} {
 			want := CodeInvalidParams
 			switch name {
-			case "lobby edit", "lobby thread", "new room", "new private", "add someone", "emoji", "welcome", "toggle":
+			case "lobby edit", "lobby thread", "new room", "new private", "add someone", "emoji", "welcome", "lobby":
 				want = CodeDenied
 			case "read elsewhere":
 				// activity is never answered (§4.6).
@@ -285,14 +285,15 @@ func TestLobbyInvite(t *testing.T) {
 	guest, _ := lobbyGuest(t, httpServer)
 	expectMembership(t, ada, "lobby", guest.userID, true)
 
-	// /help lists /welcome and /toggle to admins and moderators only.
+	// /help lists /welcome and /lobby to admins and moderators only, and
+	// there is no /toggle.
 	before, _ := commandIn(t, ada, "general", "/help")
-	if text := noticeText(t, before[0]); !strings.Contains(text, "`/welcome <user_id>`") || !strings.Contains(text, "`/toggle [lobby [open|close]]`") {
+	if text := noticeText(t, before[0]); !strings.Contains(text, "`/welcome <user_id>`") || !strings.Contains(text, "`/lobby [open|close]`") || strings.Contains(text, "/toggle") {
 		t.Fatalf("an admin's /help: %q", text)
 	}
 	guest.drain(t)
 	before, _ = commandIn(t, guest, "lobby", "/help")
-	if text := noticeText(t, before[0]); strings.Contains(text, "/welcome ") || strings.Contains(text, "/toggle") {
+	if text := noticeText(t, before[0]); strings.Contains(text, "/welcome ") || strings.Contains(text, "/lobby") {
 		t.Fatalf("a guest's /help: %q", text)
 	}
 
@@ -535,10 +536,10 @@ func TestLobbyWaitingAccountResumes(t *testing.T) {
 	}
 }
 
-// /toggle lobby closes the Lobby to newcomers: its guests go, with 1008,
+// /lobby close closes the Lobby to newcomers: its guests go, with 1008,
 // new connections are offered no guests or sign-ups, and waiting accounts
 // stay. It stays closed across a restart, and opens again.
-func TestLobbyToggle(t *testing.T) {
+func TestLobbyOpenAndClose(t *testing.T) {
 	memory := store.NewMemory()
 	mailbox := make(testMailbox, 16)
 	configure := func(config *Config) {
@@ -550,20 +551,25 @@ func TestLobbyToggle(t *testing.T) {
 	ada, _ := emailSignUp(t, httpServer, mailbox, "ada@example.com", "ada", "general")
 	_, waiting := emailSignUp(t, httpServer, mailbox, "wes@example.com", "wes", "lobby")
 	guest, _ := lobbyGuest(t, httpServer)
-	if before, reply := commandIn(t, ada, "general", "/toggle"); errorCode(reply) != 0 || !strings.Contains(noticeText(t, before[len(before)-1]), "`lobby`: open") {
-		t.Fatalf("/toggle = %#v after %#v", reply, before)
+	if before, reply := commandIn(t, ada, "general", "/lobby"); errorCode(reply) != 0 || !strings.HasPrefix(noticeText(t, before[len(before)-1]), "The Public Lobby is open;") {
+		t.Fatalf("/lobby = %#v after %#v", reply, before)
+	}
+	if _, reply := commandIn(t, ada, "general", "/toggle lobby"); errorCode(reply) != CodeInvalidParams {
+		t.Fatalf("/toggle lobby = %#v", reply)
 	}
 	ada.drain(t)
 
-	if before, reply := commandIn(t, ada, "general", "/toggle lobby open"); errorCode(reply) != 0 || noticeText(t, before[0]) != "The Public Lobby is open already." {
-		t.Fatalf("/toggle lobby open = %#v after %#v", reply, before)
+	if before, reply := commandIn(t, ada, "general", "/lobby open"); errorCode(reply) != 0 || noticeText(t, before[0]) != "The Public Lobby is open already." {
+		t.Fatalf("/lobby open = %#v after %#v", reply, before)
 	}
-	if _, reply := commandIn(t, ada, "general", "/toggle lobby shut"); errorCode(reply) != CodeInvalidParams {
-		t.Fatalf("/toggle lobby shut = %#v", reply)
+	for _, line := range []string{"/lobby shut", "/lobby lobby", "/lobby open now"} {
+		if _, reply := commandIn(t, ada, "general", line); errorCode(reply) != CodeInvalidParams {
+			t.Fatalf("%s = %#v", line, reply)
+		}
 	}
-	before, reply := commandIn(t, ada, "general", "/toggle lobby close")
+	before, reply := commandIn(t, ada, "general", "/lobby close")
 	if errorCode(reply) != 0 || len(before) != 2 {
-		t.Fatalf("/toggle lobby = %#v after %#v", reply, before)
+		t.Fatalf("/lobby close = %#v after %#v", reply, before)
 	}
 	if params := notificationParams(t, before[0], "server"); slices.Contains(params["auth"].([]any), any("guest")) {
 		t.Fatalf("the admin's server frame: %#v", params)
@@ -623,11 +629,14 @@ func TestLobbyToggle(t *testing.T) {
 	propose(t, ada, "ada@example.com")
 	signInByEmail(t, ada, mailbox.receive(t).Code, nil)
 	ada.drain(t)
-	if before, reply := commandIn(t, ada, "general", "/toggle lobby close"); errorCode(reply) != 0 || noticeText(t, before[0]) != "The Public Lobby is closed already." {
-		t.Fatalf("/toggle lobby close when closed = %#v after %#v", reply, before)
+	if before, reply := commandIn(t, ada, "general", "/lobby close"); errorCode(reply) != 0 || noticeText(t, before[0]) != "The Public Lobby is closed already." {
+		t.Fatalf("/lobby close when closed = %#v after %#v", reply, before)
 	}
-	if before, reply := commandIn(t, ada, "general", "/toggle lobby"); errorCode(reply) != 0 || !strings.HasPrefix(noticeText(t, before[len(before)-1]), "The Public Lobby is open again") {
-		t.Fatalf("/toggle lobby = %#v after %#v", reply, before)
+	if before, reply := commandIn(t, ada, "general", "/lobby"); errorCode(reply) != 0 || !strings.HasPrefix(noticeText(t, before[0]), "The Public Lobby is closed;") {
+		t.Fatalf("/lobby when closed = %#v after %#v", reply, before)
+	}
+	if before, reply := commandIn(t, ada, "general", "/lobby open"); errorCode(reply) != 0 || !strings.HasPrefix(noticeText(t, before[len(before)-1]), "The Public Lobby is open again") {
+		t.Fatalf("/lobby open = %#v after %#v", reply, before)
 	}
 	lobbyGuest(t, httpServer)
 	if !app.LobbyOpen() {
@@ -986,7 +995,7 @@ func TestPrivateModeWelcome(t *testing.T) {
 	signInByEmail(t, ada, mailbox.receive(t).Code, map[string]any{"user_id": "ada"})
 	ada.drain(t)
 	before, _ := commandIn(t, ada, "general", "/help")
-	if text := noticeText(t, before[0]); !strings.Contains(text, "`/welcome <user_id>`") || strings.Contains(text, "/toggle") {
+	if text := noticeText(t, before[0]); !strings.Contains(text, "`/welcome <user_id>`") || strings.Contains(text, "/lobby") || strings.Contains(text, "/toggle") {
 		t.Fatalf("/help in private mode: %q", text)
 	}
 	if before, reply := commandIn(t, ada, "general", "/welcome @ada"); errorCode(reply) != 0 || !strings.Contains(noticeText(t, before[0]), "already a member") {
@@ -1227,7 +1236,8 @@ func TestLobbyWaitingAccountsAreNeverRoomless(t *testing.T) {
 // A waiting account that was a member while the server was public keeps
 // none of a member's powers once back in lobby mode: the rooms it made
 // and joined are gone from its sight, so it kicks, edits, and posts in
-// none, and it welcomes, toggles, and touches custom emoji no more.
+// none, and it welcomes, opens or closes the Lobby, and touches custom emoji
+// no more.
 func TestLobbyAfterAPublicSpell(t *testing.T) {
 	memory := store.NewMemory()
 	mailbox := make(testMailbox, 16)
@@ -1271,7 +1281,7 @@ func TestLobbyAfterAPublicSpell(t *testing.T) {
 		"kick in its room":    {"command", map[string]any{"room_id": mine, "body": map[string]any{"text": "/kick @ada", "mentions": []any{"ada"}}}, CodeInvalidParams},
 		"post in general":     {"message", map[string]any{"room_id": "general", "body": map[string]any{"text": "hi"}}, CodeInvalidParams},
 		"welcome":             {"command", map[string]any{"room_id": "lobby", "body": map[string]any{"text": "/welcome wes"}}, CodeDenied},
-		"toggle":              {"command", map[string]any{"room_id": "lobby", "body": map[string]any{"text": "/toggle lobby"}}, CodeDenied},
+		"lobby":               {"command", map[string]any{"room_id": "lobby", "body": map[string]any{"text": "/lobby close"}}, CodeDenied},
 		"emoji remove":        {"command", map[string]any{"room_id": "lobby", "body": map[string]any{"text": "/emoji remove :wave:"}}, CodeDenied},
 		"new room":            {"room_set", map[string]any{"title": "Another"}, CodeDenied},
 	} {
