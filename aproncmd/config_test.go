@@ -304,3 +304,39 @@ func TestExtensionFlags(t *testing.T) {
 		t.Fatalf("printed config:\n%s", printed.String())
 	}
 }
+
+func TestAccessOptions(t *testing.T) {
+	options, _ := parse(t)
+	config, err := serverConfig(*options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.Access != (apron.Access{Mode: apron.AccessPublic, LobbyRoom: apron.DefaultLobbyRoom}) {
+		t.Fatalf("default access %#v", config.Access)
+	}
+	options, _ = parse(t, "--access.mode", "lobby", "--access.lobby-room", "hello")
+	if config, err = serverConfig(*options); err != nil || config.Access != (apron.Access{Mode: apron.AccessLobby, LobbyRoom: "hello"}) {
+		t.Fatalf("lobby access %#v, %v", config.Access, err)
+	}
+	// --disable-guests is private mode, and refused with lobby mode.
+	options, _ = parse(t, "--disable-guests")
+	if config, err = serverConfig(*options); err != nil || config.Access.Mode != apron.AccessPrivate || !config.DisableGuests {
+		t.Fatalf("--disable-guests: %#v, %v", config.Access, err)
+	}
+	options, _ = parse(t, "--disable-guests", "--access.mode", "lobby")
+	if _, err = serverConfig(*options); err == nil {
+		t.Fatal("--disable-guests was taken with --access.mode lobby")
+	}
+	var bad Options
+	if _, err := flags.NewParser(&bad, flags.Default&^flags.PrintErrors).ParseArgs([]string{"--access.mode", "secret"}); err == nil {
+		t.Fatal("an unknown access mode was taken")
+	}
+	// The config file's [access] table sets them too.
+	options, parser := parse(t)
+	if err := loadConfig(parser, options, writeConfig(t, "[access]\nmode = \"lobby\"\nlobby-room = \"welcome\"\n")); err != nil {
+		t.Fatal(err)
+	}
+	if options.Access.Mode != "lobby" || options.Access.LobbyRoom != "welcome" {
+		t.Fatalf("[access] = %#v", options.Access)
+	}
+}
