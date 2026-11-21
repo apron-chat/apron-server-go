@@ -224,7 +224,7 @@ func (s *Server) guestsConfiguredLocked() bool {
 // a waiting account, which signed itself up in lobby mode, may not.
 func (s *Server) admittedLocked(u *userState) bool {
 	switch {
-	case s.config.Access.Mode == AccessPrivate && u.waiting && u.botOf == "":
+	case u.leftWaiting():
 		return false
 	case s.allowlist == nil, u.botOf != "":
 		return true
@@ -269,19 +269,42 @@ func (s *Server) admitLocked(u *userState) *Error {
 		return nil
 	}
 	if s.config.Access.Mode == AccessPrivate && u.waiting {
-		return &Error{Code: CodeDenied, Message: "This server is invite-only; ask for an invite link"}
+		return inviteOnly()
 	}
 	return notAdmitted()
 }
 
+// inviteOnly refuses a sign-in in private mode that an invitation, or the
+// allowlist, would let in.
+func inviteOnly() *Error {
+	return &Error{Code: CodeDenied, Message: "This server is invite-only; ask for an invite link"}
+}
+
 // admitsNewLocked reports whether a new account may be made for an
 // identity: one the list names, such as an email address, and none while
-// the Lobby is closed, when only an invitation makes one.
+// the Lobby is closed, or in private mode, when only an invitation makes
+// one. The operator's own choices still let an identity sign itself up in
+// private mode: the list naming it, or Config.Roles granting it a role,
+// as for the first admin of a server.
 func (s *Server) admitsNewLocked(id authn.Identity) bool {
 	if s.access.lobby != "" && s.access.closed {
 		return false
 	}
-	return s.allowlist == nil || s.allowlist.principals[principalOf(id)]
+	if s.access.private && s.allowlist == nil {
+		return s.grantsRoleLocked(id)
+	}
+	return s.allowlist == nil || s.allowlist.principals[principalOf(id)] || s.access.private && s.grantsRoleLocked(id)
+}
+
+// grantsRoleLocked reports whether Config.Roles names an identity.
+func (s *Server) grantsRoleLocked(id authn.Identity) bool {
+	p := principalOf(id)
+	for _, holders := range s.roleHolders {
+		if slices.Contains(holders, p) {
+			return true
+		}
+	}
+	return false
 }
 
 // startSignIn starts sign-in once the extensions are started, and every

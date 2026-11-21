@@ -41,7 +41,11 @@ const (
 	// Lobby (Access.LobbyRoom) and its threads, until an admin or moderator
 	// welcomes them in with /welcome.
 	AccessLobby AccessMode = "lobby"
-	// AccessPrivate offers no guests: only accounts sign in.
+	// AccessPrivate offers no guests, and nobody signs themselves up: a
+	// new account needs an invitation (Server.Invite), or an identity the
+	// operator names, on an extension's allowlist (Registrar.RestrictSignIn)
+	// or granted a role (Config.Roles). /welcome lets in the waiting
+	// accounts lobby mode left.
 	AccessPrivate AccessMode = "private"
 )
 
@@ -101,6 +105,9 @@ type accessState struct {
 	// closed reports that the Lobby is closed to newcomers (/toggle lobby).
 	// Guarded by s.mu.
 	closed bool
+	// private reports private mode, where /welcome admits the waiting
+	// accounts lobby mode left.
+	private bool
 }
 
 // Lobby states, which show as a role beside the user's name.
@@ -135,9 +142,15 @@ func (u *userState) restricted() bool { return u.lobbyState() != "" }
 func (u *userState) moderates() bool { return u.hasRole("admin") || u.hasRole("moderator") }
 
 // mayWelcome reports whether u may run /welcome and /toggle: an admin or
-// moderator in lobby mode.
+// moderator in lobby mode, or /welcome in private mode.
 func (u *userState) mayWelcome() bool {
-	return u.access != nil && u.access.lobby != "" && u.botOf == "" && u.moderates()
+	return u.access != nil && (u.access.lobby != "" || u.access.private) && u.botOf == "" && u.moderates()
+}
+
+// leftWaiting reports a waiting account in private mode: one that signed
+// itself up in lobby mode, and may not sign in until it is welcomed.
+func (u *userState) leftWaiting() bool {
+	return u.access != nil && u.access.private && u.waiting && u.account() && u.botOf == "" && !u.moderates()
 }
 
 // allows reports whether r is in what u may see apart from private rooms:
@@ -261,6 +274,14 @@ func (s *Server) welcomeLocked(target *userState, by string) string {
 	if by != "" {
 		welcomer = "@" + by
 	}
+	if target.leftWaiting() {
+		// Private mode has no Lobby: the account, signed out at start,
+		// signs in as a member from now on, in general.
+		target.waiting = false
+		s.touchUser(target.id)
+		s.admitToRoomsLocked(target)
+		return fmt.Sprintf("@%s is in: they may sign in as a member now.", target.id)
+	}
 	switch target.lobbyState() {
 	case "":
 		return fmt.Sprintf("@%s is already a member.", target.id)
@@ -349,9 +370,9 @@ func (s *Server) viewChangedLocked(u *userState) {
 // member is left as it is.
 func (s *Server) Admit(ctx context.Context, userID string) error {
 	s.mu.Lock()
-	if s.access.lobby == "" {
+	if s.access.lobby == "" && !s.access.private {
 		s.unlock()
-		return errors.New("apron: the server is not in lobby mode")
+		return errors.New("apron: the server is in public mode")
 	}
 	u := s.users[userID]
 	if u == nil || u.retired {
@@ -367,14 +388,15 @@ func (s *Server) Admit(ctx context.Context, userID string) error {
 // Admit lets a user in from the Lobby; see Server.Admit.
 func (h *Host) Admit(ctx context.Context, userID string) error { return h.s.Admit(ctx, userID) }
 
-// Waiting reports whether the user is limited to the Lobby, waiting to be
-// welcomed in: a guest or an account that signed itself up in lobby mode.
-// It is false in the other modes.
+// Waiting reports whether the user is waiting to be welcomed in: in lobby
+// mode a guest or an account that signed itself up, limited to the Lobby,
+// and in private mode such an account left from lobby mode, which may not
+// sign in. It is false in public mode.
 func (s *Server) Waiting(userID string) bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	u := s.users[userID]
-	return u != nil && u.lobbyState() == lobbyWaiting
+	return u != nil && (u.lobbyState() == lobbyWaiting || u.leftWaiting())
 }
 
 // Waiting reports whether the user is waiting in the Lobby; see

@@ -360,24 +360,30 @@ func (s *Server) finishUsable(usable usableCommands) []commandForm {
 // lobbyCommands are the commands of lobby mode (access.go), which follow
 // the core commands in /help and ext:command_list.
 func lobbyCommands() []serverCommand {
-	mayWelcome := func(_ *Server, c *client, _ *roomState) bool { return c.user.mayWelcome() }
 	return []serverCommand{
-		{
-			name: "welcome",
-			forms: []commandForm{{
-				name: "welcome", group: groupRole, hint: "<user_id>", description: "let someone in from the Public Lobby: a waiting account becomes a member at once, and a guest once they sign up",
-				may: mayWelcome,
-			}},
-			run: (*Server).welcomeCommand,
-		},
+		welcomeCommand("let someone in from the Public Lobby: a waiting account becomes a member at once, and a guest once they sign up"),
 		{
 			name: "toggle",
 			forms: []commandForm{{
 				name: "toggle", group: groupRole, hint: "[lobby]", description: "show the toggles, or close the Public Lobby to newcomers or open it again",
-				may: mayWelcome,
+				may: func(_ *Server, c *client, _ *roomState) bool { return c.user.mayWelcome() },
 			}},
 			run: (*Server).toggleCommand,
 		},
+	}
+}
+
+// welcomeCommand is /welcome, with the description of the mode it is in:
+// lobby mode, and private mode, where it admits the waiting accounts lobby
+// mode left.
+func welcomeCommand(description string) serverCommand {
+	return serverCommand{
+		name: "welcome",
+		forms: []commandForm{{
+			name: "welcome", group: groupRole, hint: "<user_id>", description: description,
+			may: func(_ *Server, c *client, _ *roomState) bool { return c.user.mayWelcome() },
+		}},
+		run: (*Server).welcomeCommand,
 	}
 }
 

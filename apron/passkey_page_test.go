@@ -459,6 +459,7 @@ func TestPasskeyPageRegistration(t *testing.T) {
 	for name, configure := range map[string]func(*Config){
 		"guest first":    func(c *Config) { c.GuestFirstPasskeys = true },
 		"without guests": func(c *Config) { c.DisableGuests = true },
+		"private mode":   func(c *Config) { c.Access.Mode = AccessPrivate },
 	} {
 		t.Run(name, func(t *testing.T) { testPasskeyPageInvitedRegistration(t, configure) })
 	}

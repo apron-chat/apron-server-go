@@ -139,10 +139,19 @@ func TestServerFrame(t *testing.T) {
 // without a secret: where guests are allowed, on a connection that is not
 // signed in. Without guests, by DisableGuests or a restricted sign-in, a
 // passkey only signs in, and an invited client registers anyway, as
-// webauthn stays in auth (§3.2).
+// webauthn stays in auth (§3.2). Email signs up only where an allowlist
+// may name a new address: DisableGuests is private mode, where only an
+// invitation makes an account.
 func TestSignupWithoutGuests(t *testing.T) {
 	for name, configure := range map[string]func(*Config){
 		"guests disabled": func(c *Config) { c.DisableGuests = true },
+		"private and restricted": func(c *Config) {
+			c.Access.Mode = AccessPrivate
+			c.Extensions = []Extension{testExtension{"private", func(r *Registrar) error {
+				r.RestrictSignIn()
+				return nil
+			}}}
+		},
 		"sign-in restricted": func(c *Config) {
 			c.Extensions = []Extension{testExtension{"private", func(r *Registrar) error {
 				r.RestrictSignIn()
@@ -167,7 +176,11 @@ func TestSignupWithoutGuests(t *testing.T) {
 			_, both := newTestServer(t, config)
 			_, frame = dialRaw(t, both)
 			params = frame["params"].(map[string]any)
-			if !reflect.DeepEqual(params["auth"], []any{"webauthn", "email", "token"}) || !reflect.DeepEqual(params["signup"], []any{"email"}) {
+			signup := []any{"email"}
+			if name == "guests disabled" {
+				signup = []any{}
+			}
+			if !reflect.DeepEqual(params["auth"], []any{"webauthn", "email", "token"}) || !reflect.DeepEqual(params["signup"], signup) {
 				t.Fatalf("with email, auth: %#v, signup: %#v", params["auth"], params["signup"])
 			}
 		})

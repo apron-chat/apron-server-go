@@ -768,6 +768,10 @@ func Open(config Config) (*Server, error) {
 		s.access.lobby = access.LobbyRoom
 		s.commands = append(s.commands, lobbyCommands()...)
 	}
+	if access.Mode == AccessPrivate {
+		s.access.private = true
+		s.commands = append(s.commands, welcomeCommand("let in a waiting account from when the server was in lobby mode, so it signs in as a member"))
+	}
 	s.extContext, s.extCancel = context.WithCancel(context.Background())
 	for role, holders := range config.Roles {
 		role = strings.ToLower(strings.TrimSpace(role))
@@ -1260,9 +1264,11 @@ func (s *Server) serverParams(baseURL string, revealed, lobbyView bool) map[stri
 	signup := slices.DeleteFunc(slices.Clone(authSchemes), func(scheme string) bool {
 		return scheme == "token" || scheme == passkey.Name && (!guests || s.config.GuestFirstPasskeys)
 	})
-	if s.access.lobby != "" && s.access.closed {
-		// A closed Lobby takes in nobody new (admitsNewLocked): only an
-		// invitation makes an account, which webauthn in auth presents.
+	if s.access.lobby != "" && s.access.closed || s.access.private && s.allowlist == nil {
+		// A closed Lobby, and private mode without an allowlist, take in
+		// nobody new by themselves (admitsNewLocked): only an invitation
+		// makes an account, which webauthn in auth presents, and signup
+		// lists what any client can do.
 		signup = []string{}
 	}
 	params := map[string]any{

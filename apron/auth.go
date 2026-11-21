@@ -492,6 +492,8 @@ func (s *Server) provenAccountLocked(scheme authn.Scheme, proof authn.Proof, cre
 		switch {
 		case !create:
 			return nil, false, &Error{Code: CodeDenied, Message: "This " + scheme.Label() + " belongs to no account"}
+		case !s.admitsNewLocked(id) && s.access.private:
+			return nil, false, inviteOnly()
 		case !s.admitsNewLocked(id):
 			return nil, false, notAdmitted()
 		}

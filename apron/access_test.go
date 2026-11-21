@@ -3,6 +3,7 @@ package apron
 import (
 	"context"
 	"errors"
+	"net/http"
 	"net/http/httptest"
 	"reflect"
 	"slices"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/coder/websocket"
 
+	"github.com/apron-chat/apron-server-go/internal/oauthtest"
 	"github.com/apron-chat/apron-server-go/store"
 )
 
@@ -789,5 +791,201 @@ func TestLobbyPublicRooms(t *testing.T) {
 	}
 	if err := host.Admit(context.Background(), "nobody"); err == nil || errors.Is(err, context.Canceled) {
 		t.Fatalf("Admit(nobody) = %v", err)
+	}
+}
+
+// In private mode nobody makes an account by themselves: a passkey
+// registration, an email address no account has, and an external identity
+// no account has are refused, unless an invitation comes with the
+// registration. Existing accounts sign in by every scheme, and add to
+// themselves.
+func TestPrivateModeIsInviteOnly(t *testing.T) {
+	memory := store.NewMemory()
+	mailbox := make(testMailbox, 16)
+	identity := &Identity{Subject: "idp:1", Name: "Ext", UserID: "ext"}
+	start := func(mode AccessMode) (*Server, *httptest.Server, func()) {
+		return startWith(t, memory, t.TempDir(), func(config *Config) {
+			config.Access.Mode = mode
+			config.EmailSender = mailbox
+			config.EmailLinkURL = "https://chat.example/login"
+			config.Extensions = []Extension{ssoExtension(identity)}
+		})
+	}
+	external := func(httpServer *httptest.Server) (*testClient, map[string]any) {
+		t.Helper()
+		c, _ := dialRaw(t, httpServer)
+		page := c.result(t, "auth", "begin", map[string]any{"scheme": "external"})["external"].(map[string]any)["url"].(string)
+		app := oauthtest.New(t, httpServer.URL)
+		screen := app.Get(app.URL(page, nil))
+		if screen.Status != http.StatusOK {
+			return c, map[string]any{"status": screen.Status, "body": screen.Body}
+		}
+		return c, c.call(t, "auth", "finish", redemption(app, app.Code(app.Press(screen, "allow"), httpServer.URL)))
+	}
+
+	// Public mode: an account by email, by passkey, and by external sign-in.
+	_, httpServer, stop := start(AccessPublic)
+	emailSignUp(t, httpServer, mailbox, "eve@example.com", "eve", "general")
+	pat, _ := dialOrigin(t, httpServer, testPasskeyOrigin)
+	passkey := newTestAuthenticator(t)
+	options := passkeyResult(t, passkeyCall(t, pat, "begin", "register", "begin", map[string]any{"user_id": "pat"}))
+	passkeyResult(t, passkeyCall(t, pat, "finish", "register", "finish", map[string]any{"credential": passkey.registration(t, options, testPasskeyOrigin)}))
+	if _, frame := external(httpServer); errorCode(frame) != 0 || frame["result"] == nil {
+		t.Fatalf("external sign-up in public mode: %#v", frame)
+	}
+	stop()
+
+	app, httpServer, _ := start(AccessPrivate)
+	newcomer, frame := dialOrigin(t, httpServer, testPasskeyOrigin)
+	// signup lists nothing: only an invitation makes an account, which
+	// webauthn in auth carries.
+	if params := frame["params"].(map[string]any); !reflect.DeepEqual(params["auth"], []any{"webauthn", "email", "external", "token"}) || !reflect.DeepEqual(params["signup"], []any{}) {
+		t.Fatalf("auth %v, signup %v", params["auth"], params["signup"])
+	}
+
+	// A passkey registration without an invitation is refused.
+	refusal := passkeyCall(t, newcomer, "begin", "register", "begin", map[string]any{"name": "New"})
+	if message := refusal["error"].(map[string]any)["message"]; errorCode(refusal) != CodeDenied || message != "This server is invite-only; ask for an invite link" {
+		t.Fatalf("a registration without an invitation: %#v", refusal)
+	}
+	// An address no account has is mailed no code.
+	propose(t, newcomer, "new@example.com")
+	select {
+	case message := <-mailbox:
+		t.Fatalf("a code was sent to %s", message.To)
+	case <-time.After(100 * time.Millisecond):
+	}
+	// An external identity no account has is refused on the page.
+	identity.Subject, identity.UserID = "idp:2", "other"
+	if _, refused := external(httpServer); refused["status"] != http.StatusForbidden {
+		t.Fatalf("a new external identity: %#v", refused)
+	}
+
+	// An invitation makes an account.
+	invitation, err := app.Invite(context.Background(), InvitationOptions{Name: "Ivy"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	invited, _ := dialOrigin(t, httpServer, testPasskeyOrigin)
+	if you := passkeyResult(t, registerInvited(t, invited, newTestAuthenticator(t), invitation.Token, nil))["you"].(map[string]any); you["name"] != "Ivy" {
+		t.Fatalf("an invited registration: %#v", you)
+	}
+
+	// Existing accounts sign in by every scheme.
+	identity.Subject, identity.UserID = "idp:1", "ext"
+	if _, signedIn := external(httpServer); errorCode(signedIn) != 0 || signedIn["result"].(map[string]any)["you"].(map[string]any)["user_id"] != "ext" {
+		t.Fatalf("an existing external identity: %#v", signedIn)
+	}
+	login, _ := dialOrigin(t, httpServer, testPasskeyOrigin)
+	options = passkeyResult(t, passkeyCall(t, login, "begin", "login", "begin", nil))
+	if you := passkeyResult(t, passkeyCall(t, login, "finish", "login", "finish", map[string]any{"credential": passkey.assertion(t, options, testPasskeyOrigin, "localhost", 0x05)}))["you"].(map[string]any); you["user_id"] != "pat" {
+		t.Fatalf("a passkey login: %#v", you)
+	}
+	eve, _ := dialOrigin(t, httpServer, testPasskeyOrigin)
+	ageSends(app, "eve@example.com", time.Minute)
+	propose(t, eve, "eve@example.com")
+	signInByEmail(t, eve, mailbox.receive(t).Code, nil)
+	if eve.userID != "eve" {
+		t.Fatalf("an email sign-in as %s", eve.userID)
+	}
+	eve.drain(t)
+	// And add to themselves: eve's first passkey.
+	options = passkeyResult(t, passkeyCall(t, eve, "add-begin", "register", "begin", nil))
+	if you := passkeyResult(t, passkeyCall(t, eve, "add-finish", "register", "finish", map[string]any{"credential": newTestAuthenticator(t).registration(t, options, testPasskeyOrigin)}))["you"].(map[string]any); you["user_id"] != "eve" {
+		t.Fatalf("eve's passkey: %#v", you)
+	}
+}
+
+// An allowlist is the operator's own choice: in private mode an address it
+// names may still make its account, and signup lists email.
+func TestPrivateModeWithAnAllowlist(t *testing.T) {
+	_, mailbox, httpServer := emailTestServer(t, func(config *Config) {
+		config.Access.Mode = AccessPrivate
+		config.Extensions = []Extension{testExtension{"private", func(r *Registrar) error {
+			p, err := ParsePrincipal("ann@example.com")
+			if err != nil {
+				return err
+			}
+			return r.RestrictSignIn().Allow(p)
+		}}}
+	})
+	ann, frame := dialRaw(t, httpServer)
+	if params := frame["params"].(map[string]any); !reflect.DeepEqual(params["signup"], []any{"email"}) {
+		t.Fatalf("signup %v", params["signup"])
+	}
+	propose(t, ann, "ann@example.com")
+	signInByEmail(t, ann, mailbox.receive(t).Code, map[string]any{"user_id": "ann"})
+	// The whole server frame follows the sign-in, then the join.
+	notificationParams(t, ann.read(t), "server")
+	expectJoined(t, ann, "general", "ann")
+	bob, _ := dialRaw(t, httpServer)
+	propose(t, bob, "bob@example.com")
+	select {
+	case message := <-mailbox:
+		t.Fatalf("a code was sent to %s", message.To)
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+// /welcome in private mode admits a waiting account left from lobby mode,
+// which then signs in as a member.
+func TestPrivateModeWelcome(t *testing.T) {
+	memory := store.NewMemory()
+	mailbox := make(testMailbox, 16)
+	start := func(mode AccessMode) (*Server, *httptest.Server, func()) {
+		return startWith(t, memory, t.TempDir(), func(config *Config) {
+			lobbyConfigure(config)
+			config.Access.Mode = mode
+			config.EmailSender = mailbox
+			config.WebAuthn = nil
+		})
+	}
+	_, httpServer, stop := start(AccessLobby)
+	emailSignUp(t, httpServer, mailbox, "wes@example.com", "wes", "lobby")
+	stop()
+
+	app, httpServer, _ := start(AccessPrivate)
+	if !app.Waiting("wes") {
+		t.Fatal("wes does not wait in private mode")
+	}
+	c, _ := dialRaw(t, httpServer)
+	propose(t, c, "wes@example.com")
+	select {
+	case message := <-mailbox:
+		t.Fatalf("a code was sent to the waiting account's %s", message.To)
+	case <-time.After(100 * time.Millisecond):
+	}
+	// An identity a role is granted to, by the operator, makes its account.
+	ada, _ := dialRaw(t, httpServer)
+	propose(t, ada, "ada@example.com")
+	signInByEmail(t, ada, mailbox.receive(t).Code, map[string]any{"user_id": "ada"})
+	ada.drain(t)
+	before, _ := commandIn(t, ada, "general", "/help")
+	if text := noticeText(t, before[0]); !strings.Contains(text, "`/welcome <user_id>`") || strings.Contains(text, "/toggle") {
+		t.Fatalf("/help in private mode: %q", text)
+	}
+	if before, reply := commandIn(t, ada, "general", "/welcome @ada"); errorCode(reply) != 0 || !strings.Contains(noticeText(t, before[0]), "already a member") {
+		t.Fatalf("/welcome @ada = %#v after %#v", reply, before)
+	}
+	if _, reply := commandIn(t, ada, "general", "/welcome nobody"); errorCode(reply) != CodeInvalidParams {
+		t.Fatalf("/welcome nobody = %#v", reply)
+	}
+	if before, reply := commandIn(t, ada, "general", "/welcome wes"); errorCode(reply) != 0 || !strings.Contains(noticeText(t, before[len(before)-1]), "is in") {
+		t.Fatalf("/welcome wes = %#v after %#v", reply, before)
+	}
+	if app.Waiting("wes") {
+		t.Fatal("wes still waits")
+	}
+	ageSends(app, "wes@example.com", time.Minute)
+	wes, _ := dialRaw(t, httpServer)
+	propose(t, wes, "wes@example.com")
+	_, result := signInByEmail(t, wes, mailbox.receive(t).Code, nil)
+	if you := result["you"].(map[string]any); you["user_id"] != "wes" || !reflect.DeepEqual(rolesOf(you), []any{}) {
+		t.Fatalf("wes signed in as %#v", you)
+	}
+	wes.drain(t)
+	historyPage(t, wes, "general", map[string]any{})
+	if joined := roomIDs(t, listRooms(t, wes, map[string]any{})["joined"]); !slices.Contains(joined, "general") {
+		t.Fatalf("wes joined %v", joined)
 	}
 }

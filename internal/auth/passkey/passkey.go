@@ -296,6 +296,9 @@ func (s *Scheme) begin(r *authn.Request, action string, local bool) (authn.Resul
 	// attempted.
 	r.State.Store(nil)
 	if action == "register" && r.Account == nil && r.Invitation == nil && !s.signsUp(r) {
+		if !r.Guests {
+			return nil, authn.Denied(InviteOnly)
+		}
 		return nil, authn.Denied("Sign in as a guest, or present an invitation, before adding a passkey")
 	}
 	page, err := s.pageURL(r, action)
@@ -500,6 +503,10 @@ func (s *Scheme) finishNew(r *authn.Request, c *ceremony) (authn.Result, error) 
 	}
 	return s.signUp(r, c.handle, credential, c.name, cmp.Or(c.requested, r.UserID), false), nil
 }
+
+// InviteOnly refuses a new account's registration without an invitation on
+// a server without guests, where only an invitation makes one.
+const InviteOnly = "This server is invite-only; ask for an invite link"
 
 // signsUp reports whether a registration on a connection that is not
 // signed in makes a new account without an invitation: where anyone may
