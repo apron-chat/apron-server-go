@@ -1,8 +1,8 @@
 // Command minimal is a whole Apron server in about a hundred lines, built on
-// package wire rather than package apron: one room, guests, profiles, and a
-// /help command, with its state in a map. It is the starting point for a
-// server that keeps its own state, such as a bridge or a gateway in front of
-// another chat system.
+// package wire rather than package apron: one room, guests, profiles, and
+// commands (package wire/commands), with its state in a map. It is the
+// starting point for a server that keeps its own state, such as a bridge or
+// a gateway in front of another chat system.
 //
 //	go run ./examples/minimal --addr 127.0.0.1:8080
 package main
@@ -17,6 +17,7 @@ import (
 	"sync"
 
 	"github.com/apron-chat/apron-server-go/wire"
+	"github.com/apron-chat/apron-server-go/wire/commands"
 )
 
 func main() {
@@ -31,8 +32,9 @@ func main() {
 
 // Chat is a one-room chat: the backend of its wire.Server.
 type Chat struct {
-	Server *wire.Server
-	clock  wire.Clock
+	Server   *wire.Server
+	clock    wire.Clock
+	commands commands.Router
 
 	mu       sync.Mutex
 	guests   int
@@ -43,13 +45,21 @@ const room = "general"
 
 func NewChat() *Chat {
 	c := &Chat{messages: make(map[wire.LogID]bool)}
+	// The Router answers /help, and lists the commands for clients that
+	// complete them (ext:command_list).
+	c.commands.MustAdd(commands.Command{
+		Name:  "nick",
+		Forms: []commands.Form{{Usage: "/nick <name>", Help: "change your name"}},
+		Run:   c.nick,
+	})
 	c.Server = &wire.Server{
 		Backend:     c,
 		Messages:    c,
 		Profiles:    c,
-		Commands:    c,
+		Commands:    &c.commands,
 		CheckOrigin: wire.AnyOrigin,
 	}
+	c.Server.Handle(commands.ListMethod, c.commands.ListHandler())
 	return c
 }
 
@@ -125,11 +135,17 @@ func (c *Chat) Me(_ context.Context, conn *wire.Conn, p wire.MeParams, reply wir
 	return reply.Send(wire.CurrentUser{User: you, Cleared: patch.Cleared})
 }
 
-func (c *Chat) Command(_ context.Context, conn *wire.Conn, p wire.CommandParams, reply wire.Reply[wire.CommandResult]) error {
-	switch strings.Fields(p.Body.Text + " ")[0] {
-	case "/help":
-		conn.Notify(wire.Notice(p.RoomID, "- `/help`: this list"))
-		return reply.Send(wire.CommandResult{})
+// nick is /nick <name>: a rename, as me does it. Its effect, the user
+// update, goes out before the result (§4.1).
+func (c *Chat) nick(_ context.Context, call *commands.Call) error {
+	if call.Args == "" {
+		return call.UsageError("")
 	}
-	return wire.InvalidParams("Unknown command; try /help")
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	old := *call.Conn.User()
+	you := old
+	you.Name = call.Args
+	c.Server.PublishUser(old, you, nil)
+	return call.Done()
 }

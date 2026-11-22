@@ -20,6 +20,7 @@ file sets in a table of that name (`[sso]`). Run one with
 [`minimal`](minimal) is the other kind: a whole server in about a hundred
 lines on package [`wire`](../wire), which speaks the protocol for a program
 that keeps its own state, such as a gateway in front of another chat system.
-It takes only `--addr`, and its test uses package
+Its commands are a [`wire/commands`](../wire/commands) Router, which answers
+`/help` and lists them. It takes only `--addr`, and its test uses package
 [`wiretest`](../wire/wiretest). Run the conformance checks against it with
 `conform.py ws://127.0.0.1:8080/ws`.

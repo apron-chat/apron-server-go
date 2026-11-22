@@ -78,10 +78,24 @@ func TestChat(t *testing.T) {
 	if _, err := ada.Call(ctx, "command", map[string]any{"body": map[string]any{"text": "/help"}}); err != nil {
 		t.Fatal(err)
 	}
-	if f, err := ada.Next(ctx); err != nil || !strings.Contains(string(f.Params), "/help") {
+	if f, err := ada.Next(ctx); err != nil || !strings.Contains(string(f.Params), "/help") || !strings.Contains(string(f.Params), "/nick <name>") {
 		t.Fatalf("help: %s %v", f.Raw, err)
 	}
 	if _, err := ada.Call(ctx, "command", map[string]any{"body": map[string]any{"text": "/nope"}}); wire.CodeOf(err) != wire.CodeInvalidParams {
 		t.Fatalf("an unknown command: %v", err)
+	}
+	if _, err := ada.Call(ctx, "command", map[string]any{"body": map[string]any{"text": "/nick"}}); wire.CodeOf(err) != wire.CodeInvalidParams {
+		t.Fatalf("/nick without a name: %v", err)
+	}
+
+	// /nick renames, as me does: the user update comes before the result.
+	if _, before, err := ada.CallFrames(ctx, "command", map[string]any{"body": map[string]any{"text": "/nick Ada L."}}); err != nil || len(before) != 1 || !strings.Contains(string(before[0].Params), `"name":"Ada L."`) {
+		t.Fatalf("/nick: %v %v", before, err)
+	}
+	if f, err := bob.Expect(ctx, wiretest.Method("user")); err != nil || !strings.Contains(string(f.Params), `"new"`) {
+		t.Fatalf("bob's user frame: %s %v", f.Raw, err)
+	}
+	if raw, err := ada.Call(ctx, "ext:command_list", nil); err != nil || string(raw) != `{"commands":[{"description":"list the commands you can use here","group":"all","name":"help"},{"description":"change your name","hint":"<name>","name":"nick"}]}` {
+		t.Fatalf("command list: %s %v", raw, err)
 	}
 }
