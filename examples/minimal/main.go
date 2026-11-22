@@ -73,20 +73,22 @@ func (c *Chat) Message(_ context.Context, conn *wire.Conn, p wire.MessageParams)
 	if p.Body.Empty() {
 		return wire.MessageResult{}, wire.InvalidParams("A new message needs text or embeds") // §3.5.1
 	}
+	// The log_id is assigned, and the message broadcast, under one lock,
+	// so that every connection gets messages in log_id order (§1): sending
+	// never blocks, and is meant to be done under the backend's lock.
 	c.mu.Lock()
+	defer c.mu.Unlock()
 	if p.ReplyTo != nil && !c.messages[p.ReplyTo.MessageID] {
-		c.mu.Unlock()
 		return wire.MessageResult{}, wire.InvalidParams("reply_to names no message")
 	}
 	id := c.clock.Next()
-	c.messages[id] = true
-	c.mu.Unlock()
 	frame, err := wire.Encode("message", wire.Message{
 		MessageID: id, LogID: id, RoomID: room, From: *conn.User(), Body: p.Body, ReplyTo: p.ReplyTo,
 	})
 	if err != nil {
 		return wire.MessageResult{}, err
 	}
+	c.messages[id] = true
 	// Every connection is in the one room; the sender's copy is queued
 	// before the result.
 	c.Server.Broadcast(frame, nil)
@@ -94,6 +96,10 @@ func (c *Chat) Message(_ context.Context, conn *wire.Conn, p wire.MessageParams)
 }
 
 func (c *Chat) Me(_ context.Context, conn *wire.Conn, p wire.MeParams) (wire.User, error) {
+	// Under the lock, as Message is, so that profile changes reach every
+	// connection in the order they were made.
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	you := *conn.User()
 	if p.Name != nil {
 		you.Name = strings.TrimSpace(*p.Name)

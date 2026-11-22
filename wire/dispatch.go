@@ -85,7 +85,8 @@ func (r *Request) Decode(v any) error {
 // between them, rather than once its handler returns. A backend that keeps
 // its state under a lock replies while it holds it, so that the result
 // reflects every notification sent before it on the connection, and none
-// after (§1). It reports false for a second reply, or a closed connection.
+// after (§1); like Conn.Send, it never blocks. It reports false for a
+// second reply, or a closed connection.
 // A notification gets no reply, but its frames are sent.
 func (r *Request) Reply(result any, then ...Frame) bool {
 	r.mu.Lock()

@@ -333,7 +333,11 @@ func (s *Server) Conns() []*Conn {
 }
 
 // Broadcast sends a frame to every signed-in connection for which to
-// returns true, or every one when to is nil.
+// returns true, or every one when to is nil. Like Conn.Send, it never
+// blocks, and is meant to be called while the backend holds the lock of
+// the change the frame describes, so that every connection gets such
+// frames in the order of the changes. to is called in the caller's
+// goroutine, so it may read what that lock guards.
 func (s *Server) Broadcast(frame Frame, to func(*Conn) bool) {
 	for _, c := range s.Conns() {
 		if c.UserID() != "" && (to == nil || to(c)) {

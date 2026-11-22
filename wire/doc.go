@@ -13,7 +13,8 @@
 //     frames that go out together ([Conn.SendBatch]), and frames held until
 //     the backend's changes are durable ([Conn.Fence]);
 //   - in-process connections ([Server.Local]) for bots, bridges, and tests,
-//     whose requests take a network client's path;
+//     whose requests ([Local.Call]) and notifications ([Local.Notify])
+//     take a network client's path;
 //   - the server frame on connect (§3.1), and the liveness ping and pong (§1);
 //   - the envelope: parse errors, invalid requests, request ids, and the
 //     error codes (§1.1), with unknown methods answered error/unsupported and
@@ -41,9 +42,10 @@
 // ([SchemeChecker]).
 //
 // A [Method] registered with [Server.Handle] handles a request or client
-// notification by name, raw: an extension's own method, or one that takes
-// the place of an interface's, as the reference server does to keep every
-// rule of its own.
+// notification by name, raw: an extension's own method, such as the
+// reference server's push_register and account methods, or one that takes
+// the place of an interface's. The reference server implements the
+// interfaces, and replies to each request itself ([Request.Reply]).
 //
 // # Requests and ordering
 //
@@ -56,6 +58,21 @@
 // once the handler returns. Either way, the notifications a request queues
 // to its own connection before its reply are sent before it: a Conn's queue
 // is first in, first out.
+//
+// Sending never blocks, and calls nothing of the backend's but
+// Broadcast's filter: [Conn.Send], [Conn.Notify], [Conn.SendBatch],
+// [Server.Broadcast], and [Request.Reply] queue frames, and disconnect a
+// client too slow to take them. So a backend sends while it holds the lock
+// of the change a frame describes, which keeps every connection's frames in
+// the order of the changes, such as messages in log_id order; one that
+// sends after letting go of the lock lets two changes' frames cross.
+//
+// A handler's error that is an [*Error] is the error reply, as [CodeOf]
+// tells; any other is error/internal_error, and logged. A handler that
+// panics is logged, and answered error/internal_error unless it handles a
+// notification; its connection goes on, as in net/http. The param
+// accessors of [Fields] and [Request], such as [Fields.String], return an
+// error that is always an *Error.
 //
 // # Hosts that keep less
 //

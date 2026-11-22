@@ -136,7 +136,7 @@ func (c *Conn) Context() context.Context { return c.ctx }
 func (c *Conn) Done() <-chan struct{} { return c.rt.Done() }
 
 // Notify queues a notification. It reports false when the connection is
-// closed, or the params cannot be encoded.
+// closed, or the params cannot be encoded. Like Send, it never blocks.
 func (c *Conn) Notify(method string, params any) bool {
 	frame, err := Encode(method, params)
 	if err != nil {
@@ -149,13 +149,19 @@ func (c *Conn) Notify(method string, params any) bool {
 // SendMessage queues a message notification (§3.5).
 func (c *Conn) SendMessage(m Message) bool { return c.Notify("message", m) }
 
-// Send queues an encoded frame. A client whose queue is full is too slow to
-// keep up, and is disconnected.
+// Send queues an encoded frame. It never blocks, and calls nothing of the
+// backend's: a client whose queue is full is too slow to keep up, and is
+// disconnected. So a backend that keeps its state under a lock sends while
+// it holds it, which is what keeps every connection's frames in the order
+// of the changes they describe (§1); one that sends after it lets go of the
+// lock lets two senders' frames cross, such as two messages whose log_ids
+// arrive out of order.
 func (c *Conn) Send(frame Frame) bool { return c.SendBatch(frame) }
 
 // SendBatch queues frames to be written one after another, with no other
 // frame between them, such as a result and the notifications that complete
-// it. They take one place in the queue (Server.OutgoingQueue).
+// it. They take one place in the queue (Server.OutgoingQueue). Like Send,
+// it never blocks, and is meant to be called under the backend's lock.
 func (c *Conn) SendBatch(frames ...Frame) bool {
 	if len(frames) == 0 {
 		return true
