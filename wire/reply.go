@@ -54,10 +54,10 @@ func (p Reply[T]) Send(result T, then ...Frame) error {
 		value = func() (any, error) { return p.check(&result) }
 	}
 	var apply func()
-	if p.apply != nil {
+	if p.apply != nil && p.r.c != nil {
 		apply = func() { p.apply(&result) }
 	}
-	return p.r.send(value, apply, then)
+	return p.r.send(result, value, apply, then)
 }
 
 // Request is the request the reply answers, raw: its params as they
@@ -68,8 +68,9 @@ func (p Reply[T]) Send(result T, then ...Frame) error {
 func (p Reply[T]) Request() *Request { return p.r }
 
 // send queues the reply to r: the value it renders, followed by then. apply
-// runs as it is queued.
-func (r *Request) send(value func() (any, error), apply func(), then []Frame) error {
+// runs as it is queued. sent is the result as the handler gave it, which a
+// request on no connection records.
+func (r *Request) send(sent any, value func() (any, error), apply func(), then []Frame) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.replied {
@@ -77,14 +78,22 @@ func (r *Request) send(value func() (any, error), apply func(), then []Frame) er
 	}
 	result, err := value()
 	if err != nil {
-		r.c.server.logger().Error("wire: a handler sent a result its method may not have", "method", r.Method, "error", err)
+		r.logger().Error("wire: a handler sent a result its method may not have", "method", r.Method, "error", err)
 		e := internalError()
 		r.failLocked(e)
 		return e
 	}
-	frame, encoded, e := r.c.server.encodeReply(r, result, nil)
+	frame, encoded, e := r.encodeReply(result, nil)
 	r.replied = true
 	r.outcome = dedupOutcome{encoded, e}
+	if r.rec != nil {
+		if e != nil {
+			r.rec.Record(sent, nil, e, nil)
+			return e
+		}
+		r.rec.Record(sent, encoded, nil, framesOf(then))
+		return nil
+	}
 	switch {
 	case frame == nil:
 		r.c.Close()
@@ -108,7 +117,11 @@ func (r *Request) send(value func() (any, error), apply func(), then []Frame) er
 func (r *Request) failLocked(e *Error) {
 	r.replied = true
 	r.outcome = dedupOutcome{err: e}
-	if frame, _, _ := r.c.server.encodeReply(r, nil, e); frame != nil {
+	if r.rec != nil {
+		r.rec.Record(nil, nil, e, nil)
+		return
+	}
+	if frame, _, _ := r.encodeReply(nil, e); frame != nil {
 		r.c.enqueue([]Frame{frame})
 	}
 }
@@ -123,4 +136,13 @@ func isEmpty[T any]() bool {
 // errNoReply is a handler's bug: it returned nil without replying.
 func errNoReply(method string) error {
 	return fmt.Errorf("wire: the handler of %s returned nil without replying, as it must, or returning an error", method)
+}
+
+// framesOf returns frames as the byte slices they are.
+func framesOf(frames []Frame) [][]byte {
+	raw := make([][]byte, len(frames))
+	for i, frame := range frames {
+		raw[i] = frame
+	}
+	return raw
 }

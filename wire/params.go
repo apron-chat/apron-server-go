@@ -15,20 +15,15 @@ import (
 // at all, as the protocol tells a field sent empty from one left out
 // (§3.3.1), and returns its error as an error that is an *Error, nil when
 // the field is absent or well formed. The typed params of the Server's
-// handlers are read with them, and a Handler reads its own the same way,
-// with the Request's accessors, which read its params.
+// handlers are read with them (ParseMessage, ...), and a Handler reads its
+// own the same way, with the Request's accessors, which read its params,
+// or a Decoder, which reads several and keeps the first error.
 type Fields map[string]jsontext.Value
 
-// Fields returns the request's params, by name.
-func (r *Request) Fields() Fields {
-	if r.keys == nil {
-		_ = json.Unmarshal(r.Params, &r.keys)
-		if r.keys == nil {
-			r.keys = Fields{}
-		}
-	}
-	return r.keys
-}
+// Fields returns the request's params, by name, as they were decoded once
+// when the frame was read. They are shared: a handler reads them, and does
+// not change them.
+func (r *Request) Fields() Fields { return r.fields }
 
 // Missing is the error of a request that lacks a required param.
 func Missing(name string) *Error { return InvalidParams("Missing " + name) }

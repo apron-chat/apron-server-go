@@ -186,11 +186,7 @@ func (c *Conn) SendBatch(frames ...Frame) bool {
 }
 
 func (c *Conn) enqueue(frames []Frame) bool {
-	raw := make([][]byte, len(frames))
-	for i, frame := range frames {
-		raw[i] = frame
-	}
-	return c.rt.Send(raw...)
+	return c.rt.Send(framesOf(frames)...)
 }
 
 // Fence holds every frame queued after it until f is done, so that a reply

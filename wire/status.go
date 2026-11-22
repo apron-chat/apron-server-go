@@ -88,35 +88,3 @@ func (StatusUpdate) Method() string { return "status" }
 type StatusHandler interface {
 	Status(ctx context.Context, c *Conn, p StatusParams, reply Reply[Empty]) error
 }
-
-// parseStatus reads a status request's params (§4.5.3): idle is false or
-// a non-negative number of seconds, mute true, false, or a positive number
-// of seconds, and room_id scopes only the mute, so it is sent with one.
-func parseStatus(r *Request) (p StatusParams, err error) {
-	var scoped bool
-	if p.RoomID, scoped, err = r.IDParam("room_id"); err != nil {
-		return p, err
-	}
-	if raw, ok := r.Param("idle"); ok {
-		var seconds int64
-		switch raw := bytes.TrimSpace(raw); {
-		case bytes.Equal(raw, []byte("false")):
-			p.Idle = &Idle{Attended: true}
-		case !isNull(raw) && json.Unmarshal(raw, &seconds) == nil && seconds >= 0:
-			p.Idle = &Idle{Seconds: seconds}
-		default:
-			return p, InvalidParams("idle must be false or a non-negative whole number of seconds")
-		}
-	}
-	if raw, ok := r.Param("mute"); ok {
-		var mute Mute
-		if mute.UnmarshalJSON(raw) != nil {
-			return p, InvalidParams("mute must be true, false, or a positive whole number of seconds")
-		}
-		p.Mute = &mute
-	}
-	if scoped && p.Mute == nil {
-		return p, InvalidParams("room_id scopes a mute; send it with mute")
-	}
-	return p, nil
-}

@@ -109,26 +109,3 @@ func Page(log Log, p HistoryParams, limit int) HistoryResult {
 	}
 	return result
 }
-
-// parseHistory reads history's params.
-func parseHistory(r *Request) (p HistoryParams, err error) {
-	if p.RoomID, _, err = r.IDParam("room_id"); err != nil {
-		return p, err
-	}
-	for _, bound := range []struct {
-		name string
-		to   **LogID
-	}{{"after", &p.After}, {"before", &p.Before}} {
-		value, present, err := r.LogID(bound.name)
-		if err != nil {
-			return p, err
-		}
-		if present {
-			*bound.to = &value
-		}
-	}
-	if p.Limit, _, err = r.Count("limit"); err != nil {
-		return p, err
-	}
-	return p, nil
-}

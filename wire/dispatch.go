@@ -6,12 +6,14 @@ import (
 	"encoding/json/v2"
 	"errors"
 	"fmt"
+	"log/slog"
 	"runtime/debug"
 	"slices"
 	"strconv"
 	"sync"
 
 	"github.com/apron-chat/apron-server-go/internal/wirecore"
+	"github.com/apron-chat/apron-server-go/wire/internal/testhook"
 )
 
 // Handler handles one request method by name, raw: an extension's own
@@ -56,9 +58,10 @@ type method struct {
 
 // Request is a request, or a notification, as a handler gets it: its
 // method, id, and params, raw, which a Handler reads with its accessors,
-// such as Request.String, and answers with Request.Reply. A typed
-// handler's Reply has it too (Reply.Request), and its context carries it
-// (RequestFrom).
+// such as Request.String, or its Decoder, and answers with Request.Reply.
+// A typed handler's Reply has it too (Reply.Request), and its context
+// carries it (RequestFrom). Its params are decoded once, as the frame is
+// read, and may be read from any goroutine.
 type Request struct {
 	// Method is the request's method, and ID its id, or "" for a
 	// notification.
@@ -70,7 +73,10 @@ type Request struct {
 	c            *Conn
 	notification bool
 	hasID        bool
-	keys         Fields
+	fields       Fields
+	// rec, for a request on no connection, made by package wiretest, gets
+	// its reply.
+	rec testhook.Recorder
 
 	mu      sync.Mutex
 	replied bool
@@ -122,7 +128,7 @@ func (r *Request) Reply(result any, then ...Frame) bool {
 	if r.notification {
 		return r.c.SendBatch(then...)
 	}
-	return r.send(func() (any, error) { return result, nil }, nil, then) == nil
+	return r.send(result, func() (any, error) { return result, nil }, nil, then) == nil
 }
 
 // Replied reports whether the request has its reply.
@@ -150,7 +156,7 @@ func (r *Request) fail(e *Error) {
 }
 
 // encodeReply renders the reply to r: its result, or e.
-func (s *Server) encodeReply(r *Request, result any, e *Error) (frame Frame, encoded jsontext.Value, _ *Error) {
+func (r *Request) encodeReply(result any, e *Error) (frame Frame, encoded jsontext.Value, _ *Error) {
 	if e == nil {
 		switch v := result.(type) {
 		case jsontext.Value:
@@ -163,7 +169,7 @@ func (s *Server) encodeReply(r *Request, result any, e *Error) (frame Frame, enc
 				raw = []byte("{}") // A typed nil, such as a nil map.
 			}
 			if err != nil || !jsontext.Value(raw).IsValid() || raw[0] != '{' {
-				s.logger().Error("wire: a result is not a JSON object", "method", r.Method, "error", err)
+				r.logger().Error("wire: a result is not a JSON object", "method", r.Method, "error", err)
 				e = internalError()
 			} else {
 				encoded = raw
@@ -185,6 +191,14 @@ func (s *Server) encodeReply(r *Request, result any, e *Error) (frame Frame, enc
 		return nil, nil, e
 	}
 	return payload, encoded, e
+}
+
+// logger is the logger of the request's Server.
+func (r *Request) logger() *slog.Logger {
+	if r.c == nil {
+		return slog.Default()
+	}
+	return r.c.server.logger()
 }
 
 // protocolError turns a handler's error into the error reply.
@@ -231,7 +245,11 @@ func (s *Server) afterReply(ctx context.Context, method string, err error) {
 // error/internal_error when the frame is a request; the connection goes on.
 func (s *Server) processFrame(ctx context.Context, c *Conn, payload []byte) {
 	parsed, failed := wirecore.ParseRequest(payload)
-	r := &Request{Method: parsed.Method, ID: parsed.ID, Params: parsed.Params, c: c, notification: !parsed.HasID, hasID: parsed.HasID}
+	fields := Fields(parsed.Fields)
+	if fields == nil {
+		fields = Fields{}
+	}
+	r := &Request{Method: parsed.Method, ID: parsed.ID, Params: parsed.Params, fields: fields, c: c, notification: !parsed.HasID, hasID: parsed.HasID}
 	defer s.recoverFrame(r)
 	if failed != nil {
 		// An error about a frame that has no id omits it (§1.1).
@@ -373,18 +391,14 @@ func (s *Server) method(name string) (method, bool) {
 }
 
 // typed makes a request handler of a typed one: its params parsed by parse,
-// and its Reply finished by reply, such as with the method's checks.
-func typed[P, T any](parse func(*Request) (P, error), handle func(context.Context, *Conn, P, Reply[T]) error, reply func(c *Conn, p P, reply *Reply[T])) method {
+// and its Reply doing what Send does for the method (replyFor).
+func typed[P, T any](parse func(*Request) (P, error), handle func(context.Context, *Conn, P, Reply[T]) error) method {
 	return method{strict: !isEmpty[T](), serve: func(ctx context.Context, c *Conn, r *Request) error {
 		p, err := parse(r)
 		if err != nil {
 			return err
 		}
-		rp := Reply[T]{r: r}
-		if reply != nil {
-			reply(c, p, &rp)
-		}
-		return handle(ctx, c, p, rp)
+		return handle(ctx, c, p, replyFor[T](r, p))
 	}}
 }
 
@@ -404,36 +418,31 @@ func (s *Server) builtins() map[string]method {
 		methods["message"] = method{strict: true, serve: s.message(messages, nil)}
 	}
 	if p := s.Profiles; p != nil {
-		methods["me"] = typed(parseMe, p.Me, func(c *Conn, _ MeParams, reply *Reply[CurrentUser]) {
-			reply.check = func(you *CurrentUser) (any, error) { return meResult{You: *you}, nil }
-			reply.apply = func(you *CurrentUser) { c.SetUser(you.User) }
-		})
+		methods["me"] = typed(ParseMe, p.Me)
 	}
 	if cmd := s.Commands; cmd != nil {
-		methods["command"] = typed(parseCommand, cmd.Command, nil).with("command", false)
+		methods["command"] = typed(ParseCommand, cmd.Command).with("command", false)
 	}
 	if rooms := s.Rooms; rooms != nil {
-		methods["room_list"] = typed(parseRoomList, rooms.RoomList, func(_ *Conn, p RoomListParams, reply *Reply[RoomListResult]) {
-			reply.check = func(result *RoomListResult) (any, error) { return normalizeRoomList(p, *result), nil }
-		}).with("rooms", true)
-		methods["room_join"] = typed(parseRoomJoin, rooms.RoomJoin, nil).with("rooms", false)
-		methods["room_leave"] = typed(parseRoomLeave, rooms.RoomLeave, nil).with("rooms", false)
-		methods["room_set"] = typed(parseRoomSet, rooms.RoomSet, nil).with("rooms", false)
+		methods["room_list"] = typed(ParseRoomList, rooms.RoomList).with("rooms", true)
+		methods["room_join"] = typed(ParseRoomJoin, rooms.RoomJoin).with("rooms", false)
+		methods["room_leave"] = typed(ParseRoomLeave, rooms.RoomLeave).with("rooms", false)
+		methods["room_set"] = typed(ParseRoomSet, rooms.RoomSet).with("rooms", false)
 	}
 	if h := s.History; h != nil {
-		methods["history"] = typed(parseHistory, h.History, nil).with("history", true)
+		methods["history"] = typed(ParseHistory, h.History).with("history", true)
 	}
 	if st := s.Status; st != nil {
-		methods["status"] = typed(parseStatus, st.Status, nil).with("status", false)
+		methods["status"] = typed(ParseStatus, st.Status).with("status", false)
 	}
 	if reactions := s.Reactions; reactions != nil {
-		methods["reactions"] = typed(parseReact, reactions.React, nil).with("reactions", false)
+		methods["reactions"] = typed(ParseReact, reactions.React).with("reactions", false)
 	}
 	if a := s.Activity; a != nil {
 		methods["activity"] = method{capability: "activity", notify: func(ctx context.Context, c *Conn, r *Request) {
 			// Params that are not valid are ignored, as a notification is
 			// never answered (§1.1).
-			if p, err := parseActivity(r); err == nil {
+			if p, err := ParseActivity(r); err == nil {
 				a.Activity(ctx, c, p)
 			}
 		}}
@@ -441,102 +450,16 @@ func (s *Server) builtins() map[string]method {
 	return methods
 }
 
-// messageFields are the params of a message request or a command (§3.5),
-// before they are told apart.
-type messageFields struct {
-	messageID LogID
-	roomID    string
-	deleted   bool
-	body      *Body
-	replyTo   *Ref
-	ext       Ext
-}
-
-// parseMessage reads the params of a message or command (§3.5): what each
-// field is, as the protocol defines it. Limits, such as on the count of
-// mentions, are the backend's.
-func parseMessage(r *Request) (p messageFields, err error) {
-	if p.roomID, _, err = r.IDParam("room_id"); err != nil {
-		return p, err
-	}
-	if p.messageID, _, err = r.MessageID("message_id"); err != nil {
-		return p, err
-	}
-	if replyTo, present, err := r.MessageRef("reply_to"); err != nil {
-		return p, err
-	} else if present {
-		p.replyTo = &Ref{MessageID: replyTo}
-	}
-	if p.deleted, _, err = r.Bool("deleted"); err != nil {
-		return p, err
-	}
-	if p.ext, _, err = r.Ext("ext"); err != nil {
-		return p, err
-	}
-	if p.deleted {
-		// A deletion leaves no body (§4.4): what it sends is ignored.
-		return p, nil
-	}
-	fields, present, err := r.Object("body")
-	if err != nil || !present {
-		return p, err
-	}
-	raw, _ := r.Param("body")
-	p.body, err = parseBody(raw, fields)
-	return p, err
-}
-
-// parseBody reads a message body (§3.5), raw and by its fields: each field
-// this package knows is checked, and the others are kept in Unknown.
-func parseBody(raw jsontext.Value, fields Fields) (*Body, error) {
-	body := &Body{}
-	if raw, ok := fields["text"]; ok && (isNull(raw) || json.Unmarshal(raw, &body.Text) != nil) {
-		return nil, InvalidParams("body.text must be a string")
-	}
-	if raw, ok := fields["format"]; ok {
-		if isNull(raw) || json.Unmarshal(raw, &body.Format) != nil || (body.Format != Plain && body.Format != Markdown) {
-			return nil, InvalidParams("body.format must be plain or markdown")
-		}
-	}
-	if raw, ok := fields["mentions"]; ok {
-		if isNull(raw) || json.Unmarshal(raw, &body.Mentions) != nil || slices.ContainsFunc(body.Mentions, func(id string) bool { return !ValidID(id) }) {
-			return nil, InvalidParams("body.mentions must be an array of user_id strings")
-		}
-	}
-	if raw, ok := fields["embeds"]; ok {
-		if isNull(raw) || json.Unmarshal(raw, &body.Embeds) != nil {
-			return nil, InvalidParams("body.embeds must be an array")
-		}
-		for i, embed := range body.Embeds {
-			var kind struct {
-				Kind *string `json:"kind"`
-			}
-			if json.Unmarshal(embed, &kind) != nil || isNull(embed) || embed[0] != '{' {
-				return nil, InvalidParams(fmt.Sprintf("body.embeds[%d] must be an object", i))
-			}
-			if kind.Kind == nil || *kind.Kind == "" {
-				return nil, InvalidParams(fmt.Sprintf("body.embeds[%d].kind must be a non-empty string", i))
-			}
-		}
-	}
-	// Every field it knows is well formed, so the body decodes, and keeps
-	// the fields it does not know as they arrived.
-	if err := json.Unmarshal(raw, body); err != nil {
-		return nil, InvalidParams("body must be an object")
-	}
-	return body, nil
-}
-
 // message applies the core rules of a message request (§3.5.1, §3.6), and
 // passes it on to messages, a new message, or edits, an existing one.
 func (s *Server) message(messages MessageHandler, edits EditHandler) func(context.Context, *Conn, *Request) error {
 	return func(ctx context.Context, c *Conn, r *Request) error {
-		m, err := parseMessage(r)
+		m, err := parseMessageFields(r)
 		if err != nil {
 			return err
 		}
-		reply := Reply[MessageResult]{r: r}
-		if m.messageID != 0 || m.deleted {
+		reply := NewReply[MessageResult](r)
+		if m.edit() {
 			switch {
 			case edits == nil:
 				return Unsupported("This server does not edit messages")
@@ -544,7 +467,7 @@ func (s *Server) message(messages MessageHandler, edits EditHandler) func(contex
 				// Only a save of an existing message deletes it (§4.4).
 				return InvalidParams("Cannot create a deleted message")
 			}
-			return edits.Edit(ctx, c, EditParams{MessageID: m.messageID, RoomID: m.roomID, Deleted: m.deleted, Body: m.body, ReplyTo: m.replyTo, Ext: m.ext}, reply)
+			return edits.Edit(ctx, c, m.editParams(), reply)
 		}
 		if m.body == nil {
 			return Missing("body")
@@ -554,24 +477,6 @@ func (s *Server) message(messages MessageHandler, edits EditHandler) func(contex
 		}
 		return messages.Message(ctx, c, MessageParams{RoomID: m.roomID, Body: m.body, ReplyTo: m.replyTo, Ext: m.ext}, reply)
 	}
-}
-
-// parseCommand reads a command's params (§4.1): a message's, but for
-// message_id and deleted, and with a body.
-func parseCommand(r *Request) (CommandParams, error) {
-	for _, name := range []string{"message_id", "deleted"} {
-		if r.Has(name) {
-			return CommandParams{}, InvalidParams("A command has no " + name + "; send it as a message instead")
-		}
-	}
-	m, err := parseMessage(r)
-	if err != nil {
-		return CommandParams{}, err
-	}
-	if m.body == nil {
-		return CommandParams{}, InvalidParams("A command needs a body")
-	}
-	return CommandParams{RoomID: m.roomID, Body: m.body, ReplyTo: m.replyTo, Ext: m.ext}, nil
 }
 
 // definedSchemes are the auth schemes PROTOCOL.md defines.
@@ -598,12 +503,11 @@ func (s *Server) authenticate(ctx context.Context, c *Conn, r *Request) {
 	if c.Closing() {
 		return
 	}
-	var p AuthParams
-	if err := json.Unmarshal(r.Params, &p); err != nil || p.Scheme == "" {
-		r.fail(InvalidParams("auth needs a scheme"))
+	p, err := ParseAuth(r)
+	if err != nil {
+		r.fail(s.protocolError(ctx, "auth", err))
 		return
 	}
-	p.Raw = r.Params
 	check := checkScheme
 	if s.config.checkScheme != nil {
 		check = s.config.checkScheme
@@ -620,30 +524,6 @@ func (s *Server) authenticate(ctx context.Context, c *Conn, r *Request) {
 	// A panic is answered before the frames held meanwhile are let go, as
 	// an error is.
 	defer s.recoverFrame(r)
-	reply := Reply[AuthResult]{r: r, check: s.checkAuth, apply: func(result *AuthResult) {
-		if result.You != nil {
-			c.SetUser(*result.You)
-		}
-	}}
-	err := s.Backend.Auth(context.WithValue(ctx, requestKey{}, r), c, p, reply)
+	err = s.Backend.Auth(context.WithValue(ctx, requestKey{}, r), c, p, replyFor[AuthResult](r, p))
 	s.finish(ctx, r, true, err)
-}
-
-// checkAuth checks an auth result: one that signs in has a valid user_id,
-// and Extra names no field of its own.
-func (s *Server) checkAuth(result *AuthResult) (any, error) {
-	if result.You != nil && !ValidID(result.You.UserID) {
-		return nil, fmt.Errorf("auth assigned an invalid user_id %q", result.You.UserID)
-	}
-	for _, name := range []string{"you", "token"} {
-		if _, ok := result.Extra[name]; ok {
-			return nil, fmt.Errorf("an auth result's Extra names its own field %s", name)
-		}
-	}
-	return *result, nil
-}
-
-// meResult is the result of me (§3.3.2).
-type meResult struct {
-	You CurrentUser `json:"you"`
 }

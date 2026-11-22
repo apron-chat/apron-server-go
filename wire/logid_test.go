@@ -102,28 +102,28 @@ func TestLogIDParams(t *testing.T) {
 		t.Error("a message_id of 0 was accepted")
 	}
 
-	p, err := parseMessage(req(`{"message_id":"7","body":{"text":"x"},"reply_to":{"message_id":"3"}}`))
+	p, err := parseMessageFields(req(`{"message_id":"7","body":{"text":"x"},"reply_to":{"message_id":"3"}}`))
 	if err != nil || p.messageID != 7 || p.replyTo == nil || p.replyTo.MessageID != 3 {
 		t.Errorf("message: %+v %v", p, err)
 	}
 	for _, bad := range []string{`{"message_id":"0"}`, `{"message_id":"07"}`, `{"message_id":7}`, `{"reply_to":{"message_id":"0"}}`, `{"reply_to":{}}`, `{"reply_to":"3"}`} {
-		if _, err := parseMessage(req(bad)); CodeOf(err) != CodeInvalidParams {
+		if _, err := parseMessageFields(req(bad)); CodeOf(err) != CodeInvalidParams {
 			t.Errorf("message %s: %v", bad, err)
 		}
 	}
-	if p, err := parseReact(req(`{"message_id":"9","emojis":[]}`)); err != nil || p.MessageID != 9 {
+	if p, err := ParseReact(req(`{"message_id":"9","emojis":[]}`)); err != nil || p.MessageID != 9 {
 		t.Errorf("reactions: %+v %v", p, err)
 	}
-	if _, err := parseReact(req(`{"message_id":"x","emojis":[]}`)); CodeOf(err) != CodeInvalidParams {
+	if _, err := ParseReact(req(`{"message_id":"x","emojis":[]}`)); CodeOf(err) != CodeInvalidParams {
 		t.Errorf("reactions with a bad message_id: %v", err)
 	}
-	if p, err := parseActivity(req(`{"read_message_id":"11"}`)); err != nil || p.ReadMessageID == nil || *p.ReadMessageID != 11 {
+	if p, err := ParseActivity(req(`{"read_message_id":"11"}`)); err != nil || p.ReadMessageID == nil || *p.ReadMessageID != 11 {
 		t.Errorf("activity: %+v %v", p, err)
 	}
-	if _, err := parseActivity(req(`{"read_message_id":""}`)); err == nil {
+	if _, err := ParseActivity(req(`{"read_message_id":""}`)); err == nil {
 		t.Error("activity with an empty read_message_id was accepted")
 	}
-	if p, err := parseRoomList(req(`{"latest_log_id":"12"}`)); err != nil || p.LatestLogID == nil || *p.LatestLogID != 12 {
+	if p, err := ParseRoomList(req(`{"latest_log_id":"12"}`)); err != nil || p.LatestLogID == nil || *p.LatestLogID != 12 {
 		t.Errorf("room_list: %+v %v", p, err)
 	}
 }
