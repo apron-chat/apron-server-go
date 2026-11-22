@@ -56,7 +56,7 @@ type readCursor struct {
 // private room is hidden from everyone outside that room, members of the
 // thread included.
 func (r *roomState) visibleTo(u *userState) bool {
-	if !u.scope.allows(r) {
+	if !u.allows(r) {
 		return false
 	}
 	for room := r; room != nil; room = room.parent {
@@ -256,7 +256,7 @@ func (s *Server) deliverMembershipLocked(membership jsontext.Value, r *roomState
 // room's other members (§4.2.2). It returns the membership record, nil if
 // u was a member already.
 func (s *Server) addMemberLocked(u *userState, r *roomState) jsontext.Value {
-	if u.joined[r.id] != nil || !u.scope.allows(r) {
+	if u.joined[r.id] != nil || !u.allows(r) {
 		return nil
 	}
 	u.joined[r.id] = r
@@ -273,11 +273,11 @@ func (s *Server) addMemberLocked(u *userState, r *roomState) jsontext.Value {
 }
 
 // joinDefaultRoomLocked joins a new identity to the default room, so its
-// room list is not empty. Like any join, its connections receive
-// room_update joined with the membership (§4.2.3), after the auth result
-// (§3.2).
+// room list is not empty, or a restricted one to the Lobby (access.go).
+// Like any join, its connections receive room_update joined with the
+// membership (§4.2.3), after the auth result (§3.2).
 func (s *Server) joinDefaultRoomLocked(u *userState) {
-	s.joinLocked(u, s.rooms[defaultRoomID])
+	s.joinLocked(u, s.defaultRoomLocked(u))
 }
 
 // joinLocked joins u to r: the room's other members receive the membership,
@@ -523,6 +523,14 @@ func (s *Server) setRoom(c *client, req request) (any, bool, *Error) {
 		if existing == nil {
 			return nil, false, invalidParams("Unknown room %q", roomID)
 		}
+		// In lobby mode only admins and moderators edit the Lobby itself,
+		// which everyone sees, and restricted users edit nothing.
+		if u.restricted() {
+			return nil, false, restrictedRefusal("edit rooms")
+		}
+		if existing.id == s.access.lobby && !u.moderates() {
+			return nil, false, &Error{Code: CodeDenied, Message: "Only admins and moderators can edit the Public Lobby"}
+		}
 		parent = existing.parent
 		keptExt = extOf(existing.record["ext"])
 	} else if parentID != "" {
@@ -564,8 +572,9 @@ func (s *Server) setRoom(c *client, req request) (any, bool, *Error) {
 		// A thread created without private takes its parent's (§4.2.4).
 		private = parent.private
 	}
-	// The server description may be the default room's.
+	// The server description may be the default room's, or the Lobby's.
 	serverDescription, _ := s.profileValueLocked("description")
+	lobbyDescription, _ := s.profileValueForLocked("description", true)
 	r := s.commitRoomLocked(roomID, parent, private, fields)
 	if !updating {
 		r.creator = u.id
@@ -574,7 +583,9 @@ func (s *Server) setRoom(c *client, req request) (any, bool, *Error) {
 	// Room updates precede the result, so the room is known when it arrives.
 	if updating {
 		s.announceRoomLocked(r, u)
-		if description, _ := s.profileValueLocked("description"); description != serverDescription {
+		description, _ := s.profileValueLocked("description")
+		lobby, _ := s.profileValueForLocked("description", true)
+		if description != serverDescription || lobby != lobbyDescription {
 			s.announceServerLocked()
 		}
 	} else {
@@ -809,6 +820,9 @@ func (s *Server) joinRoom(c *client, req request) (any, bool, *Error) {
 	}
 	target := u
 	if hasTarget && targetID != u.id {
+		if u.restricted() {
+			return nil, false, restrictedRefusal("add others to a room")
+		}
 		if r.members[u.id] == nil {
 			return nil, false, &Error{Code: CodeDenied, Message: fmt.Sprintf("Join %s before adding others to it", r.title())}
 		}
@@ -820,7 +834,7 @@ func (s *Server) joinRoom(c *client, req request) (any, bool, *Error) {
 		if r.parent != nil && !r.parent.visibleTo(target) {
 			return nil, false, &Error{Code: CodeDenied, Message: fmt.Sprintf("Add %s to the private room %s is in first", targetID, r.title())}
 		}
-		if !target.scope.allows(r) {
+		if !target.allows(r) {
 			return nil, false, &Error{Code: CodeDenied, Message: fmt.Sprintf("%s is limited to other rooms", targetID)}
 		}
 		if r.private && r.parent == nil && r.members[target.id] == nil && s.privateRoomsFullLocked(target) {
@@ -1141,7 +1155,7 @@ func (s *Server) activity(c *client, req request) (any, bool, *Error) {
 		return nil, false, err
 	}
 	if _, has := req.params["room_id"]; !has {
-		roomID = defaultRoomID
+		roomID = s.defaultRoomFor(c)
 	}
 	var typing any
 	if raw, ok := req.params["typing"]; ok {

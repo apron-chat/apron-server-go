@@ -171,6 +171,8 @@ func coreCommands() []serverCommand {
 			forms: []commandForm{{
 				name: "avatar", group: groupAll, description: "with one image attached: set your avatar",
 				uses: embeds, requires: embeds,
+				// A guest in the Public Lobby keeps no avatar (access.go).
+				may: func(_ *Server, c *client, _ *roomState) bool { return c.user.account() || !c.user.restricted() },
 			}},
 			run: (*Server).avatarCommand,
 		},
@@ -204,8 +206,9 @@ func coreCommands() []serverCommand {
 				{
 					name: "emoji add", group: groupAll, hint: ":<name>:", description: "with one image attached, add a custom emoji or replace one you added",
 					uses: embeds, requires: embeds,
-					// A connection not offered ext:emoji may not add one.
-					may: func(_ *Server, c *client, _ *roomState) bool { return clientsLoad(c.baseURL) },
+					// A connection not offered ext:emoji may not add one, nor
+					// may a user limited to the Public Lobby (access.go).
+					may: func(_ *Server, c *client, _ *roomState) bool { return clientsLoad(c.baseURL) && !c.user.restricted() },
 				},
 				{
 					name: "emoji remove", group: groupAdmin, hint: ":<name>:", description: "remove a custom emoji",
@@ -357,6 +360,40 @@ func (s *Server) finishUsable(usable usableCommands) []commandForm {
 	return forms
 }
 
+// lobbyCommands are the commands of lobby mode (access.go), which follow
+// the core commands in /help and ext:command_list.
+func lobbyCommands() []serverCommand {
+	return []serverCommand{
+		welcomeCommand("let someone in from the Public Lobby, named or by replying to their message: a waiting account becomes a member at once, and a guest once they sign up"),
+		{
+			name: "lobby",
+			forms: []commandForm{{
+				name: "lobby", group: groupRole, hint: "[open|close]", description: "show whether the Public Lobby is open, or open or close it to newcomers",
+				may: func(_ *Server, c *client, _ *roomState) bool { return c.user.mayWelcome() },
+			}},
+			run: (*Server).lobbyCommand,
+		},
+	}
+}
+
+// welcomeCommand is /welcome, with the description of the mode it is in:
+// lobby mode, and private mode, where it admits the waiting accounts lobby
+// mode left. Its user is the one mentioned, else the one typed, else the
+// author of the message it replies to (access.go): it uses reply_to and
+// body.mentions, and requires neither, nor any text, which a reply makes
+// optional. It acts the same in every room, so it does not use room_id.
+func welcomeCommand(description string) serverCommand {
+	return serverCommand{
+		name: "welcome",
+		forms: []commandForm{{
+			name: "welcome", group: groupRole, hint: "[<user_id>|@user]", description: description,
+			uses: []string{fieldReplyTo, fieldMentions},
+			may:  func(_ *Server, c *client, _ *roomState) bool { return c.user.mayWelcome() },
+		}},
+		run: (*Server).welcomeCommand,
+	}
+}
+
 // command runs a `command` request (§4.1). It takes the params of a new
 // message and is never logged, broadcast, or saved: body.text is the command
 // line, and mentions, reply_to, and embeds are arguments that notify no one.
@@ -377,7 +414,7 @@ func (s *Server) command(c *client, req request) (any, bool, *Error) {
 		return nil, false, err
 	}
 	if _, has := req.params["room_id"]; !has {
-		roomID = defaultRoomID
+		roomID = s.defaultRoomFor(c)
 	}
 	replyID, hasReply, err := parseMessageRef(req.params, "reply_to")
 	if err != nil {
@@ -580,6 +617,9 @@ func (s *Server) avatarCommand(c *client, _ *roomState, body map[string]any, _, 
 	embeds := asList(body["embeds"])
 	if len(embeds) != 1 || embeds[0].(map[string]any)["kind"] != "upload" {
 		return nil, invalidParams("/avatar takes exactly one upload embed: attach an image")
+	}
+	if c.user.restricted() && !c.user.account() {
+		return nil, restrictedRefusal("set an avatar as a guest")
 	}
 	if err := s.admitPostLocked(c.user); err != nil {
 		return nil, err

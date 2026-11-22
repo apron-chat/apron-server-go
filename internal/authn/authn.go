@@ -124,6 +124,10 @@ type Request struct {
 	// on a connection that is not signed in (SignIn.Create): signing in as
 	// a guest first would add a round trip, and no protection.
 	Guests bool
+	// NoSignUp, when Guests is false, says why a new account needs an
+	// invitation here, for a scheme to refuse one without it with, such as
+	// "This server is invite-only; ask for an invite link".
+	NoSignUp string
 }
 
 // Invitation is an invitation to make one account, as a scheme sees it.

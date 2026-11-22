@@ -193,6 +193,8 @@ func (s *Server) authenticate(c *client, req request) (any, *Error) {
 	// unsupported (§3.2), whatever else the request holds.
 	scheme := s.schemeLocked(name)
 	switch {
+	case name == "guest" && s.guestsConfiguredLocked() && !s.guestsAllowedLocked():
+		err = &Error{Code: CodeUnsupported, Message: "The Public Lobby is closed; sign in with an account"}
 	case name == "guest" && !s.guestsAllowedLocked():
 		err = &Error{Code: CodeUnsupported, Message: "This server has no guests; sign in with an account"}
 	case name == "token" && len(s.schemes) == 0 && !presentsServiceToken(req):
@@ -291,10 +293,8 @@ func (s *Server) authenticateGuestLocked(c *client, req request) (any, *Error) {
 	if err != nil {
 		return nil, err
 	}
-	requested, err := parseString(req.params, "user_id", false)
-	if err != nil {
-		return nil, err
-	}
+	// A requested user_id is checked like any (authenticate), and ignored:
+	// a guest is always guest_<n>, so it cannot pass as a member (§3.2).
 	if c.user != nil {
 		// Guest auth on a signed-in connection answers with the identity it
 		// has. It signs the connection in as no other user, so it is no
@@ -303,7 +303,7 @@ func (s *Server) authenticateGuestLocked(c *client, req request) (any, *Error) {
 		c.sendResult(req, result)
 		return result, nil
 	}
-	user := newUserState(s.assignUserIDLocked(requested), normalizeName(name))
+	user := s.newUserLocked(s.assignGuestIDLocked(), normalizeName(name))
 	s.users[user.id] = user
 	s.touchUser(user.id)
 	// A new guest joins the default room, so their room list is not empty.
@@ -317,7 +317,7 @@ func (s *Server) authRequestLocked(c *client, req request, scheme authn.Scheme, 
 		Params: maps.Clone(req.params), Name: normalizeName(name), UserID: requested,
 		Origin: c.origin, BaseURL: c.baseURL, ClientKey: c.clientKey, Now: now,
 		Conn:   &schemeConn{s: s, c: c, scheme: scheme, name: name, userID: requested, now: now},
-		Guests: s.guestsAllowedLocked(),
+		Guests: s.guestsAllowedLocked(), NoSignUp: s.noSignUpLocked(),
 	}
 	if c.user != nil {
 		r.Account = &authn.Account{
@@ -406,17 +406,15 @@ func (s *Server) addProvenLocked(c *client, req request, scheme authn.Scheme, pr
 	if err != nil {
 		return nil, err
 	}
-	becomesAccount := !account.account()
-	s.setIdentityLocked(account, id, record)
-	name := normalizeName(proof.Name)
-	renamed := becomesAccount && name != "" && name != account.name
-	if renamed {
-		account.name = name
-		account.fromValue = nil
+	if wasGuest {
+		return s.guestSignUpLocked(c, req, scheme, proof, id, record, session, anyOrigin)
 	}
+	s.setIdentityLocked(account, id, record)
 	s.setGrantLocked(account, id.Scheme, proof.Roles)
-	// An account takes the roles its user_id or new identity is granted.
-	changed := s.grantRolesLocked(account) || renamed
+	// An account takes the roles its new identity is granted.
+	lobbyBefore := account.lobbyState()
+	changed := s.grantRolesLocked(account)
+	promoted := lobbyBefore != "" && !account.restricted()
 	// The result carries the account as `you`, so its own connection is
 	// told no more.
 	if changed {
@@ -426,13 +424,81 @@ func (s *Server) addProvenLocked(c *client, req request, scheme authn.Scheme, pr
 		now := time.Now()
 		result, err := s.signInLocked(c, req, account, now, false, false, anyOrigin)
 		if err == nil {
-			s.provedLocked(c, scheme, proof, now, wasGuest)
+			s.provedLocked(c, scheme, proof, now, false)
+			if promoted {
+				s.viewChangedLocked(account)
+				s.admitToRoomsLocked(account)
+			}
 		}
 		return result, err
 	}
-	s.provedLocked(c, scheme, proof, time.Now(), wasGuest)
+	s.provedLocked(c, scheme, proof, time.Now(), false)
 	result := map[string]any{"you": account.you()}
 	c.sendResult(req, result)
+	if promoted {
+		s.viewChangedLocked(account)
+		s.admitToRoomsLocked(account)
+	}
+	return result, nil
+}
+
+// guestSignUpLocked makes a new account of an identity a guest's
+// connection proved: a separate user, decoupled from the guest's history
+// (PROTOCOL.md §3.3.3), with a user_id of its own, the one the proof asked
+// for, else user_<n>. It is announced as a guest's connection signing in to
+// an existing account is, without `old`: the guest departs, retired with
+// its leaves, and keeps what it posted, its reactions, read cursors, and
+// rooms it created, and the account arrives with its own status. The
+// account takes the guest's name, chosen status, and ext, and joins, as
+// itself, the rooms the guest was in, so the person keeps their place; in
+// lobby mode a waiting account stays in the Lobby, and a welcomed guest's
+// account, a member, also joins the default room (admitToRoomsLocked). The
+// guest's other connections, if any, become the account's too.
+func (s *Server) guestSignUpLocked(c *client, req request, scheme authn.Scheme, proof authn.Proof, id authn.Identity, record jsontext.Value, session, anyOrigin bool) (any, *Error) {
+	guest := c.user
+	rooms := slices.SortedFunc(maps.Values(guest.joined), func(a, b *roomState) int {
+		return cmp.Compare(a.createdID, b.createdID)
+	})
+	account := s.newUserLocked(s.assignAccountIDLocked(proof.UserID), cmp.Or(normalizeName(proof.Name), guest.name))
+	account.chosen, account.ext = guest.chosen, maps.Clone(guest.ext)
+	if guest.avatarEmbed == nil {
+		// A hosted avatar is the guest's upload, which goes with it.
+		account.avatar = guest.avatar
+	}
+	s.users[account.id] = account
+	s.touchUser(account.id)
+	s.setIdentityLocked(account, id, record)
+	s.setGrantLocked(account, id.Scheme, proof.Roles)
+	s.grantRolesLocked(account)
+	// In lobby mode the account waits in the Lobby, unless someone welcomed
+	// the guest or a role makes it an admin or moderator (access.go).
+	account.waiting = s.access.lobby != "" && !guest.welcomed && !account.moderates()
+	for other := range guest.clients {
+		if other != c {
+			s.attachLocked(other, account)
+			other.enqueue(notification("user", map[string]any{"you": account.you()}))
+		}
+	}
+	now := time.Now()
+	var result any
+	if session {
+		var err *Error
+		if result, err = s.signInLocked(c, req, account, now, true, false, anyOrigin); err != nil {
+			return nil, err
+		}
+	} else {
+		result = s.switchUserLocked(c, req, account, nil, true, false)
+	}
+	s.provedLocked(c, scheme, proof, now, true)
+	for _, r := range rooms {
+		s.joinLocked(account, r)
+	}
+	switch {
+	case account.restricted():
+		s.confineLocked(account)
+	case s.access.lobby != "":
+		s.admitToRoomsLocked(account)
+	}
 	return result, nil
 }
 
@@ -460,7 +526,8 @@ func (s *Server) signInProvenLocked(c *client, req request, scheme authn.Scheme,
 // provenAccountLocked returns the account of an identity a scheme proved,
 // after its checks and its Commit: the identity's, or, with create, a new
 // one for an identity that none has, which takes the user_id the proof
-// requested as guests do, or user_<n>; created reports a new one. It
+// requested (assignAccountIDLocked), or user_<n>; created reports a new
+// one. It
 // changes nothing it refuses.
 func (s *Server) provenAccountLocked(scheme authn.Scheme, proof authn.Proof, create bool) (user *userState, created bool, err *Error) {
 	id, err := identityOf(scheme, proof)
@@ -472,6 +539,8 @@ func (s *Server) provenAccountLocked(scheme authn.Scheme, proof authn.Proof, cre
 		switch {
 		case !create:
 			return nil, false, &Error{Code: CodeDenied, Message: "This " + scheme.Label() + " belongs to no account"}
+		case !s.admitsNewLocked(id) && s.access.private:
+			return nil, false, inviteOnly()
 		case !s.admitsNewLocked(id):
 			return nil, false, notAdmitted()
 		}
@@ -479,11 +548,15 @@ func (s *Server) provenAccountLocked(scheme authn.Scheme, proof authn.Proof, cre
 		if err != nil {
 			return nil, false, err
 		}
-		user := newUserState(s.assignAccountIDLocked(proof.UserID), normalizeName(proof.Name))
+		user := s.newUserLocked(s.assignAccountIDLocked(proof.UserID), normalizeName(proof.Name))
 		s.users[user.id] = user
 		s.setIdentityLocked(user, id, record)
 		s.setGrantLocked(user, id.Scheme, proof.Roles)
 		s.grantRolesLocked(user)
+		// In lobby mode an account someone signs up for themselves waits
+		// in the Lobby to be welcomed in, unless a role makes it an admin or
+		// moderator (access.go).
+		user.waiting = s.access.lobby != "" && !user.moderates()
 		return user, true, nil
 	}
 	if err := s.admitLocked(owner); err != nil {
@@ -522,7 +595,8 @@ func (s *Server) setIdentityLocked(u *userState, id authn.Identity, record jsont
 // setGrantLocked sets the roles an account's identity of scheme grants it,
 // and reports whether they changed; grantRolesLocked then applies them.
 func (s *Server) setGrantLocked(u *userState, scheme string, roles []string) bool {
-	roles = normalizeRoles(roles)
+	// The lobby's roles are the server's, whatever an identity says.
+	roles = slices.DeleteFunc(normalizeRoles(roles), serverRole)
 	if slices.Equal(u.granted[scheme], roles) {
 		return false
 	}
@@ -561,8 +635,12 @@ func (s *Server) approveLocked(c *client, req request, token, state, name, reque
 			return nil, &Error{Code: CodeDenied, Message: "Open this link where the account that asked for it is signed in"}
 		}
 		s.dropProposalLocked(p)
-		// An addition names nobody: the account keeps its name.
+		// An addition names nobody: the account keeps its name. A guest
+		// asks for the user_id it becomes an account under (§3.3.3).
 		proof.Name, proof.UserID = "", ""
+		if !c.user.account() {
+			proof.UserID = cmp.Or(requested, p.userID)
+		}
 		return s.addProvenLocked(c, req, p.scheme, proof, false, false)
 	}
 	// A sign-in authenticates a connection that is not signed in; the
@@ -944,8 +1022,9 @@ func webSocketURL(base string) string {
 	return parsed.String()
 }
 
-// assignAccountIDLocked honors a requested user_id as assignUserIDLocked
-// does, and otherwise assigns the next unused user_<n>.
+// assignAccountIDLocked honors a requested user_id when it is requestable
+// and was never assigned, ignoring case, nor names a room, nor is granted a
+// role; otherwise it assigns the next unused user_<n>.
 func (s *Server) assignAccountIDLocked(requested string) string {
 	if requestable(requested) && s.claimUserIDLocked(requested) {
 		return requested

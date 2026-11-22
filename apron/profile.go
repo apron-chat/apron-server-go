@@ -54,6 +54,13 @@ type storedProfile struct {
 // profileValueLocked returns the current value of a profile field and
 // where it comes from.
 func (s *Server) profileValueLocked(field string) (string, int) {
+	return s.profileValueForLocked(field, false)
+}
+
+// profileValueForLocked is profileValueLocked as a newcomer in the Lobby
+// sees it with lobbyView (lobbyViewLocked): a description taken from a room
+// is the Lobby's.
+func (s *Server) profileValueForLocked(field string, lobbyView bool) (string, int) {
 	var set, configured string
 	switch field {
 	case "title":
@@ -74,7 +81,11 @@ func (s *Server) profileValueLocked(field string) (string, int) {
 	case field == "description":
 		// A room description longer than a server description is left
 		// out rather than cut, which could break its markup.
-		if room := s.rooms[defaultRoomID]; room != nil {
+		room := s.rooms[defaultRoomID]
+		if lobbyView {
+			room = s.lobbyRoomLocked()
+		}
+		if room != nil {
 			if description, _ := room.record["description"].(string); description != "" && len(description) <= maxServerDescriptionBytes {
 				return description, fromRoom
 			}
@@ -93,12 +104,12 @@ func (s *Server) profileChangedLocked() {
 // server frame (§3.1).
 func (s *Server) announceServerLocked() {
 	type kind struct {
-		baseURL  string
-		revealed bool
+		baseURL             string
+		revealed, lobbyView bool
 	}
 	frames := make(map[kind]jsontext.Value)
 	for c := range s.clients {
-		key := kind{c.baseURL, s.revealedLocked(c)}
+		key := kind{c.baseURL, s.revealedLocked(c), s.lobbyViewLocked(c.user)}
 		frame, seen := frames[key]
 		if !seen {
 			frame = s.serverFrameLocked(c)

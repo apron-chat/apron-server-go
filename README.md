@@ -52,6 +52,14 @@ Email sign-in is off unless `--email.enable` is set. To try it locally, run
 `go run ./cmd/aprond --email.enable --email.sender log`, which writes codes to
 the server log instead of sending them.
 
+Anyone may chat as a guest by default. `--access.mode lobby` shows
+newcomers only a Public Lobby, where they introduce themselves until an
+admin or moderator lets them in with `/welcome <user_id>`, and
+`--access.mode private` offers no guests, and lets nobody sign
+themselves up: an account comes from an invitation, an allowlist, or a
+`--role` grant; see
+[Access modes](SERVER.md#access-modes).
+
 External sign-in, such as with GitHub or an OpenID Connect provider, is an
 extension's: aprond is the OAuth authorization server apps sign in with,
 and hands its page to the extension; see the [sso example](examples/sso)

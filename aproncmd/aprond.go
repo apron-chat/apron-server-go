@@ -53,8 +53,13 @@ type Options struct {
 	Title                  string   `long:"title" description:"Plain name clients show for this server (server.title), such as in a list of servers; an admin's /server title overrides it"`
 	Description            string   `long:"description" description:"CommonMark saying in a few words what this server is about (server.description; default: the general room's description, up to 500 bytes); an admin's /server description overrides it"`
 	Avatar                 string   `long:"avatar" description:"Square icon of this server, at least 256 pixels wide (server.avatar): an https: URL or a small data:image URL; an admin's /server avatar overrides it"`
-	DisableGuests          bool     `long:"disable-guests" description:"Do not offer guest sign-in, so only accounts sign in: by passkey, email, or an extension's external sign-in"`
+	DisableGuests          bool     `long:"disable-guests" description:"Do not offer guest sign-in, so only accounts sign in: by passkey, email, or an extension's external sign-in (refused with --access.mode lobby)"`
 	Roles                  []string `long:"role" description:"Grant a role to an account as role=user_id, role=email, or role=scheme:subject, such as admin=ada; repeat for more. admin and moderator may remove others from rooms, and admin may replace and remove custom emoji and set the server's title, description, and avatar with /server"`
+
+	Access struct {
+		Mode      string `long:"mode" default:"public" choice:"public" choice:"lobby" choice:"private" description:"Who may see what before being admitted: public lets anyone in as a guest; lobby shows newcomers, guests and those who sign themselves up, only the Lobby room until an admin or moderator welcomes them in with /welcome (and /lobby open or close lets newcomers in or not); private offers no guests, and makes accounts only with an invitation, or for an identity an allowlist or --role names"`
+		LobbyRoom string `long:"lobby-room" default:"lobby" description:"The Lobby's room_id in lobby mode; the server creates it, titled Public Lobby, unless a room with that room_id exists, which becomes the Lobby as it is"`
+	} `group:"Access" namespace:"access"`
 
 	WebAuthn struct {
 		RPID             string   `long:"rp-id" default:"localhost" description:"Passkey relying party domain; empty disables passkeys"`
@@ -231,6 +236,10 @@ func serverConfig(options Options) (apron.Config, error) {
 	config.Avatar = strings.TrimSpace(options.Avatar)
 	config.ClientIPHeader = options.ClientIPHeader
 	config.DisableGuests = options.DisableGuests
+	config.Access = apron.Access{Mode: apron.AccessMode(options.Access.Mode), LobbyRoom: options.Access.LobbyRoom}
+	if options.DisableGuests && config.Access.Mode == apron.AccessLobby {
+		return config, errors.New("--disable-guests offers no guests, which --access.mode lobby is for: use one or the other")
+	}
 	for _, grant := range options.Roles {
 		role, holder, ok := strings.Cut(grant, "=")
 		role, holder = strings.ToLower(strings.TrimSpace(role)), strings.TrimSpace(holder)

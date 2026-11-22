@@ -82,6 +82,7 @@ type dirtySet struct {
 	vapid       bool
 	emoji       bool
 	profile     bool
+	lobby       bool
 }
 
 func newDirtySet() dirtySet {
@@ -210,6 +211,9 @@ type storedUser struct {
 	Enrolled *storedEnrollment `json:"enrolled,omitzero"`
 	// Scope is the rooms the account is limited to (scope.go).
 	Scope *storedScope `json:"scope,omitzero"`
+	// Waiting marks an account that signed itself up in lobby mode, and
+	// has not been welcomed in (access.go).
+	Waiting bool `json:"waiting,omitzero"`
 	// Consents are the hosts of apps the account allowed on the external
 	// sign-in page, with when, in Unix milliseconds (consents.go).
 	Consents map[string]int64 `json:"consents,omitzero"`
@@ -401,6 +405,9 @@ func (s *Server) entriesLocked(d dirtySet) []store.Entry {
 	if d.profile {
 		put(entryMeta, "profile", s.storedProfileLocked())
 	}
+	if d.lobby {
+		put(entryMeta, "lobby", storedLobby{Closed: s.access.closed})
+	}
 	return batch
 }
 
@@ -447,7 +454,7 @@ func storedUserOf(u *userState) storedUser {
 		Bot: u.botOf, Identities: u.identities, Records: u.records, Grants: u.granted,
 		Email: u.identities[email.Name], External: u.identities[external.Name],
 		Passkey: u.records[passkey.Name], Granted: u.granted[external.Name],
-		Enrolled: u.enrolled.stored(), Scope: u.scope.stored(), Consents: u.consents,
+		Enrolled: u.enrolled.stored(), Scope: u.scope.stored(), Consents: u.consents, Waiting: u.waiting,
 	}
 	if !u.created.IsZero() {
 		stored.Created = u.created.UnixMilli()
@@ -647,8 +654,9 @@ func (s *Server) restoreLocked() (map[string]bool, error) {
 			return nil, err
 		}
 		storedUsers[id] = stored
-		u := newUserState(id, stored.Name)
+		u := s.newUserLocked(id, stored.Name)
 		u.avatar, u.ext = stored.Avatar, stored.Ext
+		u.waiting = stored.Waiting
 		u.created = time.Time{}
 		if stored.Created != 0 {
 			u.created = time.UnixMilli(stored.Created)
@@ -726,6 +734,9 @@ func (s *Server) restoreLocked() (map[string]bool, error) {
 		return nil, err
 	}
 	if err := s.restoreProfileLocked(entries[entryMeta]["profile"]); err != nil {
+		return nil, err
+	}
+	if err := s.restoreLobbyLocked(entries[entryMeta]["lobby"]); err != nil {
 		return nil, err
 	}
 

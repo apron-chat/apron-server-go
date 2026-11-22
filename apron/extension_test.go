@@ -436,15 +436,21 @@ func TestExtensionBotsEventsAndViews(t *testing.T) {
 
 func TestBotIDs(t *testing.T) {
 	memory := store.NewMemory()
+	mailbox := make(testMailbox, 1)
 	config := DefaultConfig()
 	config.Store = memory
+	config.EmailSender = mailbox
 	app, httpServer := newTestServer(t, config)
 	c, _ := dialRaw(t, httpServer)
-	c.result(t, "auth", "a1", map[string]any{"scheme": "guest", "user_id": "assistant"})
+	propose(t, c, "ada@example.com")
+	signInByEmail(t, c, mailbox.receive(t).Code, map[string]any{"user_id": "assistant"})
+	if c.userID != "assistant" {
+		t.Fatalf("the account is %q", c.userID)
+	}
 	if err := app.Shutdown(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	// A user_id a guest ever had is never a bot's.
+	// A user_id a person ever had is never a bot's.
 	config = extensionConfig(testExtension{"assistant", func(r *Registrar) error {
 		_, err := r.Bot("assistant", BotOptions{})
 		return err

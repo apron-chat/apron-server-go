@@ -328,6 +328,11 @@ func (s *Server) emojiCommand(c *client, _ *roomState, body map[string]any, args
 	if !emojiKeyPattern.MatchString(key) || len(key) > maxEmojiBytes {
 		return nil, invalidParams("Usage: /emoji add :<name>: with one image attached, or /emoji remove :<name>:; a name is letters, digits, _, +, and -, at most %d characters", maxEmojiBytes-2)
 	}
+	if u.restricted() {
+		// Custom emoji show to everyone, past the Lobby, and one a waiting
+		// account added while the server was public stays as it is.
+		return nil, restrictedRefusal("add or remove custom emoji")
+	}
 	existing := s.emoji[key]
 	// The form's word matches exactly, as command names do.
 	switch action {

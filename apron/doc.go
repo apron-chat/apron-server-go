@@ -49,6 +49,12 @@
 // a bot's service tokens ([Bot.IssueToken]) sign in its clients outside
 // the process, expire on time, and are revoked at once.
 //
+// [Config].Access sets the access mode: public, the default; private, with
+// no guests; or lobby, where guests and accounts that sign themselves up
+// see only one room, the Lobby, until an admin or moderator lets them in
+// with /welcome, or a program with [Server.Admit] ([Server.Waiting] says who
+// waits). The Lobby's limit is a scope the server applies itself.
+//
 // Invitations ([Host.Invite], [Server.Invite]) each let one person make an
 // account with a passkey, without a guest to start from: the account is
 // made, admitted, and given what the invitation grants in one stored

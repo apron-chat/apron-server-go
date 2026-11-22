@@ -172,6 +172,7 @@ func (a *Allowlist) Allow(principals ...Principal) error {
 	for _, p := range principals {
 		s.allowlist.principals[p] = true
 	}
+	s.admitVouchedLocked()
 	return nil
 }
 
@@ -205,16 +206,27 @@ func (a *Allowlist) Principals() []Principal {
 	})
 }
 
-// guestsAllowedLocked reports whether guests may sign in.
+// guestsAllowedLocked reports whether guests may sign in: in public mode,
+// and in lobby mode while the Lobby is open, unless an extension restricts
+// sign-in.
 func (s *Server) guestsAllowedLocked() bool {
-	return !s.config.DisableGuests && s.allowlist == nil
+	return s.guestsConfiguredLocked() && !(s.access.lobby != "" && s.access.closed)
+}
+
+// guestsConfiguredLocked reports whether the configuration has guests, even
+// while the Lobby is closed.
+func (s *Server) guestsConfiguredLocked() bool {
+	return !s.config.DisableGuests && s.config.Access.Mode != AccessPrivate && s.allowlist == nil
 }
 
 // admittedLocked reports whether the account may sign in: always, unless
 // sign-in is restricted, and then when the list names it. An extension's
-// bot always may; a guest never may on a restricted server.
+// bot always may; a guest never may on a restricted server. In private mode
+// a waiting account, which signed itself up in lobby mode, may not.
 func (s *Server) admittedLocked(u *userState) bool {
 	switch {
+	case u.leftWaiting() && !s.vouchedLocked(u):
+		return false
 	case s.allowlist == nil, u.botOf != "":
 		return true
 	case !u.account():
@@ -251,18 +263,53 @@ func (s *Server) listedLocked(u *userState) bool {
 	return false
 }
 
-// admitLocked refuses a sign-in to an account the list does not name.
+// admitLocked refuses a sign-in to an account the list does not name, or
+// to a waiting account in private mode, which the operator's word lets in
+// as a member instead.
 func (s *Server) admitLocked(u *userState) *Error {
 	if s.admittedLocked(u) {
+		if u.leftWaiting() {
+			s.admitWaitingLocked(u)
+		}
 		return nil
+	}
+	if s.config.Access.Mode == AccessPrivate && u.waiting {
+		return inviteOnly()
 	}
 	return notAdmitted()
 }
 
+// inviteOnly refuses a sign-in in private mode that an invitation, or the
+// allowlist, would let in.
+func inviteOnly() *Error {
+	return &Error{Code: CodeDenied, Message: "This server is invite-only; ask for an invite link"}
+}
+
 // admitsNewLocked reports whether a new account may be made for an
-// identity: one the list names, such as an email address.
+// identity: one the list names, such as an email address, and none while
+// the Lobby is closed, or in private mode, when only an invitation makes
+// one. The operator's own choices still let an identity sign itself up in
+// private mode: the list naming it, or Config.Roles granting it a role,
+// as for the first admin of a server.
 func (s *Server) admitsNewLocked(id authn.Identity) bool {
-	return s.allowlist == nil || s.allowlist.principals[principalOf(id)]
+	if s.access.lobby != "" && s.access.closed {
+		return false
+	}
+	if s.access.private && s.allowlist == nil {
+		return s.grantsRoleLocked(id)
+	}
+	return s.allowlist == nil || s.allowlist.principals[principalOf(id)] || s.access.private && s.grantsRoleLocked(id)
+}
+
+// grantsRoleLocked reports whether Config.Roles names an identity.
+func (s *Server) grantsRoleLocked(id authn.Identity) bool {
+	p := principalOf(id)
+	for _, holders := range s.roleHolders {
+		if slices.Contains(holders, p) {
+			return true
+		}
+	}
+	return false
 }
 
 // startSignIn starts sign-in once the extensions are started, and every
@@ -276,10 +323,14 @@ func (s *Server) startSignIn() error {
 	if err := s.restoreSchemesLocked(); err != nil {
 		return fmt.Errorf("restoring the stored state: %w", err)
 	}
-	if !s.guestsAllowedLocked() && len(s.schemes) == 0 {
+	if !s.guestsConfiguredLocked() && len(s.schemes) == 0 {
 		return errors.New("nobody can sign in: without guests, the server needs a sign-in scheme, such as passkeys, email sign-in, or an extension's external sign-in")
 	}
-	if s.allowlist != nil {
+	// In private mode waiting accounts, from lobby mode, are signed out:
+	// their sessions and push registrations go, and what they posted and
+	// their profiles stay. Those the operator names are let in instead.
+	s.admitVouchedLocked()
+	if s.allowlist != nil || s.config.Access.Mode == AccessPrivate {
 		for _, u := range s.users {
 			if u.account() && !s.admittedLocked(u) {
 				s.signOutLocked(u)

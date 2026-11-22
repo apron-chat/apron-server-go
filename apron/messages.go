@@ -81,7 +81,7 @@ func (s *Server) saveMessage(c *client, req request) (any, bool, *Error) {
 		return nil, false, err
 	}
 	if _, has := req.params["room_id"]; !has {
-		roomID = defaultRoomID
+		roomID = s.defaultRoomFor(c)
 	}
 	messageID, err := parseString(req.params, "message_id", false)
 	if err != nil {
@@ -180,6 +180,10 @@ func (s *Server) saveMessage(c *client, req request) (any, bool, *Error) {
 		// and the message.
 		if source := s.rooms[current.roomID]; source != destination && source.revealsTo(destination) {
 			return nil, false, &Error{Code: CodeDenied, Message: "A message cannot move to a room that fewer people can see"}
+		} else if s.crossesLobbyLocked(source, destination) {
+			// The Lobby is seen by restricted users, who see no other room:
+			// a move either way would show them the other room's room_id.
+			return nil, false, &Error{Code: CodeDenied, Message: "A message cannot move into or out of the Public Lobby"}
 		}
 		from = current.from
 	}
@@ -190,7 +194,7 @@ func (s *Server) saveMessage(c *client, req request) (any, bool, *Error) {
 		}
 		// A reply names its target's message_id to everyone who sees the
 		// reply, so it may not name a message some of them cannot see.
-		if destination.revealsTo(s.rooms[target.roomID]) {
+		if s.revealsLocked(destination, s.rooms[target.roomID]) {
 			return nil, false, &Error{Code: CodeDenied, Message: "A reply cannot quote a message that fewer people can see"}
 		}
 	}
@@ -343,7 +347,7 @@ func (s *Server) commitSnapshotLocked(m *messageState, snapshot map[string]any, 
 		rooms = []*roomState{source, destination}
 		// A move out of a room that some who see the destination cannot see,
 		// such as a private one, does not name it to them.
-		if !destination.revealsTo(source) {
+		if !s.revealsLocked(destination, source) {
 			snapshot["prev_room_id"] = m.roomID
 		}
 	}

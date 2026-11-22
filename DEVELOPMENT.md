@@ -87,10 +87,11 @@ created, guests only read until they sign in with a passkey, and guests'
 memberships are not logged, so its `room_list` ignores `latest_log_id`). A
 signed-in user can run `/invite-bot` for a bot token. The public demo has
 persistent passkeys and rolling history; its passkey registration creates a new
-identity instead of upgrading guest ownership as the Go example does.
+identity, as the Go server's does.
 
 The example starts with a guest identity. Use **Add passkey** in the profile
-editor's Sign-in row to retain that identity and its message ownership, and
+editor's Sign-in row to make an account, a new user that takes the guest's
+place in its rooms (what the guest posted stays the guest's), and
 **Sign in with passkey** to return to it (or choose Passkey on the connect
 screen). Passkey and email sessions resume with their bearer token after a
 disconnect or a reload. Guest reconnects receive a new identity.
@@ -102,8 +103,8 @@ The Go server also offers email sign-in, off unless `--email.enable` is set.
 To try it without sending email, run
 `go run ./cmd/aprond --email.enable --email.sender log`, which writes each
 code, and a sign-in link when `--email.link-url` is set, to the server's log.
-Adding an address while signed in as a guest keeps the guest's identity, as
-adding a passkey does; see [SERVER.md](SERVER.md#email-sign-in). `--welcome` sets the text
+Adding an address while signed in as a guest makes an account in the
+same way, as adding a passkey does; see [SERVER.md](SERVER.md#email-sign-in). `--welcome` sets the text
 the sign-in screen shows, and `--role admin=<user_id, email, or scheme:subject>` grants a
 role, shown as a badge, that may remove people from any room.
 

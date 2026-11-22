@@ -296,6 +296,9 @@ func (s *Scheme) begin(r *authn.Request, action string, local bool) (authn.Resul
 	// attempted.
 	r.State.Store(nil)
 	if action == "register" && r.Account == nil && r.Invitation == nil && !s.signsUp(r) {
+		if !r.Guests && r.NoSignUp != "" {
+			return nil, authn.Denied(r.NoSignUp)
+		}
 		return nil, authn.Denied("Sign in as a guest, or present an invitation, before adding a passkey")
 	}
 	page, err := s.pageURL(r, action)
@@ -339,6 +342,11 @@ func (s *Scheme) begin(r *authn.Request, action string, local bool) (authn.Resul
 			}
 		}
 		c.userID = account.UserID
+		if r.Account != nil && account.Guest {
+			// A guest that registers becomes an account under a user_id of
+			// its own, which it may ask for as a new account does.
+			c.requested = r.UserID
+		}
 		h := &holder{name: account.Name}
 		if h.name == "" {
 			h.name = account.UserID
@@ -471,7 +479,7 @@ func (s *Scheme) finishRegistration(r *authn.Request, c *ceremony) (authn.Result
 		return nil, err
 	}
 	return &authn.Add{Session: true, Proof: authn.Proof{
-		Subject: Subject(c.handle), Name: c.name, Credential: CredentialID(credential.ID),
+		Subject: Subject(c.handle), Name: c.name, UserID: c.requested, Credential: CredentialID(credential.ID),
 		Commit: s.commitCredential(c.handle, credential),
 	}}, nil
 }

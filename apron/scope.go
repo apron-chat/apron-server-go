@@ -131,6 +131,12 @@ func (s *Server) setScopeLocked(u *userState, scope *roomScope) {
 	if scope == nil {
 		return
 	}
+	s.applyScopeLocked(u)
+}
+
+// applyScopeLocked takes u out of the rooms and threads it may not see,
+// and ends its writes into them.
+func (s *Server) applyScopeLocked(u *userState) {
 	// Threads go before the rooms they are threads of.
 	rooms := slices.SortedFunc(maps.Values(u.joined), func(a, b *roomState) int {
 		return depth(b) - depth(a)
@@ -158,8 +164,12 @@ func depth(r *roomState) int {
 }
 
 // mayCreateRoomLocked refuses a scoped account a top-level room, and a
-// thread its scope does not take in.
+// thread its scope does not take in, and a restricted user in lobby mode
+// both (access.go).
 func mayCreateRoomLocked(u *userState, parent *roomState) *Error {
+	if u.restricted() {
+		return restrictedRefusal("start a room or a thread")
+	}
 	if u.scope == nil {
 		return nil
 	}

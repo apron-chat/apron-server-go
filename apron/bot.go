@@ -89,7 +89,7 @@ func (r *Registrar) Bot(userID string, options BotOptions) (*Bot, error) {
 		}
 		s.usedIDs[key] = true
 		s.touchUsedID(key)
-		u = newUserState(userID, normalizeName(options.Name))
+		u = s.newUserLocked(userID, normalizeName(options.Name))
 		u.botOf = r.name
 		s.users[userID] = u
 		s.touchUser(userID)

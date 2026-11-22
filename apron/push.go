@@ -260,6 +260,10 @@ func (s *Server) registerPush(c *client, req request) (any, bool, *Error) {
 		return nil, false, connectionClosing()
 	}
 	u := c.user
+	if u.restricted() && !u.account() {
+		// A guest in the Public Lobby lasts as long as its connection.
+		return nil, false, restrictedRefusal("register for push as a guest")
+	}
 	now := time.Now()
 	s.expirePushesLocked(u, now)
 	if _, replacing := u.pushes[endpoint]; !replacing && len(u.pushes) >= maxPushesPerUser {

@@ -104,7 +104,11 @@ test('an app adds a passkey on the passkey page, then signs in with it there', a
 	const added = await guest.request('auth', {
 		scheme: 'webauthn', action: 'register', step: 'finish', code, code_verifier: request.verifier, redirect_uri: redirectURI, client_id: clientID
 	});
-	expect(added.you).toMatchObject({ user_id: you.user_id, name: 'Grace' });
+	// The guest becomes an account under a user_id of its own, not a guest's.
+	expect(added.you).toMatchObject({ name: 'Grace' });
+	expect(added.you.user_id).not.toBe(you.user_id);
+	expect(added.you.user_id).not.toMatch(/^guest_/);
+	const account = added.you.user_id;
 	expect(typeof added.token).toBe('string');
 	guest.close();
 
@@ -122,7 +126,7 @@ test('an app adds a passkey on the passkey page, then signs in with it there', a
 	const signedIn = await app.request('auth', {
 		scheme: 'webauthn', action: 'login', step: 'finish', code, code_verifier: request.verifier, redirect_uri: redirectURI, client_id: clientID
 	});
-	expect(signedIn.you.user_id).toBe(you.user_id);
+	expect(signedIn.you.user_id).toBe(account);
 	app.close();
 });
 

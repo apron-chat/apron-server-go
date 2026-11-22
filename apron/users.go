@@ -1,6 +1,7 @@
 package apron
 
 import (
+	"bytes"
 	"cmp"
 	"encoding/json/jsontext"
 	"fmt"
@@ -70,6 +71,13 @@ type userState struct {
 	enrolled *enrollment
 	// scope limits the rooms the account may see, nil for none (scope.go).
 	scope *roomScope
+	// access is the server's access mode (access.go). waiting marks an
+	// account that signed itself up in lobby mode, which sees only the
+	// Lobby until someone welcomes it in, and welcomed a guest someone
+	// welcomed, whose sign-up makes it a member; only waiting is stored.
+	access   *accessState
+	waiting  bool
+	welcomed bool
 	// consents are the https redirect URIs of apps the account allowed on
 	// the external sign-in page, with when, in Unix milliseconds
 	// (consents.go).
@@ -182,9 +190,10 @@ func (u *userState) profile() map[string]any {
 		value["avatar"] = u.avatar
 	}
 	// An account's roles are always sent, [] when it has none, so a role
-	// taken away clears the one a client kept (§3.3); guests hold none.
-	if len(u.roles) > 0 || u.account() {
-		value["roles"] = append([]string{}, u.roles...)
+	// taken away clears the one a client kept (§3.3); guests hold none,
+	// but a welcomed guest shows as such (access.go).
+	if roles := u.displayRoles(); len(roles) > 0 || u.account() {
+		value["roles"] = append([]string{}, roles...)
 	}
 	if len(u.ext) > 0 {
 		value["ext"] = maps.Clone(u.ext)
@@ -280,17 +289,19 @@ func validAvatar(value string) bool {
 	return strings.HasPrefix(value, "https://") && len(value) <= 2048 && !strings.ContainsAny(value, " \t\r\n\"'<>")
 }
 
-// requestableUserID is the shape of a user_id a guest may request: the
+// requestableUserID is the shape of a user_id an account may request: the
 // suggested convention for user-chosen IDs (Appendix A.3), letters, digits,
 // _, ., and -, starting with a letter, so it never looks like a system
 // identity or a log_id-derived room_id, and ending with a letter, digit, or
 // _, so a mention of it ends where it does.
 var requestableUserID = regexp.MustCompile(`^[A-Za-z](?:[A-Za-z0-9_.-]{0,62}[A-Za-z0-9_])?$`)
 
-// guestIDPrefix starts every counter-assigned guest ID. The guest_
-// namespace, ignoring case, belongs to the counter: requests in it are never
-// honored, so guest numbers are taken only in sequence and the latest one
-// counts the guests the server has admitted.
+// guestIDPrefix starts every guest's user_id, which the counter assigns:
+// a guest never chooses its own, so clients can tell a guest by it whatever
+// name it shows. The guest_ namespace, ignoring case, belongs to the
+// counter: no account may request a user_id in it either, so guest numbers
+// are taken only in sequence and the latest one counts the guests the
+// server has admitted.
 const guestIDPrefix = "guest_"
 
 // requestable reports whether a user may request id: it has the requestable
@@ -304,15 +315,10 @@ func requestable(id string) bool {
 	return requestableUserID.MatchString(id)
 }
 
-// assignUserIDLocked honors a requested user_id when it is requestable and
-// was never assigned, ignoring case, nor names a room; otherwise it assigns
-// the next unused guest_<n> (§3.2). Each call that does not honor a request
-// takes exactly one counter value: with guest_ requests refused, only the
-// counter assigns guest_<n>, so the skip over taken IDs is a safeguard.
-func (s *Server) assignUserIDLocked(requested string) string {
-	if requestable(requested) && s.claimUserIDLocked(requested) {
-		return requested
-	}
+// assignGuestIDLocked assigns a new guest the next unused guest_<n>
+// (§3.2), taking exactly one counter value: only the counter assigns
+// guest_<n>, so the skip over taken IDs is a safeguard.
+func (s *Server) assignGuestIDLocked() string {
 	for {
 		s.guestNumber++
 		if id := fmt.Sprintf("%s%d", guestIDPrefix, s.guestNumber); s.claimUserIDLocked(id) {
@@ -355,9 +361,11 @@ func (s *Server) switchUserLocked(c *client, req request, user *userState, extra
 	maps.Copy(result, extra)
 	c.sendResult(req, result)
 	// A connection that got only what signing in needs gets the whole
-	// server frame now (§3.1).
-	if !s.revealedLocked(c) {
-		c.enqueue(notification("server", s.serverParams(c.baseURL, true)))
+	// server frame now (§3.1), and so, in lobby mode, does one whose user
+	// sees another part of the server than before.
+	if frame := s.serverFrameForLocked(c.baseURL, user); !s.revealedLocked(c) ||
+		s.access.lobby != "" && !bytes.Equal(frame, s.serverFrameLocked(c)) {
+		c.enqueue(frame)
 	}
 	s.attachLocked(c, user)
 	if joinDefault {
@@ -645,9 +653,9 @@ func jsonEqual(a, b any) bool {
 // grantRolesLocked sets the roles an account holds: those Config.Roles
 // grants it, by its user_id or an identity, those its identities grant it
 // (authn.Proof.Roles), and "bot" for a bot, and reports whether they
-// changed. Guests hold no roles, so a granted user_id taken by a guest
-// grants nothing until it is an account; assignUserIDLocked never hands out
-// a granted user_id that was never used.
+// changed. Guests hold no roles, and only ever have a guest_<n>;
+// assignAccountIDLocked never hands out a granted user_id that was never
+// used, so nobody can claim one and inherit its role.
 func (s *Server) grantRolesLocked(u *userState) bool {
 	var roles []string
 	if u.account() {
@@ -661,7 +669,8 @@ func (s *Server) grantRolesLocked(u *userState) bool {
 			}
 		}
 		for _, granted := range u.granted {
-			roles = append(roles, granted...)
+			// Grants stored before the lobby's roles were the server's.
+			roles = append(roles, slices.DeleteFunc(slices.Clone(granted), serverRole)...)
 		}
 		if u.botOf != "" {
 			roles = append(roles, "bot")
@@ -673,5 +682,8 @@ func (s *Server) grantRolesLocked(u *userState) bool {
 		return false
 	}
 	u.roles = roles
+	// A waiting account that lost the role that let it past the Lobby
+	// sees only the Lobby again (access.go).
+	s.confineLocked(u)
 	return true
 }

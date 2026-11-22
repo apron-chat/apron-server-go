@@ -143,6 +143,13 @@ func TestServerFrame(t *testing.T) {
 func TestSignupWithoutGuests(t *testing.T) {
 	for name, configure := range map[string]func(*Config){
 		"guests disabled": func(c *Config) { c.DisableGuests = true },
+		"private and restricted": func(c *Config) {
+			c.Access.Mode = AccessPrivate
+			c.Extensions = []Extension{testExtension{"private", func(r *Registrar) error {
+				r.RestrictSignIn()
+				return nil
+			}}}
+		},
 		"sign-in restricted": func(c *Config) {
 			c.Extensions = []Extension{testExtension{"private", func(r *Registrar) error {
 				r.RestrictSignIn()
@@ -218,45 +225,28 @@ func TestGuestAuth(t *testing.T) {
 	c.expectQuiet(t)
 }
 
-func TestAuthHonorsRequestedUserIDs(t *testing.T) {
+// A guest is always guest_<n>, in the counter's order: a requested user_id
+// is ignored (§3.2), so a guest cannot pass as a member, while a requested
+// name is honored.
+func TestGuestsAreAlwaysNumbered(t *testing.T) {
 	_, httpServer := newTestServer(t, DefaultConfig())
-	auth := func(id string, params map[string]any) string {
+	auth := func(id string, params map[string]any) map[string]any {
 		t.Helper()
 		c, _ := dialRaw(t, httpServer)
 		params["scheme"] = "guest"
 		_, result := c.request(t, "auth", id, params)
-		return result["you"].(map[string]any)["user_id"].(string)
+		return result["you"].(map[string]any)
 	}
-	// An honored request takes no guest number.
-	if got := auth("ada", map[string]any{"user_id": "ada", "name": "Ada"}); got != "ada" {
-		t.Fatalf("requested user_id: %q", got)
+	if you := auth("ada", map[string]any{"user_id": "ada", "name": "Ada"}); you["user_id"] != "guest_1" || you["name"] != "Ada" {
+		t.Fatalf("requested user_id: %#v", you)
 	}
-	// A used ID, in any case, a system identity, a room, IDs outside the
-	// suggested convention, and anything in the counter's guest_ namespace
-	// are not honored; each such auth takes the next guest number.
-	next := 1
-	for i, requested := range []string{"ada", "ADA", "@server", "~server", "~alice", "general", "General", "1724803200042", "ada@example.com", "carol:b.example", "trailing.", "guest_1", "guest_99", "GUEST_98", "Guest_7", "guest_05", "guest_abc", "guest_", "user_1", "USER_x"} {
+	next := 2
+	for i, requested := range []string{"ada", "maya", "guest", "guest-1", "guest_7", "GUEST_98", "user_1", "general", "~server"} {
 		want := fmt.Sprintf("guest_%d", next)
-		if got := auth(fmt.Sprint("r", i), map[string]any{"user_id": requested}); got != want {
+		if got := auth(fmt.Sprint("r", i), map[string]any{"user_id": requested})["user_id"]; got != want {
 			t.Fatalf("requested %q was assigned %q, want %q", requested, got, want)
 		}
 		next++
-	}
-	// Refused guest_<n> requests claimed nothing: the counter reaches those
-	// numbers in sequence.
-	for i := next; i <= 99; i++ {
-		if got, want := auth(fmt.Sprint("n", i), map[string]any{}), fmt.Sprintf("guest_%d", i); got != want {
-			t.Fatalf("guest %d was assigned %q", i, got)
-		}
-	}
-	// Prefixes that merely resemble the namespace are ordinary requests.
-	for _, requested := range []string{"guest", "guest-1", "guests_1"} {
-		if got := auth(requested, map[string]any{"user_id": requested}); got != requested {
-			t.Fatalf("requested %q was assigned %q", requested, got)
-		}
-	}
-	if got := auth("last", map[string]any{}); got != "guest_100" {
-		t.Fatalf("counter after honored requests: %q", got)
 	}
 	// A user_id is never empty and has no whitespace or control characters
 	// (§2.4): requesting one that could be no user_id is invalid_params,
@@ -267,7 +257,7 @@ func TestAuthHonorsRequestedUserIDs(t *testing.T) {
 		c.expectError(t, "auth", fmt.Sprint("bad", i), map[string]any{"scheme": "guest", "user_id": requested}, CodeInvalidParams)
 	}
 	c.expectError(t, "auth", "bad-token", map[string]any{"scheme": "token", "token": "x", "user_id": "a b"}, CodeUnsupported)
-	if got := auth("after", map[string]any{}); got != "guest_101" {
+	if got := auth("after", map[string]any{})["user_id"]; got != fmt.Sprintf("guest_%d", next) {
 		t.Fatalf("counter after invalid requests: %q", got)
 	}
 }

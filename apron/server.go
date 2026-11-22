@@ -227,8 +227,13 @@ type Config struct {
 	// slog.Default().
 	Logger *slog.Logger
 	// DisableGuests stops offering guest sign-in (§3.2), so only accounts
-	// sign in: by passkey, email, or an extension's external sign-in.
+	// sign in: by passkey, email, or an extension's external sign-in, which
+	// still make new accounts as without it. Open refuses it with
+	// AccessLobby; AccessPrivate has no guests, and no sign-up, anyway.
 	DisableGuests bool
+	// Access is who may see what before being admitted: public, the
+	// default, lobby, or private (access.go, SERVER.md Access modes).
+	Access Access
 	// Title, Description, and Avatar show people which server this is
 	// (§3.1): a plain display name, CommonMark saying in a few words what
 	// the server is about, and a square icon URL that follows the rules
@@ -556,6 +561,9 @@ type outboundBatch struct {
 	// store (client.fenceLocked); the frames after it are never written if
 	// they are not.
 	fence *storeFence
+	// closeStatus, with closeReason, closes a WebSocket with this status
+	// and a close handshake, rather than at once.
+	closeStatus websocket.StatusCode
 }
 
 // Server is an Apron server, which Open starts. It serves the protocol
@@ -609,6 +617,8 @@ type Server struct {
 	// profile is the server's title, description, and avatar as admins set
 	// them with /server (§3.1), which override Config's.
 	profile serverProfile
+	// access is the access mode as users see it (access.go).
+	access accessState
 
 	// dirty is the state changed under mu since it was last written to the
 	// store; storeWrites queues batches for the store writer.
@@ -710,6 +720,11 @@ func Open(config Config) (*Server, error) {
 	if config.Avatar != "" && !validAvatar(config.Avatar) {
 		return fail(fmt.Errorf("the server avatar must be an https: URL or a data:image URL of at most %d bytes", maxAvatarDataURLBytes))
 	}
+	access, err := config.Access.normalized(config.DisableGuests)
+	if err != nil {
+		return fail(err)
+	}
+	config.Access = access
 	if config.Store == nil {
 		config.Store = store.NewMemory()
 	}
@@ -748,11 +763,22 @@ func Open(config Config) (*Server, error) {
 	if s.logger == nil {
 		s.logger = slog.Default()
 	}
+	if access.Mode == AccessLobby {
+		s.access.lobby = access.LobbyRoom
+		s.commands = append(s.commands, lobbyCommands()...)
+	}
+	if access.Mode == AccessPrivate {
+		s.access.private = true
+		s.commands = append(s.commands, welcomeCommand("let in a waiting account from when the server was in lobby mode, named or by replying to its message, so it signs in as a member"))
+	}
 	s.extContext, s.extCancel = context.WithCancel(context.Background())
 	for role, holders := range config.Roles {
 		role = strings.ToLower(strings.TrimSpace(role))
 		if role == "" {
 			return fail(errors.New("Config.Roles grants an empty role"))
+		}
+		if access.Mode == AccessLobby && (role == lobbyWaiting || role == lobbyWelcomed) {
+			return fail(fmt.Errorf("Config.Roles grants %q, which in lobby mode only the server gives", role))
 		}
 		for _, holder := range holders {
 			principals, err := roleHolder(holder)
@@ -821,6 +847,13 @@ func Open(config Config) (*Server, error) {
 		// The seeded default room has a logged creation record like any
 		// other room, so its history_log_id is never null.
 		s.commitRoomLocked(defaultRoomID, nil, false, map[string]any{"title": "General"})
+	}
+	if err := s.openLobbyLocked(); err != nil {
+		s.unlock()
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_ = s.Shutdown(ctx)
+		return nil, err
 	}
 	s.removeStaleUploads(files)
 	s.unlock()
@@ -1176,7 +1209,20 @@ func (s *Server) baseURL(r *http.Request) string {
 
 // serverFrameLocked is the `server` frame (PROTOCOL.md §3.1) for c.
 func (s *Server) serverFrameLocked(c *client) jsontext.Value {
-	return notification("server", s.serverParams(c.baseURL, s.revealedLocked(c)))
+	return s.serverFrameForLocked(c.baseURL, c.user)
+}
+
+// serverFrameForLocked is the `server` frame for a connection whose URLs
+// start with baseURL, signed in as u, or not signed in with nil.
+func (s *Server) serverFrameForLocked(baseURL string, u *userState) jsontext.Value {
+	return notification("server", s.serverParams(baseURL, u != nil || s.guestsAllowedLocked(), s.lobbyViewLocked(u)))
+}
+
+// lobbyViewLocked reports whether a connection signed in as u, or not
+// signed in with nil, sees the server as a newcomer in the Lobby does: in
+// lobby mode, before signing in or as a restricted user.
+func (s *Server) lobbyViewLocked(u *userState) bool {
+	return s.access.lobby != "" && (u == nil || u.restricted())
 }
 
 // revealedLocked reports whether c gets the whole server frame: once it is
@@ -1189,8 +1235,9 @@ func (s *Server) revealedLocked(c *client) bool {
 }
 
 // serverParams is the `server` frame (PROTOCOL.md §3.1) for a connection
-// whose URLs start with baseURL, whole when revealed. Callers hold s.mu.
-func (s *Server) serverParams(baseURL string, revealed bool) map[string]any {
+// whose URLs start with baseURL, whole when revealed, and as a newcomer in
+// the Lobby sees it with lobbyView (lobbyViewLocked). Callers hold s.mu.
+func (s *Server) serverParams(baseURL string, revealed, lobbyView bool) map[string]any {
 	var authSchemes []string
 	for _, scheme := range s.schemes {
 		authSchemes = append(authSchemes, scheme.Name())
@@ -1216,6 +1263,13 @@ func (s *Server) serverParams(baseURL string, revealed bool) map[string]any {
 	signup := slices.DeleteFunc(slices.Clone(authSchemes), func(scheme string) bool {
 		return scheme == "token" || scheme == passkey.Name && (!guests || s.config.GuestFirstPasskeys)
 	})
+	if s.access.lobby != "" && s.access.closed || s.access.private && s.allowlist == nil {
+		// A closed Lobby, and private mode without an allowlist, take in
+		// nobody new by themselves (admitsNewLocked): only an invitation
+		// makes an account, which webauthn in auth presents, and signup
+		// lists what any client can do.
+		signup = []string{}
+	}
 	params := map[string]any{
 		"apron":        10,
 		"agent":        "apron-go/10",
@@ -1261,7 +1315,7 @@ func (s *Server) serverParams(baseURL string, revealed bool) map[string]any {
 		params["welcome"] = s.config.Welcome
 	}
 	for _, field := range profileFields {
-		if value, source := s.profileValueLocked(field); value != "" && (revealed || source != fromRoom) {
+		if value, source := s.profileValueForLocked(field, lobbyView); value != "" && (revealed || source != fromRoom) {
 			params[field] = value
 		}
 	}
@@ -1330,7 +1384,12 @@ func (c *client) writeLoop() {
 			}
 			if batch.closeReason != "" {
 				// The error frame explains the close; a close handshake would
-				// wait on a peer that may not be reading.
+				// wait on a peer that may not be reading, so only a status
+				// the client acts on is worth one, which waits a few seconds
+				// at most.
+				if ws, ok := c.conn.(wsTransport); ok && batch.closeStatus != 0 {
+					_ = ws.ws.Close(batch.closeStatus, batch.closeReason)
+				}
 				c.stopConnection()
 				return
 			}
@@ -1390,6 +1449,26 @@ func (c *client) closeWithError(e *Error) {
 	}
 	select {
 	case c.out <- outboundBatch{frames: [][]byte{payload}, closeReason: e.Message}:
+	default:
+		c.stopConnection()
+	}
+}
+
+// closeWithStatus sends frames, after those already queued, then closes
+// the connection with a WebSocket close status, such as 1008 for a policy
+// the client should not retry against.
+func (c *client) closeWithStatus(status websocket.StatusCode, reason string, frames ...any) {
+	if !c.closing.CompareAndSwap(false, true) {
+		return
+	}
+	batch := outboundBatch{closeReason: reason, closeStatus: status}
+	for _, frame := range frames {
+		if payload := render(frame); payload != nil {
+			batch.frames = append(batch.frames, payload)
+		}
+	}
+	select {
+	case c.out <- batch:
 	default:
 		c.stopConnection()
 	}
