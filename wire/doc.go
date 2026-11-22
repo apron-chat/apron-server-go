@@ -32,7 +32,7 @@
 //     [RoomUpdate], [Reactions], [ServerInfo]), sent with [Conn.Notify] or
 //     encoded once with [Encode]; the system identities ([Private],
 //     [RoomNotice], [ServerNotice]); log_ids and message_ids as [LogID],
-//     and a [Clock] that issues them (§2.1);
+//     below 2^53, and a [Clock] that issues them (§2.1);
 //   - user changes as patches ([User.Patch], [CurrentUser]), which carry
 //     what changed and clear what was taken away (§3.3.1), published to the
 //     user's connections and those who share a room ([Server.PublishUser]).
@@ -137,9 +137,9 @@
 //	                             null: such as a limit positive, status
 //	                             idle false or seconds, emojis non-empty
 //	                             strings
-//	IDs (§2.4, §2.2)             room_id and user_id syntax; log_ids and  that they exist, and that the
-//	                             message_ids decimal strings, a           user may see them
-//	                             message_id not 0
+//	IDs (§2.4, §2.1, §2.2)       room_id and user_id syntax; log_ids and  that they exist, and that the
+//	                             message_ids decimal strings below 2^53,  user may see them
+//	                             a message_id not 0
 //	enums                        room_list filter, body.format            status values (ServerInfo.Status),
 //	                                                                      which emojis it takes
 //	required fields              those the protocol requires, such as     —

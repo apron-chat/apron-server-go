@@ -1,21 +1,27 @@
 package wire
 
 import (
+	"encoding/json/jsontext"
 	"encoding/json/v2"
+	"strings"
 	"testing"
 	"time"
 )
 
 func TestParseLogID(t *testing.T) {
-	for s, want := range map[string]LogID{"0": 0, "1": 1, "1724803200042": 1724803200042, "9223372036854775807": 1<<63 - 1} {
+	for s, want := range map[string]LogID{"0": 0, "1": 1, "1724803200042": 1724803200042, "9007199254740991": MaxLogID} {
 		if got, err := ParseLogID(s); err != nil || got != want {
 			t.Errorf("ParseLogID(%q) = %v, %v", s, got, err)
 		}
 	}
-	for _, s := range []string{"", "-1", "+1", "01", "00", "1.5", "1e3", " 1", "1 ", "0x10", "9223372036854775808"} {
+	for _, s := range []string{"", "-1", "+1", "01", "00", "1.5", "1e3", " 1", "1 ", "0x10",
+		"9007199254740992", "9223372036854775807", "9223372036854775808", "99999999999999999999"} {
 		if got, err := ParseLogID(s); err == nil || CodeOf(err) != CodeInvalidParams {
 			t.Errorf("ParseLogID(%q) = %v, %v", s, got, err)
 		}
+	}
+	if MaxLogID != 1<<53-1 {
+		t.Errorf("MaxLogID: %v", MaxLogID)
 	}
 	if s := LogID(1724803200042).String(); s != "1724803200042" {
 		t.Errorf("String: %s", s)
@@ -53,11 +59,77 @@ func TestLogIDJSON(t *testing.T) {
 			t.Errorf("%v round-trips as %s to %v", id, data, back)
 		}
 	}
-	for _, bad := range []string{`5`, `"x"`, `"-1"`, `"01"`, `true`, `{}`} {
+	for _, bad := range []string{`5`, `"x"`, `"-1"`, `"01"`, `true`, `{}`, `"9007199254740992"`} {
 		var id LogID
 		if err := json.Unmarshal([]byte(bad), &id); err == nil {
 			t.Errorf("%s decoded as %v", bad, id)
 		}
+	}
+}
+
+// log_ids are below 2^53 (§2.1): every param that reads one refuses a
+// greater one as error/invalid_params, and a Clock never issues one.
+func TestLogIDBound(t *testing.T) {
+	const atMax, past = `"9007199254740991"`, `"9007199254740992"`
+	f := Fields{"max": jsontext.Value(atMax), "past": jsontext.Value(past), "huge": jsontext.Value(`"18446744073709551616"`),
+		"ref": jsontext.Value(`{"message_id":` + past + `}`)}
+	for _, read := range []func(string) (LogID, bool, error){f.LogID, f.MessageID} {
+		if id, _, err := read("max"); id != MaxLogID || err != nil {
+			t.Errorf("max: %v, %v", id, err)
+		}
+		for _, name := range []string{"past", "huge"} {
+			if id, present, err := read(name); id != 0 || !present || CodeOf(err) != CodeInvalidParams || !strings.Contains(err.Error(), "2^53") {
+				t.Errorf("%s: %v %v %v", name, id, present, err)
+			}
+		}
+	}
+	if _, _, err := f.MessageRef("ref"); CodeOf(err) != CodeInvalidParams {
+		t.Errorf("ref: %v", err)
+	}
+	for _, params := range []string{
+		`{"message_id":` + past + `,"body":{"text":"x"}}`,
+		`{"body":{"text":"x"},"reply_to":{"message_id":` + past + `}}`,
+	} {
+		if _, err := parseMessageFields(req(params)); CodeOf(err) != CodeInvalidParams {
+			t.Errorf("message %s: %v", params, err)
+		}
+	}
+	if _, err := ParseRoomList(req(`{"latest_log_id":` + past + `}`)); CodeOf(err) != CodeInvalidParams {
+		t.Errorf("room_list: %v", err)
+	}
+	if _, err := ParseActivity(req(`{"read_message_id":` + past + `}`)); CodeOf(err) != CodeInvalidParams {
+		t.Errorf("activity: %v", err)
+	}
+	var m Message
+	if err := json.Unmarshal([]byte(`{"from":{"user_id":"a"},"log_id":`+past+`}`), &m); err == nil {
+		t.Errorf("a message with log_id %s decoded as %+v", past, m)
+	}
+
+	// A Clock issues MaxLogID, and then panics rather than issue more; a t
+	// past MaxLogID counts as not later.
+	var c Clock
+	c.Restore(MaxLogID - 2)
+	if id := c.At(time.UnixMilli(int64(MaxLogID) + 5)); id != MaxLogID-1 {
+		t.Errorf("At past the bound: %v", id)
+	}
+	if id := c.Next(); id != MaxLogID {
+		t.Errorf("last log_id: %v", id)
+	}
+	for name, f := range map[string]func(){
+		"Next":    func() { c.Next() },
+		"Restore": func() { new(Clock).Restore(MaxLogID + 1) },
+	} {
+		func() {
+			defer func() {
+				if recover() == nil {
+					t.Errorf("%s past the bound did not panic", name)
+				}
+			}()
+			f()
+		}()
+	}
+	if c.Last() != MaxLogID {
+		t.Errorf("Last after the panic: %v", c.Last())
 	}
 }
 

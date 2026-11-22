@@ -101,7 +101,7 @@ func (f Fields) Ext(name string) (Ext, bool, error) {
 }
 
 // LogID reads a log_id param, such as a history bound (§2.1): a decimal
-// string of a non-negative number, as ParseLogID reads it.
+// string of a non-negative number below 2^53, as ParseLogID reads it.
 func (f Fields) LogID(name string) (LogID, bool, error) {
 	raw, ok := f[name]
 	if !ok {
@@ -111,11 +111,13 @@ func (f Fields) LogID(name string) (LogID, bool, error) {
 	if isNull(raw) || json.Unmarshal(raw, &value) != nil {
 		return 0, true, InvalidParams(name + " must be a decimal string")
 	}
-	id, err := ParseLogID(value)
-	if err != nil {
-		return 0, true, InvalidParams(name + " must be a non-negative decimal string")
+	switch id, err := parseLogID(value); err {
+	case nil:
+		return id, true, nil
+	case errLogIDRange:
+		return 0, true, InvalidParams(name + " must be below 2^53")
 	}
-	return id, true, nil
+	return 0, true, InvalidParams(name + " must be a non-negative decimal string")
 }
 
 // MessageID reads a message_id param (§2.2): a log_id that is not 0.
@@ -128,8 +130,11 @@ func (f Fields) MessageID(name string) (LogID, bool, error) {
 	if isNull(raw) || json.Unmarshal(raw, &value) != nil {
 		return 0, true, InvalidParams(name + " must be a positive decimal string")
 	}
-	if id, err := ParseLogID(value); err == nil && id > 0 {
+	switch id, err := parseLogID(value); {
+	case err == nil && id > 0:
 		return id, true, nil
+	case err == errLogIDRange:
+		return 0, true, InvalidParams(name + " must be below 2^53")
 	}
 	return 0, true, InvalidParams(name + " must be a positive decimal string")
 }

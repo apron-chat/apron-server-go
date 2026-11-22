@@ -3,6 +3,7 @@ package wire
 import (
 	"container/list"
 	"encoding/json/v2"
+	"errors"
 	"strconv"
 	"sync"
 	"time"
@@ -19,21 +20,47 @@ import (
 // is decoded only from a string, as ParseLogID reads it.
 type LogID int64
 
+// MaxLogID is the greatest log_id (§2.1): log_ids are below 2^53, so that
+// a client may read one as a number, as JavaScript does, without losing
+// precision.
+const MaxLogID LogID = 1<<53 - 1
+
 // ParseLogID reads a log_id or message_id (§2.1): a decimal string of a
-// non-negative number, without a sign or leading zeros, that fits in an
-// int64. "0" is 0, which is a valid bound but no record's log_id.
+// non-negative number, without a sign or leading zeros, of at most
+// MaxLogID. "0" is 0, which is a valid bound but no record's log_id. Its
+// error is error/invalid_params, the error of a rejected value (§1.1).
 func ParseLogID(s string) (LogID, error) {
-	if s == "" || s[0] == '0' && len(s) > 1 {
+	id, err := parseLogID(s)
+	switch err {
+	case errNotLogID:
 		return 0, InvalidParams("Not a log_id: " + strconv.Quote(s))
+	case errLogIDRange:
+		return 0, InvalidParams("A log_id is below 2^53: " + strconv.Quote(s))
+	}
+	return id, nil
+}
+
+// The errors of parseLogID, which its callers word.
+var (
+	errNotLogID   = errors.New("not a decimal string")
+	errLogIDRange = errors.New("not below 2^53")
+)
+
+// parseLogID reads a log_id as ParseLogID does, and tells a string that is
+// no number (errNotLogID) from a number past MaxLogID (errLogIDRange).
+func parseLogID(s string) (LogID, error) {
+	if s == "" || s[0] == '0' && len(s) > 1 {
+		return 0, errNotLogID
 	}
 	for i := 0; i < len(s); i++ {
 		if s[i] < '0' || s[i] > '9' {
-			return 0, InvalidParams("Not a log_id: " + strconv.Quote(s))
+			return 0, errNotLogID
 		}
 	}
 	n, err := strconv.ParseInt(s, 10, 64)
-	if err != nil {
-		return 0, InvalidParams("Not a log_id: " + strconv.Quote(s))
+	if err != nil || n > int64(MaxLogID) {
+		// Only a number too large for an int64 is not parsed.
+		return 0, errLogIDRange
 	}
 	return LogID(n), nil
 }
@@ -71,6 +98,10 @@ func (id *LogID) UnmarshalJSON(data []byte) error {
 // Clock issues log_ids (§2.1): the time in milliseconds, or the previous
 // log_id plus one, so they strictly increase. The zero Clock is ready; one
 // whose backend keeps its log across restarts is restored first.
+//
+// A Clock never issues a log_id past MaxLogID: one whose sequence has
+// reached it panics rather than issue an invalid log_id, as the server can
+// log nothing more.
 type Clock struct {
 	mu   sync.Mutex
 	last LogID
@@ -82,11 +113,19 @@ func (c *Clock) Next() LogID { return c.At(time.Now()) }
 // At returns the next log_id for a change made at t: t in milliseconds, or
 // the previous log_id plus one when that is not later, so log_ids still
 // strictly increase (§2.1). A host that timestamps its own changes uses it
-// to keep log_ids close to when they happened.
+// to keep log_ids close to when they happened. A t past MaxLogID, after
+// the year 287,000, counts as not later.
 func (c *Clock) At(t time.Time) LogID {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.last = max(LogID(t.UnixMilli()), c.last+1)
+	if c.last >= MaxLogID {
+		panic("wire: Clock has issued the last log_id below 2^53")
+	}
+	next := c.last + 1
+	if ms := LogID(t.UnixMilli()); ms > next && ms <= MaxLogID {
+		next = ms
+	}
+	c.last = next
 	return c.last
 }
 
@@ -100,8 +139,12 @@ func (c *Clock) Last() LogID {
 // Restore resumes the sequence after last, the latest log_id a backend
 // kept, such as one it stored with its log: the log_ids issued after are
 // greater. It never moves the clock back: a last below the latest log_id
-// issued changes nothing.
+// issued changes nothing. It panics when last is past MaxLogID, which no
+// log_id is.
 func (c *Clock) Restore(last LogID) {
+	if last > MaxLogID {
+		panic("wire: restoring a Clock past 2^53: " + last.String())
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.last = max(c.last, last)
