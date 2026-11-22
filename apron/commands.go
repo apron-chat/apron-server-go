@@ -171,6 +171,8 @@ func coreCommands() []serverCommand {
 			forms: []commandForm{{
 				name: "avatar", group: groupAll, description: "with one image attached: set your avatar",
 				uses: embeds, requires: embeds,
+				// A guest in the Public Lobby keeps no avatar (access.go).
+				may: func(_ *Server, c *client, _ *roomState) bool { return c.user.account() || !c.user.restricted() },
 			}},
 			run: (*Server).avatarCommand,
 		},
@@ -204,8 +206,9 @@ func coreCommands() []serverCommand {
 				{
 					name: "emoji add", group: groupAll, hint: ":<name>:", description: "with one image attached, add a custom emoji or replace one you added",
 					uses: embeds, requires: embeds,
-					// A connection not offered ext:emoji may not add one.
-					may: func(_ *Server, c *client, _ *roomState) bool { return clientsLoad(c.baseURL) },
+					// A connection not offered ext:emoji may not add one, nor
+					// may a user limited to the Public Lobby (access.go).
+					may: func(_ *Server, c *client, _ *roomState) bool { return clientsLoad(c.baseURL) && !c.user.restricted() },
 				},
 				{
 					name: "emoji remove", group: groupAdmin, hint: ":<name>:", description: "remove a custom emoji",
@@ -361,7 +364,7 @@ func (s *Server) finishUsable(usable usableCommands) []commandForm {
 // the core commands in /help and ext:command_list.
 func lobbyCommands() []serverCommand {
 	return []serverCommand{
-		welcomeCommand("let someone in from the Public Lobby: a waiting account becomes a member at once, and a guest once they sign up"),
+		welcomeCommand("let someone in from the Public Lobby, named or by replying to their message: a waiting account becomes a member at once, and a guest once they sign up"),
 		{
 			name: "lobby",
 			forms: []commandForm{{
@@ -375,13 +378,17 @@ func lobbyCommands() []serverCommand {
 
 // welcomeCommand is /welcome, with the description of the mode it is in:
 // lobby mode, and private mode, where it admits the waiting accounts lobby
-// mode left.
+// mode left. Its user is the one mentioned, else the one typed, else the
+// author of the message it replies to (access.go): it uses reply_to and
+// body.mentions, and requires neither, nor any text, which a reply makes
+// optional. It acts the same in every room, so it does not use room_id.
 func welcomeCommand(description string) serverCommand {
 	return serverCommand{
 		name: "welcome",
 		forms: []commandForm{{
-			name: "welcome", group: groupRole, hint: "<user_id>", description: description,
-			may: func(_ *Server, c *client, _ *roomState) bool { return c.user.mayWelcome() },
+			name: "welcome", group: groupRole, hint: "[<user_id>|@user]", description: description,
+			uses: []string{fieldReplyTo, fieldMentions},
+			may:  func(_ *Server, c *client, _ *roomState) bool { return c.user.mayWelcome() },
 		}},
 		run: (*Server).welcomeCommand,
 	}

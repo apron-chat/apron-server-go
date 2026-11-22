@@ -1354,7 +1354,7 @@ effects and `~private` replies arrive before its result. Commands:
   and then a logged `~room` message (`from: {user_id: "~room", name: <room title>}`),
   such as `@guest_3 was removed by @guest_1: spamming`. The reason is the first line
   of the rest of the text, at most 200 characters.
-- `/welcome <user_id>` and `/lobby [open|close]` exist only in lobby mode,
+- `/welcome [<user_id>|@user]` and `/lobby [open|close]` exist only in lobby mode,
   for admins and moderators: the first lets someone in from the Lobby, and
   the second shows whether the Lobby is open, or opens or closes it to
   newcomers; `/welcome` also
@@ -1411,6 +1411,15 @@ everyone that check lets use the form: `all` for `/help`, `/avatar`,
 connection check is not a group), `member` for `/invite-device`, `room`
 for `/kick` (a room's creator, a guest too, as well as admins and
 moderators), and `admin` for `/emoji remove` and each form of `/server`.
+In lobby mode `/welcome` and `/lobby`, and in private mode `/welcome`, are
+listed only to admins and moderators, in group `role`: `/welcome` with
+hint `[<user_id>|@user]`, using `reply_to` and `body.mentions` and
+requiring neither, since replying to someone's message names them, and
+`/lobby` with hint `[open|close]`; neither uses `room_id`, as both act the
+same in every room. A user limited to the Lobby is not offered `/emoji
+add`, nor a guest there `/avatar`, which they would be refused
+([Access modes](#access-modes)); a waiting account welcomed in gets a
+member's list the next time it asks.
 The list changes as roles, rooms, and extensions' answers do;
 nothing announces a change, so clients ask again. A user who can see no
 room, such as a bot whose scope names none, can run no command, so the

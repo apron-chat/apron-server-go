@@ -769,7 +769,7 @@ func Open(config Config) (*Server, error) {
 	}
 	if access.Mode == AccessPrivate {
 		s.access.private = true
-		s.commands = append(s.commands, welcomeCommand("let in a waiting account from when the server was in lobby mode, so it signs in as a member"))
+		s.commands = append(s.commands, welcomeCommand("let in a waiting account from when the server was in lobby mode, named or by replying to its message, so it signs in as a member"))
 	}
 	s.extContext, s.extCancel = context.WithCancel(context.Background())
 	for role, holders := range config.Roles {

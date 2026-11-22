@@ -3,6 +3,7 @@ package apron
 import (
 	"context"
 	"errors"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -288,7 +289,7 @@ func TestLobbyInvite(t *testing.T) {
 	// /help lists /welcome and /lobby to admins and moderators only, and
 	// there is no /toggle.
 	before, _ := commandIn(t, ada, "general", "/help")
-	if text := noticeText(t, before[0]); !strings.Contains(text, "`/welcome <user_id>`") || !strings.Contains(text, "`/lobby [open|close]`") || strings.Contains(text, "/toggle") {
+	if text := noticeText(t, before[0]); !strings.Contains(text, "`/welcome [<user_id>|@user]`") || !strings.Contains(text, "`/lobby [open|close]`") || strings.Contains(text, "/toggle") {
 		t.Fatalf("an admin's /help: %q", text)
 	}
 	guest.drain(t)
@@ -1000,7 +1001,7 @@ func TestPrivateModeWelcome(t *testing.T) {
 	signInByEmail(t, ada, mailbox.receive(t).Code, map[string]any{"user_id": "ada"})
 	ada.drain(t)
 	before, _ := commandIn(t, ada, "general", "/help")
-	if text := noticeText(t, before[0]); !strings.Contains(text, "`/welcome <user_id>`") || strings.Contains(text, "/lobby") || strings.Contains(text, "/toggle") {
+	if text := noticeText(t, before[0]); !strings.Contains(text, "`/welcome [<user_id>|@user]`") || strings.Contains(text, "/lobby") || strings.Contains(text, "/toggle") {
 		t.Fatalf("/help in private mode: %q", text)
 	}
 	if before, reply := commandIn(t, ada, "general", "/welcome @ada"); errorCode(reply) != 0 || !strings.Contains(noticeText(t, before[0]), "already a member") {
@@ -1444,4 +1445,83 @@ func TestGuestSignUpMakesASeparateAccount(t *testing.T) {
 		}
 		watcher.drain(t)
 	}
+}
+
+// ext:command_list lists /welcome and /lobby exactly to who may run them:
+// admins and moderators, /lobby in lobby mode, /welcome in lobby and
+// private mode. Restricted users get no form they would be refused: a
+// guest in the Lobby no /avatar, and none of them /emoji add.
+func TestAccessCommandList(t *testing.T) {
+	welcome := map[string]any{
+		"name": "welcome", "group": "role", "hint": "[<user_id>|@user]", "uses": []any{"reply_to", "body.mentions"},
+	}
+	lobby := map[string]any{"name": "lobby", "group": "role", "hint": "[open|close]"}
+	check := func(who string, commands []map[string]any, want ...map[string]any) {
+		t.Helper()
+		for _, name := range []string{"welcome", "lobby"} {
+			var got, expected map[string]any
+			for _, command := range commands {
+				if command["name"] == name {
+					got = maps.Clone(command)
+					delete(got, "description")
+				}
+			}
+			for _, w := range want {
+				if w["name"] == name {
+					expected = w
+				}
+			}
+			if !reflect.DeepEqual(got, expected) {
+				t.Errorf("%s's /%s = %#v, want %#v", who, name, got, expected)
+			}
+		}
+	}
+
+	// Lobby mode.
+	_, mailbox, httpServer := lobbyServer(t)
+	ada, _ := emailSignUp(t, httpServer, mailbox, "ada@example.com", "ada", "general")
+	mo, _ := emailSignUp(t, httpServer, mailbox, "mo@example.com", "mo", "general")
+	waiting, _ := emailSignUp(t, httpServer, mailbox, "wes@example.com", "wes", "lobby")
+	guest, _ := lobbyGuest(t, httpServer)
+	for _, c := range []*testClient{ada, mo, waiting, guest} {
+		c.drain(t)
+	}
+	check("the admin", commandList(t, ada), welcome, lobby)
+	check("the moderator", commandList(t, mo), welcome, lobby)
+	check("a waiting account", commandList(t, waiting))
+	check("a guest", commandList(t, guest))
+	if names := commandNames(commandList(t, guest)); slices.Contains(names, "avatar") || slices.Contains(names, "emoji add") {
+		t.Errorf("a guest in the Lobby is offered %v", names)
+	}
+	if names := commandNames(commandList(t, waiting)); !slices.Contains(names, "avatar") || slices.Contains(names, "emoji add") {
+		t.Errorf("a waiting account is offered %v", names)
+	}
+	// Welcomed in, the account's list is a member's: /emoji add included,
+	// and still no /welcome or /lobby.
+	commandIn(t, ada, "general", "/welcome wes")
+	waiting.drain(t)
+	if names := commandNames(commandList(t, waiting)); !slices.Contains(names, "emoji add") || slices.Contains(names, "welcome") || slices.Contains(names, "lobby") {
+		t.Errorf("a welcomed account is offered %v", names)
+	}
+
+	// Private mode: /welcome only.
+	_, privateMail, privateServer := emailTestServer(t, func(config *Config) {
+		config.Access.Mode = AccessPrivate
+		config.Roles = map[string][]string{"admin": {"ada@example.com"}}
+	})
+	admin, _ := dialRaw(t, privateServer)
+	propose(t, admin, "ada@example.com")
+	signInByEmail(t, admin, privateMail.receive(t).Code, nil)
+	admin.drain(t)
+	check("a private server's admin", commandList(t, admin), welcome)
+
+	// Public mode: neither.
+	_, publicMail, publicServer := emailTestServer(t, func(config *Config) {
+		config.Roles = map[string][]string{"admin": {"ada@example.com"}}
+	})
+	public, _ := dialRaw(t, publicServer)
+	propose(t, public, "ada@example.com")
+	signInByEmail(t, public, publicMail.receive(t).Code, nil)
+	public.drain(t)
+	check("a public server's admin", commandList(t, public))
 }
