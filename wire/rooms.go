@@ -4,8 +4,8 @@ import (
 	"context"
 )
 
-// Room is a room record (§3.4, §4.2). LatestLogID, HistoryLogID, Members,
-// and MemberCount describe the room as one client sees it.
+// Room is a room record (§4.2): its server and client fields, as it is
+// logged, and as a history result carries it (§4.3.3).
 type Room struct {
 	RoomID       string         `json:"room_id"`
 	LogID        LogID          `json:"log_id,omitzero"`
@@ -15,10 +15,18 @@ type Room struct {
 	Title        string         `json:"title,omitempty"`
 	Description  string         `json:"description,omitempty"`
 	Ext          map[string]any `json:"ext,omitempty"`
-	LatestLogID  LogID          `json:"latest_log_id,omitzero"`
-	// HistoryLogID is the inclusive lower bound of the room's history, or
-	// nil for none (§4.3.3).
-	HistoryLogID *LogID `json:"history_log_id"`
+}
+
+// RoomView is a room record as one client sees it, with its delivery fields
+// (§4.2), as room_list and room_update carry it. With capability history,
+// LatestLogID and HistoryLogID are set (§4.3.3).
+type RoomView struct {
+	Room
+	LatestLogID LogID `json:"latest_log_id,omitzero"`
+	// HistoryLogID is the inclusive lower bound of the room's history: nil
+	// leaves the field out, and a pointer to 0 sends null, for no history
+	// (§4.3.3). Decoding, a null is nil, as for any pointer.
+	HistoryLogID *LogID `json:"history_log_id,omitzero"`
 	Members      []User `json:"members,omitempty"`
 	MemberCount  int    `json:"member_count,omitzero"`
 }
@@ -43,10 +51,10 @@ type Membership struct {
 
 // RoomUpdate is a room_update notification (§4.2.3).
 type RoomUpdate struct {
-	Joined      []Room       `json:"joined,omitempty"`
+	Joined      []RoomView   `json:"joined,omitempty"`
 	Left        []RoomRef    `json:"left,omitempty"`
 	Memberships []Membership `json:"memberships,omitempty"`
-	Updated     []Room       `json:"updated,omitempty"`
+	Updated     []RoomView   `json:"updated,omitempty"`
 	Users       []User       `json:"users,omitempty"`
 }
 
@@ -74,10 +82,10 @@ type RoomListParams struct {
 // filter asks for, empty or not, and omits the others; Left only with a
 // latest_log_id the backend applied.
 type RoomListResult struct {
-	Joined    []Room    `json:"joined,omitzero"`
-	NotJoined []Room    `json:"not_joined,omitzero"`
-	Left      []RoomRef `json:"left,omitzero"`
-	Users     []User    `json:"users,omitempty"`
+	Joined    []RoomView `json:"joined,omitzero"`
+	NotJoined []RoomView `json:"not_joined,omitzero"`
+	Left      []RoomRef  `json:"left,omitzero"`
+	Users     []User     `json:"users,omitempty"`
 }
 
 // RoomSetParams are the params of room_set (§4.2.4): a new room without
@@ -196,10 +204,10 @@ func roomHandler(rooms Rooms, name string) func(context.Context, *Conn, *Request
 			// The arrays the filter asks for are present even when empty
 			// (§4.2.1), and the others absent.
 			if p.Filter != FilterNotJoined && result.Joined == nil {
-				result.Joined = []Room{}
+				result.Joined = []RoomView{}
 			}
 			if p.Filter != FilterJoined && result.NotJoined == nil {
-				result.NotJoined = []Room{}
+				result.NotJoined = []RoomView{}
 			}
 			if p.Filter == FilterJoined {
 				result.NotJoined = nil
@@ -209,7 +217,7 @@ func roomHandler(rooms Rooms, name string) func(context.Context, *Conn, *Request
 			}
 			if !p.Members {
 				result.Users = nil
-				for _, list := range [][]Room{result.Joined, result.NotJoined} {
+				for _, list := range [][]RoomView{result.Joined, result.NotJoined} {
 					for i := range list {
 						list[i].Members, list[i].MemberCount = nil, 0
 					}

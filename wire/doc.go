@@ -25,9 +25,10 @@
 //   - deduplication of retried requests by user_id and id (§1.2);
 //   - the core checks on a new message (§3.5.1, §3.6), and on the params of
 //     every typed request;
-//   - typed frames ([User], [Message], [Room], [ServerInfo], ...), the
-//     system identities ([Private], [RoomNotice], [ServerNotice]), log_ids
-//     and message_ids as [LogID], and a [Clock] that issues them (§2.1).
+//   - typed frames ([User], [Message], [Room] and [RoomView], [ServerInfo],
+//     ...), the system identities ([Private], [RoomNotice], [ServerNotice]),
+//     log_ids and message_ids as [LogID], and a [Clock] that issues them
+//     (§2.1).
 //
 // # Backends
 //

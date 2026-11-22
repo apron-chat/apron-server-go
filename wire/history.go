@@ -18,7 +18,8 @@ type HistoryParams struct {
 	Limit  int
 }
 
-// HistoryResult is the result of history (§4.3).
+// HistoryResult is the result of history (§4.3). Its rooms are logged
+// records, without the delivery fields of a RoomView (§4.3.3).
 type HistoryResult struct {
 	Rooms       []Room           `json:"rooms,omitempty"`
 	Messages    []Message        `json:"messages,omitempty"`

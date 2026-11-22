@@ -127,3 +127,43 @@ func TestLogIDParams(t *testing.T) {
 		t.Errorf("room_list: %+v %v", p, err)
 	}
 }
+
+// history_log_id is in every history result, null for none; a RoomView
+// sends it when set, null for none; a logged Room never has it (§4.3.3).
+func TestHistoryLogIDJSON(t *testing.T) {
+	room := Room{RoomID: "general", LogID: 100}
+	for _, c := range []struct {
+		name  string
+		value any
+		json  string
+	}{
+		{"history result", HistoryResult{LatestLogID: 200, HistoryLogID: 100},
+			`{"more":false,"latest_log_id":"200","history_log_id":"100"}`},
+		{"history result without history", HistoryResult{LatestLogID: 200},
+			`{"more":false,"latest_log_id":"200","history_log_id":null}`},
+		{"history record room", HistoryResult{Rooms: []Room{room}, FirstLogID: 100, LastLogID: 100, LatestLogID: 200, HistoryLogID: 100},
+			`{"rooms":[{"room_id":"general","log_id":"100"}],"first_log_id":"100","last_log_id":"100","more":false,"latest_log_id":"200","history_log_id":"100"}`},
+		{"room_list room", RoomListResult{Joined: []RoomView{
+			{Room: room, LatestLogID: 200, HistoryLogID: ptr(100)},
+			{Room: Room{RoomID: "empty", LogID: 150}, LatestLogID: 150, HistoryLogID: ptr(0)},
+		}},
+			`{"joined":[{"room_id":"general","log_id":"100","latest_log_id":"200","history_log_id":"100"},{"room_id":"empty","log_id":"150","latest_log_id":"150","history_log_id":null}]}`},
+		{"room_update room", RoomUpdate{
+			Joined:  []RoomView{{Room: room, LatestLogID: 200, HistoryLogID: ptr(0), Members: []User{{UserID: "a"}}}},
+			Updated: []RoomView{{Room: Room{RoomID: "general", LogID: 300, PrevLogID: 100, Title: "General"}}},
+		},
+			`{"joined":[{"room_id":"general","log_id":"100","latest_log_id":"200","history_log_id":null,"members":[{"user_id":"a"}]}],"updated":[{"room_id":"general","log_id":"300","prev_log_id":"100","title":"General"}]}`},
+	} {
+		got, err := marshal(c.value)
+		if err != nil || string(got) != c.json {
+			t.Errorf("%s:\n got %s, %v\nwant %s", c.name, got, err, c.json)
+		}
+	}
+
+	// A RoomView decodes into its Room and its delivery fields.
+	var view RoomView
+	if err := json.Unmarshal([]byte(`{"room_id":"general","log_id":"100","latest_log_id":"200","history_log_id":"100","member_count":3}`), &view); err != nil ||
+		view.RoomID != "general" || view.LogID != 100 || view.LatestLogID != 200 || view.HistoryLogID == nil || *view.HistoryLogID != 100 || view.MemberCount != 3 {
+		t.Fatalf("decoded %+v, %v", view, err)
+	}
+}
