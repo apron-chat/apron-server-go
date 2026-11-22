@@ -24,7 +24,7 @@ type ServerInfo struct {
 	Welcome      string            `json:"welcome,omitempty"`
 	Signup       []string          `json:"signup,omitempty"`
 	Labels       map[string]string `json:"labels,omitempty"`
-	Ping         int               `json:"ping,omitempty"`
+	Ping         int               `json:"ping,omitzero"`
 	Title        string            `json:"title,omitempty"`
 	Description  string            `json:"description,omitempty"`
 	Avatar       string            `json:"avatar,omitempty"`
@@ -85,7 +85,7 @@ type Message struct {
 	ReplyTo    *Ref           `json:"reply_to,omitempty"`
 	PrevLogID  string         `json:"prev_log_id,omitempty"`
 	PrevRoomID string         `json:"prev_room_id,omitempty"`
-	Deleted    bool           `json:"deleted,omitempty"`
+	Deleted    bool           `json:"deleted,omitzero"`
 	Ext        map[string]any `json:"ext,omitempty"`
 }
 
@@ -124,7 +124,7 @@ type MessageParams struct {
 	RoomID    string         `json:"room_id,omitempty"`
 	Body      *Body          `json:"body,omitempty"`
 	ReplyTo   *Ref           `json:"reply_to,omitempty"`
-	Deleted   bool           `json:"deleted,omitempty"`
+	Deleted   bool           `json:"deleted,omitzero"`
 	Ext       map[string]any `json:"ext,omitempty"`
 	Raw       jsontext.Value `json:"-"`
 }
