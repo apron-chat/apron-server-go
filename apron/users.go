@@ -456,28 +456,57 @@ func (s *Server) sharersLocked(u *userState) []*userState {
 	return users
 }
 
-// notifyProfileLocked sends a `user` notification after a profile change:
-// `you` to the user's connections other than except, and `new` to everyone
-// who shares a room with them (§3.3). Each carries the complete profile, so
-// at least the fields that changed. removed lists fields the change
-// removed, and cleared the ext keys it removed, both announced as empty
-// values, since clients merge a notification into the object they keep.
-func (s *Server) notifyProfileLocked(u *userState, except *client, cleared extObject, removed ...string) {
-	// The profile goes to every sharer, so it publishes the shown status,
-	// one held back to coalesce included.
+// userViews are a user as its two audiences see it (wire.UserChange): its
+// own connections, which see the chosen status (you), and everyone else,
+// who see the shown status (shownView).
+type userViews struct{ you, shown wire.User }
+
+// views are u as each audience sees it now, for a change to be told from.
+func (u *userState) views() userViews {
+	return userViews{you: u.you().User, shown: u.shownView()}
+}
+
+// shownView is u as others see it: its profile, with the published shown
+// status, and its seen whenever it is known, as a client keeps it. As seen
+// changes only when the shown status becomes offline (§4.5.2), the change
+// of one view to another carries seen only then, with that status, and
+// never clears it: a user object carries seen only with a shown offline.
+func (u *userState) shownView() wire.User {
+	shown := u.profile().User
+	if u.seen > 0 {
+		shown.Seen = strconv.FormatInt(u.seen, 10)
+	}
+	return shown
+}
+
+// notifyProfileLocked tells of a change to u since before, as package wire
+// does (wire.Server.PublishUserChange): `you` to the user's connections but
+// except, whose result carries the user, and `new` to everyone who shares
+// a room with them (§3.3.3), each with the fields of their view that
+// changed, a cleared one as its empty value (§3.3.1), and only when their
+// view changed. The change goes to every sharer, so it publishes the shown
+// status, one held back to coalesce included.
+func (s *Server) notifyProfileLocked(u *userState, except *client, before userViews) {
 	s.publishLocked(u)
-	profile := withCleared(withRemoved(u.profile(), removed), cleared)
-	yours := withCleared(withRemoved(u.you(), removed), cleared)
-	you := notification("user", wire.UserUpdate{You: &yours})
-	for c := range u.clients {
-		if c != except {
-			c.enqueue(you)
-		}
-	}
-	others := notification("user", wire.UserUpdate{New: &profile})
+	s.publishUserLocked(u, except, before)
+}
+
+// publishUserLocked tells of a change to u since before (notifyProfileLocked),
+// without publishing its shown status.
+func (s *Server) publishUserLocked(u *userState, except *client, before userViews) {
+	sharers := make(map[*userState]bool)
 	for _, other := range s.sharersLocked(u) {
-		other.send(others)
+		sharers[other] = true
 	}
+	now := u.views()
+	change := wire.UserChange{Old: before.you, New: now.you, OldShown: before.shown, NewShown: now.shown}
+	if except != nil {
+		change.Except = except.conn
+	}
+	s.wire.PublishUserChange(change, func(wc *wire.Conn) bool {
+		c, ok := wire.DataOf[*client](wc)
+		return ok && c.user != nil && sharers[c.user]
+	})
 }
 
 // withRemoved clears each removed field of a profile, which sends it as
@@ -488,21 +517,6 @@ func withRemoved(profile wire.CurrentUser, removed []string) wire.CurrentUser {
 			profile.Cleared = append(profile.Cleared, field)
 		}
 	}
-	return profile
-}
-
-// withCleared adds each cleared ext key to a profile's ext as its empty
-// value (§4.12).
-func withCleared(profile wire.CurrentUser, cleared extObject) wire.CurrentUser {
-	if len(cleared) == 0 {
-		return profile
-	}
-	ext := maps.Clone(profile.Ext)
-	if ext == nil {
-		ext = make(extObject, len(cleared))
-	}
-	maps.Copy(ext, cleared)
-	profile.Ext = ext
 	return profile
 }
 
@@ -566,7 +580,7 @@ func (s *Server) updateProfile(c *client, p wire.MeParams, reply wire.Reply[wire
 			return err
 		}
 	}
-	before, beforeYou := u.profile(), u.you()
+	before := u.views()
 	s.touchUser(u.id)
 	var removed []string
 	if hasName {
@@ -583,16 +597,13 @@ func (s *Server) updateProfile(c *client, p wire.MeParams, reply wire.Reply[wire
 	if hasAvatar && avatar == "" {
 		removed = append(removed, "avatar")
 	}
-	cleared := clearedExt(u.ext, extWrite)
 	u.ext = ext
 	if hasStatus {
 		// A change of the chosen status is sent at once, with the profile.
 		u.chosen = status
 		s.publishLocked(u)
 	}
-	if !jsonEqual(before, u.profile()) || !jsonEqual(beforeYou, u.you()) {
-		s.notifyProfileLocked(u, c, cleared, removed...)
-	}
+	s.notifyProfileLocked(u, c, before)
 	// The result is the user's complete object, which Send makes the
 	// connection's user too.
 	_ = reply.Send(withRemoved(u.you(), removed))

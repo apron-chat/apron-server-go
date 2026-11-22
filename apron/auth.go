@@ -421,6 +421,7 @@ func (s *Server) addProvenLocked(c *client, req request, scheme authn.Scheme, pr
 		return nil, err
 	}
 	becomesAccount := !account.account()
+	before := account.views()
 	s.setIdentityLocked(account, id, record)
 	name := normalizeName(proof.Name)
 	renamed := becomesAccount && name != "" && name != account.name
@@ -434,7 +435,7 @@ func (s *Server) addProvenLocked(c *client, req request, scheme authn.Scheme, pr
 	// The result carries the account as `you`, so its own connection is
 	// told no more.
 	if changed {
-		s.notifyProfileLocked(account, c, nil)
+		s.notifyProfileLocked(account, c, before)
 	}
 	if session {
 		now := time.Now()
@@ -511,8 +512,8 @@ func (s *Server) provenAccountLocked(scheme authn.Scheme, proof authn.Proof, cre
 	if record != nil {
 		s.setIdentityLocked(owner, id, record)
 	}
-	if s.setGrantLocked(owner, id.Scheme, proof.Roles) && s.grantRolesLocked(owner) {
-		s.notifyProfileLocked(owner, nil, nil)
+	if before := owner.views(); s.setGrantLocked(owner, id.Scheme, proof.Roles) && s.grantRolesLocked(owner) {
+		s.notifyProfileLocked(owner, nil, before)
 	}
 	return owner, false, nil
 }

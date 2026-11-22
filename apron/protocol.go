@@ -151,22 +151,6 @@ func emptyJSON(value jsontext.Value) bool {
 // nil when no key is left; kept is not modified.
 func mergeExt(kept, write extObject) extObject { return wire.MergeExt(kept, write) }
 
-// clearedExt lists, as their empty values, the keys of a write's ext that
-// cleared a key that was kept, for a notification that carries the change
-// (§4.12).
-func clearedExt(kept, write extObject) extObject {
-	var cleared extObject
-	for key, value := range write {
-		if _, had := kept[key]; had && emptyJSON(value) {
-			if cleared == nil {
-				cleared = make(extObject)
-			}
-			cleared[key] = value
-		}
-	}
-	return cleared
-}
-
 // extOf returns the ext of an object decoded with decodeObject, or nil.
 func extOf(value any) extObject {
 	ext, _ := value.(extObject)

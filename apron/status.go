@@ -511,18 +511,21 @@ func (s *Server) announceStatusLocked(u *userState) {
 			if s.closed || s.users[u.id] != u {
 				return
 			}
+			before := u.views()
 			if s.publishLocked(u) {
-				s.sendStatusLocked(u, s.sharersLocked(u))
+				s.publishUserLocked(u, nil, before)
 			}
 		})
 		return
 	}
+	before := u.views()
 	s.publishLocked(u)
-	s.sendStatusLocked(u, s.sharersLocked(u))
+	s.publishUserLocked(u, nil, before)
 }
 
 // sendStatusLocked tells the connections of users u's published shown
-// status.
+// status, such as those of a room u just joined, who share it with u for
+// the first time.
 func (s *Server) sendStatusLocked(u *userState, users []*userState) {
 	frame := statusFrame(u)
 	for _, other := range users {

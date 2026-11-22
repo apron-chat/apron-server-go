@@ -575,7 +575,10 @@ func TestProfilesAndUserNotifications(t *testing.T) {
 	if !reflect.DeepEqual(you, any(want)) {
 		t.Fatalf("you = %#v", you)
 	}
-	if notice := b.notification(t, "user"); !reflect.DeepEqual(notice, map[string]any{"new": want}) {
+	// A notification carries user_id and the fields that changed (§3.3.1).
+	changed := maps.Clone(want)
+	delete(changed, "status")
+	if notice := b.notification(t, "user"); !reflect.DeepEqual(notice, map[string]any{"new": changed}) {
 		t.Fatalf("user notification: %#v", notice)
 	}
 	// Avatars and ext travel in profiles, not in every from.
@@ -615,19 +618,18 @@ func TestProfilesAndUserNotifications(t *testing.T) {
 	if !reflect.DeepEqual(you, any(merged)) {
 		t.Fatalf("merge result: %#v", you)
 	}
-	if notice := b.notification(t, "user"); !reflect.DeepEqual(notice, map[string]any{"new": merged}) {
+	if notice := b.notification(t, "user"); !reflect.DeepEqual(notice, map[string]any{"new": map[string]any{"user_id": "guest_1", "ext": map[string]any{"example.net": nil}}}) {
 		t.Fatalf("merge notification: %#v", notice)
 	}
 	// An empty value removes a field or an ext key. The result is complete,
 	// and the notification, which clients merge, carries what it removed as
-	// those empty values.
+	// empty values, each of the kind of the value it clears (§4.12).
 	you = a.result(t, "me", "clear", map[string]any{"ext": map[string]any{"example.org": "", "example.net": []any{}, "absent.example": map[string]any{}}, "avatar": ""})["you"]
 	cleared := map[string]any{"user_id": "guest_1", "name": "Ada", "avatar": "", "status": "online"}
 	if !reflect.DeepEqual(you, any(cleared)) {
 		t.Fatalf("removal result: %#v", you)
 	}
-	announced := maps.Clone(cleared)
-	announced["ext"] = map[string]any{"example.org": "", "example.net": []any{}}
+	announced := map[string]any{"user_id": "guest_1", "avatar": "", "ext": map[string]any{"example.org": map[string]any{}, "example.net": ""}}
 	if notice := b.notification(t, "user"); !reflect.DeepEqual(notice, map[string]any{"new": announced}) {
 		t.Fatalf("removal notification: %#v", notice)
 	}

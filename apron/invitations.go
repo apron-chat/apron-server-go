@@ -321,8 +321,8 @@ func (s *Server) RevokeEnrollment(ctx context.Context, userID string) error {
 func (s *Server) revokeEnrollmentLocked(u *userState) {
 	u.enrolled.admitted = false
 	s.touchUser(u.id)
-	if s.setGrantLocked(u, invitationGrant, nil) && s.grantRolesLocked(u) {
-		s.notifyProfileLocked(u, nil, nil)
+	if before := u.views(); s.setGrantLocked(u, invitationGrant, nil) && s.grantRolesLocked(u) {
+		s.notifyProfileLocked(u, nil, before)
 	}
 	if s.allowlist != nil && !s.admittedLocked(u) {
 		s.signOutLocked(u)

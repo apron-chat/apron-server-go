@@ -621,10 +621,11 @@ func (s *Server) writeUpload(w http.ResponseWriter, r *http.Request, e *embedSta
 	}
 	if u := e.avatarFor; u != nil {
 		if s.users[u.id] == u {
+			before := u.views()
 			s.setAvatarEmbedLocked(u, e)
 			u.avatar = e.fileURL()
 			s.touchUser(u.id)
-			s.notifyProfileLocked(u, nil, nil)
+			s.notifyProfileLocked(u, nil, before)
 		} else {
 			s.removeEmbedLocked(e.id)
 		}

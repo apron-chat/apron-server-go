@@ -422,7 +422,7 @@ func TestMessageSnapshotsReplaceEditableState(t *testing.T) {
 	observer := dialTestClient(t, httpServer)
 	expectMembership(t, owner, "general", observer.userID, true)
 	owner.result(t, "me", "name", map[string]any{"name": "Alice"})
-	if renamed := observer.notification(t, "user"); !reflect.DeepEqual(renamed, map[string]any{"new": map[string]any{"user_id": "guest_1", "name": "Alice", "status": "online"}}) {
+	if renamed := observer.notification(t, "user"); !reflect.DeepEqual(renamed, map[string]any{"new": map[string]any{"user_id": "guest_1", "name": "Alice"}}) {
 		t.Fatalf("rename notification: %#v", renamed)
 	}
 	ext := map[string]any{"irc": map[string]any{"nick": "ada_"}}
