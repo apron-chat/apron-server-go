@@ -289,6 +289,17 @@ func (s *Server) hello(c *Conn) ServerInfo {
 	if _, ok := s.Backend.(Editor); ok {
 		add("edit")
 	}
+	if _, ok := s.Backend.(Rooms); ok {
+		add("rooms")
+	}
+	if _, ok := s.Backend.(Historian); ok {
+		add("history")
+	}
+	if _, ok := s.Backend.(Statuser); ok {
+		add("status")
+	} else {
+		info.Status = nil // Only servers with capability status send it (§4.5.1).
+	}
 	s.mu.Lock()
 	for _, m := range s.methods {
 		add(m.capability)
@@ -485,6 +496,9 @@ func (s *Server) handler(name string) (HandlerFunc, bool) {
 					return nil, InvalidParams("Invalid profile")
 				}
 				params.Raw = raw
+				if params.Status != nil && *params.Status != StatusOnline && *params.Status != "" && !slices.Contains(c.info.Status, *params.Status) {
+					return nil, InvalidParams("This server does not offer status " + strconv.Quote(*params.Status))
+				}
 				you, err := p.Me(ctx, c, params)
 				if err != nil {
 					return nil, err
@@ -508,6 +522,18 @@ func (s *Server) handler(name string) (HandlerFunc, bool) {
 				}
 				return cmd.Command(ctx, c, p)
 			}, false
+		}
+	case "room_list", "room_join", "room_leave", "room_set":
+		if rooms, ok := s.Backend.(Rooms); ok {
+			return s.roomHandler(rooms, name), name == "room_list"
+		}
+	case "history":
+		if h, ok := s.Backend.(Historian); ok {
+			return s.historyHandler(h), true
+		}
+	case "status":
+		if st, ok := s.Backend.(Statuser); ok {
+			return s.statusHandler(st), false
 		}
 	}
 	s.mu.Lock()

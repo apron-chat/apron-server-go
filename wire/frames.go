@@ -138,8 +138,11 @@ type MessageResult struct {
 // MeParams are the params of me (§3.3.2): the profile fields to change. A
 // nil field is left as it is; an empty one clears it.
 type MeParams struct {
-	Name   *string        `json:"name,omitempty"`
-	Avatar *string        `json:"avatar,omitempty"`
+	Name   *string `json:"name,omitempty"`
+	Avatar *string `json:"avatar,omitempty"`
+	// Status is the chosen status, with capability status (§4.5.1). Server
+	// accepts only online, "", and the values of ServerInfo.Status.
+	Status *string        `json:"status,omitempty"`
 	Raw    jsontext.Value `json:"-"`
 }
 
