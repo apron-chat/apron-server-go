@@ -125,6 +125,15 @@ type client struct {
 
 // Server is an Apron server, which Open starts. It serves the protocol
 // through Handler, and is safe for concurrent use.
+//
+// Its state is guarded by mu. Cohesive parts of it live in modules under
+// apron/internal, which know nothing of Server: the log and its paging
+// (roomlog), the store writer and its fences (durable), sessions
+// (sessions), out-of-band sign-in proposals (proposals), and the
+// extensions' values (kv), whose methods are called holding mu; and push
+// delivery (webpush), live text (livetext), and upload files (uploads),
+// which own their own locks or atomics. Server keeps what ties them
+// together: users, rooms, messages, embeds, status, and delivery.
 type Server struct {
 	config Config
 

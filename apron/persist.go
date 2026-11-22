@@ -23,10 +23,13 @@ import (
 )
 
 // Persistence writes the server's state through to a store.Store. Every
-// change made under s.mu marks what it changed (touch*); when the lock is
-// released, unlock serializes the marked state into one batch, and a single
-// writer applies batches to the store in order, off the lock. At start, New
-// rebuilds the state from the store.
+// change made under s.mu marks what it changed: the server's own state in
+// its dirty set (touch*), and the modules that keep their own, the log
+// (roomlog), the extensions' values (kv), and the sessions (sessions), in
+// theirs. When the lock is released, unlock renders the marked state into
+// one batch, and the store writer (durable) applies batches to the store
+// in order, off the lock. At start, Open rebuilds the state from the
+// store.
 //
 // Entry kinds and IDs:
 //
@@ -41,12 +44,12 @@ import (
 //	room     room_id
 //	message  message_id
 //	user     user_id      guests too, retired at the next start
-//	session  hex SHA-256 of the bearer token
+//	session  hex SHA-256 of the bearer token (sessions)
 //	device   hex SHA-256 of the /invite-device token
 //	embed    embed_id
 //	push     user_id, a space, and url (url alone before registrations
 //	         belonged to their user)
-//	ext/<n>  a key        a value Extension <n> keeps (Host.Store)
+//	ext/<n>  a key        a value Extension <n> keeps (Host.Store, kv)
 const (
 	entryMeta    = "meta"
 	entryUsedID  = "used_id"
