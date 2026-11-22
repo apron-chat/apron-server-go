@@ -6,7 +6,7 @@ import (
 )
 
 // parseMe reads me's params (§3.3.2).
-func parseMe(r *Request) (p MeParams, err *Error) {
+func parseMe(r *Request) (p MeParams, err error) {
 	for _, field := range []struct {
 		name string
 		to   **string
@@ -38,7 +38,7 @@ type Reactor interface {
 	React(ctx context.Context, c *Conn, p ReactParams) error
 }
 
-func parseReact(r *Request) (p ReactParams, err *Error) {
+func parseReact(r *Request) (p ReactParams, err error) {
 	var present bool
 	if p.MessageID, present, err = r.String("message_id"); err == nil && !present {
 		err = Missing("message_id")
@@ -91,7 +91,7 @@ type Activity interface {
 	Activity(ctx context.Context, c *Conn, p ActivityParams)
 }
 
-func parseActivity(r *Request) (p ActivityParams, err *Error) {
+func parseActivity(r *Request) (p ActivityParams, err error) {
 	if p.RoomID, _, err = r.IDParam("room_id"); err != nil {
 		return p, err
 	}

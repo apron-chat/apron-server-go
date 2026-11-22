@@ -108,7 +108,7 @@ type Rooms interface {
 }
 
 // parseRoomList reads room_list's params.
-func parseRoomList(r *Request) (p RoomListParams, err *Error) {
+func parseRoomList(r *Request) (p RoomListParams, err error) {
 	var present bool
 	if p.Filter, present, err = r.String("filter"); err != nil {
 		return p, err
@@ -140,7 +140,7 @@ func parseRoomList(r *Request) (p RoomListParams, err *Error) {
 }
 
 // parseMembership reads the params of room_join and room_leave (§4.2.2).
-func parseMembership(r *Request) (roomID, userID string, err *Error) {
+func parseMembership(r *Request) (roomID, userID string, err error) {
 	roomID, present, err := r.IDParam("room_id")
 	if err == nil && !present {
 		err = Missing("room_id")
@@ -153,7 +153,7 @@ func parseMembership(r *Request) (roomID, userID string, err *Error) {
 }
 
 // parseRoomSet reads room_set's params.
-func parseRoomSet(r *Request) (p RoomSetParams, err *Error) {
+func parseRoomSet(r *Request) (p RoomSetParams, err error) {
 	if p.RoomID, _, err = r.IDParam("room_id"); err != nil {
 		return p, err
 	}

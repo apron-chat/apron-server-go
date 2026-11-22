@@ -53,6 +53,19 @@ func RetryAfter(message string, seconds int) *Error {
 // TooLarge is a CodeTooLarge error.
 func TooLarge(message string) *Error { return &Error{Code: CodeTooLarge, Message: message} }
 
+// CodeOf returns the error code a client is told for err (§1.1): the Code
+// of the *Error it is or wraps, CodeInternalError for any other error, as
+// a handler's error is answered, and 0 for nil.
+func CodeOf(err error) int {
+	if err == nil {
+		return 0
+	}
+	if e, ok := asError(err); ok {
+		return e.Code
+	}
+	return CodeInternalError
+}
+
 // internalError is what a client is told about an error that is not an
 // *Error: nothing, as its text may be about the server's internals.
 func internalError() *Error {

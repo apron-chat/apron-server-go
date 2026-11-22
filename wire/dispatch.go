@@ -366,7 +366,7 @@ func (s *Server) builtins() map[string]Method {
 // parseMessage reads the params of a message or command (§3.5): what each
 // field is, as the protocol defines it. Limits, such as on the count of
 // mentions, are the backend's.
-func parseMessage(r *Request) (p MessageParams, err *Error) {
+func parseMessage(r *Request) (p MessageParams, err error) {
 	if p.RoomID, _, err = r.IDParam("room_id"); err != nil {
 		return p, err
 	}
@@ -404,7 +404,7 @@ func parseMessage(r *Request) (p MessageParams, err *Error) {
 }
 
 // parseBody reads a message body's fields (§3.5).
-func parseBody(fields Fields) (*Body, *Error) {
+func parseBody(fields Fields) (*Body, error) {
 	body := &Body{}
 	if raw, ok := fields["text"]; ok && (isNull(raw) || json.Unmarshal(raw, &body.Text) != nil) {
 		return nil, InvalidParams("body.text must be a string")

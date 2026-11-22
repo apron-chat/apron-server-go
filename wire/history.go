@@ -109,7 +109,7 @@ func Page(log []Record, p HistoryParams, limit int, lower, latest int64) History
 }
 
 // parseHistory reads history's params.
-func parseHistory(r *Request) (p HistoryParams, err *Error) {
+func parseHistory(r *Request) (p HistoryParams, err error) {
 	if p.RoomID, _, err = r.IDParam("room_id"); err != nil {
 		return p, err
 	}

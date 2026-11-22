@@ -3,6 +3,7 @@ package apron
 import (
 	"encoding/json/jsontext"
 	"encoding/json/v2"
+	"errors"
 	"fmt"
 
 	"github.com/apron-chat/apron-server-go/wire"
@@ -76,12 +77,24 @@ func invalidParams(format string, args ...any) *Error {
 	return &Error{Code: CodeInvalidParams, Message: fmt.Sprintf(format, args...)}
 }
 
+// paramError is the error of one of wire's param accessors, which is an
+// *Error whenever it is not nil, as an *Error: nil stays a nil *Error.
+func paramError(err error) *Error {
+	if err == nil {
+		return nil
+	}
+	if e, ok := errors.AsType[*Error](err); ok {
+		return e
+	}
+	return internalError()
+}
+
 func parseString(params wire.Fields, name string, required bool) (string, *Error) {
 	value, present, err := params.String(name)
 	if err == nil && required && !present {
 		err = wire.Missing(name)
 	}
-	return value, err
+	return value, paramError(err)
 }
 
 // validID reports whether id can be a room_id or user_id (§2.4): one that is
@@ -93,14 +106,15 @@ func parseBool(params wire.Fields, name string, required bool) (bool, *Error) {
 	if err == nil && required && !present {
 		err = wire.Missing(name)
 	}
-	return value, err
+	return value, paramError(err)
 }
+
 func parseObject(params wire.Fields, name string, required bool) (map[string]any, *Error) {
 	if _, present, err := params.Object(name); err != nil || !present {
 		if err == nil && required {
 			err = wire.Missing(name)
 		}
-		return nil, err
+		return nil, paramError(err)
 	}
 	var value map[string]any
 	_ = json.Unmarshal(params[name], &value)
@@ -114,8 +128,9 @@ type extObject = wire.Ext
 
 // parseExt reads an optional ext object of a write (§4.12). present reports
 // whether the request carried it.
-func parseExt(params wire.Fields, name string) (ext extObject, present bool, err *Error) {
-	return params.Ext(name)
+func parseExt(params wire.Fields, name string) (extObject, bool, *Error) {
+	ext, present, err := params.Ext(name)
+	return ext, present, paramError(err)
 }
 
 // emptyJSON reports whether a compact JSON value is an empty value ("", [],

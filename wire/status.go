@@ -62,7 +62,7 @@ type Statuser interface {
 // parseStatus reads a status request's params (§4.5.3): idle is false or
 // a non-negative number of seconds, mute true, false, or a positive number
 // of seconds, and room_id scopes only the mute, so it is sent with one.
-func parseStatus(r *Request) (p StatusParams, err *Error) {
+func parseStatus(r *Request) (p StatusParams, err error) {
 	var scoped bool
 	if p.RoomID, scoped, err = r.IDParam("room_id"); err != nil {
 		return p, err
