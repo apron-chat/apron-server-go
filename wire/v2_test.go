@@ -3,8 +3,8 @@ package wire_test
 import (
 	"context"
 	"encoding/json/jsontext"
-	"encoding/json/v2"
 	"errors"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -31,20 +31,22 @@ func TestReplyInHandler(t *testing.T) {
 		}
 		return nil
 	}})
-	c, _ := serve(t, s)
-	c.signIn("a")
-	c.send(`{"method":"snapshot","id":"s"}`)
-	if f := c.read(); f["id"] != "s" || f.result()["state"] != float64(1) {
-		t.Fatalf("got %v", f)
+	c := connect(t, s)
+	signIn(t, c)
+	send(t, c, `{"method":"snapshot","id":"s"}`)
+	if f := next(t, c); f.ID != "s" || fields(f)["state"] != float64(1) {
+		t.Fatalf("got %s", f.Raw)
 	}
-	if f := c.read(); f["method"] != "cursor" {
-		t.Fatalf("got %v, want the frame after the reply", f)
+	if f := next(t, c); f.Method != "cursor" {
+		t.Fatalf("got %s, want the frame after the reply", f.Raw)
 	}
-	c.sync()
+	if err := c.Sync(wait(t)); err != nil || len(c.Pending()) != 0 {
+		t.Fatalf("sync: %v, %d frames more", err, len(c.Pending()))
+	}
 	// A duplicate gets the reply that was sent.
-	c.send(`{"method":"snapshot","id":"s"}`)
-	if f := c.read(); f.result()["state"] != float64(1) {
-		t.Fatalf("duplicate: %v", f)
+	send(t, c, `{"method":"snapshot","id":"s"}`)
+	if f := next(t, c); fields(f)["state"] != float64(1) {
+		t.Fatalf("duplicate: %s", f.Raw)
 	}
 }
 
@@ -57,23 +59,20 @@ func TestNotificationMethod(t *testing.T) {
 		v, _ := r.Param("typing")
 		got <- string(v)
 	}})
-	c, hello := serve(t, s)
-	if !strings.Contains(string(mustJSON(hello)), `"activity"`) {
-		t.Fatalf("capabilities: %v", hello)
+	c := connect(t, s)
+	if capabilities := c.Hello().Capabilities; !slices.Contains(capabilities, "activity") {
+		t.Fatalf("capabilities: %v", capabilities)
 	}
-	c.send(`{"method":"activity","params":{"typing":1}}`) // Before sign-in: ignored.
-	c.signIn("a")
-	c.send(`{"method":"activity","params":{"typing":2}}`)
-	c.send(`{"method":"activity","id":"x","params":{"typing":3}}`)
-	c.sync()
+	send(t, c, `{"method":"activity","params":{"typing":1}}`) // Before sign-in: ignored.
+	signIn(t, c)
+	send(t, c, `{"method":"activity","params":{"typing":2}}`)
+	send(t, c, `{"method":"activity","id":"x","params":{"typing":3}}`)
+	if err := c.Sync(wait(t)); err != nil {
+		t.Fatal(err)
+	}
 	if a, b := <-got, <-got; a != "2" || b != "3" || len(got) != 0 {
 		t.Fatalf("handled %s %s, %d more", a, b, len(got))
 	}
-}
-
-func mustJSON(v any) []byte {
-	b, _ := json.Marshal(v)
-	return b
 }
 
 type refreshing struct {
@@ -92,13 +91,13 @@ func (b *refreshing) Me(_ context.Context, c *wire.Conn, _ wire.MeParams, reply 
 
 func TestRefreshDuplicate(t *testing.T) {
 	b := &refreshing{}
-	c, _ := serve(t, wired(&wire.Server{Backend: b, RefreshDuplicate: b.Refresh}))
-	c.signIn("a")
-	c.send(`{"method":"me","id":"m","params":{"name":"x"}}`)
-	c.read()
+	c := connect(t, wired(&wire.Server{Backend: b, RefreshDuplicate: b.Refresh}))
+	signIn(t, c)
+	send(t, c, `{"method":"me","id":"m","params":{"name":"x"}}`)
+	next(t, c)
 	b.version = 7
-	c.send(`{"method":"me","id":"m","params":{"name":"x"}}`)
-	if f := c.read(); f.result()["version"] != float64(7) || f.result()["method"] != "me" {
+	send(t, c, `{"method":"me","id":"m","params":{"name":"x"}}`)
+	if f := fields(next(t, c)); f["version"] != float64(7) || f["method"] != "me" {
 		t.Fatalf("duplicate: %v", f)
 	}
 }
@@ -114,37 +113,34 @@ func (*anyScheme) CheckScheme(_ context.Context, _ *wire.Conn, p wire.AuthParams
 
 func TestCheckScheme(t *testing.T) {
 	b := &anyScheme{}
-	c, _ := serve(t, wired(&wire.Server{Backend: b, CheckScheme: b.CheckScheme}))
-	c.send(`{"method":"auth","id":"1","params":{"scheme":"guest"}}`)
-	if f := c.read(); f.errorCode() != wire.CodeDenied {
-		t.Fatalf("got %v", f)
+	c := connect(t, wired(&wire.Server{Backend: b, CheckScheme: b.CheckScheme}))
+	if _, err := c.Auth(wait(t), map[string]any{"scheme": "guest"}); wire.CodeOf(err) != wire.CodeDenied {
+		t.Fatalf("got %v", err)
 	}
-	c.send(`{"method":"auth","id":"2","params":{"scheme":"secret"}}`)
-	if f := c.read(); f.result()["you"] == nil {
-		t.Fatalf("got %v", f)
+	if result, err := c.Auth(wait(t), map[string]any{"scheme": "secret"}); err != nil || result.You == nil {
+		t.Fatalf("got %+v %v", result, err)
 	}
 }
 
 func TestAnnounce(t *testing.T) {
 	s := wired(&wire.Server{Backend: &backend{}})
 	s.Handle("ext:thing", wire.Handler{Capability: "ext:thing", Serve: func(context.Context, *wire.Conn, *wire.Request) error { return nil }})
-	c, _ := serve(t, s)
-	c.signIn("a")
+	c := connect(t, s)
+	signIn(t, c)
 	conn := onlyConn(t, s)
 	conn.Announce(wire.ServerInfo{Auth: []string{"guest"}, Title: "Revealed"})
-	f := c.read()
-	params, _ := f["params"].(map[string]any)
-	if f["method"] != "server" || params["title"] != "Revealed" || params["apron"] != float64(wire.Version) ||
-		!strings.Contains(string(mustJSON(params["capabilities"])), "ext:thing") {
-		t.Fatalf("got %v", f)
+	f := next(t, c)
+	var info wire.ServerInfo
+	if err := f.Decode(&info); err != nil || f.Method != "server" || info.Title != "Revealed" || info.Apron != wire.Version ||
+		!slices.Contains(info.Capabilities, "ext:thing") {
+		t.Fatalf("got %s", f.Raw)
 	}
 	if conn.Info().Title != "Revealed" {
 		t.Fatalf("Info: %+v", conn.Info())
 	}
 	conn.SignOut()
-	c.send(`{"method":"message","id":"m","params":{"body":{"text":"x"}}}`)
-	if f := c.read(); f.errorCode() != wire.CodeDenied {
-		t.Fatalf("after SignOut: %v", f)
+	if _, err := c.Call(wait(t), "message", params(`{"body":{"text":"x"}}`)); wire.CodeOf(err) != wire.CodeDenied {
+		t.Fatalf("after SignOut: %v", err)
 	}
 }
 
@@ -231,12 +227,6 @@ func TestLocalFellBehind(t *testing.T) {
 	if !errors.Is(l.Err(), wire.ErrFellBehind) {
 		t.Fatalf("Err: %v", l.Err())
 	}
-}
-
-func (b *backend) disconnectedConns() []*wire.Conn {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return append([]*wire.Conn(nil), b.disconnected...)
 }
 
 // A Local connection opens as a network one does: OnConnect, signed in

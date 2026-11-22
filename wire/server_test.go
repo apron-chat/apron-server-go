@@ -3,12 +3,13 @@ package wire_test
 import (
 	"bufio"
 	"context"
-	"encoding/json"
+	"encoding/json/jsontext"
 	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -18,6 +19,7 @@ import (
 	"github.com/coder/websocket"
 
 	"github.com/apron-chat/apron-server-go/wire"
+	"github.com/apron-chat/apron-server-go/wire/wiretest"
 )
 
 // backend is a test Backend: guests sign in as guest_<n>, with a notice
@@ -72,6 +74,12 @@ func (b *backend) Disconnected(c *wire.Conn) {
 	b.mu.Unlock()
 }
 
+func (b *backend) disconnectedConns() []*wire.Conn {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return append([]*wire.Conn(nil), b.disconnected...)
+}
+
 // wired sets the handler fields of s that its Backend implements, and the
 // hooks it has methods for, as each test backend is one value for all of
 // them.
@@ -98,109 +106,92 @@ func wired(s *wire.Server) *wire.Server {
 	return s
 }
 
-// client is the other end of a LineTransport over net.Pipe.
-type client struct {
-	t     *testing.T
-	conn  net.Conn
-	lines *bufio.Scanner
-	done  chan struct{}
-}
-
-type frame map[string]any
-
-func (f frame) errorCode() int {
-	e, _ := f["error"].(map[string]any)
-	code, _ := e["code"].(float64)
-	return int(code)
-}
-
-func (f frame) result() map[string]any {
-	r, _ := f["result"].(map[string]any)
-	return r
-}
-
-// serve serves one connection of s over net.Pipe, and returns the client
-// end, having read the server frame.
-func serve(t *testing.T, s *wire.Server) (*client, frame) {
+// connect connects a client to s in process, closed when the test ends.
+func connect(t *testing.T, s *wire.Server) *wiretest.Client {
 	t.Helper()
-	server, conn := net.Pipe()
-	c := &client{t: t, conn: conn, lines: bufio.NewScanner(conn), done: make(chan struct{})}
-	c.lines.Buffer(nil, 1<<20)
-	go func() {
-		defer close(c.done)
-		s.ServeTransport(context.Background(), wire.LineTransport(server, 1<<16), nil, nil)
-	}()
-	t.Cleanup(func() {
-		_ = conn.Close()
-		select {
-		case <-c.done:
-		case <-time.After(5 * time.Second):
-			t.Error("ServeTransport did not return")
-		}
-	})
-	hello := c.read()
-	if hello["method"] != "server" {
-		t.Fatalf("first frame = %v, want the server frame", hello)
-	}
-	return c, hello
+	c := wiretest.Connect(s)
+	t.Cleanup(func() { _ = c.Close() })
+	return c
 }
 
-func (c *client) send(raw string) {
-	c.t.Helper()
-	_ = c.conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
-	if _, err := io.WriteString(c.conn, raw+"\n"); err != nil {
-		c.t.Fatalf("send %s: %v", raw, err)
+// wait is a context for a test's waits on the server.
+func wait(t *testing.T) context.Context {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	t.Cleanup(cancel)
+	return ctx
+}
+
+// send sends a frame as it is.
+func send(t *testing.T, c *wiretest.Client, raw string) {
+	t.Helper()
+	if err := c.Send(wait(t), []byte(raw)); err != nil {
+		t.Fatalf("send %s: %v", raw, err)
 	}
 }
 
-func (c *client) read() frame {
-	c.t.Helper()
-	_ = c.conn.SetReadDeadline(time.Now().Add(5 * time.Second))
-	if !c.lines.Scan() {
-		c.t.Fatalf("read: %v", c.lines.Err())
-	}
-	var f frame
-	if err := json.Unmarshal(c.lines.Bytes(), &f); err != nil {
-		c.t.Fatalf("read %q: %v", c.lines.Bytes(), err)
+// next takes the next frame.
+func next(t *testing.T, c *wiretest.Client) wiretest.Frame {
+	t.Helper()
+	f, err := c.Next(wait(t))
+	if err != nil {
+		t.Fatalf("next frame: %v", err)
 	}
 	return f
 }
 
-// readEOF expects the server to close the connection.
-func (c *client) readEOF() {
-	c.t.Helper()
-	_ = c.conn.SetReadDeadline(time.Now().Add(5 * time.Second))
-	if c.lines.Scan() {
-		c.t.Fatalf("read %s, want the connection closed", c.lines.Bytes())
+// code is the code of an error reply, or of an error about the connection,
+// or 0.
+func code(f wiretest.Frame) int {
+	if f.Error == nil {
+		return 0
 	}
-	var timeout net.Error
-	if errors.As(c.lines.Err(), &timeout) && timeout.Timeout() {
-		c.t.Fatal("the connection stayed open")
+	return f.Error.Code
+}
+
+// fields are a reply's result, or a notification's params, decoded.
+func fields(f wiretest.Frame) map[string]any {
+	var m map[string]any
+	_ = f.Decode(&m)
+	return m
+}
+
+// params are params as they are sent, raw.
+func params(raw string) jsontext.Value { return jsontext.Value(raw) }
+
+// expectClosed expects the server to close the connection, after the
+// frames not taken yet.
+func expectClosed(t *testing.T, c *wiretest.Client) {
+	t.Helper()
+	f, err := c.Next(wait(t))
+	switch {
+	case err == nil:
+		t.Fatalf("got %s, want the connection closed", f.Raw)
+	case !errors.Is(err, wire.ErrClosed):
+		t.Fatalf("the connection stayed open: %v", err)
 	}
 }
 
-// sync sends a ping with an id, which is processed in order with the frames
-// before it (unlike the exact liveness ping), and expects its pong next.
-func (c *client) sync() {
-	c.t.Helper()
-	c.send(`{"method":"ping","id":"sync"}`)
-	if f := c.read(); f["method"] != "pong" || f["id"] != nil {
-		c.t.Fatalf("got %v, want the pong", f)
+// quiet expects no frame to arrive for a moment.
+func quiet(t *testing.T, c *wiretest.Client) {
+	t.Helper()
+	time.Sleep(50 * time.Millisecond)
+	if pending := c.Pending(); len(pending) != 0 {
+		t.Fatalf("got %s, want nothing yet", pending[0].Raw)
 	}
 }
 
-func (c *client) signIn(id string) string {
-	c.t.Helper()
-	c.send(`{"method":"auth","id":"` + id + `","params":{"scheme":"guest","name":"Ada"}}`)
-	r := c.read()
-	you, _ := r.result()["you"].(map[string]any)
-	if r["id"] != id || you == nil {
-		c.t.Fatalf("auth reply = %v", r)
+// signIn signs c in as a guest, and takes the welcome notice Auth sends
+// after the result.
+func signIn(t *testing.T, c *wiretest.Client) string {
+	t.Helper()
+	result, err := c.Auth(wait(t), map[string]any{"scheme": "guest", "name": "Ada"})
+	if err != nil || result.You == nil {
+		t.Fatalf("auth: %+v %v", result, err)
 	}
-	if n := c.read(); n["method"] != "message" {
-		c.t.Fatalf("after the auth result got %v, want the welcome notice", n)
+	if f := next(t, c); f.Method != "message" {
+		t.Fatalf("after the auth result got %s, want the welcome notice", f.Raw)
 	}
-	return you["user_id"].(string)
+	return result.You.UserID
 }
 
 func onlyConn(t *testing.T, s *wire.Server) *wire.Conn {
@@ -214,67 +205,66 @@ func onlyConn(t *testing.T, s *wire.Server) *wire.Conn {
 
 func TestServerFrame(t *testing.T) {
 	s := wired(&wire.Server{Backend: &backend{}, PingInterval: 20 * time.Second})
-	_, hello := serve(t, s)
-	params, _ := hello["params"].(map[string]any)
-	if params["apron"] != float64(wire.Version) || params["ping"] != float64(20) || params["agent"] != "wire-test/1" {
-		t.Fatalf("server frame = %v", hello)
+	if hello := connect(t, s).Hello(); hello.Apron != wire.Version || hello.Ping != 20 || hello.Agent != "wire-test/1" {
+		t.Fatalf("server frame = %+v", hello)
 	}
 }
 
 func TestFramingErrors(t *testing.T) {
-	c, _ := serve(t, wired(&wire.Server{Backend: &backend{}}))
+	c := connect(t, wired(&wire.Server{Backend: &backend{}}))
 	for _, tc := range []struct {
 		send string
 		code int
-		id   any
+		id   string
 	}{
-		{`not json`, wire.CodeParseError, nil},
-		{`[1,2]`, wire.CodeInvalidRequest, nil},
+		{`not json`, wire.CodeParseError, ""},
+		{`[1,2]`, wire.CodeInvalidRequest, ""},
 		{`{"id":"x"}`, wire.CodeInvalidRequest, "x"},
-		{`{"method":"message","id":5}`, wire.CodeInvalidRequest, nil},
-		{`{"method":"message","id":null}`, wire.CodeInvalidRequest, nil},
+		{`{"method":"message","id":5}`, wire.CodeInvalidRequest, ""},
+		{`{"method":"message","id":null}`, wire.CodeInvalidRequest, ""},
 		{`{"method":"message","id":"p","params":[1]}`, wire.CodeInvalidParams, "p"},
 		{`{"method":"message","id":"q","params":null}`, wire.CodeInvalidParams, "q"},
 	} {
-		c.send(tc.send)
-		f := c.read()
-		if f.errorCode() != tc.code || f["id"] != tc.id {
-			t.Errorf("%s: got %v, want code %d and id %v", tc.send, f, tc.code, tc.id)
+		send(t, c, tc.send)
+		if f := next(t, c); code(f) != tc.code || f.ID != tc.id || (tc.id == "" && strings.Contains(string(f.Raw), `"id"`)) {
+			t.Errorf("%s: got %s, want code %d and id %q", tc.send, f.Raw, tc.code, tc.id)
 		}
 	}
 	// Not answered: a notification with bad params, a request method without
 	// an id, an unknown notification, and activity with an id.
-	c.send(`{"method":"message","params":[1]}`)
-	c.send(`{"method":"message","params":{"body":{"text":"x"}}}`)
-	c.send(`{"method":"nope"}`)
-	c.send(`{"method":"activity","id":"a","params":{}}`)
-	c.sync()
+	send(t, c, `{"method":"message","params":[1]}`)
+	send(t, c, `{"method":"message","params":{"body":{"text":"x"}}}`)
+	send(t, c, `{"method":"nope"}`)
+	send(t, c, `{"method":"activity","id":"a","params":{}}`)
+	if err := c.Sync(wait(t)); err != nil {
+		t.Fatal(err)
+	}
+	if pending := c.Pending(); len(pending) != 0 {
+		t.Fatalf("got %s, want nothing", pending[0].Raw)
+	}
 	// The exact liveness ping is answered too.
-	c.send(`{"method":"ping"}`)
-	if f := c.read(); f["method"] != "pong" {
-		t.Fatalf("got %v, want pong", f)
+	send(t, c, `{"method":"ping"}`)
+	if f := next(t, c); f.Method != "pong" {
+		t.Fatalf("got %s, want pong", f.Raw)
 	}
 }
 
 func TestDeniedBeforeAuth(t *testing.T) {
 	b := &backend{}
-	c, _ := serve(t, wired(&wire.Server{Backend: b}))
-	c.send(`{"method":"message","id":"m","params":{"body":{"text":"hi"}}}`)
-	if f := c.read(); f.errorCode() != wire.CodeDenied || f["id"] != "m" {
-		t.Fatalf("got %v, want denied", f)
+	c := connect(t, wired(&wire.Server{Backend: b}))
+	message := params(`{"body":{"text":"hi"}}`)
+	if _, err := c.Call(wait(t), "message", message); wire.CodeOf(err) != wire.CodeDenied {
+		t.Fatalf("got %v, want denied", err)
 	}
-	c.send(`{"method":"nope","id":"n"}`)
-	if f := c.read(); f.errorCode() != wire.CodeDenied {
-		t.Fatalf("got %v, want denied before the method is looked up", f)
+	if _, err := c.Call(wait(t), "nope", nil); wire.CodeOf(err) != wire.CodeDenied {
+		t.Fatalf("got %v, want denied before the method is looked up", err)
 	}
 	// A failed sign-in leaves the connection signed out.
-	c.send(`{"method":"auth","id":"a","params":{"scheme":"guest","name":"refuse"}}`)
-	if f := c.read(); f.errorCode() != wire.CodeDenied || f["id"] != "a" {
-		t.Fatalf("got %v, want the auth refused", f)
+	if _, err := c.Auth(wait(t), map[string]any{"scheme": "guest", "name": "refuse"}); wire.CodeOf(err) != wire.CodeDenied {
+		t.Fatalf("got %v, want the auth refused", err)
 	}
-	c.send(`{"method":"message","id":"m2","params":{"body":{"text":"hi"}}}`)
-	if f := c.read(); f.errorCode() != wire.CodeDenied {
-		t.Fatalf("got %v, want denied", f)
+	if _, err := c.Call(wait(t), "message", message); wire.CodeOf(err) != wire.CodeDenied {
+		t.Fatalf("got %v, want denied", err)
 	}
 	if b.messages.Load() != 0 {
 		t.Fatal("a message reached the backend before sign-in")
@@ -282,18 +272,18 @@ func TestDeniedBeforeAuth(t *testing.T) {
 }
 
 func TestAuthSchemes(t *testing.T) {
-	c, _ := serve(t, wired(&wire.Server{Backend: &backend{}}))
-	c.send(`{"method":"auth","id":"a","params":{}}`)
-	if f := c.read(); f.errorCode() != wire.CodeInvalidParams {
-		t.Fatalf("got %v, want invalid_params for no scheme", f)
-	}
-	c.send(`{"method":"auth","id":"b","params":{"scheme":"token","token":"x"}}`)
-	if f := c.read(); f.errorCode() != wire.CodeUnsupported {
-		t.Fatalf("got %v, want unsupported for a known scheme not offered", f)
-	}
-	c.send(`{"method":"auth","id":"c","params":{"scheme":"magic"}}`)
-	if f := c.read(); f.errorCode() != wire.CodeUnsupported {
-		t.Fatalf("got %v, want unsupported for an unknown scheme", f)
+	c := connect(t, wired(&wire.Server{Backend: &backend{}}))
+	for _, tc := range []struct {
+		params string
+		code   int
+	}{
+		{`{}`, wire.CodeInvalidParams},                           // No scheme.
+		{`{"scheme":"token","token":"x"}`, wire.CodeUnsupported}, // A known scheme not offered.
+		{`{"scheme":"magic"}`, wire.CodeUnsupported},             // An unknown scheme.
+	} {
+		if _, err := c.Auth(wait(t), params(tc.params)); wire.CodeOf(err) != tc.code {
+			t.Errorf("auth %s: %v, want code %d", tc.params, err, tc.code)
+		}
 	}
 }
 
@@ -302,9 +292,9 @@ func TestAuthSchemes(t *testing.T) {
 func TestAuthBarrier(t *testing.T) {
 	b := &backend{authDelay: 50 * time.Millisecond}
 	s := wired(&wire.Server{Backend: b})
-	c, _ := serve(t, s)
-	c.send(`{"method":"auth","id":"a","params":{"scheme":"guest","name":"Ada"}}`)
-	c.send(`{"method":"message","id":"m","params":{"body":{"text":"hi"}}}`)
+	c := connect(t, s)
+	send(t, c, `{"method":"auth","id":"a","params":{"scheme":"guest","name":"Ada"}}`)
+	send(t, c, `{"method":"message","id":"m","params":{"body":{"text":"hi"}}}`)
 	// A frame broadcast while Auth runs is held too.
 	time.Sleep(10 * time.Millisecond)
 	conn := onlyConn(t, s)
@@ -314,17 +304,17 @@ func TestAuthBarrier(t *testing.T) {
 	}
 	conn.Send(frame)
 
-	if f := c.read(); f["id"] != "a" || f.result()["you"] == nil {
-		t.Fatalf("first reply = %v, want the auth result", f)
+	if f := next(t, c); f.ID != "a" || fields(f)["you"] == nil {
+		t.Fatalf("first reply = %s, want the auth result", f.Raw)
 	}
-	if f := c.read(); f["method"] != "message" {
-		t.Fatalf("got %v, want the held welcome notice", f)
+	if f := next(t, c); f.Method != "message" {
+		t.Fatalf("got %s, want the held welcome notice", f.Raw)
 	}
-	if f := c.read(); f["method"] != "status" {
-		t.Fatalf("got %v, want the held status", f)
+	if f := next(t, c); f.Method != "status" {
+		t.Fatalf("got %s, want the held status", f.Raw)
 	}
-	if f := c.read(); f["id"] != "m" || f.result()["message_id"] == nil {
-		t.Fatalf("got %v, want the message result", f)
+	if f := next(t, c); f.ID != "m" || fields(f)["message_id"] == nil {
+		t.Fatalf("got %s, want the message result", f.Raw)
 	}
 	if conn.UserID() != "guest_1" || conn.User().Name != "Ada" {
 		t.Fatalf("conn user = %v", conn.User())
@@ -332,25 +322,18 @@ func TestAuthBarrier(t *testing.T) {
 }
 
 func TestUnsupportedMethod(t *testing.T) {
-	c, _ := serve(t, wired(&wire.Server{Backend: &backend{}}))
-	c.signIn("a")
-	c.send(`{"method":"nope","id":"u"}`)
-	if f := c.read(); f.errorCode() != wire.CodeUnsupported || f["id"] != "u" {
-		t.Fatalf("got %v, want unsupported", f)
-	}
+	c := connect(t, wired(&wire.Server{Backend: &backend{}}))
+	signIn(t, c)
 	// me and command without Profiles or Commands are unsupported too.
-	c.send(`{"method":"me","id":"me","params":{"name":"B"}}`)
-	if f := c.read(); f.errorCode() != wire.CodeUnsupported {
-		t.Fatalf("got %v, want unsupported", f)
-	}
-	c.send(`{"method":"command","id":"c","params":{"body":{"text":"/help"}}}`)
-	if f := c.read(); f.errorCode() != wire.CodeUnsupported {
-		t.Fatalf("got %v, want unsupported", f)
+	for method, p := range map[string]string{"nope": `{}`, "me": `{"name":"B"}`, "command": `{"body":{"text":"/help"}}`} {
+		if _, err := c.Call(wait(t), method, params(p)); wire.CodeOf(err) != wire.CodeUnsupported {
+			t.Errorf("%s: %v, want unsupported", method, err)
+		}
 	}
 	long := strings.Repeat("x", 300)
-	c.send(`{"method":"message","id":"` + long + `","params":{"body":{"text":"hi"}}}`)
-	if f := c.read(); f.errorCode() != wire.CodeTooLarge {
-		t.Fatalf("got %v, want too_large for a long id", f)
+	send(t, c, `{"method":"message","id":"`+long+`","params":{"body":{"text":"hi"}}}`)
+	if f := next(t, c); code(f) != wire.CodeTooLarge {
+		t.Fatalf("got %s, want too_large for a long id", f.Raw)
 	}
 }
 
@@ -363,64 +346,59 @@ func TestHandle(t *testing.T) {
 	s.Handle("fail", wire.Handler{NoDedup: true, Serve: func(context.Context, *wire.Conn, *wire.Request) error {
 		return errors.New("secret detail")
 	}})
-	c, hello := serve(t, s)
-	capabilities, _ := hello["params"].(map[string]any)["capabilities"].([]any)
-	if len(capabilities) != 1 || capabilities[0] != "ext:echo" {
+	c := connect(t, s)
+	if capabilities := c.Hello().Capabilities; !slices.Equal(capabilities, []string{"ext:echo"}) {
 		t.Fatalf("capabilities = %v", capabilities)
 	}
-	c.signIn("a")
-	c.send(`{"method":"echo","id":"e","params":{"b":1,"a":2}}`)
-	if f := c.read(); f.result()["a"] != float64(2) {
-		t.Fatalf("got %v", f)
+	signIn(t, c)
+	if result, err := c.Call(wait(t), "echo", params(`{"b":1,"a":2}`)); err != nil || string(result) != `{"b":1,"a":2}` {
+		t.Fatalf("echo: %s %v", result, err)
 	}
-	c.send(`{"method":"fail","id":"f"}`)
-	f := c.read()
-	if f.errorCode() != wire.CodeInternalError || strings.Contains(fmt.Sprint(f), "secret") {
-		t.Fatalf("got %v, want an internal error that says nothing", f)
+	if _, err := c.Call(wait(t), "fail", nil); wire.CodeOf(err) != wire.CodeInternalError || strings.Contains(err.Error(), "secret") {
+		t.Fatalf("got %v, want an internal error that says nothing", err)
 	}
 }
 
 func TestDedup(t *testing.T) {
 	b := &backend{}
-	c, _ := serve(t, wired(&wire.Server{Backend: b}))
-	c.signIn("a")
-	c.send(`{"method":"message","id":"d","params":{"room_id":"r","body":{"text":"hi"}}}`)
-	first := c.read()
+	c := connect(t, wired(&wire.Server{Backend: b}))
+	signIn(t, c)
+	send(t, c, `{"method":"message","id":"d","params":{"room_id":"r","body":{"text":"hi"}}}`)
+	first := next(t, c)
 	// The same params in another key order are the same request (§1.2).
-	c.send(`{"id":"d","params":{"body":{"text":"hi"},"room_id":"r"},"method":"message"}`)
-	second := c.read()
-	if first.result()["message_id"] == nil || fmt.Sprint(first) != fmt.Sprint(second) {
-		t.Fatalf("a retry got %v, the original %v", second, first)
+	send(t, c, `{"id":"d","params":{"body":{"text":"hi"},"room_id":"r"},"method":"message"}`)
+	second := next(t, c)
+	if fields(first)["message_id"] == nil || string(first.Raw) != string(second.Raw) {
+		t.Fatalf("a retry got %s, the original %s", second.Raw, first.Raw)
 	}
 	if n := b.messages.Load(); n != 1 {
 		t.Fatalf("the backend saw %d messages, want 1", n)
 	}
-	c.send(`{"method":"message","id":"d","params":{"body":{"text":"other"}}}`)
-	if f := c.read(); f.errorCode() != wire.CodeInvalidParams || f["id"] != "d" {
-		t.Fatalf("got %v, want invalid_params for a reused id", f)
+	send(t, c, `{"method":"message","id":"d","params":{"body":{"text":"other"}}}`)
+	if f := next(t, c); code(f) != wire.CodeInvalidParams || f.ID != "d" {
+		t.Fatalf("got %s, want invalid_params for a reused id", f.Raw)
 	}
 	// A failed request is not kept: a retry runs again.
-	c.send(`{"method":"message","id":"bad","params":{"room_id":"has space","body":{"text":"x"}}}`)
-	if f := c.read(); f.errorCode() != wire.CodeInvalidParams {
-		t.Fatalf("got %v", f)
+	send(t, c, `{"method":"message","id":"bad","params":{"room_id":"has space","body":{"text":"x"}}}`)
+	if f := next(t, c); code(f) != wire.CodeInvalidParams {
+		t.Fatalf("got %s", f.Raw)
 	}
-	c.send(`{"method":"message","id":"bad","params":{"body":{"text":"x"}}}`)
-	if f := c.read(); f.result()["message_id"] == nil {
-		t.Fatalf("got %v, want the retry to run", f)
+	send(t, c, `{"method":"message","id":"bad","params":{"body":{"text":"x"}}}`)
+	if f := next(t, c); fields(f)["message_id"] == nil {
+		t.Fatalf("got %s, want the retry to run", f.Raw)
 	}
 }
 
 func TestDedupPerUser(t *testing.T) {
 	b := &backend{}
 	s := wired(&wire.Server{Backend: b})
-	c1, _ := serve(t, s)
-	c1.signIn("a")
-	c2, _ := serve(t, s)
-	c2.signIn("a")
+	c1, c2 := connect(t, s), connect(t, s)
+	signIn(t, c1)
+	signIn(t, c2)
 	// Different users: the same id is a different request.
-	c1.send(`{"method":"message","id":"x","params":{"body":{"text":"one"}}}`)
-	c2.send(`{"method":"message","id":"x","params":{"body":{"text":"two"}}}`)
-	if c1.read().result()["message_id"] == nil || c2.read().result()["message_id"] == nil {
+	send(t, c1, `{"method":"message","id":"x","params":{"body":{"text":"one"}}}`)
+	send(t, c2, `{"method":"message","id":"x","params":{"body":{"text":"two"}}}`)
+	if fields(next(t, c1))["message_id"] == nil || fields(next(t, c2))["message_id"] == nil {
 		t.Fatal("a request failed")
 	}
 	if n := b.messages.Load(); n != 2 {
@@ -430,11 +408,11 @@ func TestDedupPerUser(t *testing.T) {
 
 func TestDedupOff(t *testing.T) {
 	b := &backend{}
-	c, _ := serve(t, wired(&wire.Server{Backend: b, DedupSize: -1}))
-	c.signIn("a")
+	c := connect(t, wired(&wire.Server{Backend: b, DedupSize: -1}))
+	signIn(t, c)
 	for range 2 {
-		c.send(`{"method":"message","id":"d","params":{"body":{"text":"hi"}}}`)
-		c.read()
+		send(t, c, `{"method":"message","id":"d","params":{"body":{"text":"hi"}}}`)
+		next(t, c)
 	}
 	if n := b.messages.Load(); n != 2 {
 		t.Fatalf("the backend saw %d messages, want 2", n)
@@ -443,16 +421,15 @@ func TestDedupOff(t *testing.T) {
 
 func TestMessageChecks(t *testing.T) {
 	b := &backend{}
-	c, _ := serve(t, wired(&wire.Server{Backend: b}))
-	c.signIn("a")
-	c.send(`{"method":"message","id":"e","params":{"body":{"text":""}}}`)
-	if f := c.read(); f.errorCode() != wire.CodeInvalidParams {
-		t.Fatalf("an empty message got %v, want invalid_params", f)
+	c := connect(t, wired(&wire.Server{Backend: b}))
+	signIn(t, c)
+	if result, err := c.Call(wait(t), "message", params(`{"body":{"text":""}}`)); wire.CodeOf(err) != wire.CodeInvalidParams {
+		t.Fatalf("an empty message got %s %v, want invalid_params", result, err)
 	}
 	if b.messages.Load() != 0 {
 		t.Fatal("an empty message was saved")
 	}
-	for i, tc := range []struct {
+	for _, tc := range []struct {
 		params string
 		code   int
 	}{
@@ -464,9 +441,8 @@ func TestMessageChecks(t *testing.T) {
 		{`{"reply_to":{},"body":{"text":"x"}}`, wire.CodeInvalidParams},
 		{`{"body":"x"}`, wire.CodeInvalidParams},
 	} {
-		c.send(`{"method":"message","id":"` + fmt.Sprint(i) + `","params":` + tc.params + `}`)
-		if f := c.read(); f.errorCode() != tc.code {
-			t.Errorf("%s: got %v, want code %d", tc.params, f, tc.code)
+		if _, err := c.Call(wait(t), "message", params(tc.params)); wire.CodeOf(err) != tc.code {
+			t.Errorf("%s: got %v, want code %d", tc.params, err, tc.code)
 		}
 	}
 	if b.messages.Load() != 0 {
@@ -486,14 +462,13 @@ func (e *editor) Edit(_ context.Context, _ *wire.Conn, _ wire.EditParams, reply 
 
 func TestEditor(t *testing.T) {
 	b := &editor{}
-	c, hello := serve(t, wired(&wire.Server{Backend: b}))
-	if fmt.Sprint(hello["params"].(map[string]any)["capabilities"]) != "[edit]" {
-		t.Fatalf("server frame = %v, want capability edit", hello)
+	c := connect(t, wired(&wire.Server{Backend: b}))
+	if capabilities := c.Hello().Capabilities; !slices.Equal(capabilities, []string{"edit"}) {
+		t.Fatalf("capabilities = %v, want edit", capabilities)
 	}
-	c.signIn("a")
-	c.send(`{"method":"message","id":"e","params":{"message_id":"1","deleted":true}}`)
-	if f := c.read(); f["error"] != nil {
-		t.Fatalf("got %v", f)
+	signIn(t, c)
+	if _, err := c.Call(wait(t), "message", params(`{"message_id":"1","deleted":true}`)); err != nil {
+		t.Fatal(err)
 	}
 	if b.edits.Load() != 1 || b.messages.Load() != 0 {
 		t.Fatalf("%d edits, %d messages", b.edits.Load(), b.messages.Load())
@@ -503,11 +478,19 @@ func TestEditor(t *testing.T) {
 func TestSlowClientDisconnected(t *testing.T) {
 	b := &backend{}
 	s := wired(&wire.Server{Backend: b, OutgoingQueue: 2})
-	c, _ := serve(t, s)
-	c.signIn("a")
+	// A client that reads nothing: the server frame is being written, and
+	// the frames after it wait.
+	server, client := net.Pipe()
+	defer client.Close()
+	go s.ServeTransport(context.Background(), wire.LineTransport(server, 1<<16), nil, nil)
+	deadline := time.Now().Add(5 * time.Second)
+	for len(s.Conns()) == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("the connection did not open")
+		}
+		time.Sleep(time.Millisecond)
+	}
 	conn := onlyConn(t, s)
-	// The client stops reading: one frame is being written, two wait, and
-	// the next finds the queue full.
 	frame, _ := wire.EncodeRaw("status", map[string]any{})
 	sent := 0
 	for range 10 {
@@ -535,34 +518,27 @@ func TestSlowClientDisconnected(t *testing.T) {
 func TestCloseWithError(t *testing.T) {
 	b := &backend{}
 	s := wired(&wire.Server{Backend: b})
-	c, _ := serve(t, s)
-	c.signIn("a")
+	c := connect(t, s)
+	signIn(t, c)
 	conn := onlyConn(t, s)
 	conn.NotifyRaw("status", map[string]any{"n": 1})
 	conn.CloseWithError(wire.RetryAfter("Going away", 7))
 	if conn.NotifyRaw("status", map[string]any{"n": 2}) {
 		t.Fatal("a frame was queued after CloseWithError")
 	}
-	if f := c.read(); f["method"] != "status" {
-		t.Fatalf("got %v, want the frame queued first", f)
+	if f := next(t, c); f.Method != "status" {
+		t.Fatalf("got %s, want the frame queued first", f.Raw)
 	}
-	f := c.read()
-	data, _ := f["error"].(map[string]any)["data"].(map[string]any)
-	if f.errorCode() != wire.CodeRetryAfter || f["id"] != nil || data["retry_after"] != float64(7) {
-		t.Fatalf("got %v, want the connection's error", f)
+	f := next(t, c)
+	data, _ := f.Error.Data.(map[string]any)
+	if code(f) != wire.CodeRetryAfter || f.ID != "" || data["retry_after"] != float64(7) {
+		t.Fatalf("got %s, want the connection's error", f.Raw)
 	}
-	c.readEOF()
-	<-conn.Done()
-	// Disconnected runs as ServeTransport returns.
-	select {
-	case <-c.done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("ServeTransport did not return")
-	}
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	if len(b.disconnected) != 1 || b.disconnected[0] != conn {
-		t.Fatalf("Disconnected saw %v", b.disconnected)
+	expectClosed(t, c)
+	// OnDisconnect has run once Close returns, as ServeTransport has.
+	_ = c.Close()
+	if d := b.disconnectedConns(); len(d) != 1 || d[0] != conn {
+		t.Fatalf("Disconnected saw %v", d)
 	}
 }
 
@@ -596,24 +572,22 @@ func TestLineTransport(t *testing.T) {
 // TestFrameTooLarge closes a connection whose client sends more than the
 // transport's limit.
 func TestFrameTooLarge(t *testing.T) {
-	c, _ := serve(t, wired(&wire.Server{Backend: &backend{}}))
+	c := connect(t, wired(&wire.Server{Backend: &backend{}, ReadLimit: 1 << 16}))
 	// The write fails once the server stops reading and closes.
 	go func() {
-		_, _ = io.WriteString(c.conn, `{"method":"message","id":"x","params":{"body":{"text":"`+strings.Repeat("x", 1<<17)+`"}}}`+"\n")
+		_ = c.Send(context.Background(), []byte(`{"method":"message","id":"x","params":{"body":{"text":"`+strings.Repeat("x", 1<<17)+`"}}}`))
 	}()
-	c.readEOF()
+	expectClosed(t, c)
 }
 
 func TestShutdown(t *testing.T) {
 	s := wired(&wire.Server{Backend: &backend{}})
-	c, _ := serve(t, s)
-	c.signIn("a")
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	if err := s.Shutdown(ctx); err != nil {
+	c := connect(t, s)
+	signIn(t, c)
+	if err := s.Shutdown(wait(t)); err != nil {
 		t.Fatal(err)
 	}
-	c.readEOF()
+	expectClosed(t, c)
 	if len(s.Conns()) != 0 {
 		t.Fatal("connections left after Shutdown")
 	}
@@ -628,23 +602,26 @@ func TestShutdown(t *testing.T) {
 
 func TestBroadcast(t *testing.T) {
 	s := wired(&wire.Server{Backend: &backend{}})
-	c1, _ := serve(t, s)
-	c1.signIn("a")
-	c2, _ := serve(t, s) // not signed in: not broadcast to
+	c1, c2 := connect(t, s), connect(t, s) // c2 is not signed in: not broadcast to.
+	signIn(t, c1)
 	frame, _ := wire.EncodeRaw("status", map[string]any{"x": 1})
 	s.Broadcast(frame, nil)
-	if f := c1.read(); f["method"] != "status" {
-		t.Fatalf("got %v", f)
+	if f := next(t, c1); f.Method != "status" {
+		t.Fatalf("got %s", f.Raw)
 	}
-	c2.sync()
+	if err := c2.Sync(wait(t)); err != nil {
+		t.Fatal(err)
+	}
+	if pending := c2.Pending(); len(pending) != 0 {
+		t.Fatalf("a connection that is not signed in got %s", pending[0].Raw)
+	}
 }
 
 func TestWebSocket(t *testing.T) {
 	s := wired(&wire.Server{Backend: &backend{}, CheckOrigin: wire.AnyOrigin})
 	server := httptest.NewServer(s)
 	defer server.Close()
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
+	ctx := wait(t)
 	ws, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(server.URL, "http"), nil)
 	if err != nil {
 		t.Fatal(err)
@@ -686,8 +663,8 @@ func (f *fence) Err() error            { return f.err }
 
 func TestSendBatchAndFence(t *testing.T) {
 	s := wired(&wire.Server{Backend: &backend{}, OutgoingQueue: 2})
-	c, _ := serve(t, s)
-	c.signIn("a")
+	c := connect(t, s)
+	signIn(t, c)
 	conn := onlyConn(t, s)
 	f := &fence{done: make(chan struct{})}
 	if !conn.Fence(f) {
@@ -699,17 +676,11 @@ func TestSendBatchAndFence(t *testing.T) {
 	if !conn.SendBatch(a, b, a) || !conn.SendBatch() {
 		t.Fatal("SendBatch failed")
 	}
-	_ = c.conn.SetReadDeadline(time.Now().Add(50 * time.Millisecond))
-	if c.lines.Scan() {
-		t.Fatalf("read %s before the fence was released", c.lines.Bytes())
-	}
-	// A net.Pipe read that timed out leaves the stream usable once the
-	// deadline is reset; the scanner is done, so it is replaced.
-	c.lines = bufio.NewScanner(c.conn)
+	quiet(t, c)
 	close(f.done)
 	for _, want := range []string{"a", "b", "a"} {
-		if got := c.read(); got["method"] != want {
-			t.Fatalf("got %v, want %s", got, want)
+		if got := next(t, c); got.Method != want {
+			t.Fatalf("got %s, want %s", got.Raw, want)
 		}
 	}
 
@@ -717,10 +688,10 @@ func TestSendBatchAndFence(t *testing.T) {
 	conn.Fence(failed)
 	conn.Send(a)
 	close(failed.done)
-	if got := c.read(); got.errorCode() != wire.CodeInternalError || got["id"] != nil {
-		t.Fatalf("got %v, want internal_error in place of the frames behind a failed fence", got)
+	if got := next(t, c); code(got) != wire.CodeInternalError || got.ID != "" {
+		t.Fatalf("got %s, want internal_error in place of the frames behind a failed fence", got.Raw)
 	}
-	c.readEOF()
+	expectClosed(t, c)
 }
 
 // TestFenceDuringAuth holds the auth result behind a fence placed while
@@ -728,19 +699,15 @@ func TestSendBatchAndFence(t *testing.T) {
 func TestFenceDuringAuth(t *testing.T) {
 	f := &fence{done: make(chan struct{})}
 	b := &fencingBackend{fence: f}
-	c, _ := serve(t, wired(&wire.Server{Backend: b}))
-	c.send(`{"method":"auth","id":"a","params":{"scheme":"guest","name":"Ada"}}`)
-	_ = c.conn.SetReadDeadline(time.Now().Add(50 * time.Millisecond))
-	if c.lines.Scan() {
-		t.Fatalf("read %s before the fence was released", c.lines.Bytes())
-	}
-	c.lines = bufio.NewScanner(c.conn)
+	c := connect(t, wired(&wire.Server{Backend: b}))
+	send(t, c, `{"method":"auth","id":"a","params":{"scheme":"guest","name":"Ada"}}`)
+	quiet(t, c)
 	close(f.done)
-	if r := c.read(); r["id"] != "a" {
-		t.Fatalf("got %v, want the auth result", r)
+	if r := next(t, c); r.ID != "a" {
+		t.Fatalf("got %s, want the auth result", r.Raw)
 	}
-	if n := c.read(); n["method"] != "message" {
-		t.Fatalf("got %v, want the welcome notice", n)
+	if n := next(t, c); n.Method != "message" {
+		t.Fatalf("got %s, want the welcome notice", n.Raw)
 	}
 }
 
@@ -760,12 +727,12 @@ func (b *fencingBackend) Auth(_ context.Context, c *wire.Conn, p wire.AuthParams
 
 func TestMaxConnections(t *testing.T) {
 	s := wired(&wire.Server{Backend: &backend{}, MaxConnections: 1})
-	c1, _ := serve(t, s)
-	c2, _ := serve(t, s)
-	f := c2.read()
-	if f.errorCode() != wire.CodeRetryAfter || f["id"] != nil {
-		t.Fatalf("got %v, want retry_after", f)
+	c1, c2 := connect(t, s), connect(t, s)
+	if f := next(t, c2); code(f) != wire.CodeRetryAfter || f.ID != "" {
+		t.Fatalf("got %s, want retry_after", f.Raw)
 	}
-	c2.readEOF()
-	c1.sync()
+	expectClosed(t, c2)
+	if err := c1.Sync(wait(t)); err != nil {
+		t.Fatal(err)
+	}
 }

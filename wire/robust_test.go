@@ -70,24 +70,27 @@ func TestHandlerPanics(t *testing.T) {
 	s.HandleNotification("tick", wire.NotificationHandler{Serve: func(context.Context, *wire.Conn, *wire.Request) {
 		panic("in a notification")
 	}})
-	c, _ := serve(t, s)
-	c.send(`{"method":"auth","id":"p","params":{"scheme":"guest","name":"panic"}}`)
-	if f := c.read(); f["id"] != "p" || f.errorCode() != wire.CodeInternalError {
-		t.Fatalf("got %v, want the auth's internal_error", f)
+	c := connect(t, s)
+	if _, err := c.Auth(wait(t), map[string]any{"scheme": "guest", "name": "panic"}); wire.CodeOf(err) != wire.CodeInternalError {
+		t.Fatalf("got %v, want the auth's internal_error", err)
 	}
 	// The frame held during the failed auth is dropped: the next is the
 	// sign-in's result.
-	c.signIn("a")
-	c.send(`{"method":"boom","id":"b"}`)
-	if f := c.read(); f["id"] != "b" || f.errorCode() != wire.CodeInternalError {
-		t.Fatalf("got %v, want internal_error", f)
+	signIn(t, c)
+	send(t, c, `{"method":"boom","id":"b"}`)
+	if f := next(t, c); f.ID != "b" || code(f) != wire.CodeInternalError {
+		t.Fatalf("got %s, want internal_error", f.Raw)
 	}
-	c.send(`{"method":"tick"}`)
-	c.sync()
+	if err := c.Notify(wait(t), "tick", nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Sync(wait(t)); err != nil {
+		t.Fatal(err)
+	}
 	// The failure is not kept: a retry runs again.
-	c.send(`{"method":"boom","id":"b"}`)
-	if f := c.read(); f["id"] != "b" || f.result()["ok"] != true {
-		t.Fatalf("retry: got %v", f)
+	send(t, c, `{"method":"boom","id":"b"}`)
+	if f := next(t, c); f.ID != "b" || fields(f)["ok"] != true {
+		t.Fatalf("retry: got %s", f.Raw)
 	}
 }
 
@@ -100,13 +103,11 @@ func TestErrorAfterReply(t *testing.T) {
 		r.Reply(nil)
 		return wire.Denied("too late")
 	}})
-	c, _ := serve(t, s)
-	c.signIn("a")
-	c.send(`{"method":"late","id":"l"}`)
-	if f := c.read(); f["id"] != "l" || f["error"] != nil {
-		t.Fatalf("got %v", f)
+	c := connect(t, s)
+	signIn(t, c)
+	if _, err := c.Call(wait(t), "late", nil); err != nil {
+		t.Fatal(err)
 	}
-	c.sync()
 	mu.Lock()
 	defer mu.Unlock()
 	if out := logged.String(); !strings.Contains(out, "level=DEBUG") || !strings.Contains(out, "too late") {
@@ -146,21 +147,25 @@ func TestDuplicateWaitEndsWithConnection(t *testing.T) {
 		<-release
 		return nil
 	}})
-	c1, _ := serve(t, s)
-	c1.signIn("a")
-	c2, _ := serve(t, s)
-	c2.signIn("a")
-	c1.send(`{"method":"slow","id":"x"}`)
+	c1, c2 := connect(t, s), connect(t, s)
+	signIn(t, c1)
+	signIn(t, c2)
+	send(t, c1, `{"method":"slow","id":"x"}`)
 	<-started
-	c2.send(`{"method":"slow","id":"x"}`)
+	send(t, c2, `{"method":"slow","id":"x"}`)
 	time.Sleep(20 * time.Millisecond) // Let it start waiting.
-	_ = c2.conn.Close()
-	deadline := time.Now().Add(5 * time.Second)
-	for len(b.disconnectedConns()) != 1 {
-		if time.Now().After(deadline) {
-			t.Fatal("the duplicate's connection did not end while its original ran")
-		}
-		time.Sleep(10 * time.Millisecond)
+	closed := make(chan struct{})
+	go func() {
+		defer close(closed)
+		_ = c2.Close()
+	}()
+	select {
+	case <-closed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the duplicate's connection did not end while its original ran")
+	}
+	if n := len(b.disconnectedConns()); n != 1 {
+		t.Fatalf("%d connections ended, want the duplicate's", n)
 	}
 }
 
@@ -209,13 +214,14 @@ func (b *connecting) Connected(context.Context, *wire.Conn) error {
 func TestMaxConnectionsFirst(t *testing.T) {
 	b := &connecting{}
 	s := wired(&wire.Server{Backend: b, MaxConnections: 1, OnConnect: b.Connected})
-	c1, _ := serve(t, s)
-	c2, _ := serve(t, s)
-	if f := c2.read(); f.errorCode() != wire.CodeRetryAfter {
-		t.Fatalf("got %v, want retry_after", f)
+	c1, c2 := connect(t, s), connect(t, s)
+	if f := next(t, c2); code(f) != wire.CodeRetryAfter {
+		t.Fatalf("got %s, want retry_after", f.Raw)
 	}
-	c2.readEOF()
-	c1.sync()
+	expectClosed(t, c2)
+	if err := c1.Sync(wait(t)); err != nil {
+		t.Fatal(err)
+	}
 	if n := b.connected.Load(); n != 1 {
 		t.Fatalf("Connected %d times, want 1", n)
 	}

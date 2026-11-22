@@ -221,23 +221,20 @@ func (b *broadcasting) Auth(_ context.Context, c *wire.Conn, p wire.AuthParams, 
 func TestAuthSendSignsIn(t *testing.T) {
 	b := &broadcasting{}
 	b.s = &wire.Server{Backend: b, Logger: slog.New(slog.DiscardHandler)}
-	c, _ := serve(t, b.s)
-	c.send(`{"method":"auth","id":"x","params":{"scheme":"guest","user_id":"bad id"}}`)
-	if f := c.read(); f["id"] != "x" || f.errorCode() != wire.CodeInternalError {
-		t.Fatalf("got %v, want internal_error for an invalid user_id", f)
+	c := connect(t, b.s)
+	if _, err := c.Auth(wait(t), map[string]any{"scheme": "guest", "user_id": "bad id"}); wire.CodeOf(err) != wire.CodeInternalError {
+		t.Fatalf("got %v, want internal_error for an invalid user_id", err)
 	}
-	c.send(`{"method":"auth","id":"a","params":{"scheme":"guest"}}`)
-	if f := c.read(); f["id"] != "a" || f.result()["you"] == nil {
-		t.Fatalf("got %v, want the auth result", f)
+	result, before, err := c.CallFrames(wait(t), "auth", map[string]any{"scheme": "guest"})
+	if err != nil || len(before) != 0 || !strings.Contains(string(result), `"you"`) {
+		t.Fatalf("got %s %v, %d frames before, want the auth result first", result, err, len(before))
 	}
-	if f := c.read(); f["method"] != "joined" {
-		t.Fatalf("got %v, want the broadcast after the result", f)
+	if f := next(t, c); f.Method != "joined" {
+		t.Fatalf("got %s, want the broadcast after the result", f.Raw)
 	}
-	f := c.read()
-	params, _ := f["params"].(map[string]any)
-	you, _ := params["you"].(map[string]any)
-	if f["method"] != "user" || you["name"] != "Ada L" {
-		t.Fatalf("got %v, want the published user", f)
+	var update wire.UserUpdate
+	if f := next(t, c); f.Method != "user" || f.Decode(&update) != nil || update.You == nil || update.You.Name != "Ada L" {
+		t.Fatalf("got %s, want the published user", f.Raw)
 	}
 	if u := onlyConn(t, b.s).User(); u == nil || u.Name != "Ada L" {
 		t.Fatalf("the connection's user is %+v", u)
