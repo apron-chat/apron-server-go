@@ -633,3 +633,95 @@ func TestWebSocket(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// fence is a test Fence.
+type fence struct {
+	done chan struct{}
+	err  error
+}
+
+func (f *fence) Done() <-chan struct{} { return f.done }
+func (f *fence) Err() error            { return f.err }
+
+func TestSendBatchAndFence(t *testing.T) {
+	s := &wire.Server{Backend: &backend{}, OutgoingQueue: 2}
+	c, _ := serve(t, s)
+	c.signIn("a")
+	conn := onlyConn(t, s)
+	f := &fence{done: make(chan struct{})}
+	if !conn.Fence(f) {
+		t.Fatal("Fence failed")
+	}
+	// Three frames in one place in the queue, behind the fence.
+	a, _ := wire.Encode("a", map[string]any{})
+	b, _ := wire.Encode("b", map[string]any{})
+	if !conn.SendBatch(a, b, a) || !conn.SendBatch() {
+		t.Fatal("SendBatch failed")
+	}
+	_ = c.conn.SetReadDeadline(time.Now().Add(50 * time.Millisecond))
+	if c.lines.Scan() {
+		t.Fatalf("read %s before the fence was released", c.lines.Bytes())
+	}
+	// A net.Pipe read that timed out leaves the stream usable once the
+	// deadline is reset; the scanner is done, so it is replaced.
+	c.lines = bufio.NewScanner(c.conn)
+	close(f.done)
+	for _, want := range []string{"a", "b", "a"} {
+		if got := c.read(); got["method"] != want {
+			t.Fatalf("got %v, want %s", got, want)
+		}
+	}
+
+	failed := &fence{done: make(chan struct{}), err: errors.New("not stored")}
+	conn.Fence(failed)
+	conn.Send(a)
+	close(failed.done)
+	if got := c.read(); got.errorCode() != wire.CodeInternalError || got["id"] != nil {
+		t.Fatalf("got %v, want internal_error in place of the frames behind a failed fence", got)
+	}
+	c.readEOF()
+}
+
+// TestFenceDuringAuth holds the auth result behind a fence placed while
+// Auth runs, and the notifications Auth sent after it.
+func TestFenceDuringAuth(t *testing.T) {
+	f := &fence{done: make(chan struct{})}
+	b := &fencingBackend{fence: f}
+	c, _ := serve(t, &wire.Server{Backend: b})
+	c.send(`{"method":"auth","id":"a","params":{"scheme":"guest","name":"Ada"}}`)
+	_ = c.conn.SetReadDeadline(time.Now().Add(50 * time.Millisecond))
+	if c.lines.Scan() {
+		t.Fatalf("read %s before the fence was released", c.lines.Bytes())
+	}
+	c.lines = bufio.NewScanner(c.conn)
+	close(f.done)
+	if r := c.read(); r["id"] != "a" {
+		t.Fatalf("got %v, want the auth result", r)
+	}
+	if n := c.read(); n["method"] != "message" {
+		t.Fatalf("got %v, want the welcome notice", n)
+	}
+}
+
+type fencingBackend struct {
+	backend
+	fence *fence
+}
+
+func (b *fencingBackend) Auth(ctx context.Context, c *wire.Conn, p wire.AuthParams) (wire.AuthResult, error) {
+	result, err := b.backend.Auth(ctx, c, p)
+	c.Fence(b.fence)
+	return result, err
+}
+
+func TestMaxConnections(t *testing.T) {
+	s := &wire.Server{Backend: &backend{}, MaxConnections: 1}
+	c1, _ := serve(t, s)
+	c2, _ := serve(t, s)
+	f := c2.read()
+	if f.errorCode() != wire.CodeRetryAfter || f["id"] != nil {
+		t.Fatalf("got %v, want retry_after", f)
+	}
+	c2.readEOF()
+	c1.sync()
+}

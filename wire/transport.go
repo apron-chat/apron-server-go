@@ -3,11 +3,8 @@ package wire
 import (
 	"bufio"
 	"context"
-	"errors"
 	"io"
 	"sync"
-
-	"github.com/coder/websocket"
 )
 
 // Transport carries whole frames both ways (§1): a WebSocket, a line of
@@ -23,29 +20,6 @@ type Transport interface {
 	// Close ends the transport at once.
 	Close() error
 }
-
-type wsTransport struct{ ws *websocket.Conn }
-
-var errBinaryFrame = errors.New("wire: text frames required")
-
-func (t wsTransport) Read(ctx context.Context) ([]byte, error) {
-	kind, payload, err := t.ws.Read(ctx)
-	if err != nil {
-		return nil, err
-	}
-	if kind != websocket.MessageText {
-		_ = t.ws.Close(websocket.StatusUnsupportedData, "text frames required")
-		return nil, errBinaryFrame
-	}
-	return payload, nil
-}
-
-func (t wsTransport) Write(ctx context.Context, frame []byte) error {
-	return t.ws.Write(ctx, websocket.MessageText, frame)
-}
-
-func (t wsTransport) Ping(ctx context.Context) error { return t.ws.Ping(ctx) }
-func (t wsTransport) Close() error                   { return t.ws.CloseNow() }
 
 // LineTransport carries newline-delimited JSON frames on a byte stream, such
 // as a TCP connection, a pipe, or stdin and stdout (§1).

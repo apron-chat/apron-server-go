@@ -5,8 +5,6 @@ import (
 	"net"
 	"net/http"
 	"sync"
-	"sync/atomic"
-	"time"
 
 	"github.com/apron-chat/apron-server-go/internal/wirecore"
 )
@@ -14,34 +12,28 @@ import (
 // Conn is one client connection. Its methods are safe for concurrent use.
 type Conn struct {
 	server  *Server
-	t       Transport
+	rt      *wirecore.Conn
 	info    ServerInfo
 	remote  net.Addr
 	request *http.Request
 	ctx     context.Context
 	cancel  context.CancelFunc
 
-	out     chan outbound
-	done    chan struct{}
-	stop    sync.Once
-	closing atomic.Bool
-
 	mu   sync.Mutex
 	user *User
 	// holding is set while auth runs: notifications queued meanwhile wait
 	// in held until its result is queued (§3.2.2).
 	holding bool
-	held    []Frame
+	held    [][]Frame
 	data    any
-
-	pinged    atomic.Bool
-	lastFrame atomic.Int64
 }
 
-type outbound struct {
-	frame Frame
-	// last closes the connection once the frame is written.
-	last bool
+// Fence is a condition the frames queued after it wait for, such as a
+// change being stored: Done is closed once it is decided, and Err is then
+// nil when it holds.
+type Fence interface {
+	Done() <-chan struct{}
+	Err() error
 }
 
 // User returns a copy of the connection's identity, or nil before it signs
@@ -102,7 +94,7 @@ func (c *Conn) Request() *http.Request { return c.request }
 func (c *Conn) Context() context.Context { return c.ctx }
 
 // Done is closed when the connection ends.
-func (c *Conn) Done() <-chan struct{} { return c.done }
+func (c *Conn) Done() <-chan struct{} { return c.rt.Done() }
 
 // Notify queues a notification. It reports false when the connection is
 // closed, or the params cannot be encoded.
@@ -120,32 +112,40 @@ func (c *Conn) SendMessage(m Message) bool { return c.Notify("message", m) }
 
 // Send queues an encoded frame. A client whose queue is full is too slow to
 // keep up, and is disconnected.
-func (c *Conn) Send(frame Frame) bool {
+func (c *Conn) Send(frame Frame) bool { return c.SendBatch(frame) }
+
+// SendBatch queues frames to be written one after another, with no other
+// frame between them, such as a result and the notifications that complete
+// it. They take one place in the queue (Server.OutgoingQueue).
+func (c *Conn) SendBatch(frames ...Frame) bool {
+	if len(frames) == 0 {
+		return true
+	}
 	c.mu.Lock()
 	if c.holding {
-		c.held = append(c.held, frame)
+		c.held = append(c.held, frames)
 		c.mu.Unlock()
 		return true
 	}
 	c.mu.Unlock()
-	return c.enqueue(frame)
+	return c.enqueue(frames)
 }
 
-func (c *Conn) enqueue(frame Frame) bool {
-	if c.closing.Load() {
-		return false
+func (c *Conn) enqueue(frames []Frame) bool {
+	raw := make([][]byte, len(frames))
+	for i, frame := range frames {
+		raw[i] = frame
 	}
-	select {
-	case <-c.done:
-		return false
-	case c.out <- outbound{frame: frame}:
-		return true
-	default:
-		c.server.logger().Warn("wire: closing a connection that fell behind", "remote", c.remote)
-		c.Close()
-		return false
-	}
+	return c.rt.Send(raw...)
 }
+
+// Fence holds every frame queued after it until f is done, so that a reply
+// queued after a change is made durable in the background, such as a new
+// account's, is sent only once it is. If f then has an error, the frames
+// after it are never sent: the connection is sent error/internal_error and
+// closed. A fence placed while auth runs holds its result too. Fence
+// reports false when the connection is closed or fell behind.
+func (c *Conn) Fence(f Fence) bool { return c.rt.Fence(f) }
 
 // hold queues notifications aside until release.
 func (c *Conn) hold() {
@@ -161,8 +161,8 @@ func (c *Conn) release() {
 	held := c.held
 	c.held, c.holding = nil, false
 	// Queued under mu, so that a Send that finds holding cleared comes after.
-	for _, frame := range held {
-		if !c.enqueue(frame) {
+	for _, frames := range held {
+		if !c.enqueue(frames) {
 			break
 		}
 	}
@@ -170,73 +170,16 @@ func (c *Conn) release() {
 }
 
 // Close ends the connection at once.
-func (c *Conn) Close() {
-	c.stop.Do(func() {
-		close(c.done)
-		c.cancel()
-		_ = c.t.Close()
-	})
-}
+func (c *Conn) Close() { c.rt.Stop() }
 
 // CloseWithError sends an error about the connection as a whole, after the
 // frames already queued, then closes it (§1.1).
 func (c *Conn) CloseWithError(e *Error) {
 	payload, err := marshal(map[string]any{"error": e})
-	if err != nil || !c.closing.CompareAndSwap(false, true) {
+	if err != nil {
 		return
 	}
-	select {
-	case c.out <- outbound{frame: payload, last: true}:
-	default:
-		c.Close()
-	}
+	c.rt.SendLast(payload)
 }
 
-func (c *Conn) writeLoop() {
-	timeout := c.server.writeTimeout()
-	for {
-		select {
-		case <-c.done:
-			return
-		case o := <-c.out:
-			ctx, cancel := context.WithTimeout(context.Background(), timeout)
-			err := c.t.Write(ctx, o.frame)
-			cancel()
-			if err != nil || o.last {
-				c.Close()
-				return
-			}
-		}
-	}
-}
-
-// pingLoop checks the transport, and closes a connection whose client sent
-// liveness pings (§1) and then fell silent for three intervals.
-func (c *Conn) pingLoop() {
-	interval, timeout := c.server.pingInterval(), c.server.pingTimeout()
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-c.done:
-			return
-		case <-ticker.C:
-			if c.pinged.Load() && time.Since(time.Unix(0, c.lastFrame.Load())) > 3*interval+timeout {
-				c.Close()
-				return
-			}
-			ctx, cancel := context.WithTimeout(context.Background(), timeout)
-			err := c.t.Ping(ctx)
-			cancel()
-			if err != nil {
-				c.Close()
-				return
-			}
-		}
-	}
-}
-
-func (c *Conn) pong() {
-	c.pinged.Store(true)
-	c.enqueue(wirecore.PongFrame)
-}
+func (c *Conn) pong() { c.rt.Pong() }

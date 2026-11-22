@@ -246,9 +246,7 @@ func (b *Bot) Connect(options SessionOptions) (*Session, error) {
 	}
 	c := &client{
 		server: s,
-		conn:   sessionTransport{session},
-		out:    make(chan outboundBatch, max(s.config.OutgoingQueue, sessionFrameQueue)),
-		done:   make(chan struct{}),
+		conn:   s.newConn(sessionTransport{session}, max(s.config.OutgoingQueue, sessionFrameQueue)),
 	}
 	session.c = c
 	if options.OnFrame != nil {
@@ -286,10 +284,11 @@ func (b *Bot) Connect(options SessionOptions) (*Session, error) {
 	}
 	go func() {
 		defer s.extensionWork.Done()
-		<-c.done
+		<-c.conn.Done()
 		session.forget()
 	}()
-	go c.writeLoop()
+	// In process, there is no transport to ping.
+	c.conn.Start(false)
 	s.clients[c] = struct{}{}
 	s.sessionCount++
 	s.attachLocked(c, u)
@@ -381,14 +380,15 @@ func (b *Session) Close() error {
 // sessionTransport delivers a Session's frames in-process.
 type sessionTransport struct{ session *Session }
 
-func (t sessionTransport) write(_ context.Context, payload []byte) error {
+func (t sessionTransport) Write(_ context.Context, payload []byte) error {
 	return t.session.receive(payload)
 }
 
-func (t sessionTransport) ping(context.Context) error { return nil }
+func (t sessionTransport) Ping(context.Context) error { return nil }
 
-func (t sessionTransport) close() {
+func (t sessionTransport) Close() error {
 	t.session.closeOnce.Do(func() { close(t.session.closed) })
+	return nil
 }
 
 // receive routes a frame: a reply to the request that waits for it, and a

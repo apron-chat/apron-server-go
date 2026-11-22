@@ -1,7 +1,6 @@
 package apron
 
 import (
-	"bytes"
 	"container/list"
 	"context"
 	"encoding/json/jsontext"
@@ -458,38 +457,15 @@ func formatID(id int64) string {
 	return strconv.FormatInt(id, 10)
 }
 
-// transport carries a connection's frames: a WebSocket, or an in-process
-// Session.
-type transport interface {
-	// write sends one frame.
-	write(ctx context.Context, payload []byte) error
-	// ping checks that the peer is still there.
-	ping(ctx context.Context) error
-	// close ends the transport without a handshake.
-	close()
-}
-
-// wsTransport is a WebSocket connection.
-type wsTransport struct{ ws *websocket.Conn }
-
-func (t wsTransport) write(ctx context.Context, payload []byte) error {
-	return t.ws.Write(ctx, websocket.MessageText, payload)
-}
-
-func (t wsTransport) ping(ctx context.Context) error { return t.ws.Ping(ctx) }
-
-func (t wsTransport) close() { _ = t.ws.CloseNow() }
-
 type client struct {
 	server *Server
-	conn   transport
+	// conn is the connection's runtime: its write queue, writer, pinger,
+	// and in-order frame worker, as package wire's connections have.
+	conn *wirecore.Conn
 	// request is the context of the request being processed, which the
 	// extension code it runs gets: canceled when the connection closes. It
 	// is set by whoever processes the connection's frames, one at a time.
 	request context.Context
-	out     chan outboundBatch
-	done    chan struct{}
-	stop    sync.Once
 
 	// user is the connection's identity, nil before authentication. Guarded
 	// by server.mu.
@@ -531,27 +507,6 @@ type client struct {
 	// idle reports that nobody is attending the connection (§4.5): false
 	// until the connection says otherwise. Guarded by server.mu.
 	idle bool
-	// closing is set once the final batch is queued; later frames are dropped.
-	closing atomic.Bool
-	// pinged is set by the first liveness ping (§1); lastFrame is when the
-	// latest frame arrived, in Unix nanoseconds.
-	pinged    atomic.Bool
-	lastFrame atomic.Int64
-}
-
-// outboundBatch keeps a sequence of protocol frames together in the writer's
-// queue while each frame is still written as its own WebSocket message, such
-// as a room_list result and the read cursors that follow it, without
-// consuming one queue slot per frame or interleaving another broadcast between
-// them. A batch with closeReason is the connection's last: the writer closes
-// the connection after writing it.
-type outboundBatch struct {
-	frames      [][]byte
-	closeReason string
-	// fence, if set, holds the writer until the changes before it are in the
-	// store (client.fenceLocked); the frames after it are never written if
-	// they are not.
-	fence *storeFence
 }
 
 // Server is an Apron server, which Open starts. It serves the protocol
@@ -1024,18 +979,15 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 	ws.SetReadLimit(s.config.ReadLimit)
 
+	transport := wirecore.WebSocket{Conn: ws}
 	c := &client{
 		server:    s,
-		conn:      wsTransport{ws},
-		out:       make(chan outboundBatch, s.config.OutgoingQueue),
-		done:      make(chan struct{}),
+		conn:      s.newConn(transport, s.config.OutgoingQueue),
 		origin:    r.Header.Get("Origin"),
 		clientKey: clientKey(s.clientIP(r)),
 		baseURL:   s.baseURL(r),
 	}
-	c.lastFrame.Store(time.Now().UnixNano())
-	go c.writeLoop()
-	go c.pingLoop()
+	c.conn.Start(true)
 	s.mu.Lock()
 	if s.closed {
 		s.unlock()
@@ -1047,7 +999,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		c.enqueue(s.serverFrameLocked(c))
 		c.closeWithError(&Error{Code: CodeRetryAfter, Message: "Server at capacity; try again shortly", Data: map[string]any{"retry_after": retryAfterSeconds}})
 		s.unlock()
-		<-c.done
+		<-c.conn.Done()
 		return
 	}
 	s.clients[c] = struct{}{}
@@ -1074,49 +1026,23 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	// sign-out, takes effect; only a connection the server closed with an
 	// error drops what is left.
 	ctx, cancel := context.WithCancel(r.Context())
-	frames := make(chan []byte, inboundQueue)
-	worked := make(chan struct{})
-	go func() {
-		defer close(worked)
-		c.request = ctx
-		for payload := range frames {
-			if !c.closing.Load() {
-				s.processFrame(c, payload)
-			}
-		}
-	}()
-	defer func() {
-		cancel()
-		close(frames)
-		<-worked
-	}()
-	for {
-		messageType, payload, err := ws.Read(ctx)
-		if err != nil {
-			return
-		}
-		if messageType != websocket.MessageText {
-			_ = ws.Close(websocket.StatusUnsupportedData, "text frames required")
-			return
-		}
-		c.lastFrame.Store(time.Now().UnixNano())
-		// The liveness ping has fixed bytes, answered without parsing or
-		// waiting for the frames before it (§1).
-		if bytes.Equal(payload, pingFrame) {
-			c.pong()
-			continue
-		}
-		select {
-		case frames <- payload:
-		case <-c.done:
-			return
-		}
-	}
+	c.request = ctx
+	c.conn.Serve(func() ([]byte, error) { return transport.Read(ctx) }, func(payload []byte) { s.processFrame(c, payload) }, cancel)
 }
 
-// inboundQueue bounds the frames read from a connection and waiting for its
-// worker; a client that sends more waits for them.
-const inboundQueue = 64
+// newConn returns the runtime of a connection on t, whose write queue holds
+// queue batches.
+func (s *Server) newConn(t wirecore.Writer, queue int) *wirecore.Conn {
+	return wirecore.NewConn(t, wirecore.Options{
+		Queue:        queue,
+		WriteTimeout: s.config.WriteTimeout,
+		PingInterval: s.config.PingInterval,
+		PingTimeout:  s.config.PingTimeout,
+		// What the frames behind a failed store fence acknowledge is not
+		// stored: the connection closes rather than send them.
+		FenceFailed: encodeJSON(errorResponse(nil, internalError())),
+	})
+}
 
 // clientKey identifies a connection's client for rate limits: its IP, or
 // the /64 of an IPv6 address, which one household or host usually has.
@@ -1287,107 +1213,18 @@ func (s *Server) serverParams(baseURL string, revealed bool) map[string]any {
 	return params
 }
 
-func (c *client) writeLoop() {
-	for {
-		select {
-		case <-c.done:
-			return
-		case batch := <-c.out:
-			if batch.fence != nil {
-				select {
-				case <-c.done:
-					return
-				case <-batch.fence.done:
-				}
-				if batch.fence.err != nil {
-					// What the frames behind it acknowledge is not stored: the
-					// connection closes rather than send them.
-					ctx, cancel := context.WithTimeout(context.Background(), c.server.config.WriteTimeout)
-					_ = c.conn.write(ctx, encodeJSON(errorResponse(nil, internalError())))
-					cancel()
-					c.stopConnection()
-					return
-				}
-				continue
-			}
-			for _, payload := range batch.frames {
-				select {
-				case <-c.done:
-					return
-				default:
-				}
-				ctx, cancel := context.WithTimeout(context.Background(), c.server.config.WriteTimeout)
-				err := c.conn.write(ctx, payload)
-				cancel()
-				if err != nil {
-					c.stopConnection()
-					return
-				}
-			}
-			if batch.closeReason != "" {
-				// The error frame explains the close; a close handshake would
-				// wait on a peer that may not be reading.
-				c.stopConnection()
-				return
-			}
-		}
-	}
-}
-
-// pingLoop pings at the WebSocket level, which finds dead transports, and
-// closes a connection whose client sent liveness pings (§1) and then fell
-// silent for three intervals: its page is frozen or gone even if the socket
-// is not. Three intervals leave room for background timer throttling.
-func (c *client) pingLoop() {
-	config := c.server.config
-	ticker := time.NewTicker(config.PingInterval)
-	defer ticker.Stop()
-	silence := 3*config.PingInterval + config.PingTimeout
-	for {
-		select {
-		case <-c.done:
-			return
-		case <-ticker.C:
-			if c.pinged.Load() && time.Since(time.Unix(0, c.lastFrame.Load())) > silence {
-				c.stopConnection()
-				return
-			}
-			ctx, cancel := context.WithTimeout(context.Background(), config.PingTimeout)
-			err := c.conn.ping(ctx)
-			cancel()
-			if err != nil {
-				c.stopConnection()
-				return
-			}
-		}
-	}
-}
-
 // pong answers a liveness ping, before authentication too (§1).
-func (c *client) pong() {
-	c.pinged.Store(true)
-	c.enqueue(pongFrame)
-}
+func (c *client) pong() { c.conn.Pong() }
 
-func (c *client) stopConnection() {
-	c.stop.Do(func() {
-		close(c.done)
-		c.conn.close()
-	})
-}
+// stopConnection ends the connection at once.
+func (c *client) stopConnection() { c.conn.Stop() }
 
 // closeWithError sends an error about the connection as a whole, without id
 // (PROTOCOL.md §1.1), after the frames already queued, then closes the
 // connection.
 func (c *client) closeWithError(e *Error) {
-	payload := encodeJSON(errorResponse(nil, e))
-	if payload == nil || !c.closing.CompareAndSwap(false, true) {
-		return
-	}
-	select {
-	case c.out <- outboundBatch{frames: [][]byte{payload}, closeReason: e.Message}:
-	default:
-		c.stopConnection()
+	if payload := encodeJSON(errorResponse(nil, e)); payload != nil {
+		c.conn.SendLast(payload)
 	}
 }
 
@@ -1395,14 +1232,20 @@ func (c *client) enqueue(value any) bool {
 	return c.enqueueBatch(value)
 }
 
+// enqueueBatch keeps a sequence of protocol frames together in the writer's
+// queue while each frame is still written as its own WebSocket message,
+// such as a room_list result and the read cursors that follow it, without
+// consuming one queue slot per frame or interleaving another broadcast
+// between them. A slow client whose queue is full is disconnected: it
+// cannot hold the room lock or the server's broadcast path.
 func (c *client) enqueueBatch(values ...any) bool {
 	if len(values) == 0 {
 		return true
 	}
-	if c.closing.Load() {
+	if c.conn.Closing() {
 		return false
 	}
-	batch := outboundBatch{frames: make([][]byte, 0, len(values))}
+	frames := make([][]byte, 0, len(values))
 	for _, value := range values {
 		// A frame rendered once for many connections is shared as is; the
 		// writer never modifies it.
@@ -1413,18 +1256,9 @@ func (c *client) enqueueBatch(values ...any) bool {
 				return false
 			}
 		}
-		batch.frames = append(batch.frames, payload)
+		frames = append(frames, payload)
 	}
-	select {
-	case <-c.done:
-		return false
-	case c.out <- batch:
-		return true
-	default:
-		// A slow client cannot hold the room lock or the server's broadcast path.
-		c.stopConnection()
-		return false
-	}
+	return c.conn.Send(frames...)
 }
 
 func (c *client) sendResult(req request, result any) {
@@ -1523,7 +1357,7 @@ func (s *Server) processFrame(c *client, payload []byte) {
 	s.mu.Lock()
 	// A connection being closed, as when its account is signed out, does
 	// nothing more: the frames it sent before are dropped.
-	if c.closing.Load() {
+	if c.conn.Closing() {
 		s.unlock()
 		return
 	}

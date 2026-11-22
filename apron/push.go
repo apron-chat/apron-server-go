@@ -256,7 +256,7 @@ func (s *Server) registerPush(c *client, req request) (any, bool, *Error) {
 
 	s.mu.Lock()
 	defer s.unlock()
-	if c.closing.Load() {
+	if c.conn.Closing() {
 		return nil, false, connectionClosing()
 	}
 	u := c.user

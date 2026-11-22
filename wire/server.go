@@ -1,7 +1,6 @@
 package wire
 
 import (
-	"bytes"
 	"context"
 	"encoding/json/jsontext"
 	"encoding/json/v2"
@@ -96,6 +95,10 @@ type Server struct {
 	WriteTimeout time.Duration
 	PingInterval time.Duration
 	PingTimeout  time.Duration
+	// MaxConnections bounds the open connections; 0 is unlimited. A
+	// connection over it is sent the server frame, then error retry_after
+	// (§1.1), and closed.
+	MaxConnections int
 	// DedupSize is how many request ids are kept for deduplication (§1.2),
 	// across all users; 4096 by default, and negative keeps none.
 	DedupSize int
@@ -174,7 +177,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if addr, err := net.ResolveTCPAddr("tcp", r.RemoteAddr); err == nil {
 		remote = addr
 	}
-	s.ServeTransport(r.Context(), wsTransport{ws}, remote, r)
+	s.ServeTransport(r.Context(), wirecore.WebSocket{Conn: ws}, remote, r)
 }
 
 // ServeTransport serves a connection on any transport until it closes.
@@ -194,23 +197,43 @@ func (s *Server) ServeTransport(ctx context.Context, t Transport, remote net.Add
 	ctx, cancel := context.WithCancel(ctx)
 	c := &Conn{
 		server:  s,
-		t:       t,
 		remote:  remote,
 		request: r,
 		ctx:     ctx,
 		cancel:  cancel,
-		out:     make(chan outbound, s.outgoingQueue()),
-		done:    make(chan struct{}),
 	}
-	c.lastFrame.Store(time.Now().UnixNano())
+	c.rt = wirecore.NewConn(t, wirecore.Options{
+		Queue:        s.outgoingQueue(),
+		WriteTimeout: s.writeTimeout(),
+		PingInterval: s.pingInterval(),
+		PingTimeout:  s.pingTimeout(),
+		FenceFailed:  internalErrorFrame,
+		OnStop:       cancel,
+		OnFellBehind: func() {
+			s.logger().Warn("wire: closing a connection that fell behind", "remote", remote)
+		},
+	})
 	c.info = s.hello(c)
-	go c.writeLoop()
-	go c.pingLoop()
+	c.rt.Start(true)
 
 	s.mu.Lock()
 	if s.closed {
 		s.mu.Unlock()
 		c.Close()
+		return
+	}
+	if s.MaxConnections > 0 && len(s.conns) >= s.MaxConnections {
+		s.mu.Unlock()
+		// An error about the connection as a whole omits id (§1.1).
+		if frame, err := Encode("server", c.info); err == nil {
+			c.rt.Send(frame)
+		}
+		c.CloseWithError(RetryAfter("Server at capacity; try again shortly", 30))
+		select {
+		case <-c.Done():
+		case <-s.shutdown:
+			c.Close()
+		}
 		return
 	}
 	s.conns[c] = struct{}{}
@@ -227,7 +250,7 @@ func (s *Server) ServeTransport(ctx context.Context, t Transport, remote net.Add
 
 	// The server frame goes first, before any frame is read (§3.1).
 	if frame, err := Encode("server", c.info); err == nil {
-		c.enqueue(frame)
+		c.rt.Send(frame)
 	} else {
 		s.logger().Error("wire: encoding the server frame", "error", err)
 		return
@@ -237,37 +260,11 @@ func (s *Server) ServeTransport(ctx context.Context, t Transport, remote net.Add
 	// which makes auth a barrier (§3.2.2), by a worker of the connection's
 	// own; the reader goes on reading meanwhile, which keeps the
 	// transport's pings answered while the backend works.
-	frames := make(chan []byte, 64)
-	worked := make(chan struct{})
-	go func() {
-		defer close(worked)
-		for payload := range frames {
-			if !c.closing.Load() {
-				s.processFrame(c, payload)
-			}
-		}
-	}()
-	defer func() {
-		close(frames)
-		<-worked
-	}()
-	for {
-		payload, err := t.Read(ctx)
-		if err != nil {
-			return
-		}
-		c.lastFrame.Store(time.Now().UnixNano())
-		if bytes.Equal(payload, wirecore.PingFrame) {
-			c.pong()
-			continue
-		}
-		select {
-		case frames <- payload:
-		case <-c.done:
-			return
-		}
-	}
+	c.rt.Serve(func() ([]byte, error) { return t.Read(ctx) }, func(payload []byte) { s.processFrame(c, payload) }, nil)
 }
+
+// internalErrorFrame closes a connection whose fence failed.
+var internalErrorFrame, _ = marshal(map[string]any{"error": internalError()})
 
 func (s *Server) hello(c *Conn) ServerInfo {
 	info := s.Backend.Hello(c)
@@ -460,7 +457,7 @@ func (s *Server) reply(c *Conn, req request, result any, e *Error) jsontext.Valu
 		c.Close()
 		return nil
 	}
-	c.enqueue(payload)
+	c.rt.Send(payload)
 	return encoded
 }
 

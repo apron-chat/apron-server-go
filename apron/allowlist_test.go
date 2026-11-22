@@ -170,10 +170,11 @@ func TestClosingConnectionsDoNothing(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer app.Shutdown(context.Background())
-	c := &client{server: app, out: make(chan outboundBatch, 4), done: make(chan struct{}), user: newUserState("ada", "Ada")}
-	c.closing.Store(true)
+	c := &client{server: app, conn: app.newConn(sessionTransport{&Session{closed: make(chan struct{})}}, 4), user: newUserState("ada", "Ada")}
+	c.closeWithError(Denied("closing"))
+	queued := c.conn.Queued()
 	app.processFrame(c, []byte(`{"method":"push_register","id":"p1","params":{"kind":"relay","url":"https://push.example/x","token":"t"}}`))
-	if len(c.out) != 0 || len(app.pushes) != 0 {
-		t.Fatalf("a closing connection's request ran: %d frames, %d pushes", len(c.out), len(app.pushes))
+	if c.conn.Queued() != queued || len(app.pushes) != 0 {
+		t.Fatalf("a closing connection's request ran: %d frames, %d pushes", c.conn.Queued()-queued, len(app.pushes))
 	}
 }

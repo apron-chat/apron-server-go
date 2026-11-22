@@ -40,6 +40,10 @@ func (f *storeFence) release(err error) {
 	close(f.done)
 }
 
+// Done and Err make a storeFence a connection's fence (wirecore.Fence).
+func (f *storeFence) Done() <-chan struct{} { return f.done }
+func (f *storeFence) Err() error            { return f.err }
+
 // newFenceLocked returns a fence that waits for the changes made so far,
 // those the current lock made included, to be stored. Called holding s.mu,
 // whose release (unlock) queues them.
@@ -55,16 +59,7 @@ func (s *Server) newFenceLocked() *storeFence {
 // after the fence, such as a new account's result, means its change is
 // stored. Called holding s.mu.
 func (c *client) fenceLocked() {
-	f := c.server.newFenceLocked()
-	if c.closing.Load() {
-		return
-	}
-	select {
-	case <-c.done:
-	case c.out <- outboundBatch{fence: f}:
-	default:
-		c.stopConnection()
-	}
+	c.conn.Fence(c.server.newFenceLocked())
 }
 
 // StoreErr is the store's failure, wrapping ErrStoreFailed, or nil while it

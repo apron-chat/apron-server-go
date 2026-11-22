@@ -12,6 +12,8 @@
 //   - WebSocket transport (§1), or any [Transport] that carries whole
 //     frames, with a bounded write queue per connection that drops a client
 //     too slow to keep up, write timeouts, and transport-level pings;
+//     frames that go out together ([Conn.SendBatch]), and frames held until
+//     the backend's changes are durable ([Conn.Fence]);
 //   - the server frame on connect (§3.1), and the liveness ping and pong (§1);
 //   - the envelope: parse errors, invalid requests, request ids, and the
 //     error codes (§1.1), with unknown methods answered error/unsupported and

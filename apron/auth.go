@@ -175,7 +175,7 @@ func (s *Server) restoreSchemesLocked() error {
 // applied under it.
 func (s *Server) authenticate(c *client, req request) (any, *Error) {
 	s.mu.Lock()
-	if c.closing.Load() {
+	if c.conn.Closing() {
 		s.unlock()
 		return nil, connectionClosing()
 	}
@@ -253,7 +253,7 @@ func (s *Server) authenticate(c *client, req request) (any, *Error) {
 	}
 	s.mu.Lock()
 	defer s.unlock()
-	if c.closing.Load() {
+	if c.conn.Closing() {
 		return nil, connectionClosing()
 	}
 	switch result := result.(type) {
@@ -753,7 +753,7 @@ func (sc *schemeConn) ProposeCode(spec authn.CodeProposal) (authn.Tokens, error)
 // takes one of the connection's proposals (proposalsPerConnection).
 func (sc *schemeConn) proposeLocked(state string) (*proposal, *authn.Error) {
 	s, c := sc.s, sc.c
-	if c.closing.Load() {
+	if c.conn.Closing() {
 		return nil, authn.Denied("This connection is closing")
 	}
 	if c.proposalBudget == nil {
