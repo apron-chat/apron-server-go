@@ -78,10 +78,13 @@ func (s *Server) saveMessage(c *client, req request, p wire.MessageParams) (any,
 	if roomID == "" {
 		roomID = defaultRoomID
 	}
-	messageID, replacing := p.MessageID, p.MessageID != ""
+	messageID, replacing := "", p.MessageID != 0
+	if replacing {
+		messageID = p.MessageID.String()
+	}
 	replyID, hasReply := "", p.ReplyTo != nil
 	if hasReply {
-		replyID = p.ReplyTo.MessageID
+		replyID = p.ReplyTo.MessageID.String()
 	}
 	deleted := p.Deleted
 	if deleted && !replacing {
@@ -523,7 +526,7 @@ const (
 // (§4.7). Entries are kept fully qualified, and duplicates collapse; an
 // unchanged set logs nothing. The broadcast precedes the result (§1).
 func (s *Server) react(c *client, req request, p wire.ReactParams) (any, bool, *Error) {
-	messageID := p.MessageID
+	messageID := p.MessageID.String()
 	emojis, err := normalizeEmojis(p.Emojis)
 	if err != nil {
 		return nil, false, err

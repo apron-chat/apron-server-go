@@ -26,7 +26,7 @@ func parseMe(r *Request) (p MeParams, err error) {
 // ReactParams are the params of reactions (§4.7): the sender's whole set
 // of emoji on a message, which replaces the last; empty clears it.
 type ReactParams struct {
-	MessageID string
+	MessageID LogID
 	// Emojis are non-empty strings, in the order sent; duplicates are the
 	// backend's to collapse, as it compares emoji (§4.7).
 	Emojis []string
@@ -40,7 +40,7 @@ type Reactor interface {
 
 func parseReact(r *Request) (p ReactParams, err error) {
 	var present bool
-	if p.MessageID, present, err = r.String("message_id"); err == nil && !present {
+	if p.MessageID, present, err = r.MessageID("message_id"); err == nil && !present {
 		err = Missing("message_id")
 	}
 	if err != nil {
@@ -82,7 +82,7 @@ type ActivityParams struct {
 	// Typing is the seconds to show the user as typing, 0 to stop.
 	Typing *int
 	// ReadMessageID is the message the user has read up to.
-	ReadMessageID *string
+	ReadMessageID *LogID
 }
 
 // Activity handles activity notifications, and adds capability activity
@@ -102,7 +102,7 @@ func parseActivity(r *Request) (p ActivityParams, err error) {
 		}
 		p.Typing = &typing
 	}
-	if read, present, err := r.String("read_message_id"); err != nil {
+	if read, present, err := r.MessageID("read_message_id"); err != nil {
 		return p, err
 	} else if present {
 		p.ReadMessageID = &read

@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json/jsontext"
 	"sort"
-	"strconv"
 )
 
 // HistoryParams are the params of history (§4.3): an empty RoomID is every
@@ -14,8 +13,8 @@ import (
 // backend's default.
 type HistoryParams struct {
 	RoomID string
-	After  *int64
-	Before *int64
+	After  *LogID
+	Before *LogID
 	Limit  int
 }
 
@@ -25,13 +24,13 @@ type HistoryResult struct {
 	Messages    []Message        `json:"messages,omitempty"`
 	Reactions   []jsontext.Value `json:"reactions,omitempty"`
 	Memberships []Membership     `json:"memberships,omitempty"`
-	FirstLogID  string           `json:"first_log_id,omitempty"`
-	LastLogID   string           `json:"last_log_id,omitempty"`
+	FirstLogID  LogID            `json:"first_log_id,omitzero"`
+	LastLogID   LogID            `json:"last_log_id,omitzero"`
 	More        bool             `json:"more"`
-	LatestLogID string           `json:"latest_log_id,omitempty"`
+	LatestLogID LogID            `json:"latest_log_id,omitzero"`
 	// HistoryLogID is the inclusive lower bound of what is retrievable, or
-	// nil for nothing.
-	HistoryLogID *string `json:"history_log_id"`
+	// 0 for nothing, which is sent as null: every result has it (§4.3.3).
+	HistoryLogID LogID `json:"history_log_id"`
 }
 
 // Historian handles history, and adds capability history (§4.3).
@@ -39,52 +38,52 @@ type Historian interface {
 	History(ctx context.Context, c *Conn, p HistoryParams) (HistoryResult, error)
 }
 
-// Record is one logged record, for Page: exactly one of its fields is set,
-// and LogID is its log_id as a number.
+// Record is one logged record, for Page: exactly one of Room, Message,
+// Membership, and Reactions is set, and LogID is its log_id.
 type Record struct {
-	LogID      int64
+	LogID      LogID
 	Room       *Room
 	Message    *Message
 	Membership *Membership
 	Reactions  jsontext.Value
 }
 
+// Log is a log for Page: its Records, in ascending log_id order, and its
+// bounds (§4.3.3). Lower is its effective lower bound, history_log_id, and
+// Latest its latest_log_id, both 0 for an empty log; records below Lower
+// are not retrievable.
+type Log struct {
+	Records       []Record
+	Lower, Latest LogID
+}
+
 // Page selects a window of a log as a history result (§4.3.2): the records
-// in log, in ascending log_id order, between the bounds, at most limit of
-// them, from the oldest with After and the newest without. lower is the
-// log's effective lower bound (history_log_id) and latest its latest_log_id,
-// both 0 for an empty log; records below lower are not returned. A limit
-// below 1 is 1.
+// between the bounds, at most limit of them, from the oldest with After and
+// the newest without. A limit below 1 is 1.
 //
 // A backend whose log is a slice of records, such as a host's recent
 // history, answers history with Page and nothing more.
-func Page(log []Record, p HistoryParams, limit int, lower, latest int64) HistoryResult {
-	result := HistoryResult{}
-	if latest > 0 {
-		result.LatestLogID = strconv.FormatInt(latest, 10)
-	}
-	if lower > 0 {
-		h := strconv.FormatInt(lower, 10)
-		result.HistoryLogID = &h
-	}
+func Page(log Log, p HistoryParams, limit int) HistoryResult {
+	result := HistoryResult{LatestLogID: log.Latest, HistoryLogID: log.Lower}
 	limit = max(limit, 1)
 	if p.Limit > 0 && p.Limit < limit {
 		limit = p.Limit
 	}
-	after := lower
+	records := log.Records
+	after := log.Lower
 	if p.After != nil {
-		after = max(*p.After, lower)
+		after = max(*p.After, log.Lower)
 	}
-	start := sort.Search(len(log), func(i int) bool { return log[i].LogID >= after })
-	end := len(log)
+	start := sort.Search(len(records), func(i int) bool { return records[i].LogID >= after })
+	end := len(records)
 	if p.Before != nil {
 		before := *p.Before
-		end = sort.Search(len(log), func(i int) bool { return log[i].LogID > before })
+		end = sort.Search(len(records), func(i int) bool { return records[i].LogID > before })
 	}
 	if start >= end {
 		return result
 	}
-	window := log[start:end]
+	window := records[start:end]
 	if len(window) > limit {
 		result.More = true
 		if p.After != nil {
@@ -93,8 +92,8 @@ func Page(log []Record, p HistoryParams, limit int, lower, latest int64) History
 			window = window[len(window)-limit:]
 		}
 	}
-	result.FirstLogID = strconv.FormatInt(window[0].LogID, 10)
-	result.LastLogID = strconv.FormatInt(window[len(window)-1].LogID, 10)
+	result.FirstLogID = window[0].LogID
+	result.LastLogID = window[len(window)-1].LogID
 	for _, r := range window {
 		switch {
 		case r.Room != nil:
@@ -117,7 +116,7 @@ func parseHistory(r *Request) (p HistoryParams, err error) {
 	}
 	for _, bound := range []struct {
 		name string
-		to   **int64
+		to   **LogID
 	}{{"after", &p.After}, {"before", &p.Before}} {
 		value, present, err := r.LogID(bound.name)
 		if err != nil {

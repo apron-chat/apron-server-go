@@ -8,19 +8,19 @@ import (
 // and MemberCount describe the room as one client sees it.
 type Room struct {
 	RoomID       string         `json:"room_id"`
-	LogID        string         `json:"log_id,omitempty"`
-	PrevLogID    string         `json:"prev_log_id,omitempty"`
+	LogID        LogID          `json:"log_id,omitzero"`
+	PrevLogID    LogID          `json:"prev_log_id,omitzero"`
 	ParentRoomID string         `json:"parent_room_id,omitempty"`
 	Private      bool           `json:"private,omitzero"`
 	Title        string         `json:"title,omitempty"`
 	Description  string         `json:"description,omitempty"`
 	Ext          map[string]any `json:"ext,omitempty"`
-	LatestLogID  string         `json:"latest_log_id,omitempty"`
+	LatestLogID  LogID          `json:"latest_log_id,omitzero"`
 	// HistoryLogID is the inclusive lower bound of the room's history, or
 	// nil for none (§4.3.3).
-	HistoryLogID *string `json:"history_log_id"`
-	Members      []User  `json:"members,omitempty"`
-	MemberCount  int     `json:"member_count,omitzero"`
+	HistoryLogID *LogID `json:"history_log_id"`
+	Members      []User `json:"members,omitempty"`
+	MemberCount  int    `json:"member_count,omitzero"`
 }
 
 // RoomRef names a room, as in room_update's left.
@@ -36,7 +36,7 @@ type Member struct {
 
 // Membership is a membership record (§4.2.2).
 type Membership struct {
-	LogID   string   `json:"log_id"`
+	LogID   LogID    `json:"log_id"`
 	RoomID  string   `json:"room_id"`
 	Members []Member `json:"members"`
 }
@@ -67,7 +67,7 @@ type RoomListParams struct {
 	Members      bool
 	UserID       string
 	// LatestLogID, if set, lists only the rooms that changed after it.
-	LatestLogID *int64
+	LatestLogID *LogID
 }
 
 // RoomListResult is the result of room_list. Server sends the arrays the

@@ -26,8 +26,8 @@
 //   - the core checks on a new message (§3.5.1, §3.6), and on the params of
 //     every typed request;
 //   - typed frames ([User], [Message], [Room], [ServerInfo], ...), the
-//     system identities ([Private], [RoomNotice], [ServerNotice]), and a
-//     [Clock] for log_ids (§2.1).
+//     system identities ([Private], [RoomNotice], [ServerNotice]), log_ids
+//     and message_ids as [LogID], and a [Clock] that issues them (§2.1).
 //
 // # Backends
 //
@@ -78,6 +78,6 @@
 //
 // A host that keeps less than the protocol asks for gets helpers: [IDs]
 // gives message_ids to messages that have none, derived from their own
-// times, and [Page] answers history from any ordered slice of records, such
-// as a host's recent-message buffer.
+// times, and [Page] answers history from a [Log]: any ordered slice of
+// records, such as a host's recent-message buffer, and its bounds.
 package wire

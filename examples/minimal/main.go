@@ -36,13 +36,13 @@ type Chat struct {
 
 	mu       sync.Mutex
 	guests   int
-	messages map[string]bool
+	messages map[wire.LogID]bool
 }
 
 const room = "general"
 
 func NewChat() *Chat {
-	c := &Chat{messages: make(map[string]bool)}
+	c := &Chat{messages: make(map[wire.LogID]bool)}
 	c.Server = &wire.Server{Backend: c, AllowAnyOrigin: true}
 	return c
 }

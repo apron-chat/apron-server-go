@@ -412,13 +412,8 @@ func parseMessage(r *Request) (p MessageParams, err error) {
 	if p.RoomID, _, err = r.IDParam("room_id"); err != nil {
 		return p, err
 	}
-	if id, present, err := r.String("message_id"); err != nil {
+	if p.MessageID, _, err = r.MessageID("message_id"); err != nil {
 		return p, err
-	} else if present {
-		if !ValidMessageID(id) {
-			return p, InvalidParams("message_id must be a positive decimal string")
-		}
-		p.MessageID = id
 	}
 	if replyTo, present, err := r.MessageRef("reply_to"); err != nil {
 		return p, err
@@ -487,7 +482,7 @@ func (s *Server) message(ctx context.Context, c *Conn, r *Request) (any, error) 
 	if err != nil {
 		return nil, err
 	}
-	if p.MessageID != "" || p.Deleted {
+	if p.MessageID != 0 || p.Deleted {
 		editor, ok := s.Backend.(Editor)
 		if !ok {
 			return nil, Unsupported("This server does not edit messages")

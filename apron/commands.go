@@ -375,7 +375,7 @@ func (s *Server) command(c *client, req request, p wire.MessageParams) (any, boo
 	}
 	replyID, hasReply := "", p.ReplyTo != nil
 	if hasReply {
-		replyID = p.ReplyTo.MessageID
+		replyID = p.ReplyTo.MessageID.String()
 	}
 	var body map[string]any
 	_ = json.Unmarshal(p.BodyRaw, &body)

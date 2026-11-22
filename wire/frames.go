@@ -3,9 +3,7 @@ package wire
 import (
 	"encoding/json/jsontext"
 	"slices"
-	"strconv"
 	"strings"
-	"sync"
 	"unicode"
 
 	"github.com/apron-chat/apron-server-go/internal/wirecore"
@@ -117,19 +115,19 @@ const (
 
 // Ref refers to a message by its message_id (§3.5.4).
 type Ref struct {
-	MessageID string `json:"message_id"`
+	MessageID LogID `json:"message_id"`
 }
 
 // Message is a message snapshot, or a transient notice when MessageID is
-// empty (§3.5).
+// 0 (§3.5).
 type Message struct {
-	MessageID  string         `json:"message_id,omitempty"`
-	LogID      string         `json:"log_id,omitempty"`
+	MessageID  LogID          `json:"message_id,omitzero"`
+	LogID      LogID          `json:"log_id,omitzero"`
 	RoomID     string         `json:"room_id,omitempty"`
 	From       User           `json:"from"`
 	Body       *Body          `json:"body,omitempty"`
 	ReplyTo    *Ref           `json:"reply_to,omitempty"`
-	PrevLogID  string         `json:"prev_log_id,omitempty"`
+	PrevLogID  LogID          `json:"prev_log_id,omitzero"`
 	PrevRoomID string         `json:"prev_room_id,omitempty"`
 	Deleted    bool           `json:"deleted,omitzero"`
 	Ext        map[string]any `json:"ext,omitempty"`
@@ -166,9 +164,9 @@ type AuthResult struct {
 // MessageParams are the params of a message request, or of a command
 // (§3.5, §4.1, §4.4).
 type MessageParams struct {
-	// MessageID is set on a save of an existing message (§4.4), and empty
-	// on a new one.
-	MessageID string
+	// MessageID is set on a save of an existing message (§4.4), and 0 on
+	// a new one.
+	MessageID LogID
 	// RoomID is the room, or "" for the default room.
 	RoomID string
 	// Body is nil when the request leaves it out, as a deletion does.
@@ -185,7 +183,7 @@ type MessageParams struct {
 // MessageResult is the result of a message request: the new message's
 // message_id, or nothing.
 type MessageResult struct {
-	MessageID string `json:"message_id,omitempty"`
+	MessageID LogID `json:"message_id,omitzero"`
 }
 
 // MeParams are the params of me (§3.3.2): the profile fields to change. A
@@ -215,19 +213,4 @@ func marshal(value any) ([]byte, error) { return wirecore.Marshal(value) }
 // with no whitespace or control characters.
 func ValidID(id string) bool {
 	return id != "" && !strings.ContainsFunc(id, func(r rune) bool { return unicode.IsSpace(r) || unicode.IsControl(r) })
-}
-
-// Clock issues log_ids (§2.1): the time in milliseconds, or the previous
-// log_id plus one, so they strictly increase. The zero Clock is ready.
-type Clock struct {
-	mu   sync.Mutex
-	last int64
-}
-
-// Next returns the next log_id.
-func (c *Clock) Next() string {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.last = wirecore.NextLogID(c.last)
-	return strconv.FormatInt(c.last, 10)
 }

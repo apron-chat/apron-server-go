@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"maps"
 	"slices"
-	"strconv"
 )
 
 // Fields are the fields of a JSON object, such as a request's params, each
@@ -108,21 +107,37 @@ func (f Fields) Ext(name string) (Ext, bool, error) {
 }
 
 // LogID reads a log_id param, such as a history bound (§2.1): a decimal
-// string of a non-negative number.
-func (f Fields) LogID(name string) (int64, bool, error) {
+// string of a non-negative number, as ParseLogID reads it.
+func (f Fields) LogID(name string) (LogID, bool, error) {
 	raw, ok := f[name]
 	if !ok {
 		return 0, false, nil
 	}
 	var value string
-	if json.Unmarshal(raw, &value) != nil {
+	if isNull(raw) || json.Unmarshal(raw, &value) != nil {
 		return 0, true, InvalidParams(name + " must be a decimal string")
 	}
-	number, err := strconv.ParseInt(value, 10, 64)
-	if err != nil || number < 0 {
+	id, err := ParseLogID(value)
+	if err != nil {
 		return 0, true, InvalidParams(name + " must be a non-negative decimal string")
 	}
-	return number, true, nil
+	return id, true, nil
+}
+
+// MessageID reads a message_id param (§2.2): a log_id that is not 0.
+func (f Fields) MessageID(name string) (LogID, bool, error) {
+	raw, ok := f[name]
+	if !ok {
+		return 0, false, nil
+	}
+	var value string
+	if isNull(raw) || json.Unmarshal(raw, &value) != nil {
+		return 0, true, InvalidParams(name + " must be a positive decimal string")
+	}
+	if id, err := ParseLogID(value); err == nil && id > 0 {
+		return id, true, nil
+	}
+	return 0, true, InvalidParams(name + " must be a positive decimal string")
 }
 
 // Count reads a positive integer param, such as a limit.
@@ -139,33 +154,21 @@ func (f Fields) Count(name string) (int, bool, error) {
 }
 
 // MessageRef reads a reference to a message (§3.5.4), {"message_id": ...},
-// and returns its message_id, a positive decimal string.
-func (f Fields) MessageRef(name string) (string, bool, error) {
+// and returns its message_id, as MessageID reads it.
+func (f Fields) MessageRef(name string) (LogID, bool, error) {
 	raw, present := f[name]
 	if !present {
-		return "", false, nil
+		return 0, false, nil
 	}
-	var ref struct {
-		MessageID *string `json:"message_id"`
+	var ref Fields
+	if isNull(raw) || json.Unmarshal(raw, &ref) != nil || ref == nil {
+		return 0, true, InvalidParams(name + ".message_id must be a positive decimal string")
 	}
-	if isNull(raw) || json.Unmarshal(raw, &ref) != nil || ref.MessageID == nil || !ValidMessageID(*ref.MessageID) {
-		return "", true, InvalidParams(name + ".message_id must be a positive decimal string")
+	id, present, err := ref.MessageID("message_id")
+	if err != nil || !present {
+		return 0, true, InvalidParams(name + ".message_id must be a positive decimal string")
 	}
-	return *ref.MessageID, true, nil
-}
-
-// ValidMessageID reports whether id may be a message_id or log_id: a
-// positive decimal string (§2.1).
-func ValidMessageID(id string) bool {
-	if len(id) == 0 || id[0] < '1' || id[0] > '9' {
-		return false
-	}
-	for _, ch := range id {
-		if ch < '0' || ch > '9' {
-			return false
-		}
-	}
-	return true
+	return id, true, nil
 }
 
 // Ext is an ext object (§4.13), keyed by extension name, each value kept
@@ -206,11 +209,12 @@ func emptyJSON(value jsontext.Value) bool {
 
 // The Request's accessors read its params (Fields).
 
-func (r *Request) String(name string) (string, bool, error)     { return r.Fields().String(name) }
-func (r *Request) IDParam(name string) (string, bool, error)    { return r.Fields().IDParam(name) }
-func (r *Request) Bool(name string) (bool, bool, error)         { return r.Fields().Bool(name) }
-func (r *Request) Object(name string) (Fields, bool, error)     { return r.Fields().Object(name) }
-func (r *Request) Ext(name string) (Ext, bool, error)           { return r.Fields().Ext(name) }
-func (r *Request) LogID(name string) (int64, bool, error)       { return r.Fields().LogID(name) }
-func (r *Request) Count(name string) (int, bool, error)         { return r.Fields().Count(name) }
-func (r *Request) MessageRef(name string) (string, bool, error) { return r.Fields().MessageRef(name) }
+func (r *Request) String(name string) (string, bool, error)    { return r.Fields().String(name) }
+func (r *Request) IDParam(name string) (string, bool, error)   { return r.Fields().IDParam(name) }
+func (r *Request) Bool(name string) (bool, bool, error)        { return r.Fields().Bool(name) }
+func (r *Request) Object(name string) (Fields, bool, error)    { return r.Fields().Object(name) }
+func (r *Request) Ext(name string) (Ext, bool, error)          { return r.Fields().Ext(name) }
+func (r *Request) LogID(name string) (LogID, bool, error)      { return r.Fields().LogID(name) }
+func (r *Request) MessageID(name string) (LogID, bool, error)  { return r.Fields().MessageID(name) }
+func (r *Request) Count(name string) (int, bool, error)        { return r.Fields().Count(name) }
+func (r *Request) MessageRef(name string) (LogID, bool, error) { return r.Fields().MessageRef(name) }

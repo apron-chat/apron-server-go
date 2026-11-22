@@ -641,7 +641,7 @@ func (s *Server) listRooms(c *client, req request, p wire.RoomListParams) (any, 
 	var since int64
 	hasSince := p.LatestLogID != nil
 	if hasSince {
-		since = *p.LatestLogID
+		since = int64(*p.LatestLogID)
 	}
 
 	s.mu.RLock()
@@ -855,10 +855,10 @@ func (s *Server) history(c *client, req request, p wire.HistoryParams) (any, boo
 	var after, before int64
 	hasAfter, hasBefore := p.After != nil, p.Before != nil
 	if hasAfter {
-		after = *p.After
+		after = int64(*p.After)
 	}
 	if hasBefore {
-		before = *p.Before
+		before = int64(*p.Before)
 	}
 	limit := s.config.HistoryPageSize
 	if p.Limit > 0 {
@@ -1056,7 +1056,7 @@ func (s *Server) activity(c *client, p wire.ActivityParams) *Error {
 	}
 	readID, hasRead := "", p.ReadMessageID != nil
 	if hasRead {
-		readID = *p.ReadMessageID
+		readID = p.ReadMessageID.String()
 	}
 	s.mu.Lock()
 	defer s.unlock()
