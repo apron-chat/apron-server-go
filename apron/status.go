@@ -417,11 +417,8 @@ func (u *userState) shownStatus() string {
 
 // you is the user's own current object (§3.3): its profile, with the
 // chosen status in place of the shown one, and never seen (§4.5.2).
-func (u *userState) you() map[string]any {
-	profile := u.profile()
-	profile["status"] = u.chosen
-	delete(profile, "seen")
-	return profile
+func (u *userState) you() wire.CurrentUser {
+	return u.current(u.chosen, false)
 }
 
 // noteShownLocked notes u's shown status after a change to its chosen

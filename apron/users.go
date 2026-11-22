@@ -7,6 +7,7 @@ import (
 	"maps"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -174,22 +175,30 @@ func (u *userState) hasRole(role string) bool {
 // profile is the complete current user object for user and users (§3.3),
 // with the published shown status, and seen when it is offline (§4.5.2);
 // you has the chosen status instead.
-func (u *userState) profile() map[string]any {
-	value := maps.Clone(u.from())
-	value["status"] = u.status
-	u.addSeen(value)
-	if u.avatar != "" {
-		value["avatar"] = u.avatar
+func (u *userState) profile() wire.CurrentUser {
+	return u.current(u.status, true)
+}
+
+// current is the user's complete current object with status, and seen
+// when the status is offline and withSeen is set. The status is always
+// sent, "" too, and so are an account's roles, [] when it has none, so
+// that a role taken away clears the one a client kept (§3.3); guests hold
+// none.
+func (u *userState) current(status string, withSeen bool) wire.CurrentUser {
+	object := wire.CurrentUser{User: wire.User{
+		UserID: u.id, Name: u.name, Avatar: u.avatar, Status: status,
+		Roles: slices.Clone(u.roles), Ext: maps.Clone(u.ext),
+	}}
+	if withSeen && status == statusOffline && u.seen > 0 {
+		object.Seen = strconv.FormatInt(u.seen, 10)
 	}
-	// An account's roles are always sent, [] when it has none, so a role
-	// taken away clears the one a client kept (§3.3); guests hold none.
-	if len(u.roles) > 0 || u.account() {
-		value["roles"] = append([]string{}, u.roles...)
+	if status == "" {
+		object.Cleared = append(object.Cleared, "status")
 	}
-	if len(u.ext) > 0 {
-		value["ext"] = maps.Clone(u.ext)
+	if len(u.roles) == 0 && u.account() {
+		object.Cleared = append(object.Cleared, "roles")
 	}
-	return value
+	return object
 }
 
 // normalizeName prepares a requested display name with the PRECIS
@@ -457,38 +466,42 @@ func (s *Server) notifyProfileLocked(u *userState, except *client, cleared extOb
 	// one held back to coalesce included.
 	s.publishLocked(u)
 	profile := withCleared(withRemoved(u.profile(), removed), cleared)
-	you := notification("user", map[string]any{"you": withCleared(withRemoved(u.you(), removed), cleared)})
+	yours := withCleared(withRemoved(u.you(), removed), cleared)
+	you := notification("user", wire.UserUpdate{You: &yours})
 	for c := range u.clients {
 		if c != except {
 			c.enqueue(you)
 		}
 	}
-	others := notification("user", map[string]any{"new": profile})
+	others := notification("user", wire.UserUpdate{New: &profile})
 	for _, other := range s.sharersLocked(u) {
 		other.send(others)
 	}
 }
 
-// withRemoved adds each removed field to a profile as its empty value.
-func withRemoved(profile map[string]any, removed []string) map[string]any {
+// withRemoved clears each removed field of a profile, which sends it as
+// its empty value.
+func withRemoved(profile wire.CurrentUser, removed []string) wire.CurrentUser {
 	for _, field := range removed {
-		profile[field] = ""
+		if !slices.Contains(profile.Cleared, field) {
+			profile.Cleared = append(profile.Cleared, field)
+		}
 	}
 	return profile
 }
 
 // withCleared adds each cleared ext key to a profile's ext as its empty
 // value (§4.12).
-func withCleared(profile map[string]any, cleared extObject) map[string]any {
+func withCleared(profile wire.CurrentUser, cleared extObject) wire.CurrentUser {
 	if len(cleared) == 0 {
 		return profile
 	}
-	ext := maps.Clone(extOf(profile["ext"]))
+	ext := maps.Clone(profile.Ext)
 	if ext == nil {
 		ext = make(extObject, len(cleared))
 	}
 	maps.Copy(ext, cleared)
-	profile["ext"] = ext
+	profile.Ext = ext
 	return profile
 }
 
