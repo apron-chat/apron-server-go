@@ -16,3 +16,9 @@ file sets in a table of that name (`[sso]`). Run one with
 | [`irc-bridge`](irc-bridge) | A room bridged to an IRC channel both ways, relaying what it missed while down: `Follow`, `WithExt`. |
 | [`private`](private) | Only invited people may sign in, and nothing is visible to anyone else; admins manage the list with `/allow` and `/disallow`, which signs people out: `RestrictSignIn`, `Allowlist`, `ParsePrincipal`, `Store`. |
 | [`search`](search) | Full-text search as a request and a command, limited to rooms the person may see, and a web archive of public rooms: `Method`, `Advertise`, `OnEventFrom`, `Visible`, `Public`. |
+
+[`minimal`](minimal) is the other kind: a whole server in about a hundred
+lines on package [`wire`](../wire), which speaks the protocol for a program
+that keeps its own state, such as a gateway in front of another chat system.
+It takes only `--addr`. Run the conformance checks against it with
+`conform.py ws://127.0.0.1:8080/ws`.

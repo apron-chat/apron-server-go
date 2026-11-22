@@ -95,6 +95,11 @@ func (Hello) Init(r *apron.Registrar) error {
 func main() { aproncmd.Main(Hello{}) }
 ```
 
+A program that already keeps its own chat state, such as a gateway in front
+of another chat system, uses package [`wire`](wire) instead: it speaks the
+protocol and asks the program for every answer, as
+[`examples/minimal`](examples/minimal) shows in about a hundred lines.
+
 [`examples`](examples) has complete servers: GitHub single sign-on,
 moderation, an AI assistant, an ops room with deploys, an IRC bridge, and
 search with a public archive. See the
