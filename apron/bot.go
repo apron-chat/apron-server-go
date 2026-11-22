@@ -6,6 +6,7 @@ import (
 	"encoding/json/v2"
 	"errors"
 	"fmt"
+	"github.com/apron-chat/apron-server-go/apron/internal/livetext"
 	"github.com/apron-chat/apron-server-go/wire"
 	"net"
 	"net/url"
@@ -581,7 +582,7 @@ type LiveWriter struct {
 
 	mu     sync.Mutex
 	e      *embedState
-	live   *liveText
+	live   *livetext.Text
 	err    error
 	closed bool
 }
@@ -633,7 +634,7 @@ func (w *LiveWriter) Write(p []byte) (int, error) {
 		return 0, err
 	case closed:
 		return 0, ErrLiveTextEnded
-	case !live.write(p):
+	case !live.Write(p):
 		return 0, ErrLiveTextEnded
 	}
 	return len(p), nil

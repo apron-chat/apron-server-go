@@ -22,6 +22,8 @@ import (
 	"time"
 
 	_ "golang.org/x/image/webp" // Registered for image.DecodeConfig.
+
+	"github.com/apron-chat/apron-server-go/apron/internal/livetext"
 )
 
 // HTTP paths for embed content (§4.8.3). Write URLs carry a one-time token;
@@ -87,7 +89,7 @@ type embedState struct {
 	contentType string
 	// live holds a terminal's or an append's text until it finishes; a
 	// finished terminal serves its output from owned. Restored embeds have none.
-	live *liveText
+	live *livetext.Text
 }
 
 // image reports whether the embed is an avatar, the server's included, or
@@ -106,7 +108,7 @@ func (e *embedState) apart() bool {
 
 func (e *embedState) endLive() {
 	if e.live != nil {
-		e.live.end()
+		e.live.End()
 	}
 }
 
@@ -225,7 +227,7 @@ func ogImageAlt(og any) string {
 			if len(alt) > maxAltBytes {
 				// Alt text describes an image in a sentence or two; the
 				// server keeps it, and the emoji catalog serves it to all.
-				alt = string(wholeRunes([]byte(alt[:maxAltBytes])))
+				alt = string(livetext.WholeRunes([]byte(alt[:maxAltBytes])))
 			}
 			return alt
 		}
