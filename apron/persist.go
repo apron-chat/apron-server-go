@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"log/slog"
 	"maps"
-	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -651,7 +650,7 @@ func (s *Server) restoreLocked() (map[string]bool, error) {
 			contentType: stored.ContentType, seq: stored.Seq,
 		}
 		if stored.File != "" {
-			e.path = filepath.Join(s.uploadDir, stored.File)
+			e.path = s.files.Path(stored.File)
 			files[e.path] = true
 			uploads = append(uploads, e)
 		}
@@ -808,17 +807,6 @@ func (s *Server) restoreVAPIDLocked(raw jsontext.Value) error {
 	s.vapid, s.vapidStored = key, true
 	s.dirty.vapid = true
 	return nil
-}
-
-// removeStaleUploads deletes upload files in the upload directory that no
-// restored embed holds, such as those of a run without persistence.
-func (s *Server) removeStaleUploads(keep map[string]bool) {
-	stale, _ := filepath.Glob(filepath.Join(s.uploadDir, "*"+uploadSuffix))
-	for _, name := range stale {
-		if !keep[name] {
-			_ = os.Remove(name)
-		}
-	}
 }
 
 // restoreIdentitiesLocked gives a stored account its identities, their

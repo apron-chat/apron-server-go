@@ -12,14 +12,12 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"os"
 	"path"
 	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/go-webauthn/webauthn/protocol"
@@ -29,6 +27,7 @@ import (
 	"github.com/apron-chat/apron-server-go/apron/internal/durable"
 	"github.com/apron-chat/apron-server-go/apron/internal/proposals"
 	"github.com/apron-chat/apron-server-go/apron/internal/roomlog"
+	"github.com/apron-chat/apron-server-go/apron/internal/uploads"
 	"github.com/apron-chat/apron-server-go/apron/internal/webpush"
 	"github.com/apron-chat/apron-server-go/internal/auth/external"
 	"github.com/apron-chat/apron-server-go/internal/auth/passkey"
@@ -481,14 +480,9 @@ type Server struct {
 	// size. Custom emoji have their own bound, MaxEmojiStorageBytes.
 	uploads     *list.List
 	uploadBytes int64
-	// uploadsArriving counts the bytes written by uploads whose bodies are
-	// arriving, or not yet recorded (arrivingWriter), which
-	// MaxUploadStorageBytes also bounds. It is atomic, as bodies arrive
-	// without s.mu.
-	uploadsArriving atomic.Int64
-	// uploadDir holds upload content; tempUploadDir is removed on Shutdown.
-	uploadDir     string
-	tempUploadDir bool
+	// files holds upload content, and counts the bytes of bodies arriving,
+	// which MaxUploadStorageBytes also bounds.
+	files *uploads.Dir
 	// uploadSeq orders finished uploads across restarts.
 	uploadSeq int64
 	// emoji is the custom emoji catalog by key (ext:emoji); emojiCatalog
@@ -684,7 +678,7 @@ func Open(config Config) (*Server, error) {
 		}
 		s.externalBy = "Config.ExternalIssuer"
 	}
-	s.openUploadDir()
+	s.files = uploads.Open(config.UploadDir, config.MaxUploadStorageBytes)
 	s.store = durable.Start(config.Store, config.OnStoreError, ErrServerClosed)
 	s.mu.Lock()
 	files, err := s.restoreLocked()
@@ -699,7 +693,7 @@ func Open(config Config) (*Server, error) {
 		// other room, so its history_log_id is never null.
 		s.commitRoomLocked(defaultRoomID, nil, false, roomlog.RoomRecord{Title: "General"})
 	}
-	s.removeStaleUploads(files)
+	s.files.RemoveStale(files)
 	s.unlock()
 	go s.sweepPushes()
 	err = s.initExtensions(config.Extensions)
@@ -836,9 +830,7 @@ func (s *Server) Shutdown(ctx context.Context) error {
 		for _, u := range s.users {
 			s.stopTimersLocked(u)
 		}
-		if s.tempUploadDir {
-			_ = os.RemoveAll(s.uploadDir)
-		}
+		s.files.Close()
 	}
 	s.unlock()
 

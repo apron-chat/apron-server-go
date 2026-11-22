@@ -6,11 +6,6 @@ import (
 	"crypto/subtle"
 	"errors"
 	"fmt"
-	"image"
-	_ "image/gif" // Registered for image.DecodeConfig.
-	_ "image/jpeg"
-	_ "image/png"
-	"io"
 	"log/slog"
 	"maps"
 	"mime"
@@ -18,12 +13,10 @@ import (
 	"os"
 	"strconv"
 	"strings"
-	"sync/atomic"
 	"time"
 
-	_ "golang.org/x/image/webp" // Registered for image.DecodeConfig.
-
 	"github.com/apron-chat/apron-server-go/apron/internal/livetext"
+	"github.com/apron-chat/apron-server-go/apron/internal/uploads"
 )
 
 // HTTP paths for embed content (§4.8.3). Write URLs carry a one-time token;
@@ -516,24 +509,24 @@ func (s *Server) writeUpload(w http.ResponseWriter, r *http.Request, e *embedSta
 		tooLargeMessage = fmt.Sprintf("This upload is limited to %d bytes", limit)
 	}
 	_ = http.NewResponseController(w).SetReadDeadline(time.Now().Add(uploadReadTimeout))
-	file, size, err := s.receiveUpload(w, r, limit)
+	file, size, err := s.files.Receive(w, r, limit)
 	// What arrived counts as arriving until the upload is recorded, and so
 	// counted in uploadBytes, or its file removed.
-	defer s.uploadsArriving.Add(-size)
+	defer s.files.Release(size)
 	var head []byte
 	if file != nil {
 		head = make([]byte, 512)
 		n, _ := file.ReadAt(head, 0)
 		head = head[:n]
 	}
-	contentType := uploadContentType(r.Header.Get("Content-Type"), head)
-	if err == nil && e.image() && !validAvatarImage(contentType, file) {
+	contentType := uploads.ContentType(r.Header.Get("Content-Type"), head)
+	if err == nil && e.image() && !uploads.ValidImage(contentType, file) {
 		err = errNotAvatar
 	}
 	var og map[string]any
 	if err == nil {
 		e.contentType = contentType
-		og = describeUpload(e, file)
+		og = uploads.Describe(e.fileURL(), e.contentType, e.title, e.alt, file)
 	}
 	if file != nil {
 		// A finished upload is on disk before the store records it, so a
@@ -542,12 +535,12 @@ func (s *Server) writeUpload(w http.ResponseWriter, r *http.Request, e *embedSta
 		if err == nil {
 			if syncErr := file.Sync(); syncErr != nil {
 				slog.Error("cannot store upload", "error", syncErr)
-				err = errUploadStore
+				err = uploads.ErrStore
 			}
 		}
 		if closeErr := file.Close(); err == nil && closeErr != nil {
 			slog.Error("cannot store upload", "error", closeErr)
-			err = errUploadStore
+			err = uploads.ErrStore
 		}
 	}
 	s.mu.Lock()
@@ -579,11 +572,11 @@ func (s *Server) writeUpload(w http.ResponseWriter, r *http.Request, e *embedSta
 	case errors.Is(err, errNotAvatar):
 		fail(http.StatusUnsupportedMediaType, "Avatars and emoji must be PNG, JPEG, GIF, or WebP images")
 		return
-	case errors.Is(err, errUploadsArriving):
+	case errors.Is(err, uploads.ErrArriving):
 		w.Header().Set("Retry-After", strconv.Itoa(retryAfterSeconds))
 		fail(http.StatusInsufficientStorage, "The server is receiving too many uploads at once; try again shortly")
 		return
-	case errors.Is(err, errUploadStore):
+	case errors.Is(err, uploads.ErrStore):
 		fail(http.StatusInternalServerError, "The server could not store the upload")
 		return
 	case err != nil:
@@ -654,61 +647,6 @@ var errNotAvatar = errors.New("not an avatar image")
 // (writeAllowedLocked).
 const writeRevokedMessage = "The account that made this write URL may no longer write here"
 
-// errUploadStore is the server's failure to keep an upload's file, rather
-// than the writer's.
-var errUploadStore = errors.New("cannot store the upload")
-
-// errUploadsArriving refuses the part of an upload's body that would take
-// the bodies arriving at once past MaxUploadStorageBytes.
-var errUploadsArriving = errors.New("too many uploads arriving")
-
-// arrivingWriter writes an upload's body to its file, counting each byte
-// written in arriving until the upload ends (writeUpload), and refuses what
-// would take that count past limit. The hosted storage counts only finished
-// uploads, so this bounds what is on disk while bodies arrive: the bytes
-// that arrived, never a reservation for what may, so that bodies sent a byte
-// at a time cannot hold the storage from everyone else.
-type arrivingWriter struct {
-	file     *os.File
-	arriving *atomic.Int64
-	limit    int64
-}
-
-func (w arrivingWriter) Write(p []byte) (int, error) {
-	if w.arriving.Add(int64(len(p))) > w.limit {
-		w.arriving.Add(-int64(len(p)))
-		return 0, errUploadsArriving
-	}
-	n, err := w.file.Write(p)
-	w.arriving.Add(int64(n - len(p)))
-	if err != nil {
-		// Writing the file is the server's failure, such as a full disk.
-		slog.Error("cannot store upload", "error", err)
-		return n, errUploadStore
-	}
-	return n, nil
-}
-
-// receiveUpload copies a request body of at most limit bytes into a new file
-// in the upload directory, and returns the bytes written, which it counts in
-// uploadsArriving. On error the file, if any, is still returned so the
-// caller can remove it.
-func (s *Server) receiveUpload(w http.ResponseWriter, r *http.Request, limit int64) (*os.File, int64, error) {
-	if limit <= 0 {
-		return nil, 0, &http.MaxBytesError{Limit: limit}
-	}
-	file, err := os.CreateTemp(s.uploadDir, "*"+uploadSuffix)
-	if err != nil {
-		slog.Error("cannot store upload", "error", err)
-		return nil, 0, errUploadStore
-	}
-	// Every byte written is counted in uploadsArriving, so size is what
-	// writeUpload releases.
-	written := arrivingWriter{file: file, arriving: &s.uploadsArriving, limit: s.config.MaxUploadStorageBytes}
-	size, err := io.Copy(written, http.MaxBytesReader(w, r.Body, limit))
-	return file, size, err
-}
-
 // messageUploadBytesLocked totals the finished uploads of one message.
 func (s *Server) messageUploadBytesLocked(messageID string) int64 {
 	var total int64
@@ -754,109 +692,6 @@ func (s *Server) evictUploadsLocked(keep *embedState) {
 	}
 }
 
-// uploadSuffix names upload files, so stale ones can be told apart from
-// anything else in the directory.
-const uploadSuffix = ".upload"
-
-// openUploadDir prepares the upload directory: the configured one, or a new
-// temporary one. Upload files no restored embed holds are removed after the
-// state is restored.
-func (s *Server) openUploadDir() {
-	dir := s.config.UploadDir
-	if dir == "" {
-		temp, err := os.MkdirTemp("", "aprond-uploads-")
-		if err != nil {
-			slog.Error("cannot create a temporary upload directory", "error", err)
-			return
-		}
-		s.uploadDir, s.tempUploadDir = temp, true
-		return
-	}
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		slog.Error("cannot create the upload directory", "dir", dir, "error", err)
-	}
-	s.uploadDir = dir
-}
-
-// uploadContentType prefers the sender's declared type, except for types a
-// browser would run as a document, and otherwise sniffs the content.
-func uploadContentType(declared string, head []byte) string {
-	if mediaType, _, err := mime.ParseMediaType(declared); err == nil && mediaType != "application/octet-stream" {
-		if !activeType(mediaType) {
-			return mediaType
-		}
-	}
-	mediaType, _, _ := mime.ParseMediaType(http.DetectContentType(head))
-	if activeType(mediaType) {
-		return "application/octet-stream"
-	}
-	return mediaType
-}
-
-// activeType reports whether a browser could run or apply content of the
-// type on this origin: markup, scripts, stylesheets, and WebAssembly.
-func activeType(mediaType string) bool {
-	for _, marker := range []string{"html", "xml", "xsl", "script", "jscript", "css", "wasm"} {
-		if strings.Contains(mediaType, marker) {
-			return true
-		}
-	}
-	return false
-}
-
-// validAvatarImage checks that an avatar upload's content decodes as the
-// image type it declares.
-func validAvatarImage(contentType string, file *os.File) bool {
-	if !avatarType(contentType) || file == nil {
-		return false
-	}
-	_, format, err := image.DecodeConfig(io.NewSectionReader(file, 0, 1<<30))
-	return err == nil && "image/"+format == contentType
-}
-
-func avatarType(contentType string) bool {
-	switch contentType {
-	case "image/png", "image/jpeg", "image/gif", "image/webp":
-		return true
-	}
-	return false
-}
-
-// describeUpload builds the og the server sets on a finished upload
-// (§4.8.4): image for a preview, or video or audio to play. Other files
-// have none, so clients show a file card.
-func describeUpload(e *embedState, file *os.File) map[string]any {
-	media := map[string]any{"url": e.fileURL(), "type": e.contentType}
-	og := map[string]any{}
-	switch {
-	case avatarType(e.contentType):
-		if config, _, err := image.DecodeConfig(io.NewSectionReader(file, 0, 1<<30)); err == nil {
-			media["width"], media["height"] = config.Width, config.Height
-		}
-		if e.alt != "" {
-			media["alt"] = e.alt
-		}
-		og["image"] = media
-	case strings.HasPrefix(e.contentType, "video/"):
-		og["video"] = media
-	case strings.HasPrefix(e.contentType, "audio/"):
-		og["audio"] = media
-	default:
-		return nil
-	}
-	if e.title != "" {
-		og["title"] = e.title
-	}
-	return og
-}
-
-// inlineType reports whether a hosted file may be shown in the browser
-// rather than downloaded.
-func inlineType(contentType string) bool {
-	return avatarType(contentType) || contentType == "text/plain" ||
-		strings.HasPrefix(contentType, "video/") || strings.HasPrefix(contentType, "audio/")
-}
-
 // handleFile serves a finished upload. Hosted files never run as documents on
 // this origin: they are sandboxed, not sniffed, and downloaded unless they
 // are media or plain text.
@@ -888,7 +723,7 @@ func (s *Server) handleFile(w http.ResponseWriter, r *http.Request) {
 	header.Set("Content-Security-Policy", "sandbox; default-src 'none'")
 	header.Set("Cache-Control", "private, max-age=3600")
 	disposition := "attachment"
-	if inlineType(contentType) {
+	if uploads.Inline(contentType) {
 		disposition = "inline"
 	}
 	if title != "" {

@@ -8,11 +8,13 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/apron-chat/apron-server-go/apron/internal/uploads"
 )
 
 func TestUploadsAreStoredOnDiskWithinLimits(t *testing.T) {
 	dir := t.TempDir()
-	stale := filepath.Join(dir, "left-by-an-earlier-run"+uploadSuffix)
+	stale := filepath.Join(dir, "left-by-an-earlier-run"+uploads.Suffix)
 	other := filepath.Join(dir, "notes.txt")
 	for _, name := range []string{stale, other} {
 		if err := os.WriteFile(name, []byte("x"), 0o600); err != nil {
@@ -66,7 +68,7 @@ func TestUploadsAreStoredOnDiskWithinLimits(t *testing.T) {
 		t.Fatalf("second upload: %d", status)
 	}
 	secondFile := embedsOf(t, a.notification(t, "message"))[0]["url"].(string)
-	if files, _ := filepath.Glob(filepath.Join(dir, "*"+uploadSuffix)); len(files) != 2 {
+	if files, _ := filepath.Glob(filepath.Join(dir, "*"+uploads.Suffix)); len(files) != 2 {
 		t.Fatalf("upload files: %v", files)
 	}
 
@@ -88,7 +90,7 @@ func TestUploadsAreStoredOnDiskWithinLimits(t *testing.T) {
 	if status, _, _ := httpDo(t, http.MethodGet, secondFile, nil, ""); status != http.StatusOK {
 		t.Fatalf("kept file: %d", status)
 	}
-	if files, _ := filepath.Glob(filepath.Join(dir, "*"+uploadSuffix)); len(files) != 2 {
+	if files, _ := filepath.Glob(filepath.Join(dir, "*"+uploads.Suffix)); len(files) != 2 {
 		t.Fatalf("upload files after eviction: %v", files)
 	}
 }

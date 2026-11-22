@@ -214,9 +214,9 @@ func TestArrivingUploadsAreBounded(t *testing.T) {
 		t.Helper()
 		// A write counts its bytes until writeUpload returns, just after
 		// its answer.
-		for deadline := time.Now().Add(5 * time.Second); app.uploadsArriving.Load() != want; {
+		for deadline := time.Now().Add(5 * time.Second); app.files.Arriving() != want; {
 			if time.Now().After(deadline) {
-				t.Fatalf("%d bytes arriving, want %d", app.uploadsArriving.Load(), want)
+				t.Fatalf("%d bytes arriving, want %d", app.files.Arriving(), want)
 			}
 			time.Sleep(10 * time.Millisecond)
 		}

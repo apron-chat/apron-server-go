@@ -17,6 +17,7 @@ import (
 
 	"github.com/coder/websocket"
 
+	"github.com/apron-chat/apron-server-go/apron/internal/uploads"
 	"github.com/apron-chat/apron-server-go/store"
 )
 
@@ -120,7 +121,7 @@ func putEmoji(t *testing.T, writeURL string, content []byte, contentType string)
 // uploadFiles counts the upload files in dir.
 func uploadFiles(t *testing.T, dir string) int {
 	t.Helper()
-	files, err := filepath.Glob(filepath.Join(dir, "*"+uploadSuffix))
+	files, err := filepath.Glob(filepath.Join(dir, "*"+uploads.Suffix))
 	if err != nil {
 		t.Fatal(err)
 	}

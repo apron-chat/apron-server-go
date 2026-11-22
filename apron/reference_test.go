@@ -17,6 +17,8 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+
+	"github.com/apron-chat/apron-server-go/apron/internal/uploads"
 )
 
 func TestRoomListFiltersAndOrder(t *testing.T) {
@@ -748,11 +750,11 @@ func TestUploadTypesThatCouldRunAreServedAsDownloads(t *testing.T) {
 		"text/xsl":         "text/plain",
 		"application/wasm": "text/plain",
 	} {
-		if got := uploadContentType(declared, []byte("hello")); got != want {
+		if got := uploads.ContentType(declared, []byte("hello")); got != want {
 			t.Errorf("%s: served as %s, want %s", declared, got, want)
 		}
 	}
-	if got := uploadContentType("text/css", []byte("<html><script>")); got != "application/octet-stream" {
+	if got := uploads.ContentType("text/css", []byte("<html><script>")); got != "application/octet-stream" {
 		t.Errorf("sniffed markup served as %s", got)
 	}
 }
@@ -765,7 +767,7 @@ func TestAvatarUploadsMustBeImages(t *testing.T) {
 		}
 		defer file.Close()
 		_, _ = file.Write(data)
-		return validAvatarImage(contentType, file)
+		return uploads.ValidImage(contentType, file)
 	}
 	if !check("image/png", testPNG(t)) {
 		t.Fatal("a PNG was refused")
