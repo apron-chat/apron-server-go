@@ -748,7 +748,7 @@ func (kv KV) kind() string { return extEntryPrefix + kv.h.name }
 func (kv KV) Get(key string, into any) (bool, error) {
 	s := kv.h.s
 	s.mu.RLock()
-	raw, ok := s.extData[kv.kind()][key]
+	raw, ok := s.extData.Get(kv.kind(), key)
 	s.mu.RUnlock()
 	if !ok {
 		return false, nil
@@ -786,12 +786,7 @@ func (kv KV) put(key string, value any) error {
 	if s.store.Stopped() {
 		return ErrServerClosed
 	}
-	kind := kv.kind()
-	if s.extData[kind] == nil {
-		s.extData[kind] = make(map[string]jsontext.Value)
-	}
-	s.extData[kind][key] = raw
-	s.dirty.ext[extKey{kind, key}] = true
+	s.extData.Put(kv.kind(), key, raw)
 	return nil
 }
 
@@ -807,11 +802,7 @@ func (kv KV) Delete(key string) error {
 	if s.store.Stopped() {
 		return ErrServerClosed
 	}
-	kind := kv.kind()
-	if _, ok := s.extData[kind][key]; ok {
-		delete(s.extData[kind], key)
-		s.dirty.ext[extKey{kind, key}] = true
-	}
+	s.extData.Delete(kv.kind(), key)
 	return nil
 }
 
@@ -820,12 +811,7 @@ func (kv KV) Keys(prefix string) []string {
 	s := kv.h.s
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	var keys []string
-	for key := range s.extData[kv.kind()] {
-		if strings.HasPrefix(key, prefix) && !strings.HasPrefix(key, reservedKeyPrefix) {
-			keys = append(keys, key)
-		}
-	}
-	slices.Sort(keys)
-	return keys
+	return slices.DeleteFunc(s.extData.Keys(kv.kind(), prefix), func(key string) bool {
+		return strings.HasPrefix(key, reservedKeyPrefix)
+	})
 }

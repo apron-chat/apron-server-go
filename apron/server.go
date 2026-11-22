@@ -25,6 +25,7 @@ import (
 	"golang.org/x/time/rate"
 
 	"github.com/apron-chat/apron-server-go/apron/internal/durable"
+	"github.com/apron-chat/apron-server-go/apron/internal/kv"
 	"github.com/apron-chat/apron-server-go/apron/internal/proposals"
 	"github.com/apron-chat/apron-server-go/apron/internal/roomlog"
 	"github.com/apron-chat/apron-server-go/apron/internal/uploads"
@@ -545,7 +546,7 @@ type Server struct {
 	advertised map[string]jsontext.Value
 	routes     []route
 	filters    []extensionFilter
-	extData    map[string]map[string]jsontext.Value
+	extData    *kv.Values
 	// extContext is canceled by Shutdown, which waits for extensionWork:
 	// Host.Go goroutines and event followers.
 	extContext    context.Context
@@ -613,7 +614,7 @@ func Open(config Config) (*Server, error) {
 
 		commands:   coreCommands(),
 		advertised: make(map[string]jsontext.Value),
-		extData:    make(map[string]map[string]jsontext.Value),
+		extData:    kv.New(),
 		log:        roomlog.NewLog(),
 		logger:     config.Logger,
 	}

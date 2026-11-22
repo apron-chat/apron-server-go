@@ -72,7 +72,6 @@ type dirtySet struct {
 	invitations map[[32]byte]bool
 	services    map[[32]byte]bool
 	pushes      map[string]bool
-	ext         map[extKey]bool
 	usedIDs     []string
 	vapid       bool
 	emoji       bool
@@ -90,13 +89,8 @@ func newDirtySet() dirtySet {
 		services:    make(map[[32]byte]bool),
 		embeds:      make(map[string]bool),
 		pushes:      make(map[string]bool),
-		ext:         make(map[extKey]bool),
 	}
 }
-
-// extKey names one value an extension keeps: its entry kind, ext/<name>,
-// and its key.
-type extKey struct{ kind, id string }
 
 func (s *Server) touchRoom(r *roomState)       { s.dirty.rooms[r.id] = true }
 func (s *Server) touchMessage(m *messageState) { s.dirty.messages[m.id] = true }
@@ -274,10 +268,11 @@ func (s *Server) flushLocked() {
 	if s.store.Stopped() {
 		s.dirty = newDirtySet()
 		s.log.Entries()
+		s.extData.Entries()
 		s.store.Queue(nil)
 		return
 	}
-	batch := s.entriesLocked(s.dirty, s.log.Entries())
+	batch := append(s.entriesLocked(s.dirty, s.log.Entries()), s.extData.Entries()...)
 	meta := s.metaLocked()
 	if meta != s.storedMeta {
 		s.storedMeta = meta
@@ -344,13 +339,6 @@ func (s *Server) entriesLocked(d dirtySet, records []store.Entry) []store.Entry 
 			put(entryEmbed, id, storedEmbedOf(e))
 		} else {
 			del(entryEmbed, id)
-		}
-	}
-	for key := range d.ext {
-		if value, ok := s.extData[key.kind][key.id]; ok {
-			batch = append(batch, store.Entry{Kind: key.kind, ID: key.id, Value: value})
-		} else {
-			del(key.kind, key.id)
 		}
 	}
 	for key := range d.pushes {
@@ -515,7 +503,7 @@ func (s *Server) restoreLocked() (map[string]bool, error) {
 	}
 	for kind, values := range entries {
 		if strings.HasPrefix(kind, extEntryPrefix) {
-			s.extData[kind] = values
+			s.extData.Restore(kind, values)
 		}
 	}
 	if err := s.restoreVAPIDLocked(entries[entryMeta]["vapid"]); err != nil {
