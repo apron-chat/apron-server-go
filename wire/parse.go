@@ -222,7 +222,7 @@ func ParseRoomLeave(r *Request) (RoomLeaveParams, error) {
 	return parsed(p, d)
 }
 
-// ParseRoomSet reads room_set's params (§4.2.3).
+// ParseRoomSet reads room_set's params (§4.2.4).
 func ParseRoomSet(r *Request) (RoomSetParams, error) {
 	d := r.Decoder()
 	p := RoomSetParams{

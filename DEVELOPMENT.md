@@ -17,8 +17,11 @@ forgets it on restart); see [SERVER.md](SERVER.md#storage).
   answers. `apron` is a Backend of it, and so is any server built on it,
   such as a gateway in front of another chat system, or
   `examples/minimal`. It depends only on the standard library and the
-  WebSocket package, so that other programs can embed it cheaply; `internal/wirecore` is its connection runtime and
-  request parsing. Sign-in schemes live in
+  WebSocket package, so that other programs can embed it cheaply;
+  `internal/wirecore` is its connection runtime and request parsing, which
+  only `wire` imports. `wire/wiretest` tests a backend of it, a handler at a
+  time or a whole server as a client sees it, as `examples/minimal`'s test
+  does. Sign-in schemes live in
   `internal/auth/{email,passkey,external}`, and depend only on
   `internal/authn`, the boundary between them and the server: a scheme
   proves a subject of its own, and the server names the identity, and owns

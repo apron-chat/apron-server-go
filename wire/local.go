@@ -15,7 +15,8 @@ import (
 
 // Errors of a Local connection.
 var (
-	// ErrClosed is a call on a Local connection that has ended.
+	// ErrClosed is a call on a connection that has ended, such as a
+	// Local one, or a reply to a request whose connection has.
 	ErrClosed = errors.New("wire: the connection is closed")
 	// ErrFellBehind ends a Local connection whose OnFrame did not keep up.
 	ErrFellBehind = errors.New("wire: the connection's frame handler fell behind")
