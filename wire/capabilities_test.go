@@ -7,6 +7,10 @@ import (
 	"time"
 )
 
+func ptr(n int64) *int64 { return &n }
+
+func req(params string) *Request { return &Request{Params: jsontext.Value(params)} }
+
 func logOf(ids ...int64) []Record {
 	var log []Record
 	for _, id := range ids {
@@ -28,12 +32,12 @@ func TestPage(t *testing.T) {
 		count       int
 	}{
 		{"newest without after", HistoryParams{}, 2, 10, "40", "50", true, 2},
-		{"oldest with after", HistoryParams{After: 15}, 2, 10, "20", "30", true, 2},
-		{"inclusive bounds", HistoryParams{After: 20, Before: 40}, 10, 10, "20", "40", false, 3},
-		{"one record", HistoryParams{After: 30, Before: 30}, 10, 10, "30", "30", false, 1},
+		{"oldest with after", HistoryParams{After: ptr(15)}, 2, 10, "20", "30", true, 2},
+		{"inclusive bounds", HistoryParams{After: ptr(20), Before: ptr(40)}, 10, 10, "20", "40", false, 3},
+		{"one record", HistoryParams{After: ptr(30), Before: ptr(30)}, 10, 10, "30", "30", false, 1},
 		{"client limit under the server's", HistoryParams{Limit: 1}, 10, 10, "50", "50", true, 1},
-		{"below the lower bound", HistoryParams{Before: 25}, 10, 30, "", "", false, 0},
-		{"empty", HistoryParams{After: 60}, 10, 10, "", "", false, 0},
+		{"below the lower bound", HistoryParams{Before: ptr(25)}, 10, 30, "", "", false, 0},
+		{"empty", HistoryParams{After: ptr(60)}, 10, 10, "", "", false, 0},
 	}
 	for _, c := range cases {
 		r := Page(log, c.p, c.limit, c.lower, 50)
@@ -81,16 +85,16 @@ func TestIDs(t *testing.T) {
 }
 
 func TestParseStatus(t *testing.T) {
-	p, err := parseStatus(jsontext.Value(`{"idle": false, "mute": 3600, "room_id": "general"}`))
+	p, err := parseStatus(req(`{"idle": false, "mute": 3600, "room_id": "general"}`))
 	if err != nil || p.Idle == nil || !p.Idle.Attended || p.Mute == nil || !p.Mute.On || p.Mute.Seconds != 3600 || p.RoomID != "general" {
 		t.Fatalf("got %+v %v", p, err)
 	}
-	p, err = parseStatus(jsontext.Value(`{"idle": 300}`))
+	p, err = parseStatus(req(`{"idle": 300}`))
 	if err != nil || p.Idle.Seconds != 300 || p.Mute != nil {
 		t.Fatalf("got %+v %v", p, err)
 	}
 	for _, bad := range []string{`{"room_id": "general", "idle": 5}`, `{"idle": true}`, `{"idle": -1}`, `{"mute": 0}`, `{"mute": "x"}`} {
-		if _, err := parseStatus(jsontext.Value(bad)); err == nil {
+		if _, err := parseStatus(req(bad)); err == nil {
 			t.Errorf("%s was accepted", bad)
 		}
 	}
@@ -104,12 +108,12 @@ func TestParseStatus(t *testing.T) {
 }
 
 func TestParseHistory(t *testing.T) {
-	p, err := parseHistory(jsontext.Value(`{"room_id": "general", "after": "10", "before": "20", "limit": 5}`))
-	if err != nil || p.After != 10 || p.Before != 20 || p.Limit != 5 {
+	p, err := parseHistory(req(`{"room_id": "general", "after": "10", "before": "20", "limit": 5}`))
+	if err != nil || p.After == nil || *p.After != 10 || p.Before == nil || *p.Before != 20 || p.Limit != 5 {
 		t.Fatalf("got %+v %v", p, err)
 	}
 	for _, bad := range []string{`{"after": "x"}`, `{"limit": 0}`, `{"room_id": "a b"}`} {
-		if _, err := parseHistory(jsontext.Value(bad)); err == nil {
+		if _, err := parseHistory(req(bad)); err == nil {
 			t.Errorf("%s was accepted", bad)
 		}
 	}

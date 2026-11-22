@@ -1,10 +1,9 @@
 package apron
 
 import (
-	"bytes"
 	"encoding/json/jsontext"
-	"encoding/json/v2"
 	"fmt"
+	"github.com/apron-chat/apron-server-go/wire"
 	"maps"
 	"slices"
 	"strconv"
@@ -118,51 +117,24 @@ type statusUpdate struct {
 	muteSeconds int64
 }
 
-// parseStatus reads a status request's params (§4.5). Any field of the
-// wrong type is invalid_params, and then nothing changes: room_id a string,
-// idle false or a non-negative whole number of seconds, and mute true,
-// false, or a positive whole number of seconds, a longer one shortened to
-// maxMuteSeconds. room_id scopes only the mute, so room_id without mute is
-// invalid_params: idle is about the connection either way.
-func parseStatus(params map[string]jsontext.Value) (statusUpdate, *Error) {
-	var update statusUpdate
-	if _, has := params["room_id"]; has {
-		roomID, err := parseString(params, "room_id", true)
-		if err != nil {
-			return update, err
-		}
-		update.roomID, update.scoped = roomID, true
-	}
-	if raw, has := params["idle"]; has {
-		// idle is false, or the seconds since attention stopped; this
-		// server takes the connection as idle from the report on.
-		var seconds int64
-		idle := true
-		switch raw := bytes.TrimSpace(raw); {
-		case bytes.Equal(raw, []byte("false")):
-			idle = false
-		case bytes.Equal(raw, []byte("null")) || json.Unmarshal(raw, &seconds) != nil || seconds < 0:
-			return update, invalidParams("idle must be false or a non-negative whole number of seconds")
-		}
+// statusUpdateOf is a status request (§4.5.3), as package wire reads it,
+// with a mute longer than maxMuteSeconds shortened to it.
+func statusUpdateOf(p wire.StatusParams) statusUpdate {
+	update := statusUpdate{roomID: p.RoomID, scoped: p.RoomID != ""}
+	if p.Idle != nil {
+		idle := !p.Idle.Attended
 		update.idle = &idle
 	}
-	if raw, has := params["mute"]; has {
-		var seconds int64
-		switch raw := bytes.TrimSpace(raw); {
-		case bytes.Equal(raw, []byte("true")):
-			update.hasMute, update.muteForever = true, true
-		case bytes.Equal(raw, []byte("false")):
-			update.hasMute = true
-		case !bytes.Equal(raw, []byte("null")) && json.Unmarshal(raw, &seconds) == nil && seconds > 0:
-			update.hasMute, update.muteSeconds = true, min(seconds, maxMuteSeconds)
-		default:
-			return update, invalidParams("mute must be true, false, or a positive whole number of seconds")
+	if p.Mute != nil {
+		update.hasMute = true
+		switch {
+		case p.Mute.On && p.Mute.Seconds == 0:
+			update.muteForever = true
+		case p.Mute.On:
+			update.muteSeconds = min(p.Mute.Seconds, maxMuteSeconds)
 		}
 	}
-	if update.scoped && !update.hasMute {
-		return update, invalidParams("room_id scopes a mute; send it with mute")
-	}
-	return update, nil
+	return update
 }
 
 // mute returns the mute an update sets, starting at now.
@@ -184,11 +156,8 @@ func (update statusUpdate) mute(now time.Time) muteState {
 // package wire ignores. On an error nothing changes: invalid params, a mute
 // of a room the user cannot see, a mute of another room beyond
 // maxRoomMutes, or more requests than the user's limit (admitStatusLocked).
-func (s *Server) status(c *client, req request) (any, bool, *Error) {
-	update, err := parseStatus(req.params)
-	if err != nil {
-		return nil, false, err
-	}
+func (s *Server) status(c *client, req request, p wire.StatusParams) (any, bool, *Error) {
+	update := statusUpdateOf(p)
 	s.mu.Lock()
 	defer s.unlock()
 	u := c.user

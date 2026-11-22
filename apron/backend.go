@@ -79,6 +79,29 @@ func (s *Server) registerOp(name string, op operation) {
 	})
 }
 
+// run runs an operation for one of wire's typed interfaces, as registerOp
+// does for a method: its result goes out as it replies (request.reply), or
+// once it returns.
+func (b backend) run(ctx context.Context, wc *wire.Conn, op func(c *client, req request) (any, bool, *Error)) error {
+	c := clientOf(wc)
+	r := wire.RequestFrom(ctx)
+	if c == nil || r == nil {
+		return internalError()
+	}
+	previous := c.request
+	c.request = ctx
+	defer func() { c.request = previous }()
+	req := newRequest(r)
+	result, replied, err := op(c, req)
+	switch {
+	case err != nil:
+		return err
+	case !replied:
+		req.reply(result)
+	}
+	return nil
+}
+
 func clientOf(wc *wire.Conn) *client {
 	c, _ := wc.Data().(*client)
 	return c
@@ -204,4 +227,89 @@ func (b backend) Refresh(wc *wire.Conn, method string, result jsontext.Value) an
 		return current
 	}
 	return result
+}
+
+// Rooms (§4.2).
+
+var _ wire.Rooms = backend{}
+
+func (b backend) RoomJoin(ctx context.Context, wc *wire.Conn, roomID, userID string) error {
+	return b.run(ctx, wc, func(c *client, req request) (any, bool, *Error) {
+		return b.s.joinRoom(c, req, roomID, userID)
+	})
+}
+
+func (b backend) RoomLeave(ctx context.Context, wc *wire.Conn, roomID, userID string) error {
+	return b.run(ctx, wc, func(c *client, req request) (any, bool, *Error) {
+		return b.s.leaveRoom(c, req, roomID, userID)
+	})
+}
+
+func (b backend) RoomList(ctx context.Context, wc *wire.Conn, p wire.RoomListParams) (wire.RoomListResult, error) {
+	return wire.RoomListResult{}, b.run(ctx, wc, func(c *client, req request) (any, bool, *Error) {
+		return b.s.listRooms(c, req, p)
+	})
+}
+
+func (b backend) RoomSet(ctx context.Context, wc *wire.Conn, p wire.RoomSetParams) (string, error) {
+	return "", b.run(ctx, wc, func(c *client, req request) (any, bool, *Error) {
+		return b.s.setRoom(c, req, p)
+	})
+}
+
+// History (§4.3).
+
+var _ wire.Historian = backend{}
+
+func (b backend) History(ctx context.Context, wc *wire.Conn, p wire.HistoryParams) (wire.HistoryResult, error) {
+	return wire.HistoryResult{}, b.run(ctx, wc, func(c *client, req request) (any, bool, *Error) {
+		return b.s.history(c, req, p)
+	})
+}
+
+// Profiles (§3.3.2).
+
+var _ wire.Profiler = backend{}
+
+// Me changes the user's profile. updateProfile replies itself, with the
+// user's complete object, and sets the connection's user.
+func (b backend) Me(ctx context.Context, wc *wire.Conn, p wire.MeParams) (wire.User, error) {
+	return wire.User{}, b.run(ctx, wc, func(c *client, req request) (any, bool, *Error) {
+		return b.s.updateProfile(c, req, p)
+	})
+}
+
+// Status (§4.5).
+
+var _ wire.Statuser = backend{}
+
+func (b backend) Status(ctx context.Context, wc *wire.Conn, p wire.StatusParams) error {
+	return b.run(ctx, wc, func(c *client, req request) (any, bool, *Error) {
+		return b.s.status(c, req, p)
+	})
+}
+
+// Activity (§4.6): a notification, which gets no reply.
+
+var _ wire.Activity = backend{}
+
+func (b backend) Activity(ctx context.Context, wc *wire.Conn, p wire.ActivityParams) {
+	c := clientOf(wc)
+	if c == nil {
+		return
+	}
+	previous := c.request
+	c.request = ctx
+	defer func() { c.request = previous }()
+	_ = b.s.activity(c, p)
+}
+
+// Reactions (§4.7).
+
+var _ wire.Reactor = backend{}
+
+func (b backend) React(ctx context.Context, wc *wire.Conn, p wire.ReactParams) error {
+	return b.run(ctx, wc, func(c *client, req request) (any, bool, *Error) {
+		return b.s.react(c, req, p)
+	})
 }

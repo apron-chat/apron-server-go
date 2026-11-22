@@ -5,6 +5,7 @@ import (
 	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"fmt"
+	"github.com/apron-chat/apron-server-go/wire"
 	"slices"
 	"sort"
 	"time"
@@ -556,12 +557,9 @@ const (
 // react replaces the caller's complete reaction set on one message
 // (§4.7). Entries are kept fully qualified, and duplicates collapse; an
 // unchanged set logs nothing. The broadcast precedes the result (§1).
-func (s *Server) react(c *client, req request) (any, bool, *Error) {
-	messageID, err := parseString(req.params, "message_id", true)
-	if err != nil {
-		return nil, false, err
-	}
-	emojis, err := parseEmojis(req.params)
+func (s *Server) react(c *client, req request, p wire.ReactParams) (any, bool, *Error) {
+	messageID := p.MessageID
+	emojis, err := normalizeEmojis(p.Emojis)
 	if err != nil {
 		return nil, false, err
 	}
@@ -613,21 +611,9 @@ func (s *Server) commitReactionsLocked(m *messageState, elements []any) {
 	s.deliverLocked(rawNotification("reactions", record.raw), r)
 }
 
-func parseEmojis(params map[string]jsontext.Value) ([]string, *Error) {
-	raw, ok := params["emojis"]
-	if !ok {
-		return nil, invalidParams("Missing emojis")
-	}
-	var values []jsontext.Value
-	if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) || json.Unmarshal(raw, &values) != nil {
-		return nil, invalidParams("emojis must be an array of strings")
-	}
+func normalizeEmojis(values []string) ([]string, *Error) {
 	emojis := make([]string, 0, len(values))
-	for _, value := range values {
-		var emoji string
-		if json.Unmarshal(value, &emoji) != nil || emoji == "" {
-			return nil, invalidParams("emojis must be non-empty strings")
-		}
+	for _, emoji := range values {
 		// Entries that differ only in U+FE0F are the same entry, kept fully
 		// qualified (§4.7).
 		if emoji = qualifyEmoji(emoji); emoji == "" {

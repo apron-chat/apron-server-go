@@ -1,8 +1,8 @@
 package wire
 
 import (
+	"bytes"
 	"context"
-	"encoding/json/jsontext"
 	"encoding/json/v2"
 )
 
@@ -31,13 +31,13 @@ type StatusParams struct {
 // Idle is a status request's idle: false (Attended), or seconds.
 type Idle struct {
 	Attended bool
-	Seconds  int
+	Seconds  int64
 }
 
 // Mute is a status request's mute: true, false, or seconds.
 type Mute struct {
 	On      bool
-	Seconds int
+	Seconds int64
 }
 
 // MarshalJSON writes a mute as the protocol does: false, true, or seconds.
@@ -59,53 +59,47 @@ type Statuser interface {
 	Status(ctx context.Context, c *Conn, p StatusParams) error
 }
 
-func parseStatus(raw jsontext.Value) (StatusParams, error) {
-	var p struct {
-		RoomID string         `json:"room_id,omitempty"`
-		Idle   jsontext.Value `json:"idle,omitzero"`
-		Mute   jsontext.Value `json:"mute,omitzero"`
+// parseStatus reads a status request's params (§4.5.3): idle is false or
+// a non-negative number of seconds, mute true, false, or a positive number
+// of seconds, and room_id scopes only the mute, so it is sent with one.
+func parseStatus(r *Request) (p StatusParams, err *Error) {
+	var scoped bool
+	if p.RoomID, scoped, err = r.IDParam("room_id"); err != nil {
+		return p, err
 	}
-	if err := json.Unmarshal(raw, &p); err != nil {
-		return StatusParams{}, InvalidParams("Invalid status: " + err.Error())
-	}
-	if p.RoomID != "" && !ValidID(p.RoomID) {
-		return StatusParams{}, InvalidParams("Invalid room_id")
-	}
-	out := StatusParams{RoomID: p.RoomID}
-	if len(p.Idle) > 0 {
-		var attended bool
-		var seconds int
-		switch {
-		case json.Unmarshal(p.Idle, &attended) == nil && !attended:
-			out.Idle = &Idle{Attended: true}
-		case json.Unmarshal(p.Idle, &seconds) == nil && seconds >= 0:
-			out.Idle = &Idle{Seconds: seconds}
+	if raw, ok := r.Param("idle"); ok {
+		var seconds int64
+		switch raw := bytes.TrimSpace(raw); {
+		case bytes.Equal(raw, []byte("false")):
+			p.Idle = &Idle{Attended: true}
+		case !isNull(raw) && json.Unmarshal(raw, &seconds) == nil && seconds >= 0:
+			p.Idle = &Idle{Seconds: seconds}
 		default:
-			return StatusParams{}, InvalidParams("idle is false or a number of seconds")
+			return p, InvalidParams("idle must be false or a non-negative whole number of seconds")
 		}
 	}
-	if len(p.Mute) > 0 {
-		var on bool
-		var seconds int
-		switch {
-		case json.Unmarshal(p.Mute, &on) == nil:
-			out.Mute = &Mute{On: on}
-		case json.Unmarshal(p.Mute, &seconds) == nil && seconds > 0:
-			out.Mute = &Mute{On: true, Seconds: seconds}
+	if raw, ok := r.Param("mute"); ok {
+		var seconds int64
+		switch raw := bytes.TrimSpace(raw); {
+		case bytes.Equal(raw, []byte("true")):
+			p.Mute = &Mute{On: true}
+		case bytes.Equal(raw, []byte("false")):
+			p.Mute = &Mute{}
+		case !isNull(raw) && json.Unmarshal(raw, &seconds) == nil && seconds > 0:
+			p.Mute = &Mute{On: true, Seconds: seconds}
 		default:
-			return StatusParams{}, InvalidParams("mute is true, false, or a number of seconds")
+			return p, InvalidParams("mute must be true, false, or a positive whole number of seconds")
 		}
 	}
-	if out.RoomID != "" && out.Mute == nil {
-		// room_id says where a mute applies (§4.5.3).
-		return StatusParams{}, InvalidParams("room_id goes with mute")
+	if scoped && p.Mute == nil {
+		return p, InvalidParams("room_id scopes a mute; send it with mute")
 	}
-	return out, nil
+	return p, nil
 }
 
 func statusHandler(st Statuser) func(context.Context, *Conn, *Request) (any, error) {
 	return func(ctx context.Context, c *Conn, r *Request) (any, error) {
-		p, err := parseStatus(r.Params)
+		p, err := parseStatus(r)
 		if err != nil {
 			return nil, err
 		}

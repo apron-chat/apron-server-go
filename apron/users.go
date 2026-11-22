@@ -502,26 +502,19 @@ func withCleared(profile map[string]any, cleared extObject) map[string]any {
 // user's limit on status changes (admitStatusLocked), beyond which the
 // request is retry_after and changes nothing. roles are not settable, and
 // like other unknown fields are ignored.
-func (s *Server) updateProfile(c *client, req request) (any, bool, *Error) {
-	name, err := parseString(req.params, "name", false)
-	if err != nil {
-		return nil, false, err
+func (s *Server) updateProfile(c *client, req request, p wire.MeParams) (any, bool, *Error) {
+	var name, avatar, status string
+	hasName, hasAvatar, hasStatus := p.Name != nil, p.Avatar != nil, p.Status != nil
+	if hasName {
+		name = *p.Name
 	}
-	avatar, err := parseString(req.params, "avatar", false)
-	if err != nil {
-		return nil, false, err
+	if hasAvatar {
+		avatar = *p.Avatar
 	}
-	extWrite, hasExt, err := parseExt(req.params, "ext")
-	if err != nil {
-		return nil, false, err
+	if hasStatus {
+		status = *p.Status
 	}
-	status, err := parseString(req.params, "status", false)
-	if err != nil {
-		return nil, false, err
-	}
-	_, hasName := req.params["name"]
-	_, hasAvatar := req.params["avatar"]
-	_, hasStatus := req.params["status"]
+	extWrite, hasExt := p.Ext, p.Ext != nil
 
 	s.mu.Lock()
 	defer s.unlock()

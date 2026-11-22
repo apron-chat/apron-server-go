@@ -1171,17 +1171,8 @@ type operation func(s *Server, c *client, req request) (result any, replied bool
 
 func (s *Server) operations() map[string]operation {
 	ops := map[string]operation{
-		"me":         (*Server).updateProfile,
 		"message":    (*Server).saveMessage,
 		"command":    (*Server).command,
-		"history":    (*Server).history,
-		"room_set":   (*Server).setRoom,
-		"room_list":  (*Server).listRooms,
-		"room_join":  (*Server).joinRoom,
-		"room_leave": (*Server).leaveRoom,
-		"reactions":  (*Server).react,
-		"activity":   (*Server).activity,
-		"status":     (*Server).status,
 		// ext:command_list (apron's extensions/ext_command_list.md).
 		commandListMethod: (*Server).listCommands,
 	}

@@ -2,8 +2,6 @@ package wire
 
 import (
 	"context"
-	"encoding/json/jsontext"
-	"encoding/json/v2"
 )
 
 // Room is a room record (§3.4, §4.2). LatestLogID, HistoryLogID, Members,
@@ -60,14 +58,16 @@ const (
 )
 
 // RoomListParams are the params of room_list (§4.2.1). Filter is one of the
-// Filter constants, FilterAll when the client sent none.
+// Filter constants, FilterAll when the client sent none; an empty ID was
+// not sent.
 type RoomListParams struct {
-	Filter       string `json:"filter,omitempty"`
-	ParentRoomID string `json:"parent_room_id,omitempty"`
-	RoomID       string `json:"room_id,omitempty"`
-	Members      bool   `json:"members,omitzero"`
-	UserID       string `json:"user_id,omitempty"`
-	LatestLogID  string `json:"latest_log_id,omitempty"`
+	Filter       string
+	ParentRoomID string
+	RoomID       string
+	Members      bool
+	UserID       string
+	// LatestLogID, if set, lists only the rooms that changed after it.
+	LatestLogID *int64
 }
 
 // RoomListResult is the result of room_list. Server sends the arrays the
@@ -81,15 +81,19 @@ type RoomListResult struct {
 }
 
 // RoomSetParams are the params of room_set (§4.2.4): a new room without
-// RoomID, else an edit of that room's client fields.
+// RoomID, else an edit that merges into that room's client fields, where an
+// omitted field keeps its value and "" clears it, but for Private, which is
+// fixed at creation, and Ext, which merges one level into its keys.
 type RoomSetParams struct {
-	RoomID       string         `json:"room_id,omitempty"`
-	ParentRoomID string         `json:"parent_room_id,omitempty"`
-	Private      *bool          `json:"private,omitempty"`
-	Title        string         `json:"title,omitempty"`
-	Description  string         `json:"description,omitempty"`
-	Ext          map[string]any `json:"ext,omitempty"`
-	Raw          jsontext.Value `json:"-"`
+	RoomID       string
+	ParentRoomID string
+	// Title and Description are nil when the request leaves them out.
+	Title       *string
+	Description *string
+	// Private is nil when the request leaves it out.
+	Private *bool
+	// Ext is nil when the request leaves it out.
+	Ext Ext
 }
 
 // Rooms handles room_list, room_join, room_leave, and room_set, and adds
@@ -103,29 +107,90 @@ type Rooms interface {
 	RoomSet(ctx context.Context, c *Conn, p RoomSetParams) (roomID string, err error)
 }
 
+// parseRoomList reads room_list's params.
+func parseRoomList(r *Request) (p RoomListParams, err *Error) {
+	var present bool
+	if p.Filter, present, err = r.String("filter"); err != nil {
+		return p, err
+	}
+	switch {
+	case !present:
+		p.Filter = FilterAll
+	case p.Filter != FilterAll && p.Filter != FilterJoined && p.Filter != FilterNotJoined:
+		return p, InvalidParams("filter must be joined, not_joined, or all")
+	}
+	if p.RoomID, _, err = r.IDParam("room_id"); err != nil {
+		return p, err
+	}
+	if p.ParentRoomID, _, err = r.IDParam("parent_room_id"); err != nil {
+		return p, err
+	}
+	if p.UserID, _, err = r.IDParam("user_id"); err != nil {
+		return p, err
+	}
+	if p.Members, _, err = r.Bool("members"); err != nil {
+		return p, err
+	}
+	if latest, present, err := r.LogID("latest_log_id"); err != nil {
+		return p, err
+	} else if present {
+		p.LatestLogID = &latest
+	}
+	return p, nil
+}
+
+// parseMembership reads the params of room_join and room_leave (§4.2.2).
+func parseMembership(r *Request) (roomID, userID string, err *Error) {
+	roomID, present, err := r.IDParam("room_id")
+	if err == nil && !present {
+		err = Missing("room_id")
+	}
+	if err != nil {
+		return "", "", err
+	}
+	userID, _, err = r.IDParam("user_id")
+	return roomID, userID, err
+}
+
+// parseRoomSet reads room_set's params.
+func parseRoomSet(r *Request) (p RoomSetParams, err *Error) {
+	if p.RoomID, _, err = r.IDParam("room_id"); err != nil {
+		return p, err
+	}
+	if p.ParentRoomID, _, err = r.IDParam("parent_room_id"); err != nil {
+		return p, err
+	}
+	if title, present, err := r.String("title"); err != nil {
+		return p, err
+	} else if present {
+		p.Title = &title
+	}
+	if description, present, err := r.String("description"); err != nil {
+		return p, err
+	} else if present {
+		p.Description = &description
+	}
+	if private, present, err := r.Bool("private"); err != nil {
+		return p, err
+	} else if present {
+		p.Private = &private
+	}
+	if p.Ext, _, err = r.Ext("ext"); err != nil {
+		return p, err
+	}
+	return p, nil
+}
+
 func roomHandler(rooms Rooms, name string) func(context.Context, *Conn, *Request) (any, error) {
 	switch name {
 	case "room_list":
 		return func(ctx context.Context, c *Conn, r *Request) (any, error) {
-			raw := r.Params
-			var p RoomListParams
-			if err := json.Unmarshal(raw, &p); err != nil {
-				return nil, InvalidParams("Invalid room_list: " + err.Error())
-			}
-			switch p.Filter {
-			case "":
-				p.Filter = FilterAll
-			case FilterAll, FilterJoined, FilterNotJoined:
-			default:
-				return nil, InvalidParams(`filter is "joined", "not_joined", or "all"`)
-			}
-			for _, id := range []string{p.RoomID, p.ParentRoomID, p.UserID} {
-				if id != "" && !ValidID(id) {
-					return nil, InvalidParams("Invalid ID " + id)
-				}
+			p, perr := parseRoomList(r)
+			if perr != nil {
+				return nil, perr
 			}
 			result, err := rooms.RoomList(ctx, c, p)
-			if err != nil {
+			if err != nil || r.Replied() {
 				return nil, err
 			}
 			// The arrays the filter asks for are present even when empty
@@ -154,31 +219,20 @@ func roomHandler(rooms Rooms, name string) func(context.Context, *Conn, *Request
 		}
 	case "room_join", "room_leave":
 		return func(ctx context.Context, c *Conn, r *Request) (any, error) {
-			raw := r.Params
-			var p struct {
-				RoomID string `json:"room_id"`
-				UserID string `json:"user_id,omitempty"`
-			}
-			if err := json.Unmarshal(raw, &p); err != nil || !ValidID(p.RoomID) || (p.UserID != "" && !ValidID(p.UserID)) {
-				return nil, InvalidParams(name + " needs a room_id")
+			roomID, userID, perr := parseMembership(r)
+			if perr != nil {
+				return nil, perr
 			}
 			if name == "room_join" {
-				return nil, rooms.RoomJoin(ctx, c, p.RoomID, p.UserID)
+				return nil, rooms.RoomJoin(ctx, c, roomID, userID)
 			}
-			return nil, rooms.RoomLeave(ctx, c, p.RoomID, p.UserID)
+			return nil, rooms.RoomLeave(ctx, c, roomID, userID)
 		}
 	case "room_set":
 		return func(ctx context.Context, c *Conn, r *Request) (any, error) {
-			raw := r.Params
-			var p RoomSetParams
-			if err := json.Unmarshal(raw, &p); err != nil {
-				return nil, InvalidParams("Invalid room_set: " + err.Error())
-			}
-			p.Raw = raw
-			for _, id := range []string{p.RoomID, p.ParentRoomID} {
-				if id != "" && !ValidID(id) {
-					return nil, InvalidParams("Invalid room_id " + id)
-				}
+			p, perr := parseRoomSet(r)
+			if perr != nil {
+				return nil, perr
 			}
 			roomID, err := rooms.RoomSet(ctx, c, p)
 			if err != nil {

@@ -140,12 +140,13 @@ type MessageResult struct {
 // MeParams are the params of me (§3.3.2): the profile fields to change. A
 // nil field is left as it is; an empty one clears it.
 type MeParams struct {
-	Name   *string `json:"name,omitempty"`
-	Avatar *string `json:"avatar,omitempty"`
-	// Status is the chosen status, with capability status (§4.5.1). Server
-	// accepts only online, "", and the values of ServerInfo.Status.
-	Status *string        `json:"status,omitempty"`
-	Raw    jsontext.Value `json:"-"`
+	Name   *string
+	Avatar *string
+	// Status is the chosen status, with capability status (§4.5.1). A
+	// server that does not accept a value sets "" (§4.5.1).
+	Status *string
+	// Ext merges into the user's ext (§4.13).
+	Ext Ext
 }
 
 // Frame is one encoded frame, which can be sent to many connections without

@@ -320,16 +320,12 @@ func (s *Server) builtins() map[string]Method {
 	}
 	if p, ok := s.Backend.(Profiler); ok {
 		methods["me"] = Method{Handle: func(ctx context.Context, c *Conn, r *Request) (any, error) {
-			var params MeParams
-			if err := r.Decode(&params); err != nil {
-				return nil, err
-			}
-			params.Raw = r.Params
-			if params.Status != nil && *params.Status != StatusOnline && *params.Status != "" && !slices.Contains(c.Info().Status, *params.Status) {
-				return nil, InvalidParams("This server does not offer status " + strconv.Quote(*params.Status))
+			params, perr := parseMe(r)
+			if perr != nil {
+				return nil, perr
 			}
 			you, err := p.Me(ctx, c, params)
-			if err != nil {
+			if err != nil || r.Replied() {
 				return nil, err
 			}
 			c.SetUser(you)
@@ -361,6 +357,12 @@ func (s *Server) builtins() map[string]Method {
 	}
 	if st, ok := s.Backend.(Statuser); ok {
 		methods["status"] = Method{Capability: "status", Handle: statusHandler(st)}
+	}
+	if reactor, ok := s.Backend.(Reactor); ok {
+		methods["reactions"] = Method{Capability: "reactions", Handle: reactionsHandler(reactor)}
+	}
+	if a, ok := s.Backend.(Activity); ok {
+		methods["activity"] = Method{Capability: "activity", Notification: true, Handle: activityHandler(a)}
 	}
 	return methods
 }

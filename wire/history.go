@@ -3,18 +3,19 @@ package wire
 import (
 	"context"
 	"encoding/json/jsontext"
-	"encoding/json/v2"
 	"sort"
 	"strconv"
 )
 
 // HistoryParams are the params of history (§4.3): an empty RoomID is every
 // room the connection receives; After and Before are inclusive log_id
-// bounds, 0 for none; Limit is positive, 0 for the backend's default.
+// bounds, nil when left out, which also sets the direction: from the oldest
+// with After, and from the newest without; Limit is positive, 0 for the
+// backend's default.
 type HistoryParams struct {
 	RoomID string
-	After  int64
-	Before int64
+	After  *int64
+	Before *int64
 	Limit  int
 }
 
@@ -68,11 +69,14 @@ func Page(log []Record, p HistoryParams, limit int, lower, latest int64) History
 	if p.Limit > 0 && p.Limit < limit {
 		limit = p.Limit
 	}
-	after := max(p.After, lower)
-	before := p.Before
+	after := lower
+	if p.After != nil {
+		after = max(*p.After, lower)
+	}
 	start := sort.Search(len(log), func(i int) bool { return log[i].LogID >= after })
 	end := len(log)
-	if before > 0 {
+	if p.Before != nil {
+		before := *p.Before
 		end = sort.Search(len(log), func(i int) bool { return log[i].LogID > before })
 	}
 	if start >= end {
@@ -81,7 +85,7 @@ func Page(log []Record, p HistoryParams, limit int, lower, latest int64) History
 	window := log[start:end]
 	if len(window) > limit {
 		result.More = true
-		if p.After > 0 {
+		if p.After != nil {
 			window = window[:limit]
 		} else {
 			window = window[len(window)-limit:]
@@ -104,45 +108,32 @@ func Page(log []Record, p HistoryParams, limit int, lower, latest int64) History
 	return result
 }
 
-func parseHistory(raw jsontext.Value) (HistoryParams, error) {
-	var p struct {
-		RoomID string `json:"room_id,omitempty"`
-		After  string `json:"after,omitempty"`
-		Before string `json:"before,omitempty"`
-		Limit  *int   `json:"limit,omitempty"`
+// parseHistory reads history's params.
+func parseHistory(r *Request) (p HistoryParams, err *Error) {
+	if p.RoomID, _, err = r.IDParam("room_id"); err != nil {
+		return p, err
 	}
-	if err := json.Unmarshal(raw, &p); err != nil {
-		return HistoryParams{}, InvalidParams("Invalid history: " + err.Error())
-	}
-	if p.RoomID != "" && !ValidID(p.RoomID) {
-		return HistoryParams{}, InvalidParams("Invalid room_id")
-	}
-	out := HistoryParams{RoomID: p.RoomID}
 	for _, bound := range []struct {
-		text string
-		to   *int64
-	}{{p.After, &out.After}, {p.Before, &out.Before}} {
-		if bound.text == "" {
-			continue
+		name string
+		to   **int64
+	}{{"after", &p.After}, {"before", &p.Before}} {
+		value, present, err := r.LogID(bound.name)
+		if err != nil {
+			return p, err
 		}
-		n, err := strconv.ParseInt(bound.text, 10, 64)
-		if err != nil || n <= 0 {
-			return HistoryParams{}, InvalidParams("after and before are log_ids")
+		if present {
+			*bound.to = &value
 		}
-		*bound.to = n
 	}
-	if p.Limit != nil {
-		if *p.Limit <= 0 {
-			return HistoryParams{}, InvalidParams("limit is a positive count")
-		}
-		out.Limit = *p.Limit
+	if p.Limit, _, err = r.Count("limit"); err != nil {
+		return p, err
 	}
-	return out, nil
+	return p, nil
 }
 
 func historyHandler(h Historian) func(context.Context, *Conn, *Request) (any, error) {
 	return func(ctx context.Context, c *Conn, r *Request) (any, error) {
-		p, err := parseHistory(r.Params)
+		p, err := parseHistory(r)
 		if err != nil {
 			return nil, err
 		}

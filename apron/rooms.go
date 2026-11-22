@@ -3,8 +3,8 @@ package apron
 import (
 	"cmp"
 	"encoding/json/jsontext"
-	"encoding/json/v2"
 	"fmt"
+	"github.com/apron-chat/apron-server-go/wire"
 	"maps"
 	"slices"
 	"strconv"
@@ -460,9 +460,9 @@ func (s *Server) announceRoomLocked(r *roomState, editor *userState) {
 	}
 }
 
-// setRoom creates a room (no room_id) or replaces an existing room's client
-// fields (§4.2.4). parent_room_id and private are fixed at creation and
-// ignored on updates, so an omitted private is kept; a thread created
+// setRoom creates a room (no room_id) or merges into an existing room's
+// client fields (§4.2.4). parent_room_id and private are fixed at creation
+// and ignored on updates, so an omitted private is kept; a thread created
 // without private takes its parent's. Any authenticated user may create rooms and threads and
 // update any room they can see.
 //
@@ -472,48 +472,27 @@ func (s *Server) announceRoomLocked(r *roomState, editor *userState) {
 // other members as room_update updated, without joining them. An edit goes
 // as updated to the room's members, to the parent's members for a thread
 // that is not private, and to the editor.
-func (s *Server) setRoom(c *client, req request) (any, bool, *Error) {
-	_, updating := req.params["room_id"]
-	var roomID, parentID string
-	var err *Error
-	if updating {
-		roomID, err = parseString(req.params, "room_id", true)
-		if err != nil {
-			return nil, false, err
-		}
-	} else if _, present := req.params["parent_room_id"]; present {
-		parentID, err = parseString(req.params, "parent_room_id", true)
-		if err != nil {
-			return nil, false, err
-		}
-		if parentID == "" {
-			return nil, false, invalidParams("parent_room_id must be a non-empty string")
-		}
+func (s *Server) setRoom(c *client, req request, p wire.RoomSetParams) (any, bool, *Error) {
+	updating := p.RoomID != ""
+	roomID, parentID := p.RoomID, ""
+	if !updating {
+		parentID = p.ParentRoomID
 	}
-	title, err := parseString(req.params, "title", false)
-	if err != nil {
-		return nil, false, err
+	var title, description string
+	if p.Title != nil {
+		title = *p.Title
 	}
-	_, hasTitle := req.params["title"]
-	description, err := parseString(req.params, "description", false)
-	if err != nil {
-		return nil, false, err
+	if p.Description != nil {
+		description = *p.Description
 	}
-	_, hasDescription := req.params["description"]
 	if len(title) > maxTitleBytes {
 		return nil, false, &Error{Code: CodeTooLarge, Message: fmt.Sprintf("title is at most %d bytes", maxTitleBytes)}
 	}
 	if len(description) > maxDescriptionBytes {
 		return nil, false, &Error{Code: CodeTooLarge, Message: fmt.Sprintf("description is at most %d bytes", maxDescriptionBytes)}
 	}
-	extWrite, _, err := parseExt(req.params, "ext")
-	if err != nil {
-		return nil, false, err
-	}
-	private, err := parseBool(req.params, "private", false)
-	if err != nil {
-		return nil, false, err
-	}
+	extWrite := p.Ext
+	private := p.Private != nil && *p.Private
 
 	s.mu.Lock()
 	defer s.unlock()
@@ -529,10 +508,10 @@ func (s *Server) setRoom(c *client, req request) (any, bool, *Error) {
 		keptExt = extOf(existing.record["ext"])
 		// An edit merges into the room's client fields (§4.2.4): a field it
 		// leaves out keeps its value, and "" clears it.
-		if !hasTitle {
+		if p.Title == nil {
 			title, _ = existing.record["title"].(string)
 		}
-		if !hasDescription {
+		if p.Description == nil {
 			description, _ = existing.record["description"].(string)
 		}
 	} else if parentID != "" {
@@ -653,41 +632,16 @@ func threadTitle(description string) string {
 //
 // The result is followed by the read cursors kept for the listed rooms
 // (§4.6).
-func (s *Server) listRooms(c *client, req request) (any, bool, *Error) {
-	filter, err := parseString(req.params, "filter", false)
-	if err != nil {
-		return nil, false, err
-	}
-	switch filter {
-	case "":
-		filter = "all"
-	case "all", "joined", "not_joined":
-	default:
-		return nil, false, invalidParams("filter must be joined, not_joined, or all")
-	}
-	wantJoined, wantOthers := filter != "not_joined", filter != "joined"
-	withMembers, err := parseBool(req.params, "members", false)
-	if err != nil {
-		return nil, false, err
-	}
-	parentID, err := parseString(req.params, "parent_room_id", false)
-	if err != nil {
-		return nil, false, err
-	}
-	_, hasParent := req.params["parent_room_id"]
-	roomID, err := parseString(req.params, "room_id", false)
-	if err != nil {
-		return nil, false, err
-	}
-	_, hasRoom := req.params["room_id"]
-	onlyUser, err := parseString(req.params, "user_id", false)
-	if err != nil {
-		return nil, false, err
-	}
-	_, hasUser := req.params["user_id"]
-	since, hasSince, err := parseBound(req.params, "latest_log_id")
-	if err != nil {
-		return nil, false, err
+func (s *Server) listRooms(c *client, req request, p wire.RoomListParams) (any, bool, *Error) {
+	wantJoined, wantOthers := p.Filter != wire.FilterNotJoined, p.Filter != wire.FilterJoined
+	withMembers := p.Members
+	parentID, hasParent := p.ParentRoomID, p.ParentRoomID != ""
+	roomID, hasRoom := p.RoomID, p.RoomID != ""
+	onlyUser, hasUser := p.UserID, p.UserID != ""
+	var since int64
+	hasSince := p.LatestLogID != nil
+	if hasSince {
+		since = *p.LatestLogID
 	}
 
 	s.mu.RLock()
@@ -805,11 +759,8 @@ func profiles(users map[string]*userState) []any {
 // With the user_id of another user, a member of the room adds that user,
 // which is how people are brought into a private room; adding a member
 // changes nothing.
-func (s *Server) joinRoom(c *client, req request) (any, bool, *Error) {
-	roomID, targetID, hasTarget, err := parseMembershipParams(req.params)
-	if err != nil {
-		return nil, false, err
-	}
+func (s *Server) joinRoom(c *client, req request, roomID, targetID string) (any, bool, *Error) {
+	hasTarget := targetID != ""
 	s.mu.Lock()
 	defer s.unlock()
 	u := c.user
@@ -857,11 +808,8 @@ func (s *Server) joinRoom(c *client, req request) (any, bool, *Error) {
 //
 // With the user_id of another user, it removes that user, which the room's
 // creator and users with the admin or moderator role may do.
-func (s *Server) leaveRoom(c *client, req request) (any, bool, *Error) {
-	roomID, targetID, hasTarget, err := parseMembershipParams(req.params)
-	if err != nil {
-		return nil, false, err
-	}
+func (s *Server) leaveRoom(c *client, req request, roomID, targetID string) (any, bool, *Error) {
+	hasTarget := targetID != ""
 	s.mu.Lock()
 	defer s.unlock()
 	u := c.user
@@ -889,22 +837,6 @@ func (s *Server) leaveRoom(c *client, req request) (any, bool, *Error) {
 	return result, true, nil
 }
 
-// parseMembershipParams reads room_join and room_leave params: room_id and
-// an optional user_id (§4.2.2).
-func parseMembershipParams(params map[string]jsontext.Value) (roomID, userID string, hasUser bool, err *Error) {
-	if roomID, err = parseString(params, "room_id", true); err != nil {
-		return "", "", false, err
-	}
-	if userID, err = parseString(params, "user_id", false); err != nil {
-		return "", "", false, err
-	}
-	_, hasUser = params["user_id"]
-	if hasUser && !validID(userID) {
-		return "", "", false, invalidParams("user_id must be a user_id: not empty, without whitespace or control characters")
-	}
-	return roomID, userID, hasUser, nil
-}
-
 // history returns a window of the log (§4.3): with room_id, that room's
 // log, which needs no membership, only a room the user can see; without it,
 // the log of every room the user joined, whose deliveries their connections
@@ -918,23 +850,19 @@ func parseMembershipParams(params map[string]jsontext.Value) (roomID, userID str
 // prev_room_id, so a window bounded to one log_id (after == before) in the
 // room a snapshot names walks prev_log_id back through a message's edits
 // (§4.3.1). Across rooms, it comes once.
-func (s *Server) history(c *client, req request) (any, bool, *Error) {
-	roomID, err := parseString(req.params, "room_id", false)
-	if err != nil {
-		return nil, false, err
+func (s *Server) history(c *client, req request, p wire.HistoryParams) (any, bool, *Error) {
+	roomID, hasRoom := p.RoomID, p.RoomID != ""
+	var after, before int64
+	hasAfter, hasBefore := p.After != nil, p.Before != nil
+	if hasAfter {
+		after = *p.After
 	}
-	_, hasRoom := req.params["room_id"]
-	after, hasAfter, err := parseBound(req.params, "after")
-	if err != nil {
-		return nil, false, err
+	if hasBefore {
+		before = *p.Before
 	}
-	before, hasBefore, err := parseBound(req.params, "before")
-	if err != nil {
-		return nil, false, err
-	}
-	limit, err := parseLimit(req.params, s.config.HistoryPageSize)
-	if err != nil {
-		return nil, false, err
+	limit := s.config.HistoryPageSize
+	if p.Limit > 0 {
+		limit = min(p.Limit, maxHistoryPageSize)
 	}
 
 	s.mu.RLock()
@@ -1111,79 +1039,42 @@ func compareLogID(record *logRecord, id int64) int {
 	return cmp.Compare(record.id, id)
 }
 
-func parseBound(params map[string]jsontext.Value, name string) (int64, bool, *Error) {
-	raw, ok := params[name]
-	if !ok {
-		return 0, false, nil
-	}
-	var value string
-	if json.Unmarshal(raw, &value) != nil {
-		return 0, false, invalidParams("%s must be a decimal string", name)
-	}
-	number, err := strconv.ParseInt(value, 10, 64)
-	if err != nil || number < 0 {
-		return 0, false, invalidParams("%s must be a non-negative decimal string", name)
-	}
-	return number, true, nil
-}
-
-func parseLimit(params map[string]jsontext.Value, defaultLimit int) (int, *Error) {
-	raw, ok := params["limit"]
-	if !ok {
-		return defaultLimit, nil
-	}
-	var value int
-	if json.Unmarshal(raw, &value) != nil || value <= 0 {
-		return 0, invalidParams("limit must be a positive integer")
-	}
-	return min(value, maxHistoryPageSize), nil
-}
-
 // activity applies a connection's activity (§4.6). typing and a read cursor
 // in a room are relayed to the room's members; a read cursor must name a
 // message in the room and only advances, and the server keeps the latest per
 // user and sends it after the room is listed. A frame whose fields change
 // nothing relays nothing, and typing past the user's limit on actions
 // (admitActionLocked) is dropped.
-func (s *Server) activity(c *client, req request) (any, bool, *Error) {
-	roomID, err := parseString(req.params, "room_id", false)
-	if err != nil {
-		return nil, false, err
-	}
-	if _, has := req.params["room_id"]; !has {
+func (s *Server) activity(c *client, p wire.ActivityParams) *Error {
+	roomID := p.RoomID
+	if roomID == "" {
 		roomID = defaultRoomID
 	}
 	var typing any
-	if raw, ok := req.params["typing"]; ok {
-		var value int
-		if json.Unmarshal(raw, &value) != nil || value < 0 {
-			return nil, false, invalidParams("typing must be a non-negative integer")
-		}
-		typing = value
+	if p.Typing != nil {
+		typing = *p.Typing
 	}
-	readID, err := parseString(req.params, "read_message_id", false)
-	if err != nil {
-		return nil, false, err
+	readID, hasRead := "", p.ReadMessageID != nil
+	if hasRead {
+		readID = *p.ReadMessageID
 	}
-	_, hasRead := req.params["read_message_id"]
 	s.mu.Lock()
 	defer s.unlock()
 	inRoom := typing != nil || hasRead
 	r := s.visibleRoomLocked(c.user, roomID)
 	if inRoom && r == nil {
-		return nil, false, invalidParams("Unknown room %q", roomID)
+		return invalidParams("Unknown room %q", roomID)
 	}
 	// A cursor reads the room up to a message in it (§4.6): one naming a
 	// message elsewhere would be relayed to the room's members as a receipt,
 	// and its log_id would stand for the room's read position.
 	if m := s.visibleMessageLocked(c.user, readID); hasRead && (m == nil || m.roomID != roomID) {
-		return nil, false, invalidParams("Unknown read_message_id %q in room %q", readID, roomID)
+		return invalidParams("Unknown read_message_id %q in room %q", readID, roomID)
 	}
 	// The relays this request causes are queued before package wire sends
 	// its result (§1).
-	result := map[string]any{}
 	if !inRoom {
-		return result, false, nil
+		return nil
 	}
 	u := c.user
 	if typing != nil && admitActionLocked(u) != nil {
@@ -1222,5 +1113,5 @@ func (s *Server) activity(c *client, req request) (any, bool, *Error) {
 		// Reading lowers the unread count the user's other devices show.
 		s.unreadChangedLocked(u, r.id)
 	}
-	return result, false, nil
+	return nil
 }
