@@ -25,7 +25,9 @@
 //     Validation), with the core rules of a new message (§3.5.1, §3.6);
 //   - typed frames ([User], [Message], [Room] and [RoomView], [ServerInfo],
 //     ...), which keep the members they have no field for (Unknown), with
-//     ext as raw JSON ([Ext], [MergeExt]); typed notifications
+//     ext as raw JSON ([Ext], [MergeExt]), and a message [Body] that
+//     encodes as it was decoded, each field it left out left out and each
+//     it sent empty sent empty (§3.5.1); typed notifications
 //     ([Notification]: [Message], [UserUpdate], [StatusUpdate],
 //     [RoomUpdate], [Reactions], [ServerInfo]), sent with [Conn.Notify] or
 //     encoded once with [Encode]; the system identities ([Private],

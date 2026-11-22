@@ -76,28 +76,6 @@ var (
 	ServerNotice = User{UserID: "~server", Name: "Server"}
 )
 
-// Body is a message's content (§3.5).
-type Body struct {
-	Text     string           `json:"text"`
-	Format   string           `json:"format,omitempty"`
-	Mentions []string         `json:"mentions,omitempty"`
-	Embeds   []jsontext.Value `json:"embeds,omitempty"`
-	// Unknown holds the members this package has no field for, as they
-	// arrived, such as a newer protocol's, and is sent after the others:
-	// a backend that keeps a Body keeps them.
-	Unknown jsontext.Value `json:",embed"`
-}
-
-// Empty reports whether a body has no text and no embeds: a new message
-// with such a body is invalid_params (§3.5.1).
-func (b *Body) Empty() bool { return b == nil || b.Text == "" && len(b.Embeds) == 0 }
-
-// Formats of a Body.
-const (
-	Plain    = "plain"
-	Markdown = "markdown"
-)
-
 // Ref refers to a message by its message_id (§3.5.4).
 type Ref struct {
 	MessageID LogID `json:"message_id"`
@@ -110,7 +88,7 @@ type Message struct {
 	LogID      LogID  `json:"log_id,omitzero"`
 	RoomID     string `json:"room_id,omitempty"`
 	From       User   `json:"from"`
-	Body       *Body  `json:"body,omitempty"`
+	Body       *Body  `json:"body,omitzero"`
 	ReplyTo    *Ref   `json:"reply_to,omitempty"`
 	PrevLogID  LogID  `json:"prev_log_id,omitzero"`
 	PrevRoomID string `json:"prev_room_id,omitempty"`

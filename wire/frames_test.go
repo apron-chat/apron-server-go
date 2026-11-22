@@ -277,14 +277,15 @@ func TestTypedParams(t *testing.T) {
 		result, err := l.Call(context.Background(), method, jsontext.Value(params))
 		return string(result), err
 	}
-	// A new message's body keeps the fields wire does not know.
+	// A new message's body keeps the fields wire does not know, and
+	// encodes as it was sent.
 	if _, err := call("message", `{"body":{"text":"hi","color":"red","mentions":[]}}`); err != nil {
 		t.Fatal(err)
 	}
 	if body := b.bodies[0]; body.Text != "hi" || string(body.Unknown) != `{"color":"red"}` {
 		t.Fatalf("body: %+v", body)
 	}
-	if out, _ := json.Marshal(b.bodies[0]); string(out) != `{"text":"hi","color":"red"}` {
+	if out, _ := json.Marshal(b.bodies[0]); string(out) != `{"text":"hi","mentions":[],"color":"red"}` {
 		t.Fatalf("body sent as %s", out)
 	}
 	if _, err := call("message", `{"message_id":"7","room_id":"r","body":{"text":"x"},"ext":{"a":1}}`); err != nil {
