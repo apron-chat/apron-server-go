@@ -1,5 +1,6 @@
 import { expect, test, type BrowserContext, type WebSocketRoute } from '@playwright/test';
 import {
+	cancelRoomEdit,
 	composer,
 	deleteMessage,
 	editMessage,
@@ -15,6 +16,7 @@ import {
 	reactTo,
 	recordOffsiteRequests,
 	roomAction,
+	roomEditor,
 	sendMessage,
 	setDisplayName,
 	startThread,
@@ -78,16 +80,16 @@ test.describe('chat protocol interoperability', () => {
 			await expect(pageB.getByTestId('reconnect-divider')).toHaveCount(0);
 			await expect(await waitForMessage(pageB, `${token}-latest`)).toBeVisible();
 			await (await roomAction(pageB, 'edit-room')).click();
-			const editor = pageB.getByRole('dialog', { name: 'Edit thread', exact: true });
+			const editor = await roomEditor(pageB, 'thread');
 			const titleB = editor.getByRole('textbox', { name: 'Thread title', exact: true });
 			await expect(titleB).toHaveValue(`${token} first line`);
 			await titleB.fill('Cancelled title');
-			await editor.getByRole('button', { name: 'Cancel', exact: true }).click();
+			await cancelRoomEdit(pageB, editor);
 			await expect(pageB.getByRole('heading', { level: 1 })).toContainText(`${token} first line`);
 			await (await roomAction(pageB, 'edit-room')).click();
 			await titleB.fill(`${token}-renamed`);
 			await editor.getByRole('button', { name: 'Save', exact: true }).click();
-			await expect(editor).toHaveCount(0);
+			await expect(titleB).toHaveCount(0);
 			await expect(pageB.getByRole('heading', { level: 1 })).toContainText(`${token}-renamed`);
 			await expect(cardA).toContainText(`${token}-renamed`);
 			// The rename shows in the thread as a system line, live and when its history loads again.
@@ -110,7 +112,7 @@ test.describe('chat protocol interoperability', () => {
 			// Without a description, the card previews only the latest message.
 			await cardA.click();
 			await (await roomAction(pageA, 'edit-room')).click();
-			const editorA = pageA.getByRole('dialog', { name: 'Edit thread', exact: true });
+			const editorA = await roomEditor(pageA, 'thread');
 			await editorA.getByRole('textbox', { name: 'Thread description', exact: true }).fill('');
 			await editorA.getByRole('button', { name: 'Save', exact: true }).click();
 			await expect(pageA.getByTestId('pane-description')).toHaveCount(0);
