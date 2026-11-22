@@ -51,7 +51,9 @@ func (t wsTransport) Close() error                   { return t.ws.CloseNow() }
 // as a TCP connection, a pipe, or stdin and stdout (§1).
 func LineTransport(rw io.ReadWriteCloser, maxFrame int) Transport {
 	scanner := bufio.NewScanner(rw)
-	scanner.Buffer(make([]byte, 0, 4096), maxFrame)
+	// The scanner's limit is the larger of maxFrame and the buffer's
+	// capacity.
+	scanner.Buffer(make([]byte, 0, min(4096, maxFrame)), maxFrame)
 	return &lineTransport{rw: rw, lines: scanner}
 }
 
