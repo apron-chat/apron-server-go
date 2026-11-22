@@ -23,7 +23,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/coder/websocket"
 	"github.com/go-webauthn/webauthn/protocol"
 	"github.com/go-webauthn/webauthn/webauthn"
 	"golang.org/x/time/rate"
@@ -33,6 +32,7 @@ import (
 	"github.com/apron-chat/apron-server-go/internal/authn"
 	"github.com/apron-chat/apron-server-go/internal/wirecore"
 	"github.com/apron-chat/apron-server-go/store"
+	"github.com/apron-chat/apron-server-go/wire"
 )
 
 const (
@@ -420,12 +420,6 @@ func (r *logRecord) rewrite(edit func(value map[string]any)) {
 	r.raw = encodeJSON(value)
 }
 
-// pingFrame is the exact client liveness ping (§1); pongFrame answers it.
-var (
-	pingFrame = wirecore.PingFrame
-	pongFrame = jsontext.Value(wirecore.PongFrame)
-)
-
 // notification renders a frame once, for sending to many connections.
 func notification(method string, params any) jsontext.Value {
 	return encodeJSON(map[string]any{"method": method, "params": params})
@@ -442,26 +436,16 @@ func rawNotification(method string, params jsontext.Value) jsontext.Value {
 	return append(payload, '}')
 }
 
-// rawResponse renders a result reply around a result that is already JSON,
-// as response would with the decoded result.
-func rawResponse(id string, result []byte) jsontext.Value {
-	payload := make([]byte, 0, len(id)+len(result)+24)
-	payload = append(payload, `{"id":`...)
-	payload = strconv.AppendQuote(payload, id)
-	payload = append(payload, `,"result":`...)
-	payload = append(payload, result...)
-	return append(payload, '}')
-}
-
 func formatID(id int64) string {
 	return strconv.FormatInt(id, 10)
 }
 
 type client struct {
 	server *Server
-	// conn is the connection's runtime: its write queue, writer, pinger,
-	// and in-order frame worker, as package wire's connections have.
-	conn *wirecore.Conn
+	// conn is the connection as package wire serves it, and session the
+	// Session it is, if any.
+	conn    *wire.Conn
+	session *Session
 	// request is the context of the request being processed, which the
 	// extension code it runs gets: canceled when the connection closes. It
 	// is set by whoever processes the connection's frames, one at a time.
@@ -596,7 +580,9 @@ type Server struct {
 	// deliveries, which Shutdown awaits.
 	schemeWork sync.WaitGroup
 
-	ops  map[string]operation
+	ops map[string]operation
+	// wire serves the protocol, with s as its Backend (backend.go).
+	wire *wire.Server
 	push *pushDeliverer
 	// vapid is the webpush key (§4.9); vapidStored reports that it is the
 	// one kept in the store.
@@ -607,8 +593,7 @@ type Server struct {
 	badgeDelay time.Duration
 	badges     sync.WaitGroup
 	// stopped ends the background sweep of expired push registrations.
-	stopped     chan struct{}
-	connections sync.WaitGroup
+	stopped chan struct{}
 
 	// commands are the core commands, then the extensions' (§4.1).
 	commands []serverCommand
@@ -719,6 +704,7 @@ func Open(config Config) (*Server, error) {
 		}
 	}
 	s.ops = s.operations()
+	s.newWire()
 	s.push = newPushDeliverer(config.AllowInsecurePush)
 	if config.VAPIDPrivateKey != "" {
 		key, err := parseVAPIDKey(config.VAPIDPrivateKey)
@@ -815,7 +801,7 @@ func (s *Server) buildHandler(routes []route) (handler http.Handler, err error) 
 		}
 	}()
 	mux := http.NewServeMux()
-	mux.HandleFunc("/ws", s.handleWebSocket)
+	mux.Handle("/ws", s.wire)
 	mux.HandleFunc("/healthz", s.handleHealth)
 	mux.HandleFunc(writePath, s.handleWrite)
 	mux.HandleFunc(filePath, s.handleFile)
@@ -896,9 +882,6 @@ func (s *Server) Shutdown(ctx context.Context) error {
 		s.closed = true
 		close(s.stopped)
 		s.extCancel()
-		for c := range s.clients {
-			c.closeWithError(&Error{Code: CodeRetryAfter, Message: "Server is shutting down; reconnect shortly", Data: map[string]any{"retry_after": 5}})
-		}
 		for _, e := range s.embeds {
 			e.endLive()
 		}
@@ -921,7 +904,11 @@ func (s *Server) Shutdown(ctx context.Context) error {
 
 	done := make(chan struct{})
 	go func() {
-		s.connections.Wait()
+		// Each connection is told to come back shortly, after what is
+		// already queued for it.
+		if s.wire != nil {
+			_ = s.wire.Shutdown(ctx)
+		}
 		s.badges.Wait()
 		s.push.wait()
 		s.schemeWork.Wait()
@@ -954,94 +941,6 @@ func (s *Server) nativeOrigin(origin string) bool {
 		return false
 	}
 	return slices.Contains(s.config.WebAuthn.Config.RPOrigins, origin)
-}
-
-func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
-	s.mu.Lock()
-	if s.closed {
-		s.unlock()
-		http.Error(w, "server is shutting down", http.StatusServiceUnavailable)
-		return
-	}
-	s.connections.Add(1)
-	s.unlock()
-	defer s.connections.Done()
-
-	options := &websocket.AcceptOptions{}
-	if s.config.AllowAnyOrigin || s.nativeOrigin(r.Header.Get("Origin")) {
-		options.InsecureSkipVerify = true
-	} else {
-		options.OriginPatterns = s.config.OriginPatterns
-	}
-	ws, err := websocket.Accept(w, r, options)
-	if err != nil {
-		return
-	}
-	ws.SetReadLimit(s.config.ReadLimit)
-
-	transport := wirecore.WebSocket{Conn: ws}
-	c := &client{
-		server:    s,
-		conn:      s.newConn(transport, s.config.OutgoingQueue),
-		origin:    r.Header.Get("Origin"),
-		clientKey: clientKey(s.clientIP(r)),
-		baseURL:   s.baseURL(r),
-	}
-	c.conn.Start(true)
-	s.mu.Lock()
-	if s.closed {
-		s.unlock()
-		c.stopConnection()
-		return
-	}
-	if s.config.MaxConnections > 0 && len(s.clients)-s.sessionCount >= s.config.MaxConnections {
-		// An error about the connection as a whole omits id (§1.1).
-		c.enqueue(s.serverFrameLocked(c))
-		c.closeWithError(&Error{Code: CodeRetryAfter, Message: "Server at capacity; try again shortly", Data: map[string]any{"retry_after": retryAfterSeconds}})
-		s.unlock()
-		<-c.conn.Done()
-		return
-	}
-	s.clients[c] = struct{}{}
-	s.seenBaseURL = c.baseURL
-	// The server announcement is queued before the reader starts accepting auth.
-	c.enqueue(s.serverFrameLocked(c))
-	s.unlock()
-
-	defer func() {
-		c.stopConnection()
-		s.mu.Lock()
-		delete(s.clients, c)
-		s.detachLocked(c)
-		s.unlock()
-	}()
-
-	// Frames are processed in order, each to completion before the next,
-	// which makes auth a barrier (§3.2), by a worker of the connection's
-	// own: the reader goes on reading meanwhile, which keeps the WebSocket's
-	// pings answered while an extension's callback runs. The worker's
-	// requests get a context that the connection's end cancels. Frames read
-	// before the client closed the connection are still processed, so a
-	// request sent just before closing, such as the push_unregister of a
-	// sign-out, takes effect; only a connection the server closed with an
-	// error drops what is left.
-	ctx, cancel := context.WithCancel(r.Context())
-	c.request = ctx
-	c.conn.Serve(func() ([]byte, error) { return transport.Read(ctx) }, func(payload []byte) { s.processFrame(c, payload) }, cancel)
-}
-
-// newConn returns the runtime of a connection on t, whose write queue holds
-// queue batches.
-func (s *Server) newConn(t wirecore.Writer, queue int) *wirecore.Conn {
-	return wirecore.NewConn(t, wirecore.Options{
-		Queue:        queue,
-		WriteTimeout: s.config.WriteTimeout,
-		PingInterval: s.config.PingInterval,
-		PingTimeout:  s.config.PingTimeout,
-		// What the frames behind a failed store fence acknowledge is not
-		// stored: the connection closes rather than send them.
-		FenceFailed: encodeJSON(errorResponse(nil, internalError())),
-	})
 }
 
 // clientKey identifies a connection's client for rate limits: its IP, or
@@ -1097,8 +996,8 @@ func (s *Server) baseURL(r *http.Request) string {
 }
 
 // serverFrameLocked is the `server` frame (PROTOCOL.md §3.1) for c.
-func (s *Server) serverFrameLocked(c *client) jsontext.Value {
-	return notification("server", s.serverParams(c.baseURL, s.revealedLocked(c)))
+func (s *Server) serverFrameLocked(c *client) wire.ServerInfo {
+	return s.serverParams(c.baseURL, s.revealedLocked(c))
 }
 
 // revealedLocked reports whether c gets the whole server frame: once it is
@@ -1111,8 +1010,9 @@ func (s *Server) revealedLocked(c *client) bool {
 }
 
 // serverParams is the `server` frame (PROTOCOL.md §3.1) for a connection
-// whose URLs start with baseURL, whole when revealed. Callers hold s.mu.
-func (s *Server) serverParams(baseURL string, revealed bool) map[string]any {
+// whose URLs start with baseURL, whole when revealed; package wire adds the
+// protocol version and the ping interval. Callers hold s.mu.
+func (s *Server) serverParams(baseURL string, revealed bool) wire.ServerInfo {
 	var authSchemes []string
 	for _, scheme := range s.schemes {
 		authSchemes = append(authSchemes, scheme.Name())
@@ -1138,26 +1038,24 @@ func (s *Server) serverParams(baseURL string, revealed bool) map[string]any {
 	signup := slices.DeleteFunc(slices.Clone(authSchemes), func(scheme string) bool {
 		return scheme == "token" || scheme == passkey.Name && (!guests || s.config.GuestFirstPasskeys)
 	})
-	params := map[string]any{
-		"apron":        10,
-		"agent":        "apron-go/10",
-		"capabilities": []string{"history", "edit", "rooms", "reactions", "activity", "embed:upload", "embed:append", "embed:terminal", "command", "status", "ext"},
-		"auth":         authSchemes,
-		"ping":         max(1, int(s.config.PingInterval/time.Second)),
+	info := wire.ServerInfo{
+		Agent:        "apron-go/10",
+		Capabilities: []string{"history", "edit", "rooms", "reactions", "activity", "embed:upload", "embed:append", "embed:terminal", "command", "status", "ext"},
+		Auth:         authSchemes,
 		// The optional statuses accepted with `me` (§4.5); online and ""
 		// always are, and are not listed.
-		"status": optionalStatuses,
+		Status: optionalStatuses,
 	}
 	// ext:editors (apron's EXTENSIONS.md) needs no data of its own, and
 	// neither does ext:command_list, which lists the commands that
 	// `command` runs.
-	params["capabilities"] = append(params["capabilities"].([]string), "ext:editors", commandListMethod)
+	info.Capabilities = append(info.Capabilities, "ext:editors", commandListMethod)
 	if slices.Contains(authSchemes, external.Name) {
 		// ext:oauth: external sign-in's OAuth extras (SERVER.md), the
 		// server's own authorization server metadata and token endpoint,
 		// or its protected resource metadata naming another issuer. A
 		// client needs it to sign in, so it is listed before.
-		params["capabilities"] = append(params["capabilities"].([]string), "ext:oauth")
+		info.Capabilities = append(info.Capabilities, "ext:oauth")
 	}
 	if revealed && slices.ContainsFunc(s.schemes, func(scheme authn.Scheme) bool {
 		_, ok := scheme.(authn.Credentials)
@@ -1165,11 +1063,11 @@ func (s *Server) serverParams(baseURL string, revealed bool) map[string]any {
 	}) {
 		// ext:account (account.go): credentials, such as passkeys, and
 		// other sessions.
-		params["capabilities"] = append(params["capabilities"].([]string), "ext:"+accountExt)
+		info.Capabilities = append(info.Capabilities, "ext:"+accountExt)
 	}
 	ext := make(map[string]any)
 	if emoji := s.emojiExt(baseURL); emoji != nil && revealed {
-		params["capabilities"] = append(params["capabilities"].([]string), "ext:emoji")
+		info.Capabilities = append(info.Capabilities, "ext:emoji")
 		ext["emoji"] = emoji
 	}
 	if !s.config.DisablePush {
@@ -1177,20 +1075,27 @@ func (s *Server) serverParams(baseURL string, revealed bool) map[string]any {
 		if s.vapid != nil {
 			push["webpush"] = map[string]any{"key": s.vapid.public}
 		}
-		params["push"] = push
+		info.Push = push
 	}
 	if s.config.Welcome != "" {
-		params["welcome"] = s.config.Welcome
+		info.Welcome = s.config.Welcome
 	}
 	for _, field := range profileFields {
 		if value, source := s.profileValueLocked(field); value != "" && (revealed || source != fromRoom) {
-			params[field] = value
+			switch field {
+			case "title":
+				info.Title = value
+			case "description":
+				info.Description = value
+			case "avatar":
+				info.Avatar = value
+			}
 		}
 	}
 	if s.config.MaxPrivateRooms > 0 {
 		// ext:settings (apron's EXTENSIONS.md): read_cursors is absent,
 		// so true, since the server keeps read_message_id (§4.6).
-		params["capabilities"] = append(params["capabilities"].([]string), "ext:settings")
+		info.Capabilities = append(info.Capabilities, "ext:settings")
 		ext["settings"] = map[string]any{"private_rooms": s.config.MaxPrivateRooms}
 	}
 	// Each extension that advertises (Host.Advertise) adds its capability,
@@ -1199,34 +1104,27 @@ func (s *Server) serverParams(baseURL string, revealed bool) map[string]any {
 		if !revealed {
 			break
 		}
-		params["capabilities"] = append(params["capabilities"].([]string), "ext:"+name)
+		info.Capabilities = append(info.Capabilities, "ext:"+name)
 		if value := s.advertised[name]; len(value) > 0 {
 			ext[name] = value
 		}
 	}
 	if len(ext) > 0 {
-		params["ext"] = ext
+		info.Ext = ext
 	}
 	if !slices.Equal(signup, authSchemes) {
-		params["signup"] = signup
+		info.Signup = signup
 	}
-	return params
+	return info
 }
 
-// pong answers a liveness ping, before authentication too (§1).
-func (c *client) pong() { c.conn.Pong() }
-
 // stopConnection ends the connection at once.
-func (c *client) stopConnection() { c.conn.Stop() }
+func (c *client) stopConnection() { c.conn.Close() }
 
 // closeWithError sends an error about the connection as a whole, without id
 // (PROTOCOL.md §1.1), after the frames already queued, then closes the
 // connection.
-func (c *client) closeWithError(e *Error) {
-	if payload := encodeJSON(errorResponse(nil, e)); payload != nil {
-		c.conn.SendLast(payload)
-	}
-}
+func (c *client) closeWithError(e *Error) { c.conn.CloseWithError(e) }
 
 func (c *client) enqueue(value any) bool {
 	return c.enqueueBatch(value)
@@ -1245,7 +1143,7 @@ func (c *client) enqueueBatch(values ...any) bool {
 	if c.conn.Closing() {
 		return false
 	}
-	frames := make([][]byte, 0, len(values))
+	frames := make([]wire.Frame, 0, len(values))
 	for _, value := range values {
 		// A frame rendered once for many connections is shared as is; the
 		// writer never modifies it.
@@ -1256,18 +1154,13 @@ func (c *client) enqueueBatch(values ...any) bool {
 				return false
 			}
 		}
-		frames = append(frames, payload)
+		frames = append(frames, wire.Frame(payload))
 	}
-	return c.conn.Send(frames...)
+	return c.conn.SendBatch(frames...)
 }
 
-func (c *client) sendResult(req request, result any) {
-	c.enqueue(response(req.id, result))
-}
-
-func (c *client) sendError(req request, err *Error) {
-	c.enqueue(errorResponse(req.id, err))
-}
+// sendResult replies to req now (request.reply).
+func (c *client) sendResult(req request, result any) { req.reply(result) }
 
 // operation is a request handler. When it succeeds and has already queued its
 // own reply, it reports replied. Handlers whose results describe state queue
@@ -1303,163 +1196,6 @@ func (s *Server) operations() map[string]operation {
 // readOnlyOps change nothing, so their results are not kept for
 // deduplication (§1.2): a duplicate after the original finished runs again.
 var readOnlyOps = map[string]bool{"history": true, "room_list": true, commandListMethod: true}
-
-func (s *Server) processFrame(c *client, payload []byte) {
-	req, parseErr := parseRequest(payload)
-	if parseErr != nil {
-		if wirecore.NotificationOnly[req.method] {
-			// The id of a notification method may be ignored, and the frame
-			// handled as a notification (§1.1): it is never answered, even
-			// with invalid params, and a ping is still a ping.
-			if req.method == "ping" {
-				c.pong()
-			}
-			return
-		}
-		if parseErr.Code == CodeInvalidParams && !req.hasID {
-			return
-		}
-		if req.hasID {
-			c.sendError(req, parseErr)
-		} else {
-			c.enqueue(errorResponse(nil, parseErr))
-		}
-		return
-	}
-
-	// parseRequest drops the id of a notification method, which a server
-	// may ignore, handling the frame as a notification (§1.1): activity and
-	// ping are never answered.
-	if req.method == "ping" {
-		// A ping is answered before sign-in too (§3.2), and one with other
-		// spacing or keys is still a ping.
-		c.pong()
-		return
-	}
-	// Clients send every other method they send as a request, with an id.
-	// A server may ignore a request method sent without one (§1.1), and
-	// this one does, whatever its method and params, before sign-in or
-	// after: guest auth and status alike.
-	if !req.hasID && !wirecore.NotificationOnly[req.method] {
-		return
-	}
-	// auth is a barrier (§3.2): the read loop processes one frame at a time,
-	// so auth finishes before any later frame on the connection is read.
-	// Requests pipelined behind a failed auth, or behind a WebAuthn begin
-	// step, find no identity below and are denied.
-	if req.method == "auth" {
-		if _, err := s.authenticate(c, req); err != nil {
-			c.sendError(req, err)
-		}
-		return
-	}
-
-	s.mu.Lock()
-	// A connection being closed, as when its account is signed out, does
-	// nothing more: the frames it sent before are dropped.
-	if c.conn.Closing() {
-		s.unlock()
-		return
-	}
-	user := c.user
-	if user == nil {
-		s.unlock()
-		if req.hasID {
-			c.sendError(req, &Error{Code: CodeDenied, Message: "Sign in before sending requests"})
-		}
-		return
-	}
-	op := s.ops[req.method]
-	if op == nil {
-		s.unlock()
-		if req.hasID {
-			c.sendError(req, &Error{Code: CodeUnsupported, Message: "Unsupported method " + strconv.Quote(req.method)})
-		}
-		return
-	}
-	// Requests deduplicate per user (§1.2): a duplicate waits for the original,
-	// even one running on another connection, and replies with its outcome,
-	// brought up to date with the current state.
-	var entry *dedupEntry
-	if req.hasID && len(req.id) > maxRequestIDBytes {
-		// Request ids are any string (§2.4), but each is kept for
-		// deduplication, so their size is bounded.
-		s.unlock()
-		c.sendError(req, &Error{Code: CodeTooLarge, Message: fmt.Sprintf("A request id is at most %d bytes", maxRequestIDBytes)})
-		return
-	}
-	if req.hasID {
-		fingerprint := wirecore.Fingerprint(req.method, req.raw)
-		var prior *dedupEntry
-		if entry, prior = user.dedup.Claim(req.id, fingerprint); prior != nil {
-			s.unlock()
-			if prior.Fingerprint != fingerprint {
-				c.sendError(req, invalidParams("Request id %q was already used for another operation", req.id))
-				return
-			}
-			<-prior.Done()
-			if prior.Value.err != nil {
-				c.sendError(req, prior.Value.err)
-			} else {
-				s.mu.Lock()
-				result := s.currentResultLocked(user, req.method, prior.Value.result)
-				c.sendResult(req, result)
-				s.unlock()
-			}
-			return
-		}
-	}
-	s.unlock()
-
-	result, replied, err := op(s, c, req)
-	if req.hasID && !replied {
-		if err != nil {
-			c.sendError(req, err)
-		} else {
-			c.sendResult(req, result)
-		}
-	}
-	if entry != nil {
-		s.mu.Lock()
-		// Failed operations are not cached, and neither are reads, whose
-		// results can be large and which are safe to run again: a retry
-		// executes again. Concurrent duplicates still share the outcome.
-		user.dedup.Finish(req.id, entry, dedupOutcome{result, err}, err != nil || readOnlyOps[req.method])
-		s.unlock()
-	}
-}
-
-// currentResultLocked brings a duplicate's result up to date (§1.2): `me`
-// answers with the current profile, and a message result lists only the
-// write URLs that are still unused. Other results name what the request
-// made, which does not change.
-func (s *Server) currentResultLocked(u *userState, method string, result any) any {
-	switch method {
-	case "me":
-		return map[string]any{"you": u.you()}
-	case "message", "command":
-		original, ok := result.(map[string]any)
-		if !ok || original["embeds"] == nil {
-			return result
-		}
-		current := maps.Clone(original)
-		var writes []any
-		for _, value := range asList(original["embeds"]) {
-			written, _ := value.(map[string]any)
-			id, _ := written["embed_id"].(string)
-			if e := s.embeds[id]; e != nil && !e.started && !e.removed && s.writes[e.token] == e {
-				writes = append(writes, written)
-			}
-		}
-		if len(writes) == 0 {
-			delete(current, "embeds")
-		} else {
-			current["embeds"] = writes
-		}
-		return current
-	}
-	return result
-}
 
 // nextIDLocked returns the next log_id in the server-wide sequence: the commit
 // time in milliseconds, or the previous log_id + 1.

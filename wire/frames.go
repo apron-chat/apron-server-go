@@ -22,7 +22,7 @@ type ServerInfo struct {
 	Agent        string            `json:"agent,omitempty"`
 	Capabilities []string          `json:"capabilities,omitempty"`
 	Welcome      string            `json:"welcome,omitempty"`
-	Signup       []string          `json:"signup,omitempty"`
+	Signup       []string          `json:"signup,omitzero"`
 	Labels       map[string]string `json:"labels,omitempty"`
 	Ping         int               `json:"ping,omitzero"`
 	Title        string            `json:"title,omitempty"`

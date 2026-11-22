@@ -778,11 +778,11 @@ func (s *Server) listRooms(c *client, req request) (any, bool, *Error) {
 	if withMembers {
 		result["users"] = profiles(users)
 	}
-	frames := []any{response(req.id, result)}
+	var cursors []any
 	for _, r := range slices.Concat(joined, others) {
-		frames = append(frames, s.cursorFramesLocked(u, r)...)
+		cursors = append(cursors, s.cursorFramesLocked(u, r)...)
 	}
-	c.enqueueBatch(frames...)
+	req.reply(result, cursors...)
 	return result, true, nil
 }
 
@@ -1036,7 +1036,7 @@ func (s *Server) history(c *client, req request) (any, bool, *Error) {
 	result := jsontext.Value(renderHistory(latest, created, len(rooms) > 0, matching, more, size))
 	// The records are already JSON: the reply is assembled from them without
 	// decoding or re-encoding.
-	c.enqueue(rawResponse(req.id, result))
+	req.reply(result)
 	return result, true, nil
 }
 
@@ -1179,7 +1179,7 @@ func (s *Server) activity(c *client, req request) (any, bool, *Error) {
 	if m := s.visibleMessageLocked(c.user, readID); hasRead && (m == nil || m.roomID != roomID) {
 		return nil, false, invalidParams("Unknown read_message_id %q in room %q", readID, roomID)
 	}
-	// The relays this request causes are queued before processFrame sends
+	// The relays this request causes are queued before package wire sends
 	// its result (§1).
 	result := map[string]any{}
 	if !inRoom {

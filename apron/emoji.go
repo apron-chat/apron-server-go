@@ -7,6 +7,7 @@ import (
 	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"fmt"
+	"github.com/apron-chat/apron-server-go/wire"
 	"maps"
 	"net"
 	"net/http"
@@ -239,7 +240,7 @@ func (s *Server) emojiChangedLocked() {
 		baseURL  string
 		revealed bool
 	}
-	frames := make(map[kind]jsontext.Value)
+	frames := make(map[kind]*wire.ServerInfo)
 	for c := range s.clients {
 		key := kind{c.baseURL, s.revealedLocked(c)}
 		frame, seen := frames[key]
@@ -247,12 +248,13 @@ func (s *Server) emojiChangedLocked() {
 			// A connection not offered ext:emoji has no catalog_url to
 			// change.
 			if key.revealed && s.emojiExt(c.baseURL) != nil {
-				frame = s.serverFrameLocked(c)
+				info := s.serverFrameLocked(c)
+				frame = &info
 			}
 			frames[key] = frame
 		}
 		if frame != nil {
-			c.enqueue(frame)
+			c.conn.Announce(*frame)
 		}
 	}
 }

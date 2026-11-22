@@ -181,7 +181,7 @@ func (update statusUpdate) mute(now time.Time) muteState {
 // mute's echo to the user's connections, the sender's included, precedes
 // the result. Like other requests it needs a signed-in connection, and a
 // `status` without an id is a notification no client sends, which
-// processFrame ignores. On an error nothing changes: invalid params, a mute
+// package wire ignores. On an error nothing changes: invalid params, a mute
 // of a room the user cannot see, a mute of another room beyond
 // maxRoomMutes, or more requests than the user's limit (admitStatusLocked).
 func (s *Server) status(c *client, req request) (any, bool, *Error) {

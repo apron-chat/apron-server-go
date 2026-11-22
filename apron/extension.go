@@ -331,7 +331,7 @@ func (s *Server) runExtensionCommand(c *client, req request, command *extensionC
 	if encodeErr != nil {
 		return nil, false, command.host.protocolError(fmt.Errorf("/%s returned a result that is not JSON: %w", command.command.Name, encodeErr))
 	}
-	c.enqueue(rawResponse(req.id, encoded))
+	req.reply(jsontext.Value(encoded))
 	return jsontext.Value(encoded), true, nil
 }
 
@@ -398,6 +398,7 @@ func (r *Registrar) Method(name string, fn MethodFunc) {
 			}
 			return jsontext.Value(encoded), false, nil
 		}
+		h.s.registerOp(name, h.s.ops[name])
 		return nil
 	})
 }

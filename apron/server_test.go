@@ -1044,7 +1044,7 @@ func TestDefaultRoomAndEmptyMessages(t *testing.T) {
 }
 
 func TestRequestDeduplication(t *testing.T) {
-	app, httpServer := newTestServer(t, DefaultConfig())
+	_, httpServer := newTestServer(t, DefaultConfig())
 	c := dialTestClient(t, httpServer)
 	thread, _ := saveRoom(t, c, "thread", map[string]any{"parent_room_id": "general", "title": "Deploy"})
 	c.write(t, map[string]any{"method": "room_set", "id": "thread", "params": map[string]any{"title": "Deploy", "parent_room_id": "general"}})
@@ -1083,22 +1083,6 @@ func TestRequestDeduplication(t *testing.T) {
 	second := c.result(t, "history", "read", map[string]any{"room_id": thread})
 	if len(logIDs(t, second, "messages")) != len(logIDs(t, first, "messages"))+1 {
 		t.Fatalf("a finished read was answered from the cache: %#v", second)
-	}
-	// The server forgets a read just after sending its result, so the
-	// result can arrive first.
-	kept := func(id string) bool {
-		app.mu.RLock()
-		defer app.mu.RUnlock()
-		return app.users[c.userID].dedup.Kept(id)
-	}
-	for deadline := time.Now().Add(time.Second); kept("read") && time.Now().Before(deadline); {
-		time.Sleep(time.Millisecond)
-	}
-	if kept("read") {
-		t.Fatal("history result kept for deduplication")
-	}
-	if !kept("post") {
-		t.Fatal("message result not kept for deduplication")
 	}
 }
 

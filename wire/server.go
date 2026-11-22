@@ -58,20 +58,25 @@ type Server struct {
 	// then has the proxy's address, which a backend that bans by address
 	// would ban together.
 	ClientAddr func(r *http.Request) net.Addr
+	// ShutdownError, if set, is sent to each open connection on Shutdown,
+	// after the frames already queued, such as error/retry_after to have
+	// clients come back shortly; without it, connections close at once.
+	ShutdownError *Error
 	// FenceFailed is sent in place of the frames behind a fence that failed
 	// (Conn.Fence), before the connection closes; error/internal_error by
 	// default.
 	FenceFailed *Error
 
-	once     sync.Once
-	mu       sync.Mutex
-	methods  map[string]Method
-	conns    map[*Conn]struct{}
-	network  int
-	closed   bool
-	dedup    *dedup
-	serving  sync.WaitGroup
-	shutdown chan struct{}
+	once      sync.Once
+	checkOnce sync.Once
+	mu        sync.Mutex
+	methods   map[string]Method
+	conns     map[*Conn]struct{}
+	network   int
+	closed    bool
+	dedup     *dedup
+	serving   sync.WaitGroup
+	shutdown  chan struct{}
 }
 
 // Handle registers a method, which takes the place of the Backend's for the
@@ -86,9 +91,6 @@ func (s *Server) Handle(name string, m Method) {
 func (s *Server) init() {
 	s.once.Do(func() {
 		s.methods = s.builtins()
-		if _, ok := s.methods["message"]; !ok {
-			s.logger().Warn("wire: the backend takes no messages, which every server should (§3.6): implement Messenger, or Handle message")
-		}
 		s.conns = make(map[*Conn]struct{})
 		s.shutdown = make(chan struct{})
 		perUser := s.DedupSize
@@ -170,6 +172,11 @@ func (s *Server) ServeTransport(ctx context.Context, t Transport, remote net.Add
 	s.mu.Unlock()
 	defer s.serving.Done()
 
+	s.checkOnce.Do(func() {
+		if _, ok := s.method("message"); !ok {
+			s.logger().Warn("wire: the backend takes no messages, which every server should (§3.6): implement Messenger, or Handle message")
+		}
+	})
 	ctx, cancel := context.WithCancel(ctx)
 	c := s.newConn(ctx, cancel, t, s.outgoingQueue(), nil)
 	c.remote, c.request = remote, r
@@ -323,10 +330,18 @@ func (s *Server) Shutdown(ctx context.Context) error {
 		s.closed = true
 		close(s.shutdown)
 	}
+	conns := make([]*Conn, 0, len(s.conns))
 	for c := range s.conns {
-		c.Close()
+		conns = append(conns, c)
 	}
 	s.mu.Unlock()
+	for _, c := range conns {
+		if s.ShutdownError != nil {
+			c.CloseWithError(s.ShutdownError)
+		} else {
+			c.Close()
+		}
+	}
 	done := make(chan struct{})
 	go func() {
 		s.serving.Wait()
@@ -336,6 +351,9 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	case <-done:
 		return nil
 	case <-ctx.Done():
+		for _, c := range conns {
+			c.Close()
+		}
 		return ctx.Err()
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"fmt"
+	"github.com/apron-chat/apron-server-go/wire"
 	"maps"
 	"net/http"
 	"slices"
@@ -96,7 +97,7 @@ func (s *Server) announceServerLocked() {
 		baseURL  string
 		revealed bool
 	}
-	frames := make(map[kind]jsontext.Value)
+	frames := make(map[kind]wire.ServerInfo)
 	for c := range s.clients {
 		key := kind{c.baseURL, s.revealedLocked(c)}
 		frame, seen := frames[key]
@@ -104,7 +105,7 @@ func (s *Server) announceServerLocked() {
 			frame = s.serverFrameLocked(c)
 			frames[key] = frame
 		}
-		c.enqueue(frame)
+		c.conn.Announce(frame)
 	}
 }
 

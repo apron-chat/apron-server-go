@@ -40,7 +40,7 @@ func (f *storeFence) release(err error) {
 	close(f.done)
 }
 
-// Done and Err make a storeFence a connection's fence (wirecore.Fence).
+// Done and Err make a storeFence a connection's fence (wire.Fence).
 func (f *storeFence) Done() <-chan struct{} { return f.done }
 func (f *storeFence) Err() error            { return f.err }
 

@@ -1,6 +1,10 @@
 package apron
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/apron-chat/apron-server-go/internal/wirecore"
+)
 
 func TestMalformedFrames(t *testing.T) {
 	for _, tc := range []struct {
@@ -19,8 +23,8 @@ func TestMalformedFrames(t *testing.T) {
 		{"{\"method\":\"message\",\"params\":{\"body\":{\"text\":\"\xff\"}}}", CodeParseError, ""},
 	} {
 		t.Run(tc.input, func(t *testing.T) {
-			req, err := parseRequest([]byte(tc.input))
-			if err == nil || err.Code != tc.code || req.id != tc.id {
+			req, err := wirecore.ParseRequest([]byte(tc.input))
+			if err == nil || err.Code != tc.code || req.ID != tc.id {
 				t.Fatalf("parse result = %#v, %#v", req, err)
 			}
 		})
@@ -35,8 +39,8 @@ func TestUnknownEnvelopeKeysAreIgnored(t *testing.T) {
 		`{"jsonrpc":"1.0","method":"history","id":"x"}`,
 		`{"jsonrpc":2,"method":"history","id":"x","extra":{}}`,
 	} {
-		req, err := parseRequest([]byte(input))
-		if err != nil || req.method != "history" || req.id != "x" {
+		req, err := wirecore.ParseRequest([]byte(input))
+		if err != nil || req.Method != "history" || req.ID != "x" {
 			t.Fatalf("%s: %#v, %#v", input, req, err)
 		}
 	}

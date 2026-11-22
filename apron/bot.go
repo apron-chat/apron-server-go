@@ -2,17 +2,16 @@ package apron
 
 import (
 	"context"
-	"crypto/rand"
 	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"errors"
 	"fmt"
+	"github.com/apron-chat/apron-server-go/wire"
 	"net"
 	"net/url"
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 )
 
 // Errors of Sessions, which Session.Err reports and their requests return.
@@ -23,13 +22,13 @@ var (
 	// ErrFellBehind is why the server closed a Session whose OnFrame fell
 	// too far behind its frames, as it disconnects a client that does not
 	// read.
-	ErrFellBehind = errors.New("apron: the session's frame handler fell behind")
+	ErrFellBehind = wire.ErrFellBehind
 	// ErrReentrant is returned by a request a Session is asked to send
 	// while the request it is sending waits on the caller, such as from a
 	// filter or command that the session's own message runs: the session
 	// sends one request at a time. Send it with another Session
 	// (Bot.Connect).
-	ErrReentrant = errors.New("apron: the session is waiting on this call; use another session")
+	ErrReentrant = wire.ErrReentrant
 )
 
 // Bot is an account an extension owns and speaks through: it holds the
@@ -188,34 +187,18 @@ func (b *Bot) StreamTerminal(ctx context.Context, roomID, title string, options 
 
 // Session is one in-process connection of a Bot. It speaks the protocol
 // (PROTOCOL.md) as a WebSocket client does, and gets the frames a client
-// would. It sends one request at a time, in order; its methods are safe to
-// call from any goroutine.
+// would: it is a wire.Local connection. It sends one request at a time, in
+// order; its methods are safe to call from any goroutine.
 type Session struct {
 	s   *Server
 	bot *Bot
 	c   *client
-
-	// turn holds a token while a request is processed, as a connection's
-	// frames are processed one at a time. Request ids are prefix and a
-	// number, unique across the bot's sessions, whose requests share
-	// deduplication (§1.2).
-	turn    chan struct{}
-	prefix  string
-	nextID  atomic.Uint64
-	pending sync.Map // request id → chan sessionReply
-	frames  chan jsontext.Value
-	// closed is closed with the transport; done once the server has
-	// forgotten the connection, with err set.
-	closed    chan struct{}
-	closeOnce sync.Once
-	done      chan struct{}
-	errMu     sync.Mutex
-	err       error
-}
-
-type sessionReply struct {
-	result jsontext.Value
-	err    *Error
+	l   *wire.Local
+	// done is closed once the server has forgotten the connection, with
+	// err set.
+	done  chan struct{}
+	errMu sync.Mutex
+	err   error
 }
 
 // SessionOptions configure a Session.
@@ -231,26 +214,21 @@ type SessionOptions struct {
 // sessionFrameQueue bounds the notifications waiting for OnFrame.
 const sessionFrameQueue = 1024
 
-// inFlight keys the context of the request a Session is sending, so that a
-// request on the same session from code that request runs is refused.
-type inFlight struct{ s *Session }
-
 // Connect opens another connection for the bot, such as one that reads its
 // frames with OnFrame, which Close ends. The bot's own requests use a
 // connection of their own.
 func (b *Bot) Connect(options SessionOptions) (*Session, error) {
 	s := b.s
-	session := &Session{
-		s: s, bot: b, prefix: rand.Text()[:12] + "-",
-		turn: make(chan struct{}, 1), closed: make(chan struct{}), done: make(chan struct{}),
+	c := &client{server: s}
+	session := &Session{s: s, bot: b, c: c, done: make(chan struct{})}
+	c.session = session
+	local := wire.LocalOptions{
+		User:  wire.User{UserID: b.userID},
+		Data:  c,
+		Queue: max(s.config.OutgoingQueue, sessionFrameQueue),
 	}
-	c := &client{
-		server: s,
-		conn:   s.newConn(sessionTransport{session}, max(s.config.OutgoingQueue, sessionFrameQueue)),
-	}
-	session.c = c
 	if options.OnFrame != nil {
-		session.frames = make(chan jsontext.Value, sessionFrameQueue)
+		local.OnFrame = func(frame wire.Frame) { options.OnFrame(jsontext.Value(frame)) }
 	}
 
 	s.mu.Lock()
@@ -262,55 +240,29 @@ func (b *Bot) Connect(options SessionOptions) (*Session, error) {
 	case u == nil || u.botOf != b.host.name:
 		return nil, fmt.Errorf("apron: %s is not extension %s's bot", b.userID, b.host.name)
 	}
+	l, err := s.wire.Local(local)
+	if err != nil {
+		return nil, ErrServerClosed
+	}
+	session.l, c.conn = l, l.Conn()
 	c.baseURL = s.sessionBaseURLLocked()
-	// The session's goroutines are extension work, which Shutdown waits for.
-	work := 1
-	if options.OnFrame != nil {
-		work++
-	}
-	s.extensionWork.Add(work)
-	if options.OnFrame != nil {
-		go func() {
-			defer s.extensionWork.Done()
-			for {
-				select {
-				case frame := <-session.frames:
-					options.OnFrame(frame)
-				case <-session.closed:
-					return
-				}
-			}
-		}()
-	}
-	go func() {
-		defer s.extensionWork.Done()
-		<-c.conn.Done()
-		session.forget()
-	}()
-	// In process, there is no transport to ping.
-	c.conn.Start(false)
+	c.request = s.extContext
 	s.clients[c] = struct{}{}
 	s.sessionCount++
 	s.attachLocked(c, u)
-	c.enqueue(s.serverFrameLocked(c))
+	c.conn.Announce(s.serverFrameLocked(c))
 	s.sendAfterAuthLocked(c)
 	return session, nil
 }
 
-// forget removes the closed session's connection from the server, as a
-// WebSocket's is when it closes, and records why it closed.
-func (b *Session) forget() {
-	s := b.s
-	s.mu.Lock()
-	if _, ok := s.clients[b.c]; ok {
-		delete(s.clients, b.c)
-		s.sessionCount--
-		s.detachLocked(b.c)
-	}
-	closed := s.closed
-	s.unlock()
-	if closed {
+// forgotten records why the session closed, once the server has forgotten
+// its connection (backend.Disconnected).
+func (b *Session) forgotten(serverClosed bool) {
+	if serverClosed {
 		b.setErr(ErrServerClosed)
+	}
+	if errors.Is(b.l.Err(), wire.ErrFellBehind) {
+		b.setErr(ErrFellBehind)
 	}
 	b.setErr(ErrSessionClosed)
 	close(b.done)
@@ -372,57 +324,15 @@ func (b *Session) Err() error {
 // account stays.
 func (b *Session) Close() error {
 	b.setErr(ErrSessionClosed)
-	b.c.stopConnection()
+	_ = b.l.Close()
 	<-b.done
 	return nil
 }
 
-// sessionTransport delivers a Session's frames in-process.
-type sessionTransport struct{ session *Session }
-
-func (t sessionTransport) Write(_ context.Context, payload []byte) error {
-	return t.session.receive(payload)
-}
-
-func (t sessionTransport) Ping(context.Context) error { return nil }
-
-func (t sessionTransport) Close() error {
-	t.session.closeOnce.Do(func() { close(t.session.closed) })
-	return nil
-}
-
-// receive routes a frame: a reply to the request that waits for it, and a
-// notification to OnFrame.
-func (b *Session) receive(payload []byte) error {
-	var frame struct {
-		ID     *string        `json:"id"`
-		Method string         `json:"method"`
-		Result jsontext.Value `json:"result"`
-		Error  *Error         `json:"error"`
-	}
-	if err := json.Unmarshal(payload, &frame); err != nil {
-		return err
-	}
-	if frame.ID != nil && frame.Method == "" {
-		if waiting, ok := b.pending.LoadAndDelete(*frame.ID); ok {
-			waiting.(chan sessionReply) <- sessionReply{frame.Result, frame.Error}
-		}
-		return nil
-	}
-	if b.frames == nil {
-		return nil
-	}
-	select {
-	case b.frames <- jsontext.Value(payload):
-		return nil
-	default:
-		b.setErr(ErrFellBehind)
+func (b *Session) closedErr() error {
+	if errors.Is(b.l.Err(), wire.ErrFellBehind) {
 		return ErrFellBehind
 	}
-}
-
-// closedErr is the error of a request on a closed session.
-func (b *Session) closedErr() error {
 	if err := b.Err(); err != nil {
 		return err
 	}
@@ -436,49 +346,11 @@ func (b *Session) Call(ctx context.Context, method string, params any) (jsontext
 	if method == "auth" {
 		return nil, errors.New("apron: a session is signed in as its bot")
 	}
-	if ctx.Value(inFlight{b}) != nil {
-		return nil, ErrReentrant
-	}
-	id := b.prefix + strconv.FormatUint(b.nextID.Add(1), 10)
-	frame := map[string]any{"method": method, "id": id}
-	if params != nil {
-		frame["params"] = params
-	}
-	payload, err := json.Marshal(frame, jsonOptions)
-	if err != nil {
-		return nil, err
-	}
-	reply := make(chan sessionReply, 1)
-	b.pending.Store(id, reply)
-	defer b.pending.Delete(id)
-	select {
-	case b.turn <- struct{}{}:
-	case <-b.closed:
+	result, err := b.l.Call(ctx, method, params)
+	if errors.Is(err, wire.ErrClosed) || errors.Is(err, wire.ErrFellBehind) {
 		return nil, b.closedErr()
-	case <-ctx.Done():
-		return nil, ctx.Err()
 	}
-	select {
-	case <-b.closed:
-		<-b.turn
-		return nil, b.closedErr()
-	default:
-	}
-	b.c.request = context.WithValue(ctx, inFlight{b}, true)
-	b.s.processFrame(b.c, payload)
-	b.c.request = nil
-	<-b.turn
-	select {
-	case r := <-reply:
-		if r.err != nil {
-			return nil, r.err
-		}
-		return r.result, nil
-	case <-b.closed:
-		return nil, b.closedErr()
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	}
+	return result, err
 }
 
 // postRequest is a message a Session posts, as options set it.

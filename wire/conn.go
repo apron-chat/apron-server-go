@@ -114,6 +114,9 @@ func (c *Conn) Announce(info ServerInfo) bool {
 	return c.Send(frame)
 }
 
+// Queued returns how many batches wait to be written to the client.
+func (c *Conn) Queued() int { return c.rt.Queued() }
+
 // Closing reports whether the connection is closing or closed: its last
 // frame is queued, and the frames it sent after are dropped.
 func (c *Conn) Closing() bool { return c.rt.Closing() }

@@ -2,12 +2,14 @@ package apron
 
 import (
 	"context"
+	"errors"
 	"slices"
 	"testing"
 	"time"
 
 	"github.com/apron-chat/apron-server-go/internal/authn"
 	"github.com/apron-chat/apron-server-go/store"
+	"github.com/apron-chat/apron-server-go/wire"
 )
 
 func TestParsePrincipal(t *testing.T) {
@@ -170,11 +172,19 @@ func TestClosingConnectionsDoNothing(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer app.Shutdown(context.Background())
-	c := &client{server: app, conn: app.newConn(sessionTransport{&Session{closed: make(chan struct{})}}, 4), user: newUserState("ada", "Ada")}
+	c := &client{server: app, user: newUserState("ada", "Ada")}
+	l, err := app.wire.Local(wire.LocalOptions{User: wire.User{UserID: "ada"}, Data: c})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.conn = l.Conn()
 	c.closeWithError(Denied("closing"))
-	queued := c.conn.Queued()
-	app.processFrame(c, []byte(`{"method":"push_register","id":"p1","params":{"kind":"relay","url":"https://push.example/x","token":"t"}}`))
-	if c.conn.Queued() != queued || len(app.pushes) != 0 {
-		t.Fatalf("a closing connection's request ran: %d frames, %d pushes", c.conn.Queued()-queued, len(app.pushes))
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if _, err := l.Call(ctx, "push_register", map[string]any{"kind": "relay", "url": "https://push.example/x", "token": "t"}); !errors.Is(err, wire.ErrClosed) {
+		t.Fatalf("a closing connection's request: %v", err)
+	}
+	if len(app.pushes) != 0 {
+		t.Fatalf("a closing connection's request ran: %d pushes", len(app.pushes))
 	}
 }

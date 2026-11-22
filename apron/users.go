@@ -13,7 +13,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/apron-chat/apron-server-go/internal/authn"
-	"github.com/apron-chat/apron-server-go/internal/wirecore"
+	"github.com/apron-chat/apron-server-go/wire"
 	"golang.org/x/text/secure/precis"
 	"golang.org/x/time/rate"
 )
@@ -84,7 +84,6 @@ type userState struct {
 	// leftAt maps each room the user left, and has not rejoined, to the
 	// log_id of the leave, for room_list's `left` (§4.2.1).
 	leftAt map[string]int64
-	dedup  dedupCache
 	// posts limits the user's new messages, room_set requests, and /avatar
 	// commands to MessagesPerMinute; nil when unlimited.
 	posts *rate.Limiter
@@ -142,7 +141,6 @@ func newUserState(id, name string) *userState {
 		pushes:    make(map[string]*pushRegistration),
 		pings:     make(map[string]int64),
 		created:   time.Now(),
-		dedup:     dedupCache{Size: maxDedupEntries},
 	}
 }
 
@@ -193,19 +191,6 @@ func (u *userState) profile() map[string]any {
 	}
 	return value
 }
-
-// dedupOutcome is a request's result, or its error, kept for its
-// duplicates (§1.2).
-type dedupOutcome struct {
-	result any
-	err    *Error
-}
-
-type dedupEntry = wirecore.DedupEntry[dedupOutcome]
-
-// dedupCache keeps the latest maxDedupEntries request IDs of one user.
-// Guarded by s.mu.
-type dedupCache = wirecore.Dedup[string, dedupOutcome]
 
 // normalizeName prepares a requested display name with the PRECIS
 // Nickname profile (RFC 8266): it maps compatibility characters, folds
@@ -324,7 +309,7 @@ func (s *Server) switchUserLocked(c *client, req request, user *userState, extra
 	// A connection that got only what signing in needs gets the whole
 	// server frame now (§3.1).
 	if !s.revealedLocked(c) {
-		c.enqueue(notification("server", s.serverParams(c.baseURL, true)))
+		c.conn.Announce(s.serverParams(c.baseURL, true))
 	}
 	s.attachLocked(c, user)
 	if joinDefault {
@@ -365,6 +350,7 @@ func (s *Server) attachLocked(c *client, user *userState) {
 	// ceremony.
 	c.authStates = nil
 	c.user = user
+	c.conn.SetUser(wire.User{UserID: user.id})
 	user.clients[c] = struct{}{}
 	// The previous identity's departure goes first, then the user's own
 	// status.
@@ -386,6 +372,7 @@ func (s *Server) detachLocked(c *client) {
 	}
 	delete(user.clients, c)
 	c.user = nil
+	c.conn.SignOut()
 	if len(user.clients) == 0 && !user.account() {
 		s.retireLocked(user)
 		return

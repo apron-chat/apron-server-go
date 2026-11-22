@@ -8,7 +8,6 @@ import (
 	"maps"
 	"slices"
 
-	"github.com/apron-chat/apron-server-go/internal/wirecore"
 	"github.com/apron-chat/apron-server-go/wire"
 )
 
@@ -43,40 +42,42 @@ func Denied(message string) *Error { return wire.Denied(message) }
 // InvalidParams is a CodeInvalidParams error with message.
 func InvalidParams(message string) *Error { return wire.InvalidParams(message) }
 
-type rpcResponse struct {
-	ID     any    `json:"id,omitzero"`
-	Result any    `json:"result,omitzero"`
-	Error  *Error `json:"error,omitzero"`
-}
-
 type request struct {
 	method string
 	params map[string]jsontext.Value
-	// raw is params as they arrived, which deduplication fingerprints.
-	raw   jsontext.Value
-	id    string
-	hasID bool
+	id     string
+	hasID  bool
+	// w is the request as package wire handles it, which a reply goes
+	// through.
+	w *wire.Request
 }
 
-// parseRequest parses a frame (§1.1). On failure the request still has the
-// method and id that could be read.
-func parseRequest(payload []byte) (request, *Error) {
-	parsed, failed := wirecore.ParseRequest(payload)
-	req := request{method: parsed.Method, params: parsed.Fields, raw: parsed.Params, id: parsed.ID, hasID: parsed.HasID}
-	if failed != nil {
-		return req, &Error{Code: failed.Code, Message: failed.Message}
+// newRequest is the request of r, with its params by name.
+func newRequest(r *wire.Request) request {
+	req := request{method: r.Method, id: r.ID, hasID: !r.Notification(), w: r}
+	_ = json.Unmarshal(r.Params, &req.params)
+	if req.params == nil {
+		req.params = map[string]jsontext.Value{}
 	}
-	return req, nil
+	return req
 }
 
-func response(id string, result any) rpcResponse {
-	return rpcResponse{ID: id, Result: result}
-}
-
-// errorResponse builds an error reply. A nil id omits "id", as for errors not
-// tied to a request (PROTOCOL.md §1.1).
-func errorResponse(id any, e *Error) rpcResponse {
-	return rpcResponse{ID: id, Error: e}
+// reply sends the request's result now, followed by frames, with nothing
+// between them: handlers whose results describe state reply while they
+// hold s.mu, so that a result reflects every notification sent before it
+// on the connection, and none after (§1).
+func (req request) reply(result any, then ...any) bool {
+	frames := make([]wire.Frame, 0, len(then))
+	for _, value := range then {
+		payload, rendered := value.(jsontext.Value)
+		if !rendered {
+			payload = encodeJSON(value)
+		}
+		if payload != nil {
+			frames = append(frames, wire.Frame(payload))
+		}
+	}
+	return req.w.Reply(result, frames...)
 }
 
 func invalidParams(format string, args ...any) *Error {
