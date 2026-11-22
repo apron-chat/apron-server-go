@@ -15,9 +15,9 @@ forgets it on restart); see [SERVER.md](SERVER.md#storage).
   with no rooms, log, or accounts of its own: connections, frames, the auth
   barrier, deduplication, and in-process connections, with a Backend that
   answers. `apron` is a Backend of it, and so is any server built on it,
-  such as ssh-chat's gateway or `examples/minimal`. It depends only on the
-  standard library and the WebSocket package, so that other programs can
-  embed it cheaply; `internal/wirecore` is its connection runtime and
+  such as a gateway in front of another chat system, or
+  `examples/minimal`. It depends only on the standard library and the
+  WebSocket package, so that other programs can embed it cheaply; `internal/wirecore` is its connection runtime and
   request parsing. Sign-in schemes live in
   `internal/auth/{email,passkey,external}`, and depend only on
   `internal/authn`, the boundary between them and the server: a scheme
