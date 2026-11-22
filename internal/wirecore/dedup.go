@@ -38,15 +38,28 @@ func (d *Dedup[K, V]) Claim(key K, fingerprint [32]byte) (entry, prior *DedupEnt
 	entry = &DedupEntry[V]{Fingerprint: fingerprint, done: make(chan struct{})}
 	d.entries[key] = entry
 	d.order = append(d.order, key)
-	for len(d.order) > d.Size {
-		oldest := d.order[0]
-		d.order = d.order[1:]
-		// A request still running stays, so that its duplicates find it.
-		if e := d.entries[oldest]; e != nil && isClosed(e.done) {
-			delete(d.entries, oldest)
-		}
+	for len(d.order) > d.Size && d.evict() {
 	}
 	return entry, nil
+}
+
+// evict forgets the oldest request that finished, and reports whether
+// there was one. A request still running stays, in its place, so that its
+// duplicates find it, and it is forgotten once it is the oldest finished.
+func (d *Dedup[K, V]) evict() bool {
+	for i, key := range d.order {
+		if e := d.entries[key]; e != nil && !isClosed(e.done) {
+			continue
+		}
+		delete(d.entries, key)
+		if i == 0 {
+			d.order = d.order[1:]
+		} else {
+			d.order = append(d.order[:i], d.order[i+1:]...)
+		}
+		return true
+	}
+	return false
 }
 
 // Finish records the outcome of a claimed request; forget drops it once
