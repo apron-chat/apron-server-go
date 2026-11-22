@@ -32,10 +32,18 @@
 // A Backend implements three methods, which together are the core
 // conformance checklist (§3.6): Hello, Auth, and Message. It adds the
 // optional core request me, and capabilities, by implementing more
-// interfaces ([Profiler], [Commander], [Editor]), or by registering request
-// methods of its own with [Server.Handle]. It sends notifications with
-// [Conn.Notify], or encodes a frame once with [Encode] and sends it to many
-// connections with [Conn.Send].
+// interfaces: [Profiler] (me), [Commander] (command), [Editor] (edit),
+// [Rooms] (rooms), [Historian] (history), and [Statuser] (status). Each one
+// adds its capability to the server frame and its requests, with their
+// params checked before the backend sees them. Request methods of its own
+// go to [Server.Handle]. It sends notifications with [Conn.Notify], or
+// encodes a frame once with [Encode] and sends it to many connections with
+// [Conn.Send].
+//
+// A host that keeps less than the protocol asks for gets helpers: [IDs]
+// gives message_ids to messages that have none, derived from their own
+// times, and [Page] answers history from any ordered slice of records, such
+// as a host's recent-message buffer.
 //
 // A request's notifications to its own connection are sent before its
 // result when the backend queues them before it returns (§1): Conn's queue
