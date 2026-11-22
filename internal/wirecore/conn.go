@@ -123,9 +123,14 @@ func (c *Conn) enqueue(b batch) bool {
 	if c.closing.Load() {
 		return false
 	}
+	// A stopped connection queues nothing, even when its queue has room: a
+	// select with both cases ready picks either.
 	select {
 	case <-c.done:
 		return false
+	default:
+	}
+	select {
 	case c.out <- b:
 		return true
 	default:
