@@ -10,6 +10,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/apron-chat/apron-server-go/wire/commands"
 )
 
 // commandList sends ext:command_list and returns its commands.
@@ -254,10 +256,13 @@ func TestCommandListUsage(t *testing.T) {
 	}
 }
 
-// formOf picks the form with the most fixed words that start the command
-// line's arguments, matched exactly.
+// A command line selects the form with the most fixed words that start its
+// arguments, matched exactly.
 func TestFormOf(t *testing.T) {
-	s := &Server{commands: append(coreCommands(), serverCommand{name: "a", forms: []commandForm{{name: "a"}, {name: "a b"}, {name: "a b c"}}})}
+	sc := coreCommands()
+	if err := sc.add(commands.Command{Name: "a", Forms: []commands.Form{{Name: "a"}, {Name: "a b"}, {Name: "a b c"}}}, serverCommand{}); err != nil {
+		t.Fatal(err)
+	}
 	for _, test := range []struct{ name, args, want string }{
 		{"emoji", "add :x:", "emoji add"},
 		{"emoji", "remove\t:x:", "emoji remove"},
@@ -274,11 +279,11 @@ func TestFormOf(t *testing.T) {
 		{"nope", "", ""},
 	} {
 		got := ""
-		if form := s.formOf(test.name, test.args); form != nil {
-			got = form.name
+		if _, form := sc.forms.Find(test.name, test.args); form != nil {
+			got = form.Name
 		}
 		if got != test.want {
-			t.Errorf("formOf(%q, %q) = %q, want %q", test.name, test.args, got, test.want)
+			t.Errorf("Find(%q, %q) = %q, want %q", test.name, test.args, got, test.want)
 		}
 	}
 }

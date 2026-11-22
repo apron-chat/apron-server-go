@@ -593,7 +593,7 @@ type Server struct {
 	stopped chan struct{}
 
 	// commands are the core commands, then the extensions' (§4.1).
-	commands []serverCommand
+	commands *serverCommands
 	// The extensions' state (extension.go): the capabilities and ext they
 	// advertise, their HTTP routes, message filters, and kept
 	// values by entry kind and key. Registration takes s.mu.

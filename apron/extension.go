@@ -15,10 +15,10 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
-	"unicode"
 
 	"github.com/apron-chat/apron-server-go/internal/auth/email"
 	"github.com/apron-chat/apron-server-go/wire"
+	"github.com/apron-chat/apron-server-go/wire/commands"
 )
 
 // Extension adds features to a Server without forking it: commands, request
@@ -278,40 +278,27 @@ func (r *Registrar) Command(command Command) {
 		case command.Run == nil:
 			return fmt.Errorf("command /%s has no Run", command.Name)
 		}
-		for _, existing := range r.s.commands {
-			if existing.name == command.Name {
-				return fmt.Errorf("command /%s exists already", command.Name)
-			}
-		}
-		// The hint is what follows "/name" and whitespace in Usage, on one
-		// line; /help shows any other Usage as written.
-		hint, ok := strings.CutPrefix(command.Usage, "/"+command.Name)
-		usageText := ""
-		if trimmed := strings.TrimLeftFunc(hint, unicode.IsSpace); ok && (hint == "" || trimmed != hint) {
-			hint = strings.Join(strings.Fields(trimmed), " ")
-		} else {
-			hint, usageText = "", command.Usage
-			if command.Usage != "" {
-				r.logger.Warn("a command's Usage does not start with its name, so ext:command_list gives it no hint", "command", command.Name, "usage", command.Usage)
-			}
-		}
-		if err := checkCommandFields(command.Uses, command.Requires); err != nil {
-			return fmt.Errorf("command /%s: %w", command.Name, err)
-		}
-		if command.Group != "" && !slices.Contains(commandGroups, command.Group) {
-			return fmt.Errorf("command /%s: group %q is none of %s", command.Name, command.Group, strings.Join(commandGroups, ", "))
-		}
-		// Help is one line of plain text in /help's Markdown list.
-		description := strings.Join(strings.Fields(command.Help), " ")
+		// The command's one form takes the hint from Usage, collapses Help
+		// into one line of plain text in /help's Markdown list, and checks
+		// the fields and the group, as package commands does for any
+		// backend; Available is asked outside s.mu, so it is not the
+		// form's May (finishUsable).
 		command.Uses, command.Requires = slices.Clone(command.Uses), slices.Clone(command.Requires)
-		r.s.commands = append(r.s.commands, serverCommand{
-			name: command.Name,
-			forms: []commandForm{{
-				name: command.Name, group: command.Group, hint: hint, usageText: usageText, description: description,
-				uses: command.Uses, requires: command.Requires,
+		err := r.s.commands.add(commands.Command{
+			Name: command.Name,
+			Forms: []commands.Form{{
+				Usage: command.Usage, Help: command.Help, Group: command.Group,
+				Uses: command.Uses, Requires: command.Requires,
 			}},
-			extension: &extensionCommand{host: r.Host, command: command},
-		})
+		}, serverCommand{extension: &extensionCommand{host: r.Host, command: command}})
+		if err != nil {
+			return err
+		}
+		// /help shows any Usage that does not start with "/name" and
+		// whitespace as written.
+		if _, ok := commands.ParseUsage(command.Name, command.Usage); !ok && command.Usage != "" {
+			r.logger.Warn("a command's Usage does not start with its name, so ext:command_list gives it no hint", "command", command.Name, "usage", command.Usage)
+		}
 		return nil
 	})
 }
