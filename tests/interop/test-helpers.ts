@@ -1,4 +1,4 @@
-import { expect, type BrowserContext, type Locator, type Page } from '@playwright/test';
+import { expect, type BrowserContext, type Dialog, type Locator, type Page } from '@playwright/test';
 
 export function composer(page: Page): Locator {
 	return page.getByRole('textbox', { name: 'Message', exact: true });
@@ -250,9 +250,41 @@ export async function startThread(page: Page, message: Locator): Promise<string>
  * Escape after.
  */
 export async function roomAction(page: Page, testId: 'edit-room' | 'leave-room'): Promise<Locator> {
+	// apron-web shows a room's description over its conversation, whose header has no ⋯ menu while it shows: shut it
+	// first (older versions show no such sheet).
+	const closeDescription = page.getByRole('button', { name: 'Close description', exact: true });
+	if (await closeDescription.count()) await closeDescription.click();
 	const menu = page.getByTestId('room-actions');
 	if ((await menu.getAttribute('aria-expanded')) !== 'true') await menu.click();
 	return page.getByTestId(testId);
+}
+
+/**
+ * Where a room's or thread's title and description are edited, once Edit is chosen (`roomAction(page, 'edit-room')`):
+ * apron-web edits them where the description reads, the title in the header and the description in the sheet over the
+ * conversation, with Cancel and Save in the header; older versions in a dialog named "Edit room" or "Edit thread". Its
+ * fields and buttons are found within what this returns, the same in either; once it is saved or cancelled, its title
+ * field is gone in both.
+ */
+export async function roomEditor(page: Page, kind: 'room' | 'thread'): Promise<Locator> {
+	const noun = kind === 'thread' ? 'Thread' : 'Room';
+	await expect(page.getByRole('textbox', { name: `${noun} title`, exact: true })).toBeVisible();
+	const dialog = page.getByRole('dialog', { name: `Edit ${kind}`, exact: true });
+	return (await dialog.count()) ? dialog : page.locator('body');
+}
+
+/**
+ * Cancels an edit (`roomEditor`), discarding what was typed: apron-web asks first whether to discard a changed title
+ * or description, and this says yes; older versions don't ask.
+ */
+export async function cancelRoomEdit(page: Page, editor: Locator): Promise<void> {
+	const discard = (dialog: Dialog) => void dialog.accept();
+	page.on('dialog', discard);
+	try {
+		await editor.getByRole('button', { name: 'Cancel', exact: true }).click();
+	} finally {
+		page.off('dialog', discard);
+	}
 }
 
 /**

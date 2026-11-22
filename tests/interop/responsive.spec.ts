@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test';
-import { composer, deleteMessage, emojiPicker, messageAction, moreAction, openChat, pickFromEmojiPicker, reactionChip, reactTo, roomAction, sendMessage, startThread, waitForMessage } from './test-helpers';
+import { composer, deleteMessage, emojiPicker, messageAction, moreAction, openChat, pickFromEmojiPicker, reactionChip, reactTo, roomAction, roomEditor, sendMessage, startThread, waitForMessage } from './test-helpers';
 
 test('chat remains usable without horizontal overflow on a phone viewport', async ({ page }) => {
 	await openChat(page);
@@ -31,7 +31,7 @@ test('thread description previews and the thread editor fit a phone viewport', a
 		expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(320);
 	}
 	await title.fill(`${token} renamed`);
-	await page.getByRole('dialog', { name: 'Edit thread', exact: true }).getByRole('button', { name: 'Save', exact: true }).click();
+	await (await roomEditor(page, 'thread')).getByRole('button', { name: 'Save', exact: true }).click();
 	await expect(page.getByRole('heading', { level: 1 })).toContainText(`${token} renamed`);
 	await page.getByRole('button', { name: 'Back to room', exact: true }).click();
 	const card = page.getByTestId('thread-card').filter({ hasText: token });
