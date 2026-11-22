@@ -11,12 +11,12 @@ import "context"
 // connection, for one frame at a time, so calls for different connections
 // are concurrent.
 type Backend interface {
-	// Hello returns the server frame for a new connection (§3.1), with ctx
-	// the connection's context. Server sets Apron and Ping, and adds the
-	// capabilities of what it handles. A connection refused at capacity
-	// (Server.MaxConnections) is sent one too, before its error, so Hello
-	// is called for it without OnConnect, and must not count on what
-	// OnConnect keeps with a connection.
+	// Hello returns the server frame for a new connection (§3.1), network
+	// or Local, with ctx the connection's context. Server sets Apron and
+	// Ping, and adds the capabilities of what it handles. A connection
+	// refused at capacity (Server.MaxConnections) is sent one too, before
+	// its error, so Hello is called for it without OnConnect, and must not
+	// count on what OnConnect keeps with a connection.
 	Hello(ctx context.Context, c *Conn) ServerInfo
 	// Auth signs a connection in (§3.2), and answers with reply.Send, or
 	// returns an error. A result with You set signs the connection in as

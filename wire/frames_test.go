@@ -155,6 +155,9 @@ func TestPublishUser(t *testing.T) {
 			t.Fatal(err)
 		}
 		t.Cleanup(func() { _ = l.Close() })
+		if f := <-frames; !strings.HasPrefix(f, `{"method":"server"`) {
+			t.Fatalf("first frame %s, want the server frame", f)
+		}
 		return local{l, frames}
 	}
 	ada, ada2, bob, eve := open("ada"), open("ada"), open("bob"), open("eve")

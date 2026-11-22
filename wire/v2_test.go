@@ -7,6 +7,7 @@ import (
 	"errors"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -174,6 +175,9 @@ func TestLocal(t *testing.T) {
 	if err != nil || !strings.Contains(string(result), `"bot"`) {
 		t.Fatalf("Call: %s %v", result, err)
 	}
+	if f := <-frames; !strings.HasPrefix(f, `{"method":"server"`) {
+		t.Fatalf("first frame: %s, want the server frame", f)
+	}
 	if f := <-frames; !strings.Contains(f, `"hello"`) {
 		t.Fatalf("OnFrame: %s", f)
 	}
@@ -233,4 +237,57 @@ func (b *backend) disconnectedConns() []*wire.Conn {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return append([]*wire.Conn(nil), b.disconnected...)
+}
+
+// A Local connection opens as a network one does: OnConnect, signed in
+// already, then Hello, whose server frame goes before anything sent to it
+// meanwhile. An error of OnConnect is Local's, and no OnDisconnect follows.
+func TestLocalOpens(t *testing.T) {
+	refuse := errors.New("refused")
+	var disconnects atomic.Int64
+	s := wired(&wire.Server{Backend: &backend{}})
+	s.OnConnect = func(_ context.Context, c *wire.Conn) error {
+		if c.HTTPRequest() != nil || c.Data() == nil {
+			t.Errorf("OnConnect: request %v, data %v", c.HTTPRequest(), c.Data())
+		}
+		if c.UserID() == "nobody" {
+			return refuse
+		}
+		c.NotifyRaw("welcome", map[string]any{"to": c.UserID()})
+		return nil
+	}
+	s.OnDisconnect = func(*wire.Conn) { disconnects.Add(1) }
+	frames := make(chan string, 8)
+	l, err := s.Local(wire.LocalOptions{User: wire.User{UserID: "bot"}, Data: 1, OnFrame: func(f wire.Frame) { frames <- string(f) }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f := <-frames; !strings.HasPrefix(f, `{"method":"server"`) {
+		t.Fatalf("first frame %s, want the server frame", f)
+	}
+	if f := <-frames; f != `{"method":"welcome","params":{"to":"bot"}}` {
+		t.Fatalf("second frame %s, want the welcome", f)
+	}
+	if info := l.Conn().Info(); info.Agent != "wire-test/1" {
+		t.Fatalf("Info: %+v", info)
+	}
+	if _, err := s.Local(wire.LocalOptions{User: wire.User{UserID: "nobody"}, Data: 1}); err != refuse {
+		t.Fatalf("a refused Local: %v", err)
+	}
+	if err := l.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	<-l.Done()
+	if err := l.Close(); !errors.Is(err, wire.ErrClosed) {
+		t.Fatalf("a second Close: %v", err)
+	}
+	if err := s.Shutdown(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if n := disconnects.Load(); n != 1 {
+		t.Fatalf("%d disconnects, want the one of the connection that opened", n)
+	}
+	if _, err := s.Local(wire.LocalOptions{User: wire.User{UserID: "bot"}}); !errors.Is(err, wire.ErrClosed) {
+		t.Fatalf("after Shutdown: %v", err)
+	}
 }

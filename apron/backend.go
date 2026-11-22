@@ -107,9 +107,13 @@ func run[T any](b backend, ctx context.Context, wc *wire.Conn, reply wire.Reply[
 	}, b.s)
 }
 
-// connected keeps a new WebSocket's client.
+// connected keeps a new WebSocket's client, or signs a Session's in, whose
+// client its Bot made (Bot.Connect).
 func (b backend) connected(_ context.Context, wc *wire.Conn) error {
 	s := b.s
+	if c, ok := wire.DataOf[*client](wc); ok && c.session != nil {
+		return s.connectSession(c, wc)
+	}
 	r := wc.HTTPRequest()
 	c := &client{server: s, conn: wc}
 	if r != nil {

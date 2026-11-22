@@ -230,41 +230,52 @@ func (b *Bot) Connect(options SessionOptions) (*Session, error) {
 	if options.OnFrame != nil {
 		local.OnFrame = func(frame wire.Frame) { options.OnFrame(jsontext.Value(frame)) }
 	}
+	// wire opens the connection as a network one, calling backend.connected
+	// (connectSession) and Hello, which take s.mu, so it is opened without
+	// it.
+	l, err := s.wire.Local(local)
+	switch {
+	case errors.Is(err, wire.ErrClosed):
+		return nil, ErrServerClosed
+	case err != nil:
+		return nil, err
+	}
+	session.l = l
+	return session, nil
+}
 
+// connectSession signs a Session's connection in as its bot, as a network
+// connection is signed in by auth, while wire opens it: frames sent to it
+// meanwhile, such as those after a sign-in, go after its server frame.
+func (s *Server) connectSession(c *client, wc *wire.Conn) error {
+	b := c.session.bot
 	s.mu.Lock()
 	defer s.unlock()
 	u := s.users[b.userID]
 	switch {
 	case s.closed:
-		return nil, ErrServerClosed
+		return ErrServerClosed
 	case u == nil || u.botOf != b.host.name:
-		return nil, fmt.Errorf("apron: %s is not extension %s's bot", b.userID, b.host.name)
+		return fmt.Errorf("apron: %s is not extension %s's bot", b.userID, b.host.name)
 	}
-	l, err := s.wire.Local(local)
-	if err != nil {
-		return nil, ErrServerClosed
-	}
-	session.l, c.conn = l, l.Conn()
+	c.conn = wc
 	c.baseURL = s.sessionBaseURLLocked()
 	c.request = s.extContext
 	s.clients[c] = struct{}{}
 	s.sessionCount++
 	s.attachLocked(c, u)
-	c.conn.Announce(s.serverFrameLocked(c))
 	s.sendAfterAuthLocked(c)
-	return session, nil
+	return nil
 }
 
 // forgotten records why the session closed, once the server has forgotten
-// its connection (backend.Disconnected).
+// its connection (backend.disconnected). Whether it fell behind is read
+// from its wire.Local when asked (Err), as wire may forget a connection
+// that fails to open before Connect has it.
 func (b *Session) forgotten(serverClosed bool) {
 	if serverClosed {
 		b.setErr(ErrServerClosed)
 	}
-	if errors.Is(b.l.Err(), wire.ErrFellBehind) {
-		b.setErr(ErrFellBehind)
-	}
-	b.setErr(ErrSessionClosed)
 	close(b.done)
 }
 
@@ -315,15 +326,32 @@ func (b *Session) Done() <-chan struct{} { return b.done }
 // ErrSessionClosed after Close, ErrServerClosed at shutdown, ErrFellBehind,
 // or nil while it is open.
 func (b *Session) Err() error {
+	select {
+	case <-b.done:
+	default:
+		b.errMu.Lock()
+		defer b.errMu.Unlock()
+		return b.err
+	}
+	b.closing()
 	b.errMu.Lock()
 	defer b.errMu.Unlock()
 	return b.err
 }
 
+// closing records why the session is closing, unless that was recorded
+// already: it fell behind, or else it was closed.
+func (b *Session) closing() {
+	if errors.Is(b.l.Err(), wire.ErrFellBehind) {
+		b.setErr(ErrFellBehind)
+	}
+	b.setErr(ErrSessionClosed)
+}
+
 // Close ends the session and waits until the server forgot it. The bot's
 // account stays.
 func (b *Session) Close() error {
-	b.setErr(ErrSessionClosed)
+	b.closing()
 	_ = b.l.Close()
 	<-b.done
 	return nil

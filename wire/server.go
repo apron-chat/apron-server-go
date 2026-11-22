@@ -40,11 +40,12 @@ type Server struct {
 	Reactions ReactionHandler // reactions, capability reactions (§4.7)
 	Activity  ActivityHandler // activity, capability activity (§4.6)
 
-	// OnConnect, if set, is told of a new network connection before its
-	// server frame is made, with ctx the connection's context, such as to
-	// keep the backend's own state for it (Conn.SetData). An error closes
-	// the connection; an *Error is sent to the client first, after the
-	// server frame.
+	// OnConnect, if set, is told of a new connection before its server
+	// frame is made, with ctx the connection's context, such as to keep
+	// the backend's own state for it (Conn.SetData). A Local connection is
+	// signed in already, and has its LocalOptions.Data. An error closes
+	// the connection: a network client is sent an *Error first, after the
+	// server frame, and Server.Local returns it.
 	OnConnect func(ctx context.Context, c *Conn) error
 	// OnDisconnect, if set, is told when a connection ends, signed in or
 	// not, network or Local: every one but those refused as they opened,

@@ -33,11 +33,13 @@ type LocalOptions struct {
 	// User is who the connection is signed in as, from the start.
 	User User
 	// Data is the backend's value for the connection (Conn.SetData), set
-	// before anything else happens on it.
+	// before OnConnect is called, such as the backend's own record of the
+	// connection, which OnConnect then tells from a network one's.
 	Data any
-	// OnFrame, if set, gets each notification and connection error sent to
-	// the connection, in order, on a goroutine of the connection's own; the
-	// replies to Call go to Call. Without it, they are dropped.
+	// OnFrame, if set, gets each frame sent to the connection but the
+	// replies to Call, which go to Call, in order, on a goroutine of the
+	// connection's own: the server frame first, then notifications and
+	// connection errors. Without it, they are dropped.
 	OnFrame func(Frame)
 	// Queue bounds the frames waiting to be written to the connection, and
 	// those waiting for OnFrame; 1024 by default. An OnFrame that lets more
@@ -47,10 +49,18 @@ type LocalOptions struct {
 
 // Local is an in-process connection to a Server: a client in the same
 // program, such as a bot, a bridge, or a test, whose requests take the same
-// path as a network client's, deduplication and all. It is the backend's
-// own, already signed in: the Server calls no Hello, OnConnect, or Auth for
-// it, but OnDisconnect when it ends. It does not count toward
-// MaxConnections.
+// path as a network client's, deduplication and all.
+//
+// It is signed in from the start, as LocalOptions.User, without Auth, and
+// otherwise opens as a network connection does: the Server calls OnConnect
+// for it, with Conn.HTTPRequest nil, then Hello, whose server frame is its
+// first frame, and OnDisconnect when it ends. The frames the backend sends
+// it while OnConnect and Hello run are sent after the server frame, so a
+// backend that keeps its connections under its own lock adds a Local one,
+// and sends it what a sign-in would, in OnConnect, as for a network
+// connection in Auth; since the Server calls them, the backend does not
+// open a Local connection while it holds a lock they take. It does not
+// count toward MaxConnections.
 type Local struct {
 	s      *Server
 	c      *Conn
@@ -75,7 +85,9 @@ type localReply struct {
 
 type inFlight struct{ l *Local }
 
-// Local opens an in-process connection.
+// Local opens an in-process connection, and returns once its server frame
+// is queued. An error of OnConnect is returned as it is, and ErrClosed when
+// the Server is shut down.
 func (s *Server) Local(options LocalOptions) (*Local, error) {
 	s.freeze()
 	if !ValidID(options.User.UserID) {
@@ -83,22 +95,25 @@ func (s *Server) Local(options LocalOptions) (*Local, error) {
 	}
 	queue := orDefault(options.Queue, 1024)
 	l := &Local{s: s, prefix: rand.Text()[:12] + "-", turn: make(chan struct{}, 1), closed: make(chan struct{})}
+	if options.OnFrame != nil {
+		l.frames = make(chan Frame, queue)
+	}
 	ctx, cancel := context.WithCancel(context.Background())
-	l.c = s.newConn(ctx, cancel, localWriter{l}, queue, func() { l.shut(ErrFellBehind) })
-	l.c.SetUser(options.User)
-	l.c.SetData(options.Data)
+	c := s.newConn(ctx, cancel, localWriter{l}, queue, func() { l.shut(ErrFellBehind) })
+	l.c = c
+	c.SetUser(options.User)
+	c.SetData(options.Data)
 
 	s.mu.Lock()
 	if s.closed {
 		s.mu.Unlock()
+		cancel()
 		return nil, ErrClosed
 	}
-	s.conns[l.c] = struct{}{}
 	s.serving.Add(1)
 	s.mu.Unlock()
 
 	if options.OnFrame != nil {
-		l.frames = make(chan Frame, queue)
 		s.serving.Add(1)
 		go func() {
 			defer s.serving.Done()
@@ -112,25 +127,71 @@ func (s *Server) Local(options LocalOptions) (*Local, error) {
 			}
 		}()
 	}
+	// In process, there is no transport to ping.
+	c.rt.Start(false)
+	if err := s.openLocal(ctx, c); err != nil {
+		c.Close()
+		s.serving.Done()
+		return nil, err
+	}
 	go func() {
 		defer s.serving.Done()
-		<-l.c.Done()
+		<-c.Done()
 		l.shut(ErrClosed)
 		s.mu.Lock()
-		delete(s.conns, l.c)
+		delete(s.conns, c)
 		s.mu.Unlock()
-		s.disconnected(l.c)
+		s.disconnected(c)
 	}()
-	// In process, there is no transport to ping.
-	l.c.rt.Start(false)
 	return l, nil
+}
+
+// openLocal opens a Local connection as a network one opens (ServeTransport):
+// OnConnect, then the server frame, which goes before anything the backend
+// sends meanwhile. OnDisconnect is called for a connection that OnConnect
+// accepted but that does not open.
+func (s *Server) openLocal(ctx context.Context, c *Conn) error {
+	c.hold()
+	if connect := s.config.onConnect; connect != nil {
+		if err := connect(ctx, c); err != nil {
+			c.release(true)
+			return err
+		}
+	}
+	var info ServerInfo
+	if s.Backend != nil {
+		info = s.Backend.Hello(ctx, c)
+	}
+	info = s.complete(info)
+	frame, err := Encode(info)
+	if err != nil {
+		s.logger().Error("wire: encoding the server frame", "error", err)
+	}
+	s.mu.Lock()
+	if err == nil && s.closed {
+		err = ErrClosed
+	}
+	if err != nil {
+		s.mu.Unlock()
+		c.release(true)
+		s.disconnected(c)
+		return err
+	}
+	s.conns[c] = struct{}{}
+	s.mu.Unlock()
+	c.mu.Lock()
+	c.info = info
+	c.mu.Unlock()
+	c.enqueue([]Frame{frame})
+	c.release(false)
+	return nil
 }
 
 // Conn is the connection, for the backend.
 func (l *Local) Conn() *Conn { return l.c }
 
-// Done is closed when the connection ends.
-func (l *Local) Done() <-chan struct{} { return l.c.Done() }
+// Done is closed when the connection ends, once Err has the reason.
+func (l *Local) Done() <-chan struct{} { return l.closed }
 
 // Err returns why the connection ended, such as ErrFellBehind, or nil while
 // it is open.
@@ -140,10 +201,14 @@ func (l *Local) Err() error {
 	return l.err
 }
 
-// Close ends the connection.
+// Close ends the connection. It returns nil, or, when the connection had
+// ended already, why, as Err does: ErrClosed after an earlier Close or the
+// Server's Shutdown, or ErrFellBehind. OnDisconnect may still be running
+// when it returns: Done is closed as the connection ends, before it.
 func (l *Local) Close() error {
+	err := l.Err()
 	l.c.Close()
-	return nil
+	return err
 }
 
 func (l *Local) shut(err error) {
