@@ -1,9 +1,6 @@
 package wirecore
 
-import (
-	"encoding/json/v2"
-	"time"
-)
+import "encoding/json/v2"
 
 // JSONOptions encode deterministically, sorting object keys, and keep
 // encoding/json's null for nil slices and maps. encoding/json/v2 never
@@ -25,9 +22,3 @@ var (
 	PingFrame = []byte(`{"method":"ping"}`)
 	PongFrame = []byte(`{"method":"pong"}`)
 )
-
-// NextLogID returns the log_id after last (§2.1): the time in milliseconds,
-// or last plus one, so that log_ids strictly increase.
-func NextLogID(last int64) int64 {
-	return max(time.Now().UnixMilli(), last+1)
-}

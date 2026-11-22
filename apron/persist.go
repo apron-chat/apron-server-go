@@ -19,6 +19,7 @@ import (
 	"github.com/apron-chat/apron-server-go/internal/auth/passkey"
 	"github.com/apron-chat/apron-server-go/internal/authn"
 	"github.com/apron-chat/apron-server-go/store"
+	"github.com/apron-chat/apron-server-go/wire"
 )
 
 // Persistence writes the server's state through to a store.Store. Every
@@ -276,7 +277,7 @@ type storedPush struct {
 
 // metaLocked is the counters entry of the current state.
 func (s *Server) metaLocked() storedMeta {
-	return storedMeta{LastID: s.lastID, GuestNumber: s.guestNumber, AccountNumber: s.accountNumber, EmbedNumber: s.embedNumber, UploadSeq: s.uploadSeq}
+	return storedMeta{LastID: int64(s.clock.Last()), GuestNumber: s.guestNumber, AccountNumber: s.accountNumber, EmbedNumber: s.embedNumber, UploadSeq: s.uploadSeq}
 }
 
 func sessionID(key [32]byte) string { return hex.EncodeToString(key[:]) }
@@ -555,7 +556,8 @@ func (s *Server) restoreLocked() (map[string]bool, error) {
 		if err := decode(entryMeta, "counters", raw, &s.storedMeta); err != nil {
 			return nil, err
 		}
-		s.lastID, s.guestNumber, s.accountNumber = s.storedMeta.LastID, s.storedMeta.GuestNumber, s.storedMeta.AccountNumber
+		s.clock.Restore(wire.LogID(s.storedMeta.LastID))
+		s.guestNumber, s.accountNumber = s.storedMeta.GuestNumber, s.storedMeta.AccountNumber
 		s.embedNumber, s.uploadSeq = s.storedMeta.EmbedNumber, s.storedMeta.UploadSeq
 	}
 	for kind, values := range entries {

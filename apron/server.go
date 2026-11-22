@@ -499,8 +499,9 @@ type Server struct {
 	config Config
 
 	mu sync.RWMutex
-	// lastID is the single log_id sequence shared by every record kind and room.
-	lastID   int64
+	// clock issues the single log_id sequence shared by every record kind
+	// and room.
+	clock    wire.Clock
 	rooms    map[string]*roomState
 	messages map[string]*messageState
 	clients  map[*client]struct{}
@@ -1189,8 +1190,7 @@ var readOnlyOps = map[string]bool{"history": true, "room_list": true, commandLis
 // nextIDLocked returns the next log_id in the server-wide sequence: the commit
 // time in milliseconds, or the previous log_id + 1.
 func (s *Server) nextIDLocked() int64 {
-	s.lastID = wirecore.NextLogID(s.lastID)
-	return s.lastID
+	return int64(s.clock.Next())
 }
 
 // appendLocked adds a committed record to the log of each room it belongs to.
