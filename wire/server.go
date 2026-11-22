@@ -104,6 +104,12 @@ type Server struct {
 	DedupSize int
 	// Logger logs what goes wrong; slog.Default() when nil.
 	Logger *slog.Logger
+	// ClientAddr returns the address of the client that opened a WebSocket,
+	// such as one a trusted reverse proxy names in a header, or nil for none.
+	// By default it is the request's RemoteAddr: behind a proxy, every client
+	// then has the proxy's address, which a backend that bans by address
+	// would ban together.
+	ClientAddr func(r *http.Request) net.Addr
 
 	once     sync.Once
 	mu       sync.Mutex
@@ -174,7 +180,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	ws.SetReadLimit(s.readLimit())
 	var remote net.Addr
-	if addr, err := net.ResolveTCPAddr("tcp", r.RemoteAddr); err == nil {
+	if s.ClientAddr != nil {
+		remote = s.ClientAddr(r)
+	} else if addr, err := net.ResolveTCPAddr("tcp", r.RemoteAddr); err == nil {
 		remote = addr
 	}
 	s.ServeTransport(r.Context(), wirecore.WebSocket{Conn: ws}, remote, r)
@@ -408,7 +416,11 @@ func (s *Server) processFrame(c *Conn, payload []byte) {
 	if err != nil {
 		var ok bool
 		if rerr, ok = asError(err); !ok {
-			s.logger().Error("wire: request failed", "method", req.Method, "error", err)
+			// A request cut short by its connection's end is not the
+			// backend's failure.
+			if c.ctx.Err() == nil {
+				s.logger().Error("wire: request failed", "method", req.Method, "error", err)
+			}
 			rerr = internalError()
 		}
 	}
