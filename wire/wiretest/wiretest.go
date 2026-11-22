@@ -29,6 +29,10 @@
 // arrived before a request's reply, and Sync waits until every frame the
 // server queued before it handled Sync's request has arrived, after which
 // Pending holds them.
+//
+// Package conformance, below this one, checks a whole Server against the
+// core of PROTOCOL.md (conformance.Run), as the protocol's own conformance
+// suite does, so that every backend runs those checks as tests.
 package wiretest
 
 import (
