@@ -132,7 +132,7 @@ type oneUser struct{ backend }
 
 func (*oneUser) Auth(_ context.Context, c *wire.Conn, _ wire.AuthParams, reply wire.Reply[wire.AuthResult]) error {
 	c.Notify(wire.Notice("", "welcome"))
-	return reply.Send(wire.AuthResult{You: &wire.User{UserID: "same"}})
+	return reply.Send(wire.AuthResult{You: &wire.CurrentUser{User: wire.User{UserID: "same"}}})
 }
 
 // A duplicate waiting for its original on another connection stops waiting

@@ -354,7 +354,7 @@ func replyFor[T any](r *Request, params any) Reply[T] {
 			p.check = checkAuth
 			p.apply = func(result *AuthResult) {
 				if result.You != nil {
-					r.c.SetUser(*result.You)
+					r.c.SetUser(result.You.User)
 				}
 			}
 		}

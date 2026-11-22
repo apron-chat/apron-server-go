@@ -148,8 +148,8 @@ func (h *rooms) RoomList(_ context.Context, _ *wire.Conn, _ wire.RoomListParams,
 // raw reply sends it as it is.
 func TestRoomListSend(t *testing.T) {
 	member := wire.User{UserID: "bob"}
-	general := wire.RoomView{Room: wire.Room{RoomID: "general"}, Members: []wire.User{member}, MemberCount: 9}
-	h := &rooms{result: wire.RoomListResult{NotJoined: []wire.RoomView{general}, Users: []wire.User{member}}}
+	general := wire.RoomView{Room: wire.Room{RoomID: "general"}, Members: []wire.CurrentUser{{User: member}}, MemberCount: 9}
+	h := &rooms{result: wire.RoomListResult{NotJoined: []wire.RoomView{general}, Users: []wire.CurrentUser{{User: member}}}}
 	s := &wire.Server{Backend: &backend{}, Rooms: h}
 	l := local(t, s)
 	for _, tc := range []struct{ params, want string }{
@@ -206,7 +206,7 @@ func (b *broadcasting) Auth(_ context.Context, c *wire.Conn, p wire.AuthParams, 
 	if p.UserID == "bad id" {
 		you.UserID = p.UserID
 	}
-	if err := reply.Send(wire.AuthResult{You: &you}); err != nil {
+	if err := reply.Send(wire.AuthResult{You: &wire.CurrentUser{User: you}}); err != nil {
 		return err
 	}
 	if c.UserID() != "ada" {

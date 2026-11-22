@@ -221,7 +221,7 @@ func TestHistoryLogIDJSON(t *testing.T) {
 		}},
 			`{"joined":[{"room_id":"general","log_id":"100","latest_log_id":"200","history_log_id":"100"},{"room_id":"empty","log_id":"150","latest_log_id":"150","history_log_id":null}]}`},
 		{"room_update room", RoomUpdate{
-			Joined:  []RoomView{{Room: room, LatestLogID: 200, HistoryLogID: ptr(0), Members: []User{{UserID: "a"}}}},
+			Joined:  []RoomView{{Room: room, LatestLogID: 200, HistoryLogID: ptr(0), Members: []CurrentUser{{User: User{UserID: "a"}}}}},
 			Updated: []RoomView{{Room: Room{RoomID: "general", LogID: 300, PrevLogID: 100, Title: "General"}}},
 		},
 			`{"joined":[{"room_id":"general","log_id":"100","latest_log_id":"200","history_log_id":null,"members":[{"user_id":"a"}]}],"updated":[{"room_id":"general","log_id":"300","prev_log_id":"100","title":"General"}]}`},

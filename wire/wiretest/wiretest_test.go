@@ -51,7 +51,7 @@ func (c *chat) Auth(_ context.Context, _ *wire.Conn, p wire.AuthParams, reply wi
 	if err != nil {
 		return err
 	}
-	return reply.Send(wire.AuthResult{You: &wire.User{UserID: fmt.Sprintf("guest_%d", c.guests)}}, welcome)
+	return reply.Send(wire.AuthResult{You: &wire.CurrentUser{User: wire.User{UserID: fmt.Sprintf("guest_%d", c.guests)}}}, welcome)
 }
 
 func (c *chat) Message(_ context.Context, conn *wire.Conn, p wire.MessageParams, reply wire.Reply[wire.MessageResult]) error {
@@ -114,7 +114,7 @@ func TestNewReply(t *testing.T) {
 		t.Fatalf("me: %+v %s", you.Result(), you.Raw())
 	}
 	auth, signedIn := wiretest.NewReply[wire.AuthResult](wiretest.NewRequest("auth", map[string]any{"scheme": "guest"}))
-	if err := auth.Send(wire.AuthResult{You: &wire.User{UserID: "not valid"}}); wire.CodeOf(err) != wire.CodeInternalError || wire.CodeOf(signedIn.Err()) != wire.CodeInternalError {
+	if err := auth.Send(wire.AuthResult{You: &wire.CurrentUser{User: wire.User{UserID: "not valid"}}}); wire.CodeOf(err) != wire.CodeInternalError || wire.CodeOf(signedIn.Err()) != wire.CodeInternalError {
 		t.Fatalf("an invalid auth result: %v, recorded %v", err, signedIn.Err())
 	}
 }

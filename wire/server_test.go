@@ -49,7 +49,7 @@ func (b *backend) Auth(_ context.Context, c *wire.Conn, p wire.AuthParams, reply
 }
 
 // guest is who Auth signs a connection in as.
-func (b *backend) guest(c *wire.Conn, p wire.AuthParams) (*wire.User, error) {
+func (b *backend) guest(c *wire.Conn, p wire.AuthParams) (*wire.CurrentUser, error) {
 	if p.Name == "refuse" {
 		return nil, wire.Denied("No")
 	}
@@ -57,7 +57,7 @@ func (b *backend) guest(c *wire.Conn, p wire.AuthParams) (*wire.User, error) {
 	// Queued before the result, sent after it (§3.2.2).
 	c.Notify(wire.Notice("", "welcome "+id))
 	time.Sleep(b.authDelay)
-	return &wire.User{UserID: id, Name: p.Name}, nil
+	return &wire.CurrentUser{User: wire.User{UserID: id, Name: p.Name}}, nil
 }
 
 func (b *backend) Message(_ context.Context, c *wire.Conn, p wire.MessageParams, reply wire.Reply[wire.MessageResult]) error {

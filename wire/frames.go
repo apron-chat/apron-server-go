@@ -123,10 +123,12 @@ type AuthParams struct {
 
 // AuthResult is the result of auth (§3.2). A result with You nil
 // authenticated nothing, such as the begin step of a ceremony; with You, the
-// connection is signed in as You.
+// connection is signed in as You. You is complete (§3.3.1), so a field it
+// carries empty, such as a status of "", which a complete object carries
+// (§4.5.2), is in its Cleared.
 type AuthResult struct {
-	You   *User  `json:"you,omitzero"`
-	Token string `json:"token,omitempty"`
+	You   *CurrentUser `json:"you,omitzero"`
+	Token string       `json:"token,omitempty"`
 	// Extra holds more result fields, sent beside you and token, such as
 	// a webauthn begin's options. It names neither of them: a result that
 	// does is error/internal_error.
@@ -188,9 +190,12 @@ type CommandResult struct {
 }
 
 // MessageResult is the result of a message request: the new message's
-// message_id, or nothing.
+// message_id, or nothing, and the write URLs of the embeds it made.
 type MessageResult struct {
 	MessageID LogID `json:"message_id,omitzero"`
+	// Embeds are the embed writes the message reserved, for the sender
+	// only (§4.8.3), as their objects.
+	Embeds []jsontext.Value `json:"embeds,omitempty"`
 }
 
 // MeParams are the params of me (§3.3.2): the profile fields to change. A

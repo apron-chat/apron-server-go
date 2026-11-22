@@ -32,8 +32,10 @@ type RoomView struct {
 	// leaves the field out, and a pointer to 0 sends null, for no history
 	// (§4.3.3). Decoding, a null is nil, as for any pointer.
 	HistoryLogID *LogID `json:"history_log_id,omitzero"`
-	Members      []User `json:"members,omitempty"`
-	MemberCount  int    `json:"member_count,omitzero"`
+	// Members are current user objects (§4.2.1), each with the fields it
+	// carries empty, such as a status of "" (§4.5.2), in its Cleared.
+	Members     []CurrentUser `json:"members,omitempty"`
+	MemberCount int           `json:"member_count,omitzero"`
 }
 
 // RoomRef names a room, as in room_update's left.
@@ -60,7 +62,8 @@ type RoomUpdate struct {
 	Left        []RoomRef    `json:"left,omitempty"`
 	Memberships []Membership `json:"memberships,omitempty"`
 	Updated     []RoomView   `json:"updated,omitempty"`
-	Users       []User       `json:"users,omitempty"`
+	// Users are complete current objects (§3.3.1).
+	Users []CurrentUser `json:"users,omitempty"`
 }
 
 // Method makes a RoomUpdate a Notification.
@@ -93,7 +96,10 @@ type RoomListResult struct {
 	Joined    []RoomView `json:"joined,omitzero"`
 	NotJoined []RoomView `json:"not_joined,omitzero"`
 	Left      []RoomRef  `json:"left,omitzero"`
-	Users     []User     `json:"users,omitempty"`
+	// Users are the members' complete current objects (§3.3.1), each with
+	// the fields it carries empty, such as a status of "" (§4.5.2), in its
+	// Cleared.
+	Users []CurrentUser `json:"users,omitempty"`
 }
 
 // RoomSetParams are the params of room_set (§4.2.4): a new room without

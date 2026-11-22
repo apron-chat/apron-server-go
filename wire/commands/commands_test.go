@@ -32,7 +32,7 @@ func (b *backend) Auth(_ context.Context, _ *wire.Conn, _ wire.AuthParams, reply
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.guests++
-	return reply.Send(wire.AuthResult{You: &wire.User{UserID: fmt.Sprintf("guest_%d", b.guests)}})
+	return reply.Send(wire.AuthResult{You: &wire.CurrentUser{User: wire.User{UserID: fmt.Sprintf("guest_%d", b.guests)}}})
 }
 
 // admin lets guest_1 use a form.

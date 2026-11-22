@@ -86,7 +86,7 @@ func (c *Chat) Auth(_ context.Context, _ *wire.Conn, p wire.AuthParams, reply wi
 		return err
 	}
 	// The welcome goes right after the result (§3.2.2).
-	return reply.Send(wire.AuthResult{You: &wire.User{UserID: id, Name: name}}, welcome)
+	return reply.Send(wire.AuthResult{You: &wire.CurrentUser{User: wire.User{UserID: id, Name: name}}}, welcome)
 }
 
 func (c *Chat) Message(_ context.Context, conn *wire.Conn, p wire.MessageParams, reply wire.Reply[wire.MessageResult]) error {

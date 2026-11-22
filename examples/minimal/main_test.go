@@ -27,7 +27,7 @@ func signIn(t *testing.T, ctx context.Context, chat *Chat, name string) (*wirete
 	if err != nil || !strings.Contains(string(welcome.Params), "Welcome, "+name) {
 		t.Fatalf("welcome: %s %v", welcome.Raw, err)
 	}
-	return c, *result.You
+	return c, result.You.User
 }
 
 func TestChat(t *testing.T) {

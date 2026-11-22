@@ -148,7 +148,7 @@ func TestNewReply(t *testing.T) {
 		t.Fatalf("another method: %s", rec.raw)
 	}
 	rec = send("auth", `{"scheme":"guest"}`, func(r *Request) {
-		if err := NewReply[AuthResult](r).Send(AuthResult{You: &User{UserID: "a b"}}); CodeOf(err) != CodeInternalError {
+		if err := NewReply[AuthResult](r).Send(AuthResult{You: &CurrentUser{User: User{UserID: "a b"}}}); CodeOf(err) != CodeInternalError {
 			t.Errorf("an invalid user_id: %v", err)
 		}
 	})
