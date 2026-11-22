@@ -1,19 +1,19 @@
-// Package wire serves the Apron protocol for a program that keeps its own
-// chat state: a bridge, a gateway in front of another chat system, a coding
-// harness, or a small bot server. The program is the authority on who
-// everyone is, which rooms exist, and what was said; wire speaks the
-// protocol for it.
+// Package wire serves the Apron protocol for a Backend: the program that
+// decides who everyone is, which rooms exist, and what was said. wire owns
+// no chat state at all; it is the part of PROTOCOL.md that is the same for
+// every server, and every server in this module runs on it: package apron,
+// the reference server, is a Backend like any other, and so is a small
+// gateway in front of another chat system, a bridge, or a bot server.
 //
-// Package apron in this module is a complete server that owns its state.
-// Package wire is the other way around: it owns no state at all, and asks a
-// [Backend] for every answer. What it does on its own is the part of
-// PROTOCOL.md that is the same for every server:
+// What wire does on its own:
 //
 //   - WebSocket transport (§1), or any [Transport] that carries whole
 //     frames, with a bounded write queue per connection that drops a client
 //     too slow to keep up, write timeouts, and transport-level pings;
 //     frames that go out together ([Conn.SendBatch]), and frames held until
 //     the backend's changes are durable ([Conn.Fence]);
+//   - in-process connections ([Server.Local]) for bots, bridges, and tests,
+//     whose requests take a network client's path;
 //   - the server frame on connect (§3.1), and the liveness ping and pong (§1);
 //   - the envelope: parse errors, invalid requests, request ids, and the
 //     error codes (§1.1), with unknown methods answered error/unsupported and
@@ -22,30 +22,45 @@
 //     auth and ping before a sign-in, and every notification a sign-in
 //     causes is sent after its result;
 //   - deduplication of retried requests by user_id and id (§1.2);
-//   - the core checks on a new message (§3.5.1, §3.6): a message with
-//     message_id or deleted without capability edit is unsupported, an empty
-//     one is not passed on, room_id and format are checked;
-//   - typed frames for the core ([User], [Message], [ServerInfo]), the
+//   - the core checks on a new message (§3.5.1, §3.6), and on the params of
+//     every typed request;
+//   - typed frames ([User], [Message], [Room], [ServerInfo], ...), the
 //     system identities ([Private], [RoomNotice], [ServerNotice]), and a
 //     [Clock] for log_ids (§2.1).
 //
-// A Backend implements three methods, which together are the core
-// conformance checklist (§3.6): Hello, Auth, and Message. It adds the
-// optional core request me, and capabilities, by implementing more
-// interfaces: [Profiler] (me), [Commander] (command), [Editor] (edit),
-// [Rooms] (rooms), [Historian] (history), and [Statuser] (status). Each one
-// adds its capability to the server frame and its requests, with their
-// params checked before the backend sees them. Request methods of its own
-// go to [Server.Handle]. It sends notifications with [Conn.Notify], or
-// encodes a frame once with [Encode] and sends it to many connections with
-// [Conn.Send].
+// # Backends
+//
+// A [Backend] says who the server is (Hello) and who each connection is
+// (Auth). Everything else it adds one capability at a time, by implementing
+// an optional interface — [Messenger] (message), [Editor] (edit),
+// [Profiler] (me), [Commander] (command), [Rooms] (rooms), [Historian]
+// (history), [Statuser] (status) — each of which adds its requests, with
+// their params checked, and its capability in the server frame. Hooks
+// follow a connection's life ([Connecter], [Disconnecter]), bring a
+// duplicate's result up to date ([Refresher]), and decide the auth schemes
+// ([SchemeChecker]).
+//
+// A [Method] registered with [Server.Handle] handles a request or client
+// notification by name, raw: an extension's own method, or one that takes
+// the place of an interface's, as the reference server does to keep every
+// rule of its own.
+//
+// # Requests and ordering
+//
+// Every handler's context carries its [Request] ([RequestFrom]): its params,
+// with presence ([Request.Param]), and [Request.Reply], which sends the
+// result now, followed by frames with nothing between them. A backend that
+// keeps its state under a lock replies while it holds the lock, so that the
+// result reflects every notification sent before it on the connection, and
+// none after (§1); one that does not reply itself has its return value sent
+// once the handler returns. Either way, the notifications a request queues
+// to its own connection before its reply are sent before it: a Conn's queue
+// is first in, first out.
+//
+// # Hosts that keep less
 //
 // A host that keeps less than the protocol asks for gets helpers: [IDs]
 // gives message_ids to messages that have none, derived from their own
 // times, and [Page] answers history from any ordered slice of records, such
 // as a host's recent-message buffer.
-//
-// A request's notifications to its own connection are sent before its
-// result when the backend queues them before it returns (§1): Conn's queue
-// is first in, first out.
 package wire

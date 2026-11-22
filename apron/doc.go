@@ -15,10 +15,11 @@
 //     a library: flags, a config file, TLS, email delivery, and signals around
 //     this package. Its Main runs a server with extensions added.
 //   - cmd/aprond is the aprond binary, which calls aproncmd.Main.
-//   - [github.com/apron-chat/apron-server-go/wire] serves the protocol for a
-//     program that keeps its own state, such as a gateway in front of another
-//     chat system: framing, sign-in order, and deduplication, with every
-//     answer from the program. This package shares its connection handling.
+//   - [github.com/apron-chat/apron-server-go/wire] is the protocol itself:
+//     connections, frames, sign-in order, and deduplication, with a Backend
+//     that answers. This package is a Backend of it; so is a program that
+//     keeps its own chat state, such as a gateway in front of another chat
+//     system.
 //
 // # Serving
 //
