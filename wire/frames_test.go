@@ -162,7 +162,9 @@ func TestPublishUser(t *testing.T) {
 	}
 	ada, ada2, bob, eve := open("ada"), open("ada"), open("bob"), open("eve")
 	old := wire.User{UserID: "ada", Roles: []string{"op"}}
-	s.PublishUser(old, wire.User{UserID: "ada"}, func(c *wire.Conn) bool { return c.UserID() != "eve" })
+	if !s.PublishUser(old, wire.User{UserID: "ada"}, func(c *wire.Conn) bool { return c.UserID() != "eve" }) {
+		t.Fatal("PublishUser reported no change")
+	}
 	expect := func(who local, want string) {
 		t.Helper()
 		select {
@@ -180,10 +182,21 @@ func TestPublishUser(t *testing.T) {
 	if u := ada2.l.Conn().User(); len(u.Roles) != 0 {
 		t.Fatalf("the connection's user is %+v", u)
 	}
-	// Unchanged: nothing is sent, so bob's next frame is eve's change, of
-	// which eve was not told before.
-	s.PublishUser(wire.User{UserID: "ada"}, wire.User{UserID: "ada"}, nil)
-	s.PublishUser(wire.User{UserID: "eve"}, wire.User{UserID: "eve", Name: "Eve"}, nil)
+	// Unchanged: nothing is done at all, so bob's next frame is eve's
+	// change, of which eve was not told before; shares is not called, and
+	// no connection's identity is set, even one that is not cur, which is
+	// the backend's to bring up to date.
+	ada.l.Conn().SetUser(wire.User{UserID: "ada", Name: "Stale"})
+	same := wire.User{UserID: "ada", Roles: []string{}, Ext: wire.Ext{}}
+	if s.PublishUser(wire.User{UserID: "ada"}, same, func(*wire.Conn) bool { t.Error("shares called with no change"); return true }) {
+		t.Fatal("PublishUser reported a change where there was none")
+	}
+	if u := ada.l.Conn().User(); u.Name != "Stale" {
+		t.Fatalf("an unchanged PublishUser set the connection's user: %+v", u)
+	}
+	if !s.PublishUser(wire.User{UserID: "eve"}, wire.User{UserID: "eve", Name: "Eve"}, nil) {
+		t.Fatal("PublishUser reported no change")
+	}
 	expect(eve, `{"method":"user","params":{"you":{"user_id":"eve","name":"Eve"}}}`)
 	expect(bob, `{"method":"user","params":{"new":{"user_id":"eve","name":"Eve"}}}`)
 }

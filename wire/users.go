@@ -196,14 +196,23 @@ type UserUpdate struct {
 // Method makes a UserUpdate a Notification.
 func (UserUpdate) Method() string { return "user" }
 
-// PublishUser announces a change of a user from old to cur (§3.3.3): it
-// makes cur the identity of the user's own connections (Conn.SetUser), and
-// sends them {"you": patch}, and the other signed-in connections for which
-// shares returns true, or every one when shares is nil, {"new": patch},
-// where patch is cur.Patch(old). Nothing is sent when nothing changed. The
-// user's own connections are those signed in as cur's user_id, or old's:
-// when the two differ, as when a guest becomes an account, others are sent
-// old too.
+// PublishUser announces a change of a user from old to cur (§3.3.3), and
+// reports whether there was one: whether cur.Patch(old) changed anything.
+// When it did, PublishUser makes cur the identity of the user's own
+// connections (Conn.SetUser), and sends them {"you": patch}, and the other
+// signed-in connections for which shares returns true, or every one when
+// shares is nil, {"new": patch}, where patch is cur.Patch(old). The user's
+// own connections are those signed in as cur's user_id, or old's: when the
+// two differ, as when a guest becomes an account, others are sent old too.
+//
+// When nothing changed, PublishUser does nothing at all: it neither walks
+// the connections nor calls SetUser, so a backend may call it on every
+// change it might have made, and learn from the result whether it did.
+// Patch covers every field of User, so nothing changed means cur is old;
+// old is what the backend last made the user's connections' identity and
+// told their clients, and a connection whose identity is something else,
+// such as one the backend set itself with Conn.SetUser, is the backend's
+// to bring up to date.
 //
 // A backend tells others only of users who share a room with them
 // (§3.3.3): shares says who does. A backend whose user's own connections
@@ -214,22 +223,23 @@ func (UserUpdate) Method() string { return "user" }
 // backend holds the lock of the change, so that every connection gets a
 // user's changes in the order they were made; shares is called in the
 // caller's goroutine, so it may read what that lock guards.
-func (s *Server) PublishUser(old, cur User, shares func(*Conn) bool) {
+func (s *Server) PublishUser(old, cur User, shares func(*Conn) bool) bool {
 	patch, changed := cur.Patch(old)
-	var you, others Frame
-	if changed {
-		update := UserUpdate{New: &patch}
-		if old.UserID != "" && old.UserID != cur.UserID {
-			update.Old = &CurrentUser{User: old.clone()}
-		}
-		var err error
-		if you, err = Encode(UserUpdate{You: &patch}); err == nil {
-			others, err = Encode(update)
-		}
-		if err != nil {
-			s.logger().Error("wire: encoding a user notification", "user_id", cur.UserID, "error", err)
-			you, others = nil, nil
-		}
+	if !changed {
+		return false
+	}
+	update := UserUpdate{New: &patch}
+	if old.UserID != "" && old.UserID != cur.UserID {
+		update.Old = &CurrentUser{User: old.clone()}
+	}
+	you, err := Encode(UserUpdate{You: &patch})
+	var others Frame
+	if err == nil {
+		others, err = Encode(update)
+	}
+	if err != nil {
+		s.logger().Error("wire: encoding a user notification", "user_id", cur.UserID, "error", err)
+		you, others = nil, nil
 	}
 	for _, c := range s.Conns() {
 		switch id := c.UserID(); {
@@ -243,4 +253,5 @@ func (s *Server) PublishUser(old, cur User, shares func(*Conn) bool) {
 			c.Send(others)
 		}
 	}
+	return true
 }

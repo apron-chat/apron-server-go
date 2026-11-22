@@ -81,6 +81,13 @@
 // connection before its reply are sent before it: a Conn's queue is first
 // in, first out.
 //
+// While Auth runs, the notifications sent to its connection are held, and
+// sent after its result, or dropped when it fails (§3.2.2). Only those
+// are: what is sent to the connection after a failed Auth has returned
+// goes out, as a notice before sign-in may, so a backend stops its own
+// senders for the connection, such as a goroutine it started during
+// Auth, before it returns the error.
+//
 // [Reply.Request] is the request, raw: its params, with presence
 // ([Request.Param]), and [Request.Reply], which sends any result without
 // what Send does with the method's, as a [Handler] replies. A handler's
@@ -181,5 +188,7 @@
 // with a request on no connection (wiretest.NewRequest); and it tests a
 // whole Server as a client sees it (wiretest.Connect, in process, and
 // wiretest.Dial, over a WebSocket), with a Client that signs in, calls,
-// and expects the notifications that came before a result.
+// and expects the notifications that came before a result
+// (Client.CallFrames), or waits for every frame queued so far
+// (Client.Sync).
 package wire
