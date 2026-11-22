@@ -103,7 +103,7 @@ func (s *Server) SetScope(ctx context.Context, userID string, scope *RoomScope) 
 	s.setScopeLocked(u, newRoomScope(scope))
 	f := s.newFenceLocked()
 	s.unlock()
-	return waitFence(ctx, f)
+	return f.Wait(ctx)
 }
 
 // SetScope limits an account to some rooms; see Server.SetScope.

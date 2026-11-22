@@ -776,7 +776,7 @@ func (kv KV) put(key string, value any) error {
 	s := kv.h.s
 	s.mu.Lock()
 	defer s.unlock()
-	if s.storeClosed {
+	if s.store.Stopped() {
 		return ErrServerClosed
 	}
 	kind := kv.kind()
@@ -797,7 +797,7 @@ func (kv KV) Delete(key string) error {
 	s := kv.h.s
 	s.mu.Lock()
 	defer s.unlock()
-	if s.storeClosed {
+	if s.store.Stopped() {
 		return ErrServerClosed
 	}
 	kind := kv.kind()

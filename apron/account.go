@@ -442,7 +442,7 @@ func (s *Server) RemoveCredential(ctx context.Context, userID, scheme, id string
 	}
 	f := s.newFenceLocked()
 	s.unlock()
-	return waitFence(ctx, f)
+	return f.Wait(ctx)
 }
 
 // RemoveCredential removes an account's credential; see
@@ -462,18 +462,8 @@ func (s *Server) SignOut(ctx context.Context, userID string) error {
 	}
 	f := s.newFenceLocked()
 	s.unlock()
-	return waitFence(ctx, f)
+	return f.Wait(ctx)
 }
 
 // SignOut signs an account out everywhere; see Server.SignOut.
 func (h *Host) SignOut(ctx context.Context, userID string) error { return h.s.SignOut(ctx, userID) }
-
-// waitFence waits for a fence, or for ctx to end.
-func waitFence(ctx context.Context, f *storeFence) error {
-	select {
-	case <-f.done:
-		return f.err
-	case <-ctx.Done():
-		return ctx.Err()
-	}
-}

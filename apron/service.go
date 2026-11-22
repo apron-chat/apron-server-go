@@ -135,7 +135,7 @@ func (b *Bot) RevokeToken(ctx context.Context, id string) (bool, error) {
 	}
 	f := s.newFenceLocked()
 	s.unlock()
-	return found, waitFence(ctx, f)
+	return found, f.Wait(ctx)
 }
 
 func (s *Server) issueServiceToken(ctx context.Context, userID string, options ServiceTokenOptions, replaces string, overlap time.Duration) (ServiceToken, error) {
@@ -154,7 +154,7 @@ func (s *Server) issueServiceToken(ctx context.Context, userID string, options S
 	key := sha256.Sum256([]byte(token))
 	now := time.Now()
 	s.mu.Lock()
-	if s.storeClosed {
+	if s.store.Stopped() {
 		s.unlock()
 		return ServiceToken{}, ErrServerClosed
 	}
@@ -206,7 +206,7 @@ func (s *Server) issueServiceToken(ctx context.Context, userID string, options S
 	s.dirty.services[key] = true
 	f := s.newFenceLocked()
 	s.unlock()
-	if err := waitFence(ctx, f); err != nil {
+	if err := f.Wait(ctx); err != nil {
 		return ServiceToken{}, err
 	}
 	described := t.describe()

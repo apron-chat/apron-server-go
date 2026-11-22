@@ -199,7 +199,7 @@ func (s *Server) invite(ctx context.Context, by string, options InvitationOption
 		rooms: slices.Clone(options.Rooms), roles: normalizeRoles(options.Roles), data: data,
 	}
 	s.mu.Lock()
-	if s.storeClosed {
+	if s.store.Stopped() {
 		s.unlock()
 		return Invitation{}, ErrServerClosed
 	}
@@ -213,13 +213,8 @@ func (s *Server) invite(ctx context.Context, by string, options InvitationOption
 	s.dirty.invitations[key] = true
 	f := s.newFenceLocked()
 	s.unlock()
-	select {
-	case <-f.done:
-		if f.err != nil {
-			return Invitation{}, f.err
-		}
-	case <-ctx.Done():
-		return Invitation{}, ctx.Err()
+	if err := f.Wait(ctx); err != nil {
+		return Invitation{}, err
 	}
 	described := inv.describe()
 	described.Token = token
@@ -269,12 +264,7 @@ func (s *Server) RevokeInvitation(ctx context.Context, id string) (bool, error) 
 	}
 	f := s.newFenceLocked()
 	s.unlock()
-	select {
-	case <-f.done:
-		return found, f.err
-	case <-ctx.Done():
-		return found, ctx.Err()
-	}
+	return found, f.Wait(ctx)
 }
 
 // RevokeInvitation forgets an invitation; see Server.RevokeInvitation.
@@ -310,12 +300,7 @@ func (s *Server) RevokeEnrollment(ctx context.Context, userID string) error {
 	}
 	f := s.newFenceLocked()
 	s.unlock()
-	select {
-	case <-f.done:
-		return f.err
-	case <-ctx.Done():
-		return ctx.Err()
-	}
+	return f.Wait(ctx)
 }
 
 func (s *Server) revokeEnrollmentLocked(u *userState) {

@@ -26,6 +26,7 @@ import (
 	"github.com/go-webauthn/webauthn/webauthn"
 	"golang.org/x/time/rate"
 
+	"github.com/apron-chat/apron-server-go/apron/internal/durable"
 	"github.com/apron-chat/apron-server-go/internal/auth/external"
 	"github.com/apron-chat/apron-server-go/internal/auth/passkey"
 	"github.com/apron-chat/apron-server-go/internal/authn"
@@ -543,16 +544,9 @@ type Server struct {
 	profile serverProfile
 
 	// dirty is the state changed under mu since it was last written to the
-	// store; storeWrites queues batches for the store writer.
-	dirty       dirtySet
-	storeWrites chan storeBatch
-	storeDone   chan struct{}
-	storeClosed bool
-	// fences wait for the batch the next flush queues (newFenceLocked).
-	fences []*storeFence
-	// storeErr is the store's first failure, after which nothing more is
-	// written.
-	storeErr   atomic.Pointer[error]
+	// store; store writes it, in batches, in the background (durable.go).
+	dirty      dirtySet
+	store      *durable.Writer
 	storedMeta storedMeta
 	pushes     map[string]*pushRegistration
 	closed     bool
@@ -667,8 +661,6 @@ func Open(config Config) (*Server, error) {
 		accounts:    make(map[authn.Identity]*userState),
 		proposals:   proposals{links: make(map[string]*proposal), states: make(map[string]*proposal)},
 		dirty:       newDirtySet(),
-		storeWrites: make(chan storeBatch, storeQueue),
-		storeDone:   make(chan struct{}),
 		badgeDelay:  badgeDelay,
 		stopped:     make(chan struct{}),
 
@@ -740,14 +732,12 @@ func Open(config Config) (*Server, error) {
 		s.externalBy = "Config.ExternalIssuer"
 	}
 	s.openUploadDir()
-	go s.writeStore()
+	s.store = durable.Start(config.Store, config.OnStoreError, ErrServerClosed)
 	s.mu.Lock()
 	files, err := s.restoreLocked()
 	if err != nil {
-		s.storeClosed = true
-		close(s.storeWrites)
+		s.store.Stop()
 		s.mu.Unlock()
-		<-s.storeDone
 		return fail(fmt.Errorf("restoring the stored state: %w", err))
 	}
 	s.push.vapid = s.vapid
