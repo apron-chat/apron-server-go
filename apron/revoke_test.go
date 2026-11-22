@@ -43,6 +43,9 @@ func TestSignOutEndsWrites(t *testing.T) {
 	pipe, writerDone := startLiveWrite(t, app, liveURL, "partial")
 	posted := b.notification(t, "message")
 	a.notification(t, "message")
+	// The server holds "partial" before the sign-out, so the finished
+	// output carries it.
+	waitLiveTotal(t, app, liveURL, int64(len("partial")))
 
 	app.mu.Lock()
 	u := app.users[a.userID]
@@ -139,5 +142,32 @@ func TestAGuestsWriteOutlivesItsConnection(t *testing.T) {
 	_ = pipe.Close()
 	if status := <-writerDone; status != http.StatusNoContent {
 		t.Fatalf("writer status %d", status)
+	}
+}
+
+// waitLiveTotal waits until the live text at writeURL has received at least
+// n bytes from its writer.
+func waitLiveTotal(t *testing.T, app *Server, writeURL string, n int64) {
+	t.Helper()
+	token := writeURL[strings.LastIndex(writeURL, "/")+1:]
+	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(time.Millisecond) {
+		app.mu.RLock()
+		e := app.writes[token]
+		var live *liveText
+		if e != nil {
+			live = e.live
+		}
+		app.mu.RUnlock()
+		if live != nil {
+			live.mu.Lock()
+			total := live.total
+			live.mu.Unlock()
+			if total >= n {
+				return
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the live write never received %d bytes", n)
+		}
 	}
 }
