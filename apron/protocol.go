@@ -92,8 +92,9 @@ func invalidParams(format string, args ...any) *Error {
 	return &Error{Code: CodeInvalidParams, Message: fmt.Sprintf(format, args...)}
 }
 
-// paramError is the error of one of wire's param accessors, which is an
-// *Error whenever it is not nil, as an *Error: nil stays a nil *Error.
+// paramError is the error of wire's param accessors, or of a
+// wire.Decoder, which is an *Error whenever it is not nil, as an *Error:
+// nil stays a nil *Error.
 func paramError(err error) *Error {
 	if err == nil {
 		return nil
@@ -104,49 +105,28 @@ func paramError(err error) *Error {
 	return internalError()
 }
 
-func parseString(params wire.Fields, name string, required bool) (string, *Error) {
-	value, present, err := params.String(name)
-	if err == nil && required && !present {
-		err = wire.Missing(name)
-	}
-	return value, paramError(err)
+// Whether a param read with parseString or a wire.Decoder may be left out.
+const (
+	required = wire.Required
+	optional = wire.Optional
+)
+
+// parseString reads one string param, for a request that reads only it;
+// one that reads more reads them with a wire.Decoder.
+func parseString(params wire.Fields, name string, p wire.Presence) (string, *Error) {
+	d := params.Decoder()
+	value := d.String(name, p)
+	return value, paramError(d.Err())
 }
 
 // validID reports whether id can be a room_id or user_id (§2.4): one that is
 // not empty and has no whitespace or control characters.
 func validID(id string) bool { return wire.ValidID(id) }
 
-func parseBool(params wire.Fields, name string, required bool) (bool, *Error) {
-	value, present, err := params.Bool(name)
-	if err == nil && required && !present {
-		err = wire.Missing(name)
-	}
-	return value, paramError(err)
-}
-
-func parseObject(params wire.Fields, name string, required bool) (map[string]any, *Error) {
-	if _, present, err := params.Object(name); err != nil || !present {
-		if err == nil && required {
-			err = wire.Missing(name)
-		}
-		return nil, paramError(err)
-	}
-	var value map[string]any
-	_ = json.Unmarshal(params[name], &value)
-	return value, nil
-}
-
 // extObject is an ext object (§4.12) keyed by extension name, each value
 // kept as the JSON it arrived as, so a merge or a store keeps it byte for
 // byte, numbers beyond 2^53 included.
 type extObject = wire.Ext
-
-// parseExt reads an optional ext object of a write (§4.12). present reports
-// whether the request carried it.
-func parseExt(params wire.Fields, name string) (extObject, bool, *Error) {
-	ext, present, err := params.Ext(name)
-	return ext, present, paramError(err)
-}
 
 // emptyJSON reports whether a compact JSON value is an empty value ("", [],
 // or {}), which clears what it is merged into (§3.3).

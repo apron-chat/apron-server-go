@@ -43,8 +43,11 @@ func (d *Decoder) Err() error { return d.err }
 
 // Fail records err as the Decoder's error, unless it has one: a check of
 // the handler's own, such as one value's range, in the order of the reads.
-// A nil err records nothing.
+// A nil err records nothing, and neither does a nil *Error.
 func (d *Decoder) Fail(err error) {
+	if e, ok := err.(*Error); ok && e == nil {
+		return
+	}
 	if d.err == nil {
 		d.err = err
 	}

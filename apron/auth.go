@@ -184,7 +184,7 @@ func (s *Server) authenticate(c *client, req request) (any, *Error) {
 		s.unlock()
 		return nil, serviceRefusal()
 	}
-	name, err := parseString(req.params, "scheme", true)
+	name, err := parseString(req.params, "scheme", required)
 	if err != nil {
 		s.unlock()
 		return nil, err
@@ -209,11 +209,12 @@ func (s *Server) authenticate(c *client, req request) (any, *Error) {
 	// characters (§2.4): requesting one that could be no user_id is
 	// invalid_params, with any scheme. One that could be, but that this
 	// server would not assign, is ignored where the scheme assigns one.
-	if _, has := req.params["user_id"]; has && err == nil {
-		var requested string
-		if requested, err = parseString(req.params, "user_id", true); err == nil && !validID(requested) {
-			err = invalidParams("user_id must not be empty, or contain whitespace or control characters")
+	if err == nil {
+		d := req.params.Decoder()
+		if requested := d.String("user_id", optional); d.Has("user_id") && d.Err() == nil && !validID(requested) {
+			d.Fail(invalidParams("user_id must not be empty, or contain whitespace or control characters"))
 		}
+		err = paramError(d.Err())
 	}
 	if err != nil {
 		s.unlock()
@@ -280,18 +281,14 @@ func (s *Server) authenticate(c *client, req request) (any, *Error) {
 // presentsServiceToken reports whether a token auth presents a bot's
 // service token, which signs in on a server without sign-in schemes too.
 func presentsServiceToken(req request) bool {
-	token, _ := parseString(req.params, "token", false)
+	token, _ := parseString(req.params, "token", optional)
 	return strings.HasPrefix(token, serviceTokenPrefix)
 }
 
 // authenticateGuestLocked signs the connection in as a new guest, or
 // answers with the identity a signed-in connection has.
 func (s *Server) authenticateGuestLocked(c *client, req request) (any, *Error) {
-	name, err := parseString(req.params, "name", false)
-	if err != nil {
-		return nil, err
-	}
-	requested, err := parseString(req.params, "user_id", false)
+	name, requested, err := parseRequested(req)
 	if err != nil {
 		return nil, err
 	}

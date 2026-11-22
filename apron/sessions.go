@@ -78,10 +78,10 @@ func (s *Server) newSessionLocked(user *userState, origin string, anyOrigin bool
 // parseRequested parses the name and user_id that an auth request may request
 // for a new account.
 func parseRequested(req request) (name, requested string, err *Error) {
-	if name, err = parseString(req.params, "name", false); err != nil {
-		return "", "", err
-	}
-	if requested, err = parseString(req.params, "user_id", false); err != nil {
+	d := req.params.Decoder()
+	name = d.String("name", optional)
+	requested = d.String("user_id", optional)
+	if err := paramError(d.Err()); err != nil {
 		return "", "", err
 	}
 	return name, requested, nil
@@ -130,12 +130,13 @@ func (s *Server) authenticateToken(c *client, req request) (any, *Error) {
 	// as a passkey ceremony, whether or not it signs in.
 	c.authStates = nil
 	now := time.Now()
-	token, err := parseString(req.params, "token", true)
-	if err != nil {
-		return nil, err
+	d := req.params.Decoder()
+	token := d.String("token", required)
+	if d.Err() == nil && token == "" {
+		d.Fail(invalidParams("token must be a non-empty string"))
 	}
-	if token == "" {
-		return nil, invalidParams("token must be a non-empty string")
+	if err := paramError(d.Err()); err != nil {
+		return nil, err
 	}
 	if strings.HasPrefix(token, deviceTokenPrefix) {
 		return s.authenticateDeviceLocked(c, req, token)
@@ -150,7 +151,7 @@ func (s *Server) authenticateToken(c *client, req request) (any, *Error) {
 		// A temporary token approves its proposal with this scheme too, as
 		// a client presents the token of a link that isn't its own
 		// (§4.11.2), with the proposal's state or without (§4.11.3).
-		state, err := parseString(req.params, "state", false)
+		state, err := parseString(req.params, "state", optional)
 		if err != nil {
 			return nil, err
 		}

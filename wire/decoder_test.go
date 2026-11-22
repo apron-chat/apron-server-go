@@ -28,6 +28,8 @@ func TestDecoder(t *testing.T) {
 	if n := d.Count("n", Required); n != 0 {
 		t.Fatalf("n = %d after an error", n)
 	}
+	var none *Error
+	d.Fail(none)
 	d.Fail(InvalidParams("later"))
 	if err := d.Err(); CodeOf(err) != CodeInvalidParams || !strings.Contains(err.Error(), "kind must be a string") {
 		t.Fatalf("Err = %v, want the first", err)
@@ -37,6 +39,7 @@ func TestDecoder(t *testing.T) {
 	}
 
 	d = req(`{}`).Decoder()
+	d.Fail(none)
 	d.ID("room_id", Optional)
 	if d.Err() != nil {
 		t.Fatalf("an optional param: %v", d.Err())

@@ -286,18 +286,13 @@ func (s *Server) listCredentials(c *client, req request) (any, bool, *Error) {
 // credentialParams parses a credential's scheme, webauthn by default, and
 // id.
 func credentialParams(req request) (string, string, *Error) {
-	scheme, err := parseString(req.params, "scheme", false)
-	if err != nil {
-		return "", "", err
+	d := req.params.Decoder()
+	scheme := d.String("scheme", optional)
+	id := d.String("id", required)
+	if d.Err() == nil && id == "" {
+		d.Fail(invalidParams("id must be a non-empty string"))
 	}
-	id, err := parseString(req.params, "id", true)
-	if err != nil {
-		return "", "", err
-	}
-	if id == "" {
-		return "", "", invalidParams("id must be a non-empty string")
-	}
-	return cmp.Or(scheme, "webauthn"), id, nil
+	return cmp.Or(scheme, "webauthn"), id, paramError(d.Err())
 }
 
 func (s *Server) renameCredential(c *client, req request) (any, bool, *Error) {
@@ -305,7 +300,7 @@ func (s *Server) renameCredential(c *client, req request) (any, bool, *Error) {
 	if err != nil {
 		return nil, false, err
 	}
-	name, err := parseString(req.params, "name", true)
+	name, err := parseString(req.params, "name", required)
 	if err != nil {
 		return nil, false, err
 	}
@@ -359,8 +354,9 @@ func (s *Server) removeCredential(c *client, req request) (any, bool, *Error) {
 // `others`, ends every other session and device token of the account and
 // closes its other connections, which needs a recent reauthentication.
 func (s *Server) signOut(c *client, req request) (any, bool, *Error) {
-	others, err := parseBool(req.params, "others", false)
-	if err != nil {
+	d := req.params.Decoder()
+	others := d.Bool("others", optional)
+	if err := paramError(d.Err()); err != nil {
 		return nil, false, err
 	}
 	s.mu.Lock()

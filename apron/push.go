@@ -202,19 +202,14 @@ func (s *Server) registerPush(c *client, req request) (any, bool, *Error) {
 		// a registration would outlive the token's revocation.
 		return nil, false, &Error{Code: CodeDenied, Message: "A service token's connection does not register for push"}
 	}
-	kind, err := parseString(req.params, "kind", true)
-	if err != nil {
-		return nil, false, err
+	d := req.params.Decoder()
+	kind := d.String("kind", required)
+	if d.Err() == nil && kind != "relay" && kind != "webpush" {
+		d.Fail(invalidParams("Unknown push kind %q; this server supports relay and webpush", kind))
 	}
-	if kind != "relay" && kind != "webpush" {
-		return nil, false, invalidParams("Unknown push kind %q; this server supports relay and webpush", kind)
-	}
-	endpoint, err := parseString(req.params, "url", true)
-	if err != nil {
-		return nil, false, err
-	}
-	token, err := parseString(req.params, "token", false)
-	if err != nil {
+	endpoint := d.String("url", required)
+	token := d.String("token", optional)
+	if err := paramError(d.Err()); err != nil {
 		return nil, false, err
 	}
 	endpoint, problem := s.checkPushURL(endpoint)
@@ -224,11 +219,11 @@ func (s *Server) registerPush(c *client, req request) (any, bool, *Error) {
 	if len(endpoint) > maxPushURLBytes || len(token) > maxPushTokenLen {
 		return nil, false, &Error{Code: CodeTooLarge, Message: fmt.Sprintf("url is at most %d bytes and token at most %d", maxPushURLBytes, maxPushTokenLen)}
 	}
-	pushID, err := parseString(req.params, "push_id", false)
-	if err != nil {
+	pushID := d.String("push_id", optional)
+	if err := paramError(d.Err()); err != nil {
 		return nil, false, err
 	}
-	if _, has := req.params["push_id"]; has && !pushIDPattern.MatchString(pushID) {
+	if d.Has("push_id") && !pushIDPattern.MatchString(pushID) {
 		return nil, false, invalidParams("push_id is 1 to 64 letters, digits, _ or -")
 	}
 	keys, err := parseKeysParam(req.params)
@@ -284,11 +279,11 @@ func parseKeysParam(params map[string]jsontext.Value) (*pushKeys, *Error) {
 	if json.Unmarshal(params["keys"], &raw) != nil || raw == nil {
 		return nil, invalidParams("keys must be an object with p256dh and auth")
 	}
-	p256dh, err := parseString(raw, "p256dh", true)
+	p256dh, err := parseString(raw, "p256dh", required)
 	if err != nil {
 		return nil, invalidParams("keys.p256dh must be a string")
 	}
-	auth, err := parseString(raw, "auth", true)
+	auth, err := parseString(raw, "auth", required)
 	if err != nil {
 		return nil, invalidParams("keys.auth must be a string")
 	}
@@ -302,7 +297,7 @@ func parseKeysParam(params map[string]jsontext.Value) (*pushKeys, *Error) {
 // unregisterPush removes the caller's registration of a url; an unknown url
 // is already unregistered (§4.9).
 func (s *Server) unregisterPush(c *client, req request) (any, bool, *Error) {
-	endpoint, err := parseString(req.params, "url", true)
+	endpoint, err := parseString(req.params, "url", required)
 	if err != nil {
 		return nil, false, err
 	}

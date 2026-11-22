@@ -343,17 +343,15 @@ func (s *Server) pruneInvitationsLocked(now time.Time) {
 // with "invitation", if any, and refuses one that is unknown, used, or
 // expired, or presented on a connection signed in already.
 func (s *Server) presentedInvitationLocked(c *client, req request) (*invitation, *Error) {
-	if _, has := req.params["invitation"]; !has {
-		return nil, nil
-	}
-	token, err := parseString(req.params, "invitation", true)
-	if err != nil {
+	d := req.params.Decoder()
+	token := wire.Opt(d, "invitation", d.String)
+	if err := paramError(d.Err()); err != nil || token == nil {
 		return nil, err
 	}
 	if c.user != nil {
 		return nil, &Error{Code: CodeDenied, Message: "An invitation makes a new account; sign out first"}
 	}
-	inv := s.invitations[sha256.Sum256([]byte(token))]
+	inv := s.invitations[sha256.Sum256([]byte(*token))]
 	if inv == nil || !time.Now().Before(inv.expires) {
 		return nil, &Error{Code: CodeDenied, Message: "This invitation is invalid, used, or expired"}
 	}
@@ -415,7 +413,7 @@ func (s *Server) enrollLocked(c *client, req request, scheme authn.Scheme, proof
 
 // mustString is a string param that parsing found already.
 func mustString(params map[string]jsontext.Value, name string) string {
-	value, _ := parseString(params, name, true)
+	value, _ := parseString(params, name, required)
 	return value
 }
 
