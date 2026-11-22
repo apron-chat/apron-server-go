@@ -15,7 +15,7 @@ import (
 // deduplication, and backend answers for the Server, as its Backend and
 // each of its handlers. The Server's other operations are wire methods
 // (registerOp). Each replies while it holds s.mu where its result describes
-// state (request.reply).
+// state (request.reply), or, for me, with its typed reply.
 
 // backend is the Server as wire's Backend and handlers, kept unexported so
 // that wire's interfaces are not part of the Server's API.
@@ -264,11 +264,11 @@ func (b backend) History(ctx context.Context, wc *wire.Conn, p wire.HistoryParam
 
 // Profiles (§3.3.2).
 
-// Me changes the user's profile. updateProfile replies itself, with the
-// user's complete object.
+// Me changes the user's profile. updateProfile sends the user's complete
+// object while it holds s.mu, which makes it the connection's user.
 func (b backend) Me(ctx context.Context, wc *wire.Conn, p wire.MeParams, reply wire.Reply[wire.CurrentUser]) error {
-	return run(b, ctx, wc, reply, func(c *client, req request) (any, bool, *Error) {
-		return b.s.updateProfile(c, req, p)
+	return run(b, ctx, wc, reply, func(c *client, _ request) (any, bool, *Error) {
+		return nil, true, b.s.updateProfile(c, p, reply)
 	})
 }
 

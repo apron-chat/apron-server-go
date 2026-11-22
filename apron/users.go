@@ -515,7 +515,7 @@ func withCleared(profile wire.CurrentUser, cleared extObject) wire.CurrentUser {
 // user's limit on status changes (admitStatusLocked), beyond which the
 // request is retry_after and changes nothing. roles are not settable, and
 // like other unknown fields are ignored.
-func (s *Server) updateProfile(c *client, req request, p wire.MeParams) (any, bool, *Error) {
+func (s *Server) updateProfile(c *client, p wire.MeParams, reply wire.Reply[wire.CurrentUser]) *Error {
 	var name, avatar, status string
 	hasName, hasAvatar, hasStatus := p.Name != nil, p.Avatar != nil, p.Status != nil
 	if hasName {
@@ -534,9 +534,9 @@ func (s *Server) updateProfile(c *client, req request, p wire.MeParams) (any, bo
 	u := c.user
 	if hasAvatar && avatar != "" && avatar != u.avatar && !validAvatar(avatar) {
 		if strings.HasPrefix(avatar, "data:") && len(avatar) > maxAvatarDataURLBytes {
-			return nil, false, &Error{Code: CodeTooLarge, Message: fmt.Sprintf("An avatar data: URL is at most %d bytes; upload larger images with /avatar", maxAvatarDataURLBytes)}
+			return &Error{Code: CodeTooLarge, Message: fmt.Sprintf("An avatar data: URL is at most %d bytes; upload larger images with /avatar", maxAvatarDataURLBytes)}
 		}
-		return nil, false, invalidParams("avatar must be an https: URL or a data:image URL of at most %d bytes; upload larger images with /avatar", maxAvatarDataURLBytes)
+		return invalidParams("avatar must be an https: URL or a data:image URL of at most %d bytes; upload larger images with /avatar", maxAvatarDataURLBytes)
 	}
 	if hasStatus && !settableStatus(status) {
 		status = statusNone
@@ -547,7 +547,7 @@ func (s *Server) updateProfile(c *client, req request, p wire.MeParams) (any, bo
 	if hasExt {
 		ext = mergeExt(u.ext, extWrite)
 		if encodedSize(ext) > maxProfileExtBytes {
-			return nil, false, &Error{Code: CodeTooLarge, Message: fmt.Sprintf("Your profile's ext would be over %d bytes", maxProfileExtBytes)}
+			return &Error{Code: CodeTooLarge, Message: fmt.Sprintf("Your profile's ext would be over %d bytes", maxProfileExtBytes)}
 		}
 	}
 	// A status change counts against the user's limit on status changes,
@@ -555,14 +555,14 @@ func (s *Server) updateProfile(c *client, req request, p wire.MeParams) (any, bo
 	// cannot make the server announce it to every sharer without end.
 	if hasStatus && status != u.chosen {
 		if err := admitStatusLocked(u); err != nil {
-			return nil, false, err
+			return err
 		}
 	}
 	// A change of name, avatar, or ext goes to everyone who shares a room
 	// with the user.
 	if (hasName && normalizeName(name) != u.name) || (hasAvatar && avatar != u.avatar) || (hasExt && !jsonEqual(ext, u.ext)) {
 		if err := admitActionLocked(u); err != nil {
-			return nil, false, err
+			return err
 		}
 	}
 	before, beforeYou := u.profile(), u.you()
@@ -589,12 +589,13 @@ func (s *Server) updateProfile(c *client, req request, p wire.MeParams) (any, bo
 		u.chosen = status
 		s.publishLocked(u)
 	}
-	result := map[string]any{"you": withRemoved(u.you(), removed)}
 	if !jsonEqual(before, u.profile()) || !jsonEqual(beforeYou, u.you()) {
 		s.notifyProfileLocked(u, c, cleared, removed...)
 	}
-	c.sendResult(req, result)
-	return result, true, nil
+	// The result is the user's complete object, which Send makes the
+	// connection's user too.
+	_ = reply.Send(withRemoved(u.you(), removed))
+	return nil
 }
 
 func jsonEqual(a, b any) bool {
