@@ -1,7 +1,6 @@
 package apron
 
 import (
-	"encoding/json/v2"
 	"fmt"
 	"github.com/apron-chat/apron-server-go/wire"
 	"slices"
@@ -72,8 +71,9 @@ func (m *messageState) snapshot() map[string]any {
 // so a sender who has joined receives a new upload's pending snapshot before
 // the result carrying its write URL. Posting does not join the room
 // (§4.2.2): a poster who has not joined gets only the result. A new message
-// with no text and no embeds is invalid_params (§3.5.1).
-func (s *Server) saveMessage(c *client, req request, p wire.MessageParams) (any, bool, *Error) {
+// with no text and no embeds is invalid_params (§3.5.1). A new message is a
+// save with no message_id, as backend.Message makes it.
+func (s *Server) saveMessage(c *client, req request, p wire.EditParams) (any, bool, *Error) {
 	roomID := p.RoomID
 	if roomID == "" {
 		roomID = defaultRoomID
@@ -86,16 +86,14 @@ func (s *Server) saveMessage(c *client, req request, p wire.MessageParams) (any,
 	if hasReply {
 		replyID = p.ReplyTo.MessageID.String()
 	}
+	// package wire refuses a deletion without message_id.
 	deleted := p.Deleted
-	if deleted && !replacing {
-		return nil, false, invalidParams("Cannot create a deleted message")
-	}
 	var body map[string]any
 	if !deleted {
-		if p.BodyRaw == nil {
+		if p.Body == nil {
 			return nil, false, wire.Missing("body")
 		}
-		_ = json.Unmarshal(p.BodyRaw, &body)
+		body = req.body()
 		if err := validateBody(body); err != nil {
 			return nil, false, err
 		}

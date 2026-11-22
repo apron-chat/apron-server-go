@@ -2,6 +2,7 @@ package wire
 
 import (
 	"encoding/json/jsontext"
+	"errors"
 	"slices"
 	"strings"
 	"unicode"
@@ -30,57 +31,38 @@ type ServerInfo struct {
 	Status       []string          `json:"status,omitempty"`
 	// Push enables push (§4.9): its kinds and wake scopes.
 	Push map[string]any `json:"push,omitempty"`
-	Ext  map[string]any `json:"ext,omitempty"`
+	Ext  Ext            `json:"ext,omitempty"`
+	// Unknown holds the members this package has no field for, as they
+	// arrived, and is sent after the others.
+	Unknown jsontext.Value `json:",embed"`
 }
 
-// User is a user object (§3.3.1).
+// Method makes a server frame a Notification (§3.1); Conn.Announce sends
+// one with what Server fills in.
+func (ServerInfo) Method() string { return "server" }
+
+// User is a user object (§3.3.1): a recorded one, such as a message's
+// from, or a complete current one. A current object that carries cleared
+// fields, as a user notification does, is a CurrentUser.
 type User struct {
-	UserID string         `json:"user_id"`
-	Name   string         `json:"name,omitempty"`
-	Avatar string         `json:"avatar,omitempty"`
-	Roles  []string       `json:"roles,omitempty"`
-	Status string         `json:"status,omitempty"`
-	Seen   string         `json:"seen,omitempty"`
-	Ext    map[string]any `json:"ext,omitempty"`
+	UserID string   `json:"user_id"`
+	Name   string   `json:"name,omitempty"`
+	Avatar string   `json:"avatar,omitempty"`
+	Roles  []string `json:"roles,omitempty"`
+	Status string   `json:"status,omitempty"`
+	Seen   string   `json:"seen,omitempty"`
+	Ext    Ext      `json:"ext,omitempty"`
+	// Unknown holds the members this package has no field for, as they
+	// arrived, and is sent after the others.
+	Unknown jsontext.Value `json:",embed"`
 }
 
 // clone returns a copy of u that shares nothing with it.
 func (u User) clone() User {
 	u.Roles = slices.Clone(u.Roles)
-	if u.Ext != nil {
-		ext := make(map[string]any, len(u.Ext))
-		for key, value := range u.Ext {
-			ext[key] = cloneJSON(value)
-		}
-		u.Ext = ext
-	}
+	u.Ext = u.Ext.clone()
+	u.Unknown = cloneRaw(u.Unknown)
 	return u
-}
-
-// cloneJSON copies a value decoded from JSON, or made to encode as JSON,
-// with its maps, slices, and raw values; anything else is shared.
-func cloneJSON(v any) any {
-	switch v := v.(type) {
-	case map[string]any:
-		copied := make(map[string]any, len(v))
-		for key, value := range v {
-			copied[key] = cloneJSON(value)
-		}
-		return copied
-	case []any:
-		copied := make([]any, len(v))
-		for i, value := range v {
-			copied[i] = cloneJSON(value)
-		}
-		return copied
-	case jsontext.Value:
-		return slices.Clone(v)
-	case []byte:
-		return slices.Clone(v)
-	case []string:
-		return slices.Clone(v)
-	}
-	return v
 }
 
 // The system identities (Appendix A.1): a message from one says who else
@@ -101,6 +83,10 @@ type Body struct {
 	Format   string           `json:"format,omitempty"`
 	Mentions []string         `json:"mentions,omitempty"`
 	Embeds   []jsontext.Value `json:"embeds,omitempty"`
+	// Unknown holds the members this package has no field for, as they
+	// arrived, such as a newer protocol's, and is sent after the others:
+	// a backend that keeps a Body keeps them.
+	Unknown jsontext.Value `json:",embed"`
 }
 
 // Empty reports whether a body has no text and no embeds: a new message
@@ -121,17 +107,24 @@ type Ref struct {
 // Message is a message snapshot, or a transient notice when MessageID is
 // 0 (§3.5).
 type Message struct {
-	MessageID  LogID          `json:"message_id,omitzero"`
-	LogID      LogID          `json:"log_id,omitzero"`
-	RoomID     string         `json:"room_id,omitempty"`
-	From       User           `json:"from"`
-	Body       *Body          `json:"body,omitempty"`
-	ReplyTo    *Ref           `json:"reply_to,omitempty"`
-	PrevLogID  LogID          `json:"prev_log_id,omitzero"`
-	PrevRoomID string         `json:"prev_room_id,omitempty"`
-	Deleted    bool           `json:"deleted,omitzero"`
-	Ext        map[string]any `json:"ext,omitempty"`
+	MessageID  LogID  `json:"message_id,omitzero"`
+	LogID      LogID  `json:"log_id,omitzero"`
+	RoomID     string `json:"room_id,omitempty"`
+	From       User   `json:"from"`
+	Body       *Body  `json:"body,omitempty"`
+	ReplyTo    *Ref   `json:"reply_to,omitempty"`
+	PrevLogID  LogID  `json:"prev_log_id,omitzero"`
+	PrevRoomID string `json:"prev_room_id,omitempty"`
+	Deleted    bool   `json:"deleted,omitzero"`
+	Ext        Ext    `json:"ext,omitempty"`
+	// Unknown holds the members this package has no field for, as they
+	// arrived, and is sent after the others.
+	Unknown jsontext.Value `json:",embed"`
 }
+
+// Method makes a message a Notification: a snapshot, or a transient notice
+// (§3.5).
+func (Message) Method() string { return "message" }
 
 // Notice is a transient ~private notice with text, shown in roomID, or
 // wherever the client likes when roomID is empty.
@@ -147,7 +140,7 @@ type AuthParams struct {
 	UserID string         `json:"user_id,omitempty"`
 	Agent  string         `json:"agent,omitempty"`
 	Token  string         `json:"token,omitempty"`
-	Ext    map[string]any `json:"ext,omitempty"`
+	Ext    Ext            `json:"ext,omitempty"`
 	Raw    jsontext.Value `json:"-"`
 }
 
@@ -155,29 +148,66 @@ type AuthParams struct {
 // authenticated nothing, such as the begin step of a ceremony; with You, the
 // connection is signed in as You.
 type AuthResult struct {
-	You   *User  `json:"you,omitempty"`
+	You   *User  `json:"you,omitzero"`
 	Token string `json:"token,omitempty"`
-	// Extra holds more result fields, such as a webauthn begin's.
-	Extra map[string]any `json:"-"`
+	// Extra holds more result fields, sent beside you and token, such as
+	// a webauthn begin's options. It names neither of them: a result that
+	// does is error/internal_error.
+	Extra map[string]any `json:",embed"`
 }
 
-// MessageParams are the params of a message request, or of a command
-// (§3.5, §4.1, §4.4).
+// MessageParams are the params of a new message (§3.5.1): a message
+// request without message_id.
 type MessageParams struct {
-	// MessageID is set on a save of an existing message (§4.4), and 0 on
-	// a new one.
-	MessageID LogID
 	// RoomID is the room, or "" for the default room.
 	RoomID string
-	// Body is nil when the request leaves it out, as a deletion does.
-	Body *Body
-	// BodyRaw is the body exactly as sent, fields this package does not
-	// know included, for a backend that keeps them; nil without a body.
-	BodyRaw jsontext.Value
+	// Body is never nil. Its Unknown holds the fields this package does
+	// not know, for a backend that keeps them.
+	Body    *Body
 	ReplyTo *Ref
+	// Ext is the message's ext (§4.13); nil when left out.
+	Ext Ext
+}
+
+// EditParams are the params of a save of an existing message (§4.4): a
+// message request with message_id, which edits, moves, or deletes it.
+type EditParams struct {
+	// MessageID is the message saved, never 0.
+	MessageID LogID
+	// RoomID is the room to save the message in, or "" for the default
+	// room: one other than the message's moves it.
+	RoomID string
+	// Deleted saves a tombstone: Body is then nil, whatever was sent.
 	Deleted bool
+	// Body is nil when the request leaves it out. Its Unknown holds the
+	// fields this package does not know.
+	Body    *Body
+	ReplyTo *Ref
 	// Ext merges into the message's ext (§4.13); nil when left out.
 	Ext Ext
+}
+
+// CommandParams are the params of a command (§4.1): those of a new
+// message, whose body.text is the command line, and whose other fields
+// are its arguments.
+type CommandParams struct {
+	// RoomID is the room the command runs in, or "" for the default room.
+	RoomID string
+	// Body is never nil.
+	Body    *Body
+	ReplyTo *Ref
+	Ext     Ext
+}
+
+// CommandResult is the result of a command (§4.1): empty, or the write
+// URLs of the embeds it made.
+type CommandResult struct {
+	// Embeds are the embed writes the command reserved (§4.8.2), as their
+	// objects.
+	Embeds []jsontext.Value `json:"embeds,omitempty"`
+	// Unknown holds more result fields, an extension's, as one JSON
+	// object's members, sent after the others.
+	Unknown jsontext.Value `json:",embed"`
 }
 
 // MessageResult is the result of a message request: the new message's
@@ -202,8 +232,25 @@ type MeParams struct {
 // being encoded again.
 type Frame []byte
 
-// Encode renders a notification frame.
-func Encode(method string, params any) (Frame, error) {
+// Notification is the params of a notification the server sends, which
+// names its method, such as a Message ("message"), a UserUpdate ("user"),
+// or a RoomUpdate ("room_update").
+type Notification interface {
+	Method() string
+}
+
+// Encode renders a notification frame, such as to broadcast it
+// (Server.Broadcast) without encoding it for every connection.
+func Encode(n Notification) (Frame, error) {
+	if n == nil {
+		return nil, errors.New("wire: encoding a nil notification")
+	}
+	return EncodeRaw(n.Method(), n)
+}
+
+// EncodeRaw renders a notification frame of any method and params, such
+// as an extension's own notification.
+func EncodeRaw(method string, params any) (Frame, error) {
 	return marshal(map[string]any{"method": method, "params": params})
 }
 

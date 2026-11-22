@@ -32,6 +32,27 @@ type ReactParams struct {
 	Emojis []string
 }
 
+// Reactions is a reactions record (§4.7): a reactions notification, and a
+// history result's reactions (§4.3). Each element replaces its user's set
+// of emoji on the message.
+type Reactions struct {
+	LogID     LogID      `json:"log_id"`
+	MessageID LogID      `json:"message_id"`
+	RoomID    string     `json:"room_id"`
+	Reactions []Reaction `json:"reactions"`
+}
+
+// Method makes a reactions record a Notification.
+func (Reactions) Method() string { return "reactions" }
+
+// Reaction is one user's set of emoji in a reactions record: From is a
+// recorded user object (§3.3.1), and Emojis are empty when the user took
+// theirs away.
+type Reaction struct {
+	From   User     `json:"from"`
+	Emojis []string `json:"emojis"`
+}
+
 // Reactor handles reactions, and adds capability reactions (§4.7). It
 // broadcasts the reaction set, including to c, before it returns.
 type Reactor interface {

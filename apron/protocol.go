@@ -73,6 +73,21 @@ func (req request) reply(result any, then ...any) bool {
 	return req.w.Reply(result, frames...)
 }
 
+// body decodes the request's body param as it was sent, every field kept,
+// such as one this server does not know, or nil without one. The body
+// package wire checked is a wire.Body, with the fields it does not know
+// apart (Body.Unknown); the server keeps the body whole, as it arrived, and
+// stores it so.
+func (req request) body() map[string]any {
+	raw, ok := req.params["body"]
+	if !ok {
+		return nil
+	}
+	var body map[string]any
+	_ = json.Unmarshal(raw, &body)
+	return body
+}
+
 func invalidParams(format string, args ...any) *Error {
 	return &Error{Code: CodeInvalidParams, Message: fmt.Sprintf(format, args...)}
 }

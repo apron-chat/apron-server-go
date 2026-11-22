@@ -196,7 +196,7 @@ func (s *Server) ServeTransport(ctx context.Context, t Transport, remote net.Add
 	case s.MaxConnections > 0 && s.network >= s.MaxConnections:
 		s.mu.Unlock()
 		c.info = s.complete(s.Backend.Hello(c))
-		if frame, err := Encode("server", c.info); err == nil {
+		if frame, err := Encode(c.info); err == nil {
 			c.rt.Send(frame)
 		}
 		// An error about the connection as a whole omits id (§1.1).
@@ -216,7 +216,7 @@ func (s *Server) ServeTransport(ctx context.Context, t Transport, remote net.Add
 		if err := connecter.Connected(c); err != nil {
 			if e, ok := asError(err); ok {
 				c.info = s.complete(s.Backend.Hello(c))
-				if frame, err := Encode("server", c.info); err == nil {
+				if frame, err := Encode(c.info); err == nil {
 					c.rt.Send(frame)
 				}
 				c.CloseWithError(e)
@@ -228,7 +228,7 @@ func (s *Server) ServeTransport(ctx context.Context, t Transport, remote net.Add
 		}
 	}
 	c.info = s.complete(s.Backend.Hello(c))
-	frame, err := Encode("server", c.info)
+	frame, err := Encode(c.info)
 	if err != nil {
 		s.logger().Error("wire: encoding the server frame", "error", err)
 		c.Close()

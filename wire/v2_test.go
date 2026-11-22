@@ -21,7 +21,7 @@ func TestReplyInHandler(t *testing.T) {
 	s.Handle("snapshot", wire.Method{Handle: func(ctx context.Context, c *wire.Conn, r *wire.Request) (any, error) {
 		mu.Lock()
 		defer mu.Unlock()
-		after, _ := wire.Encode("cursor", map[string]any{"n": 1})
+		after, _ := wire.EncodeRaw("cursor", map[string]any{"n": 1})
 		if wire.RequestFrom(ctx) != r || !r.Reply(map[string]any{"state": 1}, after) {
 			t.Error("Reply failed")
 		}
@@ -85,9 +85,11 @@ func (b *refreshing) Refresh(_ *wire.Conn, method string, result jsontext.Value)
 	return map[string]any{"method": method, "version": b.version}
 }
 
-func (b *refreshing) Me(_ context.Context, c *wire.Conn, _ wire.MeParams) (wire.User, error) {
+var _ wire.Profiler = (*refreshing)(nil)
+
+func (b *refreshing) Me(_ context.Context, c *wire.Conn, _ wire.MeParams) (wire.CurrentUser, error) {
 	b.version++
-	return *c.User(), nil
+	return wire.CurrentUser{User: *c.User()}, nil
 }
 
 func TestRefresher(t *testing.T) {
@@ -152,7 +154,7 @@ func TestLocal(t *testing.T) {
 	s := &wire.Server{Backend: b}
 	var once sync.Once
 	s.Handle("whoami", wire.Method{Handle: func(ctx context.Context, c *wire.Conn, r *wire.Request) (any, error) {
-		c.Notify("hello", map[string]any{})
+		c.NotifyRaw("hello", map[string]any{})
 		var err error
 		once.Do(func() {
 			// Calling back into the same connection would wait for itself.
@@ -216,7 +218,7 @@ func TestLocalFellBehind(t *testing.T) {
 		t.Fatal(err)
 	}
 	for range 20 {
-		l.Conn().Notify("x", map[string]any{})
+		l.Conn().NotifyRaw("x", map[string]any{})
 	}
 	select {
 	case <-l.Done():

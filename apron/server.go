@@ -1066,10 +1066,10 @@ func (s *Server) serverParams(baseURL string, revealed bool) wire.ServerInfo {
 		// other sessions.
 		info.Capabilities = append(info.Capabilities, "ext:"+accountExt)
 	}
-	ext := make(map[string]any)
+	var ext wire.Ext
 	if emoji := s.emojiExt(baseURL); emoji != nil && revealed {
 		info.Capabilities = append(info.Capabilities, "ext:emoji")
-		ext["emoji"] = emoji
+		ext = ext.With("emoji", emoji)
 	}
 	if !s.config.DisablePush {
 		push := map[string]any{"relay": map[string]any{}, "wake": (urgentScopes | wakeJoined | wakeBadge).names()}
@@ -1097,7 +1097,7 @@ func (s *Server) serverParams(baseURL string, revealed bool) wire.ServerInfo {
 		// ext:settings (apron's EXTENSIONS.md): read_cursors is absent,
 		// so true, since the server keeps read_message_id (§4.6).
 		info.Capabilities = append(info.Capabilities, "ext:settings")
-		ext["settings"] = map[string]any{"private_rooms": s.config.MaxPrivateRooms}
+		ext = ext.With("settings", map[string]any{"private_rooms": s.config.MaxPrivateRooms})
 	}
 	// Each extension that advertises (Host.Advertise) adds its capability,
 	// ext:<name>, and its data under its name in ext (EXTENSIONS.md).
@@ -1107,12 +1107,13 @@ func (s *Server) serverParams(baseURL string, revealed bool) wire.ServerInfo {
 		}
 		info.Capabilities = append(info.Capabilities, "ext:"+name)
 		if value := s.advertised[name]; len(value) > 0 {
+			if ext == nil {
+				ext = make(wire.Ext)
+			}
 			ext[name] = value
 		}
 	}
-	if len(ext) > 0 {
-		info.Ext = ext
-	}
+	info.Ext = ext
 	if !slices.Equal(signup, authSchemes) {
 		info.Signup = signup
 	}

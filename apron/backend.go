@@ -233,15 +233,15 @@ func (b backend) Refresh(wc *wire.Conn, method string, result jsontext.Value) an
 
 var _ wire.Rooms = backend{}
 
-func (b backend) RoomJoin(ctx context.Context, wc *wire.Conn, roomID, userID string) error {
+func (b backend) RoomJoin(ctx context.Context, wc *wire.Conn, p wire.RoomJoinParams) error {
 	return b.run(ctx, wc, func(c *client, req request) (any, bool, *Error) {
-		return b.s.joinRoom(c, req, roomID, userID)
+		return b.s.joinRoom(c, req, p.RoomID, p.UserID)
 	})
 }
 
-func (b backend) RoomLeave(ctx context.Context, wc *wire.Conn, roomID, userID string) error {
+func (b backend) RoomLeave(ctx context.Context, wc *wire.Conn, p wire.RoomLeaveParams) error {
 	return b.run(ctx, wc, func(c *client, req request) (any, bool, *Error) {
-		return b.s.leaveRoom(c, req, roomID, userID)
+		return b.s.leaveRoom(c, req, p.RoomID, p.UserID)
 	})
 }
 
@@ -251,8 +251,8 @@ func (b backend) RoomList(ctx context.Context, wc *wire.Conn, p wire.RoomListPar
 	})
 }
 
-func (b backend) RoomSet(ctx context.Context, wc *wire.Conn, p wire.RoomSetParams) (string, error) {
-	return "", b.run(ctx, wc, func(c *client, req request) (any, bool, *Error) {
+func (b backend) RoomSet(ctx context.Context, wc *wire.Conn, p wire.RoomSetParams) (wire.RoomSetResult, error) {
+	return wire.RoomSetResult{}, b.run(ctx, wc, func(c *client, req request) (any, bool, *Error) {
 		return b.s.setRoom(c, req, p)
 	})
 }
@@ -273,8 +273,8 @@ var _ wire.Profiler = backend{}
 
 // Me changes the user's profile. updateProfile replies itself, with the
 // user's complete object, and sets the connection's user.
-func (b backend) Me(ctx context.Context, wc *wire.Conn, p wire.MeParams) (wire.User, error) {
-	return wire.User{}, b.run(ctx, wc, func(c *client, req request) (any, bool, *Error) {
+func (b backend) Me(ctx context.Context, wc *wire.Conn, p wire.MeParams) (wire.CurrentUser, error) {
+	return wire.CurrentUser{}, b.run(ctx, wc, func(c *client, req request) (any, bool, *Error) {
 		return b.s.updateProfile(c, req, p)
 	})
 }
@@ -322,20 +322,21 @@ var (
 	_ wire.Commander = backend{}
 )
 
+// Message saves a new message, as a save without a message_id.
 func (b backend) Message(ctx context.Context, wc *wire.Conn, p wire.MessageParams) (wire.MessageResult, error) {
+	return b.Edit(ctx, wc, wire.EditParams{RoomID: p.RoomID, Body: p.Body, ReplyTo: p.ReplyTo, Ext: p.Ext})
+}
+
+// Edit saves an existing message: an edit, a move, or a deletion, as
+// saveMessage handles new ones.
+func (b backend) Edit(ctx context.Context, wc *wire.Conn, p wire.EditParams) (wire.MessageResult, error) {
 	return wire.MessageResult{}, b.run(ctx, wc, func(c *client, req request) (any, bool, *Error) {
 		return b.s.saveMessage(c, req, p)
 	})
 }
 
-// Edit saves an existing message: an edit, a move, or a deletion, as
-// saveMessage handles new ones.
-func (b backend) Edit(ctx context.Context, wc *wire.Conn, p wire.MessageParams) (wire.MessageResult, error) {
-	return b.Message(ctx, wc, p)
-}
-
-func (b backend) Command(ctx context.Context, wc *wire.Conn, p wire.MessageParams) (map[string]any, error) {
-	return nil, b.run(ctx, wc, func(c *client, req request) (any, bool, *Error) {
+func (b backend) Command(ctx context.Context, wc *wire.Conn, p wire.CommandParams) (wire.CommandResult, error) {
+	return wire.CommandResult{}, b.run(ctx, wc, func(c *client, req request) (any, bool, *Error) {
 		return b.s.command(c, req, p)
 	})
 }

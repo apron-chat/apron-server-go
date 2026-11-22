@@ -104,7 +104,7 @@ func (c *Conn) Info() ServerInfo {
 // the backend holds its own locks.
 func (c *Conn) Announce(info ServerInfo) bool {
 	info = c.server.complete(info)
-	frame, err := Encode("server", info)
+	frame, err := Encode(info)
 	if err != nil {
 		c.server.logger().Error("wire: encoding the server frame", "error", err)
 		return false
@@ -135,19 +135,28 @@ func (c *Conn) Context() context.Context { return c.ctx }
 // Done is closed when the connection ends.
 func (c *Conn) Done() <-chan struct{} { return c.rt.Done() }
 
-// Notify queues a notification. It reports false when the connection is
-// closed, or the params cannot be encoded. Like Send, it never blocks.
-func (c *Conn) Notify(method string, params any) bool {
-	frame, err := Encode(method, params)
+// Notify queues a notification, such as a Message, a UserUpdate, or a
+// StatusUpdate. It reports false when the connection is closed, or the
+// notification cannot be encoded. Like Send, it never blocks.
+func (c *Conn) Notify(n Notification) bool {
+	frame, err := Encode(n)
+	if err != nil {
+		c.server.logger().Error("wire: encoding a notification", "error", err)
+		return false
+	}
+	return c.Send(frame)
+}
+
+// NotifyRaw queues a notification of any method and params, such as an
+// extension's own, as Notify does.
+func (c *Conn) NotifyRaw(method string, params any) bool {
+	frame, err := EncodeRaw(method, params)
 	if err != nil {
 		c.server.logger().Error("wire: encoding a notification", "method", method, "error", err)
 		return false
 	}
 	return c.Send(frame)
 }
-
-// SendMessage queues a message notification (§3.5).
-func (c *Conn) SendMessage(m Message) bool { return c.Notify("message", m) }
 
 // Send queues an encoded frame. It never blocks, and calls nothing of the
 // backend's: a client whose queue is full is too slow to keep up, and is

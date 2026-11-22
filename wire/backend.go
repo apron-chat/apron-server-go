@@ -40,23 +40,27 @@ type Messenger interface {
 	Message(ctx context.Context, c *Conn, p MessageParams) (MessageResult, error)
 }
 
-// Editor handles a message request with message_id, an edit or a deletion,
-// and adds capability edit (§4.4).
+// Editor handles a message request with message_id: an edit, a move, or a
+// deletion, and adds capability edit (§4.4). A deletion without message_id
+// is invalid_params before it gets here.
 type Editor interface {
-	Edit(ctx context.Context, c *Conn, p MessageParams) (MessageResult, error)
+	Edit(ctx context.Context, c *Conn, p EditParams) (MessageResult, error)
 }
 
 // Profiler handles me (§3.3.2): it changes the user's profile and returns
-// the complete current user object, which becomes the connection's.
+// the complete current user object, with the fields the change cleared
+// (CurrentUser.Cleared), whose User becomes the connection's. The backend
+// tells the user's other connections, and those who share a room with the
+// user, itself, such as with Server.PublishUser (§3.3.3).
 type Profiler interface {
-	Me(ctx context.Context, c *Conn, p MeParams) (User, error)
+	Me(ctx context.Context, c *Conn, p MeParams) (CurrentUser, error)
 }
 
 // Commander handles command requests, and adds capability command (§4.1).
-// The body is present; p has no message_id and is not deleted. The result is
-// nil or extra result fields, such as embeds.
+// The body is present. The result is empty, or the embeds the command
+// made.
 type Commander interface {
-	Command(ctx context.Context, c *Conn, p MessageParams) (map[string]any, error)
+	Command(ctx context.Context, c *Conn, p CommandParams) (CommandResult, error)
 }
 
 // Connecter is told of a new network connection before its server frame

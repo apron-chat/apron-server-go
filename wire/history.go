@@ -2,7 +2,6 @@ package wire
 
 import (
 	"context"
-	"encoding/json/jsontext"
 	"sort"
 )
 
@@ -21,14 +20,14 @@ type HistoryParams struct {
 // HistoryResult is the result of history (§4.3). Its rooms are logged
 // records, without the delivery fields of a RoomView (§4.3.3).
 type HistoryResult struct {
-	Rooms       []Room           `json:"rooms,omitempty"`
-	Messages    []Message        `json:"messages,omitempty"`
-	Reactions   []jsontext.Value `json:"reactions,omitempty"`
-	Memberships []Membership     `json:"memberships,omitempty"`
-	FirstLogID  LogID            `json:"first_log_id,omitzero"`
-	LastLogID   LogID            `json:"last_log_id,omitzero"`
-	More        bool             `json:"more"`
-	LatestLogID LogID            `json:"latest_log_id,omitzero"`
+	Rooms       []Room       `json:"rooms,omitempty"`
+	Messages    []Message    `json:"messages,omitempty"`
+	Reactions   []Reactions  `json:"reactions,omitempty"`
+	Memberships []Membership `json:"memberships,omitempty"`
+	FirstLogID  LogID        `json:"first_log_id,omitzero"`
+	LastLogID   LogID        `json:"last_log_id,omitzero"`
+	More        bool         `json:"more"`
+	LatestLogID LogID        `json:"latest_log_id,omitzero"`
 	// HistoryLogID is the inclusive lower bound of what is retrievable, or
 	// 0 for nothing, which is sent as null: every result has it (§4.3.3).
 	HistoryLogID LogID `json:"history_log_id"`
@@ -46,7 +45,7 @@ type Record struct {
 	Room       *Room
 	Message    *Message
 	Membership *Membership
-	Reactions  jsontext.Value
+	Reactions  *Reactions
 }
 
 // Log is a log for Page: its Records, in ascending log_id order, and its
@@ -104,7 +103,7 @@ func Page(log Log, p HistoryParams, limit int) HistoryResult {
 		case r.Membership != nil:
 			result.Memberships = append(result.Memberships, *r.Membership)
 		case r.Reactions != nil:
-			result.Reactions = append(result.Reactions, r.Reactions)
+			result.Reactions = append(result.Reactions, *r.Reactions)
 		}
 	}
 	return result

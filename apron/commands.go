@@ -2,7 +2,6 @@ package apron
 
 import (
 	"cmp"
-	"encoding/json/v2"
 	"fmt"
 	"github.com/apron-chat/apron-server-go/wire"
 	"slices"
@@ -368,7 +367,7 @@ func (s *Server) finishUsable(usable usableCommands) []commandForm {
 // all before the result (§1). Only /embed-terminal and /embed-append make
 // live text, and they make their own embed: a terminal or append embed in a
 // command is invalid_params.
-func (s *Server) command(c *client, req request, p wire.MessageParams) (any, bool, *Error) {
+func (s *Server) command(c *client, req request, p wire.CommandParams) (any, bool, *Error) {
 	roomID, hasRoom := p.RoomID, p.RoomID != ""
 	if !hasRoom {
 		roomID = defaultRoomID
@@ -377,8 +376,7 @@ func (s *Server) command(c *client, req request, p wire.MessageParams) (any, boo
 	if hasReply {
 		replyID = p.ReplyTo.MessageID.String()
 	}
-	var body map[string]any
-	_ = json.Unmarshal(p.BodyRaw, &body)
+	body := req.body()
 	if err := validateBody(body); err != nil {
 		return nil, false, err
 	}

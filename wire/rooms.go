@@ -2,19 +2,23 @@ package wire
 
 import (
 	"context"
+	"encoding/json/jsontext"
 )
 
 // Room is a room record (§4.2): its server and client fields, as it is
 // logged, and as a history result carries it (§4.3.3).
 type Room struct {
-	RoomID       string         `json:"room_id"`
-	LogID        LogID          `json:"log_id,omitzero"`
-	PrevLogID    LogID          `json:"prev_log_id,omitzero"`
-	ParentRoomID string         `json:"parent_room_id,omitempty"`
-	Private      bool           `json:"private,omitzero"`
-	Title        string         `json:"title,omitempty"`
-	Description  string         `json:"description,omitempty"`
-	Ext          map[string]any `json:"ext,omitempty"`
+	RoomID       string `json:"room_id"`
+	LogID        LogID  `json:"log_id,omitzero"`
+	PrevLogID    LogID  `json:"prev_log_id,omitzero"`
+	ParentRoomID string `json:"parent_room_id,omitempty"`
+	Private      bool   `json:"private,omitzero"`
+	Title        string `json:"title,omitempty"`
+	Description  string `json:"description,omitempty"`
+	Ext          Ext    `json:"ext,omitempty"`
+	// Unknown holds the members this package has no field for, as they
+	// arrived, and is sent after the others.
+	Unknown jsontext.Value `json:",embed"`
 }
 
 // RoomView is a room record as one client sees it, with its delivery fields
@@ -57,6 +61,9 @@ type RoomUpdate struct {
 	Updated     []RoomView   `json:"updated,omitempty"`
 	Users       []User       `json:"users,omitempty"`
 }
+
+// Method makes a RoomUpdate a Notification.
+func (RoomUpdate) Method() string { return "room_update" }
 
 // The values of RoomListParams.Filter.
 const (
@@ -104,15 +111,35 @@ type RoomSetParams struct {
 	Ext Ext
 }
 
+// RoomSetResult is the result of room_set: the room made or edited.
+type RoomSetResult struct {
+	RoomID string `json:"room_id"`
+}
+
+// RoomJoinParams are the params of room_join (§4.2.2): the room, a valid
+// ID, and the user to add, or "" for the sender.
+type RoomJoinParams struct {
+	RoomID string
+	UserID string
+}
+
+// RoomLeaveParams are the params of room_leave (§4.2.2): the room, a valid
+// ID, and the user to remove, or "" for the sender.
+type RoomLeaveParams struct {
+	RoomID string
+	UserID string
+}
+
 // Rooms handles room_list, room_join, room_leave, and room_set, and adds
-// capability rooms (§4.2). A backend sends room_update itself. userID is
-// empty unless the client names another user to add or remove; a backend
-// that does not support that returns an Unsupported error.
+// capability rooms (§4.2). A backend sends room_update itself. A join's or
+// leave's UserID is empty unless the client names another user to add or
+// remove; a backend that does not support that returns an Unsupported
+// error.
 type Rooms interface {
 	RoomList(ctx context.Context, c *Conn, p RoomListParams) (RoomListResult, error)
-	RoomJoin(ctx context.Context, c *Conn, roomID, userID string) error
-	RoomLeave(ctx context.Context, c *Conn, roomID, userID string) error
-	RoomSet(ctx context.Context, c *Conn, p RoomSetParams) (roomID string, err error)
+	RoomJoin(ctx context.Context, c *Conn, p RoomJoinParams) error
+	RoomLeave(ctx context.Context, c *Conn, p RoomLeaveParams) error
+	RoomSet(ctx context.Context, c *Conn, p RoomSetParams) (RoomSetResult, error)
 }
 
 // parseRoomList reads room_list's params.
@@ -232,9 +259,9 @@ func roomHandler(rooms Rooms, name string) func(context.Context, *Conn, *Request
 				return nil, perr
 			}
 			if name == "room_join" {
-				return nil, rooms.RoomJoin(ctx, c, roomID, userID)
+				return nil, rooms.RoomJoin(ctx, c, RoomJoinParams{RoomID: roomID, UserID: userID})
 			}
-			return nil, rooms.RoomLeave(ctx, c, roomID, userID)
+			return nil, rooms.RoomLeave(ctx, c, RoomLeaveParams{RoomID: roomID, UserID: userID})
 		}
 	case "room_set":
 		return func(ctx context.Context, c *Conn, r *Request) (any, error) {
@@ -242,11 +269,11 @@ func roomHandler(rooms Rooms, name string) func(context.Context, *Conn, *Request
 			if perr != nil {
 				return nil, perr
 			}
-			roomID, err := rooms.RoomSet(ctx, c, p)
-			if err != nil {
+			result, err := rooms.RoomSet(ctx, c, p)
+			if err != nil || r.Replied() {
 				return nil, err
 			}
-			return map[string]any{"room_id": roomID}, nil
+			return result, nil
 		}
 	}
 	return nil

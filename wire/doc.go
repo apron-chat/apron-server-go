@@ -26,9 +26,16 @@
 //   - the core checks on a new message (§3.5.1, §3.6), and on the params of
 //     every typed request;
 //   - typed frames ([User], [Message], [Room] and [RoomView], [ServerInfo],
-//     ...), the system identities ([Private], [RoomNotice], [ServerNotice]),
-//     log_ids and message_ids as [LogID], and a [Clock] that issues them
-//     (§2.1).
+//     ...), which keep the members they have no field for (Unknown), with
+//     ext as raw JSON ([Ext], [MergeExt]); typed notifications
+//     ([Notification]: [Message], [UserUpdate], [StatusUpdate],
+//     [RoomUpdate], [Reactions], [ServerInfo]), sent with [Conn.Notify] or
+//     encoded once with [Encode]; the system identities ([Private],
+//     [RoomNotice], [ServerNotice]); log_ids and message_ids as [LogID],
+//     and a [Clock] that issues them (§2.1);
+//   - user changes as patches ([User.Patch], [CurrentUser]), which carry
+//     what changed and clear what was taken away (§3.3.1), published to the
+//     user's connections and those who share a room ([Server.PublishUser]).
 //
 // # Backends
 //
@@ -61,8 +68,9 @@
 // is first in, first out.
 //
 // Sending never blocks, and calls nothing of the backend's but
-// Broadcast's filter: [Conn.Send], [Conn.Notify], [Conn.SendBatch],
-// [Server.Broadcast], and [Request.Reply] queue frames, and disconnect a
+// Broadcast's and PublishUser's filters: [Conn.Send], [Conn.Notify],
+// [Conn.SendBatch], [Server.Broadcast], [Server.PublishUser], and
+// [Request.Reply] queue frames, and disconnect a
 // client too slow to take them. So a backend sends while it holds the lock
 // of the change a frame describes, which keeps every connection's frames in
 // the order of the changes, such as messages in log_id order; one that

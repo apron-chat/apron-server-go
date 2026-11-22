@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json/v2"
+	"errors"
 )
 
 // The status values every server with capability status accepts (§4.5.1),
@@ -51,6 +52,35 @@ func (m Mute) MarshalJSON() ([]byte, error) {
 	return []byte("true"), nil
 }
 
+// UnmarshalJSON reads a mute as the protocol writes it: false, true, or
+// a positive number of seconds.
+func (m *Mute) UnmarshalJSON(raw []byte) error {
+	var seconds int64
+	switch raw := bytes.TrimSpace(raw); {
+	case bytes.Equal(raw, []byte("true")):
+		*m = Mute{On: true}
+	case bytes.Equal(raw, []byte("false")):
+		*m = Mute{}
+	case !isNull(raw) && json.Unmarshal(raw, &seconds) == nil && seconds > 0:
+		*m = Mute{On: true, Seconds: seconds}
+	default:
+		return errors.New("wire: mute must be true, false, or a positive whole number of seconds")
+	}
+	return nil
+}
+
+// StatusUpdate is a status notification (§4.5.3): one of the user's
+// mutes in effect, sent to the user's own connections, such as after a
+// status request, or a sign-in. RoomID is the room the mute is for, or ""
+// for the user's mute of everything.
+type StatusUpdate struct {
+	RoomID string `json:"room_id,omitempty"`
+	Mute   Mute   `json:"mute"`
+}
+
+// Method makes a StatusUpdate a Notification.
+func (StatusUpdate) Method() string { return "status" }
+
 // Statuser handles the status request, and adds capability status (§4.5).
 // A backend sends the user's mutes to its connections as status
 // notifications, and statuses as user notifications. The statuses it
@@ -79,17 +109,11 @@ func parseStatus(r *Request) (p StatusParams, err error) {
 		}
 	}
 	if raw, ok := r.Param("mute"); ok {
-		var seconds int64
-		switch raw := bytes.TrimSpace(raw); {
-		case bytes.Equal(raw, []byte("true")):
-			p.Mute = &Mute{On: true}
-		case bytes.Equal(raw, []byte("false")):
-			p.Mute = &Mute{}
-		case !isNull(raw) && json.Unmarshal(raw, &seconds) == nil && seconds > 0:
-			p.Mute = &Mute{On: true, Seconds: seconds}
-		default:
+		var mute Mute
+		if mute.UnmarshalJSON(raw) != nil {
 			return p, InvalidParams("mute must be true, false, or a positive whole number of seconds")
 		}
+		p.Mute = &mute
 	}
 	if scoped && p.Mute == nil {
 		return p, InvalidParams("room_id scopes a mute; send it with mute")

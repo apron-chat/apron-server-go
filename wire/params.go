@@ -5,7 +5,6 @@ import (
 	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"fmt"
-	"maps"
 	"slices"
 )
 
@@ -169,42 +168,6 @@ func (f Fields) MessageRef(name string) (LogID, bool, error) {
 		return 0, true, InvalidParams(name + ".message_id must be a positive decimal string")
 	}
 	return id, true, nil
-}
-
-// Ext is an ext object (§4.13), keyed by extension name, each value kept
-// as the JSON it arrived as, so that a merge or a store keeps it byte for
-// byte.
-type Ext = map[string]jsontext.Value
-
-// MergeExt merges a write's ext into a kept one, one level deep (§4.13):
-// each key the write carries replaces the kept value, a key whose value is
-// empty ("", [], {}) is removed, and keys the write leaves out stay. null
-// is an ordinary value. The result is a new object, or nil when no key is
-// left; kept is not modified.
-func MergeExt(kept, write Ext) Ext {
-	merged := make(Ext, len(kept)+len(write))
-	maps.Copy(merged, kept)
-	for key, value := range write {
-		if emptyJSON(value) {
-			delete(merged, key)
-		} else {
-			merged[key] = value
-		}
-	}
-	if len(merged) == 0 {
-		return nil
-	}
-	return merged
-}
-
-// emptyJSON reports whether a compact JSON value is an empty value, which
-// clears what it is merged into (§3.3.1).
-func emptyJSON(value jsontext.Value) bool {
-	switch string(value) {
-	case `""`, `[]`, `{}`:
-		return true
-	}
-	return false
 }
 
 // The Request's accessors read its params (Fields).

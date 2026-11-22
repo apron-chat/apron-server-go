@@ -364,8 +364,8 @@ func (s *Server) builtins() map[string]Method {
 			if err != nil || r.Replied() {
 				return nil, err
 			}
-			c.SetUser(you)
-			return map[string]any{"you": you}, nil
+			c.SetUser(you.User)
+			return meResult{You: you}, nil
 		}}
 	}
 	if cmd, ok := s.Backend.(Commander); ok {
@@ -375,14 +375,14 @@ func (s *Server) builtins() map[string]Method {
 					return nil, InvalidParams("A command has no " + name + "; send it as a message instead")
 				}
 			}
-			p, err := parseMessage(r)
+			m, err := parseMessage(r)
 			if err != nil {
 				return nil, err
 			}
-			if p.Body == nil {
+			if m.body == nil {
 				return nil, InvalidParams("A command needs a body")
 			}
-			return cmd.Command(ctx, c, p)
+			return cmd.Command(ctx, c, CommandParams{RoomID: m.roomID, Body: m.body, ReplyTo: m.replyTo, Ext: m.ext})
 		}}
 	}
 	if rooms, ok := s.Backend.(Rooms); ok {
@@ -405,28 +405,39 @@ func (s *Server) builtins() map[string]Method {
 	return methods
 }
 
+// messageFields are the params of a message request or a command (§3.5),
+// before they are told apart.
+type messageFields struct {
+	messageID LogID
+	roomID    string
+	deleted   bool
+	body      *Body
+	replyTo   *Ref
+	ext       Ext
+}
+
 // parseMessage reads the params of a message or command (§3.5): what each
 // field is, as the protocol defines it. Limits, such as on the count of
 // mentions, are the backend's.
-func parseMessage(r *Request) (p MessageParams, err error) {
-	if p.RoomID, _, err = r.IDParam("room_id"); err != nil {
+func parseMessage(r *Request) (p messageFields, err error) {
+	if p.roomID, _, err = r.IDParam("room_id"); err != nil {
 		return p, err
 	}
-	if p.MessageID, _, err = r.MessageID("message_id"); err != nil {
+	if p.messageID, _, err = r.MessageID("message_id"); err != nil {
 		return p, err
 	}
 	if replyTo, present, err := r.MessageRef("reply_to"); err != nil {
 		return p, err
 	} else if present {
-		p.ReplyTo = &Ref{MessageID: replyTo}
+		p.replyTo = &Ref{MessageID: replyTo}
 	}
-	if p.Deleted, _, err = r.Bool("deleted"); err != nil {
+	if p.deleted, _, err = r.Bool("deleted"); err != nil {
 		return p, err
 	}
-	if p.Ext, _, err = r.Ext("ext"); err != nil {
+	if p.ext, _, err = r.Ext("ext"); err != nil {
 		return p, err
 	}
-	if p.Deleted {
+	if p.deleted {
 		// A deletion leaves no body (§4.4): what it sends is ignored.
 		return p, nil
 	}
@@ -434,14 +445,14 @@ func parseMessage(r *Request) (p MessageParams, err error) {
 	if err != nil || !present {
 		return p, err
 	}
-	p.BodyRaw, _ = r.Param("body")
-	body, err := parseBody(fields)
-	p.Body = body
+	raw, _ := r.Param("body")
+	p.body, err = parseBody(raw, fields)
 	return p, err
 }
 
-// parseBody reads a message body's fields (§3.5).
-func parseBody(fields Fields) (*Body, error) {
+// parseBody reads a message body (§3.5), raw and by its fields: each field
+// this package knows is checked, and the others are kept in Unknown.
+func parseBody(raw jsontext.Value, fields Fields) (*Body, error) {
 	body := &Body{}
 	if raw, ok := fields["text"]; ok && (isNull(raw) || json.Unmarshal(raw, &body.Text) != nil) {
 		return nil, InvalidParams("body.text must be a string")
@@ -472,31 +483,40 @@ func parseBody(fields Fields) (*Body, error) {
 			}
 		}
 	}
+	// Every field it knows is well formed, so the body decodes, and keeps
+	// the fields it does not know as they arrived.
+	if err := json.Unmarshal(raw, body); err != nil {
+		return nil, InvalidParams("body must be an object")
+	}
 	return body, nil
 }
 
 // message applies the core rules of a message request (§3.5.1, §3.6), and
 // passes it on to the backend.
 func (s *Server) message(ctx context.Context, c *Conn, r *Request) (any, error) {
-	p, err := parseMessage(r)
+	m, err := parseMessage(r)
 	if err != nil {
 		return nil, err
 	}
-	if p.MessageID != 0 || p.Deleted {
+	if m.messageID != 0 || m.deleted {
 		editor, ok := s.Backend.(Editor)
-		if !ok {
+		switch {
+		case !ok:
 			return nil, Unsupported("This server does not edit messages")
+		case m.messageID == 0:
+			// Only a save of an existing message deletes it (§4.4).
+			return nil, InvalidParams("Cannot create a deleted message")
 		}
-		return editor.Edit(ctx, c, p)
+		return editor.Edit(ctx, c, EditParams{MessageID: m.messageID, RoomID: m.roomID, Deleted: m.deleted, Body: m.body, ReplyTo: m.replyTo, Ext: m.ext})
 	}
-	if p.Body == nil {
+	if m.body == nil {
 		return nil, Missing("body")
 	}
 	messenger, ok := s.Backend.(Messenger)
 	if !ok {
 		return nil, Unsupported("This server takes no new messages")
 	}
-	return messenger.Message(ctx, c, p)
+	return messenger.Message(ctx, c, MessageParams{RoomID: m.roomID, Body: m.body, ReplyTo: m.replyTo, Ext: m.ext})
 }
 
 // definedSchemes are the auth schemes PROTOCOL.md defines.
@@ -558,16 +578,20 @@ func (s *Server) authenticate(ctx context.Context, c *Conn, r *Request) {
 		r.fail(internalError())
 		return
 	}
-	fields := make(map[string]any, len(result.Extra)+2)
-	for k, v := range result.Extra {
-		fields[k] = v
+	for _, name := range []string{"you", "token"} {
+		if _, ok := result.Extra[name]; ok {
+			s.logger().Error("wire: an auth result's Extra names a field of its own", "field", name)
+			r.fail(internalError())
+			return
+		}
 	}
 	if result.You != nil {
-		fields["you"] = result.You
 		c.SetUser(*result.You)
 	}
-	if result.Token != "" {
-		fields["token"] = result.Token
-	}
-	r.Reply(fields)
+	r.Reply(result)
+}
+
+// meResult is the result of me (§3.3.2).
+type meResult struct {
+	You CurrentUser `json:"you"`
 }

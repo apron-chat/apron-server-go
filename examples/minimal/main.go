@@ -62,7 +62,7 @@ func (c *Chat) Auth(_ context.Context, conn *wire.Conn, p wire.AuthParams) (wire
 	}
 	you := wire.User{UserID: id, Name: name}
 	// Sent after the auth result, though queued before it (§3.2.2).
-	conn.SendMessage(wire.Notice(room, "Welcome, "+name+"! Try /help."))
+	conn.Notify(wire.Notice(room, "Welcome, "+name+"! Try /help."))
 	return wire.AuthResult{You: &you}, nil
 }
 
@@ -82,7 +82,7 @@ func (c *Chat) Message(_ context.Context, conn *wire.Conn, p wire.MessageParams)
 		return wire.MessageResult{}, wire.InvalidParams("reply_to names no message")
 	}
 	id := c.clock.Next()
-	frame, err := wire.Encode("message", wire.Message{
+	frame, err := wire.Encode(wire.Message{
 		MessageID: id, LogID: id, RoomID: room, From: *conn.User(), Body: p.Body, ReplyTo: p.ReplyTo,
 	})
 	if err != nil {
@@ -95,32 +95,33 @@ func (c *Chat) Message(_ context.Context, conn *wire.Conn, p wire.MessageParams)
 	return wire.MessageResult{MessageID: id}, nil
 }
 
-func (c *Chat) Me(_ context.Context, conn *wire.Conn, p wire.MeParams) (wire.User, error) {
+func (c *Chat) Me(_ context.Context, conn *wire.Conn, p wire.MeParams) (wire.CurrentUser, error) {
 	// Under the lock, as Message is, so that profile changes reach every
 	// connection in the order they were made.
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	you := *conn.User()
+	old := *conn.User()
+	you := old
 	if p.Name != nil {
 		you.Name = strings.TrimSpace(*p.Name)
 	}
 	if p.Avatar != nil {
 		you.Avatar = *p.Avatar
 	}
-	frame, err := wire.Encode("user", map[string]any{"new": you})
-	if err != nil {
-		return you, err
-	}
-	conn.Notify("user", map[string]any{"you": you})
-	c.Server.Broadcast(frame, func(other *wire.Conn) bool { return other != conn })
-	return you, nil
+	// What changed goes to every connection, "you" to the user's own
+	// (§3.3.3); everyone shares the one room.
+	c.Server.PublishUser(old, you, nil)
+	// The result is the complete object, with the fields cleared as their
+	// empty values (§3.3.2).
+	patch, _ := you.Patch(old)
+	return wire.CurrentUser{User: you, Cleared: patch.Cleared}, nil
 }
 
-func (c *Chat) Command(_ context.Context, conn *wire.Conn, p wire.MessageParams) (map[string]any, error) {
+func (c *Chat) Command(_ context.Context, conn *wire.Conn, p wire.CommandParams) (wire.CommandResult, error) {
 	switch strings.Fields(p.Body.Text + " ")[0] {
 	case "/help":
-		conn.SendMessage(wire.Notice(p.RoomID, "- `/help`: this list"))
-		return nil, nil
+		conn.Notify(wire.Notice(p.RoomID, "- `/help`: this list"))
+		return wire.CommandResult{}, nil
 	}
-	return nil, wire.InvalidParams("Unknown command; try /help")
+	return wire.CommandResult{}, wire.InvalidParams("Unknown command; try /help")
 }

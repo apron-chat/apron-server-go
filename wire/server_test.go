@@ -44,7 +44,7 @@ func (b *backend) Auth(_ context.Context, c *wire.Conn, p wire.AuthParams) (wire
 	}
 	id := fmt.Sprintf("guest_%d", b.guests.Add(1))
 	// Queued before the result, sent after it (§3.2.2).
-	c.SendMessage(wire.Notice("", "welcome "+id))
+	c.Notify(wire.Notice("", "welcome "+id))
 	time.Sleep(b.authDelay)
 	return wire.AuthResult{You: &wire.User{UserID: id, Name: p.Name}}, nil
 }
@@ -273,7 +273,7 @@ func TestAuthBarrier(t *testing.T) {
 	// A frame broadcast while Auth runs is held too.
 	time.Sleep(10 * time.Millisecond)
 	conn := onlyConn(t, s)
-	frame, err := wire.Encode("status", map[string]any{"x": 1})
+	frame, err := wire.EncodeRaw("status", map[string]any{"x": 1})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -443,7 +443,9 @@ type editor struct {
 	edits atomic.Int64
 }
 
-func (e *editor) Edit(context.Context, *wire.Conn, wire.MessageParams) (wire.MessageResult, error) {
+var _ wire.Editor = (*editor)(nil)
+
+func (e *editor) Edit(context.Context, *wire.Conn, wire.EditParams) (wire.MessageResult, error) {
 	e.edits.Add(1)
 	return wire.MessageResult{}, nil
 }
@@ -472,7 +474,7 @@ func TestSlowClientDisconnected(t *testing.T) {
 	conn := onlyConn(t, s)
 	// The client stops reading: one frame is being written, two wait, and
 	// the next finds the queue full.
-	frame, _ := wire.Encode("status", map[string]any{})
+	frame, _ := wire.EncodeRaw("status", map[string]any{})
 	sent := 0
 	for range 10 {
 		if !conn.Send(frame) {
@@ -502,9 +504,9 @@ func TestCloseWithError(t *testing.T) {
 	c, _ := serve(t, s)
 	c.signIn("a")
 	conn := onlyConn(t, s)
-	conn.Notify("status", map[string]any{"n": 1})
+	conn.NotifyRaw("status", map[string]any{"n": 1})
 	conn.CloseWithError(wire.RetryAfter("Going away", 7))
-	if conn.Notify("status", map[string]any{"n": 2}) {
+	if conn.NotifyRaw("status", map[string]any{"n": 2}) {
 		t.Fatal("a frame was queued after CloseWithError")
 	}
 	if f := c.read(); f["method"] != "status" {
@@ -595,7 +597,7 @@ func TestBroadcast(t *testing.T) {
 	c1, _ := serve(t, s)
 	c1.signIn("a")
 	c2, _ := serve(t, s) // not signed in: not broadcast to
-	frame, _ := wire.Encode("status", map[string]any{"x": 1})
+	frame, _ := wire.EncodeRaw("status", map[string]any{"x": 1})
 	s.Broadcast(frame, nil)
 	if f := c1.read(); f["method"] != "status" {
 		t.Fatalf("got %v", f)
@@ -658,8 +660,8 @@ func TestSendBatchAndFence(t *testing.T) {
 		t.Fatal("Fence failed")
 	}
 	// Three frames in one place in the queue, behind the fence.
-	a, _ := wire.Encode("a", map[string]any{})
-	b, _ := wire.Encode("b", map[string]any{})
+	a, _ := wire.EncodeRaw("a", map[string]any{})
+	b, _ := wire.EncodeRaw("b", map[string]any{})
 	if !conn.SendBatch(a, b, a) || !conn.SendBatch() {
 		t.Fatal("SendBatch failed")
 	}

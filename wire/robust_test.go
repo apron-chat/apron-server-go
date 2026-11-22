@@ -49,7 +49,7 @@ type panicky struct{ backend }
 
 func (b *panicky) Auth(ctx context.Context, c *wire.Conn, p wire.AuthParams) (wire.AuthResult, error) {
 	if p.Name == "panic" {
-		c.SendMessage(wire.Notice("", "held"))
+		c.Notify(wire.Notice("", "held"))
 		panic("auth went wrong")
 	}
 	return b.backend.Auth(ctx, c, p)
@@ -130,7 +130,7 @@ func (w lockedWriter) Write(p []byte) (int, error) {
 type oneUser struct{ backend }
 
 func (*oneUser) Auth(_ context.Context, c *wire.Conn, _ wire.AuthParams) (wire.AuthResult, error) {
-	c.SendMessage(wire.Notice("", "welcome"))
+	c.Notify(wire.Notice("", "welcome"))
 	return wire.AuthResult{You: &wire.User{UserID: "same"}}, nil
 }
 
@@ -229,7 +229,7 @@ func TestMaxConnectionsFirst(t *testing.T) {
 func TestUserCopies(t *testing.T) {
 	s := &wire.Server{Backend: &backend{}}
 	roles := []string{"op"}
-	l, err := s.Local(wire.LocalOptions{User: wire.User{UserID: "bot", Roles: roles, Ext: map[string]any{"x": map[string]any{"y": 1}}}})
+	l, err := s.Local(wire.LocalOptions{User: wire.User{UserID: "bot", Roles: roles, Ext: wire.MustExt("x", map[string]any{"y": 1})}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -237,9 +237,9 @@ func TestUserCopies(t *testing.T) {
 	roles[0] = "changed"
 	u := l.Conn().User()
 	u.Roles[0] = "mutated"
-	u.Ext["x"].(map[string]any)["y"] = 2
+	u.Ext["x"][5] = '2'
 	again := l.Conn().User()
-	if again.Roles[0] != "op" || again.Ext["x"].(map[string]any)["y"] != 1 {
+	if again.Roles[0] != "op" || string(again.Ext["x"]) != `{"y":1}` {
 		t.Fatalf("the connection's user changed: %+v", again)
 	}
 }
