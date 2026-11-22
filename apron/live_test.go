@@ -615,7 +615,7 @@ func TestLiveEmbedsInOtherCommandsAreInvalid(t *testing.T) {
 			a.expectError(t, "command", fmt.Sprint(kind, i), map[string]any{"body": map[string]any{"text": text, "embeds": []any{map[string]any{"kind": kind}}}}, CodeInvalidParams)
 		}
 	}
-	a.expectError(t, "command", "upload", map[string]any{"body": map[string]any{"text": "/embed-terminal", "embeds": []any{map[string]any{"kind": "upload"}}}}, CodeInvalidParams)
+	a.expectError(t, "command", "upload", map[string]any{"room_id": "general", "body": map[string]any{"text": "/embed-terminal", "embeds": []any{map[string]any{"kind": "upload"}}}}, CodeInvalidParams)
 	a.expectQuiet(t)
 }
 
@@ -772,11 +772,11 @@ func TestEmbedCommandWritesExpire(t *testing.T) {
 	config.UploadStartTimeout = 100 * time.Millisecond
 	app, httpServer := newTestServer(t, config)
 	a := dialTestClient(t, httpServer)
-	_, writeURL, notice := liveCommand(t, a, "terminal", map[string]any{"body": map[string]any{"text": "/embed-terminal"}})
+	_, writeURL, notice := liveCommand(t, a, "terminal", map[string]any{"room_id": "general", "body": map[string]any{"text": "/embed-terminal"}})
 	if !strings.Contains(notice, "within 1 second") {
 		t.Fatalf("notice: %s", notice)
 	}
-	_, appendURL, _ := liveCommand(t, a, "append", map[string]any{"body": map[string]any{"text": "/embed-append"}})
+	_, appendURL, _ := liveCommand(t, a, "append", map[string]any{"room_id": "general", "body": map[string]any{"text": "/embed-append"}})
 	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(10 * time.Millisecond) {
 		app.mu.RLock()
 		left := len(app.writes) + len(app.embeds)

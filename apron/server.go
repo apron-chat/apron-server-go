@@ -1226,8 +1226,10 @@ func (s *Server) serverParams(baseURL string, revealed bool) map[string]any {
 		// always are, and are not listed.
 		"status": optionalStatuses,
 	}
-	// ext:editors (apron's EXTENSIONS.md) needs no data of its own.
-	params["capabilities"] = append(params["capabilities"].([]string), "ext:editors")
+	// ext:editors (apron's EXTENSIONS.md) needs no data of its own, and
+	// neither does ext:command_list, which lists the commands that
+	// `command` runs.
+	params["capabilities"] = append(params["capabilities"].([]string), "ext:editors", commandListMethod)
 	if slices.Contains(authSchemes, external.Name) {
 		// ext:oauth: external sign-in's OAuth extras (SERVER.md), the
 		// server's own authorization server metadata and token endpoint,
@@ -1457,6 +1459,8 @@ func (s *Server) operations() map[string]operation {
 		"reactions":  (*Server).react,
 		"activity":   (*Server).activity,
 		"status":     (*Server).status,
+		// ext:command_list (apron's extensions/ext_command_list.md).
+		commandListMethod: (*Server).listCommands,
 	}
 	accountOps(ops)
 	if !s.config.DisablePush {
@@ -1468,7 +1472,7 @@ func (s *Server) operations() map[string]operation {
 
 // readOnlyOps change nothing, so their results are not kept for
 // deduplication (§1.2): a duplicate after the original finished runs again.
-var readOnlyOps = map[string]bool{"history": true, "room_list": true}
+var readOnlyOps = map[string]bool{"history": true, "room_list": true, commandListMethod: true}
 
 func (s *Server) processFrame(c *client, payload []byte) {
 	req, parseErr := parseRequest(payload)

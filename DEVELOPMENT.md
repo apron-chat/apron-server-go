@@ -196,11 +196,12 @@ a command: the composer tags it, and Run sends it as a `command` request
 and `room_set` with `description`), while `//` posts a message starting with `/`. Replies arrive as
 `~private` notices without a `message_id`, shown only to you for the session
 with a dashed outline; a failed command's error shows the same way. The Go
-server offers `/help`, `/avatar` with an attached image, `/invite-device
+server offers `/help` (and lists its commands, as data, with the
+`ext:command_list` request), `/avatar` with an attached image, `/invite-device
 <name>` for a token that signs your account in on another device, `/emoji add
-:name:` with an attached image and `/emoji remove :name:` for admins (custom
+:<name>:` with an attached image and `/emoji remove :<name>:` for admins (custom
 emoji), `/server` for admins (the server's title, description, and avatar),
-and `/kick @user [reason]` for a room's creator, admins, and moderators.
+and `/kick @user [<reason>]` for a room's creator, admins, and moderators.
 
 Use a message's Reply action to reference it in a new message. `reply_to` may
 name a message in any room, so a reply in a thread can quote a message in the

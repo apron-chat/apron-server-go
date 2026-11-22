@@ -212,7 +212,9 @@ func TestServerCommand(t *testing.T) {
 		t.Fatalf("upload files after the avatar was cleared: %d", files)
 	}
 	profileChange(t, admin, others, "title")
-	params, notice = profileChange(t, admin, others, "DESCRIPTION")
+	// The form's word matches exactly, as command names do.
+	admin.expectError(t, "command", admin.nextID("server"), map[string]any{"body": map[string]any{"text": "/server DESCRIPTION"}}, CodeInvalidParams)
+	params, notice = profileChange(t, admin, others, "description")
 	if got, want := profileOf(params), [3]any{"Flag Title", "From the *flag*", flagAvatar}; got != want || !strings.Contains(notice, "(from `--description`)") {
 		t.Fatalf("profile cleared: %v, want %v; %q", got, want, notice)
 	}

@@ -181,11 +181,9 @@ func (s *Server) serverCommand(c *client, r *roomState, body map[string]any, arg
 	if !c.user.hasRole("admin") {
 		return nil, &Error{Code: CodeDenied, Message: "Only an admin can see and change the server's title, description, and avatar"}
 	}
-	field, value := args, ""
-	if i := strings.IndexFunc(args, unicode.IsSpace); i >= 0 {
-		field, value = args[:i], strings.TrimSpace(args[i:])
-	}
-	field = strings.ToLower(field)
+	field, value := cutWord(args)
+	// The form's word matches exactly, as command names do: /server Title
+	// is not /server title.
 	embeds := asList(body["embeds"])
 	if len(embeds) > 0 && field != "avatar" {
 		return nil, invalidParams("Only /server avatar takes an attachment")

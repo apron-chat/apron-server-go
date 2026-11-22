@@ -324,13 +324,13 @@ func (s *Server) handleEmoji(w http.ResponseWriter, r *http.Request) {
 // URLs clients would refuse, may not add one.
 func (s *Server) emojiCommand(c *client, _ *roomState, body map[string]any, args, _ string) (map[string]any, *Error) {
 	u := c.user
-	action, key, _ := strings.Cut(args, " ")
-	key = strings.TrimSpace(key)
+	action, key := cutWord(args)
 	if !emojiKeyPattern.MatchString(key) || len(key) > maxEmojiBytes {
-		return nil, invalidParams("Usage: /emoji add :name: with one image attached, or /emoji remove :name:; a name is letters, digits, _, +, and -, at most %d characters", maxEmojiBytes-2)
+		return nil, invalidParams("Usage: /emoji add :<name>: with one image attached, or /emoji remove :<name>:; a name is letters, digits, _, +, and -, at most %d characters", maxEmojiBytes-2)
 	}
 	existing := s.emoji[key]
-	switch strings.ToLower(action) {
+	// The form's word matches exactly, as command names do.
+	switch action {
 	case "add":
 		embeds := asList(body["embeds"])
 		if len(embeds) != 1 || embeds[0].(map[string]any)["kind"] != "upload" {
@@ -370,5 +370,5 @@ func (s *Server) emojiCommand(c *client, _ *roomState, body map[string]any, args
 		s.removeEmojiLocked(key)
 		return map[string]any{}, nil
 	}
-	return nil, invalidParams("Usage: /emoji add :name: with one image attached, or /emoji remove :name:")
+	return nil, invalidParams("Usage: /emoji add :<name>: with one image attached, or /emoji remove :<name>:")
 }

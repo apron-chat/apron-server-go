@@ -41,7 +41,8 @@ Defaults:
 - `server` frame: `apron: 10`, `agent: "apron-go/10"`, and
   `capabilities`: `history`, `edit`, `rooms`, `reactions`, `activity`,
   `embed:upload`, `embed:append`, `embed:terminal`, `command`, `status`,
-  `ext`, `ext:editors` (see [Extension data](#extension-data)), `ext:oauth`
+  `ext`, `ext:editors` (see [Extension data](#extension-data)),
+  `ext:command_list` (see [Commands](#commands)), `ext:oauth`
   while `server.auth` lists `external` (see [External sign-in](#external-sign-in)),
   `ext:emoji`,
   with `server.ext.emoji.catalog_url` (see [Custom emoji](#custom-emoji);
@@ -808,7 +809,7 @@ the URLs it was sent as disclosed.
   becomes the sender's `avatar`, followed by a `user` notification; replacing
   or removing the avatar deletes the upload. `/server avatar` sets the
   server's avatar the same way, with the same rules; see [Commands](#commands).
-- **Custom emoji**: `/emoji add :name:` with one `upload` embed takes the same
+- **Custom emoji**: `/emoji add :<name>:` with one `upload` embed takes the same
   types of image as avatars, of at most 256 KiB; see
   [Custom emoji](#custom-emoji).
 
@@ -831,7 +832,7 @@ with `Cache-Control: public, max-age=31536000, immutable` and
 other names are `404`. The catalog is kept in the store, and its images in
 the upload directory.
 
-- `/emoji add :name:` with exactly one `upload` embed returns
+- `/emoji add :<name>:` with exactly one `upload` embed returns
   `{"embeds": [{embed_id, kind, write_url}]}`, as `/avatar` does. On a
   connection not offered `ext:emoji` it is `denied` ("Custom emoji need an
   https address; set --public-url to the server's https: URL"), since the
@@ -856,7 +857,7 @@ the upload directory.
   refused with `409`, if other images have taken the room, with `413`, and
   if the image's URL is one clients refuse, with `403`.
   A refused write's upload is deleted and the catalog is unchanged.
-- `/emoji remove :name:` removes the key and deletes its image. Only an
+- `/emoji remove :<name>:` removes the key and deletes its image. Only an
   `admin` may remove keys (`denied` otherwise); an unknown key is
   `invalid_params`.
 - Each change gives the catalog a new URL, and the server sends every
@@ -925,20 +926,31 @@ again.
 `command` ([PROTOCOL.md §4.1](https://github.com/shazow/apron/blob/main/PROTOCOL.md#41-command)) takes the params of a new message, in
 `general` without `room_id`, and is never logged, broadcast, or saved;
 `message_id` and `deleted` are `invalid_params`, as are text that does not
-start with `/` and unknown commands (`Unknown command /foo; try /help`).
-Mentions in commands notify no one. A command's effects and `~private`
-replies arrive before its result. Commands:
+start with `/`, unknown commands (`Unknown command /foo; try /help`), and
+`/kick`, `/embed-terminal`, `/embed-append`, or an extension's command
+that requires `room_id` (see below) sent without `room_id` (`Send /kick
+from a room: it needs room_id`), which act only on a room the client
+names.
+A command's name, and the word that picks a form such as `add` in `/emoji
+add`, end at the first whitespace of any kind, a line break or tab too, so
+`/embed-append` followed by a new line and Markdown works. They are
+case-sensitive and match exactly: `/Kick` is an unknown command,
+and `/emoji ADD` and `/server Title` are usage errors. Arguments are parsed
+as each command says. Mentions in commands notify no one. A command's
+effects and `~private` replies arrive before its result. Commands:
 
 - `/help` sends the calling connection, and only that connection, a
   `~private` notice
   (`from: {user_id: "~private", name: "System message to you"}`, CommonMark, no `message_id`
   or `log_id`, not logged) in the command's room, listing the commands the
-  sender may use there, and returns `{}`.
+  sender may use there, one line for each form, such as
+  ``- `/emoji add :<name>:`: with one image attached, add a custom emoji or
+  replace one you added``, and returns `{}`.
 - `/avatar` with exactly one `upload` embed returns
   `{"embeds": [{embed_id, kind, write_url}]}`; see Avatars above.
-- `/emoji add :name:` and `/emoji remove :name:` add and remove custom
+- `/emoji add :<name>:` and `/emoji remove :<name>:` add and remove custom
   emoji; see [Custom emoji](#custom-emoji).
-- `/embed-terminal [title]` and `/embed-append [markdown]` prepare live
+- `/embed-terminal [<title>]` and `/embed-append [<markdown>]` prepare live
   text that posts a new message when its writer starts, for programs and
   scripts that cannot send a `message` themselves; anyone may use them.
   Each takes no embeds (`invalid_params`), counts toward
@@ -1020,7 +1032,7 @@ replies arrive before its result. Commands:
   not, a new `server` frame: before the command's result, or for a new
   avatar when its write finishes. A command that sets or clears a value
   also sends the sender a `~private` notice with the result.
-- `/kick @user [reason]` removes the one user named in `body.mentions` from
+- `/kick @user [<reason>]` removes the one user named in `body.mentions` from
   the room. Only the room's creator and users with the `admin` or
   `moderator` role may kick (`denied` otherwise, so only they can kick in
   `general`). The removal is a logged leave membership with the
@@ -1049,6 +1061,41 @@ replies arrive before its result. Commands:
   The asking connection stays open. A replacement undoes nothing else done
   with the old token: a passkey added with `register`, and the session
   token it returned, keep working.
+
+The request `ext:command_list`
+([apron's `ext:command_list`](https://github.com/shazow/apron/blob/main/extensions/ext_command_list.md)),
+under capability `ext:command_list`, returns the commands the sender may
+use on the connection in at least one room it can see, as data, in
+`/help`'s order: `{"commands": [{name, group?, description?, hint?,
+uses?, requires?}]}`. It takes no params, and ignores any. Each form of a command
+is an entry of its own: `emoji add` and `emoji remove`, and `server`,
+`server title`, `server description`, and `server avatar`. `hint` is the
+text after the name, absent for none, following the extension's suggested
+convention (`<value>`, `[optional]`, `a|b`, `...`, `@user`). `uses` lists
+the fields besides `body.text` that the form reads: `room_id` for
+`/embed-terminal`, `/embed-append`, and `/kick`, which act on the room they
+are sent in (the room a reply goes to does not count), `reply_to` for the
+first two, `body.embeds` for `/avatar`, `/emoji add`, and `/server avatar`,
+and `body.mentions` for `/kick`. `requires` lists those of them the form
+fails without: `body.embeds` for `/avatar` and `/emoji add` (`/server
+avatar` without an image clears the avatar), `room_id` for
+`/embed-terminal`, `/embed-append`, and `/kick`, which the server refuses
+without one rather than run in `general`, and `body.mentions` for
+`/kick`. It and `/help` share one check of what the connection may run:
+`/invite-device` for an account (not over a restricted service token),
+`/emoji add` on a connection offered `ext:emoji`, `/emoji remove` and
+`/server` for admins, and `/kick` for admins, moderators, and a room's
+creator, in that room for `/help` and in any room they can see for the
+list. `group`, for display only, is the narrowest group that holds
+everyone that check lets use the form: `all` for `/help`, `/avatar`,
+`/embed-terminal`, `/embed-append`, and `/emoji add` (guests too; the
+connection check is not a group), `member` for `/invite-device`, `room`
+for `/kick` (a room's creator, a guest too, as well as admins and
+moderators), and `admin` for `/emoji remove` and each form of `/server`.
+The list changes as roles, rooms, and extensions' answers do;
+nothing announces a change, so clients ask again. A user who can see no
+room, such as a bot whose scope names none, can run no command, so the
+list is empty.
 
 ## Activity
 
@@ -2098,8 +2145,22 @@ rest of the server does:
   is still `unsupported`. Its flags are `--weather.<flag>`, and its config
   file table `[weather]`. `emoji`, `settings`, and `account` are the
   server's own.
-- Its commands follow the server's in `/help`, which lists one only where
-  the extension says the sender may use it; one it refuses is `denied`.
+- Its commands follow the server's in `/help`, which lists one where the
+  extension says (`Available`) the sender may use it in the command's room,
+  and in `ext:command_list`, which lists one the extension says the sender
+  may use in at least one room the sender can see, asking about each in
+  turn, the default room first, until one says yes; one it refuses is
+  `denied`. Each is one entry, named after the command, whose `hint` is
+  its `Usage` after `/name` and whitespace, on one line (a `Usage` that
+  does not start that way gives no hint, `/help` shows it as written, and
+  `Open` logs a warning), whose `description`
+  is its `Help` on one line (absent without one, and its `/help` line
+  then has no colon), whose `uses` and `requires` are its `Uses` and
+  `Requires`: `room_id`, `reply_to`, `body.mentions`, or `body.embeds`,
+  each once, with `Requires` among `Uses` (a command that requires
+  `room_id` is refused without one, as `/kick` is), and whose
+  `group` is its `Group`: `all`, `guest`, `member`, `room`, `role`, or
+  `admin`, absent when empty. Any other field or group fails `Open`.
   They run outside the server's lock, so their notices and effects precede
   their result like the server's own. A result, or a method's, that is not
   JSON is an `internal_error`, as is any error but a protocol one.

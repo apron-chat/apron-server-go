@@ -15,6 +15,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+	"unicode"
 
 	"github.com/apron-chat/apron-server-go/internal/auth/email"
 )
@@ -186,13 +187,43 @@ func internalError() *Error {
 // (PROTOCOL.md §4.1).
 type Command struct {
 	// Name is what follows the slash: lowercase letters, digits, and
-	// dashes. It may not be a command the server has.
+	// dashes. It may not be a command the server has. Names are
+	// case-sensitive (ext:command_list): only /name exactly runs it, and
+	// /Name is an unknown command.
 	Name string
 	// Usage and Help describe the command in /help, such as
-	// "/weather <city>" and "show the forecast".
+	// "/weather <city>" and "show the forecast". When Usage starts with the
+	// slash and Name, then whitespace or nothing, what follows is the
+	// command's hint in ext:command_list (apron's
+	// extensions/ext_command_list.md), such as "<city>", which follows its
+	// suggested convention: <value>, [optional], a|b, repeats..., and @user
+	// for a mention, its whitespace collapsed. Any other Usage gives the
+	// command no hint, /help shows it as written, and Open logs it. Help
+	// is its description: plain text on one line, its
+	// whitespace collapsed; without it, the command has none.
 	Usage, Help string
-	// Available reports whether u may run the command in r, and hides it
-	// from /help otherwise. nil makes it available to everyone.
+	// Uses are the fields of the `command` request, besides body.text,
+	// that change what the command does, as ext:command_list lists them:
+	// "room_id" when it acts on the room it runs in (CommandCall.Room),
+	// and the arguments it reads, "reply_to", "body.mentions", and
+	// "body.embeds". Requires are those of Uses that the command fails
+	// without. With "room_id", the command acts only on a room the client
+	// names: one sent without room_id is refused as invalid_params rather
+	// than run in the default room.
+	Uses, Requires []string
+	// Group says who may use the command, for display in ext:command_list:
+	// "all", "guest", "member", "room", "role", or "admin", from the widest
+	// to the narrowest; "" leaves it out. It changes nothing about who may
+	// use it, which is Available's. Open refuses any other value, on
+	// purpose, so that a typo does not reach clients.
+	Group string
+	// Available reports whether u may run the command in r. /help lists
+	// the command where it is available, and ext:command_list for a user
+	// it is available to in at least one room the user can see, asking
+	// about each in turn, the default room first, until one is. So it may
+	// be called once for each room the user can see on every listing: keep
+	// it cheap and free of side effects. nil makes it available to
+	// everyone.
 	Available func(u User, r Room) bool
 	// Run runs the command. Its replies are notices (CommandCall.Notice,
 	// Host.RoomNotice) and the effects of what it does; the result, {} for
@@ -251,12 +282,33 @@ func (r *Registrar) Command(command Command) {
 				return fmt.Errorf("command /%s exists already", command.Name)
 			}
 		}
-		usage := command.Usage
-		if usage == "" {
-			usage = "/" + command.Name
+		// The hint is what follows "/name" and whitespace in Usage, on one
+		// line; /help shows any other Usage as written.
+		hint, ok := strings.CutPrefix(command.Usage, "/"+command.Name)
+		usageText := ""
+		if trimmed := strings.TrimLeftFunc(hint, unicode.IsSpace); ok && (hint == "" || trimmed != hint) {
+			hint = strings.Join(strings.Fields(trimmed), " ")
+		} else {
+			hint, usageText = "", command.Usage
+			if command.Usage != "" {
+				r.logger.Warn("a command's Usage does not start with its name, so ext:command_list gives it no hint", "command", command.Name, "usage", command.Usage)
+			}
 		}
+		if err := checkCommandFields(command.Uses, command.Requires); err != nil {
+			return fmt.Errorf("command /%s: %w", command.Name, err)
+		}
+		if command.Group != "" && !slices.Contains(commandGroups, command.Group) {
+			return fmt.Errorf("command /%s: group %q is none of %s", command.Name, command.Group, strings.Join(commandGroups, ", "))
+		}
+		// Help is one line of plain text in /help's Markdown list.
+		description := strings.Join(strings.Fields(command.Help), " ")
+		command.Uses, command.Requires = slices.Clone(command.Uses), slices.Clone(command.Requires)
 		r.s.commands = append(r.s.commands, serverCommand{
-			name: command.Name, usage: usage, help: command.Help,
+			name: command.Name,
+			forms: []commandForm{{
+				name: command.Name, group: command.Group, hint: hint, usageText: usageText, description: description,
+				uses: command.Uses, requires: command.Requires,
+			}},
 			extension: &extensionCommand{host: r.Host, command: command},
 		})
 		return nil
@@ -583,8 +635,13 @@ func (s *Server) roomViewLocked(r *roomState) Room {
 	if r == nil {
 		return Room{}
 	}
-	everyone, _ := r.audience()
-	room := Room{ID: r.id, Title: r.title(), Restricted: !everyone, Members: len(r.members)}
+	// Restricted as audience() would say, without copying its members:
+	// a private room on the way up makes the room one some users see.
+	restricted := false
+	for room := r; room != nil && !restricted; room = room.parent {
+		restricted = room.private
+	}
+	room := Room{ID: r.id, Title: r.title(), Restricted: restricted, Members: len(r.members)}
 	if r.parent != nil {
 		room.ParentID = r.parent.id
 	}

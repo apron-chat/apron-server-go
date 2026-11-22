@@ -63,6 +63,9 @@ func (m *Moderation) Init(r *apron.Registrar) error {
 	r.OnEvent(m.notePost)
 	r.Command(apron.Command{
 		Name: "slowmode", Usage: "/slowmode <seconds>|off", Help: "limit how often each member may post here",
+		Uses:      []string{"room_id"},
+		Requires:  []string{"room_id"},
+		Group:     "role",
 		Available: func(u apron.User, _ apron.Room) bool { return moderates(u) },
 		Run:       m.slowmode,
 	})
