@@ -27,6 +27,7 @@ import (
 	"golang.org/x/time/rate"
 
 	"github.com/apron-chat/apron-server-go/apron/internal/durable"
+	"github.com/apron-chat/apron-server-go/apron/internal/roomlog"
 	"github.com/apron-chat/apron-server-go/internal/auth/external"
 	"github.com/apron-chat/apron-server-go/internal/auth/passkey"
 	"github.com/apron-chat/apron-server-go/internal/authn"
@@ -358,39 +359,6 @@ func (c Config) withDefaults() Config {
 	return c
 }
 
-// recordKind partitions the server's single append-only log (PROTOCOL.md §2).
-type recordKind int
-
-const (
-	kindRoom recordKind = iota
-	kindMessage
-	kindReactions
-	kindMembership
-)
-
-// logRecord is one committed change: raw is the complete wire object
-// (including log_id) as it was at commit time, kept as JSON, which history
-// and broadcasts send as is and which costs far less memory than decoded
-// maps. Only redaction (§4.4) rewrites a record; raw is replaced, never
-// modified, so a reader may hold it after releasing s.mu. A record is
-// referenced from the log of every room it belongs to, so a move snapshot
-// appears in both the source and destination room logs (§4.3.1).
-type logRecord struct {
-	id   int64
-	kind recordKind
-	raw  jsontext.Value
-	// rooms are the rooms whose logs hold the record.
-	rooms []string
-	// message is the message_id of a message snapshot.
-	message string
-}
-
-// newLogRecord encodes value. Values hold only JSON-decoded data and
-// server-built strings, maps, and slices, so encoding cannot fail.
-func newLogRecord(id int64, kind recordKind, value map[string]any) *logRecord {
-	return &logRecord{id: id, kind: kind, raw: encodeJSON(value)}
-}
-
 // encodeJSON encodes a value as wire encodes frames (wire.Marshal), or
 // returns nil if it cannot: deterministically, sorting object keys, with
 // encoding/json's null for nil slices and maps, and without escaping <, >,
@@ -402,19 +370,6 @@ func encodeJSON(value any) []byte {
 		return nil
 	}
 	return payload
-}
-
-// value decodes the record. Its ext keeps its values as raw JSON, so
-// re-encoding the record keeps them exactly.
-func (r *logRecord) value() map[string]any {
-	return decodeObject(r.raw)
-}
-
-// rewrite replaces the record with edit applied to its decoded value.
-func (r *logRecord) rewrite(edit func(value map[string]any)) {
-	value := r.value()
-	edit(value)
-	r.raw = encodeJSON(value)
 }
 
 // notification renders a frame once, for sending to many connections.
@@ -496,9 +451,9 @@ type Server struct {
 	config Config
 
 	mu sync.RWMutex
-	// clock issues the single log_id sequence shared by every record kind
-	// and room.
-	clock    wire.Clock
+	// log is the single append-only log of every room (roomlog), which
+	// issues the log_id sequence.
+	log      *roomlog.Log
 	rooms    map[string]*roomState
 	messages map[string]*messageState
 	clients  map[*client]struct{}
@@ -595,10 +550,6 @@ type Server struct {
 	routes     []route
 	filters    []extensionFilter
 	extData    map[string]map[string]jsontext.Value
-	// records lists every logged record in log_id order, for Event
-	// followers; recordsChanged is closed and replaced when one is added.
-	records        []*logRecord
-	recordsChanged chan struct{}
 	// extContext is canceled by Shutdown, which waits for extensionWork:
 	// Host.Go goroutines and event followers.
 	extContext    context.Context
@@ -664,11 +615,11 @@ func Open(config Config) (*Server, error) {
 		badgeDelay:  badgeDelay,
 		stopped:     make(chan struct{}),
 
-		commands:       coreCommands(),
-		advertised:     make(map[string]jsontext.Value),
-		extData:        make(map[string]map[string]jsontext.Value),
-		recordsChanged: make(chan struct{}),
-		logger:         config.Logger,
+		commands:   coreCommands(),
+		advertised: make(map[string]jsontext.Value),
+		extData:    make(map[string]map[string]jsontext.Value),
+		log:        roomlog.NewLog(),
+		logger:     config.Logger,
 	}
 	if s.logger == nil {
 		s.logger = slog.Default()
@@ -744,7 +695,7 @@ func Open(config Config) (*Server, error) {
 	if s.rooms[defaultRoomID] == nil {
 		// The seeded default room has a logged creation record like any
 		// other room, so its history_log_id is never null.
-		s.commitRoomLocked(defaultRoomID, nil, false, map[string]any{"title": "General"})
+		s.commitRoomLocked(defaultRoomID, nil, false, roomlog.RoomRecord{Title: "General"})
 	}
 	s.removeStaleUploads(files)
 	s.unlock()
@@ -1192,30 +1143,5 @@ var methodCapabilities = map[string]string{
 // (§4.8), the ext it keeps (§4.12), and ext:editors (apron's
 // EXTENSIONS.md), which needs no method or data of its own.
 var featureCapabilities = []string{"embed:upload", "embed:append", "embed:terminal", "ext", "ext:editors"}
-
-// nextIDLocked returns the next log_id in the server-wide sequence: the commit
-// time in milliseconds, or the previous log_id + 1.
-func (s *Server) nextIDLocked() int64 {
-	return int64(s.clock.Next())
-}
-
-// appendLocked adds a committed record to the log of each room it belongs to.
-func (s *Server) appendLocked(record *logRecord, rooms ...*roomState) {
-	// log_ids rise, so a record almost always goes last.
-	i := len(s.records)
-	if i > 0 && s.records[i-1].id > record.id {
-		i, _ = slices.BinarySearchFunc(s.records, record.id, compareLogID)
-	}
-	s.records = slices.Insert(s.records, i, record)
-	close(s.recordsChanged)
-	s.recordsChanged = make(chan struct{})
-	for _, r := range rooms {
-		r.log = append(r.log, record)
-		r.latestID = record.id
-		record.rooms = append(record.rooms, r.id)
-		s.touchRoom(r)
-	}
-	s.touchRecord(record)
-}
 
 var _ http.Handler = (*Server)(nil)

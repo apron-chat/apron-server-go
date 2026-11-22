@@ -7,6 +7,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/apron-chat/apron-server-go/apron/internal/roomlog"
 	"github.com/apron-chat/apron-server-go/wire"
 	"github.com/apron-chat/apron-server-go/wire/commands"
 )
@@ -415,9 +416,9 @@ func privateNotice(roomID, text string) map[string]any {
 // postRoomNoticeLocked logs and delivers a message from ~room to the room's
 // members (Appendix A.1). It mentions no one.
 func (s *Server) postRoomNoticeLocked(r *roomState, text string) {
-	logID := s.nextIDLocked()
+	logID := s.log.NextID()
 	messageID := formatID(logID)
-	from := map[string]any{"user_id": roomNoticeID, "name": r.title()}
+	from := roomlog.Author{UserID: roomNoticeID, Name: r.title()}
 	m := &messageState{id: messageID, from: from, owner: roomNoticeID, reactions: make(map[string]reactionSet)}
 	s.messages[messageID] = m
 	s.commitSnapshotLocked(m, map[string]any{

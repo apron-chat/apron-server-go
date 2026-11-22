@@ -4,6 +4,8 @@ import (
 	"maps"
 	"slices"
 	"time"
+
+	"github.com/apron-chat/apron-server-go/apron/internal/roomlog"
 )
 
 // Unread counts (§4.9): one count per user, the same in every push to any of
@@ -62,8 +64,8 @@ func (s *Server) readPositionLocked(u *userState, r *roomState) (int64, bool) {
 // r's log, a move snapshot for a message moved there.
 func arrival(m *messageState, r *roomState) int64 {
 	for _, record := range m.records {
-		if slices.Contains(record.rooms, r.id) {
-			return record.id
+		if slices.Contains(record.Rooms, r.id) {
+			return record.ID
 		}
 	}
 	return 0
@@ -97,15 +99,13 @@ func (s *Server) recountLocked(u *userState, r *roomState, now time.Time) int {
 	if !counted || !r.visibleTo(u) {
 		return 0
 	}
-	start, _ := slices.BinarySearchFunc(r.log, since+1, compareLogID)
-	start = max(start, len(r.log)-maxUnreadScan)
 	count := 0
 	seen := make(map[*messageState]bool)
-	for _, record := range r.log[start:] {
-		if record.kind != kindMessage {
+	for _, record := range r.log.Since(since, maxUnreadScan) {
+		if record.Kind != roomlog.KindMessage {
 			continue
 		}
-		m := s.messages[record.message]
+		m := s.messages[record.Message]
 		if m == nil || m.roomID != r.id || seen[m] {
 			continue
 		}
@@ -201,7 +201,7 @@ func (s *Server) messageUnreadLocked(m *messageState, previous map[string]any, f
 		}
 	}
 	now := time.Now()
-	messageID := m.records[0].id
+	messageID := m.records[0].ID
 	for _, id := range slices.Sorted(maps.Keys(concerned)) {
 		u := concerned[id]
 		if !r.visibleTo(u) {

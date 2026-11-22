@@ -44,7 +44,7 @@ func TestRestrictedSignIn(t *testing.T) {
 		}}}
 	})
 	app.mu.Lock()
-	app.rooms[defaultRoomID].record["description"] = "Our plans for the quarter"
+	app.rooms[defaultRoomID].record.Description = "Our plans for the quarter"
 	app.unlock()
 
 	// Before a sign-in, the server frame holds what signing in needs.

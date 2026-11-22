@@ -386,7 +386,7 @@ func TestPushWakeScopes(t *testing.T) {
 	}
 	// A reply to carol's message wakes replies and the default.
 	app.mu.Lock()
-	logID := app.nextIDLocked()
+	logID := app.log.NextID()
 	own := formatID(logID)
 	m := &messageState{id: own, from: carol.from(), owner: carol.id, reactions: make(map[string]reactionSet)}
 	app.messages[own] = m
@@ -542,7 +542,7 @@ func serverMessage(t *testing.T, app *Server, userID string) int64 {
 	app.mu.Lock()
 	defer app.unlock()
 	u := app.users[userID]
-	logID := app.nextIDLocked()
+	logID := app.log.NextID()
 	id := formatID(logID)
 	m := &messageState{id: id, from: u.from(), owner: u.id, reactions: make(map[string]reactionSet)}
 	app.messages[id] = m

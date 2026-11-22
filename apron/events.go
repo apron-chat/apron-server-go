@@ -8,6 +8,8 @@ import (
 	"slices"
 	"strconv"
 	"time"
+
+	"github.com/apron-chat/apron-server-go/apron/internal/roomlog"
 )
 
 // EventKind is the kind of record an Event carries (PROTOCOL.md §2.3).
@@ -25,11 +27,11 @@ const (
 	EventMembership EventKind = "membership"
 )
 
-var eventKinds = map[recordKind]EventKind{
-	kindRoom:       EventRoom,
-	kindMessage:    EventMessage,
-	kindReactions:  EventReactions,
-	kindMembership: EventMembership,
+var eventKinds = map[roomlog.Kind]EventKind{
+	roomlog.KindRoom:       EventRoom,
+	roomlog.KindMessage:    EventMessage,
+	roomlog.KindReactions:  EventReactions,
+	roomlog.KindMembership: EventMembership,
 }
 
 // Event is one logged record: the server's log is the stream of what
@@ -50,18 +52,15 @@ type Event struct {
 	Record jsontext.Value
 }
 
-func eventOf(r *logRecord) Event {
-	return Event{Kind: eventKinds[r.kind], LogID: r.id, Rooms: slices.Clone(r.rooms), Record: slices.Clone(r.raw)}
+func eventOf(r *roomlog.Record) Event {
+	return Event{Kind: eventKinds[r.Kind], LogID: r.ID, Rooms: slices.Clone(r.Rooms), Record: slices.Clone(r.Raw)}
 }
 
 // LastLogID is the log_id of the latest record, 0 for none.
 func (h *Host) LastLogID() int64 {
 	h.s.mu.RLock()
 	defer h.s.mu.RUnlock()
-	if n := len(h.s.records); n > 0 {
-		return h.s.records[n-1].id
-	}
-	return 0
+	return h.s.log.Last()
 }
 
 // OnEvent calls fn with each record logged from now on, in order, on one
@@ -142,15 +141,11 @@ func (r *Registrar) follow(what string, after int64, deliver func(ctx context.Co
 		cursor := after
 		for {
 			s.mu.RLock()
-			i, found := slices.BinarySearchFunc(s.records, cursor, compareLogID)
-			if found {
-				i++
-			}
-			batch := make([]Event, 0, min(eventBatch, len(s.records)-i))
-			for _, r := range s.records[i:min(len(s.records), i+eventBatch)] {
+			records, changed := s.log.After(cursor, eventBatch)
+			batch := make([]Event, 0, len(records))
+			for _, r := range records {
 				batch = append(batch, eventOf(r))
 			}
-			changed := s.recordsChanged
 			s.mu.RUnlock()
 			if len(batch) == 0 {
 				select {

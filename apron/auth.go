@@ -427,7 +427,6 @@ func (s *Server) addProvenLocked(c *client, req request, scheme authn.Scheme, pr
 	renamed := becomesAccount && name != "" && name != account.name
 	if renamed {
 		account.name = name
-		account.fromValue = nil
 	}
 	s.setGrantLocked(account, id.Scheme, proof.Roles)
 	// An account takes the roles its user_id or new identity is granted.

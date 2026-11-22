@@ -76,7 +76,7 @@ func (s *Server) profileValueLocked(field string) (string, int) {
 		// A room description longer than a server description is left
 		// out rather than cut, which could break its markup.
 		if room := s.rooms[defaultRoomID]; room != nil {
-			if description, _ := room.record["description"].(string); description != "" && len(description) <= maxServerDescriptionBytes {
+			if description := room.record.Description; description != "" && len(description) <= maxServerDescriptionBytes {
 				return description, fromRoom
 			}
 		}

@@ -134,8 +134,7 @@ func TestHistoryPagesAreBoundedAndRecordsUnescaped(t *testing.T) {
 	a := dialTestClient(t, httpServer)
 	save(t, a, "markup", map[string]any{"body": map[string]any{"text": "<a & b>"}})
 	app.mu.RLock()
-	log := app.rooms["general"].log
-	raw := string(log[len(log)-1].raw)
+	raw := string(app.rooms["general"].log.Since(0, 1)[0].Raw)
 	app.mu.RUnlock()
 	if !strings.Contains(raw, "<a & b>") {
 		t.Fatalf("stored record escapes markup: %s", raw)

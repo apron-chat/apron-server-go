@@ -6,6 +6,7 @@ import (
 	"reflect"
 	"testing"
 
+	"github.com/apron-chat/apron-server-go/apron/internal/roomlog"
 	"github.com/apron-chat/apron-server-go/wire"
 )
 
@@ -32,26 +33,27 @@ func TestRecordsAreWireTypes(t *testing.T) {
 
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	kinds := map[recordKind]int{}
-	for _, record := range s.records {
-		kinds[record.kind]++
+	kinds := map[roomlog.Kind]int{}
+	records, _ := s.log.After(0, 1<<30)
+	for _, record := range records {
+		kinds[record.Kind]++
 		var typed any
 		var unknown []jsontext.Value
-		switch record.kind {
-		case kindRoom:
-			room := decodeRecord[wire.Room](record.raw)
+		switch record.Kind {
+		case roomlog.KindRoom:
+			room := decodeRecord[wire.Room](record.Raw)
 			typed, unknown = room, []jsontext.Value{room.Unknown}
-		case kindMessage:
-			m := decodeRecord[wire.Message](record.raw)
+		case roomlog.KindMessage:
+			m := decodeRecord[wire.Message](record.Raw)
 			typed, unknown = m, []jsontext.Value{m.Unknown, m.From.Unknown}
-		case kindReactions:
-			r := decodeRecord[wire.Reactions](record.raw)
+		case roomlog.KindReactions:
+			r := decodeRecord[wire.Reactions](record.Raw)
 			typed = r
 			for _, reaction := range r.Reactions {
 				unknown = append(unknown, reaction.From.Unknown)
 			}
-		case kindMembership:
-			m := decodeRecord[wire.Membership](record.raw)
+		case roomlog.KindMembership:
+			m := decodeRecord[wire.Membership](record.Raw)
 			typed = m
 			for _, member := range m.Members {
 				unknown = append(unknown, member.User.Unknown)
@@ -59,12 +61,12 @@ func TestRecordsAreWireTypes(t *testing.T) {
 		}
 		for _, value := range unknown {
 			if value != nil {
-				t.Errorf("record %s has members wire's types do not: %s", record.raw, value)
+				t.Errorf("record %s has members wire's types do not: %s", record.Raw, value)
 			}
 		}
 		var want, got any
-		if json.Unmarshal(record.raw, &want) != nil || json.Unmarshal(encodeJSON(typed), &got) != nil || !reflect.DeepEqual(got, want) {
-			t.Errorf("record %s encodes as %s", record.raw, encodeJSON(typed))
+		if json.Unmarshal(record.Raw, &want) != nil || json.Unmarshal(encodeJSON(typed), &got) != nil || !reflect.DeepEqual(got, want) {
+			t.Errorf("record %s encodes as %s", record.Raw, encodeJSON(typed))
 		}
 	}
 	if len(kinds) != 4 {

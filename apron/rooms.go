@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/apron-chat/apron-server-go/apron/internal/roomlog"
 	"github.com/apron-chat/apron-server-go/wire"
 )
 
@@ -29,12 +30,11 @@ type roomState struct {
 	// private is fixed at creation and kept in record as "private": true.
 	private bool
 	// record holds the latest logged room record.
-	record      map[string]any
+	record      roomlog.RoomRecord
 	recordLogID int64
-	createdID   int64
-	latestID    int64
-	log         []*logRecord
-	members     map[string]*userState
+	// log is the room's log, from its creation record.
+	log     *roomlog.Timeline
+	members map[string]*userState
 	// active maps each member to the log_id of their latest join or new
 	// message in the room, which ranks members when a listing truncates
 	// them (§4.2.1).
@@ -47,7 +47,7 @@ type roomState struct {
 }
 
 type readCursor struct {
-	from      map[string]any
+	from      roomlog.Author
 	messageID string
 	id        int64
 }
@@ -153,8 +153,8 @@ func (r *roomState) mayRemove(u *userState) bool {
 
 // title is the room's display title, falling back to its room_id (§3.4).
 func (r *roomState) title() string {
-	if title, _ := r.record["title"].(string); title != "" {
-		return title
+	if r.record.Title != "" {
+		return r.record.Title
 	}
 	return r.id
 }
@@ -182,8 +182,8 @@ func (s *Server) cursorFramesLocked(u *userState, r *roomState) []wire.Frame {
 // room's creation record. The view shares nothing with the room, so it may
 // be encoded after s.mu is released.
 func (s *Server) roomViewOfLocked(r *roomState) wire.RoomView {
-	created := wire.LogID(r.createdID)
-	return wire.RoomView{Room: decodeRecord[wire.Room](encodeJSON(r.record)), LatestLogID: wire.LogID(r.latestID), HistoryLogID: &created}
+	created := wire.LogID(r.log.Created())
+	return wire.RoomView{Room: decodeRecord[wire.Room](encodeJSON(r.record)), LatestLogID: wire.LogID(r.log.Latest()), HistoryLogID: &created}
 }
 
 // decodeRecord decodes a logged record, which the server encoded, as the
@@ -229,17 +229,24 @@ func roomUpdate(field string, records ...any) jsontext.Value {
 // in a room_update's memberships (§4.2.3). The record carries u as a
 // recorded object: user_id and name.
 func (s *Server) logMembershipLocked(u *userState, r *roomState, joined bool) jsontext.Value {
-	logID := s.nextIDLocked()
-	record := newLogRecord(logID, kindMembership, map[string]any{
-		"log_id":  formatID(logID),
-		"room_id": r.id,
-		"members": []any{map[string]any{"user": u.from(), "joined": joined}},
-	})
+	logID := s.log.NextID()
+	record := roomlog.NewMembership(logID, r.id, u.from(), joined)
 	s.appendLocked(record, r)
 	if !joined {
 		u.leftAt[r.id] = logID
 	}
-	return record.raw
+	return record.Raw
+}
+
+// appendLocked adds a committed record to the log of each room it belongs
+// to.
+func (s *Server) appendLocked(record *roomlog.Record, rooms ...*roomState) {
+	logs := make([]*roomlog.Timeline, len(rooms))
+	for i, r := range rooms {
+		logs[i] = r.log
+		s.touchRoom(r)
+	}
+	s.log.Append(record, logs...)
 }
 
 // deliverMembershipLocked sends a membership record to the room's members
@@ -267,7 +274,7 @@ func (s *Server) addMemberLocked(u *userState, r *roomState) jsontext.Value {
 	s.touchUser(u.id)
 	delete(u.leftAt, r.id)
 	membership := s.logMembershipLocked(u, r, true)
-	r.active[u.id] = r.latestID
+	r.active[u.id] = r.log.Latest()
 	s.deliverMembershipLocked(membership, r, u)
 	s.announceJoinStatusLocked(u, r)
 	s.unreadChangedLocked(u, r.id)
@@ -405,18 +412,18 @@ func (s *Server) hideThreadsLocked(u *userState, r *roomState) {
 	}
 }
 
-// commitRoomLocked logs a room record holding fields, the client fields other
-// than parent_room_id and private. An unknown roomID creates the room, private
+// commitRoomLocked logs a room record holding the client fields of fields:
+// title, description, and ext. An unknown roomID creates the room, private
 // if asked; an empty one names it by its creation log_id.
-func (s *Server) commitRoomLocked(roomID string, parent *roomState, private bool, fields map[string]any) *roomState {
-	logID := s.nextIDLocked()
+func (s *Server) commitRoomLocked(roomID string, parent *roomState, private bool, fields roomlog.RoomRecord) *roomState {
+	logID := s.log.NextID()
 	r := s.rooms[roomID]
 	if r == nil {
 		if roomID == "" {
 			roomID = formatID(logID)
 		}
 		r = &roomState{
-			id: roomID, parent: parent, private: private, createdID: logID,
+			id: roomID, parent: parent, private: private, log: roomlog.NewTimeline(roomID, logID, 0),
 			members: make(map[string]*userState), active: make(map[string]int64), reads: make(map[string]readCursor),
 		}
 		s.rooms[roomID] = r
@@ -424,20 +431,19 @@ func (s *Server) commitRoomLocked(roomID string, parent *roomState, private bool
 			parent.children = append(parent.children, r)
 		}
 	}
-	record := map[string]any{"room_id": r.id, "log_id": formatID(logID)}
+	record := roomlog.RoomRecord{
+		RoomID: r.id, LogID: formatID(logID), Private: r.private,
+		Title: fields.Title, Description: fields.Description, Ext: fields.Ext,
+	}
 	if r.recordLogID != 0 {
-		record["prev_log_id"] = formatID(r.recordLogID)
+		record.PrevLogID = formatID(r.recordLogID)
 	}
 	if r.parent != nil {
-		record["parent_room_id"] = r.parent.id
+		record.ParentRoomID = r.parent.id
 	}
-	if r.private {
-		record["private"] = true
-	}
-	maps.Copy(record, fields)
 	r.record = record
 	r.recordLogID = logID
-	s.appendLocked(newLogRecord(logID, kindRoom, record), r)
+	s.appendLocked(roomlog.New(logID, roomlog.KindRoom, record), r)
 	return r
 }
 
@@ -506,14 +512,14 @@ func (s *Server) setRoom(c *client, p wire.RoomSetParams, reply wire.Reply[wire.
 			return invalidParams("Unknown room %q", roomID)
 		}
 		parent = existing.parent
-		keptExt = extOf(existing.record["ext"])
+		keptExt = existing.record.Ext
 		// An edit merges into the room's client fields (§4.2.4): a field it
 		// leaves out keeps its value, and "" clears it.
 		if p.Title == nil {
-			title, _ = existing.record["title"].(string)
+			title = existing.record.Title
 		}
 		if p.Description == nil {
-			description, _ = existing.record["description"].(string)
+			description = existing.record.Description
 		}
 	} else if parentID != "" {
 		if parent = s.visibleRoomLocked(u, parentID); parent == nil {
@@ -536,19 +542,14 @@ func (s *Server) setRoom(c *client, p wire.RoomSetParams, reply wire.Reply[wire.
 	if err := s.admitPostLocked(u); err != nil {
 		return err
 	}
-	fields := make(map[string]any)
 	if title == "" && parent != nil {
 		// Servers title threads so clients unaware of parent_room_id render them.
 		title = threadTitle(description)
 	}
-	if title != "" {
-		fields["title"] = title
-	}
-	if description != "" {
-		fields["description"] = description
-	}
+	// Empty client fields are left out of the record.
+	fields := roomlog.RoomRecord{Title: title, Description: description}
 	if len(ext) > 0 {
-		fields["ext"] = ext
+		fields.Ext = ext
 	}
 	if p.Private == nil && !updating && parent != nil {
 		// A thread created without private takes its parent's (§4.2.4).
@@ -574,7 +575,7 @@ func (s *Server) setRoom(c *client, p wire.RoomSetParams, reply wire.Reply[wire.
 		r.members[u.id] = u
 		s.touchUser(u.id)
 		membership := s.logMembershipLocked(u, r, true)
-		r.active[u.id] = r.latestID
+		r.active[u.id] = r.log.Latest()
 		u.send(s.joinedUpdateLocked(r, membership))
 		// A private thread's record goes only to its own members.
 		if parent != nil && !r.private {
@@ -666,7 +667,7 @@ func (s *Server) listRooms(c *client, p wire.RoomListParams, reply wire.Reply[wi
 	}
 	var joined, others, left []*roomState
 	for _, r := range candidates {
-		if hasSince && r.latestID <= since {
+		if hasSince && r.log.Latest() <= since {
 			continue
 		}
 		if u.joined[r.id] != nil {
@@ -686,7 +687,7 @@ func (s *Server) listRooms(c *client, p wire.RoomListParams, reply wire.Reply[wi
 		}
 	}
 	byActivity := func(a, b *roomState) int {
-		return cmp.Or(cmp.Compare(b.latestID, a.latestID), cmp.Compare(b.createdID, a.createdID))
+		return cmp.Or(cmp.Compare(b.log.Latest(), a.log.Latest()), cmp.Compare(b.log.Created(), a.log.Created()))
 	}
 	slices.SortFunc(joined, byActivity)
 	slices.SortFunc(others, byActivity)
@@ -874,85 +875,26 @@ func (s *Server) history(c *client, p wire.HistoryParams, reply wire.Reply[wire.
 			}
 		}
 	}
-	// The rooms' windows merge by log_id from the end the page starts at,
-	// until limit+1 records: a move snapshot in two of them is one record,
-	// the same in both logs, and comes once.
-	windows := make([][]*logRecord, 0, len(rooms))
+	logs := make([]*roomlog.Timeline, len(rooms))
 	var latest int64
-	for _, r := range rooms {
-		latest = max(latest, r.latestID)
-		if records := window(r.log, after, hasAfter, before, hasBefore); len(records) > 0 {
-			windows = append(windows, records)
-		}
+	for i, r := range rooms {
+		logs[i] = r.log
+		latest = max(latest, r.log.Latest())
 	}
-	matching := make([]*logRecord, 0, min(limit+1, 64))
-	for len(matching) <= limit {
-		var next *logRecord
-		for _, records := range windows {
-			if len(records) == 0 {
-				continue
-			}
-			head := records[0]
-			if !hasAfter {
-				head = records[len(records)-1]
-			}
-			if next == nil || (hasAfter && head.id < next.id) || (!hasAfter && head.id > next.id) {
-				next = head
-			}
-		}
-		if next == nil {
-			break
-		}
-		matching = append(matching, next)
-		for i, records := range windows {
-			switch {
-			case len(records) == 0:
-			case hasAfter && records[0] == next:
-				windows[i] = records[1:]
-			case !hasAfter && records[len(records)-1] == next:
-				windows[i] = records[:len(records)-1]
-			}
-		}
-	}
-	if !hasAfter {
-		slices.Reverse(matching)
-	}
+	matching, more := roomlog.Page(logs, roomlog.Query{
+		After: after, HasAfter: hasAfter, Before: before, HasBefore: hasBefore,
+		Limit: limit, MaxBytes: maxHistoryReplyBytes,
+	})
 	// With room_id, the room's log starts at its creation. Without it, the
 	// log of the joined rooms starts where the server's does, at the default
 	// room's creation, whoever is in which room, so the lower bound never
 	// moves (§4.3.3); for a user in no rooms it is empty, ending just before.
-	created := s.rooms[defaultRoomID].createdID
+	created := s.rooms[defaultRoomID].log.Created()
 	if hasRoom {
-		created = rooms[0].createdID
+		created = rooms[0].log.Created()
 	}
 	if len(rooms) == 0 {
 		latest = created - 1
-	}
-	more := len(matching) > limit
-	if more {
-		if hasAfter {
-			matching = matching[:limit]
-		} else {
-			matching = matching[1:]
-		}
-	}
-	// A page also stops at maxHistoryReplyBytes of records, keeping at least
-	// one, so one request cannot hold the lock to render an unbounded reply.
-	size := 0
-	for i := range matching {
-		k := i
-		if !hasAfter {
-			k = len(matching) - 1 - i
-		}
-		if size += len(matching[k].raw); size > maxHistoryReplyBytes && i > 0 {
-			if hasAfter {
-				matching = matching[:k]
-			} else {
-				matching = matching[k+1:]
-			}
-			more = true
-			break
-		}
 	}
 	// The log of no rooms has no history: its history_log_id is null.
 	result := wire.HistoryResult{More: more, LatestLogID: wire.LogID(latest)}
@@ -960,43 +902,22 @@ func (s *Server) history(c *client, p wire.HistoryParams, reply wire.Reply[wire.
 		result.HistoryLogID = wire.LogID(created)
 	}
 	if len(matching) > 0 {
-		result.FirstLogID, result.LastLogID = wire.LogID(matching[0].id), wire.LogID(matching[len(matching)-1].id)
+		result.FirstLogID, result.LastLogID = wire.LogID(matching[0].ID), wire.LogID(matching[len(matching)-1].ID)
 	}
 	for _, record := range matching {
-		switch record.kind {
-		case kindRoom:
-			result.Rooms = append(result.Rooms, decodeRecord[wire.Room](record.raw))
-		case kindMessage:
-			result.Messages = append(result.Messages, decodeRecord[wire.Message](record.raw))
-		case kindReactions:
-			result.Reactions = append(result.Reactions, decodeRecord[wire.Reactions](record.raw))
-		case kindMembership:
-			result.Memberships = append(result.Memberships, decodeRecord[wire.Membership](record.raw))
+		switch record.Kind {
+		case roomlog.KindRoom:
+			result.Rooms = append(result.Rooms, decodeRecord[wire.Room](record.Raw))
+		case roomlog.KindMessage:
+			result.Messages = append(result.Messages, decodeRecord[wire.Message](record.Raw))
+		case roomlog.KindReactions:
+			result.Reactions = append(result.Reactions, decodeRecord[wire.Reactions](record.Raw))
+		case roomlog.KindMembership:
+			result.Memberships = append(result.Memberships, decodeRecord[wire.Membership](record.Raw))
 		}
 	}
 	_ = reply.Send(result)
 	return nil
-}
-
-// window returns the records of a log, which is in log_id order, within the
-// inclusive bounds.
-func window(log []*logRecord, after int64, hasAfter bool, before int64, hasBefore bool) []*logRecord {
-	if hasAfter {
-		start, _ := slices.BinarySearchFunc(log, after, compareLogID)
-		log = log[start:]
-	}
-	if hasBefore {
-		end, found := slices.BinarySearchFunc(log, before, compareLogID)
-		if found {
-			end++
-		}
-		log = log[:end]
-	}
-	return log
-}
-
-func compareLogID(record *logRecord, id int64) int {
-	return cmp.Compare(record.id, id)
 }
 
 // activity applies a connection's activity (§4.6). typing and a read cursor
@@ -1053,7 +974,7 @@ func (s *Server) activity(c *client, p wire.ActivityParams) *Error {
 				// A cursor for a room the user has not joined still syncs
 				// across their own connections.
 				u.send(map[string]any{"method": "activity", "params": map[string]any{"room_id": roomID, "from": u.from(), "read_message_id": readID}})
-				if id >= r.latestID {
+				if id >= r.log.Latest() {
 					// Read to the end: no earlier mention there counts.
 					delete(u.pings, r.id)
 					s.touchUser(u.id)

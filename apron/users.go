@@ -13,6 +13,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/apron-chat/apron-server-go/apron/internal/roomlog"
 	"github.com/apron-chat/apron-server-go/internal/authn"
 	"github.com/apron-chat/apron-server-go/wire"
 	"golang.org/x/text/secure/precis"
@@ -76,9 +77,6 @@ type userState struct {
 	// the external sign-in page, with when, in Unix milliseconds
 	// (consents.go).
 	consents map[string]int64
-
-	// fromValue caches from(); it is cleared when the name changes.
-	fromValue map[string]any
 
 	clients map[*client]struct{}
 	joined  map[string]*roomState
@@ -147,17 +145,9 @@ func newUserState(id, name string) *userState {
 
 // from is the recorded user object carried in logged records (a message's
 // or reaction's from, a membership's user): user_id and name. Avatars and
-// ext travel only in current objects (§3.3, §4.8.6). Every
-// record by the user shares the returned map until the name changes, so it
-// must not be modified.
-func (u *userState) from() map[string]any {
-	if u.fromValue == nil {
-		u.fromValue = map[string]any{"user_id": u.id}
-		if u.name != "" {
-			u.fromValue["name"] = u.name
-		}
-	}
-	return u.fromValue
+// ext travel only in current objects (§3.3, §4.8.6).
+func (u *userState) from() roomlog.Author {
+	return roomlog.Author{UserID: u.id, Name: u.name}
 }
 
 // account reports whether the user signed in with a credential (a passkey,
@@ -397,7 +387,7 @@ func (s *Server) detachLocked(c *client) {
 func (s *Server) retireLocked(u *userState) {
 	u.retired = true
 	rooms := slices.SortedFunc(maps.Values(u.joined), func(a, b *roomState) int {
-		return cmp.Compare(a.createdID, b.createdID)
+		return cmp.Compare(a.log.Created(), b.log.Created())
 	})
 	// Its registrations go first, so its leaves send it no badge pushes.
 	for _, registration := range u.pushes {
@@ -585,7 +575,6 @@ func (s *Server) updateProfile(c *client, p wire.MeParams, reply wire.Reply[wire
 	var removed []string
 	if hasName {
 		u.name = normalizeName(name)
-		u.fromValue = nil
 		if u.name == "" {
 			removed = append(removed, "name")
 		}

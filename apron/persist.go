@@ -10,16 +10,15 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
-	"strconv"
 	"strings"
 	"time"
 
+	"github.com/apron-chat/apron-server-go/apron/internal/roomlog"
 	"github.com/apron-chat/apron-server-go/internal/auth/email"
 	"github.com/apron-chat/apron-server-go/internal/auth/external"
 	"github.com/apron-chat/apron-server-go/internal/auth/passkey"
 	"github.com/apron-chat/apron-server-go/internal/authn"
 	"github.com/apron-chat/apron-server-go/store"
-	"github.com/apron-chat/apron-server-go/wire"
 )
 
 // Persistence writes the server's state through to a store.Store. Every
@@ -37,6 +36,7 @@ import (
 //	                      with /server (§3.1)
 //	used_id  lowercased user_id ever assigned
 //	record   log_id       a logged record and the rooms whose logs hold it
+//	                      (roomlog)
 //	room     room_id
 //	message  message_id
 //	user     user_id      guests too, retired at the next start
@@ -49,7 +49,6 @@ import (
 const (
 	entryMeta    = "meta"
 	entryUsedID  = "used_id"
-	entryRecord  = "record"
 	entryRoom    = "room"
 	entryMessage = "message"
 	entryUser    = "user"
@@ -63,7 +62,6 @@ const (
 // sessions, embeds, and pushes, a key missing from the server's maps at
 // flush time is deleted from the store.
 type dirtySet struct {
-	records  map[*logRecord]bool
 	rooms    map[string]bool
 	messages map[string]bool
 	users    map[string]bool
@@ -83,7 +81,6 @@ type dirtySet struct {
 
 func newDirtySet() dirtySet {
 	return dirtySet{
-		records:     make(map[*logRecord]bool),
 		rooms:       make(map[string]bool),
 		messages:    make(map[string]bool),
 		users:       make(map[string]bool),
@@ -101,7 +98,6 @@ func newDirtySet() dirtySet {
 // and its key.
 type extKey struct{ kind, id string }
 
-func (s *Server) touchRecord(r *logRecord)     { s.dirty.records[r] = true }
 func (s *Server) touchRoom(r *roomState)       { s.dirty.rooms[r.id] = true }
 func (s *Server) touchMessage(m *messageState) { s.dirty.messages[m.id] = true }
 func (s *Server) touchUser(id string)          { s.dirty.users[id] = true }
@@ -128,14 +124,8 @@ type storedMeta struct {
 	UploadSeq     int64  `json:"upload_seq"`
 }
 
-type storedRecord struct {
-	Kind  recordKind     `json:"kind"`
-	Raw   jsontext.Value `json:"raw"`
-	Rooms []string       `json:"rooms"`
-}
-
 type storedCursor struct {
-	From      map[string]any `json:"from"`
+	From      roomlog.Author `json:"from"`
 	MessageID string         `json:"message_id"`
 	ID        int64          `json:"id"`
 }
@@ -144,7 +134,7 @@ type storedRoom struct {
 	Parent      string                  `json:"parent,omitzero"`
 	Private     bool                    `json:"private,omitzero"`
 	Active      map[string]int64        `json:"active,omitzero"`
-	Record      jsontext.Value          `json:"record"`
+	Record      roomlog.RoomRecord      `json:"record"`
 	RecordLogID int64                   `json:"record_log_id"`
 	CreatedID   int64                   `json:"created_id"`
 	LatestID    int64                   `json:"latest_id"`
@@ -154,12 +144,12 @@ type storedRoom struct {
 }
 
 type storedReaction struct {
-	From   map[string]any `json:"from"`
+	From   roomlog.Author `json:"from"`
 	Emojis []string       `json:"emojis"`
 }
 
 type storedMessage struct {
-	From      map[string]any            `json:"from"`
+	From      roomlog.Author            `json:"from"`
 	LogID     int64                     `json:"log_id"`
 	Owner     string                    `json:"owner"`
 	RoomID    string                    `json:"room_id"`
@@ -273,7 +263,7 @@ type storedPush struct {
 
 // metaLocked is the counters entry of the current state.
 func (s *Server) metaLocked() storedMeta {
-	return storedMeta{LastID: int64(s.clock.Last()), GuestNumber: s.guestNumber, AccountNumber: s.accountNumber, EmbedNumber: s.embedNumber, UploadSeq: s.uploadSeq}
+	return storedMeta{LastID: s.log.LastIssued(), GuestNumber: s.guestNumber, AccountNumber: s.accountNumber, EmbedNumber: s.embedNumber, UploadSeq: s.uploadSeq}
 }
 
 func sessionID(key [32]byte) string { return hex.EncodeToString(key[:]) }
@@ -283,10 +273,11 @@ func sessionID(key [32]byte) string { return hex.EncodeToString(key[:]) }
 func (s *Server) flushLocked() {
 	if s.store.Stopped() {
 		s.dirty = newDirtySet()
+		s.log.Entries()
 		s.store.Queue(nil)
 		return
 	}
-	batch := s.entriesLocked(s.dirty)
+	batch := s.entriesLocked(s.dirty, s.log.Entries())
 	meta := s.metaLocked()
 	if meta != s.storedMeta {
 		s.storedMeta = meta
@@ -296,8 +287,9 @@ func (s *Server) flushLocked() {
 	s.store.Queue(batch)
 }
 
-// entriesLocked renders the state named by a dirty set as store entries.
-func (s *Server) entriesLocked(d dirtySet) []store.Entry {
+// entriesLocked renders the state named by a dirty set as store entries,
+// with records', those of the log.
+func (s *Server) entriesLocked(d dirtySet, records []store.Entry) []store.Entry {
 	var batch []store.Entry
 	put := func(kind, id string, value any) {
 		encoded := encodeJSON(value)
@@ -313,9 +305,7 @@ func (s *Server) entriesLocked(d dirtySet) []store.Entry {
 	for _, id := range d.usedIDs {
 		put(entryUsedID, id, true)
 	}
-	for r := range d.records {
-		put(entryRecord, formatID(r.id), storedRecord{Kind: r.kind, Raw: r.raw, Rooms: r.rooms})
-	}
+	batch = append(batch, records...)
 	for id := range d.rooms {
 		if r := s.rooms[id]; r != nil {
 			put(entryRoom, id, s.storedRoomLocked(r))
@@ -397,10 +387,10 @@ func (s *Server) entriesLocked(d dirtySet) []store.Entry {
 
 func (s *Server) storedRoomLocked(r *roomState) storedRoom {
 	stored := storedRoom{
-		Record:      encodeJSON(r.record),
+		Record:      r.record,
 		RecordLogID: r.recordLogID,
-		CreatedID:   r.createdID,
-		LatestID:    r.latestID,
+		CreatedID:   r.log.Created(),
+		LatestID:    r.log.Latest(),
 		Members:     slices.Sorted(maps.Keys(r.members)),
 		Creator:     r.creator,
 		Private:     r.private,
@@ -421,7 +411,7 @@ func (s *Server) storedRoomLocked(r *roomState) storedRoom {
 func storedMessageOf(m *messageState) storedMessage {
 	stored := storedMessage{From: m.from, LogID: m.logID, Owner: m.owner, RoomID: m.roomID}
 	for _, record := range m.records {
-		stored.Records = append(stored.Records, record.id)
+		stored.Records = append(stored.Records, record.ID)
 	}
 	if len(m.reactions) > 0 {
 		stored.Reactions = make(map[string]storedReaction, len(m.reactions))
@@ -519,7 +509,7 @@ func (s *Server) restoreLocked() (map[string]bool, error) {
 		if err := decode(entryMeta, "counters", raw, &s.storedMeta); err != nil {
 			return nil, err
 		}
-		s.clock.Restore(wire.LogID(s.storedMeta.LastID))
+		s.log.RestoreSequence(s.storedMeta.LastID)
 		s.guestNumber, s.accountNumber = s.storedMeta.GuestNumber, s.storedMeta.AccountNumber
 		s.embedNumber, s.uploadSeq = s.storedMeta.EmbedNumber, s.storedMeta.UploadSeq
 	}
@@ -535,16 +525,6 @@ func (s *Server) restoreLocked() (map[string]bool, error) {
 		s.usedIDs[id] = true
 	}
 
-	records := make(map[int64]*logRecord)
-	for id, raw := range entries[entryRecord] {
-		var stored storedRecord
-		if err := decode(entryRecord, id, raw, &stored); err != nil {
-			return nil, err
-		}
-		logID, _ := strconv.ParseInt(id, 10, 64)
-		records[logID] = &logRecord{id: logID, kind: stored.Kind, raw: stored.Raw, rooms: stored.Rooms}
-	}
-
 	storedRooms := make(map[string]storedRoom)
 	for id, raw := range entries[entryRoom] {
 		var stored storedRoom
@@ -556,13 +536,14 @@ func (s *Server) restoreLocked() (map[string]bool, error) {
 			stored.Active = make(map[string]int64)
 		}
 		s.rooms[id] = &roomState{
-			id: id, record: decodeObject(stored.Record), recordLogID: stored.RecordLogID, createdID: stored.CreatedID,
-			latestID: stored.LatestID, creator: stored.Creator, private: stored.Private, active: stored.Active,
+			id: id, record: stored.Record, recordLogID: stored.RecordLogID,
+			log:     roomlog.NewTimeline(id, stored.CreatedID, stored.LatestID),
+			creator: stored.Creator, private: stored.Private, active: stored.Active,
 			members: make(map[string]*userState), reads: make(map[string]readCursor),
 		}
 	}
 	order := slices.SortedFunc(maps.Keys(s.rooms), func(a, b string) int {
-		return int(s.rooms[a].createdID - s.rooms[b].createdID)
+		return int(s.rooms[a].log.Created() - s.rooms[b].log.Created())
 	})
 	for _, id := range order {
 		r := s.rooms[id]
@@ -574,14 +555,14 @@ func (s *Server) restoreLocked() (map[string]bool, error) {
 			r.reads[userID] = readCursor{from: cursor.From, messageID: cursor.MessageID, id: cursor.ID}
 		}
 	}
-	for _, logID := range slices.Sorted(maps.Keys(records)) {
-		record := records[logID]
-		s.records = append(s.records, record)
-		for _, roomID := range record.rooms {
-			if r := s.rooms[roomID]; r != nil {
-				r.log = append(r.log, record)
-			}
+	records, err := s.log.Restore(entries[roomlog.EntryKind], func(id string) *roomlog.Timeline {
+		if r := s.rooms[id]; r != nil {
+			return r.log
 		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
 
 	for id, raw := range entries[entryMessage] {
@@ -595,7 +576,7 @@ func (s *Server) restoreLocked() (map[string]bool, error) {
 		}
 		for _, logID := range stored.Records {
 			if record := records[logID]; record != nil {
-				record.message = id
+				record.Message = id
 				m.records = append(m.records, record)
 			}
 		}

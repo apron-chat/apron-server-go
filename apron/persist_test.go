@@ -16,6 +16,7 @@ import (
 
 	"github.com/coder/websocket"
 
+	"github.com/apron-chat/apron-server-go/apron/internal/roomlog"
 	"github.com/apron-chat/apron-server-go/store"
 )
 
@@ -353,9 +354,11 @@ func (s *Server) dumpLocked() []store.Entry {
 	}
 	for _, r := range s.rooms {
 		all.rooms[r.id] = true
-		for _, record := range r.log {
-			all.records[record] = true
-		}
+	}
+	var records []store.Entry
+	logged, _ := s.log.After(0, 1<<30)
+	for _, record := range logged {
+		records = append(records, roomlog.Entry(record))
 	}
 	for id := range s.messages {
 		all.messages[id] = true
@@ -377,5 +380,5 @@ func (s *Server) dumpLocked() []store.Entry {
 	}
 	all.vapid = s.vapidStored
 	meta := s.metaLocked()
-	return append(s.entriesLocked(all), store.Entry{Kind: entryMeta, ID: "counters", Value: encodeJSON(meta)})
+	return append(s.entriesLocked(all, records), store.Entry{Kind: entryMeta, ID: "counters", Value: encodeJSON(meta)})
 }

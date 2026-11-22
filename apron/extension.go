@@ -659,7 +659,7 @@ func (h *Host) Rooms() []Room {
 	h.s.mu.RLock()
 	defer h.s.mu.RUnlock()
 	rooms := slices.SortedFunc(maps.Values(h.s.rooms), func(a, b *roomState) int {
-		return cmp.Compare(a.createdID, b.createdID)
+		return cmp.Compare(a.log.Created(), b.log.Created())
 	})
 	views := make([]Room, len(rooms))
 	for i, r := range rooms {

@@ -2,16 +2,18 @@ package apron
 
 import (
 	"fmt"
-	"github.com/apron-chat/apron-server-go/wire"
 	"slices"
 	"sort"
 	"time"
 
 	"golang.org/x/time/rate"
+
+	"github.com/apron-chat/apron-server-go/apron/internal/roomlog"
+	"github.com/apron-chat/apron-server-go/wire"
 )
 
 type reactionSet struct {
-	from   map[string]any
+	from   roomlog.Author
 	emojis []string
 }
 
@@ -20,13 +22,13 @@ type reactionSet struct {
 type messageState struct {
 	id string
 	// from is the author identity of every snapshot.
-	from      map[string]any
+	from      roomlog.Author
 	logID     int64
 	owner     string
 	roomID    string
 	reactions map[string]reactionSet
 	// records are every logged snapshot, for redaction; the last is current.
-	records []*logRecord
+	records []*roomlog.Record
 	// cached is what push counting reads of the current snapshot, decoded
 	// once; nil until read, and after a new snapshot.
 	cached *messageInfo
@@ -59,7 +61,7 @@ func (m *messageState) info() *messageInfo {
 
 // snapshot decodes the message's current snapshot, a copy the caller owns.
 func (m *messageState) snapshot() map[string]any {
-	return m.records[len(m.records)-1].value()
+	return decodeObject(m.records[len(m.records)-1].Raw)
 }
 
 // saveMessage creates a message (no message_id) or saves an existing one
@@ -224,7 +226,7 @@ func (s *Server) saveMessage(c *client, p wire.EditParams, reply wire.Reply[wire
 		}
 	}
 
-	logID := s.nextIDLocked()
+	logID := s.log.NextID()
 	if !replacing {
 		messageID = formatID(logID)
 	}
@@ -338,12 +340,12 @@ func (s *Server) commitSnapshotLocked(m *messageState, snapshot map[string]any, 
 	if !moved && len(m.records) == 0 && destination.members[m.owner] != nil {
 		destination.active[m.owner] = logID
 	}
-	record := newLogRecord(logID, kindMessage, snapshot)
-	record.message = m.id
+	record := roomlog.New(logID, roomlog.KindMessage, snapshot)
+	record.Message = m.id
 	m.records = append(m.records, record)
 	s.touchMessage(m)
 	s.appendLocked(record, rooms...)
-	s.deliverLocked(rawNotification("message", record.raw), rooms...)
+	s.deliverLocked(rawNotification("message", record.Raw), rooms...)
 	return moved
 }
 
@@ -356,7 +358,7 @@ func (s *Server) republishLocked(m *messageState, edit func(body map[string]any)
 	if body == nil || snapshot["deleted"] == true || !edit(body) {
 		return
 	}
-	logID := s.nextIDLocked()
+	logID := s.log.NextID()
 	snapshot["log_id"] = formatID(logID)
 	s.commitSnapshotLocked(m, snapshot, logID)
 }
@@ -367,15 +369,8 @@ func (s *Server) republishLocked(m *messageState, edit func(body map[string]any)
 // replaces it with the redacted one it reads later.
 func (s *Server) redactLocked(m *messageState) {
 	for _, record := range m.records {
-		record.rewrite(tombstone)
-		s.touchRecord(record)
+		s.log.Redact(record)
 	}
-}
-
-func tombstone(snapshot map[string]any) {
-	delete(snapshot, "body")
-	delete(snapshot, "ext")
-	snapshot["deleted"] = true
 }
 
 // admitPostLocked applies MessagesPerMinute to new messages, room_set,
@@ -425,16 +420,16 @@ func admitActionLocked(u *userState) *Error {
 }
 
 // reactionElements returns every non-empty reaction set, ordered by user ID.
-func (m *messageState) reactionElements() []any {
+func (m *messageState) reactionElements() []roomlog.Reaction {
 	users := make([]string, 0, len(m.reactions))
 	for userID := range m.reactions {
 		users = append(users, userID)
 	}
 	sort.Strings(users)
-	elements := make([]any, 0, len(users))
+	elements := make([]roomlog.Reaction, 0, len(users))
 	for _, userID := range users {
 		set := m.reactions[userID]
-		elements = append(elements, map[string]any{"from": cloneObject(set.from), "emojis": slices.Clone(set.emojis)})
+		elements = append(elements, roomlog.Reaction{From: set.from, Emojis: slices.Clone(set.emojis)})
 	}
 	return elements
 }
@@ -558,7 +553,7 @@ func (s *Server) react(c *client, p wire.ReactParams, reply wire.Reply[wire.Empt
 		} else {
 			m.reactions[u.id] = reactionSet{from: from, emojis: emojis}
 		}
-		s.commitReactionsLocked(m, []any{map[string]any{"from": cloneObject(from), "emojis": slices.Clone(emojis)}})
+		s.commitReactionsLocked(m, []roomlog.Reaction{{From: from, Emojis: slices.Clone(emojis)}})
 	}
 	_ = reply.Send(wire.Empty{})
 	return nil
@@ -566,17 +561,12 @@ func (s *Server) react(c *client, p wire.ReactParams, reply wire.Reply[wire.Empt
 
 // commitReactionsLocked logs and delivers one reactions record in the
 // message's current room. Reaction sets carry no prev_log_id (§4.3.1).
-func (s *Server) commitReactionsLocked(m *messageState, elements []any) {
-	logID := s.nextIDLocked()
+func (s *Server) commitReactionsLocked(m *messageState, elements []roomlog.Reaction) {
+	logID := s.log.NextID()
 	r := s.rooms[m.roomID]
-	record := newLogRecord(logID, kindReactions, map[string]any{
-		"log_id":     formatID(logID),
-		"message_id": m.id,
-		"room_id":    m.roomID,
-		"reactions":  elements,
-	})
+	record := roomlog.NewReactions(logID, m.id, m.roomID, elements)
 	s.appendLocked(record, r)
-	s.deliverLocked(rawNotification("reactions", record.raw), r)
+	s.deliverLocked(rawNotification("reactions", record.Raw), r)
 }
 
 func normalizeEmojis(values []string) ([]string, *Error) {

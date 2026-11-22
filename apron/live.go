@@ -144,7 +144,7 @@ func (s *Server) postPendingLocked(e *embedState) bool {
 	} else {
 		body["text"], body["format"] = p.text, "markdown"
 	}
-	logID := s.nextIDLocked()
+	logID := s.log.NextID()
 	messageID := formatID(logID)
 	from := u.from()
 	snapshot := map[string]any{
