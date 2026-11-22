@@ -2,11 +2,14 @@ package wire
 
 import (
 	"context"
+	"encoding/json/jsontext"
+	"fmt"
 	"log/slog"
 	"maps"
 	"net"
 	"net/http"
 	"slices"
+	"strconv"
 	"sync"
 	"time"
 
@@ -15,19 +18,53 @@ import (
 	"github.com/apron-chat/apron-server-go/internal/wirecore"
 )
 
-// Server serves the protocol for a Backend. Set its fields before it serves
-// its first connection, or registers its first method; they must not change
-// after.
+// Server serves the protocol for a Backend, and the handlers of its fields.
+// It is configured by setting its fields, in any order, and registering
+// methods (Handle, HandleNotification), before it serves its first
+// connection or opens its first Local one: then it takes its
+// configuration, and its fields must not change after.
 type Server struct {
+	// Backend says who the server is, and who each connection is.
 	Backend Backend
 
-	// OriginPatterns are the origins, other than the server's own, that may
-	// open a WebSocket, as in github.com/coder/websocket's AcceptOptions.
-	OriginPatterns []string
-	// AllowAnyOrigin accepts a WebSocket from any origin, and AllowOrigin,
-	// if set, from the origins it accepts, such as native apps'.
-	AllowAnyOrigin bool
-	AllowOrigin    func(origin string) bool
+	// The handlers of the protocol's requests: each that is set adds its
+	// requests, with their params checked, and its capability in the server
+	// frame (§3.1). Messages and Edits share the message request.
+	Messages  MessageHandler  // message (§3.5.1)
+	Edits     EditHandler     // message with message_id, capability edit (§4.4)
+	Commands  CommandHandler  // command, capability command (§4.1)
+	Profiles  ProfileHandler  // me (§3.3.2)
+	Rooms     RoomHandler     // room_*, capability rooms (§4.2)
+	History   HistoryHandler  // history, capability history (§4.3)
+	Status    StatusHandler   // status, capability status (§4.5)
+	Reactions ReactionHandler // reactions, capability reactions (§4.7)
+	Activity  ActivityHandler // activity, capability activity (§4.6)
+
+	// OnConnect, if set, is told of a new network connection before its
+	// server frame is made, with ctx the connection's context, such as to
+	// keep the backend's own state for it (Conn.SetData). An error closes
+	// the connection; an *Error is sent to the client first, after the
+	// server frame.
+	OnConnect func(ctx context.Context, c *Conn) error
+	// OnDisconnect, if set, is told when a connection ends, signed in or
+	// not, network or Local: every one but those refused as they opened,
+	// by OnConnect or at capacity (MaxConnections).
+	OnDisconnect func(c *Conn)
+	// RefreshDuplicate, if set, brings the result of a request up to date
+	// for a duplicate of it (§1.2), which gets the original's outcome as
+	// the state is now, such as the user's current profile for a repeated
+	// me. Without it, a duplicate gets the original result as it was.
+	RefreshDuplicate func(ctx context.Context, c *Conn, method string, result jsontext.Value) any
+	// CheckScheme, if set, decides which auth schemes a connection may use,
+	// such as one the server frame does not list for everyone. Without it,
+	// the schemes are those of the frame's Auth and Signup: any other
+	// scheme is unsupported, even one PROTOCOL.md does not define (§3.2).
+	CheckScheme func(ctx context.Context, c *Conn, p AuthParams) error
+	// CheckOrigin decides whether a WebSocket may open, by the request that
+	// opens it, such as by its Origin header, as OriginPatterns does; nil
+	// accepts only the server's own origin, and requests without one.
+	CheckOrigin func(r *http.Request) bool
+
 	// ReadLimit bounds a frame from a client, in bytes; 256 KiB by default
 	// (§1).
 	ReadLimit int64
@@ -43,8 +80,8 @@ type Server struct {
 	PingTimeout  time.Duration
 	// MaxConnections bounds the open network connections, not Local ones;
 	// 0 is unlimited. A connection over it is refused before the Backend
-	// hears of it, but for its server frame (Hello, without Connecter or
-	// Disconnecter): it is sent that, then error retry_after (§1.1), and
+	// hears of it, but for its server frame (Hello, without OnConnect or
+	// OnDisconnect): it is sent that, then error retry_after (§1.1), and
 	// closed.
 	MaxConnections int
 	// DedupSize is how many request ids are kept for deduplication (§1.2)
@@ -69,35 +106,121 @@ type Server struct {
 	// default.
 	FenceFailed *Error
 
-	once      sync.Once
-	checkOnce sync.Once
-	mu        sync.Mutex
-	methods   map[string]Method
-	conns     map[*Conn]struct{}
-	network   int
-	closed    bool
-	dedup     *dedup
-	serving   sync.WaitGroup
-	shutdown  chan struct{}
+	once       sync.Once
+	freezeOnce sync.Once
+	checkOnce  sync.Once
+	mu         sync.Mutex
+	// registered are the methods registered with Handle and
+	// HandleNotification, and methods, once the Server took its
+	// configuration, every method it serves.
+	registered map[string]method
+	methods    map[string]method
+	config     config
+	conns      map[*Conn]struct{}
+	network    int
+	closed     bool
+	dedup      *dedup
+	serving    sync.WaitGroup
+	shutdown   chan struct{}
 }
 
-// Handle registers a method, which takes the place of the Backend's for the
-// same name, if any.
-func (s *Server) Handle(name string, m Method) {
+// config is what the Server took of its hooks as it started serving.
+type config struct {
+	onConnect        func(ctx context.Context, c *Conn) error
+	onDisconnect     func(c *Conn)
+	refreshDuplicate func(ctx context.Context, c *Conn, method string, result jsontext.Value) any
+	checkScheme      func(ctx context.Context, c *Conn, p AuthParams) error
+	checkOrigin      func(r *http.Request) bool
+}
+
+// reservedMethods are handled by the Server itself.
+var reservedMethods = map[string]string{
+	"auth": "auth is the Backend's",
+	"ping": "ping is answered by the Server",
+}
+
+// Handle registers a request method, such as an extension's own, which
+// takes the place of a handler field's for the same name: Handle("message",
+// h) handles every message request, edits included, so the server frame
+// lists capability edit only when h.Capability says so. It panics for a
+// name the Server handles itself (auth, ping), a notification (activity;
+// see HandleNotification), a name registered already, or a Handler without
+// Serve. A method registered once the Server serves is served from then on,
+// and its capability is in the server frames sent after.
+func (s *Server) Handle(name string, h Handler) {
+	if h.Serve == nil {
+		panic("wire: Handle " + strconv.Quote(name) + " without Serve")
+	}
+	if wirecore.NotificationOnly[name] {
+		panic("wire: Handle " + strconv.Quote(name) + ": it is a notification; use HandleNotification")
+	}
+	s.register(name, method{capability: h.Capability, noDedup: h.NoDedup, serve: h.Serve})
+}
+
+// HandleNotification registers a notification method a client sends, which
+// takes the place of a handler field's for the same name, as Handle does a
+// request method. It panics for a name the Server handles itself (auth,
+// ping), a name registered already, or a NotificationHandler without Serve.
+// Local.Call refuses a notification method with ErrNotRequest.
+func (s *Server) HandleNotification(name string, h NotificationHandler) {
+	if h.Serve == nil {
+		panic("wire: HandleNotification " + strconv.Quote(name) + " without Serve")
+	}
+	s.register(name, method{capability: h.Capability, notify: h.Serve})
+}
+
+func (s *Server) register(name string, m method) {
+	if why, reserved := reservedMethods[name]; reserved {
+		panic("wire: cannot register " + name + ": " + why)
+	}
+	if name == "" {
+		panic("wire: cannot register a method without a name")
+	}
 	s.init()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.methods[name] = m
+	if _, twice := s.registered[name]; twice {
+		panic("wire: method " + strconv.Quote(name) + " registered twice")
+	}
+	s.registered[name] = m
+	if s.methods != nil {
+		s.methods[name] = m
+	}
 }
 
+// init makes what the Server needs to hold connections and registrations,
+// which takes nothing of its configuration.
 func (s *Server) init() {
 	s.once.Do(func() {
-		s.methods = s.builtins()
+		s.registered = make(map[string]method)
 		s.conns = make(map[*Conn]struct{})
 		s.shutdown = make(chan struct{})
+	})
+}
+
+// freeze takes the Server's configuration, once, as it starts serving: the
+// methods of its handler fields, with those registered in their place, and
+// its hooks.
+func (s *Server) freeze() {
+	s.init()
+	s.freezeOnce.Do(func() {
+		builtins := s.builtins()
 		perUser := s.DedupSize
 		if perUser == 0 {
 			perUser = 1024
+		}
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		for name, m := range s.registered {
+			builtins[name] = m
+		}
+		s.methods = builtins
+		s.config = config{
+			onConnect:        s.OnConnect,
+			onDisconnect:     s.OnDisconnect,
+			refreshDuplicate: s.RefreshDuplicate,
+			checkScheme:      s.CheckScheme,
+			checkOrigin:      s.CheckOrigin,
 		}
 		s.dedup = newDedup(perUser, orDefault(s.DedupUsers, 4096))
 	})
@@ -134,7 +257,7 @@ func (s *Server) fenceFailed() []byte {
 
 // ServeHTTP accepts a WebSocket and serves it until it closes.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	s.init()
+	s.freeze()
 	s.mu.Lock()
 	closed := s.closed
 	s.mu.Unlock()
@@ -142,8 +265,12 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "server is shutting down", http.StatusServiceUnavailable)
 		return
 	}
-	options := &websocket.AcceptOptions{OriginPatterns: s.OriginPatterns}
-	if s.AllowAnyOrigin || s.AllowOrigin != nil && s.AllowOrigin(r.Header.Get("Origin")) {
+	options := &websocket.AcceptOptions{}
+	if check := s.config.checkOrigin; check != nil {
+		if !check(r) {
+			http.Error(w, fmt.Sprintf("request Origin %q is not authorized for Host %q", r.Header.Get("Origin"), r.Host), http.StatusForbidden)
+			return
+		}
 		options.InsecureSkipVerify = true
 	}
 	ws, err := websocket.Accept(w, r, options)
@@ -163,7 +290,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // ServeTransport serves a connection on any transport until it closes.
 // remote and r describe the client, and may be nil.
 func (s *Server) ServeTransport(ctx context.Context, t Transport, remote net.Addr, r *http.Request) {
-	s.init()
+	s.freeze()
 	s.mu.Lock()
 	if s.closed {
 		s.mu.Unlock()
@@ -175,8 +302,9 @@ func (s *Server) ServeTransport(ctx context.Context, t Transport, remote net.Add
 	defer s.serving.Done()
 
 	s.checkOnce.Do(func() {
+		s.logger().Info("wire: serving", "capabilities", s.capabilities())
 		if _, ok := s.method("message"); !ok {
-			s.logger().Warn("wire: the backend takes no messages, which every server should (§3.6): implement Messenger, or Handle message")
+			s.logger().Warn("wire: the server takes no messages, which every server should (§3.6): set Server.Messages, or Handle message")
 		}
 	})
 	ctx, cancel := context.WithCancel(ctx)
@@ -195,7 +323,7 @@ func (s *Server) ServeTransport(ctx context.Context, t Transport, remote net.Add
 		return
 	case s.MaxConnections > 0 && s.network >= s.MaxConnections:
 		s.mu.Unlock()
-		c.info = s.complete(s.Backend.Hello(c))
+		c.info = s.complete(s.Backend.Hello(ctx, c))
 		if frame, err := Encode(c.info); err == nil {
 			c.rt.Send(frame)
 		}
@@ -212,10 +340,10 @@ func (s *Server) ServeTransport(ctx context.Context, t Transport, remote net.Add
 		s.mu.Unlock()
 	}()
 
-	if connecter, ok := s.Backend.(Connecter); ok {
-		if err := connecter.Connected(c); err != nil {
+	if connect := s.config.onConnect; connect != nil {
+		if err := connect(ctx, c); err != nil {
 			if e, ok := asError(err); ok {
-				c.info = s.complete(s.Backend.Hello(c))
+				c.info = s.complete(s.Backend.Hello(ctx, c))
 				if frame, err := Encode(c.info); err == nil {
 					c.rt.Send(frame)
 				}
@@ -227,7 +355,7 @@ func (s *Server) ServeTransport(ctx context.Context, t Transport, remote net.Add
 			return
 		}
 	}
-	c.info = s.complete(s.Backend.Hello(c))
+	c.info = s.complete(s.Backend.Hello(ctx, c))
 	frame, err := Encode(c.info)
 	if err != nil {
 		s.logger().Error("wire: encoding the server frame", "error", err)
@@ -294,8 +422,8 @@ func (s *Server) waitClosed(c *Conn) {
 }
 
 func (s *Server) disconnected(c *Conn) {
-	if d, ok := s.Backend.(Disconnecter); ok {
-		d.Disconnected(c)
+	if disconnect := s.config.onDisconnect; disconnect != nil {
+		disconnect(c)
 	}
 }
 
@@ -306,17 +434,29 @@ func (s *Server) complete(info ServerInfo) ServerInfo {
 	info.Apron = Version
 	info.Ping = max(1, int(s.pingInterval()/time.Second))
 	info.Capabilities = slices.Clone(info.Capabilities)
-	s.mu.Lock()
-	for _, name := range slices.Sorted(maps.Keys(s.methods)) {
-		if capability := s.methods[name].Capability; capability != "" && !slices.Contains(info.Capabilities, capability) {
+	for _, capability := range s.capabilities() {
+		if !slices.Contains(info.Capabilities, capability) {
 			info.Capabilities = append(info.Capabilities, capability)
 		}
 	}
-	s.mu.Unlock()
 	if !slices.Contains(info.Capabilities, "status") {
 		info.Status = nil // Only servers with capability status send it (§4.5.1).
 	}
 	return info
+}
+
+// capabilities are those of the methods the Server handles, by the methods'
+// names.
+func (s *Server) capabilities() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var capabilities []string
+	for _, name := range slices.Sorted(maps.Keys(s.methods)) {
+		if capability := s.methods[name].capability; capability != "" && !slices.Contains(capabilities, capability) {
+			capabilities = append(capabilities, capability)
+		}
+	}
+	return capabilities
 }
 
 // Conns returns the open connections, Local ones included, such as to

@@ -14,9 +14,9 @@ import (
 // needed, is invalid_params. Each reports whether the object has the field
 // at all, as the protocol tells a field sent empty from one left out
 // (§3.3.1), and returns its error as an error that is an *Error, nil when
-// the field is absent or well formed. The typed params of the Backend's optional interfaces are read
-// with them, and a Method reads its own the same way, with the Request's
-// accessors, which read its params.
+// the field is absent or well formed. The typed params of the Server's
+// handlers are read with them, and a Handler reads its own the same way,
+// with the Request's accessors, which read its params.
 type Fields map[string]jsontext.Value
 
 // Fields returns the request's params, by name.

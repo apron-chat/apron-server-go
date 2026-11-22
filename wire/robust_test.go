@@ -47,26 +47,27 @@ func TestParamErrors(t *testing.T) {
 // panicky is a backend whose Auth panics for the name "panic".
 type panicky struct{ backend }
 
-func (b *panicky) Auth(ctx context.Context, c *wire.Conn, p wire.AuthParams) (wire.AuthResult, error) {
+func (b *panicky) Auth(ctx context.Context, c *wire.Conn, p wire.AuthParams, reply wire.Reply[wire.AuthResult]) error {
 	if p.Name == "panic" {
 		c.Notify(wire.Notice("", "held"))
 		panic("auth went wrong")
 	}
-	return b.backend.Auth(ctx, c, p)
+	return b.backend.Auth(ctx, c, p, reply)
 }
 
 // A panicking handler is answered error/internal_error, its outcome is not
 // kept, and the connection goes on.
 func TestHandlerPanics(t *testing.T) {
-	s := &wire.Server{Backend: &panicky{}, Logger: slog.New(slog.DiscardHandler)}
+	s := wired(&wire.Server{Backend: &panicky{}, Logger: slog.New(slog.DiscardHandler)})
 	var calls atomic.Int64
-	s.Handle("boom", wire.Method{Handle: func(context.Context, *wire.Conn, *wire.Request) (any, error) {
+	s.Handle("boom", wire.Handler{Serve: func(_ context.Context, _ *wire.Conn, r *wire.Request) error {
 		if calls.Add(1) == 1 {
 			panic("first time")
 		}
-		return map[string]any{"ok": true}, nil
+		r.Reply(map[string]any{"ok": true})
+		return nil
 	}})
-	s.Handle("tick", wire.Method{Notification: true, Handle: func(context.Context, *wire.Conn, *wire.Request) (any, error) {
+	s.HandleNotification("tick", wire.NotificationHandler{Serve: func(context.Context, *wire.Conn, *wire.Request) {
 		panic("in a notification")
 	}})
 	c, _ := serve(t, s)
@@ -74,9 +75,8 @@ func TestHandlerPanics(t *testing.T) {
 	if f := c.read(); f["id"] != "p" || f.errorCode() != wire.CodeInternalError {
 		t.Fatalf("got %v, want the auth's internal_error", f)
 	}
-	if f := c.read(); f["method"] != "message" {
-		t.Fatalf("got %v, want the frame held during auth", f)
-	}
+	// The frame held during the failed auth is dropped: the next is the
+	// sign-in's result.
 	c.signIn("a")
 	c.send(`{"method":"boom","id":"b"}`)
 	if f := c.read(); f["id"] != "b" || f.errorCode() != wire.CodeInternalError {
@@ -95,10 +95,10 @@ func TestHandlerPanics(t *testing.T) {
 func TestErrorAfterReply(t *testing.T) {
 	var logged bytes.Buffer
 	var mu sync.Mutex
-	s := &wire.Server{Backend: &backend{}, Logger: slog.New(slog.NewTextHandler(lockedWriter{&mu, &logged}, &slog.HandlerOptions{Level: slog.LevelDebug}))}
-	s.Handle("late", wire.Method{Handle: func(_ context.Context, _ *wire.Conn, r *wire.Request) (any, error) {
+	s := wired(&wire.Server{Backend: &backend{}, Logger: slog.New(slog.NewTextHandler(lockedWriter{&mu, &logged}, &slog.HandlerOptions{Level: slog.LevelDebug}))})
+	s.Handle("late", wire.Handler{Serve: func(_ context.Context, _ *wire.Conn, r *wire.Request) error {
 		r.Reply(nil)
-		return nil, wire.Denied("too late")
+		return wire.Denied("too late")
 	}})
 	c, _ := serve(t, s)
 	c.signIn("a")
@@ -129,22 +129,22 @@ func (w lockedWriter) Write(p []byte) (int, error) {
 // request ids (§1.2).
 type oneUser struct{ backend }
 
-func (*oneUser) Auth(_ context.Context, c *wire.Conn, _ wire.AuthParams) (wire.AuthResult, error) {
+func (*oneUser) Auth(_ context.Context, c *wire.Conn, _ wire.AuthParams, reply wire.Reply[wire.AuthResult]) error {
 	c.Notify(wire.Notice("", "welcome"))
-	return wire.AuthResult{You: &wire.User{UserID: "same"}}, nil
+	return reply.Send(wire.AuthResult{You: &wire.User{UserID: "same"}})
 }
 
 // A duplicate waiting for its original on another connection stops waiting
 // when its own connection ends.
 func TestDuplicateWaitEndsWithConnection(t *testing.T) {
 	b := &oneUser{}
-	s := &wire.Server{Backend: b}
+	s := wired(&wire.Server{Backend: b})
 	started, release := make(chan struct{}), make(chan struct{})
 	defer close(release)
-	s.Handle("slow", wire.Method{Handle: func(context.Context, *wire.Conn, *wire.Request) (any, error) {
+	s.Handle("slow", wire.Handler{Serve: func(context.Context, *wire.Conn, *wire.Request) error {
 		close(started)
 		<-release
-		return nil, nil
+		return nil
 	}})
 	c1, _ := serve(t, s)
 	c1.signIn("a")
@@ -167,12 +167,11 @@ func TestDuplicateWaitEndsWithConnection(t *testing.T) {
 // Local notifications are handled, and a Call of a notification-only method
 // returns at once.
 func TestLocalNotify(t *testing.T) {
-	s := &wire.Server{Backend: &backend{}}
+	s := wired(&wire.Server{Backend: &backend{}})
 	got := make(chan string, 1)
-	s.Handle("activity", wire.Method{Capability: "activity", Notification: true, Handle: func(_ context.Context, _ *wire.Conn, r *wire.Request) (any, error) {
+	s.HandleNotification("activity", wire.NotificationHandler{Capability: "activity", Serve: func(_ context.Context, _ *wire.Conn, r *wire.Request) {
 		v, _ := r.Param("typing")
 		got <- string(v)
-		return nil, nil
 	}})
 	l, err := s.Local(wire.LocalOptions{User: wire.User{UserID: "bot"}})
 	if err != nil {
@@ -200,7 +199,7 @@ type connecting struct {
 	connected atomic.Int64
 }
 
-func (b *connecting) Connected(*wire.Conn) error {
+func (b *connecting) Connected(context.Context, *wire.Conn) error {
 	b.connected.Add(1)
 	return nil
 }
@@ -209,7 +208,7 @@ func (b *connecting) Connected(*wire.Conn) error {
 // it, though it is sent the server frame.
 func TestMaxConnectionsFirst(t *testing.T) {
 	b := &connecting{}
-	s := &wire.Server{Backend: b, MaxConnections: 1}
+	s := wired(&wire.Server{Backend: b, MaxConnections: 1, OnConnect: b.Connected})
 	c1, _ := serve(t, s)
 	c2, _ := serve(t, s)
 	if f := c2.read(); f.errorCode() != wire.CodeRetryAfter {
@@ -227,7 +226,7 @@ func TestMaxConnectionsFirst(t *testing.T) {
 
 // Conn.User and SetUser copy the user, roles and ext included.
 func TestUserCopies(t *testing.T) {
-	s := &wire.Server{Backend: &backend{}}
+	s := wired(&wire.Server{Backend: &backend{}})
 	roles := []string{"op"}
 	l, err := s.Local(wire.LocalOptions{User: wire.User{UserID: "bot", Roles: roles, Ext: wire.MustExt("x", map[string]any{"y": 1})}})
 	if err != nil {

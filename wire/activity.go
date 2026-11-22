@@ -53,10 +53,10 @@ type Reaction struct {
 	Emojis []string `json:"emojis"`
 }
 
-// Reactor handles reactions, and adds capability reactions (§4.7). It
-// broadcasts the reaction set, including to c, before it returns.
-type Reactor interface {
-	React(ctx context.Context, c *Conn, p ReactParams) error
+// ReactionHandler handles reactions, and adds capability reactions (§4.7).
+// It broadcasts the reaction set, including to c, before it replies.
+type ReactionHandler interface {
+	React(ctx context.Context, c *Conn, p ReactParams, reply Reply[Empty]) error
 }
 
 func parseReact(r *Request) (p ReactParams, err error) {
@@ -85,16 +85,6 @@ func parseReact(r *Request) (p ReactParams, err error) {
 	return p, nil
 }
 
-func reactionsHandler(reactor Reactor) func(context.Context, *Conn, *Request) (any, error) {
-	return func(ctx context.Context, c *Conn, r *Request) (any, error) {
-		p, err := parseReact(r)
-		if err != nil {
-			return nil, err
-		}
-		return nil, reactor.React(ctx, c, p)
-	}
-}
-
 // ActivityParams are an activity notification's (§4.6): typing, and how far
 // the user has read. A nil field was left out.
 type ActivityParams struct {
@@ -106,9 +96,10 @@ type ActivityParams struct {
 	ReadMessageID *LogID
 }
 
-// Activity handles activity notifications, and adds capability activity
-// (§4.6). They get no reply: params that are not valid are ignored.
-type Activity interface {
+// ActivityHandler handles activity notifications, and adds capability
+// activity (§4.6). They get no reply: params that are not valid are
+// ignored.
+type ActivityHandler interface {
 	Activity(ctx context.Context, c *Conn, p ActivityParams)
 }
 
@@ -129,13 +120,4 @@ func parseActivity(r *Request) (p ActivityParams, err error) {
 		p.ReadMessageID = &read
 	}
 	return p, nil
-}
-
-func activityHandler(a Activity) func(context.Context, *Conn, *Request) (any, error) {
-	return func(ctx context.Context, c *Conn, r *Request) (any, error) {
-		if p, err := parseActivity(r); err == nil {
-			a.Activity(ctx, c, p)
-		}
-		return nil, nil
-	}
 }

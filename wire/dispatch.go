@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json/jsontext"
 	"encoding/json/v2"
+	"errors"
 	"fmt"
 	"runtime/debug"
 	"slices"
@@ -13,26 +14,51 @@ import (
 	"github.com/apron-chat/apron-server-go/internal/wirecore"
 )
 
-// Method handles one request method, or one notification a client sends,
-// such as activity.
-type Method struct {
+// Handler handles one request method by name, raw: an extension's own
+// method, or one that takes the place of a handler field's (Server.Handle).
+type Handler struct {
 	// Capability, if set, is listed in the server frame.
 	Capability string
-	// ReadOnly results are not kept for deduplication (§1.2): a retry runs
-	// the request again.
-	ReadOnly bool
-	// Notification methods are handled with or without an id, and never
-	// answered (§1.1): Handle's result and error are dropped.
-	Notification bool
-	// Handle handles a request from a signed-in connection. Its result is
-	// the reply, {} when nil, unless it replied itself (Request.Reply); an
-	// error that is an *Error is the error reply, and any other is
-	// error/internal_error. The request is also RequestFrom(ctx).
-	Handle func(ctx context.Context, c *Conn, r *Request) (any, error)
+	// NoDedup results are not kept for deduplication (§1.2): a retry runs
+	// the request again, as is right for one that changes nothing, such as
+	// a read.
+	NoDedup bool
+	// Serve handles a request from a signed-in connection, and replies with
+	// r.Reply, or returns an error: one that is an *Error is the error
+	// reply, and any other is error/internal_error. A Serve that returns
+	// nil without replying has {} sent for it.
+	Serve func(ctx context.Context, c *Conn, r *Request) error
 }
 
-// Request is the request a method or a Backend method handles, which its
-// context carries (RequestFrom).
+// NotificationHandler handles a notification method a client sends, such
+// as activity, by name (Server.HandleNotification). It is handled with or
+// without an id, and never answered (§1.1), and before sign-in, ignored
+// (§3.2.2).
+type NotificationHandler struct {
+	// Capability, if set, is listed in the server frame.
+	Capability string
+	// Serve handles a notification from a signed-in connection.
+	Serve func(ctx context.Context, c *Conn, r *Request)
+}
+
+// method is how the Server handles a method: a request, or else a
+// notification.
+type method struct {
+	capability string
+	noDedup    bool
+	// serve handles a request; strict is set when one that returns nil
+	// without replying is a bug, rather than {}.
+	serve  func(ctx context.Context, c *Conn, r *Request) error
+	strict bool
+	// notify, when set, makes the method a notification.
+	notify func(ctx context.Context, c *Conn, r *Request)
+}
+
+// Request is a request, or a notification, as a handler gets it: its
+// method, id, and params, raw, which a Handler reads with its accessors,
+// such as Request.String, and answers with Request.Reply. A typed
+// handler's Reply has it too (Reply.Request), and its context carries it
+// (RequestFrom).
 type Request struct {
 	// Method is the request's method, and ID its id, or "" for a
 	// notification.
@@ -53,7 +79,9 @@ type Request struct {
 
 type requestKey struct{}
 
-// RequestFrom returns the request a context was made for, or nil.
+// RequestFrom returns the request a handler's context was made for, or nil,
+// for code deep in a handler's calls that has the context but not the
+// handler's Request or Reply.
 func RequestFrom(ctx context.Context) *Request {
 	r, _ := ctx.Value(requestKey{}).(*Request)
 	return r
@@ -81,32 +109,20 @@ func (r *Request) Decode(v any) error {
 	return nil
 }
 
-// Reply sends the request's result now, followed by frames with nothing
-// between them, rather than once its handler returns. A backend that keeps
-// its state under a lock replies while it holds it, so that the result
-// reflects every notification sent before it on the connection, and none
-// after (§1); like Conn.Send, it never blocks. It reports false for a
-// second reply, or a closed connection.
+// Reply sends the request's result, any value that encodes as a JSON
+// object, {} for nil, now, followed by frames with nothing between them,
+// as Reply.Send does, but raw: without what Send does with a typed
+// method's result, such as the sign-in of an auth result, or the
+// normalization of a room_list result, which a handler that replies raw
+// does itself. Like Conn.Send, it never blocks. It reports false for a
+// second reply, a result that is not an object (answered
+// error/internal_error), or a closed connection.
 // A notification gets no reply, but its frames are sent.
 func (r *Request) Reply(result any, then ...Frame) bool {
-	r.mu.Lock()
-	defer r.mu.Unlock()
 	if r.notification {
 		return r.c.SendBatch(then...)
 	}
-	if r.replied {
-		return false
-	}
-	frame, encoded, e := r.c.server.encodeReply(r, result, nil)
-	r.replied = true
-	r.outcome = dedupOutcome{encoded, e}
-	if frame == nil {
-		r.c.Close()
-		return false
-	}
-	// A reply is never held back by auth (§3.2.2): what is held is what
-	// comes after it.
-	return r.c.enqueue(append([]Frame{frame}, then...))
+	return r.send(func() (any, error) { return result, nil }, nil, then) == nil
 }
 
 // Replied reports whether the request has its reply.
@@ -116,6 +132,13 @@ func (r *Request) Replied() bool {
 	return r.replied
 }
 
+// failed reports whether the request's reply is an error.
+func (r *Request) failed() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.outcome.err != nil
+}
+
 // fail sends an error reply, unless the request has its reply.
 func (r *Request) fail(e *Error) {
 	r.mu.Lock()
@@ -123,11 +146,7 @@ func (r *Request) fail(e *Error) {
 	if r.replied || r.notification {
 		return
 	}
-	r.replied = true
-	r.outcome = dedupOutcome{err: e}
-	if frame, _, _ := r.c.server.encodeReply(r, nil, e); frame != nil {
-		r.c.enqueue([]Frame{frame})
-	}
+	r.failLocked(e)
 }
 
 // encodeReply renders the reply to r: its result, or e.
@@ -200,7 +219,7 @@ func (s *Server) afterReply(ctx context.Context, method string, err error) {
 	switch e, ok := asError(err); {
 	case ok:
 		s.logger().Debug("wire: a request was refused after its reply", "method", method, "error", e)
-	case ctx.Err() != nil:
+	case ctx.Err() != nil, errors.Is(err, ErrClosed):
 		// Cut short by its connection's end.
 	default:
 		s.logger().Error("wire: a request failed after its reply", "method", method, "error", err)
@@ -242,13 +261,13 @@ func (s *Server) processFrame(ctx context.Context, c *Conn, payload []byte) {
 		return
 	}
 	m, found := s.method(r.Method)
-	if found && m.Notification {
+	if found && m.notify != nil {
 		// The id of a notification method may be ignored, and the frame
 		// handled as a notification (§1.1); before sign-in, it is ignored
 		// (§3.2.2).
 		r.notification = true
 		if c.UserID() != "" && !c.Closing() {
-			_, _ = m.Handle(context.WithValue(ctx, requestKey{}, r), c, r)
+			m.notify(context.WithValue(ctx, requestKey{}, r), c, r)
 		}
 		return
 	}
@@ -300,8 +319,8 @@ func (s *Server) processFrame(ctx context.Context, c *Conn, payload []byte) {
 			return
 		}
 		var result any = outcome.result
-		if refresher, ok := s.Backend.(Refresher); ok {
-			result = refresher.Refresh(c, r.Method, outcome.result)
+		if refresh := s.config.refreshDuplicate; refresh != nil {
+			result = refresh(ctx, c, r.Method, outcome.result)
 		}
 		r.Reply(result)
 		return
@@ -314,93 +333,110 @@ func (s *Server) processFrame(ctx context.Context, c *Conn, payload []byte) {
 		r.mu.Unlock()
 		// Failed requests are not kept, and neither are reads: a retry
 		// runs again. Concurrent duplicates still share the outcome.
-		s.dedup.finish(userID, r.ID, entry, outcome, outcome.err != nil || m.ReadOnly)
+		s.dedup.finish(userID, r.ID, entry, outcome, outcome.err != nil || m.noDedup)
 	}
 }
 
 // serve runs a request's handler, and sends its reply: its result, or its
 // error. A panic in either is the request's error/internal_error, so that
 // the request has its outcome for deduplication all the same.
-func (s *Server) serve(ctx context.Context, c *Conn, r *Request, m Method) {
+func (s *Server) serve(ctx context.Context, c *Conn, r *Request, m method) {
 	defer s.recoverFrame(r)
-	result, err := m.Handle(context.WithValue(ctx, requestKey{}, r), c, r)
-	switch {
-	case err != nil && r.Replied():
+	s.finish(ctx, r, m.strict, m.serve(context.WithValue(ctx, requestKey{}, r), c, r))
+}
+
+// finish answers a request whose handler returned err: with err, unless it
+// replied, and else with {}, or, when strict, error/internal_error, as a
+// handler that returns nil without replying is a bug.
+func (s *Server) finish(ctx context.Context, r *Request, strict bool, err error) {
+	switch replied := r.Replied(); {
+	case err != nil && replied:
 		s.afterReply(ctx, r.Method, err)
 	case err != nil:
 		r.fail(s.protocolError(ctx, r.Method, err))
+	case replied:
+	case strict:
+		s.logger().Error(errNoReply(r.Method).Error(), "method", r.Method)
+		r.fail(internalError())
 	default:
-		r.Reply(result)
+		r.Reply(nil)
 	}
 }
 
-// method returns the handler of a method: one registered with Handle, or
-// one of the Backend's optional interfaces.
-func (s *Server) method(name string) (Method, bool) {
+// method returns the handler of a method: one registered with Handle or
+// HandleNotification, or one of the Server's handler fields.
+func (s *Server) method(name string) (method, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	m, ok := s.methods[name]
 	return m, ok
 }
 
-// builtins are the methods of the Backend's optional interfaces.
-func (s *Server) builtins() map[string]Method {
-	methods := map[string]Method{}
-	_, messenger := s.Backend.(Messenger)
-	_, editor := s.Backend.(Editor)
-	switch {
-	case editor:
-		methods["message"] = Method{Capability: "edit", Handle: s.message}
-	case messenger:
-		methods["message"] = Method{Handle: s.message}
-	}
-	if p, ok := s.Backend.(Profiler); ok {
-		methods["me"] = Method{Handle: func(ctx context.Context, c *Conn, r *Request) (any, error) {
-			params, perr := parseMe(r)
-			if perr != nil {
-				return nil, perr
-			}
-			you, err := p.Me(ctx, c, params)
-			if err != nil || r.Replied() {
-				return nil, err
-			}
-			c.SetUser(you.User)
-			return meResult{You: you}, nil
-		}}
-	}
-	if cmd, ok := s.Backend.(Commander); ok {
-		methods["command"] = Method{Capability: "command", Handle: func(ctx context.Context, c *Conn, r *Request) (any, error) {
-			for _, name := range []string{"message_id", "deleted"} {
-				if r.Has(name) {
-					return nil, InvalidParams("A command has no " + name + "; send it as a message instead")
-				}
-			}
-			m, err := parseMessage(r)
-			if err != nil {
-				return nil, err
-			}
-			if m.body == nil {
-				return nil, InvalidParams("A command needs a body")
-			}
-			return cmd.Command(ctx, c, CommandParams{RoomID: m.roomID, Body: m.body, ReplyTo: m.replyTo, Ext: m.ext})
-		}}
-	}
-	if rooms, ok := s.Backend.(Rooms); ok {
-		for _, name := range []string{"room_list", "room_join", "room_leave", "room_set"} {
-			methods[name] = Method{Capability: "rooms", ReadOnly: name == "room_list", Handle: roomHandler(rooms, name)}
+// typed makes a request handler of a typed one: its params parsed by parse,
+// and its Reply finished by reply, such as with the method's checks.
+func typed[P, T any](parse func(*Request) (P, error), handle func(context.Context, *Conn, P, Reply[T]) error, reply func(c *Conn, p P, reply *Reply[T])) method {
+	return method{strict: !isEmpty[T](), serve: func(ctx context.Context, c *Conn, r *Request) error {
+		p, err := parse(r)
+		if err != nil {
+			return err
 		}
+		rp := Reply[T]{r: r}
+		if reply != nil {
+			reply(c, p, &rp)
+		}
+		return handle(ctx, c, p, rp)
+	}}
+}
+
+// with returns m with a capability, and noDedup.
+func (m method) with(capability string, noDedup bool) method {
+	m.capability, m.noDedup = capability, noDedup
+	return m
+}
+
+// builtins are the methods of the Server's handler fields.
+func (s *Server) builtins() map[string]method {
+	methods := map[string]method{}
+	switch messages, edits := s.Messages, s.Edits; {
+	case edits != nil:
+		methods["message"] = method{capability: "edit", strict: true, serve: s.message(messages, edits)}
+	case messages != nil:
+		methods["message"] = method{strict: true, serve: s.message(messages, nil)}
 	}
-	if h, ok := s.Backend.(Historian); ok {
-		methods["history"] = Method{Capability: "history", ReadOnly: true, Handle: historyHandler(h)}
+	if p := s.Profiles; p != nil {
+		methods["me"] = typed(parseMe, p.Me, func(c *Conn, _ MeParams, reply *Reply[CurrentUser]) {
+			reply.check = func(you *CurrentUser) (any, error) { return meResult{You: *you}, nil }
+			reply.apply = func(you *CurrentUser) { c.SetUser(you.User) }
+		})
 	}
-	if st, ok := s.Backend.(Statuser); ok {
-		methods["status"] = Method{Capability: "status", Handle: statusHandler(st)}
+	if cmd := s.Commands; cmd != nil {
+		methods["command"] = typed(parseCommand, cmd.Command, nil).with("command", false)
 	}
-	if reactor, ok := s.Backend.(Reactor); ok {
-		methods["reactions"] = Method{Capability: "reactions", Handle: reactionsHandler(reactor)}
+	if rooms := s.Rooms; rooms != nil {
+		methods["room_list"] = typed(parseRoomList, rooms.RoomList, func(_ *Conn, p RoomListParams, reply *Reply[RoomListResult]) {
+			reply.check = func(result *RoomListResult) (any, error) { return normalizeRoomList(p, *result), nil }
+		}).with("rooms", true)
+		methods["room_join"] = typed(parseRoomJoin, rooms.RoomJoin, nil).with("rooms", false)
+		methods["room_leave"] = typed(parseRoomLeave, rooms.RoomLeave, nil).with("rooms", false)
+		methods["room_set"] = typed(parseRoomSet, rooms.RoomSet, nil).with("rooms", false)
 	}
-	if a, ok := s.Backend.(Activity); ok {
-		methods["activity"] = Method{Capability: "activity", Notification: true, Handle: activityHandler(a)}
+	if h := s.History; h != nil {
+		methods["history"] = typed(parseHistory, h.History, nil).with("history", true)
+	}
+	if st := s.Status; st != nil {
+		methods["status"] = typed(parseStatus, st.Status, nil).with("status", false)
+	}
+	if reactions := s.Reactions; reactions != nil {
+		methods["reactions"] = typed(parseReact, reactions.React, nil).with("reactions", false)
+	}
+	if a := s.Activity; a != nil {
+		methods["activity"] = method{capability: "activity", notify: func(ctx context.Context, c *Conn, r *Request) {
+			// Params that are not valid are ignored, as a notification is
+			// never answered (§1.1).
+			if p, err := parseActivity(r); err == nil {
+				a.Activity(ctx, c, p)
+			}
+		}}
 	}
 	return methods
 }
@@ -492,38 +528,58 @@ func parseBody(raw jsontext.Value, fields Fields) (*Body, error) {
 }
 
 // message applies the core rules of a message request (§3.5.1, §3.6), and
-// passes it on to the backend.
-func (s *Server) message(ctx context.Context, c *Conn, r *Request) (any, error) {
+// passes it on to messages, a new message, or edits, an existing one.
+func (s *Server) message(messages MessageHandler, edits EditHandler) func(context.Context, *Conn, *Request) error {
+	return func(ctx context.Context, c *Conn, r *Request) error {
+		m, err := parseMessage(r)
+		if err != nil {
+			return err
+		}
+		reply := Reply[MessageResult]{r: r}
+		if m.messageID != 0 || m.deleted {
+			switch {
+			case edits == nil:
+				return Unsupported("This server does not edit messages")
+			case m.messageID == 0:
+				// Only a save of an existing message deletes it (§4.4).
+				return InvalidParams("Cannot create a deleted message")
+			}
+			return edits.Edit(ctx, c, EditParams{MessageID: m.messageID, RoomID: m.roomID, Deleted: m.deleted, Body: m.body, ReplyTo: m.replyTo, Ext: m.ext}, reply)
+		}
+		if m.body == nil {
+			return Missing("body")
+		}
+		if messages == nil {
+			return Unsupported("This server takes no new messages")
+		}
+		return messages.Message(ctx, c, MessageParams{RoomID: m.roomID, Body: m.body, ReplyTo: m.replyTo, Ext: m.ext}, reply)
+	}
+}
+
+// parseCommand reads a command's params (§4.1): a message's, but for
+// message_id and deleted, and with a body.
+func parseCommand(r *Request) (CommandParams, error) {
+	for _, name := range []string{"message_id", "deleted"} {
+		if r.Has(name) {
+			return CommandParams{}, InvalidParams("A command has no " + name + "; send it as a message instead")
+		}
+	}
 	m, err := parseMessage(r)
 	if err != nil {
-		return nil, err
-	}
-	if m.messageID != 0 || m.deleted {
-		editor, ok := s.Backend.(Editor)
-		switch {
-		case !ok:
-			return nil, Unsupported("This server does not edit messages")
-		case m.messageID == 0:
-			// Only a save of an existing message deletes it (§4.4).
-			return nil, InvalidParams("Cannot create a deleted message")
-		}
-		return editor.Edit(ctx, c, EditParams{MessageID: m.messageID, RoomID: m.roomID, Deleted: m.deleted, Body: m.body, ReplyTo: m.replyTo, Ext: m.ext})
+		return CommandParams{}, err
 	}
 	if m.body == nil {
-		return nil, Missing("body")
+		return CommandParams{}, InvalidParams("A command needs a body")
 	}
-	messenger, ok := s.Backend.(Messenger)
-	if !ok {
-		return nil, Unsupported("This server takes no new messages")
-	}
-	return messenger.Message(ctx, c, MessageParams{RoomID: m.roomID, Body: m.body, ReplyTo: m.replyTo, Ext: m.ext})
+	return CommandParams{RoomID: m.roomID, Body: m.body, ReplyTo: m.replyTo, Ext: m.ext}, nil
 }
 
 // definedSchemes are the auth schemes PROTOCOL.md defines.
 var definedSchemes = []string{"guest", "token", "webauthn", "email", "external"}
 
-// checkScheme is the default SchemeChecker: the schemes of the server frame.
-func checkScheme(c *Conn, p AuthParams) error {
+// checkScheme is the default of Server.CheckScheme: the schemes of the
+// server frame.
+func checkScheme(_ context.Context, c *Conn, p AuthParams) error {
 	info := c.Info()
 	if slices.Contains(info.Auth, p.Scheme) || slices.Contains(info.Signup, p.Scheme) {
 		return nil
@@ -549,46 +605,42 @@ func (s *Server) authenticate(ctx context.Context, c *Conn, r *Request) {
 	}
 	p.Raw = r.Params
 	check := checkScheme
-	if checker, ok := s.Backend.(SchemeChecker); ok {
-		check = checker.CheckScheme
+	if s.config.checkScheme != nil {
+		check = s.config.checkScheme
 	}
-	if err := check(c, p); err != nil {
+	if err := check(ctx, c, p); err != nil {
 		r.fail(s.protocolError(ctx, "auth", err))
 		return
 	}
 	// Whatever the backend sends while the sign-in runs comes after its
-	// result (§3.2.2).
+	// result (§3.2.2), and, when it fails, is not sent: it was about a
+	// sign-in that did not happen.
 	c.hold()
-	defer c.release()
-	// A panic is answered before the frames held meanwhile are sent, as an
-	// error is.
+	defer func() { c.release(r.failed()) }()
+	// A panic is answered before the frames held meanwhile are let go, as
+	// an error is.
 	defer s.recoverFrame(r)
-	result, err := s.Backend.Auth(context.WithValue(ctx, requestKey{}, r), c, p)
-	switch {
-	case r.Replied():
-		if err != nil {
-			s.afterReply(ctx, "auth", err)
+	reply := Reply[AuthResult]{r: r, check: s.checkAuth, apply: func(result *AuthResult) {
+		if result.You != nil {
+			c.SetUser(*result.You)
 		}
-		return
-	case err != nil:
-		r.fail(s.protocolError(ctx, "auth", err))
-		return
-	case result.You != nil && !ValidID(result.You.UserID):
-		s.logger().Error("wire: auth assigned an invalid user_id", "user_id", result.You.UserID)
-		r.fail(internalError())
-		return
+	}}
+	err := s.Backend.Auth(context.WithValue(ctx, requestKey{}, r), c, p, reply)
+	s.finish(ctx, r, true, err)
+}
+
+// checkAuth checks an auth result: one that signs in has a valid user_id,
+// and Extra names no field of its own.
+func (s *Server) checkAuth(result *AuthResult) (any, error) {
+	if result.You != nil && !ValidID(result.You.UserID) {
+		return nil, fmt.Errorf("auth assigned an invalid user_id %q", result.You.UserID)
 	}
 	for _, name := range []string{"you", "token"} {
 		if _, ok := result.Extra[name]; ok {
-			s.logger().Error("wire: an auth result's Extra names a field of its own", "field", name)
-			r.fail(internalError())
-			return
+			return nil, fmt.Errorf("an auth result's Extra names its own field %s", name)
 		}
 	}
-	if result.You != nil {
-		c.SetUser(*result.You)
-	}
-	r.Reply(result)
+	return *result, nil
 }
 
 // meResult is the result of me (§3.3.2).

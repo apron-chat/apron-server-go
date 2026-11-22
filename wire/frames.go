@@ -14,8 +14,7 @@ import (
 const Version = 10
 
 // ServerInfo is the server frame (PROTOCOL.md §3.1). Server fills in Apron
-// and Ping, and adds the capabilities of the interfaces the backend
-// implements.
+// and Ping, and adds the capabilities of the methods it handles.
 type ServerInfo struct {
 	Apron        int               `json:"apron"`
 	Auth         []string          `json:"auth"`

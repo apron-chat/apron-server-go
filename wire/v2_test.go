@@ -16,9 +16,9 @@ import (
 // A handler that replies itself, as a backend holding its own lock does,
 // gets its result and its frames out together, and nothing else.
 func TestReplyInHandler(t *testing.T) {
-	s := &wire.Server{Backend: &backend{}}
+	s := wired(&wire.Server{Backend: &backend{}})
 	var mu sync.Mutex
-	s.Handle("snapshot", wire.Method{Handle: func(ctx context.Context, c *wire.Conn, r *wire.Request) (any, error) {
+	s.Handle("snapshot", wire.Handler{Serve: func(ctx context.Context, c *wire.Conn, r *wire.Request) error {
 		mu.Lock()
 		defer mu.Unlock()
 		after, _ := wire.EncodeRaw("cursor", map[string]any{"n": 1})
@@ -28,7 +28,7 @@ func TestReplyInHandler(t *testing.T) {
 		if r.Reply(map[string]any{"state": 2}) {
 			t.Error("a second Reply was sent")
 		}
-		return map[string]any{"ignored": true}, nil
+		return nil
 	}})
 	c, _ := serve(t, s)
 	c.signIn("a")
@@ -50,12 +50,11 @@ func TestReplyInHandler(t *testing.T) {
 // Notification methods run with or without an id, only once signed in, and
 // are never answered.
 func TestNotificationMethod(t *testing.T) {
-	s := &wire.Server{Backend: &backend{}}
+	s := wired(&wire.Server{Backend: &backend{}})
 	got := make(chan string, 4)
-	s.Handle("activity", wire.Method{Capability: "activity", Notification: true, Handle: func(_ context.Context, _ *wire.Conn, r *wire.Request) (any, error) {
+	s.HandleNotification("activity", wire.NotificationHandler{Capability: "activity", Serve: func(_ context.Context, _ *wire.Conn, r *wire.Request) {
 		v, _ := r.Param("typing")
 		got <- string(v)
-		return nil, errors.New("never sent")
 	}})
 	c, hello := serve(t, s)
 	if !strings.Contains(string(mustJSON(hello)), `"activity"`) {
@@ -81,20 +80,18 @@ type refreshing struct {
 	version int
 }
 
-func (b *refreshing) Refresh(_ *wire.Conn, method string, result jsontext.Value) any {
+func (b *refreshing) Refresh(_ context.Context, _ *wire.Conn, method string, result jsontext.Value) any {
 	return map[string]any{"method": method, "version": b.version}
 }
 
-var _ wire.Profiler = (*refreshing)(nil)
-
-func (b *refreshing) Me(_ context.Context, c *wire.Conn, _ wire.MeParams) (wire.CurrentUser, error) {
+func (b *refreshing) Me(_ context.Context, c *wire.Conn, _ wire.MeParams, reply wire.Reply[wire.CurrentUser]) error {
 	b.version++
-	return wire.CurrentUser{User: *c.User()}, nil
+	return reply.Send(wire.CurrentUser{User: *c.User()})
 }
 
-func TestRefresher(t *testing.T) {
+func TestRefreshDuplicate(t *testing.T) {
 	b := &refreshing{}
-	c, _ := serve(t, &wire.Server{Backend: b})
+	c, _ := serve(t, wired(&wire.Server{Backend: b, RefreshDuplicate: b.Refresh}))
 	c.signIn("a")
 	c.send(`{"method":"me","id":"m","params":{"name":"x"}}`)
 	c.read()
@@ -107,15 +104,16 @@ func TestRefresher(t *testing.T) {
 
 type anyScheme struct{ backend }
 
-func (*anyScheme) CheckScheme(_ *wire.Conn, p wire.AuthParams) error {
+func (*anyScheme) CheckScheme(_ context.Context, _ *wire.Conn, p wire.AuthParams) error {
 	if p.Scheme == "secret" {
 		return nil
 	}
 	return wire.Denied("no")
 }
 
-func TestSchemeChecker(t *testing.T) {
-	c, _ := serve(t, &wire.Server{Backend: &anyScheme{}})
+func TestCheckScheme(t *testing.T) {
+	b := &anyScheme{}
+	c, _ := serve(t, wired(&wire.Server{Backend: b, CheckScheme: b.CheckScheme}))
 	c.send(`{"method":"auth","id":"1","params":{"scheme":"guest"}}`)
 	if f := c.read(); f.errorCode() != wire.CodeDenied {
 		t.Fatalf("got %v", f)
@@ -127,8 +125,8 @@ func TestSchemeChecker(t *testing.T) {
 }
 
 func TestAnnounce(t *testing.T) {
-	s := &wire.Server{Backend: &backend{}}
-	s.Handle("ext:thing", wire.Method{Capability: "ext:thing", Handle: func(context.Context, *wire.Conn, *wire.Request) (any, error) { return nil, nil }})
+	s := wired(&wire.Server{Backend: &backend{}})
+	s.Handle("ext:thing", wire.Handler{Capability: "ext:thing", Serve: func(context.Context, *wire.Conn, *wire.Request) error { return nil }})
 	c, _ := serve(t, s)
 	c.signIn("a")
 	conn := onlyConn(t, s)
@@ -151,9 +149,9 @@ func TestAnnounce(t *testing.T) {
 
 func TestLocal(t *testing.T) {
 	b := &backend{}
-	s := &wire.Server{Backend: b}
+	s := wired(&wire.Server{Backend: b})
 	var once sync.Once
-	s.Handle("whoami", wire.Method{Handle: func(ctx context.Context, c *wire.Conn, r *wire.Request) (any, error) {
+	s.Handle("whoami", wire.Handler{Serve: func(ctx context.Context, c *wire.Conn, r *wire.Request) error {
 		c.NotifyRaw("hello", map[string]any{})
 		var err error
 		once.Do(func() {
@@ -163,7 +161,8 @@ func TestLocal(t *testing.T) {
 		if !errors.Is(err, wire.ErrReentrant) && err != nil {
 			t.Errorf("reentrant call: %v", err)
 		}
-		return map[string]any{"user_id": c.UserID()}, nil
+		r.Reply(map[string]any{"user_id": c.UserID()})
+		return nil
 	}})
 	frames := make(chan string, 8)
 	l, err := s.Local(wire.LocalOptions{User: wire.User{UserID: "bot"}, OnFrame: func(f wire.Frame) { frames <- string(f) }})
@@ -210,7 +209,7 @@ func TestLocal(t *testing.T) {
 }
 
 func TestLocalFellBehind(t *testing.T) {
-	s := &wire.Server{Backend: &backend{}}
+	s := wired(&wire.Server{Backend: &backend{}})
 	block := make(chan struct{})
 	defer close(block)
 	l, err := s.Local(wire.LocalOptions{User: wire.User{UserID: "bot"}, Queue: 2, OnFrame: func(wire.Frame) { <-block }})

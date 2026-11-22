@@ -5,38 +5,51 @@ import (
 	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"maps"
+	"net/http"
 
 	"github.com/apron-chat/apron-server-go/wire"
 )
 
 // The server speaks the protocol through package wire, as any server built
 // on it does: wire carries the connections, frames, sign-in order, and
-// deduplication, and backend answers for the Server. Every request goes to
-// the Server's operations, registered as wire methods (registerOps), which
-// reply while they hold s.mu where their results describe state
-// (request.reply).
+// deduplication, and backend answers for the Server, as its Backend and
+// each of its handlers. The Server's other operations are wire methods
+// (registerOp). Each replies while it holds s.mu where its result describes
+// state (request.reply).
 
-// backend is the Server as wire's Backend, kept unexported so that wire's
-// interfaces are not part of the Server's API.
+// backend is the Server as wire's Backend and handlers, kept unexported so
+// that wire's interfaces are not part of the Server's API.
 type backend struct{ s *Server }
-
-var (
-	_ wire.Backend       = backend{}
-	_ wire.Connecter     = backend{}
-	_ wire.Disconnecter  = backend{}
-	_ wire.Refresher     = backend{}
-	_ wire.SchemeChecker = backend{}
-)
 
 // newWire makes the Server's wire server, and registers its operations.
 func (s *Server) newWire() {
 	config := s.config
+	b := backend{s}
+	patterns := wire.OriginPatterns(config.OriginPatterns...)
 	s.wire = &wire.Server{
-		Backend:        backend{s},
-		OriginPatterns: config.OriginPatterns,
-		AllowAnyOrigin: config.AllowAnyOrigin,
-		// Native apps' passkey origins (§4.10) open WebSockets too.
-		AllowOrigin:    s.nativeOrigin,
+		Backend:   b,
+		Messages:  b,
+		Edits:     b,
+		Commands:  b,
+		Profiles:  b,
+		Rooms:     b,
+		History:   b,
+		Status:    b,
+		Reactions: b,
+		Activity:  b,
+
+		OnConnect:        b.connected,
+		OnDisconnect:     b.disconnected,
+		RefreshDuplicate: b.refresh,
+		// Every scheme goes through to Auth, which knows the server's own
+		// rules, such as a service token's sign-in where no scheme offers
+		// tokens.
+		CheckScheme: func(context.Context, *wire.Conn, wire.AuthParams) error { return nil },
+		CheckOrigin: func(r *http.Request) bool {
+			// Native apps' passkey origins (§4.10) open WebSockets too.
+			return config.AllowAnyOrigin || patterns(r) || s.nativeOrigin(r.Header.Get("Origin"))
+		},
+
 		ReadLimit:      config.ReadLimit,
 		OutgoingQueue:  config.OutgoingQueue,
 		WriteTimeout:   config.WriteTimeout,
@@ -55,44 +68,27 @@ func (s *Server) newWire() {
 
 // registerOp makes an operation a wire method.
 func (s *Server) registerOp(name string, op operation) {
-	s.wire.Handle(name, wire.Method{
-		ReadOnly:     readOnlyOps[name],
-		Notification: name == "activity",
-		Handle: func(ctx context.Context, wc *wire.Conn, r *wire.Request) (any, error) {
-			c := clientOf(wc)
-			if c == nil {
-				return nil, internalError()
-			}
-			// Extension code the request runs gets its context (Host).
-			previous := c.request
-			c.request = ctx
-			defer func() { c.request = previous }()
-			result, replied, err := op(s, c, newRequest(r))
-			switch {
-			case err != nil:
-				return nil, err
-			case replied:
-				return nil, nil
-			}
-			return result, nil
+	s.wire.Handle(name, wire.Handler{
+		NoDedup: readOnlyOps[name],
+		Serve: func(ctx context.Context, wc *wire.Conn, r *wire.Request) error {
+			return serveOp(ctx, wc, r, op, s)
 		},
 	})
 }
 
-// run runs an operation for one of wire's typed interfaces, as registerOp
-// does for a method: its result goes out as it replies (request.reply), or
-// once it returns.
-func (b backend) run(ctx context.Context, wc *wire.Conn, op func(c *client, req request) (any, bool, *Error)) error {
+// serveOp runs an operation for a request: its result goes out as it
+// replies (request.reply), or once it returns.
+func serveOp(ctx context.Context, wc *wire.Conn, r *wire.Request, op operation, s *Server) error {
 	c := clientOf(wc)
-	r := wire.RequestFrom(ctx)
-	if c == nil || r == nil {
+	if c == nil {
 		return internalError()
 	}
+	// Extension code the request runs gets its context (Host).
 	previous := c.request
 	c.request = ctx
 	defer func() { c.request = previous }()
 	req := newRequest(r)
-	result, replied, err := op(c, req)
+	result, replied, err := op(s, c, req)
 	switch {
 	case err != nil:
 		return err
@@ -102,13 +98,22 @@ func (b backend) run(ctx context.Context, wc *wire.Conn, op func(c *client, req 
 	return nil
 }
 
+// run runs an operation for one of wire's typed handlers, raw, as
+// registerOp does for a method: it replies through reply's request, which
+// the Server's operations do while they hold s.mu.
+func run[T any](b backend, ctx context.Context, wc *wire.Conn, reply wire.Reply[T], op func(c *client, req request) (any, bool, *Error)) error {
+	return serveOp(ctx, wc, reply.Request(), func(_ *Server, c *client, req request) (any, bool, *Error) {
+		return op(c, req)
+	}, b.s)
+}
+
 func clientOf(wc *wire.Conn) *client {
 	c, _ := wc.Data().(*client)
 	return c
 }
 
-// Connected keeps a new WebSocket's client.
-func (b backend) Connected(wc *wire.Conn) error {
+// connected keeps a new WebSocket's client.
+func (b backend) connected(_ context.Context, wc *wire.Conn) error {
 	s := b.s
 	r := wc.HTTPRequest()
 	c := &client{server: s, conn: wc}
@@ -129,8 +134,8 @@ func (b backend) Connected(wc *wire.Conn) error {
 	return nil
 }
 
-// Disconnected forgets a closed connection, network or session.
-func (b backend) Disconnected(wc *wire.Conn) {
+// disconnected forgets a closed connection, network or session.
+func (b backend) disconnected(wc *wire.Conn) {
 	c := clientOf(wc)
 	if c == nil {
 		return
@@ -154,7 +159,7 @@ func (b backend) Disconnected(wc *wire.Conn) {
 }
 
 // Hello is the server frame of a new connection.
-func (b backend) Hello(wc *wire.Conn) wire.ServerInfo {
+func (b backend) Hello(_ context.Context, wc *wire.Conn) wire.ServerInfo {
 	s := b.s
 	c := clientOf(wc)
 	s.mu.Lock()
@@ -165,32 +170,24 @@ func (b backend) Hello(wc *wire.Conn) wire.ServerInfo {
 	return s.serverFrameLocked(c)
 }
 
-// CheckScheme lets every scheme through to Auth, which knows the server's
-// own rules, such as a service token's sign-in where no scheme offers
-// tokens.
-func (backend) CheckScheme(*wire.Conn, wire.AuthParams) error { return nil }
-
-// Auth signs a connection in. authenticate replies itself when it succeeds,
-// while it holds s.mu, and sets the connection's user (attachLocked).
-func (b backend) Auth(ctx context.Context, wc *wire.Conn, _ wire.AuthParams) (wire.AuthResult, error) {
-	c := clientOf(wc)
-	if c == nil {
-		return wire.AuthResult{}, internalError()
-	}
-	previous := c.request
-	c.request = ctx
-	defer func() { c.request = previous }()
-	if _, err := b.s.authenticate(c, newRequest(wire.RequestFrom(ctx))); err != nil {
-		return wire.AuthResult{}, err
-	}
-	return wire.AuthResult{}, nil
+// Auth signs a connection in. authenticate replies raw when it succeeds,
+// while it holds s.mu, and signs the connection in itself in the same hold
+// (attachLocked), so that every notification it sends after the result
+// reaches the connection. Its results are objects of the server's own,
+// such as a ceremony's options, or the token of a session, as it stores
+// them, so they are not AuthResults.
+func (b backend) Auth(ctx context.Context, wc *wire.Conn, _ wire.AuthParams, reply wire.Reply[wire.AuthResult]) error {
+	return run(b, ctx, wc, reply, func(c *client, req request) (any, bool, *Error) {
+		_, err := b.s.authenticate(c, req)
+		return nil, req.w.Replied(), err
+	})
 }
 
-// Refresh brings a duplicate's result up to date (§1.2): `me` answers with
+// refresh brings a duplicate's result up to date (§1.2): `me` answers with
 // the current profile, and a message result lists only the write URLs that
 // are still unused. Other results name what the request made, which does
 // not change.
-func (b backend) Refresh(wc *wire.Conn, method string, result jsontext.Value) any {
+func (b backend) refresh(_ context.Context, wc *wire.Conn, method string, result jsontext.Value) any {
 	s := b.s
 	c := clientOf(wc)
 	if c == nil {
@@ -229,69 +226,61 @@ func (b backend) Refresh(wc *wire.Conn, method string, result jsontext.Value) an
 	return result
 }
 
-// Rooms (§4.2).
+// Rooms (§4.2). A room_list result is the rooms as the server keeps
+// them, objects of their stored fields, so it is sent raw, followed by the
+// read cursors of the rooms listed.
 
-var _ wire.Rooms = backend{}
-
-func (b backend) RoomJoin(ctx context.Context, wc *wire.Conn, p wire.RoomJoinParams) error {
-	return b.run(ctx, wc, func(c *client, req request) (any, bool, *Error) {
+func (b backend) RoomJoin(ctx context.Context, wc *wire.Conn, p wire.RoomJoinParams, reply wire.Reply[wire.Empty]) error {
+	return run(b, ctx, wc, reply, func(c *client, req request) (any, bool, *Error) {
 		return b.s.joinRoom(c, req, p.RoomID, p.UserID)
 	})
 }
 
-func (b backend) RoomLeave(ctx context.Context, wc *wire.Conn, p wire.RoomLeaveParams) error {
-	return b.run(ctx, wc, func(c *client, req request) (any, bool, *Error) {
+func (b backend) RoomLeave(ctx context.Context, wc *wire.Conn, p wire.RoomLeaveParams, reply wire.Reply[wire.Empty]) error {
+	return run(b, ctx, wc, reply, func(c *client, req request) (any, bool, *Error) {
 		return b.s.leaveRoom(c, req, p.RoomID, p.UserID)
 	})
 }
 
-func (b backend) RoomList(ctx context.Context, wc *wire.Conn, p wire.RoomListParams) (wire.RoomListResult, error) {
-	return wire.RoomListResult{}, b.run(ctx, wc, func(c *client, req request) (any, bool, *Error) {
+func (b backend) RoomList(ctx context.Context, wc *wire.Conn, p wire.RoomListParams, reply wire.Reply[wire.RoomListResult]) error {
+	return run(b, ctx, wc, reply, func(c *client, req request) (any, bool, *Error) {
 		return b.s.listRooms(c, req, p)
 	})
 }
 
-func (b backend) RoomSet(ctx context.Context, wc *wire.Conn, p wire.RoomSetParams) (wire.RoomSetResult, error) {
-	return wire.RoomSetResult{}, b.run(ctx, wc, func(c *client, req request) (any, bool, *Error) {
+func (b backend) RoomSet(ctx context.Context, wc *wire.Conn, p wire.RoomSetParams, reply wire.Reply[wire.RoomSetResult]) error {
+	return run(b, ctx, wc, reply, func(c *client, req request) (any, bool, *Error) {
 		return b.s.setRoom(c, req, p)
 	})
 }
 
 // History (§4.3).
 
-var _ wire.Historian = backend{}
-
-func (b backend) History(ctx context.Context, wc *wire.Conn, p wire.HistoryParams) (wire.HistoryResult, error) {
-	return wire.HistoryResult{}, b.run(ctx, wc, func(c *client, req request) (any, bool, *Error) {
+func (b backend) History(ctx context.Context, wc *wire.Conn, p wire.HistoryParams, reply wire.Reply[wire.HistoryResult]) error {
+	return run(b, ctx, wc, reply, func(c *client, req request) (any, bool, *Error) {
 		return b.s.history(c, req, p)
 	})
 }
 
 // Profiles (§3.3.2).
 
-var _ wire.Profiler = backend{}
-
 // Me changes the user's profile. updateProfile replies itself, with the
-// user's complete object, and sets the connection's user.
-func (b backend) Me(ctx context.Context, wc *wire.Conn, p wire.MeParams) (wire.CurrentUser, error) {
-	return wire.CurrentUser{}, b.run(ctx, wc, func(c *client, req request) (any, bool, *Error) {
+// user's complete object.
+func (b backend) Me(ctx context.Context, wc *wire.Conn, p wire.MeParams, reply wire.Reply[wire.CurrentUser]) error {
+	return run(b, ctx, wc, reply, func(c *client, req request) (any, bool, *Error) {
 		return b.s.updateProfile(c, req, p)
 	})
 }
 
 // Status (§4.5).
 
-var _ wire.Statuser = backend{}
-
-func (b backend) Status(ctx context.Context, wc *wire.Conn, p wire.StatusParams) error {
-	return b.run(ctx, wc, func(c *client, req request) (any, bool, *Error) {
+func (b backend) Status(ctx context.Context, wc *wire.Conn, p wire.StatusParams, reply wire.Reply[wire.Empty]) error {
+	return run(b, ctx, wc, reply, func(c *client, req request) (any, bool, *Error) {
 		return b.s.status(c, req, p)
 	})
 }
 
 // Activity (§4.6): a notification, which gets no reply.
-
-var _ wire.Activity = backend{}
 
 func (b backend) Activity(ctx context.Context, wc *wire.Conn, p wire.ActivityParams) {
 	c := clientOf(wc)
@@ -306,37 +295,29 @@ func (b backend) Activity(ctx context.Context, wc *wire.Conn, p wire.ActivityPar
 
 // Reactions (§4.7).
 
-var _ wire.Reactor = backend{}
-
-func (b backend) React(ctx context.Context, wc *wire.Conn, p wire.ReactParams) error {
-	return b.run(ctx, wc, func(c *client, req request) (any, bool, *Error) {
+func (b backend) React(ctx context.Context, wc *wire.Conn, p wire.ReactParams, reply wire.Reply[wire.Empty]) error {
+	return run(b, ctx, wc, reply, func(c *client, req request) (any, bool, *Error) {
 		return b.s.react(c, req, p)
 	})
 }
 
 // Messages (§3.5, §4.4) and commands (§4.1).
 
-var (
-	_ wire.Messenger = backend{}
-	_ wire.Editor    = backend{}
-	_ wire.Commander = backend{}
-)
-
 // Message saves a new message, as a save without a message_id.
-func (b backend) Message(ctx context.Context, wc *wire.Conn, p wire.MessageParams) (wire.MessageResult, error) {
-	return b.Edit(ctx, wc, wire.EditParams{RoomID: p.RoomID, Body: p.Body, ReplyTo: p.ReplyTo, Ext: p.Ext})
+func (b backend) Message(ctx context.Context, wc *wire.Conn, p wire.MessageParams, reply wire.Reply[wire.MessageResult]) error {
+	return b.Edit(ctx, wc, wire.EditParams{RoomID: p.RoomID, Body: p.Body, ReplyTo: p.ReplyTo, Ext: p.Ext}, reply)
 }
 
 // Edit saves an existing message: an edit, a move, or a deletion, as
 // saveMessage handles new ones.
-func (b backend) Edit(ctx context.Context, wc *wire.Conn, p wire.EditParams) (wire.MessageResult, error) {
-	return wire.MessageResult{}, b.run(ctx, wc, func(c *client, req request) (any, bool, *Error) {
+func (b backend) Edit(ctx context.Context, wc *wire.Conn, p wire.EditParams, reply wire.Reply[wire.MessageResult]) error {
+	return run(b, ctx, wc, reply, func(c *client, req request) (any, bool, *Error) {
 		return b.s.saveMessage(c, req, p)
 	})
 }
 
-func (b backend) Command(ctx context.Context, wc *wire.Conn, p wire.CommandParams) (wire.CommandResult, error) {
-	return wire.CommandResult{}, b.run(ctx, wc, func(c *client, req request) (any, bool, *Error) {
+func (b backend) Command(ctx context.Context, wc *wire.Conn, p wire.CommandParams, reply wire.Reply[wire.CommandResult]) error {
+	return run(b, ctx, wc, reply, func(c *client, req request) (any, bool, *Error) {
 		return b.s.command(c, req, p)
 	})
 }

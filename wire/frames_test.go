@@ -143,7 +143,7 @@ func TestPatch(t *testing.T) {
 // PublishUser makes the change the user's own connections' identity, and
 // sends them you and the others who share a room new.
 func TestPublishUser(t *testing.T) {
-	s := &wire.Server{Backend: &backend{}}
+	s := wired(&wire.Server{Backend: &backend{}})
 	type local struct {
 		l      *wire.Local
 		frames chan string
@@ -185,7 +185,7 @@ func TestPublishUser(t *testing.T) {
 	expect(bob, `{"method":"user","params":{"new":{"user_id":"eve","name":"Eve"}}}`)
 }
 
-// typed is a backend with every typed interface this file tests.
+// typed is a backend with every typed handler this file tests.
 type typed struct {
 	backend
 	mu       sync.Mutex
@@ -197,64 +197,60 @@ type typed struct {
 	extra    map[string]any
 }
 
-var (
-	_ wire.Editor    = (*typed)(nil)
-	_ wire.Commander = (*typed)(nil)
-	_ wire.Rooms     = (*typed)(nil)
-)
-
-func (b *typed) Auth(ctx context.Context, c *wire.Conn, p wire.AuthParams) (wire.AuthResult, error) {
-	result, err := b.backend.Auth(ctx, c, p)
-	result.Extra = b.extra
-	return result, err
+func (b *typed) Auth(_ context.Context, c *wire.Conn, p wire.AuthParams, reply wire.Reply[wire.AuthResult]) error {
+	you, err := b.guest(c, p)
+	if err != nil {
+		return err
+	}
+	return reply.Send(wire.AuthResult{You: you, Extra: b.extra})
 }
 
-func (b *typed) Message(_ context.Context, _ *wire.Conn, p wire.MessageParams) (wire.MessageResult, error) {
+func (b *typed) Message(_ context.Context, _ *wire.Conn, p wire.MessageParams, reply wire.Reply[wire.MessageResult]) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.bodies = append(b.bodies, *p.Body)
-	return wire.MessageResult{MessageID: 1}, nil
+	return reply.Send(wire.MessageResult{MessageID: 1})
 }
 
-func (b *typed) Edit(_ context.Context, _ *wire.Conn, p wire.EditParams) (wire.MessageResult, error) {
+func (b *typed) Edit(_ context.Context, _ *wire.Conn, p wire.EditParams, reply wire.Reply[wire.MessageResult]) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.edits = append(b.edits, p)
-	return wire.MessageResult{MessageID: p.MessageID}, nil
+	return reply.Send(wire.MessageResult{MessageID: p.MessageID})
 }
 
-func (b *typed) Command(_ context.Context, _ *wire.Conn, p wire.CommandParams) (wire.CommandResult, error) {
+func (b *typed) Command(_ context.Context, _ *wire.Conn, p wire.CommandParams, reply wire.Reply[wire.CommandResult]) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.commands = append(b.commands, p)
-	return wire.CommandResult{Embeds: []jsontext.Value{jsontext.Value(`{"embed_id":"e1","kind":"upload"}`)}, Unknown: jsontext.Value(`{"note":1}`)}, nil
+	return reply.Send(wire.CommandResult{Embeds: []jsontext.Value{jsontext.Value(`{"embed_id":"e1","kind":"upload"}`)}, Unknown: jsontext.Value(`{"note":1}`)})
 }
 
-func (b *typed) RoomList(context.Context, *wire.Conn, wire.RoomListParams) (wire.RoomListResult, error) {
-	return wire.RoomListResult{}, nil
+func (b *typed) RoomList(_ context.Context, _ *wire.Conn, _ wire.RoomListParams, reply wire.Reply[wire.RoomListResult]) error {
+	return reply.Send(wire.RoomListResult{})
 }
 
-func (b *typed) RoomJoin(_ context.Context, _ *wire.Conn, p wire.RoomJoinParams) error {
+func (b *typed) RoomJoin(_ context.Context, _ *wire.Conn, p wire.RoomJoinParams, _ wire.Reply[wire.Empty]) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.joins = append(b.joins, p)
 	return nil
 }
 
-func (b *typed) RoomLeave(_ context.Context, _ *wire.Conn, p wire.RoomLeaveParams) error {
+func (b *typed) RoomLeave(_ context.Context, _ *wire.Conn, p wire.RoomLeaveParams, reply wire.Reply[wire.Empty]) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.leaves = append(b.leaves, p)
-	return nil
+	return reply.Send(wire.Empty{})
 }
 
-func (b *typed) RoomSet(_ context.Context, _ *wire.Conn, p wire.RoomSetParams) (wire.RoomSetResult, error) {
-	return wire.RoomSetResult{RoomID: "new_" + *p.Title}, nil
+func (b *typed) RoomSet(_ context.Context, _ *wire.Conn, p wire.RoomSetParams, reply wire.Reply[wire.RoomSetResult]) error {
+	return reply.Send(wire.RoomSetResult{RoomID: "new_" + *p.Title})
 }
 
 func TestTypedParams(t *testing.T) {
 	b := &typed{}
-	s := &wire.Server{Backend: b}
+	s := wired(&wire.Server{Backend: b})
 	l, err := s.Local(wire.LocalOptions{User: wire.User{UserID: "ada"}})
 	if err != nil {
 		t.Fatal(err)
@@ -312,7 +308,7 @@ func TestTypedParams(t *testing.T) {
 // either.
 func TestAuthExtra(t *testing.T) {
 	b := &typed{extra: map[string]any{"options": map[string]any{"challenge": "c"}}}
-	c, _ := serve(t, &wire.Server{Backend: b})
+	c, _ := serve(t, wired(&wire.Server{Backend: b}))
 	c.send(`{"method":"auth","id":"a","params":{"scheme":"guest"}}`)
 	f := c.read()
 	if f.result()["options"] == nil || f.result()["you"] == nil {
@@ -321,7 +317,7 @@ func TestAuthExtra(t *testing.T) {
 	c.read() // The welcome notice.
 
 	b2 := &typed{extra: map[string]any{"you": 1}}
-	c2, _ := serve(t, &wire.Server{Backend: b2, Logger: slog.New(slog.DiscardHandler)})
+	c2, _ := serve(t, wired(&wire.Server{Backend: b2, Logger: slog.New(slog.DiscardHandler)}))
 	c2.send(`{"method":"auth","id":"a","params":{"scheme":"guest"}}`)
 	if f := c2.read(); f.errorCode() != wire.CodeInternalError {
 		t.Fatalf("got %v", f)

@@ -81,12 +81,12 @@ type StatusUpdate struct {
 // Method makes a StatusUpdate a Notification.
 func (StatusUpdate) Method() string { return "status" }
 
-// Statuser handles the status request, and adds capability status (§4.5).
-// A backend sends the user's mutes to its connections as status
+// StatusHandler handles the status request, and adds capability status
+// (§4.5). A backend sends the user's mutes to its connections as status
 // notifications, and statuses as user notifications. The statuses it
 // accepts with me, other than online and "", are ServerInfo.Status.
-type Statuser interface {
-	Status(ctx context.Context, c *Conn, p StatusParams) error
+type StatusHandler interface {
+	Status(ctx context.Context, c *Conn, p StatusParams, reply Reply[Empty]) error
 }
 
 // parseStatus reads a status request's params (§4.5.3): idle is false or
@@ -119,14 +119,4 @@ func parseStatus(r *Request) (p StatusParams, err error) {
 		return p, InvalidParams("room_id scopes a mute; send it with mute")
 	}
 	return p, nil
-}
-
-func statusHandler(st Statuser) func(context.Context, *Conn, *Request) (any, error) {
-	return func(ctx context.Context, c *Conn, r *Request) (any, error) {
-		p, err := parseStatus(r)
-		if err != nil {
-			return nil, err
-		}
-		return nil, st.Status(ctx, c, p)
-	}
 }

@@ -40,41 +40,55 @@
 // # Backends
 //
 // A [Backend] says who the server is (Hello) and who each connection is
-// (Auth). Everything else it adds one capability at a time, by implementing
-// an optional interface — [Messenger] (message), [Editor] (edit),
-// [Profiler] (me), [Commander] (command), [Rooms] (rooms), [Historian]
-// (history), [Statuser] (status) — each of which adds its requests, with
-// their params checked, and its capability in the server frame. Hooks
-// follow a connection's life ([Connecter], [Disconnecter]), bring a
-// duplicate's result up to date ([Refresher]), and decide the auth schemes
-// ([SchemeChecker]).
+// (Auth). Everything else is added one capability at a time, by setting a
+// handler field of the [Server] — Messages ([MessageHandler], message),
+// Edits ([EditHandler], edit), Profiles ([ProfileHandler], me), Commands
+// ([CommandHandler], command), Rooms ([RoomHandler], rooms), History
+// ([HistoryHandler], history), Status ([StatusHandler], status), Reactions
+// ([ReactionHandler], reactions), Activity ([ActivityHandler], activity) —
+// each of which adds its requests, with their params checked, and its
+// capability in the server frame. One value may be every handler, or each
+// may be its own, such as a wrapper that adds metrics to one of them. Hook
+// fields follow a connection's life (OnConnect, OnDisconnect), bring a
+// duplicate's result up to date (RefreshDuplicate), decide the auth schemes
+// (CheckScheme), and the origins that may open a WebSocket (CheckOrigin,
+// [OriginPatterns], [AnyOrigin]).
 //
-// A [Method] registered with [Server.Handle] handles a request or client
-// notification by name, raw: an extension's own method, such as the
-// reference server's push_register and account methods, or one that takes
-// the place of an interface's. The reference server implements the
-// interfaces, and replies to each request itself ([Request.Reply]).
+// A [Handler] registered with [Server.Handle] handles a request by name,
+// raw, and a [NotificationHandler] registered with
+// [Server.HandleNotification] a client's notification: an extension's own
+// method, such as the reference server's push_register and account
+// methods, or one that takes the place of a handler field's.
 //
 // # Requests and ordering
 //
-// Every handler's context carries its [Request] ([RequestFrom]): its params,
-// with presence ([Request.Param]), and [Request.Reply], which sends the
-// result now, followed by frames with nothing between them. A backend that
-// keeps its state under a lock replies while it holds the lock, so that the
-// result reflects every notification sent before it on the connection, and
-// none after (§1); one that does not reply itself has its return value sent
-// once the handler returns. Either way, the notifications a request queues
-// to its own connection before its reply are sent before it: a Conn's queue
-// is first in, first out.
+// Every typed handler gets a [Reply] for its result: [Reply.Send] sends it
+// now, followed by frames with nothing between them, and does what wire
+// does with the method's result as it queues it, such as signing the
+// connection in with an auth result. A handler sends exactly once, or
+// returns an error; one whose result is [Empty] may return nil without
+// sending, and has {} sent for it. A backend that keeps its state under a
+// lock sends while it holds the lock, so that the result reflects every
+// notification sent before it on the connection, and none after (§1), and
+// so that a connection is signed in before any notification it sends after
+// the auth result. The notifications a request queues to its own
+// connection before its reply are sent before it: a Conn's queue is first
+// in, first out.
+//
+// [Reply.Request] is the request, raw: its params, with presence
+// ([Request.Param]), and [Request.Reply], which sends any result without
+// what Send does with the method's, as a [Handler] replies. A handler's
+// context carries its Request too ([RequestFrom]), for code deep in its
+// calls.
 //
 // Sending never blocks, and calls nothing of the backend's but
 // Broadcast's and PublishUser's filters: [Conn.Send], [Conn.Notify],
-// [Conn.SendBatch], [Server.Broadcast], [Server.PublishUser], and
-// [Request.Reply] queue frames, and disconnect a
-// client too slow to take them. So a backend sends while it holds the lock
-// of the change a frame describes, which keeps every connection's frames in
-// the order of the changes, such as messages in log_id order; one that
-// sends after letting go of the lock lets two changes' frames cross.
+// [Conn.SendBatch], [Server.Broadcast], [Server.PublishUser], [Reply.Send],
+// and [Request.Reply] queue frames, and disconnect a client too slow to
+// take them. So a backend sends while it holds the lock of the change a
+// frame describes, which keeps every connection's frames in the order of
+// the changes, such as messages in log_id order; one that sends after
+// letting go of the lock lets two changes' frames cross.
 //
 // A handler's error that is an [*Error] is the error reply, as [CodeOf]
 // tells; any other is error/internal_error, and logged. A handler that

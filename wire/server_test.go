@@ -34,33 +34,68 @@ type backend struct {
 	disconnected []*wire.Conn
 }
 
-func (*backend) Hello(*wire.Conn) wire.ServerInfo {
+func (*backend) Hello(context.Context, *wire.Conn) wire.ServerInfo {
 	return wire.ServerInfo{Auth: []string{"guest"}, Agent: "wire-test/1"}
 }
 
-func (b *backend) Auth(_ context.Context, c *wire.Conn, p wire.AuthParams) (wire.AuthResult, error) {
+func (b *backend) Auth(_ context.Context, c *wire.Conn, p wire.AuthParams, reply wire.Reply[wire.AuthResult]) error {
+	you, err := b.guest(c, p)
+	if err != nil {
+		return err
+	}
+	return reply.Send(wire.AuthResult{You: you})
+}
+
+// guest is who Auth signs a connection in as.
+func (b *backend) guest(c *wire.Conn, p wire.AuthParams) (*wire.User, error) {
 	if p.Name == "refuse" {
-		return wire.AuthResult{}, wire.Denied("No")
+		return nil, wire.Denied("No")
 	}
 	id := fmt.Sprintf("guest_%d", b.guests.Add(1))
 	// Queued before the result, sent after it (§3.2.2).
 	c.Notify(wire.Notice("", "welcome "+id))
 	time.Sleep(b.authDelay)
-	return wire.AuthResult{You: &wire.User{UserID: id, Name: p.Name}}, nil
+	return &wire.User{UserID: id, Name: p.Name}, nil
 }
 
-func (b *backend) Message(_ context.Context, c *wire.Conn, p wire.MessageParams) (wire.MessageResult, error) {
+func (b *backend) Message(_ context.Context, c *wire.Conn, p wire.MessageParams, reply wire.Reply[wire.MessageResult]) error {
 	if p.Body.Empty() {
-		return wire.MessageResult{}, wire.InvalidParams("A new message needs text or embeds")
+		return wire.InvalidParams("A new message needs text or embeds")
 	}
 	b.messages.Add(1)
-	return wire.MessageResult{MessageID: b.clock.Next()}, nil
+	return reply.Send(wire.MessageResult{MessageID: b.clock.Next()})
 }
 
 func (b *backend) Disconnected(c *wire.Conn) {
 	b.mu.Lock()
 	b.disconnected = append(b.disconnected, c)
 	b.mu.Unlock()
+}
+
+// wired sets the handler fields of s that its Backend implements, and the
+// hooks it has methods for, as each test backend is one value for all of
+// them.
+func wired(s *wire.Server) *wire.Server {
+	b := s.Backend
+	if h, ok := b.(wire.MessageHandler); ok {
+		s.Messages = h
+	}
+	if h, ok := b.(wire.EditHandler); ok {
+		s.Edits = h
+	}
+	if h, ok := b.(wire.CommandHandler); ok {
+		s.Commands = h
+	}
+	if h, ok := b.(wire.ProfileHandler); ok {
+		s.Profiles = h
+	}
+	if h, ok := b.(wire.RoomHandler); ok {
+		s.Rooms = h
+	}
+	if h, ok := b.(interface{ Disconnected(*wire.Conn) }); ok {
+		s.OnDisconnect = h.Disconnected
+	}
+	return s
 }
 
 // client is the other end of a LineTransport over net.Pipe.
@@ -178,7 +213,7 @@ func onlyConn(t *testing.T, s *wire.Server) *wire.Conn {
 }
 
 func TestServerFrame(t *testing.T) {
-	s := &wire.Server{Backend: &backend{}, PingInterval: 20 * time.Second}
+	s := wired(&wire.Server{Backend: &backend{}, PingInterval: 20 * time.Second})
 	_, hello := serve(t, s)
 	params, _ := hello["params"].(map[string]any)
 	if params["apron"] != float64(wire.Version) || params["ping"] != float64(20) || params["agent"] != "wire-test/1" {
@@ -187,7 +222,7 @@ func TestServerFrame(t *testing.T) {
 }
 
 func TestFramingErrors(t *testing.T) {
-	c, _ := serve(t, &wire.Server{Backend: &backend{}})
+	c, _ := serve(t, wired(&wire.Server{Backend: &backend{}}))
 	for _, tc := range []struct {
 		send string
 		code int
@@ -223,7 +258,7 @@ func TestFramingErrors(t *testing.T) {
 
 func TestDeniedBeforeAuth(t *testing.T) {
 	b := &backend{}
-	c, _ := serve(t, &wire.Server{Backend: b})
+	c, _ := serve(t, wired(&wire.Server{Backend: b}))
 	c.send(`{"method":"message","id":"m","params":{"body":{"text":"hi"}}}`)
 	if f := c.read(); f.errorCode() != wire.CodeDenied || f["id"] != "m" {
 		t.Fatalf("got %v, want denied", f)
@@ -247,7 +282,7 @@ func TestDeniedBeforeAuth(t *testing.T) {
 }
 
 func TestAuthSchemes(t *testing.T) {
-	c, _ := serve(t, &wire.Server{Backend: &backend{}})
+	c, _ := serve(t, wired(&wire.Server{Backend: &backend{}}))
 	c.send(`{"method":"auth","id":"a","params":{}}`)
 	if f := c.read(); f.errorCode() != wire.CodeInvalidParams {
 		t.Fatalf("got %v, want invalid_params for no scheme", f)
@@ -266,7 +301,7 @@ func TestAuthSchemes(t *testing.T) {
 // the sign-in, and the notification Auth queued comes after its result.
 func TestAuthBarrier(t *testing.T) {
 	b := &backend{authDelay: 50 * time.Millisecond}
-	s := &wire.Server{Backend: b}
+	s := wired(&wire.Server{Backend: b})
 	c, _ := serve(t, s)
 	c.send(`{"method":"auth","id":"a","params":{"scheme":"guest","name":"Ada"}}`)
 	c.send(`{"method":"message","id":"m","params":{"body":{"text":"hi"}}}`)
@@ -297,13 +332,13 @@ func TestAuthBarrier(t *testing.T) {
 }
 
 func TestUnsupportedMethod(t *testing.T) {
-	c, _ := serve(t, &wire.Server{Backend: &backend{}})
+	c, _ := serve(t, wired(&wire.Server{Backend: &backend{}}))
 	c.signIn("a")
 	c.send(`{"method":"nope","id":"u"}`)
 	if f := c.read(); f.errorCode() != wire.CodeUnsupported || f["id"] != "u" {
 		t.Fatalf("got %v, want unsupported", f)
 	}
-	// me and command without a Profiler or Commander are unsupported too.
+	// me and command without Profiles or Commands are unsupported too.
 	c.send(`{"method":"me","id":"me","params":{"name":"B"}}`)
 	if f := c.read(); f.errorCode() != wire.CodeUnsupported {
 		t.Fatalf("got %v, want unsupported", f)
@@ -320,12 +355,13 @@ func TestUnsupportedMethod(t *testing.T) {
 }
 
 func TestHandle(t *testing.T) {
-	s := &wire.Server{Backend: &backend{}}
-	s.Handle("echo", wire.Method{Capability: "ext:echo", Handle: func(_ context.Context, _ *wire.Conn, r *wire.Request) (any, error) {
-		return r.Params, nil
+	s := wired(&wire.Server{Backend: &backend{}})
+	s.Handle("echo", wire.Handler{Capability: "ext:echo", Serve: func(_ context.Context, _ *wire.Conn, r *wire.Request) error {
+		r.Reply(r.Params)
+		return nil
 	}})
-	s.Handle("fail", wire.Method{ReadOnly: true, Handle: func(context.Context, *wire.Conn, *wire.Request) (any, error) {
-		return nil, errors.New("secret detail")
+	s.Handle("fail", wire.Handler{NoDedup: true, Serve: func(context.Context, *wire.Conn, *wire.Request) error {
+		return errors.New("secret detail")
 	}})
 	c, hello := serve(t, s)
 	capabilities, _ := hello["params"].(map[string]any)["capabilities"].([]any)
@@ -346,7 +382,7 @@ func TestHandle(t *testing.T) {
 
 func TestDedup(t *testing.T) {
 	b := &backend{}
-	c, _ := serve(t, &wire.Server{Backend: b})
+	c, _ := serve(t, wired(&wire.Server{Backend: b}))
 	c.signIn("a")
 	c.send(`{"method":"message","id":"d","params":{"room_id":"r","body":{"text":"hi"}}}`)
 	first := c.read()
@@ -376,7 +412,7 @@ func TestDedup(t *testing.T) {
 
 func TestDedupPerUser(t *testing.T) {
 	b := &backend{}
-	s := &wire.Server{Backend: b}
+	s := wired(&wire.Server{Backend: b})
 	c1, _ := serve(t, s)
 	c1.signIn("a")
 	c2, _ := serve(t, s)
@@ -394,7 +430,7 @@ func TestDedupPerUser(t *testing.T) {
 
 func TestDedupOff(t *testing.T) {
 	b := &backend{}
-	c, _ := serve(t, &wire.Server{Backend: b, DedupSize: -1})
+	c, _ := serve(t, wired(&wire.Server{Backend: b, DedupSize: -1}))
 	c.signIn("a")
 	for range 2 {
 		c.send(`{"method":"message","id":"d","params":{"body":{"text":"hi"}}}`)
@@ -407,7 +443,7 @@ func TestDedupOff(t *testing.T) {
 
 func TestMessageChecks(t *testing.T) {
 	b := &backend{}
-	c, _ := serve(t, &wire.Server{Backend: b})
+	c, _ := serve(t, wired(&wire.Server{Backend: b}))
 	c.signIn("a")
 	c.send(`{"method":"message","id":"e","params":{"body":{"text":""}}}`)
 	if f := c.read(); f.errorCode() != wire.CodeInvalidParams {
@@ -443,16 +479,14 @@ type editor struct {
 	edits atomic.Int64
 }
 
-var _ wire.Editor = (*editor)(nil)
-
-func (e *editor) Edit(context.Context, *wire.Conn, wire.EditParams) (wire.MessageResult, error) {
+func (e *editor) Edit(_ context.Context, _ *wire.Conn, _ wire.EditParams, reply wire.Reply[wire.MessageResult]) error {
 	e.edits.Add(1)
-	return wire.MessageResult{}, nil
+	return reply.Send(wire.MessageResult{})
 }
 
 func TestEditor(t *testing.T) {
 	b := &editor{}
-	c, hello := serve(t, &wire.Server{Backend: b})
+	c, hello := serve(t, wired(&wire.Server{Backend: b}))
 	if fmt.Sprint(hello["params"].(map[string]any)["capabilities"]) != "[edit]" {
 		t.Fatalf("server frame = %v, want capability edit", hello)
 	}
@@ -468,7 +502,7 @@ func TestEditor(t *testing.T) {
 
 func TestSlowClientDisconnected(t *testing.T) {
 	b := &backend{}
-	s := &wire.Server{Backend: b, OutgoingQueue: 2}
+	s := wired(&wire.Server{Backend: b, OutgoingQueue: 2})
 	c, _ := serve(t, s)
 	c.signIn("a")
 	conn := onlyConn(t, s)
@@ -500,7 +534,7 @@ func TestSlowClientDisconnected(t *testing.T) {
 
 func TestCloseWithError(t *testing.T) {
 	b := &backend{}
-	s := &wire.Server{Backend: b}
+	s := wired(&wire.Server{Backend: b})
 	c, _ := serve(t, s)
 	c.signIn("a")
 	conn := onlyConn(t, s)
@@ -562,7 +596,7 @@ func TestLineTransport(t *testing.T) {
 // TestFrameTooLarge closes a connection whose client sends more than the
 // transport's limit.
 func TestFrameTooLarge(t *testing.T) {
-	c, _ := serve(t, &wire.Server{Backend: &backend{}})
+	c, _ := serve(t, wired(&wire.Server{Backend: &backend{}}))
 	// The write fails once the server stops reading and closes.
 	go func() {
 		_, _ = io.WriteString(c.conn, `{"method":"message","id":"x","params":{"body":{"text":"`+strings.Repeat("x", 1<<17)+`"}}}`+"\n")
@@ -571,7 +605,7 @@ func TestFrameTooLarge(t *testing.T) {
 }
 
 func TestShutdown(t *testing.T) {
-	s := &wire.Server{Backend: &backend{}}
+	s := wired(&wire.Server{Backend: &backend{}})
 	c, _ := serve(t, s)
 	c.signIn("a")
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -593,7 +627,7 @@ func TestShutdown(t *testing.T) {
 }
 
 func TestBroadcast(t *testing.T) {
-	s := &wire.Server{Backend: &backend{}}
+	s := wired(&wire.Server{Backend: &backend{}})
 	c1, _ := serve(t, s)
 	c1.signIn("a")
 	c2, _ := serve(t, s) // not signed in: not broadcast to
@@ -606,7 +640,7 @@ func TestBroadcast(t *testing.T) {
 }
 
 func TestWebSocket(t *testing.T) {
-	s := &wire.Server{Backend: &backend{}, AllowAnyOrigin: true}
+	s := wired(&wire.Server{Backend: &backend{}, CheckOrigin: wire.AnyOrigin})
 	server := httptest.NewServer(s)
 	defer server.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -651,7 +685,7 @@ func (f *fence) Done() <-chan struct{} { return f.done }
 func (f *fence) Err() error            { return f.err }
 
 func TestSendBatchAndFence(t *testing.T) {
-	s := &wire.Server{Backend: &backend{}, OutgoingQueue: 2}
+	s := wired(&wire.Server{Backend: &backend{}, OutgoingQueue: 2})
 	c, _ := serve(t, s)
 	c.signIn("a")
 	conn := onlyConn(t, s)
@@ -694,7 +728,7 @@ func TestSendBatchAndFence(t *testing.T) {
 func TestFenceDuringAuth(t *testing.T) {
 	f := &fence{done: make(chan struct{})}
 	b := &fencingBackend{fence: f}
-	c, _ := serve(t, &wire.Server{Backend: b})
+	c, _ := serve(t, wired(&wire.Server{Backend: b}))
 	c.send(`{"method":"auth","id":"a","params":{"scheme":"guest","name":"Ada"}}`)
 	_ = c.conn.SetReadDeadline(time.Now().Add(50 * time.Millisecond))
 	if c.lines.Scan() {
@@ -715,14 +749,17 @@ type fencingBackend struct {
 	fence *fence
 }
 
-func (b *fencingBackend) Auth(ctx context.Context, c *wire.Conn, p wire.AuthParams) (wire.AuthResult, error) {
-	result, err := b.backend.Auth(ctx, c, p)
+func (b *fencingBackend) Auth(_ context.Context, c *wire.Conn, p wire.AuthParams, reply wire.Reply[wire.AuthResult]) error {
+	you, err := b.guest(c, p)
+	if err != nil {
+		return err
+	}
 	c.Fence(b.fence)
-	return result, err
+	return reply.Send(wire.AuthResult{You: you})
 }
 
 func TestMaxConnections(t *testing.T) {
-	s := &wire.Server{Backend: &backend{}, MaxConnections: 1}
+	s := wired(&wire.Server{Backend: &backend{}, MaxConnections: 1})
 	c1, _ := serve(t, s)
 	c2, _ := serve(t, s)
 	f := c2.read()

@@ -43,61 +43,69 @@ const room = "general"
 
 func NewChat() *Chat {
 	c := &Chat{messages: make(map[wire.LogID]bool)}
-	c.Server = &wire.Server{Backend: c, AllowAnyOrigin: true}
+	c.Server = &wire.Server{
+		Backend:     c,
+		Messages:    c,
+		Profiles:    c,
+		Commands:    c,
+		CheckOrigin: wire.AnyOrigin,
+	}
 	return c
 }
 
-func (*Chat) Hello(*wire.Conn) wire.ServerInfo {
+func (*Chat) Hello(context.Context, *wire.Conn) wire.ServerInfo {
 	return wire.ServerInfo{Auth: []string{"guest"}, Agent: "apron-minimal/1", Title: "Minimal"}
 }
 
-func (c *Chat) Auth(_ context.Context, conn *wire.Conn, p wire.AuthParams) (wire.AuthResult, error) {
+// Each handler replies with reply.Send under c.mu, as it changes what the
+// lock guards: sending never blocks, so every connection gets the frames in
+// the order of the changes (§1), and a connection is signed in as Send
+// queues its auth result, before anything broadcast after it.
+
+func (c *Chat) Auth(_ context.Context, _ *wire.Conn, p wire.AuthParams, reply wire.Reply[wire.AuthResult]) error {
 	c.mu.Lock()
+	defer c.mu.Unlock()
 	c.guests++
 	id := fmt.Sprintf("guest_%d", c.guests)
-	c.mu.Unlock()
 	name := strings.TrimSpace(p.Name)
 	if name == "" {
 		name = id
 	}
-	you := wire.User{UserID: id, Name: name}
-	// Sent after the auth result, though queued before it (§3.2.2).
-	conn.Notify(wire.Notice(room, "Welcome, "+name+"! Try /help."))
-	return wire.AuthResult{You: &you}, nil
+	welcome, err := wire.Encode(wire.Notice(room, "Welcome, "+name+"! Try /help."))
+	if err != nil {
+		return err
+	}
+	// The welcome goes right after the result (§3.2.2).
+	return reply.Send(wire.AuthResult{You: &wire.User{UserID: id, Name: name}}, welcome)
 }
 
-func (c *Chat) Message(_ context.Context, conn *wire.Conn, p wire.MessageParams) (wire.MessageResult, error) {
+func (c *Chat) Message(_ context.Context, conn *wire.Conn, p wire.MessageParams, reply wire.Reply[wire.MessageResult]) error {
 	if p.RoomID != "" && p.RoomID != room {
-		return wire.MessageResult{}, wire.InvalidParams("There is only one room, " + room)
+		return wire.InvalidParams("There is only one room, " + room)
 	}
 	if p.Body.Empty() {
-		return wire.MessageResult{}, wire.InvalidParams("A new message needs text or embeds") // §3.5.1
+		return wire.InvalidParams("A new message needs text or embeds") // §3.5.1
 	}
-	// The log_id is assigned, and the message broadcast, under one lock,
-	// so that every connection gets messages in log_id order (§1): sending
-	// never blocks, and is meant to be done under the backend's lock.
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if p.ReplyTo != nil && !c.messages[p.ReplyTo.MessageID] {
-		return wire.MessageResult{}, wire.InvalidParams("reply_to names no message")
+		return wire.InvalidParams("reply_to names no message")
 	}
 	id := c.clock.Next()
 	frame, err := wire.Encode(wire.Message{
 		MessageID: id, LogID: id, RoomID: room, From: *conn.User(), Body: p.Body, ReplyTo: p.ReplyTo,
 	})
 	if err != nil {
-		return wire.MessageResult{}, err
+		return err
 	}
 	c.messages[id] = true
-	// Every connection is in the one room; the sender's copy is queued
-	// before the result.
+	// Every connection is in the one room; the sender's copy goes before
+	// the result.
 	c.Server.Broadcast(frame, nil)
-	return wire.MessageResult{MessageID: id}, nil
+	return reply.Send(wire.MessageResult{MessageID: id})
 }
 
-func (c *Chat) Me(_ context.Context, conn *wire.Conn, p wire.MeParams) (wire.CurrentUser, error) {
-	// Under the lock, as Message is, so that profile changes reach every
-	// connection in the order they were made.
+func (c *Chat) Me(_ context.Context, conn *wire.Conn, p wire.MeParams, reply wire.Reply[wire.CurrentUser]) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	old := *conn.User()
@@ -114,14 +122,14 @@ func (c *Chat) Me(_ context.Context, conn *wire.Conn, p wire.MeParams) (wire.Cur
 	// The result is the complete object, with the fields cleared as their
 	// empty values (§3.3.2).
 	patch, _ := you.Patch(old)
-	return wire.CurrentUser{User: you, Cleared: patch.Cleared}, nil
+	return reply.Send(wire.CurrentUser{User: you, Cleared: patch.Cleared})
 }
 
-func (c *Chat) Command(_ context.Context, conn *wire.Conn, p wire.CommandParams) (wire.CommandResult, error) {
+func (c *Chat) Command(_ context.Context, conn *wire.Conn, p wire.CommandParams, reply wire.Reply[wire.CommandResult]) error {
 	switch strings.Fields(p.Body.Text + " ")[0] {
 	case "/help":
 		conn.Notify(wire.Notice(p.RoomID, "- `/help`: this list"))
-		return wire.CommandResult{}, nil
+		return reply.Send(wire.CommandResult{})
 	}
-	return wire.CommandResult{}, wire.InvalidParams("Unknown command; try /help")
+	return wire.InvalidParams("Unknown command; try /help")
 }

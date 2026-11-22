@@ -3,6 +3,7 @@ package wire
 import (
 	"context"
 	"encoding/json/jsontext"
+	"slices"
 )
 
 // Room is a room record (§4.2): its server and client fields, as it is
@@ -130,16 +131,40 @@ type RoomLeaveParams struct {
 	UserID string
 }
 
-// Rooms handles room_list, room_join, room_leave, and room_set, and adds
-// capability rooms (§4.2). A backend sends room_update itself. A join's or
-// leave's UserID is empty unless the client names another user to add or
-// remove; a backend that does not support that returns an Unsupported
-// error.
-type Rooms interface {
-	RoomList(ctx context.Context, c *Conn, p RoomListParams) (RoomListResult, error)
-	RoomJoin(ctx context.Context, c *Conn, p RoomJoinParams) error
-	RoomLeave(ctx context.Context, c *Conn, p RoomLeaveParams) error
-	RoomSet(ctx context.Context, c *Conn, p RoomSetParams) (RoomSetResult, error)
+// RoomHandler handles room_list, room_join, room_leave, and room_set, and
+// adds capability rooms (§4.2). A backend sends room_update itself. A
+// join's or leave's UserID is empty unless the client names another user
+// to add or remove; a backend that does not support that returns an
+// Unsupported error. A backend that lists rooms but takes no other room
+// request embeds UnimplementedRooms.
+type RoomHandler interface {
+	// RoomList answers with the rooms, which Send makes what the filter
+	// asks for (RoomListResult).
+	RoomList(ctx context.Context, c *Conn, p RoomListParams, reply Reply[RoomListResult]) error
+	RoomJoin(ctx context.Context, c *Conn, p RoomJoinParams, reply Reply[Empty]) error
+	RoomLeave(ctx context.Context, c *Conn, p RoomLeaveParams, reply Reply[Empty]) error
+	RoomSet(ctx context.Context, c *Conn, p RoomSetParams, reply Reply[RoomSetResult]) error
+}
+
+// UnimplementedRooms refuses room_join, room_leave, and room_set as
+// error/unsupported, for a RoomHandler that embeds it and implements only
+// RoomList, such as a gateway to a chat system whose rooms its users
+// cannot change.
+type UnimplementedRooms struct{}
+
+// RoomJoin refuses a join.
+func (UnimplementedRooms) RoomJoin(context.Context, *Conn, RoomJoinParams, Reply[Empty]) error {
+	return Unsupported("This server does not join rooms on request")
+}
+
+// RoomLeave refuses a leave.
+func (UnimplementedRooms) RoomLeave(context.Context, *Conn, RoomLeaveParams, Reply[Empty]) error {
+	return Unsupported("This server does not leave rooms on request")
+}
+
+// RoomSet refuses to make or edit a room.
+func (UnimplementedRooms) RoomSet(context.Context, *Conn, RoomSetParams, Reply[RoomSetResult]) error {
+	return Unsupported("This server does not make or edit rooms on request")
 }
 
 // parseRoomList reads room_list's params.
@@ -187,6 +212,16 @@ func parseMembership(r *Request) (roomID, userID string, err error) {
 	return roomID, userID, err
 }
 
+func parseRoomJoin(r *Request) (RoomJoinParams, error) {
+	roomID, userID, err := parseMembership(r)
+	return RoomJoinParams{RoomID: roomID, UserID: userID}, err
+}
+
+func parseRoomLeave(r *Request) (RoomLeaveParams, error) {
+	roomID, userID, err := parseMembership(r)
+	return RoomLeaveParams{RoomID: roomID, UserID: userID}, err
+}
+
 // parseRoomSet reads room_set's params.
 func parseRoomSet(r *Request) (p RoomSetParams, err error) {
 	if p.RoomID, _, err = r.IDParam("room_id"); err != nil {
@@ -216,65 +251,35 @@ func parseRoomSet(r *Request) (p RoomSetParams, err error) {
 	return p, nil
 }
 
-func roomHandler(rooms Rooms, name string) func(context.Context, *Conn, *Request) (any, error) {
-	switch name {
-	case "room_list":
-		return func(ctx context.Context, c *Conn, r *Request) (any, error) {
-			p, perr := parseRoomList(r)
-			if perr != nil {
-				return nil, perr
+// normalizeRoomList makes a room_list result what its params ask for: the
+// arrays the filter asks for are present even when empty (§4.2.1), and the
+// others absent, and without members, no room has its members, nor the
+// result users.
+func normalizeRoomList(p RoomListParams, result RoomListResult) RoomListResult {
+	if p.Filter != FilterNotJoined && result.Joined == nil {
+		result.Joined = []RoomView{}
+	}
+	if p.Filter != FilterJoined && result.NotJoined == nil {
+		result.NotJoined = []RoomView{}
+	}
+	if p.Filter == FilterJoined {
+		result.NotJoined = nil
+	}
+	if p.Filter == FilterNotJoined {
+		result.Joined = nil
+	}
+	if !p.Members {
+		result.Users = nil
+		// Copies, so that the backend's own slices stay as they are.
+		for _, list := range []*[]RoomView{&result.Joined, &result.NotJoined} {
+			if *list == nil {
+				continue
 			}
-			result, err := rooms.RoomList(ctx, c, p)
-			if err != nil || r.Replied() {
-				return nil, err
+			*list = slices.Clone(*list)
+			for i := range *list {
+				(*list)[i].Members, (*list)[i].MemberCount = nil, 0
 			}
-			// The arrays the filter asks for are present even when empty
-			// (§4.2.1), and the others absent.
-			if p.Filter != FilterNotJoined && result.Joined == nil {
-				result.Joined = []RoomView{}
-			}
-			if p.Filter != FilterJoined && result.NotJoined == nil {
-				result.NotJoined = []RoomView{}
-			}
-			if p.Filter == FilterJoined {
-				result.NotJoined = nil
-			}
-			if p.Filter == FilterNotJoined {
-				result.Joined = nil
-			}
-			if !p.Members {
-				result.Users = nil
-				for _, list := range [][]RoomView{result.Joined, result.NotJoined} {
-					for i := range list {
-						list[i].Members, list[i].MemberCount = nil, 0
-					}
-				}
-			}
-			return result, nil
-		}
-	case "room_join", "room_leave":
-		return func(ctx context.Context, c *Conn, r *Request) (any, error) {
-			roomID, userID, perr := parseMembership(r)
-			if perr != nil {
-				return nil, perr
-			}
-			if name == "room_join" {
-				return nil, rooms.RoomJoin(ctx, c, RoomJoinParams{RoomID: roomID, UserID: userID})
-			}
-			return nil, rooms.RoomLeave(ctx, c, RoomLeaveParams{RoomID: roomID, UserID: userID})
-		}
-	case "room_set":
-		return func(ctx context.Context, c *Conn, r *Request) (any, error) {
-			p, perr := parseRoomSet(r)
-			if perr != nil {
-				return nil, perr
-			}
-			result, err := rooms.RoomSet(ctx, c, p)
-			if err != nil || r.Replied() {
-				return nil, err
-			}
-			return result, nil
 		}
 	}
-	return nil
+	return result
 }

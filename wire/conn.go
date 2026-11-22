@@ -209,14 +209,14 @@ func (c *Conn) hold() {
 }
 
 // release queues the notifications held since hold, after what is already
-// queued.
-func (c *Conn) release() {
+// queued, or, with discard, drops them.
+func (c *Conn) release(discard bool) {
 	c.mu.Lock()
 	held := c.held
 	c.held, c.holding = nil, false
 	// Queued under mu, so that a Send that finds holding cleared comes after.
 	for _, frames := range held {
-		if !c.enqueue(frames) {
+		if discard || !c.enqueue(frames) {
 			break
 		}
 	}

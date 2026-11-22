@@ -33,9 +33,10 @@ type HistoryResult struct {
 	HistoryLogID LogID `json:"history_log_id"`
 }
 
-// Historian handles history, and adds capability history (§4.3).
-type Historian interface {
-	History(ctx context.Context, c *Conn, p HistoryParams) (HistoryResult, error)
+// HistoryHandler handles history, and adds capability history (§4.3). A
+// backend whose log is a slice of records answers with Page.
+type HistoryHandler interface {
+	History(ctx context.Context, c *Conn, p HistoryParams, reply Reply[HistoryResult]) error
 }
 
 // Record is one logged record, for Page: exactly one of Room, Message,
@@ -130,14 +131,4 @@ func parseHistory(r *Request) (p HistoryParams, err error) {
 		return p, err
 	}
 	return p, nil
-}
-
-func historyHandler(h Historian) func(context.Context, *Conn, *Request) (any, error) {
-	return func(ctx context.Context, c *Conn, r *Request) (any, error) {
-		p, err := parseHistory(r)
-		if err != nil {
-			return nil, err
-		}
-		return h.History(ctx, c, p)
-	}
 }

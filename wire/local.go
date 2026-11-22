@@ -48,8 +48,8 @@ type LocalOptions struct {
 // Local is an in-process connection to a Server: a client in the same
 // program, such as a bot, a bridge, or a test, whose requests take the same
 // path as a network client's, deduplication and all. It is the backend's
-// own, already signed in: the Server calls no Hello, Connecter, or Auth for
-// it, but Disconnecter when it ends. It does not count toward
+// own, already signed in: the Server calls no Hello, OnConnect, or Auth for
+// it, but OnDisconnect when it ends. It does not count toward
 // MaxConnections.
 type Local struct {
 	s      *Server
@@ -77,7 +77,7 @@ type inFlight struct{ l *Local }
 
 // Local opens an in-process connection.
 func (s *Server) Local(options LocalOptions) (*Local, error) {
-	s.init()
+	s.freeze()
 	if !ValidID(options.User.UserID) {
 		return nil, errors.New("wire: a Local connection needs a user")
 	}
@@ -199,7 +199,7 @@ func (l *Local) notificationOnly(method string) bool {
 		return true
 	}
 	m, found := l.s.method(method)
-	return found && m.Notification
+	return found && m.notify != nil
 }
 
 // process sends a frame, a request with id or else a notification, and
