@@ -270,7 +270,7 @@ func (s *Server) authenticateServiceLocked(c *client, req request, token string)
 	c.service, c.serviceManage = key, t.manage
 	// It signs in with no session, device token, or credential.
 	c.token, c.device, c.credential = [32]byte{}, [32]byte{}, ""
-	return s.switchUserLocked(c, req, t.user, nil, c.user != t.user, false), nil
+	return s.switchUserLocked(c, req, t.user, "", c.user != t.user, false), nil
 }
 
 // restrictedService reports whether the connection signed in with a service

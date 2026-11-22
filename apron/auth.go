@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/json/jsontext"
+	"encoding/json/v2"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -24,6 +25,7 @@ import (
 	"github.com/apron-chat/apron-server-go/internal/auth/external"
 	"github.com/apron-chat/apron-server-go/internal/auth/passkey"
 	"github.com/apron-chat/apron-server-go/internal/authn"
+	"github.com/apron-chat/apron-server-go/wire"
 )
 
 // Sign-in (PROTOCOL.md §3.2) is split between the server and its schemes
@@ -249,8 +251,11 @@ func (s *Server) authenticate(c *client, req request) (any, *Error) {
 		return nil, authError(schemeErr)
 	}
 	if reply, ok := result.(*authn.Reply); ok && reply != nil {
-		c.sendResult(req, reply.Result)
-		return reply.Result, nil
+		// A scheme's own result, such as a ceremony's options, signs
+		// nothing in, and names neither you nor token.
+		answer := wire.AuthResult{Extra: resultFields(reply.Result)}
+		req.sendAuth(answer)
+		return answer, nil
 	}
 	s.mu.Lock()
 	defer s.unlock()
@@ -278,6 +283,17 @@ func (s *Server) authenticate(c *client, req request) (any, *Error) {
 	return nil, internalError()
 }
 
+// resultFields are the fields of a scheme's own result, an object, which
+// an auth result sends beside you and token (wire.AuthResult.Extra).
+func resultFields(result any) map[string]any {
+	if fields, ok := result.(map[string]any); ok {
+		return fields
+	}
+	var fields map[string]any
+	_ = json.Unmarshal(encodeJSON(result), &fields)
+	return fields
+}
+
 // presentsServiceToken reports whether a token auth presents a bot's
 // service token, which signs in on a server without sign-in schemes too.
 func presentsServiceToken(req request) bool {
@@ -296,15 +312,16 @@ func (s *Server) authenticateGuestLocked(c *client, req request) (any, *Error) {
 		// Guest auth on a signed-in connection answers with the identity it
 		// has. It signs the connection in as no other user, so it is no
 		// sign-in and sends nothing after its result (§4.5).
-		result := map[string]any{"you": c.user.you()}
-		c.sendResult(req, result)
+		you := c.user.you()
+		result := wire.AuthResult{You: &you}
+		req.sendAuth(result)
 		return result, nil
 	}
 	user := newUserState(s.assignUserIDLocked(requested), normalizeName(name))
 	s.users[user.id] = user
 	s.touchUser(user.id)
 	// A new guest joins the default room, so their room list is not empty.
-	return s.switchUserLocked(c, req, user, nil, true, true), nil
+	return s.switchUserLocked(c, req, user, "", true, true), nil
 }
 
 // authRequestLocked is the copy of an auth request a scheme sees.
@@ -428,8 +445,9 @@ func (s *Server) addProvenLocked(c *client, req request, scheme authn.Scheme, pr
 		return result, err
 	}
 	s.provedLocked(c, scheme, proof, time.Now(), wasGuest)
-	result := map[string]any{"you": account.you()}
-	c.sendResult(req, result)
+	you := account.you()
+	result := wire.AuthResult{You: &you}
+	req.sendAuth(result)
 	return result, nil
 }
 

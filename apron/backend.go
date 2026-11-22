@@ -13,9 +13,11 @@ import (
 // The server speaks the protocol through package wire, as any server built
 // on it does: wire carries the connections, frames, sign-in order, and
 // deduplication, and backend answers for the Server, as its Backend and
-// each of its handlers. The Server's other operations are wire methods
-// (registerOp). Each replies while it holds s.mu where its result describes
-// state (request.reply), or, for me, with its typed reply.
+// each of its handlers. Each handler renders its result as wire's type for
+// it, and sends it with its Reply while it holds s.mu where the result
+// describes state, so that wire's types make the bytes of every result.
+// The Server's own methods beyond the protocol's, such as ext:account's,
+// are wire methods (registerOp), which reply raw.
 
 // backend is the Server as wire's Backend and handlers, kept unexported so
 // that wire's interfaces are not part of the Server's API.
@@ -66,45 +68,39 @@ func (s *Server) newWire() {
 	}
 }
 
-// registerOp makes an operation a wire method.
+// registerOp makes an operation a wire method, which replies raw.
 func (s *Server) registerOp(name string, op operation) {
 	s.wire.Handle(name, wire.Handler{
 		NoDedup: readOnlyOps[name],
 		Serve: func(ctx context.Context, wc *wire.Conn, r *wire.Request) error {
-			return serveOp(ctx, wc, r, op, s)
+			return backend{s}.serve(ctx, wc, func(c *client) *Error {
+				req := request{params: r.Fields(), send: func(result any, frames []wire.Frame) bool {
+					return r.Reply(result, frames...)
+				}}
+				result, replied, err := op(s, c, req)
+				if err == nil && !replied {
+					req.reply(result)
+				}
+				return err
+			})
 		},
 	})
 }
 
-// serveOp runs an operation for a request: its result goes out as it
-// replies (request.reply), or once it returns.
-func serveOp(ctx context.Context, wc *wire.Conn, r *wire.Request, op operation, s *Server) error {
+// serve runs a handler for the connection's client, with the request's
+// context as the one extension code it runs gets (Host).
+func (b backend) serve(ctx context.Context, wc *wire.Conn, handle func(c *client) *Error) error {
 	c, ok := wire.DataOf[*client](wc)
 	if !ok {
 		return internalError()
 	}
-	// Extension code the request runs gets its context (Host).
 	previous := c.request
 	c.request = ctx
 	defer func() { c.request = previous }()
-	req := newRequest(r)
-	result, replied, err := op(s, c, req)
-	switch {
-	case err != nil:
+	if err := handle(c); err != nil {
 		return err
-	case !replied:
-		req.reply(result)
 	}
 	return nil
-}
-
-// run runs an operation for one of wire's typed handlers, raw, as
-// registerOp does for a method: it replies through reply's request, which
-// the Server's operations do while they hold s.mu.
-func run[T any](b backend, ctx context.Context, wc *wire.Conn, reply wire.Reply[T], op func(c *client, req request) (any, bool, *Error)) error {
-	return serveOp(ctx, wc, reply.Request(), func(_ *Server, c *client, req request) (any, bool, *Error) {
-		return op(c, req)
-	}, b.s)
 }
 
 // connected keeps a new WebSocket's client, or signs a Session's in, whose
@@ -169,16 +165,19 @@ func (b backend) Hello(_ context.Context, wc *wire.Conn) wire.ServerInfo {
 	return s.serverFrameLocked(c)
 }
 
-// Auth signs a connection in. authenticate replies raw when it succeeds,
-// while it holds s.mu, and signs the connection in itself in the same hold
-// (attachLocked), so that every notification it sends after the result
-// reaches the connection. Its results are objects of the server's own,
-// such as a ceremony's options, or the token of a session, as it stores
-// them, so they are not AuthResults.
-func (b backend) Auth(ctx context.Context, wc *wire.Conn, _ wire.AuthParams, reply wire.Reply[wire.AuthResult]) error {
-	return run(b, ctx, wc, reply, func(c *client, req request) (any, bool, *Error) {
-		_, err := b.s.authenticate(c, req)
-		return nil, req.w.Replied(), err
+// Auth signs a connection in. authenticate sends its result with reply
+// while it holds s.mu, which signs the connection in, and makes it the
+// identity's in the same hold (attachLocked), so that every notification
+// it sends after the result reaches the connection. The schemes read
+// params of their own, such as a ceremony's, from the request's.
+func (b backend) Auth(ctx context.Context, wc *wire.Conn, p wire.AuthParams, reply wire.Reply[wire.AuthResult]) error {
+	var params wire.Fields
+	if err := json.Unmarshal(p.Raw, &params); err != nil {
+		return internalError()
+	}
+	return b.serve(ctx, wc, func(c *client) *Error {
+		_, err := b.s.authenticate(c, request{params: params, auth: reply})
+		return err
 	})
 }
 
@@ -225,40 +224,28 @@ func (b backend) refresh(_ context.Context, wc *wire.Conn, method string, result
 	return result
 }
 
-// Rooms (§4.2). A room_list result is the rooms as the server keeps
-// them, objects of their stored fields, so it is sent raw, followed by the
-// read cursors of the rooms listed.
+// Rooms (§4.2).
 
 func (b backend) RoomJoin(ctx context.Context, wc *wire.Conn, p wire.RoomJoinParams, reply wire.Reply[wire.Empty]) error {
-	return run(b, ctx, wc, reply, func(c *client, req request) (any, bool, *Error) {
-		return b.s.joinRoom(c, req, p.RoomID, p.UserID)
-	})
+	return b.serve(ctx, wc, func(c *client) *Error { return b.s.joinRoom(c, p, reply) })
 }
 
 func (b backend) RoomLeave(ctx context.Context, wc *wire.Conn, p wire.RoomLeaveParams, reply wire.Reply[wire.Empty]) error {
-	return run(b, ctx, wc, reply, func(c *client, req request) (any, bool, *Error) {
-		return b.s.leaveRoom(c, req, p.RoomID, p.UserID)
-	})
+	return b.serve(ctx, wc, func(c *client) *Error { return b.s.leaveRoom(c, p, reply) })
 }
 
 func (b backend) RoomList(ctx context.Context, wc *wire.Conn, p wire.RoomListParams, reply wire.Reply[wire.RoomListResult]) error {
-	return run(b, ctx, wc, reply, func(c *client, req request) (any, bool, *Error) {
-		return b.s.listRooms(c, req, p)
-	})
+	return b.serve(ctx, wc, func(c *client) *Error { return b.s.listRooms(c, p, reply) })
 }
 
 func (b backend) RoomSet(ctx context.Context, wc *wire.Conn, p wire.RoomSetParams, reply wire.Reply[wire.RoomSetResult]) error {
-	return run(b, ctx, wc, reply, func(c *client, req request) (any, bool, *Error) {
-		return b.s.setRoom(c, req, p)
-	})
+	return b.serve(ctx, wc, func(c *client) *Error { return b.s.setRoom(c, p, reply) })
 }
 
 // History (§4.3).
 
 func (b backend) History(ctx context.Context, wc *wire.Conn, p wire.HistoryParams, reply wire.Reply[wire.HistoryResult]) error {
-	return run(b, ctx, wc, reply, func(c *client, req request) (any, bool, *Error) {
-		return b.s.history(c, req, p)
-	})
+	return b.serve(ctx, wc, func(c *client) *Error { return b.s.history(c, p, reply) })
 }
 
 // Profiles (§3.3.2).
@@ -266,38 +253,25 @@ func (b backend) History(ctx context.Context, wc *wire.Conn, p wire.HistoryParam
 // Me changes the user's profile. updateProfile sends the user's complete
 // object while it holds s.mu, which makes it the connection's user.
 func (b backend) Me(ctx context.Context, wc *wire.Conn, p wire.MeParams, reply wire.Reply[wire.CurrentUser]) error {
-	return run(b, ctx, wc, reply, func(c *client, _ request) (any, bool, *Error) {
-		return nil, true, b.s.updateProfile(c, p, reply)
-	})
+	return b.serve(ctx, wc, func(c *client) *Error { return b.s.updateProfile(c, p, reply) })
 }
 
 // Status (§4.5).
 
 func (b backend) Status(ctx context.Context, wc *wire.Conn, p wire.StatusParams, reply wire.Reply[wire.Empty]) error {
-	return run(b, ctx, wc, reply, func(c *client, req request) (any, bool, *Error) {
-		return b.s.status(c, req, p)
-	})
+	return b.serve(ctx, wc, func(c *client) *Error { return b.s.status(c, p, reply) })
 }
 
 // Activity (§4.6): a notification, which gets no reply.
 
 func (b backend) Activity(ctx context.Context, wc *wire.Conn, p wire.ActivityParams) {
-	c, ok := wire.DataOf[*client](wc)
-	if !ok {
-		return
-	}
-	previous := c.request
-	c.request = ctx
-	defer func() { c.request = previous }()
-	_ = b.s.activity(c, p)
+	_ = b.serve(ctx, wc, func(c *client) *Error { return b.s.activity(c, p) })
 }
 
 // Reactions (§4.7).
 
 func (b backend) React(ctx context.Context, wc *wire.Conn, p wire.ReactParams, reply wire.Reply[wire.Empty]) error {
-	return run(b, ctx, wc, reply, func(c *client, req request) (any, bool, *Error) {
-		return b.s.react(c, req, p)
-	})
+	return b.serve(ctx, wc, func(c *client) *Error { return b.s.react(c, p, reply) })
 }
 
 // Messages (§3.5, §4.4) and commands (§4.1).
@@ -310,13 +284,27 @@ func (b backend) Message(ctx context.Context, wc *wire.Conn, p wire.MessageParam
 // Edit saves an existing message: an edit, a move, or a deletion, as
 // saveMessage handles new ones.
 func (b backend) Edit(ctx context.Context, wc *wire.Conn, p wire.EditParams, reply wire.Reply[wire.MessageResult]) error {
-	return run(b, ctx, wc, reply, func(c *client, req request) (any, bool, *Error) {
-		return b.s.saveMessage(c, req, p)
-	})
+	return b.serve(ctx, wc, func(c *client) *Error { return b.s.saveMessage(c, p, reply) })
 }
 
+// Command runs a command. Its result, which a command renders as an
+// object, the extensions' too, goes out as a CommandResult, whose Unknown
+// keeps any field of an extension's own.
 func (b backend) Command(ctx context.Context, wc *wire.Conn, p wire.CommandParams, reply wire.Reply[wire.CommandResult]) error {
-	return run(b, ctx, wc, reply, func(c *client, req request) (any, bool, *Error) {
-		return b.s.command(c, req, p)
+	return b.serve(ctx, wc, func(c *client) *Error {
+		req := request{wireBody: p.Body, send: func(result any, frames []wire.Frame) bool {
+			var typed wire.CommandResult
+			if err := json.Unmarshal(encodeJSON(result), &typed); err != nil {
+				b.s.logger.Error("a command's result is not an object", "error", err)
+				_ = reply.Fail(internalError())
+				return false
+			}
+			return reply.Send(typed, frames...) == nil
+		}}
+		result, replied, err := b.s.command(c, req, p)
+		if err == nil && !replied {
+			req.reply(result)
+		}
+		return err
 	})
 }

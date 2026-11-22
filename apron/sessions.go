@@ -53,7 +53,7 @@ func (s *Server) signInLocked(c *client, req request, user *userState, now time.
 	// device token the connection signed in with stays its own, so that
 	// replacing that token still closes it.
 	c.credential = ""
-	return s.switchUserLocked(c, req, user, map[string]any{"token": token}, signIn, joinDefault), nil
+	return s.switchUserLocked(c, req, user, token, signIn, joinDefault), nil
 }
 
 // newSessionLocked makes a bearer token that resumes user's sign-in from
@@ -180,5 +180,5 @@ func (s *Server) authenticateToken(c *client, req request) (any, *Error) {
 	c.service, c.serviceManage = [32]byte{}, false
 	// Resuming the user the connection is signed in as is no sign-in
 	// (§4.5), and sends nothing after its result.
-	return s.switchUserLocked(c, req, session.user, map[string]any{"token": token}, c.user != session.user, false), nil
+	return s.switchUserLocked(c, req, session.user, token, c.user != session.user, false), nil
 }

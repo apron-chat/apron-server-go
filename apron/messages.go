@@ -73,7 +73,7 @@ func (m *messageState) snapshot() map[string]any {
 // (§4.2.2): a poster who has not joined gets only the result. A new message
 // with no text and no embeds is invalid_params (§3.5.1). A new message is a
 // save with no message_id, as backend.Message makes it.
-func (s *Server) saveMessage(c *client, req request, p wire.EditParams) (any, bool, *Error) {
+func (s *Server) saveMessage(c *client, p wire.EditParams, reply wire.Reply[wire.MessageResult]) *Error {
 	roomID := p.RoomID
 	if roomID == "" {
 		roomID = defaultRoomID
@@ -91,11 +91,11 @@ func (s *Server) saveMessage(c *client, req request, p wire.EditParams) (any, bo
 	var body map[string]any
 	if !deleted {
 		if p.Body == nil {
-			return nil, false, wire.Missing("body")
+			return wire.Missing("body")
 		}
-		body = req.body()
+		body = bodyObject(p.Body)
 		if err := validateBody(body); err != nil {
-			return nil, false, err
+			return err
 		}
 	}
 	extWrite := p.Ext
@@ -111,7 +111,7 @@ func (s *Server) saveMessage(c *client, req request, p wire.EditParams) (any, bo
 			draft.ReplyTo = replyID
 		}
 		if err := s.filterMessage(c, draft); err != nil {
-			return nil, false, err
+			return err
 		}
 		body, extWrite = draft.Body, draft.ext
 		sharedFiltered = draft.shared
@@ -120,12 +120,12 @@ func (s *Server) saveMessage(c *client, req request, p wire.EditParams) (any, bo
 	s.mu.Lock()
 	defer s.unlock()
 	if c.conn.Closing() {
-		return nil, false, connectionClosing()
+		return connectionClosing()
 	}
 	u := c.user
 	destination := s.visibleRoomLocked(u, roomID)
 	if destination == nil {
-		return nil, false, invalidParams("Unknown room %q", roomID)
+		return invalidParams("Unknown room %q", roomID)
 	}
 	from := u.from()
 	var current *messageState
@@ -135,20 +135,20 @@ func (s *Server) saveMessage(c *client, req request, p wire.EditParams) (any, bo
 	if replacing {
 		current = s.visibleMessageLocked(u, messageID)
 		if current == nil {
-			return nil, false, invalidParams("Unknown message %q", messageID)
+			return invalidParams("Unknown message %q", messageID)
 		}
 		if current.owner != u.id {
 			if deleted || !sharesText(current.snapshot(), u.id) {
-				return nil, false, &Error{Code: CodeDenied, Message: "Only the author may edit, move, or delete this message"}
+				return &Error{Code: CodeDenied, Message: "Only the author may edit, move, or delete this message"}
 			}
 			// Live text is still writing into body.text (§4.8.5).
 			if hasLiveAppend(current.snapshot()) {
-				return nil, false, &Error{Code: CodeDenied, Message: "The message's text is still being written"}
+				return &Error{Code: CodeDenied, Message: "The message's text is still being written"}
 			}
 			// The filters ran before the grant or the mention reached this
 			// user, so they skipped the save: it goes only filtered.
 			if len(s.filters) > 0 && !sharedFiltered {
-				return nil, false, &Error{Code: CodeDenied, Message: "The message changed while it was saved; try again"}
+				return &Error{Code: CodeDenied, Message: "The message changed while it was saved; try again"}
 			}
 			// The save keeps every other field, so it neither moves the
 			// message nor changes what it replies to.
@@ -162,19 +162,19 @@ func (s *Server) saveMessage(c *client, req request, p wire.EditParams) (any, bo
 		// see, such as a private room: the move would show them its room_id
 		// and the message.
 		if source := s.rooms[current.roomID]; source != destination && source.revealsTo(destination) {
-			return nil, false, &Error{Code: CodeDenied, Message: "A message cannot move to a room that fewer people can see"}
+			return &Error{Code: CodeDenied, Message: "A message cannot move to a room that fewer people can see"}
 		}
 		from = current.from
 	}
 	if hasReply {
 		target := s.visibleMessageLocked(u, replyID)
 		if target == nil || (replacing && replyID == messageID) {
-			return nil, false, invalidParams("reply_to must name another existing message")
+			return invalidParams("reply_to must name another existing message")
 		}
 		// A reply names its target's message_id to everyone who sees the
 		// reply, so it may not name a message some of them cannot see.
 		if destination.revealsTo(s.rooms[target.roomID]) {
-			return nil, false, &Error{Code: CodeDenied, Message: "A reply cannot quote a message that fewer people can see"}
+			return &Error{Code: CodeDenied, Message: "A reply cannot quote a message that fewer people can see"}
 		}
 	}
 	var previous map[string]any
@@ -186,7 +186,7 @@ func (s *Server) saveMessage(c *client, req request, p wire.EditParams) (any, bo
 		// The rest of the body is the sender's: the whole stays a body that
 		// its sender can send back in one frame (ReadLimit).
 		if encodedSize(body) > int(s.config.ReadLimit) {
-			return nil, false, &Error{Code: CodeTooLarge, Message: "The message would be too large to send back"}
+			return &Error{Code: CodeTooLarge, Message: "The message would be too large to send back"}
 		}
 		if ref, ok := previous["reply_to"].(map[string]any); ok {
 			replyID, hasReply = ref["message_id"].(string)
@@ -212,15 +212,15 @@ func (s *Server) saveMessage(c *client, req request, p wire.EditParams) (any, bo
 			ext = withEditedBy(ext, "")
 		}
 		if encodedSize(ext) > maxMessageExtBytes {
-			return nil, false, &Error{Code: CodeTooLarge, Message: fmt.Sprintf("The message's ext would be over %d bytes", maxMessageExtBytes)}
+			return &Error{Code: CodeTooLarge, Message: fmt.Sprintf("The message's ext would be over %d bytes", maxMessageExtBytes)}
 		}
 	}
 	if !replacing {
 		if text, _ := body["text"].(string); text == "" && len(asList(body["embeds"])) == 0 {
-			return nil, false, invalidParams("A new message needs text or embeds")
+			return invalidParams("A new message needs text or embeds")
 		}
 		if err := s.admitPostLocked(u); err != nil {
-			return nil, false, err
+			return err
 		}
 	}
 
@@ -238,7 +238,7 @@ func (s *Server) saveMessage(c *client, req request, p wire.EditParams) (any, bo
 		var err *Error
 		embeds, written, err = s.resolveEmbedsLocked(c, messageID, previous, body)
 		if err != nil {
-			return nil, false, err
+			return err
 		}
 		// body was decoded for this request, so it is the snapshot's own.
 		if len(embeds) > 0 {
@@ -299,12 +299,15 @@ func (s *Server) saveMessage(c *client, req request, p wire.EditParams) (any, bo
 	default:
 		s.wakeLocked(current, snapshot, previous)
 	}
-	result := map[string]any{"message_id": messageID}
-	if len(written) > 0 {
-		result["embeds"] = written
+	result := wire.MessageResult{MessageID: wire.LogID(logID)}
+	if replacing {
+		result.MessageID = p.MessageID
 	}
-	c.sendResult(req, result)
-	return result, true, nil
+	for _, write := range written {
+		result.Embeds = append(result.Embeds, encodeJSON(write))
+	}
+	_ = reply.Send(result)
+	return nil
 }
 
 // commitSnapshotLocked logs and delivers a message snapshot, adding
@@ -523,30 +526,30 @@ const (
 // react replaces the caller's complete reaction set on one message
 // (§4.7). Entries are kept fully qualified, and duplicates collapse; an
 // unchanged set logs nothing. The broadcast precedes the result (§1).
-func (s *Server) react(c *client, req request, p wire.ReactParams) (any, bool, *Error) {
+func (s *Server) react(c *client, p wire.ReactParams, reply wire.Reply[wire.Empty]) *Error {
 	messageID := p.MessageID.String()
 	emojis, err := normalizeEmojis(p.Emojis)
 	if err != nil {
-		return nil, false, err
+		return err
 	}
 	s.mu.Lock()
 	defer s.unlock()
 	u := c.user
 	m := s.visibleMessageLocked(u, messageID)
 	if m == nil {
-		return nil, false, invalidParams("Unknown message %q", messageID)
+		return invalidParams("Unknown message %q", messageID)
 	}
 	// A key must be a custom emoji (ext:emoji), unless the set has it
 	// already, so that a removed one does not keep the user from changing
 	// the rest of their set.
 	for _, emoji := range emojis {
 		if emojiKeyPattern.MatchString(emoji) && s.emoji[emoji] == nil && !slices.Contains(m.reactions[u.id].emojis, emoji) {
-			return nil, false, invalidParams("Unknown custom emoji %s", emoji)
+			return invalidParams("Unknown custom emoji %s", emoji)
 		}
 	}
 	if !sameEmojiSet(m.reactions[u.id].emojis, emojis) {
 		if err := admitActionLocked(u); err != nil {
-			return nil, false, err
+			return err
 		}
 		s.touchMessage(m)
 		from := u.from()
@@ -557,9 +560,8 @@ func (s *Server) react(c *client, req request, p wire.ReactParams) (any, bool, *
 		}
 		s.commitReactionsLocked(m, []any{map[string]any{"from": cloneObject(from), "emojis": slices.Clone(emojis)}})
 	}
-	result := map[string]any{}
-	c.sendResult(req, result)
-	return result, true, nil
+	_ = reply.Send(wire.Empty{})
+	return nil
 }
 
 // commitReactionsLocked logs and delivers one reactions record in the

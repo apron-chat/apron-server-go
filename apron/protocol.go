@@ -40,19 +40,25 @@ func Denied(message string) *Error { return wire.Denied(message) }
 // InvalidParams is a CodeInvalidParams error with message.
 func InvalidParams(message string) *Error { return wire.InvalidParams(message) }
 
+// request is a request as the code that answers it gets it: an operation's
+// (registerOp), whose result goes out raw, a command's, whose result goes
+// out as a wire.CommandResult, or an auth request's, answered with its
+// typed Reply.
 type request struct {
-	method string
 	params wire.Fields
-	id     string
-	hasID  bool
-	// w is the request as package wire handles it, which a reply goes
-	// through.
-	w *wire.Request
+	// wireBody is a command's body, as package wire read it.
+	wireBody *wire.Body
+	// send sends a result, followed by frames with nothing between them.
+	send func(result any, frames []wire.Frame) bool
+	// auth answers an auth request (sendAuth).
+	auth wire.Reply[wire.AuthResult]
 }
 
-// newRequest is the request of r, with its params by name.
-func newRequest(r *wire.Request) request {
-	return request{method: r.Method, id: r.ID, hasID: !r.Notification(), w: r, params: r.Fields()}
+// sendAuth sends an auth request's result now: with You, it signs the
+// connection in as You, so it is sent while s.mu is held, with the
+// identity the connection then takes (attachLocked).
+func (req request) sendAuth(result wire.AuthResult) {
+	_ = req.auth.Send(result)
 }
 
 // reply sends the request's result now, followed by frames, with nothing
@@ -70,21 +76,21 @@ func (req request) reply(result any, then ...any) bool {
 			frames = append(frames, wire.Frame(payload))
 		}
 	}
-	return req.w.Reply(result, frames...)
+	return req.send(result, frames)
 }
 
-// body decodes the request's body param as it was sent, every field kept,
-// such as one this server does not know, or nil without one. The body
-// package wire checked is a wire.Body, with the fields it does not know
-// apart (Body.Unknown); the server keeps the body whole, as it arrived, and
-// stores it so.
-func (req request) body() map[string]any {
-	raw, ok := req.params["body"]
-	if !ok {
+// body is a command's body, decoded (bodyObject).
+func (req request) body() map[string]any { return bodyObject(req.wireBody) }
+
+// bodyObject decodes a body package wire read, as the server keeps it:
+// every field as it was sent, those wire does not know too (Body.Unknown),
+// as a wire.Body encodes as it was decoded. It is nil for no body.
+func bodyObject(b *wire.Body) map[string]any {
+	if b == nil {
 		return nil
 	}
 	var body map[string]any
-	_ = json.Unmarshal(raw, &body)
+	_ = json.Unmarshal(encodeJSON(b), &body)
 	return body
 }
 

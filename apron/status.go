@@ -156,7 +156,7 @@ func (update statusUpdate) mute(now time.Time) muteState {
 // package wire ignores. On an error nothing changes: invalid params, a mute
 // of a room the user cannot see, a mute of another room beyond
 // maxRoomMutes, or more requests than the user's limit (admitStatusLocked).
-func (s *Server) status(c *client, req request, p wire.StatusParams) (any, bool, *Error) {
+func (s *Server) status(c *client, p wire.StatusParams, reply wire.Reply[wire.Empty]) *Error {
 	update := statusUpdateOf(p)
 	s.mu.Lock()
 	defer s.unlock()
@@ -167,18 +167,19 @@ func (s *Server) status(c *client, req request, p wire.StatusParams) (any, bool,
 	_, hasRoomMute := u.roomMutes[update.roomID]
 	clearing := hasRoomMute && update.muteSeconds == 0 && !update.muteForever
 	if update.hasMute && update.scoped && !clearing && s.visibleRoomLocked(u, update.roomID) == nil {
-		return nil, false, invalidParams("Unknown room %q", update.roomID)
+		return invalidParams("Unknown room %q", update.roomID)
 	}
 	if now := time.Now(); update.hasMute && update.scoped && update.mute(now).active(now) {
 		if _, muted := u.roomMutes[update.roomID]; !muted && len(u.roomMutes) >= maxRoomMutes {
-			return nil, false, &Error{Code: CodeDenied, Message: fmt.Sprintf("At most %d rooms can be muted; unmute one first", maxRoomMutes)}
+			return &Error{Code: CodeDenied, Message: fmt.Sprintf("At most %d rooms can be muted; unmute one first", maxRoomMutes)}
 		}
 	}
 	if err := admitStatusLocked(u); err != nil {
-		return nil, false, err
+		return err
 	}
 	s.applyStatusLocked(c, u, update)
-	return map[string]any{}, false, nil
+	_ = reply.Send(wire.Empty{})
+	return nil
 }
 
 // admitStatusLocked applies the user's limit on `status` requests, idle and
@@ -466,19 +467,17 @@ func (s *Server) publishLocked(u *userState) bool {
 	return true
 }
 
-// addSeen adds u's seen to a current object of u that carries a shown
-// offline, if it is known (§4.5.2).
-func (u *userState) addSeen(object map[string]any) {
-	if object["status"] == statusOffline && u.seen > 0 {
-		object["seen"] = strconv.FormatInt(u.seen, 10)
-	}
-}
-
 // shownObject is the bare current object of u that others see: user_id and
-// the published shown status, with seen when it is offline (§4.5.2).
-func (u *userState) shownObject() map[string]any {
-	object := map[string]any{"user_id": u.id, "status": u.status}
-	u.addSeen(object)
+// the published shown status, "" too, with seen when it is offline, if it
+// is known (§4.5.2).
+func (u *userState) shownObject() wire.CurrentUser {
+	object := wire.CurrentUser{User: wire.User{UserID: u.id, Status: u.status}}
+	switch {
+	case u.status == statusNone:
+		object.Cleared = []string{"status"}
+	case u.status == statusOffline && u.seen > 0:
+		object.Seen = strconv.FormatInt(u.seen, 10)
+	}
 	return object
 }
 
@@ -534,7 +533,8 @@ func (s *Server) sendStatusLocked(u *userState, users []*userState) {
 // statusFrame is the `user` notification of u's published shown status:
 // `{new: {user_id, status}}`, with seen when it is offline (§4.5.2).
 func statusFrame(u *userState) jsontext.Value {
-	return notification("user", map[string]any{"new": u.shownObject()})
+	shown := u.shownObject()
+	return notification("user", wire.UserUpdate{New: &shown})
 }
 
 // announceJoinStatusLocked tells the other members of r the published

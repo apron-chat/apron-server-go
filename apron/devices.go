@@ -164,7 +164,7 @@ func (s *Server) authenticateDeviceLocked(c *client, req request, token string) 
 	c.device = key
 	c.service, c.serviceManage = [32]byte{}, false
 	c.token, c.credential = [32]byte{}, ""
-	return s.switchUserLocked(c, req, device.user, nil, c.user != device.user, false), nil
+	return s.switchUserLocked(c, req, device.user, "", c.user != device.user, false), nil
 }
 
 // apronLink is a link that any Apron app opens to sign in to server with
