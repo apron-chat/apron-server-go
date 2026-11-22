@@ -3,24 +3,17 @@ package apron
 import (
 	"bytes"
 	"cmp"
-	"context"
 	"encoding/json/jsontext"
 	"encoding/json/v2"
-	"errors"
 	"fmt"
-	"io"
 	"maps"
-	"net"
 	"net/http"
-	"net/netip"
-	"net/url"
 	"regexp"
 	"slices"
-	"strings"
-	"sync"
-	"syscall"
 	"time"
 	"unicode/utf8"
+
+	"github.com/apron-chat/apron-server-go/apron/internal/webpush"
 )
 
 const (
@@ -40,23 +33,9 @@ const (
 	// often expired registrations are looked for.
 	pushExpiry        = 30 * 24 * time.Hour
 	pushSweepInterval = time.Hour
-	pushTimeout       = 10 * time.Second
-	// Deliveries run in lanes per push host, at most maxPushPerHost at once
-	// to one host, and at most maxConcurrentPushPOST in all. A user has at
-	// most maxPushQueuedPerUser deliveries waiting or running, a host
-	// maxPushQueuedPerHost, and the server maxPushQueued; beyond them a
-	// delivery is dropped, as pushes are best effort.
-	maxConcurrentPushPOST = 32
-	maxPushPerHost        = 8
-	maxPushQueuedPerUser  = 20
-	maxPushQueuedPerHost  = 256
-	maxPushQueued         = 1024
 	// maxPushesPerUserDay bounds the pushes delivered to one user in a UTC
 	// day, counting only those the endpoint accepted (2xx).
 	maxPushesPerUserDay = 1000
-	// maxPushResponseDrain is how much of a push service's answer is read so
-	// that its connection can be reused.
-	maxPushResponseDrain = 64 << 10
 )
 
 // wakeScope is a set of wake scopes (§4.9).
@@ -127,7 +106,7 @@ type pushRegistration struct {
 	// (account.go) removes the registrations it made.
 	session [32]byte
 	// keys, for webpush and optionally relay, encrypt the payload.
-	keys *pushKeys
+	keys *webpush.Keys
 	wake wakeScope
 	// renewed is when the client last registered it; it expires pushExpiry
 	// later.
@@ -212,7 +191,7 @@ func (s *Server) registerPush(c *client, req request) (any, bool, *Error) {
 	if err := paramError(d.Err()); err != nil {
 		return nil, false, err
 	}
-	endpoint, problem := s.checkPushURL(endpoint)
+	endpoint, problem := webpush.CheckURL(endpoint, s.config.AllowInsecurePush)
 	if problem != "" {
 		return nil, false, invalidParams("%s", problem)
 	}
@@ -271,7 +250,7 @@ func (s *Server) registerPush(c *client, req request) (any, bool, *Error) {
 }
 
 // parseKeysParam reads a registration's optional keys (§4.9).
-func parseKeysParam(params map[string]jsontext.Value) (*pushKeys, *Error) {
+func parseKeysParam(params map[string]jsontext.Value) (*webpush.Keys, *Error) {
 	if _, has := params["keys"]; !has {
 		return nil, nil
 	}
@@ -287,7 +266,7 @@ func parseKeysParam(params map[string]jsontext.Value) (*pushKeys, *Error) {
 	if err != nil {
 		return nil, invalidParams("keys.auth must be a string")
 	}
-	keys, problem := parsePushKeys(p256dh, auth)
+	keys, problem := webpush.ParseKeys(p256dh, auth)
 	if problem != nil {
 		return nil, invalidParams("%s", problem.Error())
 	}
@@ -301,7 +280,7 @@ func (s *Server) unregisterPush(c *client, req request) (any, bool, *Error) {
 	if err != nil {
 		return nil, false, err
 	}
-	if normalized, problem := normalizePushURL(endpoint); problem == "" {
+	if normalized, problem := webpush.NormalizeURL(endpoint); problem == "" {
 		endpoint = normalized
 	}
 	s.mu.Lock()
@@ -341,53 +320,6 @@ func (s *Server) sweepPushes() {
 			s.unlock()
 		}
 	}
-}
-
-// normalizePushURL is an endpoint in the one form a registration is kept
-// under: an absolute URL without credentials, whitespace, or a host ending
-// in a dot, with its scheme and host lowercased and no default port. A
-// problem says why it is not one.
-func normalizePushURL(endpoint string) (string, string) {
-	parsed, err := url.Parse(endpoint)
-	if err != nil || parsed.Host == "" || parsed.User != nil || parsed.Opaque != "" || strings.ContainsFunc(endpoint, func(r rune) bool { return r <= ' ' }) {
-		return "", "url must be an absolute URL"
-	}
-	parsed.Scheme = strings.ToLower(parsed.Scheme)
-	host := strings.ToLower(parsed.Hostname())
-	if host == "" || strings.HasSuffix(host, ".") {
-		return "", "url must name a host without a trailing dot"
-	}
-	if strings.Contains(host, ":") {
-		host = "[" + host + "]"
-	}
-	if port := parsed.Port(); port != "" && !(parsed.Scheme == "https" && port == "443") && !(parsed.Scheme == "http" && port == "80") {
-		host += ":" + port
-	}
-	parsed.Host = host
-	return parsed.String(), ""
-}
-
-// checkPushURL normalizes an endpoint (normalizePushURL) and requires https
-// (http too with AllowInsecurePush) and a host that is not an internal
-// address literal or localhost. Names that resolve to internal addresses
-// are refused when dialing.
-func (s *Server) checkPushURL(endpoint string) (string, string) {
-	endpoint, problem := normalizePushURL(endpoint)
-	if problem != "" {
-		return "", problem
-	}
-	parsed, _ := url.Parse(endpoint)
-	if parsed.Scheme != "https" && !(s.config.AllowInsecurePush && parsed.Scheme == "http") {
-		return "", "url must use https"
-	}
-	if s.config.AllowInsecurePush {
-		return endpoint, ""
-	}
-	host := parsed.Hostname()
-	if _, err := netip.ParseAddr(host); err == nil && !publicAddress(host) || host == "localhost" || strings.HasSuffix(host, ".localhost") {
-		return "", "url must name a public host"
-	}
-	return endpoint, ""
 }
 
 // wakeLocked pushes a message to the users it concerns (§4.9). previous is
@@ -534,7 +466,7 @@ func (s *Server) deliverPushLocked(p *pushRegistration, unread int, payload []by
 	if badge {
 		latest = pushKey(p.userID, p.url)
 	}
-	s.push.deliver(*p, payload, urgency, latest, done)
+	s.push.Deliver(webpush.Target{UserID: p.userID, Kind: p.kind, URL: p.url, Token: p.token, Keys: p.keys}, payload, urgency, latest, done)
 }
 
 // pushesTodayLocked is how many pushes the user's endpoints accepted on
@@ -632,273 +564,4 @@ func pushPayload(pushID string, unread int, snapshot map[string]any) []byte {
 		}
 	}
 	return payload
-}
-
-// pushDeliverer POSTs push payloads in the background, off the paths that
-// deliver messages. Each push host has its own lane of bounded concurrency
-// and queue, so a slow or stalling host delays only pushes to itself.
-// Unless insecure pushes are allowed, it refuses to connect to loopback,
-// private, link-local, and other non-public addresses, checked on the
-// dialed address so DNS cannot redirect it.
-type pushDeliverer struct {
-	client  *http.Client
-	slots   chan struct{}
-	pending sync.WaitGroup
-	// vapid signs webpush deliveries, with subject as their contact.
-	vapid   *vapidKey
-	subject string
-
-	mu     sync.Mutex
-	queued int
-	users  map[string]int
-	hosts  map[string]*pushLane
-	// latest holds each badge delivery that has not started, by
-	// registration, so a newer count replaces its payload and its done.
-	latest map[string]*queuedPush
-}
-
-// queuedPush is a delivery's registration, as it was when the delivery
-// was handed over, its payload, and what it reports to.
-type queuedPush struct {
-	registration pushRegistration
-	payload      []byte
-	done         func(status int)
-}
-
-// pushLane bounds concurrent deliveries to one push host; queued counts the
-// deliveries waiting for it or running, so an unused lane is forgotten.
-type pushLane struct {
-	slots  chan struct{}
-	queued int
-}
-
-// nonPublicPrefixes are special-purpose ranges that netip's classification
-// does not already exclude: this network, shared address space (CGNAT),
-// IETF protocol assignments, documentation, the 6to4 relay anycast,
-// benchmarking, and the reserved class E range; and in IPv6, IPv4-compatible
-// addresses, discard-only, translation and tunneling prefixes that embed
-// IPv4 addresses, benchmarking, ORCHID, documentation, deprecated
-// site-local, and segment routing.
-var nonPublicPrefixes = []netip.Prefix{
-	netip.MustParsePrefix("0.0.0.0/8"),
-	netip.MustParsePrefix("100.64.0.0/10"),
-	netip.MustParsePrefix("192.0.0.0/24"),
-	netip.MustParsePrefix("192.0.2.0/24"),
-	netip.MustParsePrefix("192.88.99.0/24"),
-	netip.MustParsePrefix("198.18.0.0/15"),
-	netip.MustParsePrefix("198.51.100.0/24"),
-	netip.MustParsePrefix("203.0.113.0/24"),
-	netip.MustParsePrefix("240.0.0.0/4"),
-	netip.MustParsePrefix("::/96"),
-	netip.MustParsePrefix("64:ff9b::/96"),
-	netip.MustParsePrefix("64:ff9b:1::/48"),
-	netip.MustParsePrefix("100::/64"),
-	netip.MustParsePrefix("2001::/32"),
-	netip.MustParsePrefix("2001:2::/48"),
-	netip.MustParsePrefix("2001:10::/28"),
-	netip.MustParsePrefix("2001:20::/28"),
-	netip.MustParsePrefix("2001:db8::/32"),
-	netip.MustParsePrefix("2002::/16"),
-	netip.MustParsePrefix("3fff::/20"),
-	netip.MustParsePrefix("5f00::/16"),
-	netip.MustParsePrefix("fec0::/10"),
-}
-
-// publicAddress reports whether a dialed address is on the public internet.
-func publicAddress(host string) bool {
-	addr, err := netip.ParseAddr(host)
-	if err != nil {
-		return false
-	}
-	addr = addr.Unmap()
-	if !addr.IsGlobalUnicast() || addr.IsPrivate() {
-		return false
-	}
-	for _, prefix := range nonPublicPrefixes {
-		if prefix.Contains(addr) {
-			return false
-		}
-	}
-	return true
-}
-
-func newPushDeliverer(allowInternal bool) *pushDeliverer {
-	dialer := &net.Dialer{Timeout: pushTimeout}
-	if !allowInternal {
-		dialer.Control = func(_, address string, _ syscall.RawConn) error {
-			host, _, err := net.SplitHostPort(address)
-			if err != nil {
-				return err
-			}
-			if !publicAddress(host) {
-				return errors.New("push endpoint resolves to an internal address")
-			}
-			return nil
-		}
-	}
-	transport := &http.Transport{
-		DialContext:         dialer.DialContext,
-		TLSHandshakeTimeout: pushTimeout,
-		// A custom dialer turns HTTP/2 off unless asked; push services
-		// serve many pushes over one HTTP/2 connection.
-		ForceAttemptHTTP2:   true,
-		MaxIdleConnsPerHost: maxPushPerHost,
-		// A Transport literal keeps idle connections forever and without a
-		// total bound; push hosts are chosen by clients, so both are set.
-		MaxIdleConns:    maxConcurrentPushPOST * 2,
-		IdleConnTimeout: 90 * time.Second,
-	}
-	return &pushDeliverer{
-		client: &http.Client{
-			Timeout:   pushTimeout,
-			Transport: transport,
-			CheckRedirect: func(*http.Request, []*http.Request) error {
-				return http.ErrUseLastResponse
-			},
-		},
-		slots:  make(chan struct{}, maxConcurrentPushPOST),
-		users:  make(map[string]int),
-		hosts:  make(map[string]*pushLane),
-		latest: make(map[string]*queuedPush),
-	}
-}
-
-// deliver POSTs payload to a registration's url. With latest, the key of a
-// badge delivery, a delivery for the same key that has not started takes
-// the registration, as registered now, payload, and done in place of its
-// own, and the replaced done is never called. done receives the endpoint's status code, or 0 for a delivery
-// dropped beyond the user's, the host's, or the server's queue bound, or
-// one that gets no answer.
-func (p *pushDeliverer) deliver(registration pushRegistration, payload []byte, urgency, latest string, done func(status int)) {
-	parsed, err := url.Parse(registration.url)
-	if err != nil {
-		p.dropped(done)
-		return
-	}
-	host := strings.ToLower(parsed.Host)
-	p.mu.Lock()
-	if waiting := p.latest[latest]; latest != "" && waiting != nil {
-		waiting.registration, waiting.payload, waiting.done = registration, payload, done
-		p.mu.Unlock()
-		return
-	}
-	lane := p.hosts[host]
-	if p.queued >= maxPushQueued || p.users[registration.userID] >= maxPushQueuedPerUser || lane != nil && lane.queued >= maxPushQueuedPerHost {
-		p.mu.Unlock()
-		p.dropped(done)
-		return
-	}
-	p.queued++
-	p.users[registration.userID]++
-	if lane == nil {
-		lane = &pushLane{slots: make(chan struct{}, maxPushPerHost)}
-		p.hosts[host] = lane
-	}
-	lane.queued++
-	waiting := &queuedPush{registration: registration, payload: payload, done: done}
-	if latest != "" {
-		p.latest[latest] = waiting
-	}
-	p.mu.Unlock()
-	p.pending.Add(1)
-	go func() {
-		defer p.pending.Done()
-		defer p.release(registration.userID, host, lane)
-		// The host's lane first, then a shared slot: a stalled host holds at
-		// most its lane's share of the slots.
-		lane.slots <- struct{}{}
-		defer func() { <-lane.slots }()
-		p.slots <- struct{}{}
-		defer func() { <-p.slots }()
-		p.mu.Lock()
-		registration, payload, done := waiting.registration, waiting.payload, waiting.done
-		if latest != "" {
-			delete(p.latest, latest)
-		}
-		p.mu.Unlock()
-		ctx, cancel := context.WithTimeout(context.Background(), pushTimeout)
-		defer cancel()
-		request, err := p.request(ctx, registration, payload, urgency)
-		if err != nil {
-			done(0)
-			return
-		}
-		response, err := p.client.Do(request)
-		if err != nil {
-			done(0)
-			return
-		}
-		// Reading the answer lets the connection be reused.
-		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, maxPushResponseDrain))
-		response.Body.Close()
-		done(response.StatusCode)
-	}()
-}
-
-// dropped tells done of a delivery dropped before it started, apart, since
-// the caller may hold the lock done takes.
-func (p *pushDeliverer) dropped(done func(status int)) {
-	p.pending.Add(1)
-	go func() {
-		defer p.pending.Done()
-		done(0)
-	}()
-}
-
-// request builds a delivery (§4.9), with TTL and Urgency for every kind.
-// relay: the payload as JSON, or, with keys, encrypted as for webpush, with
-// the token, if any, as bearer. webpush (RFC 8030): the payload encrypted
-// for the subscription (RFC 8291), with a VAPID Authorization (RFC 8292).
-func (p *pushDeliverer) request(ctx context.Context, registration pushRegistration, payload []byte, urgency string) (*http.Request, error) {
-	body, contentType := payload, "application/json"
-	if registration.keys != nil {
-		encrypted, err := encryptPush(payload, *registration.keys)
-		if err != nil {
-			return nil, err
-		}
-		body, contentType = encrypted, "application/octet-stream"
-	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, registration.url, bytes.NewReader(body))
-	if err != nil {
-		return nil, err
-	}
-	request.Header.Set("Content-Type", contentType)
-	if registration.keys != nil {
-		request.Header.Set("Content-Encoding", "aes128gcm")
-	}
-	request.Header.Set("TTL", pushTTL)
-	request.Header.Set("Urgency", urgency)
-	switch registration.kind {
-	case "webpush":
-		if p.vapid == nil || registration.keys == nil {
-			return nil, errors.New("webpush needs a VAPID key and subscription keys")
-		}
-		authorization, err := p.vapid.authorization(registration.url, p.subject, time.Now())
-		if err != nil {
-			return nil, err
-		}
-		request.Header.Set("Authorization", authorization)
-	default:
-		if registration.token != "" {
-			request.Header.Set("Authorization", "Bearer "+registration.token)
-		}
-	}
-	return request, nil
-}
-
-// release ends a delivery's accounting, forgetting an unused host lane.
-func (p *pushDeliverer) release(userID, host string, lane *pushLane) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.queued--
-	if p.users[userID]--; p.users[userID] == 0 {
-		delete(p.users, userID)
-	}
-	if lane.queued--; lane.queued == 0 {
-		delete(p.hosts, host)
-	}
-}
-
-func (p *pushDeliverer) wait() {
-	p.pending.Wait()
 }

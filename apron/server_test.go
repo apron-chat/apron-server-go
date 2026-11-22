@@ -15,6 +15,8 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+
+	"github.com/apron-chat/apron-server-go/apron/internal/webpush"
 )
 
 func TestShutdownClosesConnections(t *testing.T) {
@@ -75,9 +77,9 @@ func TestServerFrame(t *testing.T) {
 	// push offers relay and webpush, with the server's VAPID key, and the
 	// wake scopes it implements (§4.9).
 	push, _ := params["push"].(map[string]any)
-	webpush, _ := push["webpush"].(map[string]any)
-	key, _ := webpush["key"].(string)
-	if point, err := decodeBase64URL(key); err != nil || len(point) != p256PointBytes || len(webpush) != 1 {
+	web, _ := push["webpush"].(map[string]any)
+	key, _ := web["key"].(string)
+	if point, err := webpush.DecodeBase64URL(key); err != nil || len(point) != webpush.P256PointBytes || len(web) != 1 {
 		t.Fatalf("push.webpush: %#v", push["webpush"])
 	}
 	if !reflect.DeepEqual(push["relay"], map[string]any{}) || !reflect.DeepEqual(push["wake"], []any{"mentions", "replies", "private", "joined", "badge"}) || len(push) != 3 {

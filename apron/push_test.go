@@ -16,7 +16,6 @@ import (
 	"reflect"
 	"slices"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -24,6 +23,7 @@ import (
 	"github.com/coder/websocket"
 	"golang.org/x/time/rate"
 
+	"github.com/apron-chat/apron-server-go/apron/internal/webpush"
 	"github.com/apron-chat/apron-server-go/store"
 )
 
@@ -75,7 +75,7 @@ func (relay *testRelay) pushes(t *testing.T, app *Server, c *testClient) []relay
 	t.Helper()
 	c.drain(t)
 	app.badges.Wait()
-	app.push.wait()
+	app.push.Wait()
 	// A later Add to either WaitGroup must happen after these Waits, and a
 	// server timer, such as a mute running out, can add one at any time. The
 	// server adds only holding app.mu, so taking it here orders those Adds
@@ -912,7 +912,7 @@ func TestPushAndStatusSurviveRestart(t *testing.T) {
 		app.mu.Unlock()
 		t.Fatalf("relay registration: %#v", relay)
 	}
-	subscription, _ := parsePushKeys(keys["p256dh"].(string), keys["auth"].(string))
+	subscription, _ := webpush.ParseKeys(keys["p256dh"].(string), keys["auth"].(string))
 	app.addPushLocked(erin, &pushRegistration{
 		userID: "erin", kind: "webpush", url: "https://push.example/s", pushID: "p1", keys: &subscription,
 		wake: wakeJoined | wakeBadge, renewed: time.Now(), lastUnread: -1,
@@ -938,7 +938,7 @@ func TestPushAndStatusSurviveRestart(t *testing.T) {
 	app.mu.RLock()
 	erin = app.users["erin"]
 	web := erin.pushes["https://push.example/s"]
-	if web == nil || web.kind != "webpush" || web.pushID != "p1" || web.wake != wakeJoined|wakeBadge || web.keys == nil || encodeBase64URL(web.keys.auth) != keys["auth"] {
+	if web == nil || web.kind != "webpush" || web.pushID != "p1" || web.wake != wakeJoined|wakeBadge || web.keys == nil || webpush.EncodeBase64URL(web.keys.Auth) != keys["auth"] {
 		t.Fatalf("webpush registration after restart: %#v", web)
 	}
 	if erin.pushes["https://relay.example/erin"] == nil || len(app.pushes) != 2 {
@@ -961,10 +961,10 @@ func TestPushAndStatusSurviveRestart(t *testing.T) {
 	}
 	// A configured VAPID key replaces the stored one, and a malformed one
 	// stops the server from starting.
-	configured, _ := newVAPIDKey()
+	configured, _ := webpush.NewVAPIDKey()
 	config := DefaultConfig()
-	config.VAPIDPrivateKey = configured.encoded()
-	if app, _ := newTestServer(t, config); app.vapid.public != configured.public {
+	config.VAPIDPrivateKey = configured.Encoded()
+	if app, _ := newTestServer(t, config); app.vapid.Public != configured.Public {
 		t.Fatal("the configured VAPID key is not used")
 	}
 	config.VAPIDPrivateKey = "nope"
@@ -1016,174 +1016,6 @@ func TestPushesPerUserDay(t *testing.T) {
 	app.unlock()
 	if got := mention(); got != 1 {
 		t.Fatalf("deliveries on a new day: %d", got)
-	}
-}
-
-func TestPushRefusesInternalAddresses(t *testing.T) {
-	var hits atomic.Int32
-	relay := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { hits.Add(1) }))
-	defer relay.Close()
-	deliverer := newPushDeliverer(false)
-	called := false
-	deliverer.deliver(pushRegistration{url: relay.URL}, []byte("{}"), "normal", "", func(status int) { called = status != 0 })
-	deliverer.wait()
-	if hits.Load() != 0 || called {
-		t.Fatalf("delivered to a loopback address: hits=%d called=%v", hits.Load(), called)
-	}
-	app, _ := newTestServer(t, DefaultConfig())
-	if _, problem := app.checkPushURL("http://relay.example/p"); problem == "" {
-		t.Fatal("http push URL accepted without AllowInsecurePush")
-	}
-	// Internal address literals, localhost, and hosts ending in a dot are
-	// refused at registration.
-	for _, endpoint := range []string{"https://10.0.0.1/p", "https://[::1]/p", "https://[fd00::1]:8443/p", "https://169.254.169.254/p", "https://localhost/p", "https://push.localhost/p", "https://192.0.2.1/p", "https://push.example.net./p", "mailto:a@b.example"} {
-		if _, problem := app.checkPushURL(endpoint); problem == "" {
-			t.Errorf("%s accepted", endpoint)
-		}
-	}
-	// Endpoints are kept in one form: scheme and host lowercased, no
-	// default port.
-	for endpoint, want := range map[string]string{
-		"https://93.184.215.14/p":                   "https://93.184.215.14/p",
-		"https://fcm.googleapis.com/fcm/send/x":     "https://fcm.googleapis.com/fcm/send/x",
-		"HTTPS://FCM.GoogleAPIs.com:443/fcm/send/x": "https://fcm.googleapis.com/fcm/send/x",
-		"https://push.example.net:8443/A?b=C":       "https://push.example.net:8443/A?b=C",
-		"https://[2606:4700::1111]:443/p":           "https://[2606:4700::1111]/p",
-	} {
-		if got, problem := app.checkPushURL(endpoint); got != want {
-			t.Errorf("%s normalized to %q (%s), want %q", endpoint, got, problem, want)
-		}
-	}
-}
-
-// Badge deliveries for one registration that have not started give way to
-// the latest; lanes are per host, ignoring case.
-func TestPushDeliveriesCoalesceBadges(t *testing.T) {
-	release := make(chan struct{})
-	var bodies []string
-	var mu sync.Mutex
-	relay := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		body, _ := io.ReadAll(r.Body)
-		mu.Lock()
-		bodies = append(bodies, string(body))
-		mu.Unlock()
-		<-release
-	}))
-	defer relay.Close()
-	deliverer := newPushDeliverer(true)
-	// Fill the host's lane so later deliveries wait.
-	local := strings.Replace(relay.URL, "127.0.0.1", "localhost", 1)
-	for range maxPushPerHost {
-		deliverer.deliver(pushRegistration{userID: "filler", url: local + "/busy"}, []byte("{}"), "normal", "", func(int) {})
-	}
-	for deadline := time.Now().Add(2 * time.Second); time.Now().Before(deadline); time.Sleep(5 * time.Millisecond) {
-		mu.Lock()
-		busy := len(bodies) == maxPushPerHost
-		mu.Unlock()
-		if busy {
-			break
-		}
-	}
-	upper := strings.Replace(relay.URL, "127.0.0.1", "LocalHost", 1)
-	for i := range 3 {
-		deliverer.deliver(pushRegistration{userID: "u", url: upper + "/badge"}, []byte(formatID(int64(i))), "low", "u "+upper+"/badge", func(int) {})
-	}
-	deliverer.mu.Lock()
-	lanes, queued := len(deliverer.hosts), deliverer.users["u"]
-	deliverer.mu.Unlock()
-	close(release)
-	deliverer.wait()
-	if lanes != 1 || queued != 1 {
-		t.Fatalf("lanes %d, queued badge deliveries %d", lanes, queued)
-	}
-	mu.Lock()
-	defer mu.Unlock()
-	if !slices.Contains(bodies, "2") || slices.Contains(bodies, "0") || slices.Contains(bodies, "1") {
-		t.Fatalf("delivered bodies: %v", bodies)
-	}
-}
-
-func TestPushLanesIsolateStalledRelays(t *testing.T) {
-	release := make(chan struct{})
-	var stalled atomic.Int32
-	slow := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		stalled.Add(1)
-		select {
-		case <-release:
-		case <-r.Context().Done():
-		}
-	}))
-	defer slow.Close()
-	delivered := make(chan struct{}, 1)
-	fast := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		delivered <- struct{}{}
-		w.WriteHeader(http.StatusNoContent)
-	}))
-	defer fast.Close()
-	deliverer := newPushDeliverer(true)
-	defer func() {
-		close(release)
-		deliverer.wait()
-	}()
-
-	// One user queues at most maxPushQueuedPerUser deliveries.
-	for range maxPushQueuedPerUser + 5 {
-		deliverer.deliver(pushRegistration{userID: "spammer", url: slow.URL + "/slow"}, []byte("{}"), "normal", "", func(int) {})
-	}
-	deliverer.mu.Lock()
-	queued := deliverer.users["spammer"]
-	deliverer.mu.Unlock()
-	if queued != maxPushQueuedPerUser {
-		t.Fatalf("queued deliveries for one user: %d", queued)
-	}
-	for i := range maxConcurrentPushPOST {
-		deliverer.deliver(pushRegistration{userID: "user" + formatID(int64(i)), url: slow.URL + "/slow"}, []byte("{}"), "normal", "", func(int) {})
-	}
-	deadline := time.Now().Add(time.Second)
-	for stalled.Load() < maxPushPerHost && time.Now().Before(deadline) {
-		time.Sleep(10 * time.Millisecond)
-	}
-	if got := stalled.Load(); got != maxPushPerHost {
-		t.Fatalf("concurrent deliveries to one host: %d", got)
-	}
-	// Another push host has its own lane.
-	deliverer.deliver(pushRegistration{userID: "victim", url: fast.URL + "/fast"}, []byte("{}"), "normal", "", func(int) {})
-	select {
-	case <-delivered:
-	case <-time.After(2 * time.Second):
-		t.Fatal("a stalled push host blocked delivery to another host")
-	}
-}
-
-func TestPushRefusesNonPublicRanges(t *testing.T) {
-	for host, want := range map[string]bool{
-		"93.184.215.14":     true,
-		"2606:4700::1111":   true,
-		"127.0.0.1":         false,
-		"10.1.2.3":          false,
-		"169.254.169.254":   false,
-		"100.64.0.1":        false,
-		"100.100.100.200":   false,
-		"198.18.0.1":        false,
-		"192.0.0.1":         false,
-		"240.0.0.1":         false,
-		"::ffff:100.64.0.1": false,
-		"64:ff9b::a00:1":    false,
-		"2002:a00:1::1":     false,
-		"fd00::1":           false,
-		"192.0.2.1":         false,
-		"198.51.100.1":      false,
-		"203.0.113.1":       false,
-		"::a00:1":           false,
-		"100::1":            false,
-		"2001:db8::1":       false,
-		"fec0::1":           false,
-		"3fff::1":           false,
-		"::1":               false,
-	} {
-		if got := publicAddress(host); got != want {
-			t.Errorf("publicAddress(%s) = %v, want %v", host, got, want)
-		}
 	}
 }
 
@@ -1422,45 +1254,6 @@ func TestLeavingPrivateRoomRecountsThreads(t *testing.T) {
 	}
 	if kept, fresh := unreadState(app, carol); kept != 0 || fresh != 0 {
 		t.Fatalf("after leaving: kept %d, counted %d", kept, fresh)
-	}
-}
-
-// A badge delivery that replaces one still queued goes with the
-// registration as it is now, its token included, not as it was when the
-// first was queued.
-func TestCoalescedBadgeUsesLatestRegistration(t *testing.T) {
-	release := make(chan struct{})
-	var mu sync.Mutex
-	tokens := map[string]string{}
-	relay := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		body, _ := io.ReadAll(r.Body)
-		mu.Lock()
-		tokens[string(body)] = r.Header.Get("Authorization")
-		mu.Unlock()
-		<-release
-	}))
-	defer relay.Close()
-	deliverer := newPushDeliverer(true)
-	for range maxPushPerHost {
-		deliverer.deliver(pushRegistration{userID: "filler", url: relay.URL + "/busy"}, []byte("{}"), "normal", "", func(int) {})
-	}
-	for deadline := time.Now().Add(2 * time.Second); time.Now().Before(deadline); time.Sleep(5 * time.Millisecond) {
-		mu.Lock()
-		busy := len(tokens) > 0
-		mu.Unlock()
-		if busy {
-			break
-		}
-	}
-	key := "u " + relay.URL + "/badge"
-	deliverer.deliver(pushRegistration{userID: "u", url: relay.URL + "/badge", token: "old"}, []byte("1"), "low", key, func(int) {})
-	deliverer.deliver(pushRegistration{userID: "u", url: relay.URL + "/badge", token: "new"}, []byte("2"), "low", key, func(int) {})
-	close(release)
-	deliverer.wait()
-	mu.Lock()
-	defer mu.Unlock()
-	if _, sent := tokens["1"]; sent || tokens["2"] != "Bearer new" {
-		t.Fatalf("badge deliveries: %#v", tokens)
 	}
 }
 

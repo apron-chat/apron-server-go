@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/apron-chat/apron-server-go/apron/internal/roomlog"
+	"github.com/apron-chat/apron-server-go/apron/internal/webpush"
 	"github.com/apron-chat/apron-server-go/internal/auth/email"
 	"github.com/apron-chat/apron-server-go/internal/auth/external"
 	"github.com/apron-chat/apron-server-go/internal/auth/passkey"
@@ -366,7 +367,7 @@ func (s *Server) entriesLocked(d dirtySet, records []store.Entry) []store.Entry 
 				stored.Session = sessionID(p.session)
 			}
 			if p.keys != nil {
-				stored.P256DH, stored.Auth = encodeBase64URL(p.keys.p256dh), encodeBase64URL(p.keys.auth)
+				stored.P256DH, stored.Auth = webpush.EncodeBase64URL(p.keys.P256DH), webpush.EncodeBase64URL(p.keys.Auth)
 			}
 			put(entryPush, key, stored)
 		} else {
@@ -374,7 +375,7 @@ func (s *Server) entriesLocked(d dirtySet, records []store.Entry) []store.Entry 
 		}
 	}
 	if d.vapid && s.vapidStored {
-		put(entryMeta, "vapid", s.vapid.encoded())
+		put(entryMeta, "vapid", s.vapid.Encoded())
 	}
 	if d.emoji {
 		put(entryMeta, "emoji", s.storedEmojiLocked())
@@ -692,7 +693,7 @@ func (s *Server) restoreLocked() (map[string]bool, error) {
 			wake: parseWakeNames(stored.Wake), renewed: stored.Renewed, lastUnread: -1,
 		}
 		if stored.P256DH != "" {
-			keys, err := parsePushKeys(stored.P256DH, stored.Auth)
+			keys, err := webpush.ParseKeys(stored.P256DH, stored.Auth)
 			if err != nil {
 				return nil, fmt.Errorf("stored push %q: %w", key, err)
 			}
@@ -793,14 +794,14 @@ func (s *Server) restoreVAPIDLocked(raw jsontext.Value) error {
 		if err := json.Unmarshal(raw, &encoded); err != nil {
 			return fmt.Errorf("stored VAPID key: %w", err)
 		}
-		key, err := parseVAPIDKey(encoded)
+		key, err := webpush.ParseVAPIDKey(encoded)
 		if err != nil {
 			return fmt.Errorf("stored VAPID key: %w", err)
 		}
 		s.vapid, s.vapidStored = key, true
 		return nil
 	}
-	key, err := newVAPIDKey()
+	key, err := webpush.NewVAPIDKey()
 	if err != nil {
 		return err
 	}

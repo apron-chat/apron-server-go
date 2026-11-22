@@ -1,4 +1,4 @@
-package apron
+package webpush
 
 import (
 	"bytes"
@@ -37,7 +37,7 @@ var rfc8291 = struct {
 
 func mustDecode(t *testing.T, text string) []byte {
 	t.Helper()
-	data, err := decodeBase64URL(text)
+	data, err := DecodeBase64URL(text)
 	if err != nil {
 		t.Fatalf("decode %q: %v", text, err)
 	}
@@ -48,7 +48,7 @@ func mustDecode(t *testing.T, text string) []byte {
 // payload of one aes128gcm record with the subscription's private key.
 func decryptPush(t *testing.T, body []byte, private *ecdh.PrivateKey, auth []byte) []byte {
 	t.Helper()
-	if len(body) < pushHeaderBytes || body[20] != p256PointBytes {
+	if len(body) < pushHeaderBytes || body[20] != P256PointBytes {
 		t.Fatalf("aes128gcm header: %x", body[:min(len(body), pushHeaderBytes)])
 	}
 	salt, serverKey := body[:16], body[21:pushHeaderBytes]
@@ -89,7 +89,7 @@ func testSubscription(t *testing.T) (*ecdh.PrivateKey, map[string]any) {
 	}
 	auth := make([]byte, authSecretBytes)
 	_, _ = rand.Read(auth)
-	return private, map[string]any{"p256dh": encodeBase64URL(private.PublicKey().Bytes()), "auth": encodeBase64URL(auth)}
+	return private, map[string]any{"p256dh": EncodeBase64URL(private.PublicKey().Bytes()), "auth": EncodeBase64URL(auth)}
 }
 
 func TestWebPushEncryptionMatchesRFC8291(t *testing.T) {
@@ -98,18 +98,18 @@ func TestWebPushEncryptionMatchesRFC8291(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := encodeBase64URL(local.PublicKey().Bytes()); got != v.asPublic {
+	if got := EncodeBase64URL(local.PublicKey().Bytes()); got != v.asPublic {
 		t.Fatalf("server public key %s", got)
 	}
-	keys, err := parsePushKeys(v.uaPublic, v.auth)
+	keys, err := ParseKeys(v.uaPublic, v.auth)
 	if err != nil {
 		t.Fatal(err)
 	}
-	body, err := encryptPushWith([]byte(v.plaintext), keys, local, mustDecode(t, v.salt))
+	body, err := encryptWith([]byte(v.plaintext), keys, local, mustDecode(t, v.salt))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := encodeBase64URL(body); got != v.body {
+	if got := EncodeBase64URL(body); got != v.body {
 		t.Fatalf("body\n got %s\nwant %s", got, v.body)
 	}
 	// The receiver's private key recovers it.
@@ -117,34 +117,34 @@ func TestWebPushEncryptionMatchesRFC8291(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := decryptPush(t, body, receiver, keys.auth); string(got) != v.plaintext {
+	if got := decryptPush(t, body, receiver, keys.Auth); string(got) != v.plaintext {
 		t.Fatalf("decrypted %q", got)
 	}
 
 	// Each message has a fresh salt and server key.
-	first, _ := encryptPush([]byte("same"), keys)
-	second, _ := encryptPush([]byte("same"), keys)
+	first, _ := Encrypt([]byte("same"), keys)
+	second, _ := Encrypt([]byte("same"), keys)
 	if bytes.Equal(first[:pushHeaderBytes], second[:pushHeaderBytes]) {
 		t.Fatal("two messages share a salt and key")
 	}
 	for _, body := range [][]byte{first, second} {
-		if got := decryptPush(t, body, receiver, keys.auth); string(got) != "same" {
+		if got := decryptPush(t, body, receiver, keys.Auth); string(got) != "same" {
 			t.Fatalf("decrypted %q", got)
 		}
 	}
 	// The largest payload fills the 4096 bytes a push service must accept.
-	largest, err := encryptPush(make([]byte, maxPushPlaintext), keys)
+	largest, err := Encrypt(make([]byte, maxPushPlaintext), keys)
 	if err != nil || len(largest) != pushRecordSize {
 		t.Fatalf("largest payload: %d bytes, %v", len(largest), err)
 	}
-	if _, err := encryptPush(make([]byte, maxPushPlaintext+1), keys); err == nil {
+	if _, err := Encrypt(make([]byte, maxPushPlaintext+1), keys); err == nil {
 		t.Fatal("an oversized payload was encrypted")
 	}
 }
 
 func TestParsePushKeys(t *testing.T) {
 	v := rfc8291
-	if _, err := parsePushKeys(v.uaPublic+"=", v.auth+"=="); err != nil {
+	if _, err := ParseKeys(v.uaPublic+"=", v.auth+"=="); err != nil {
 		t.Fatalf("padded keys: %v", err)
 	}
 	offCurve := mustDecode(t, v.uaPublic)
@@ -152,32 +152,32 @@ func TestParsePushKeys(t *testing.T) {
 	compressed := mustDecode(t, v.uaPublic)[:33]
 	compressed[0] = 2
 	for name, keys := range map[string][2]string{
-		"off the curve": {encodeBase64URL(offCurve), v.auth},
-		"compressed":    {encodeBase64URL(compressed), v.auth},
-		"zero point":    {encodeBase64URL(make([]byte, 65)), v.auth},
+		"off the curve": {EncodeBase64URL(offCurve), v.auth},
+		"compressed":    {EncodeBase64URL(compressed), v.auth},
+		"zero point":    {EncodeBase64URL(make([]byte, 65)), v.auth},
 		"standard b64":  {strings.ReplaceAll(strings.ReplaceAll(v.uaPublic, "_", "/"), "-", "+"), v.auth},
-		"short auth":    {v.uaPublic, encodeBase64URL(make([]byte, 15))},
-		"long auth":     {v.uaPublic, encodeBase64URL(make([]byte, 17))},
+		"short auth":    {v.uaPublic, EncodeBase64URL(make([]byte, 15))},
+		"long auth":     {v.uaPublic, EncodeBase64URL(make([]byte, 17))},
 		"empty":         {"", ""},
 	} {
-		if _, err := parsePushKeys(keys[0], keys[1]); err == nil {
+		if _, err := ParseKeys(keys[0], keys[1]); err == nil {
 			t.Errorf("%s: accepted", name)
 		}
 	}
 }
 
 func TestVAPIDAuthorization(t *testing.T) {
-	key, err := newVAPIDKey()
+	key, err := NewVAPIDKey()
 	if err != nil {
 		t.Fatal(err)
 	}
 	// The stored form round-trips to the same key.
-	again, err := parseVAPIDKey(key.encoded())
-	if err != nil || again.public != key.public {
+	again, err := ParseVAPIDKey(key.Encoded())
+	if err != nil || again.Public != key.Public {
 		t.Fatalf("parsed key: %v %v", again, err)
 	}
-	for _, bad := range []string{"", "not base64!", encodeBase64URL(make([]byte, 31)), encodeBase64URL(make([]byte, 32))} {
-		if _, err := parseVAPIDKey(bad); err == nil {
+	for _, bad := range []string{"", "not base64!", EncodeBase64URL(make([]byte, 31)), EncodeBase64URL(make([]byte, 32))} {
+		if _, err := ParseVAPIDKey(bad); err == nil {
 			t.Errorf("VAPID key %q accepted", bad)
 		}
 	}
@@ -187,7 +187,7 @@ func TestVAPIDAuthorization(t *testing.T) {
 		t.Fatal(err)
 	}
 	token, k, ok := strings.Cut(strings.TrimPrefix(header, "vapid t="), ", k=")
-	if !ok || !strings.HasPrefix(header, "vapid t=") || k != key.public {
+	if !ok || !strings.HasPrefix(header, "vapid t=") || k != key.Public {
 		t.Fatalf("header %q", header)
 	}
 	parts := strings.Split(token, ".")
@@ -241,7 +241,7 @@ func TestVAPIDAuthorization(t *testing.T) {
 // A VAPID header is signed once per audience and subject and reused for
 // vapidTokenReuse, then signed again.
 func TestVAPIDTokensAreReused(t *testing.T) {
-	key, err := newVAPIDKey()
+	key, err := NewVAPIDKey()
 	if err != nil {
 		t.Fatal(err)
 	}

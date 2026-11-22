@@ -29,6 +29,7 @@ import (
 	"github.com/apron-chat/apron-server-go/apron/internal/durable"
 	"github.com/apron-chat/apron-server-go/apron/internal/proposals"
 	"github.com/apron-chat/apron-server-go/apron/internal/roomlog"
+	"github.com/apron-chat/apron-server-go/apron/internal/webpush"
 	"github.com/apron-chat/apron-server-go/internal/auth/external"
 	"github.com/apron-chat/apron-server-go/internal/auth/passkey"
 	"github.com/apron-chat/apron-server-go/internal/authn"
@@ -530,10 +531,10 @@ type Server struct {
 	ops map[string]operation
 	// wire serves the protocol, with s as its Backend (backend.go).
 	wire *wire.Server
-	push *pushDeliverer
+	push *webpush.Deliverer
 	// vapid is the webpush key (§4.9); vapidStored reports that it is the
 	// one kept in the store.
-	vapid       *vapidKey
+	vapid       *webpush.VAPIDKey
 	vapidStored bool
 	// badgeDelay is how long badge pushes wait to coalesce the changes to
 	// one user's unread count; badges counts the waits in progress.
@@ -646,17 +647,17 @@ func Open(config Config) (*Server, error) {
 	}
 	s.ops = s.operations()
 	s.newWire()
-	s.push = newPushDeliverer(config.AllowInsecurePush)
+	s.push = webpush.NewDeliverer(config.AllowInsecurePush)
 	if config.VAPIDPrivateKey != "" {
-		key, err := parseVAPIDKey(config.VAPIDPrivateKey)
+		key, err := webpush.ParseVAPIDKey(config.VAPIDPrivateKey)
 		if err != nil {
 			return fail(err)
 		}
 		s.vapid = key
 	}
-	s.push.subject = config.VAPIDSubject
-	if s.push.subject == "" && strings.HasPrefix(config.PublicURL, "https://") {
-		s.push.subject = config.PublicURL
+	s.push.Subject = config.VAPIDSubject
+	if s.push.Subject == "" && strings.HasPrefix(config.PublicURL, "https://") {
+		s.push.Subject = config.PublicURL
 	}
 	// The sign-in schemes get what they keep with the accounts once the
 	// extensions have added theirs (startSignIn).
@@ -692,7 +693,7 @@ func Open(config Config) (*Server, error) {
 		s.mu.Unlock()
 		return fail(fmt.Errorf("restoring the stored state: %w", err))
 	}
-	s.push.vapid = s.vapid
+	s.push.VAPID = s.vapid
 	if s.rooms[defaultRoomID] == nil {
 		// The seeded default room has a logged creation record like any
 		// other room, so its history_log_id is never null.
@@ -849,7 +850,7 @@ func (s *Server) Shutdown(ctx context.Context) error {
 			_ = s.wire.Shutdown(ctx)
 		}
 		s.badges.Wait()
-		s.push.wait()
+		s.push.Wait()
 		s.schemeWork.Wait()
 		// Extensions may keep values as they stop, so the store closes
 		// after them.
@@ -1014,7 +1015,7 @@ func (s *Server) serverParams(baseURL string, revealed bool) wire.ServerInfo {
 	if !s.config.DisablePush {
 		push := map[string]any{"relay": map[string]any{}, "wake": (urgentScopes | wakeJoined | wakeBadge).names()}
 		if s.vapid != nil {
-			push["webpush"] = map[string]any{"key": s.vapid.public}
+			push["webpush"] = map[string]any{"key": s.vapid.Public}
 		}
 		info.Push = push
 	}
