@@ -931,8 +931,11 @@ start with `/`, unknown commands (`Unknown command /foo; try /help`), and
 that requires `room_id` (see below) sent without `room_id` (`Send /kick
 from a room: it needs room_id`), which act only on a room the client
 names.
-Mentions in commands notify no one. A command's effects and `~private`
-replies arrive before its result. Commands:
+Command names, and the words that pick a form such as `add` in `/emoji
+add`, are case-sensitive and match exactly: `/Kick` is an unknown command,
+and `/emoji ADD` and `/server Title` are usage errors. Arguments are parsed
+as each command says. Mentions in commands notify no one. A command's
+effects and `~private` replies arrive before its result. Commands:
 
 - `/help` sends the calling connection, and only that connection, a
   `~private` notice

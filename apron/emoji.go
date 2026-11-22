@@ -330,7 +330,8 @@ func (s *Server) emojiCommand(c *client, _ *roomState, body map[string]any, args
 		return nil, invalidParams("Usage: /emoji add :<name>: with one image attached, or /emoji remove :<name>:; a name is letters, digits, _, +, and -, at most %d characters", maxEmojiBytes-2)
 	}
 	existing := s.emoji[key]
-	switch strings.ToLower(action) {
+	// The form's word matches exactly, as command names do.
+	switch action {
 	case "add":
 		embeds := asList(body["embeds"])
 		if len(embeds) != 1 || embeds[0].(map[string]any)["kind"] != "upload" {

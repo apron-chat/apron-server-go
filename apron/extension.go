@@ -187,7 +187,9 @@ func internalError() *Error {
 // (PROTOCOL.md §4.1).
 type Command struct {
 	// Name is what follows the slash: lowercase letters, digits, and
-	// dashes. It may not be a command the server has.
+	// dashes. It may not be a command the server has. Names are
+	// case-sensitive (ext:command_list): only /name exactly runs it, and
+	// /Name is an unknown command.
 	Name string
 	// Usage and Help describe the command in /help, such as
 	// "/weather <city>" and "show the forecast". When Usage starts with the

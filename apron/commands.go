@@ -378,7 +378,8 @@ func (s *Server) command(c *client, req request) (any, bool, *Error) {
 		return nil, false, invalidParams("A command starts with /; try /help")
 	}
 	word, args, _ := strings.Cut(line[1:], " ")
-	name := strings.ToLower(word)
+	// Names are case-sensitive (ext:command_list): /Kick is not /kick.
+	name := word
 	for i, value := range asList(body["embeds"]) {
 		if kind := value.(map[string]any)["kind"]; liveKind(kind) {
 			return nil, false, invalidParams("body.embeds[%d]: a command takes no %s embed; use /embed-%s", i, kind, kind)
@@ -455,11 +456,10 @@ func (s *Server) command(c *client, req request) (any, bool, *Error) {
 
 // formOf returns the form of the command named name that the command
 // line's args select: the one with the most fixed words that start args,
-// matched as the server's commands match them, ignoring case; nil for an
-// unknown command. s.commands does not change once Open returns, so this
+// matched exactly, as names are; nil for an unknown command. s.commands does not change once Open returns, so this
 // needs no lock.
 func (s *Server) formOf(name, args string) *commandForm {
-	words := strings.Fields(strings.ToLower(args))
+	words := strings.Fields(args)
 	var best *commandForm
 	most := -1
 	for i := range s.commands {

@@ -185,7 +185,8 @@ func (s *Server) serverCommand(c *client, r *roomState, body map[string]any, arg
 	if i := strings.IndexFunc(args, unicode.IsSpace); i >= 0 {
 		field, value = args[:i], strings.TrimSpace(args[i:])
 	}
-	field = strings.ToLower(field)
+	// The form's word matches exactly, as command names do: /server Title
+	// is not /server title.
 	embeds := asList(body["embeds"])
 	if len(embeds) > 0 && field != "avatar" {
 		return nil, invalidParams("Only /server avatar takes an attachment")

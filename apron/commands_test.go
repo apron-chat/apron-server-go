@@ -367,7 +367,7 @@ func TestCommandsThatRequireRoomID(t *testing.T) {
 		"kick":           {"text": "/kick @" + other.userID, "mentions": []any{other.userID}},
 		"embed-terminal": {"text": "/embed-terminal build"},
 		"embed-append":   {"text": "/embed-append The plan:"},
-		"here":           {"text": "/HERE"},
+		"here":           {"text": "/here"},
 	} {
 		frame := c.call(t, "command", c.nextID(name), map[string]any{"body": body})
 		failure, _ := frame["error"].(map[string]any)
@@ -398,5 +398,44 @@ func TestCommandsThatRequireRoomID(t *testing.T) {
 	}
 	if before, _ := c.request(t, "command", "help", map[string]any{"body": map[string]any{"text": "/help"}}); len(before) != 1 || privateNoticeText(t, before[0]) == "" {
 		t.Fatalf("/help without room_id: %#v", before)
+	}
+}
+
+// Command names are case-sensitive (ext:command_list): /Kick is not
+// /kick, for the server's commands, their forms' words, and extensions'.
+func TestCommandNamesAreCaseSensitive(t *testing.T) {
+	_, httpServer := newTestServer(t, extensionConfig(testExtension{"demo", func(r *Registrar) error {
+		r.Command(Command{Name: "echo", Usage: "/echo <text>", Run: func(_ context.Context, call *CommandCall) (map[string]any, error) {
+			return map[string]any{"echoed": call.Args}, nil
+		}})
+		return nil
+	}}))
+	c := dialTestClient(t, httpServer)
+	other := dialTestClient(t, httpServer)
+	c.drain(t)
+	room, _ := saveRoom(t, c, "mine", map[string]any{"title": "Mine"})
+	joinRoom(t, other, room)
+	c.drain(t)
+
+	for _, line := range []string{"/KICK @" + other.userID, "/Kick @" + other.userID, "/Help", "/HELP", "/Echo hi", "/EMOJI add :x:"} {
+		word, _, _ := strings.Cut(line[1:], " ")
+		frame := c.call(t, "command", c.nextID("unknown"), map[string]any{"room_id": room, "body": map[string]any{"text": line, "mentions": []any{other.userID}}})
+		failure, _ := frame["error"].(map[string]any)
+		if failure["code"] != float64(CodeInvalidParams) || failure["message"] != "Unknown command /"+word+"; try /help" {
+			t.Fatalf("%s = %#v", line, frame)
+		}
+	}
+	// A form's word matches exactly too: /emoji ADD is no form of /emoji.
+	frame := c.call(t, "command", "emoji", map[string]any{"body": map[string]any{"text": "/emoji ADD :x:", "embeds": []any{map[string]any{"kind": "upload"}}}})
+	if failure, _ := frame["error"].(map[string]any); failure["code"] != float64(CodeInvalidParams) || !strings.HasPrefix(failure["message"].(string), "Usage: /emoji add") {
+		t.Fatalf("/emoji ADD = %#v", frame)
+	}
+	c.expectQuiet(t)
+
+	if result := c.result(t, "command", "echo", map[string]any{"body": map[string]any{"text": "/echo hi"}}); result["echoed"] != "hi" {
+		t.Fatalf("/echo = %#v", result)
+	}
+	if _, result := c.request(t, "command", "kick", map[string]any{"room_id": room, "body": map[string]any{"text": "/kick @" + other.userID, "mentions": []any{other.userID}}}); len(result) != 0 {
+		t.Fatalf("/kick = %#v", result)
 	}
 }
