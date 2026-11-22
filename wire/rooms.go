@@ -103,10 +103,11 @@ type Rooms interface {
 	RoomSet(ctx context.Context, c *Conn, p RoomSetParams) (roomID string, err error)
 }
 
-func (s *Server) roomHandler(rooms Rooms, name string) HandlerFunc {
+func roomHandler(rooms Rooms, name string) func(context.Context, *Conn, *Request) (any, error) {
 	switch name {
 	case "room_list":
-		return func(ctx context.Context, c *Conn, raw jsontext.Value) (any, error) {
+		return func(ctx context.Context, c *Conn, r *Request) (any, error) {
+			raw := r.Params
 			var p RoomListParams
 			if err := json.Unmarshal(raw, &p); err != nil {
 				return nil, InvalidParams("Invalid room_list: " + err.Error())
@@ -152,7 +153,8 @@ func (s *Server) roomHandler(rooms Rooms, name string) HandlerFunc {
 			return result, nil
 		}
 	case "room_join", "room_leave":
-		return func(ctx context.Context, c *Conn, raw jsontext.Value) (any, error) {
+		return func(ctx context.Context, c *Conn, r *Request) (any, error) {
+			raw := r.Params
 			var p struct {
 				RoomID string `json:"room_id"`
 				UserID string `json:"user_id,omitempty"`
@@ -166,7 +168,8 @@ func (s *Server) roomHandler(rooms Rooms, name string) HandlerFunc {
 			return nil, rooms.RoomLeave(ctx, c, p.RoomID, p.UserID)
 		}
 	case "room_set":
-		return func(ctx context.Context, c *Conn, raw jsontext.Value) (any, error) {
+		return func(ctx context.Context, c *Conn, r *Request) (any, error) {
+			raw := r.Params
 			var p RoomSetParams
 			if err := json.Unmarshal(raw, &p); err != nil {
 				return nil, InvalidParams("Invalid room_set: " + err.Error())

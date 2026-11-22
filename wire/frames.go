@@ -29,7 +29,9 @@ type ServerInfo struct {
 	Description  string            `json:"description,omitempty"`
 	Avatar       string            `json:"avatar,omitempty"`
 	Status       []string          `json:"status,omitempty"`
-	Ext          map[string]any    `json:"ext,omitempty"`
+	// Push enables push (§4.9): its kinds and wake scopes.
+	Push map[string]any `json:"push,omitempty"`
+	Ext  map[string]any `json:"ext,omitempty"`
 }
 
 // User is a user object (§3.3.1).

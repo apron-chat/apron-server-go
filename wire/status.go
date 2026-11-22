@@ -103,9 +103,9 @@ func parseStatus(raw jsontext.Value) (StatusParams, error) {
 	return out, nil
 }
 
-func (s *Server) statusHandler(st Statuser) HandlerFunc {
-	return func(ctx context.Context, c *Conn, raw jsontext.Value) (any, error) {
-		p, err := parseStatus(raw)
+func statusHandler(st Statuser) func(context.Context, *Conn, *Request) (any, error) {
+	return func(ctx context.Context, c *Conn, r *Request) (any, error) {
+		p, err := parseStatus(r.Params)
 		if err != nil {
 			return nil, err
 		}

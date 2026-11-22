@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
-	"encoding/json/jsontext"
 	"errors"
 	"fmt"
 	"io"
@@ -319,12 +318,12 @@ func TestUnsupportedMethod(t *testing.T) {
 
 func TestHandle(t *testing.T) {
 	s := &wire.Server{Backend: &backend{}}
-	s.Handle("echo", "ext:echo", false, func(_ context.Context, _ *wire.Conn, params jsontext.Value) (any, error) {
-		return params, nil
-	})
-	s.Handle("fail", "", true, func(context.Context, *wire.Conn, jsontext.Value) (any, error) {
+	s.Handle("echo", wire.Method{Capability: "ext:echo", Handle: func(_ context.Context, _ *wire.Conn, r *wire.Request) (any, error) {
+		return r.Params, nil
+	}})
+	s.Handle("fail", wire.Method{ReadOnly: true, Handle: func(context.Context, *wire.Conn, *wire.Request) (any, error) {
 		return nil, errors.New("secret detail")
-	})
+	}})
 	c, hello := serve(t, s)
 	capabilities, _ := hello["params"].(map[string]any)["capabilities"].([]any)
 	if len(capabilities) != 1 || capabilities[0] != "ext:echo" {

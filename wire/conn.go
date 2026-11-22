@@ -58,11 +58,20 @@ func (c *Conn) UserID() string {
 	return c.user.UserID
 }
 
-// SetUser changes the connection's identity, as after a rename. It sends
-// nothing: the backend tells clients with a user notification (§3.3.3).
+// SetUser changes the connection's identity, as after a sign-in or a
+// rename. It sends nothing: the backend tells clients with a user
+// notification (§3.3.3).
 func (c *Conn) SetUser(u User) {
 	c.mu.Lock()
 	c.user = &u
+	c.mu.Unlock()
+}
+
+// SignOut leaves the connection without an identity: its requests are
+// denied until it signs in again.
+func (c *Conn) SignOut() {
+	c.mu.Lock()
+	c.user = nil
 	c.mu.Unlock()
 }
 
@@ -81,8 +90,33 @@ func (c *Conn) SetData(v any) {
 	c.mu.Unlock()
 }
 
-// Info returns the server frame the connection was sent.
-func (c *Conn) Info() ServerInfo { return c.info }
+// Info returns the server frame the connection was last sent.
+func (c *Conn) Info() ServerInfo {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.info
+}
+
+// Announce sends the connection a new server frame, which replaces the last
+// (§3.1), such as after a sign-in reveals more of the server. Server fills
+// it in as it does Backend.Hello's. Unlike Hello, it may be called while
+// the backend holds its own locks.
+func (c *Conn) Announce(info ServerInfo) bool {
+	info = c.server.complete(info)
+	frame, err := Encode("server", info)
+	if err != nil {
+		c.server.logger().Error("wire: encoding the server frame", "error", err)
+		return false
+	}
+	c.mu.Lock()
+	c.info = info
+	c.mu.Unlock()
+	return c.Send(frame)
+}
+
+// Closing reports whether the connection is closing or closed: its last
+// frame is queued, and the frames it sent after are dropped.
+func (c *Conn) Closing() bool { return c.rt.Closing() }
 
 // RemoteAddr is the client's address, or nil when the transport has none.
 func (c *Conn) RemoteAddr() net.Addr { return c.remote }

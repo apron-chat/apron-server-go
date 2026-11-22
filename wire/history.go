@@ -140,9 +140,9 @@ func parseHistory(raw jsontext.Value) (HistoryParams, error) {
 	return out, nil
 }
 
-func (s *Server) historyHandler(h Historian) HandlerFunc {
-	return func(ctx context.Context, c *Conn, raw jsontext.Value) (any, error) {
-		p, err := parseHistory(raw)
+func historyHandler(h Historian) func(context.Context, *Conn, *Request) (any, error) {
+	return func(ctx context.Context, c *Conn, r *Request) (any, error) {
+		p, err := parseHistory(r.Params)
 		if err != nil {
 			return nil, err
 		}
