@@ -89,7 +89,7 @@ func TestParseStatus(t *testing.T) {
 	if err != nil || p.Idle.Seconds != 300 || p.Mute != nil {
 		t.Fatalf("got %+v %v", p, err)
 	}
-	for _, bad := range []string{`{"idle": true}`, `{"idle": -1}`, `{"mute": 0}`, `{"mute": "x"}`} {
+	for _, bad := range []string{`{"room_id": "general", "idle": 5}`, `{"idle": true}`, `{"idle": -1}`, `{"mute": 0}`, `{"mute": "x"}`} {
 		if _, err := parseStatus(jsontext.Value(bad)); err == nil {
 			t.Errorf("%s was accepted", bad)
 		}

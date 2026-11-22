@@ -96,6 +96,10 @@ func parseStatus(raw jsontext.Value) (StatusParams, error) {
 			return StatusParams{}, InvalidParams("mute is true, false, or a number of seconds")
 		}
 	}
+	if out.RoomID != "" && out.Mute == nil {
+		// room_id says where a mute applies (§4.5.3).
+		return StatusParams{}, InvalidParams("room_id goes with mute")
+	}
 	return out, nil
 }
 
