@@ -6,7 +6,7 @@ import (
 	"net/http"
 	"sync"
 
-	"github.com/apron-chat/apron-server-go/internal/wirecore"
+	"github.com/apron-chat/apron-server-go/wire/internal/wirecore"
 )
 
 // Conn is one client connection. Its methods are safe for concurrent use.

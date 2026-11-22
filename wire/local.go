@@ -11,7 +11,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/apron-chat/apron-server-go/internal/wirecore"
+	"github.com/apron-chat/apron-server-go/wire/internal/wirecore"
 )
 
 // Errors of a Local connection.

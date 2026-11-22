@@ -15,7 +15,7 @@ import (
 
 	"github.com/coder/websocket"
 
-	"github.com/apron-chat/apron-server-go/internal/wirecore"
+	"github.com/apron-chat/apron-server-go/wire/internal/wirecore"
 )
 
 // Server serves the protocol for a Backend, and the handlers of its fields.

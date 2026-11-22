@@ -12,8 +12,8 @@ import (
 	"strconv"
 	"sync"
 
-	"github.com/apron-chat/apron-server-go/internal/wirecore"
 	"github.com/apron-chat/apron-server-go/wire/internal/testhook"
+	"github.com/apron-chat/apron-server-go/wire/internal/wirecore"
 )
 
 // MaxRequestIDBytes bounds a request id: ids are any string (§2.4), but

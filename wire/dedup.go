@@ -5,7 +5,7 @@ import (
 	"encoding/json/jsontext"
 	"sync"
 
-	"github.com/apron-chat/apron-server-go/internal/wirecore"
+	"github.com/apron-chat/apron-server-go/wire/internal/wirecore"
 )
 
 // dedupOutcome is a request's encoded result, or its error.
