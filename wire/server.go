@@ -3,7 +3,6 @@ package wire
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
 	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"fmt"
@@ -16,6 +15,8 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+
+	"github.com/apron-chat/apron-server-go/internal/wirecore"
 )
 
 // Backend answers for a Server. Its three methods are the core of the
@@ -136,7 +137,7 @@ func (s *Server) init() {
 		if size == 0 {
 			size = 4096
 		}
-		s.dedup = dedupCache{size: size, entries: make(map[dedupKey]*dedupEntry)}
+		s.dedup = dedupCache{Size: size}
 	})
 }
 
@@ -256,7 +257,7 @@ func (s *Server) ServeTransport(ctx context.Context, t Transport, remote net.Add
 			return
 		}
 		c.lastFrame.Store(time.Now().UnixNano())
-		if bytes.Equal(payload, pingFrame) {
+		if bytes.Equal(payload, wirecore.PingFrame) {
 			c.pong()
 			continue
 		}
@@ -267,8 +268,6 @@ func (s *Server) ServeTransport(ctx context.Context, t Transport, remote net.Add
 		}
 	}
 }
-
-var pingFrame = []byte(`{"method":"ping"}`)
 
 func (s *Server) hello(c *Conn) ServerInfo {
 	info := s.Backend.Hello(c)
@@ -342,82 +341,36 @@ func (s *Server) Shutdown(ctx context.Context) error {
 }
 
 // request is a parsed frame.
-type request struct {
-	method string
-	id     string
-	hasID  bool
-	params jsontext.Value
-}
-
-// notificationOnly are the methods a client sends as notifications; a
-// server may ignore the id of one (§1.1).
-var notificationOnly = map[string]bool{"ping": true, "activity": true}
-
-// maxRequestIDBytes bounds a request id, which is kept for deduplication.
-const maxRequestIDBytes = 256
-
-func parseRequest(payload []byte) (request, *Error) {
-	if !jsontext.Value(payload).IsValid() {
-		return request{}, &Error{Code: CodeParseError, Message: "Parse error"}
-	}
-	var object map[string]jsontext.Value
-	if err := json.Unmarshal(payload, &object); err != nil || object == nil {
-		return request{}, &Error{Code: CodeInvalidRequest, Message: "Invalid request"}
-	}
-	var req request
-	raw, ok := object["method"]
-	methodOK := ok && json.Unmarshal(raw, &req.method) == nil && req.method != ""
-	if !methodOK {
-		req.method = ""
-	}
-	if rawID, ok := object["id"]; ok && !notificationOnly[req.method] {
-		req.hasID = true
-		if json.Unmarshal(rawID, &req.id) != nil || bytes.Equal(bytes.TrimSpace(rawID), []byte("null")) {
-			req.hasID = false
-			return req, &Error{Code: CodeInvalidRequest, Message: "Request id must be a string"}
-		}
-	}
-	if !methodOK {
-		return req, &Error{Code: CodeInvalidRequest, Message: "Invalid request"}
-	}
-	req.params = jsontext.Value("{}")
-	if raw, ok := object["params"]; ok {
-		var params map[string]jsontext.Value
-		if json.Unmarshal(raw, &params) != nil || params == nil {
-			return req, InvalidParams("Params must be an object")
-		}
-		req.params = raw
-	}
-	return req, nil
-}
+type request = wirecore.Request
 
 func (s *Server) processFrame(c *Conn, payload []byte) {
-	req, perr := parseRequest(payload)
-	if perr != nil {
+	req, failed := wirecore.ParseRequest(payload)
+	if failed != nil {
+		perr := &Error{Code: failed.Code, Message: failed.Message}
 		switch {
-		case notificationOnly[req.method]:
+		case wirecore.NotificationOnly[req.Method]:
 			// A notification is never answered, and a ping with other
 			// spacing or keys is still a ping (§1.1).
-			if req.method == "ping" {
+			if req.Method == "ping" {
 				c.pong()
 			}
-		case req.hasID:
+		case req.HasID:
 			s.reply(c, req, nil, perr)
-		case perr.Code != CodeInvalidParams:
+		case !failed.InvalidParams():
 			s.reply(c, req, nil, perr)
 		}
 		return
 	}
-	if req.method == "ping" {
+	if req.Method == "ping" {
 		c.pong()
 		return
 	}
 	// Unknown notifications, and request methods sent without an id, are
 	// ignored (§1.1).
-	if !req.hasID {
+	if !req.HasID {
 		return
 	}
-	if req.method == "auth" {
+	if req.Method == "auth" {
 		s.authenticate(c, req)
 		return
 	}
@@ -426,43 +379,47 @@ func (s *Server) processFrame(c *Conn, payload []byte) {
 		s.reply(c, req, nil, Denied("Sign in before sending requests"))
 		return
 	}
-	if len(req.id) > maxRequestIDBytes {
-		s.reply(c, req, nil, TooLarge(fmt.Sprintf("A request id is at most %d bytes", maxRequestIDBytes)))
+	if len(req.ID) > wirecore.MaxRequestIDBytes {
+		s.reply(c, req, nil, TooLarge(fmt.Sprintf("A request id is at most %d bytes", wirecore.MaxRequestIDBytes)))
 		return
 	}
-	handle, readOnly := s.handler(req.method)
+	handle, readOnly := s.handler(req.Method)
 	if handle == nil {
-		s.reply(c, req, nil, Unsupported("Unsupported method "+strconv.Quote(req.method)))
+		s.reply(c, req, nil, Unsupported("Unsupported method "+strconv.Quote(req.Method)))
 		return
 	}
 
 	// Deduplicate by user_id and id (§1.2): a duplicate waits for the
 	// original, even on another connection, and gets its outcome.
-	key := dedupKey{userID: userID, id: req.id}
-	fingerprint := fingerprintOf(req)
-	entry, prior := s.dedup.claim(&s.mu, key, fingerprint)
+	key := dedupKey{userID: userID, id: req.ID}
+	fingerprint := wirecore.Fingerprint(req.Method, req.Params)
+	s.mu.Lock()
+	entry, prior := s.dedup.Claim(key, fingerprint)
+	s.mu.Unlock()
 	if prior != nil {
-		if prior.fingerprint != fingerprint {
-			s.reply(c, req, nil, InvalidParams(fmt.Sprintf("Request id %q was already used for another operation", req.id)))
+		if prior.Fingerprint != fingerprint {
+			s.reply(c, req, nil, InvalidParams(fmt.Sprintf("Request id %q was already used for another operation", req.ID)))
 			return
 		}
-		<-prior.done
-		s.reply(c, req, prior.result, prior.err)
+		<-prior.Done()
+		s.reply(c, req, prior.Value.result, prior.Value.err)
 		return
 	}
 
-	result, err := handle(c.ctx, c, req.params)
+	result, err := handle(c.ctx, c, req.Params)
 	var rerr *Error
 	if err != nil {
 		var ok bool
 		if rerr, ok = asError(err); !ok {
-			s.logger().Error("wire: request failed", "method", req.method, "error", err)
+			s.logger().Error("wire: request failed", "method", req.Method, "error", err)
 			rerr = internalError()
 		}
 	}
 	encoded := s.reply(c, req, result, rerr)
 	if entry != nil {
-		s.dedup.finish(&s.mu, key, entry, encoded, rerr, rerr != nil || readOnly)
+		s.mu.Lock()
+		s.dedup.Finish(key, entry, dedupOutcome{encoded, rerr}, rerr != nil || readOnly)
+		s.mu.Unlock()
 	}
 }
 
@@ -482,7 +439,7 @@ func (s *Server) reply(c *Conn, req request, result any, e *Error) jsontext.Valu
 				raw = []byte("{}")
 			}
 			if err != nil || !jsontext.Value(raw).IsValid() || raw[0] != '{' {
-				s.logger().Error("wire: a result is not a JSON object", "method", req.method, "error", err)
+				s.logger().Error("wire: a result is not a JSON object", "method", req.Method, "error", err)
 				e = internalError()
 			} else {
 				encoded = raw
@@ -495,8 +452,8 @@ func (s *Server) reply(c *Conn, req request, result any, e *Error) jsontext.Valu
 	} else {
 		frame = map[string]any{"result": encoded}
 	}
-	if req.hasID {
-		frame["id"] = req.id
+	if req.HasID {
+		frame["id"] = req.ID
 	}
 	payload, err := marshal(frame)
 	if err != nil {
@@ -505,14 +462,6 @@ func (s *Server) reply(c *Conn, req request, result any, e *Error) jsontext.Valu
 	}
 	c.enqueue(payload)
 	return encoded
-}
-
-func fingerprintOf(req request) [32]byte {
-	// Deduplication ignores the order of object keys (§1.2).
-	var value any
-	_ = json.Unmarshal(req.params, &value)
-	canonical, _ := marshal(value)
-	return sha256.Sum256(append([]byte(req.method+"\x00"), canonical...))
 }
 
 func (s *Server) handler(name string) (HandlerFunc, bool) {
@@ -605,11 +554,11 @@ func (s *Server) message(ctx context.Context, c *Conn, raw jsontext.Value) (any,
 
 func (s *Server) authenticate(c *Conn, req request) {
 	var p AuthParams
-	if err := json.Unmarshal(req.params, &p); err != nil || p.Scheme == "" {
+	if err := json.Unmarshal(req.Params, &p); err != nil || p.Scheme == "" {
 		s.reply(c, req, nil, InvalidParams("auth needs a scheme"))
 		return
 	}
-	p.Raw = req.params
+	p.Raw = req.Params
 	if !slices.Contains(c.info.Auth, p.Scheme) && !slices.Contains(c.info.Signup, p.Scheme) {
 		switch p.Scheme {
 		case "guest", "token", "webauthn", "email", "external":

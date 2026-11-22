@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"container/list"
 	"context"
-	"crypto/sha256"
 	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"errors"
@@ -33,6 +32,7 @@ import (
 	"github.com/apron-chat/apron-server-go/internal/auth/external"
 	"github.com/apron-chat/apron-server-go/internal/auth/passkey"
 	"github.com/apron-chat/apron-server-go/internal/authn"
+	"github.com/apron-chat/apron-server-go/internal/wirecore"
 	"github.com/apron-chat/apron-server-go/store"
 )
 
@@ -68,7 +68,7 @@ const (
 	retryAfterSeconds = 30
 	// maxRequestIDBytes bounds a request id, which deduplication keeps
 	// (§1.2) for the latest maxDedupEntries requests of each user.
-	maxRequestIDBytes = 256
+	maxRequestIDBytes = wirecore.MaxRequestIDBytes
 )
 
 // DefaultTerminalViewerURL is where a browser that opens a terminal's url is
@@ -397,11 +397,7 @@ func newLogRecord(id int64, kind recordKind, value map[string]any) *logRecord {
 // encoding/json's null for nil slices and maps. encoding/json/v2 never
 // escapes <, >, and &, which only matter for JSON embedded in HTML and would
 // make stored text up to six times larger than it arrived.
-var jsonOptions = json.JoinOptions(
-	json.Deterministic(true),
-	json.FormatNilSliceAsNull(true),
-	json.FormatNilMapAsNull(true),
-)
+var jsonOptions = wirecore.JSONOptions
 
 // encodeJSON encodes a value with jsonOptions, or returns nil if it cannot.
 func encodeJSON(value any) []byte {
@@ -427,8 +423,8 @@ func (r *logRecord) rewrite(edit func(value map[string]any)) {
 
 // pingFrame is the exact client liveness ping (§1); pongFrame answers it.
 var (
-	pingFrame = []byte(`{"method":"ping"}`)
-	pongFrame = jsontext.Value(`{"method":"pong"}`)
+	pingFrame = wirecore.PingFrame
+	pongFrame = jsontext.Value(wirecore.PongFrame)
 )
 
 // notification renders a frame once, for sending to many connections.
@@ -1477,7 +1473,7 @@ var readOnlyOps = map[string]bool{"history": true, "room_list": true, commandLis
 func (s *Server) processFrame(c *client, payload []byte) {
 	req, parseErr := parseRequest(payload)
 	if parseErr != nil {
-		if notificationOnly[req.method] {
+		if wirecore.NotificationOnly[req.method] {
 			// The id of a notification method may be ignored, and the frame
 			// handled as a notification (§1.1): it is never answered, even
 			// with invalid params, and a ping is still a ping.
@@ -1510,7 +1506,7 @@ func (s *Server) processFrame(c *client, payload []byte) {
 	// A server may ignore a request method sent without one (§1.1), and
 	// this one does, whatever its method and params, before sign-in or
 	// after: guest auth and status alike.
-	if !req.hasID && !notificationOnly[req.method] {
+	if !req.hasID && !wirecore.NotificationOnly[req.method] {
 		return
 	}
 	// auth is a barrier (§3.2): the read loop processes one frame at a time,
@@ -1559,26 +1555,25 @@ func (s *Server) processFrame(c *client, payload []byte) {
 		return
 	}
 	if req.hasID {
-		fingerprint := sha256.Sum256([]byte(requestFingerprint(req)))
-		if prior := user.dedup.get(req.id); prior != nil {
+		fingerprint := wirecore.Fingerprint(req.method, req.raw)
+		var prior *dedupEntry
+		if entry, prior = user.dedup.Claim(req.id, fingerprint); prior != nil {
 			s.unlock()
-			if prior.fingerprint != fingerprint {
+			if prior.Fingerprint != fingerprint {
 				c.sendError(req, invalidParams("Request id %q was already used for another operation", req.id))
 				return
 			}
-			<-prior.done
-			if prior.err != nil {
-				c.sendError(req, prior.err)
+			<-prior.Done()
+			if prior.Value.err != nil {
+				c.sendError(req, prior.Value.err)
 			} else {
 				s.mu.Lock()
-				result := s.currentResultLocked(user, req.method, prior.result)
+				result := s.currentResultLocked(user, req.method, prior.Value.result)
 				c.sendResult(req, result)
 				s.unlock()
 			}
 			return
 		}
-		entry = &dedupEntry{fingerprint: fingerprint, done: make(chan struct{})}
-		user.dedup.put(req.id, entry)
 	}
 	s.unlock()
 
@@ -1592,14 +1587,10 @@ func (s *Server) processFrame(c *client, payload []byte) {
 	}
 	if entry != nil {
 		s.mu.Lock()
-		entry.result, entry.err = result, err
-		if err != nil || readOnlyOps[req.method] {
-			// Failed operations are not cached, and neither are reads, whose
-			// results can be large and which are safe to run again: a retry
-			// executes again. Concurrent duplicates still share the outcome.
-			user.dedup.remove(req.id, entry)
-		}
-		close(entry.done)
+		// Failed operations are not cached, and neither are reads, whose
+		// results can be large and which are safe to run again: a retry
+		// executes again. Concurrent duplicates still share the outcome.
+		user.dedup.Finish(req.id, entry, dedupOutcome{result, err}, err != nil || readOnlyOps[req.method])
 		s.unlock()
 	}
 }
@@ -1639,7 +1630,7 @@ func (s *Server) currentResultLocked(u *userState, method string, result any) an
 // nextIDLocked returns the next log_id in the server-wide sequence: the commit
 // time in milliseconds, or the previous log_id + 1.
 func (s *Server) nextIDLocked() int64 {
-	s.lastID = max(time.Now().UnixMilli(), s.lastID+1)
+	s.lastID = wirecore.NextLogID(s.lastID)
 	return s.lastID
 }
 

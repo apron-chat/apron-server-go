@@ -1089,7 +1089,7 @@ func TestRequestDeduplication(t *testing.T) {
 	kept := func(id string) bool {
 		app.mu.RLock()
 		defer app.mu.RUnlock()
-		return app.users[c.userID].dedup.get(id) != nil
+		return app.users[c.userID].dedup.Kept(id)
 	}
 	for deadline := time.Now().Add(time.Second); kept("read") && time.Now().Before(deadline); {
 		time.Sleep(time.Millisecond)

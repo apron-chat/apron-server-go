@@ -7,6 +7,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/apron-chat/apron-server-go/internal/wirecore"
 )
 
 // Conn is one client connection. Its methods are safe for concurrent use.
@@ -234,9 +236,7 @@ func (c *Conn) pingLoop() {
 	}
 }
 
-var pongFrame = Frame(`{"method":"pong"}`)
-
 func (c *Conn) pong() {
 	c.pinged.Store(true)
-	c.enqueue(pongFrame)
+	c.enqueue(wirecore.PongFrame)
 }

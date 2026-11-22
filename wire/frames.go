@@ -2,12 +2,12 @@ package wire
 
 import (
 	"encoding/json/jsontext"
-	"encoding/json/v2"
 	"strconv"
 	"strings"
 	"sync"
-	"time"
 	"unicode"
+
+	"github.com/apron-chat/apron-server-go/internal/wirecore"
 )
 
 // Version is the protocol version this package speaks.
@@ -152,13 +152,7 @@ func Encode(method string, params any) (Frame, error) {
 	return marshal(map[string]any{"method": method, "params": params})
 }
 
-var jsonOptions = json.JoinOptions(
-	json.Deterministic(true),
-	json.FormatNilSliceAsNull(true),
-	json.FormatNilMapAsNull(true),
-)
-
-func marshal(value any) ([]byte, error) { return json.Marshal(value, jsonOptions) }
+func marshal(value any) ([]byte, error) { return wirecore.Marshal(value) }
 
 // ValidID reports whether id may be a room_id or user_id (§2.4): not empty,
 // with no whitespace or control characters.
@@ -177,6 +171,6 @@ type Clock struct {
 func (c *Clock) Next() string {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.last = max(time.Now().UnixMilli(), c.last+1)
+	c.last = wirecore.NextLogID(c.last)
 	return strconv.FormatInt(c.last, 10)
 }

@@ -13,6 +13,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/apron-chat/apron-server-go/internal/authn"
+	"github.com/apron-chat/apron-server-go/internal/wirecore"
 	"golang.org/x/text/secure/precis"
 	"golang.org/x/time/rate"
 )
@@ -141,6 +142,7 @@ func newUserState(id, name string) *userState {
 		pushes:    make(map[string]*pushRegistration),
 		pings:     make(map[string]int64),
 		created:   time.Now(),
+		dedup:     dedupCache{Size: maxDedupEntries},
 	}
 }
 
@@ -192,53 +194,18 @@ func (u *userState) profile() map[string]any {
 	return value
 }
 
-type dedupEntry struct {
-	// fingerprint is a hash of the request's method and canonical params.
-	fingerprint [32]byte
-	done        chan struct{}
-	result      any
-	err         *Error
+// dedupOutcome is a request's result, or its error, kept for its
+// duplicates (§1.2).
+type dedupOutcome struct {
+	result any
+	err    *Error
 }
 
-// dedupCache keeps the most recent request IDs of one user. Guarded by s.mu.
-type dedupCache struct {
-	entries map[string]*dedupEntry
-	order   []string
-}
+type dedupEntry = wirecore.DedupEntry[dedupOutcome]
 
-func (d *dedupCache) get(id string) *dedupEntry {
-	return d.entries[id]
-}
-
-func (d *dedupCache) put(id string, entry *dedupEntry) {
-	if d.entries == nil {
-		d.entries = make(map[string]*dedupEntry)
-	}
-	d.entries[id] = entry
-	d.order = append(d.order, id)
-	for len(d.order) > maxDedupEntries {
-		oldest := d.order[0]
-		d.order = d.order[1:]
-		if e := d.entries[oldest]; e != nil && isClosed(e.done) {
-			delete(d.entries, oldest)
-		}
-	}
-}
-
-func (d *dedupCache) remove(id string, entry *dedupEntry) {
-	if d.entries[id] == entry {
-		delete(d.entries, id)
-	}
-}
-
-func isClosed(done chan struct{}) bool {
-	select {
-	case <-done:
-		return true
-	default:
-		return false
-	}
-}
+// dedupCache keeps the latest maxDedupEntries request IDs of one user.
+// Guarded by s.mu.
+type dedupCache = wirecore.Dedup[string, dedupOutcome]
 
 // normalizeName prepares a requested display name with the PRECIS
 // Nickname profile (RFC 8266): it maps compatibility characters, folds

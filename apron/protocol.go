@@ -7,55 +7,41 @@ import (
 	"fmt"
 	"maps"
 	"slices"
-	"strings"
-	"unicode"
+
+	"github.com/apron-chat/apron-server-go/internal/wirecore"
+	"github.com/apron-chat/apron-server-go/wire"
 )
 
 // Error codes (PROTOCOL.md §1.1). Extensions return them in an *Error to
-// refuse a request, a command, or a message.
+// refuse a request, a command, or a message. They are package wire's.
 const (
-	CodeParseError     = -32700
-	CodeInvalidRequest = -32600
+	CodeParseError     = wire.CodeParseError
+	CodeInvalidRequest = wire.CodeInvalidRequest
 	// CodeUnsupported is a method or scheme the server does not offer.
-	CodeUnsupported = -32601
+	CodeUnsupported = wire.CodeUnsupported
 	// CodeInvalidParams is a request that names something that does not
 	// exist, or whose params are malformed.
-	CodeInvalidParams = -32602
-	CodeInternalError = -32603
+	CodeInvalidParams = wire.CodeInvalidParams
+	CodeInternalError = wire.CodeInternalError
 	// CodeDenied is a request the sender may not make.
-	CodeDenied = -32001
+	CodeDenied = wire.CodeDenied
 	// CodeRetryAfter is a request refused for now; Data carries
 	// retry_after, in seconds (see RetryAfter).
-	CodeRetryAfter = -32002
+	CodeRetryAfter = wire.CodeRetryAfter
 	// CodeTooLarge is a request over a size limit.
-	CodeTooLarge = -32003
+	CodeTooLarge = wire.CodeTooLarge
 )
 
-// Error is a protocol error reply (PROTOCOL.md §1.1). Message is shown to
-// people, so it says what to do in a sentence.
-type Error struct {
-	// Code is one of the Code constants.
-	Code int `json:"code"`
-	// Message is shown to people.
-	Message string `json:"message"`
-	// Data is details for clients, such as retry_after, or nil.
-	Data any `json:"data,omitzero"`
-}
-
-// Error formats the error with its code, for logs.
-func (e *Error) Error() string {
-	return fmt.Sprintf("apron error %d: %s", e.Code, e.Message)
-}
+// Error is a protocol error reply (PROTOCOL.md §1.1): package wire's, so
+// that code written for either package refuses requests the same way.
+// Message is shown to people, so it says what to do in a sentence.
+type Error = wire.Error
 
 // Denied is a CodeDenied error with message.
-func Denied(message string) *Error {
-	return &Error{Code: CodeDenied, Message: message}
-}
+func Denied(message string) *Error { return wire.Denied(message) }
 
 // InvalidParams is a CodeInvalidParams error with message.
-func InvalidParams(message string) *Error {
-	return &Error{Code: CodeInvalidParams, Message: message}
-}
+func InvalidParams(message string) *Error { return wire.InvalidParams(message) }
 
 type rpcResponse struct {
 	ID     any    `json:"id,omitzero"`
@@ -66,71 +52,21 @@ type rpcResponse struct {
 type request struct {
 	method string
 	params map[string]jsontext.Value
-	id     string
-	hasID  bool
+	// raw is params as they arrived, which deduplication fingerprints.
+	raw   jsontext.Value
+	id    string
+	hasID bool
 }
 
+// parseRequest parses a frame (§1.1). On failure the request still has the
+// method and id that could be read.
 func parseRequest(payload []byte) (request, *Error) {
-	if !jsontext.Value(payload).IsValid() {
-		return request{}, &Error{Code: CodeParseError, Message: "Parse error"}
-	}
-
-	var object map[string]jsontext.Value
-	if err := json.Unmarshal(payload, &object); err != nil || object == nil {
-		return request{}, &Error{Code: CodeInvalidRequest, Message: "Invalid request"}
-	}
-
-	// method comes first: a server may ignore the id of a notification
-	// method and handle the frame as a notification (§1.1), and this one
-	// does, whatever the id is.
-	var req request
-	rawMethod, hasMethod := object["method"]
-	methodOK := hasMethod && json.Unmarshal(rawMethod, &req.method) == nil && req.method != ""
-	if !methodOK {
-		req.method = ""
-	}
-	if rawID, ok := object["id"]; ok && !notificationOnly[req.method] {
-		req.hasID = true
-		if bytes.Equal(bytes.TrimSpace(rawID), []byte("null")) || json.Unmarshal(rawID, &req.id) != nil {
-			req.hasID = false
-			return req, &Error{Code: CodeInvalidRequest, Message: "Request id must be a string"}
-		}
-	}
-	if !methodOK {
-		return req, &Error{Code: CodeInvalidRequest, Message: "Invalid request"}
-	}
-
-	req.params = make(map[string]jsontext.Value)
-	if rawParams, ok := object["params"]; ok {
-		if bytes.Equal(bytes.TrimSpace(rawParams), []byte("null")) || json.Unmarshal(rawParams, &req.params) != nil || req.params == nil {
-			return req, invalidParams("Params must be an object")
-		}
+	parsed, failed := wirecore.ParseRequest(payload)
+	req := request{method: parsed.Method, params: parsed.Fields, raw: parsed.Params, id: parsed.ID, hasID: parsed.HasID}
+	if failed != nil {
+		return req, &Error{Code: failed.Code, Message: failed.Message}
 	}
 	return req, nil
-}
-
-// notificationOnly are the methods clients send only as notifications
-// (§1.1). A server may ignore the id of one and handle the frame as a
-// notification (§1.1), and this one does: nothing about it is answered.
-var notificationOnly = map[string]bool{"ping": true, "activity": true}
-
-func canonicalParams(params map[string]jsontext.Value) string {
-	if params == nil {
-		return "{}"
-	}
-	var value any
-	raw := encodeJSON(params)
-	if raw == nil || json.Unmarshal(raw, &value) != nil {
-		return string(raw)
-	}
-	if canonical := encodeJSON(value); canonical != nil {
-		return string(canonical)
-	}
-	return string(raw)
-}
-
-func requestFingerprint(req request) string {
-	return req.method + "\x00" + canonicalParams(req.params)
 }
 
 func response(id string, result any) rpcResponse {
@@ -164,9 +100,7 @@ func parseString(params map[string]jsontext.Value, name string, required bool) (
 
 // validID reports whether id can be a room_id or user_id (§2.4): one that is
 // not empty and has no whitespace or control characters.
-func validID(id string) bool {
-	return id != "" && !strings.ContainsFunc(id, func(r rune) bool { return unicode.IsSpace(r) || unicode.IsControl(r) })
-}
+func validID(id string) bool { return wire.ValidID(id) }
 
 func parseBool(params map[string]jsontext.Value, name string, required bool) (bool, *Error) {
 	raw, ok := params[name]
