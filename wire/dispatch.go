@@ -16,6 +16,11 @@ import (
 	"github.com/apron-chat/apron-server-go/wire/internal/testhook"
 )
 
+// MaxRequestIDBytes bounds a request id: ids are any string (§2.4), but
+// each is kept for deduplication (§1.2), so a longer one is
+// error/too_large.
+const MaxRequestIDBytes = wirecore.MaxRequestIDBytes
+
 // Handler handles one request method by name, raw: an extension's own
 // method, or one that takes the place of a handler field's (Server.Handle).
 type Handler struct {
@@ -304,10 +309,10 @@ func (s *Server) processFrame(ctx context.Context, c *Conn, payload []byte) {
 	case userID == "":
 		r.fail(Denied("Sign in before sending requests"))
 		return
-	case len(r.ID) > wirecore.MaxRequestIDBytes:
+	case len(r.ID) > MaxRequestIDBytes:
 		// Request ids are any string (§2.4), but each is kept for
 		// deduplication, so their size is bounded.
-		r.fail(TooLarge(fmt.Sprintf("A request id is at most %d bytes", wirecore.MaxRequestIDBytes)))
+		r.fail(TooLarge(fmt.Sprintf("A request id is at most %d bytes", MaxRequestIDBytes)))
 		return
 	case !found:
 		r.fail(Unsupported("Unsupported method " + strconv.Quote(r.Method)))

@@ -4,7 +4,6 @@ import (
 	"container/list"
 	"context"
 	"encoding/json/jsontext"
-	"encoding/json/v2"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -30,7 +29,6 @@ import (
 	"github.com/apron-chat/apron-server-go/internal/auth/external"
 	"github.com/apron-chat/apron-server-go/internal/auth/passkey"
 	"github.com/apron-chat/apron-server-go/internal/authn"
-	"github.com/apron-chat/apron-server-go/internal/wirecore"
 	"github.com/apron-chat/apron-server-go/store"
 	"github.com/apron-chat/apron-server-go/wire"
 )
@@ -67,7 +65,7 @@ const (
 	retryAfterSeconds = 30
 	// maxRequestIDBytes bounds a request id, which deduplication keeps
 	// (§1.2) for the latest maxDedupEntries requests of each user.
-	maxRequestIDBytes = wirecore.MaxRequestIDBytes
+	maxRequestIDBytes = wire.MaxRequestIDBytes
 )
 
 // DefaultTerminalViewerURL is where a browser that opens a terminal's url is
@@ -392,15 +390,13 @@ func newLogRecord(id int64, kind recordKind, value map[string]any) *logRecord {
 	return &logRecord{id: id, kind: kind, raw: encodeJSON(value)}
 }
 
-// jsonOptions encode deterministically, sorting object keys, and keep
-// encoding/json's null for nil slices and maps. encoding/json/v2 never
-// escapes <, >, and &, which only matter for JSON embedded in HTML and would
-// make stored text up to six times larger than it arrived.
-var jsonOptions = wirecore.JSONOptions
-
-// encodeJSON encodes a value with jsonOptions, or returns nil if it cannot.
+// encodeJSON encodes a value as wire encodes frames (wire.Marshal), or
+// returns nil if it cannot: deterministically, sorting object keys, with
+// encoding/json's null for nil slices and maps, and without escaping <, >,
+// and &, which only matter for JSON embedded in HTML and would make stored
+// text up to six times larger than it arrived.
 func encodeJSON(value any) []byte {
-	payload, err := json.Marshal(value, jsonOptions)
+	payload, err := wire.Marshal(value)
 	if err != nil {
 		return nil
 	}

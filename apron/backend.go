@@ -79,8 +79,8 @@ func (s *Server) registerOp(name string, op operation) {
 // serveOp runs an operation for a request: its result goes out as it
 // replies (request.reply), or once it returns.
 func serveOp(ctx context.Context, wc *wire.Conn, r *wire.Request, op operation, s *Server) error {
-	c := clientOf(wc)
-	if c == nil {
+	c, ok := wire.DataOf[*client](wc)
+	if !ok {
 		return internalError()
 	}
 	// Extension code the request runs gets its context (Host).
@@ -107,11 +107,6 @@ func run[T any](b backend, ctx context.Context, wc *wire.Conn, reply wire.Reply[
 	}, b.s)
 }
 
-func clientOf(wc *wire.Conn) *client {
-	c, _ := wc.Data().(*client)
-	return c
-}
-
 // connected keeps a new WebSocket's client.
 func (b backend) connected(_ context.Context, wc *wire.Conn) error {
 	s := b.s
@@ -136,8 +131,8 @@ func (b backend) connected(_ context.Context, wc *wire.Conn) error {
 
 // disconnected forgets a closed connection, network or session.
 func (b backend) disconnected(wc *wire.Conn) {
-	c := clientOf(wc)
-	if c == nil {
+	c, ok := wire.DataOf[*client](wc)
+	if !ok {
 		return
 	}
 	s := b.s
@@ -161,10 +156,10 @@ func (b backend) disconnected(wc *wire.Conn) {
 // Hello is the server frame of a new connection.
 func (b backend) Hello(_ context.Context, wc *wire.Conn) wire.ServerInfo {
 	s := b.s
-	c := clientOf(wc)
+	c, ok := wire.DataOf[*client](wc)
 	s.mu.Lock()
 	defer s.unlock()
-	if c == nil {
+	if !ok {
 		return s.serverParams("", false)
 	}
 	return s.serverFrameLocked(c)
@@ -189,8 +184,8 @@ func (b backend) Auth(ctx context.Context, wc *wire.Conn, _ wire.AuthParams, rep
 // not change.
 func (b backend) refresh(_ context.Context, wc *wire.Conn, method string, result jsontext.Value) any {
 	s := b.s
-	c := clientOf(wc)
-	if c == nil {
+	c, ok := wire.DataOf[*client](wc)
+	if !ok {
 		return result
 	}
 	s.mu.Lock()
@@ -283,8 +278,8 @@ func (b backend) Status(ctx context.Context, wc *wire.Conn, p wire.StatusParams,
 // Activity (§4.6): a notification, which gets no reply.
 
 func (b backend) Activity(ctx context.Context, wc *wire.Conn, p wire.ActivityParams) {
-	c := clientOf(wc)
-	if c == nil {
+	c, ok := wire.DataOf[*client](wc)
+	if !ok {
 		return
 	}
 	previous := c.request

@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/apron-chat/apron-server-go/internal/authn"
+	"github.com/apron-chat/apron-server-go/wire"
 )
 
 // Invitations. An invitation makes one account: a connection that is not
@@ -184,7 +185,7 @@ func (s *Server) invite(ctx context.Context, by string, options InvitationOption
 	}
 	var data jsontext.Value
 	if options.Data != nil {
-		raw, err := json.Marshal(options.Data, jsonOptions)
+		raw, err := wire.Marshal(options.Data)
 		if err != nil {
 			return Invitation{}, fmt.Errorf("apron: invitation data: %w", err)
 		}

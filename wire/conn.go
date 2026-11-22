@@ -91,6 +91,13 @@ func (c *Conn) SetData(v any) {
 	c.mu.Unlock()
 }
 
+// DataOf returns the backend's value for the connection (Conn.SetData) as
+// a T, and whether it is one.
+func DataOf[T any](c *Conn) (T, bool) {
+	value, ok := c.Data().(T)
+	return value, ok
+}
+
 // Info returns the server frame the connection was last sent.
 func (c *Conn) Info() ServerInfo {
 	c.mu.Lock()

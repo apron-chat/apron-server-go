@@ -18,6 +18,7 @@ import (
 	"unicode"
 
 	"github.com/apron-chat/apron-server-go/internal/auth/email"
+	"github.com/apron-chat/apron-server-go/wire"
 )
 
 // Extension adds features to a Server without forking it: commands, request
@@ -327,7 +328,7 @@ func (s *Server) runExtensionCommand(c *client, req request, command *extensionC
 	if result == nil {
 		result = map[string]any{}
 	}
-	encoded, encodeErr := json.Marshal(result, jsonOptions)
+	encoded, encodeErr := wire.Marshal(result)
 	if encodeErr != nil {
 		return nil, false, command.host.protocolError(fmt.Errorf("/%s returned a result that is not JSON: %w", command.command.Name, encodeErr))
 	}
@@ -392,7 +393,7 @@ func (r *Registrar) Method(name string, fn MethodFunc) {
 			// The result is encoded now: one that is not JSON is the
 			// extension's error, not the connection's, and the reply that
 			// deduplication keeps (§1.2) cannot change afterwards.
-			encoded, encodeErr := json.Marshal(result, jsonOptions)
+			encoded, encodeErr := wire.Marshal(result)
 			if encodeErr != nil {
 				return nil, false, h.protocolError(fmt.Errorf("method %s returned a result that is not JSON: %w", name, encodeErr))
 			}
@@ -412,7 +413,7 @@ func (h *Host) Advertise(value any) error {
 	var encoded jsontext.Value
 	if value != nil {
 		var err error
-		if encoded, err = json.Marshal(value, jsonOptions); err != nil {
+		if encoded, err = wire.Marshal(value); err != nil {
 			return fmt.Errorf("apron: advertised value: %w", err)
 		}
 	}
@@ -497,7 +498,7 @@ func (d *Draft) SetExt(value any) error {
 	encoded := jsontext.Value(`{}`) // an empty value clears the key (§4.12)
 	if value != nil {
 		var err error
-		if encoded, err = json.Marshal(value, jsonOptions); err != nil {
+		if encoded, err = wire.Marshal(value); err != nil {
 			return fmt.Errorf("apron: ext value: %w", err)
 		}
 	}
@@ -577,7 +578,7 @@ func (s *Server) filterMessage(c *client, d *Draft) *Error {
 			return filter.host.protocolError(err)
 		}
 	}
-	encoded, err := json.Marshal(d.Body, jsonOptions)
+	encoded, err := wire.Marshal(d.Body)
 	var body map[string]any
 	if err != nil || json.Unmarshal(encoded, &body) != nil || body == nil {
 		return internalError()
@@ -781,7 +782,7 @@ func checkKey(key string) error {
 }
 
 func (kv KV) put(key string, value any) error {
-	raw, err := json.Marshal(value, jsonOptions)
+	raw, err := wire.Marshal(value)
 	if err != nil {
 		return err
 	}

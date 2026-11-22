@@ -253,6 +253,13 @@ func EncodeRaw(method string, params any) (Frame, error) {
 	return marshal(map[string]any{"method": method, "params": params})
 }
 
+// Marshal encodes a value as JSON as wire encodes every frame:
+// deterministically, with object keys sorted, nil slices and maps as null,
+// and <, >, and & as they are, which only matter for JSON embedded in HTML.
+// A backend that keeps or compares what it sends encodes with it, so that
+// its bytes are the frames'.
+func Marshal(value any) ([]byte, error) { return wirecore.Marshal(value) }
+
 func marshal(value any) ([]byte, error) { return wirecore.Marshal(value) }
 
 // ValidID reports whether id may be a room_id or user_id (§2.4): not empty,
