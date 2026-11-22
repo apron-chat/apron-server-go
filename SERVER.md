@@ -931,8 +931,10 @@ start with `/`, unknown commands (`Unknown command /foo; try /help`), and
 that requires `room_id` (see below) sent without `room_id` (`Send /kick
 from a room: it needs room_id`), which act only on a room the client
 names.
-Command names, and the words that pick a form such as `add` in `/emoji
-add`, are case-sensitive and match exactly: `/Kick` is an unknown command,
+A command's name, and the word that picks a form such as `add` in `/emoji
+add`, end at the first whitespace of any kind, a line break or tab too, so
+`/embed-append` followed by a new line and Markdown works. They are
+case-sensitive and match exactly: `/Kick` is an unknown command,
 and `/emoji ADD` and `/server Title` are usage errors. Arguments are parsed
 as each command says. Mentions in commands notify no one. A command's
 effects and `~private` replies arrive before its result. Commands:
@@ -1091,7 +1093,9 @@ connection check is not a group), `member` for `/invite-device`, `room`
 for `/kick` (a room's creator, a guest too, as well as admins and
 moderators), and `admin` for `/emoji remove` and each form of `/server`.
 The list changes as roles, rooms, and extensions' answers do;
-nothing announces a change, so clients ask again.
+nothing announces a change, so clients ask again. A user who can see no
+room, such as a bot whose scope names none, can run no command, so the
+list is empty.
 
 ## Activity
 
@@ -2147,8 +2151,9 @@ rest of the server does:
   may use in at least one room the sender can see, asking about each in
   turn, the default room first, until one says yes; one it refuses is
   `denied`. Each is one entry, named after the command, whose `hint` is
-  its `Usage` after `/name` and whitespace (a `Usage` that does not start
-  that way gives no hint, and `Open` logs a warning), whose `description`
+  its `Usage` after `/name` and whitespace, on one line (a `Usage` that
+  does not start that way gives no hint, `/help` shows it as written, and
+  `Open` logs a warning), whose `description`
   is its `Help` on one line (absent without one, and its `/help` line
   then has no colon), whose `uses` and `requires` are its `Uses` and
   `Requires`: `room_id`, `reply_to`, `body.mentions`, or `body.embeds`,

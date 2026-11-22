@@ -197,8 +197,9 @@ type Command struct {
 	// command's hint in ext:command_list (apron's
 	// extensions/ext_command_list.md), such as "<city>", which follows its
 	// suggested convention: <value>, [optional], a|b, repeats..., and @user
-	// for a mention. Any other Usage gives the command no hint, and Open
-	// logs it. Help is its description: plain text on one line, its
+	// for a mention, its whitespace collapsed. Any other Usage gives the
+	// command no hint, /help shows it as written, and Open logs it. Help
+	// is its description: plain text on one line, its
 	// whitespace collapsed; without it, the command has none.
 	Usage, Help string
 	// Uses are the fields of the `command` request, besides body.text,
@@ -281,12 +282,14 @@ func (r *Registrar) Command(command Command) {
 				return fmt.Errorf("command /%s exists already", command.Name)
 			}
 		}
-		// The hint is what follows "/name" and whitespace in Usage.
+		// The hint is what follows "/name" and whitespace in Usage, on one
+		// line; /help shows any other Usage as written.
 		hint, ok := strings.CutPrefix(command.Usage, "/"+command.Name)
+		usageText := ""
 		if trimmed := strings.TrimLeftFunc(hint, unicode.IsSpace); ok && (hint == "" || trimmed != hint) {
-			hint = strings.TrimSpace(trimmed)
+			hint = strings.Join(strings.Fields(trimmed), " ")
 		} else {
-			hint = ""
+			hint, usageText = "", command.Usage
 			if command.Usage != "" {
 				r.logger.Warn("a command's Usage does not start with its name, so ext:command_list gives it no hint", "command", command.Name, "usage", command.Usage)
 			}
@@ -303,7 +306,7 @@ func (r *Registrar) Command(command Command) {
 		r.s.commands = append(r.s.commands, serverCommand{
 			name: command.Name,
 			forms: []commandForm{{
-				name: command.Name, group: command.Group, hint: hint, description: description,
+				name: command.Name, group: command.Group, hint: hint, usageText: usageText, description: description,
 				uses: command.Uses, requires: command.Requires,
 			}},
 			extension: &extensionCommand{host: r.Host, command: command},

@@ -324,8 +324,7 @@ func (s *Server) handleEmoji(w http.ResponseWriter, r *http.Request) {
 // URLs clients would refuse, may not add one.
 func (s *Server) emojiCommand(c *client, _ *roomState, body map[string]any, args, _ string) (map[string]any, *Error) {
 	u := c.user
-	action, key, _ := strings.Cut(args, " ")
-	key = strings.TrimSpace(key)
+	action, key := cutWord(args)
 	if !emojiKeyPattern.MatchString(key) || len(key) > maxEmojiBytes {
 		return nil, invalidParams("Usage: /emoji add :<name>: with one image attached, or /emoji remove :<name>:; a name is letters, digits, _, +, and -, at most %d characters", maxEmojiBytes-2)
 	}

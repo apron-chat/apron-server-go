@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"unicode"
 )
 
 // Scoped system identities (Appendix A.1). user_ids starting with `~` are
@@ -41,6 +42,9 @@ type commandForm struct {
 	// hint describes the text after the name, such as "@user [<reason>]";
 	// "" for none.
 	hint string
+	// usageText is how /help shows an extension's command whose Usage
+	// gives no hint, as written; "" for /name and the hint.
+	usageText string
 	// description says what the form does, in plain text on one line; ""
 	// for none, which an extension's command without Help has.
 	description string
@@ -117,6 +121,9 @@ func (f commandForm) helpLine() string {
 
 // usage is the form as /help shows it, such as "/kick @user [<reason>]".
 func (f commandForm) usage() string {
+	if f.usageText != "" {
+		return f.usageText
+	}
 	if f.hint == "" {
 		return "/" + f.name
 	}
@@ -252,6 +259,16 @@ func (s *Server) mayKickLocked(c *client, r *roomState) bool {
 	return false
 }
 
+// seesARoomLocked reports whether u can see at least one room.
+func (s *Server) seesARoomLocked(u *userState) bool {
+	for _, r := range s.rooms {
+		if r.visibleTo(u) {
+			return true
+		}
+	}
+	return false
+}
+
 // usableForm is a command form that /help or ext:command_list may list,
 // with the extension's command that decides whether it does, nil for a
 // form already decided.
@@ -279,6 +296,10 @@ type usableCommands struct {
 // command has an Available to ask about them.
 func (s *Server) usableCommandsLocked(c *client, r *roomState) usableCommands {
 	usable := usableCommands{user: userViewOf(c.user)}
+	// A user who sees no room can run no command: each runs in a room.
+	if r == nil && !s.seesARoomLocked(c.user) {
+		return usable
+	}
 	asks := false
 	for _, command := range s.commands {
 		for _, form := range command.forms {
@@ -377,8 +398,10 @@ func (s *Server) command(c *client, req request) (any, bool, *Error) {
 	if !strings.HasPrefix(line, "/") {
 		return nil, false, invalidParams("A command starts with /; try /help")
 	}
-	word, args, _ := strings.Cut(line[1:], " ")
-	// Names are case-sensitive (ext:command_list): /Kick is not /kick.
+	// The name ends at the first whitespace, a line break too, as in
+	// "/embed-append\n# Plan". Names are case-sensitive (ext:command_list):
+	// /Kick is not /kick.
+	word, args := cutWord(line[1:])
 	name := word
 	for i, value := range asList(body["embeds"]) {
 		if kind := value.(map[string]any)["kind"]; liveKind(kind) {
@@ -386,7 +409,6 @@ func (s *Server) command(c *client, req request) (any, bool, *Error) {
 		}
 	}
 
-	args = strings.TrimSpace(args)
 	// A form that requires room_id acts only on a room the client names
 	// (ext:command_list): without one it is refused, not run in the
 	// default room.
@@ -454,10 +476,22 @@ func (s *Server) command(c *client, req request) (any, bool, *Error) {
 	return result, true, nil
 }
 
+// cutWord splits text at its first whitespace, of any kind, into the word
+// before it and the rest, trimmed: how a command line's name, and the
+// fixed word of a form, are told from what follows them.
+func cutWord(text string) (word, rest string) {
+	text = strings.TrimSpace(text)
+	i := strings.IndexFunc(text, unicode.IsSpace)
+	if i < 0 {
+		return text, ""
+	}
+	return text[:i], strings.TrimSpace(text[i:])
+}
+
 // formOf returns the form of the command named name that the command
 // line's args select: the one with the most fixed words that start args,
-// matched exactly, as names are; nil for an unknown command. s.commands does not change once Open returns, so this
-// needs no lock.
+// matched exactly, as names are; nil for an unknown command. s.commands
+// does not change once Open returns, so this needs no lock.
 func (s *Server) formOf(name, args string) *commandForm {
 	words := strings.Fields(args)
 	var best *commandForm
@@ -585,8 +619,8 @@ func (s *Server) kickCommand(c *client, r *roomState, body map[string]any, args,
 	// body.mentions says who it is (§3.5.5); a user_id has no whitespace
 	// (§2.4), so the typed mention ends with the first word at the latest.
 	reason := args
-	if first, rest, _ := strings.Cut(args, " "); strings.HasPrefix(first, "@") {
-		reason = strings.TrimSpace(rest)
+	if first, rest := cutWord(args); strings.HasPrefix(first, "@") {
+		reason = rest
 	}
 	// The reason is one plain line inside a system notice.
 	reason, _, _ = strings.Cut(reason, "\n")

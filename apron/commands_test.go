@@ -219,14 +219,14 @@ func TestCommandList(t *testing.T) {
 	anonymous.expectError(t, commandListMethod, "early", map[string]any{}, CodeDenied)
 }
 
-// A command's Usage gives its hint when it starts with /name and then
-// whitespace or nothing; any other Usage gives none, and Open still
-// succeeds.
+// A command's Usage gives its hint, on one line, when it starts with /name
+// and then whitespace or nothing; any other Usage gives none, /help shows
+// it as written, and Open still succeeds.
 func TestCommandListUsage(t *testing.T) {
 	run := func(context.Context, *CommandCall) (map[string]any, error) { return nil, nil }
 	_, httpServer := newTestServer(t, extensionConfig(testExtension{"demo", func(r *Registrar) error {
 		r.Command(Command{Name: "bare", Usage: "/bare", Help: "no arguments", Run: run})
-		r.Command(Command{Name: "tabbed", Usage: "/tabbed\t<arg>", Help: "one\nline", Run: run})
+		r.Command(Command{Name: "tabbed", Usage: "/tabbed\t<arg>\n  [<more>]", Help: "one\nline", Run: run})
 		r.Command(Command{Name: "odd", Usage: "odd <arg>", Help: "no hint", Run: run})
 		r.Command(Command{Name: "other", Usage: "/otherwise <arg>", Help: "no hint either", Run: run})
 		return nil
@@ -235,7 +235,7 @@ func TestCommandListUsage(t *testing.T) {
 	commands := commandList(t, c)
 	for name, want := range map[string]map[string]any{
 		"bare":   {"name": "bare", "description": "no arguments"},
-		"tabbed": {"name": "tabbed", "hint": "<arg>", "description": "one line"},
+		"tabbed": {"name": "tabbed", "hint": "<arg> [<more>]", "description": "one line"},
 		"odd":    {"name": "odd", "description": "no hint"},
 		"other":  {"name": "other", "description": "no hint either"},
 	} {
@@ -243,13 +243,50 @@ func TestCommandListUsage(t *testing.T) {
 			t.Fatalf("%s = %#v, want %#v", name, got, want)
 		}
 	}
-	expectHelp(t, c, "general", "a guest", commandNames(commands)...)
+	lines := helpLines(t, c, "general")
+	if want := []string{
+		"- `/bare`: no arguments",
+		"- `/tabbed <arg> [<more>]`: one line",
+		"- `odd <arg>`: no hint",
+		"- `/otherwise <arg>`: no hint either",
+	}; !slices.Equal(lines[len(lines)-4:], want) {
+		t.Fatalf("/help = %q, ending with %q", lines, want)
+	}
+}
+
+// formOf picks the form with the most fixed words that start the command
+// line's arguments, matched exactly.
+func TestFormOf(t *testing.T) {
+	s := &Server{commands: append(coreCommands(), serverCommand{name: "a", forms: []commandForm{{name: "a"}, {name: "a b"}, {name: "a b c"}}})}
+	for _, test := range []struct{ name, args, want string }{
+		{"emoji", "add :x:", "emoji add"},
+		{"emoji", "remove\t:x:", "emoji remove"},
+		{"emoji", "", ""},
+		{"emoji", "ADD :x:", ""},
+		{"server", "", "server"},
+		{"server", "title My server", "server title"},
+		{"server", "titles", "server"},
+		{"server", "Title x", "server"},
+		{"a", "b c d", "a b c"},
+		{"a", "b\nx", "a b"},
+		{"a", "c", "a"},
+		{"kick", "@bob spam", "kick"},
+		{"nope", "", ""},
+	} {
+		got := ""
+		if form := s.formOf(test.name, test.args); form != nil {
+			got = form.name
+		}
+		if got != test.want {
+			t.Errorf("formOf(%q, %q) = %q, want %q", test.name, test.args, got, test.want)
+		}
+	}
 }
 
 // The list asks an extension's Available about the rooms the user can see,
 // the default room first and then by room_id, until one says yes, and
-// never about a room the user cannot see. A user who sees no room has
-// none of the commands that depend on one.
+// never about a room the user cannot see. A user who sees no room is
+// listed no command.
 func TestCommandListAsksAvailable(t *testing.T) {
 	var mu sync.Mutex
 	asked := map[string][]string{}
@@ -298,14 +335,16 @@ func TestCommandListAsksAvailable(t *testing.T) {
 		}
 	}
 
-	// A user who sees no room: only what needs none.
+	// A user who sees no room can run no command, so none is listed.
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err := app.SetScope(ctx, user.userID, &RoomScope{Rooms: []string{"nowhere"}}); err != nil {
 		t.Fatal(err)
 	}
 	user.drain(t)
-	expectCommands(t, user, "a user who sees no room", "help", "avatar", "embed-terminal", "embed-append", "emoji add", "anywhere")
+	if result := user.result(t, commandListMethod, user.nextID("commands"), map[string]any{}); !reflect.DeepEqual(result, map[string]any{"commands": []any{}}) {
+		t.Fatalf("a user who sees no room: %#v", result)
+	}
 }
 
 // A moderator may /kick in any room, without one of their own; a
@@ -437,5 +476,28 @@ func TestCommandNamesAreCaseSensitive(t *testing.T) {
 	}
 	if _, result := c.request(t, "command", "kick", map[string]any{"room_id": room, "body": map[string]any{"text": "/kick @" + other.userID, "mentions": []any{other.userID}}}); len(result) != 0 {
 		t.Fatalf("/kick = %#v", result)
+	}
+}
+
+// A command's name ends at the first whitespace of any kind, such as the
+// line break of a multi-line /embed-append.
+func TestCommandNameEndsAtAnyWhitespace(t *testing.T) {
+	_, httpServer := newTestServer(t, DefaultConfig())
+	c := dialTestClient(t, httpServer)
+	if lines := helpLines(t, c, "general"); len(lines) == 0 {
+		t.Fatal("no /help")
+	}
+	before, result := c.request(t, "command", "help", map[string]any{"room_id": "general", "body": map[string]any{"text": "/help\nplease"}})
+	if len(result) != 0 || len(before) != 1 || !strings.Contains(privateNoticeText(t, before[0]), "`/help`") {
+		t.Fatalf("/help\\nplease: %#v after %#v", result, before)
+	}
+	write, _, _ := liveCommand(t, c, "append", map[string]any{"room_id": "general", "body": map[string]any{"text": "/embed-append\n# Plan\n\n- one"}})
+	if write["kind"] != "append" {
+		t.Fatalf("/embed-append\\n# Plan: %#v", write)
+	}
+	// A tab parts a form's word too: /emoji remove, which only admins use.
+	frame := c.call(t, "command", "emoji", map[string]any{"body": map[string]any{"text": "/emoji\tremove\t:x:"}})
+	if failure, _ := frame["error"].(map[string]any); failure["message"] != "Only an admin can remove custom emoji" {
+		t.Fatalf("/emoji\\tremove: %#v", frame)
 	}
 }
