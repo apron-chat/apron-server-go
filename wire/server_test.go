@@ -618,6 +618,9 @@ func TestWebSocket(t *testing.T) {
 	if err != nil || !strings.Contains(string(hello), `"method":"server"`) {
 		t.Fatalf("server frame = %s, %v", hello, err)
 	}
+	if r := onlyConn(t, s).HTTPRequest(); r == nil || r.URL.Path != "/" {
+		t.Fatalf("HTTPRequest = %v", r)
+	}
 	if err := ws.Write(ctx, websocket.MessageText, []byte(`{"method":"ping"}`)); err != nil {
 		t.Fatal(err)
 	}

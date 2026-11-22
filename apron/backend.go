@@ -110,7 +110,7 @@ func clientOf(wc *wire.Conn) *client {
 // Connected keeps a new WebSocket's client.
 func (b backend) Connected(wc *wire.Conn) error {
 	s := b.s
-	r := wc.Request()
+	r := wc.HTTPRequest()
 	c := &client{server: s, conn: wc}
 	if r != nil {
 		c.origin = r.Header.Get("Origin")

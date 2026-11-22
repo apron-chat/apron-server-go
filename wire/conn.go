@@ -124,8 +124,9 @@ func (c *Conn) Closing() bool { return c.rt.Closing() }
 // RemoteAddr is the client's address, or nil when the transport has none.
 func (c *Conn) RemoteAddr() net.Addr { return c.remote }
 
-// Request is the HTTP request that opened the connection, or nil.
-func (c *Conn) Request() *http.Request { return c.request }
+// HTTPRequest is the HTTP request that opened the connection, or nil, as
+// for a Local connection or a transport served without one.
+func (c *Conn) HTTPRequest() *http.Request { return c.request }
 
 // Context is canceled when the connection ends.
 func (c *Conn) Context() context.Context { return c.ctx }

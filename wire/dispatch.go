@@ -286,7 +286,13 @@ func (s *Server) processFrame(ctx context.Context, c *Conn, payload []byte) {
 			r.fail(InvalidParams(fmt.Sprintf("Request id %q was already used for another operation", r.ID)))
 			return
 		}
-		<-prior.Done()
+		// A duplicate whose connection ends first, or whose Local call's
+		// context does, is sent nothing.
+		select {
+		case <-prior.Done():
+		case <-ctx.Done():
+			return
+		}
 		outcome := prior.Value
 		if outcome.err != nil {
 			r.fail(outcome.err)

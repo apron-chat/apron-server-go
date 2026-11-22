@@ -125,6 +125,45 @@ func (w lockedWriter) Write(p []byte) (int, error) {
 	return w.w.Write(p)
 }
 
+// oneUser signs every connection in as the same user, so that they share
+// request ids (§1.2).
+type oneUser struct{ backend }
+
+func (*oneUser) Auth(_ context.Context, c *wire.Conn, _ wire.AuthParams) (wire.AuthResult, error) {
+	c.SendMessage(wire.Notice("", "welcome"))
+	return wire.AuthResult{You: &wire.User{UserID: "same"}}, nil
+}
+
+// A duplicate waiting for its original on another connection stops waiting
+// when its own connection ends.
+func TestDuplicateWaitEndsWithConnection(t *testing.T) {
+	b := &oneUser{}
+	s := &wire.Server{Backend: b}
+	started, release := make(chan struct{}), make(chan struct{})
+	defer close(release)
+	s.Handle("slow", wire.Method{Handle: func(context.Context, *wire.Conn, *wire.Request) (any, error) {
+		close(started)
+		<-release
+		return nil, nil
+	}})
+	c1, _ := serve(t, s)
+	c1.signIn("a")
+	c2, _ := serve(t, s)
+	c2.signIn("a")
+	c1.send(`{"method":"slow","id":"x"}`)
+	<-started
+	c2.send(`{"method":"slow","id":"x"}`)
+	time.Sleep(20 * time.Millisecond) // Let it start waiting.
+	_ = c2.conn.Close()
+	deadline := time.Now().Add(5 * time.Second)
+	for len(b.disconnectedConns()) != 1 {
+		if time.Now().After(deadline) {
+			t.Fatal("the duplicate's connection did not end while its original ran")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 // Local notifications are handled, and a Call of a notification-only method
 // returns at once.
 func TestLocalNotify(t *testing.T) {
