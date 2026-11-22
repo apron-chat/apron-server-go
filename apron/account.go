@@ -63,10 +63,9 @@ func (s *Server) provedLocked(c *client, scheme authn.Scheme, proof authn.Proof,
 	if reauth {
 		c.verified = verification{user: c.user.id, credential: key, at: now}
 	}
-	if session, ok := s.sessions[c.token]; ok && session.user == c.user {
-		session.credential = key
-		s.sessions[c.token] = session
-		s.touchSession(c.token)
+	if session, ok := s.sessions.Get(c.token); ok && session.User == c.user {
+		session.Credential = key
+		s.sessions.Put(c.token, session)
 	}
 }
 
@@ -74,7 +73,7 @@ func (s *Server) provedLocked(c *client, scheme authn.Scheme, proof authn.Proof,
 // in or resumed with, zero when it signed in otherwise, as with a device or
 // service token.
 func (c *client) sessionKeyLocked() [32]byte {
-	if session, ok := c.server.sessions[c.token]; ok && session.user == c.user {
+	if session, ok := c.server.sessions.Get(c.token); ok && session.User == c.user {
 		return c.token
 	}
 	return [32]byte{}
@@ -163,10 +162,9 @@ func (s *Server) removeCredentialLocked(u *userState, scheme, id string, except 
 	s.touchUser(u.id)
 	key := credentialKey(scheme, id)
 	ended := make(map[[32]byte]bool)
-	for token, session := range s.sessions {
-		if session.user == u && session.credential == key {
-			delete(s.sessions, token)
-			s.touchSession(token)
+	for token, session := range s.sessions.All() {
+		if session.User == u && session.Credential == key {
+			s.sessions.Delete(token)
 			ended[token] = true
 		}
 	}
@@ -207,10 +205,9 @@ func (s *Server) signOutOthersLocked(u *userState, keep *client) {
 			c.closeWithError(&Error{Code: CodeDenied, Message: "This account signed out its other sessions"})
 		}
 	}
-	for key, s2 := range s.sessions {
-		if s2.user == u && (session == [32]byte{} || key != session) {
-			delete(s.sessions, key)
-			s.touchSession(key)
+	for key, s2 := range s.sessions.All() {
+		if s2.User == u && (session == [32]byte{} || key != session) {
+			s.sessions.Delete(key)
 		}
 	}
 	for key, d := range s.devices {
@@ -383,8 +380,7 @@ func (s *Server) signOut(c *client, req request) (any, bool, *Error) {
 	}
 	switch {
 	case session != [32]byte{}:
-		delete(s.sessions, session)
-		s.touchSession(session)
+		s.sessions.Delete(session)
 	case device != [32]byte{}:
 		delete(s.devices, device)
 		s.touchDevice(device)

@@ -366,9 +366,6 @@ func (s *Server) dumpLocked() []store.Entry {
 	for id := range s.users {
 		all.users[id] = true
 	}
-	for key := range s.sessions {
-		all.sessions[key] = true
-	}
 	for key := range s.devices {
 		all.devices[key] = true
 	}
@@ -380,5 +377,6 @@ func (s *Server) dumpLocked() []store.Entry {
 	}
 	all.vapid = s.vapidStored
 	meta := s.metaLocked()
+	records = append(records, s.sessions.Snapshot(userID)...)
 	return append(s.entriesLocked(all, records), store.Entry{Kind: entryMeta, ID: "counters", Value: encodeJSON(meta)})
 }

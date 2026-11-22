@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/apron-chat/apron-server-go/apron/internal/roomlog"
+	"github.com/apron-chat/apron-server-go/apron/internal/sessions"
 	"github.com/apron-chat/apron-server-go/apron/internal/webpush"
 	"github.com/apron-chat/apron-server-go/internal/auth/email"
 	"github.com/apron-chat/apron-server-go/internal/auth/external"
@@ -52,7 +53,6 @@ const (
 	entryRoom    = "room"
 	entryMessage = "message"
 	entryUser    = "user"
-	entrySession = "session"
 	entryDevice  = "device"
 	entryEmbed   = "embed"
 	entryPush    = "push"
@@ -65,7 +65,6 @@ type dirtySet struct {
 	rooms    map[string]bool
 	messages map[string]bool
 	users    map[string]bool
-	sessions map[[32]byte]bool
 	devices  map[[32]byte]bool
 	embeds   map[string]bool
 	// invitations are named by their tokens' SHA-256.
@@ -83,7 +82,6 @@ func newDirtySet() dirtySet {
 		rooms:       make(map[string]bool),
 		messages:    make(map[string]bool),
 		users:       make(map[string]bool),
-		sessions:    make(map[[32]byte]bool),
 		devices:     make(map[[32]byte]bool),
 		invitations: make(map[[32]byte]bool),
 		services:    make(map[[32]byte]bool),
@@ -95,7 +93,6 @@ func newDirtySet() dirtySet {
 func (s *Server) touchRoom(r *roomState)       { s.dirty.rooms[r.id] = true }
 func (s *Server) touchMessage(m *messageState) { s.dirty.messages[m.id] = true }
 func (s *Server) touchUser(id string)          { s.dirty.users[id] = true }
-func (s *Server) touchSession(key [32]byte)    { s.dirty.sessions[key] = true }
 func (s *Server) touchDevice(key [32]byte)     { s.dirty.devices[key] = true }
 func (s *Server) touchEmbed(id string)         { s.dirty.embeds[id] = true }
 func (s *Server) touchPush(key string)         { s.dirty.pushes[key] = true }
@@ -203,14 +200,6 @@ type storedMute struct {
 	Until   time.Time `json:"until,omitzero"`
 }
 
-type storedSession struct {
-	User       string    `json:"user"`
-	Origin     string    `json:"origin"`
-	AnyOrigin  bool      `json:"any_origin,omitzero"`
-	Expires    time.Time `json:"expires"`
-	Credential string    `json:"credential,omitzero"`
-}
-
 type storedDevice struct {
 	User    string    `json:"user"`
 	Name    string    `json:"name"`
@@ -260,7 +249,10 @@ func (s *Server) metaLocked() storedMeta {
 	return storedMeta{LastID: s.log.LastIssued(), GuestNumber: s.guestNumber, AccountNumber: s.accountNumber, EmbedNumber: s.embedNumber, UploadSeq: s.uploadSeq}
 }
 
-func sessionID(key [32]byte) string { return hex.EncodeToString(key[:]) }
+func sessionID(key [32]byte) string { return sessions.ID(key) }
+
+// userID names a user in what the store keeps.
+func userID(u *userState) string { return u.id }
 
 // flushLocked queues the marked changes as one batch for the store writer,
 // with the fences waiting for it.
@@ -269,10 +261,12 @@ func (s *Server) flushLocked() {
 		s.dirty = newDirtySet()
 		s.log.Entries()
 		s.extData.Entries()
+		s.sessions.Entries(userID)
 		s.store.Queue(nil)
 		return
 	}
 	batch := append(s.entriesLocked(s.dirty, s.log.Entries()), s.extData.Entries()...)
+	batch = append(batch, s.sessions.Entries(userID)...)
 	meta := s.metaLocked()
 	if meta != s.storedMeta {
 		s.storedMeta = meta
@@ -316,13 +310,6 @@ func (s *Server) entriesLocked(d dirtySet, records []store.Entry) []store.Entry 
 			put(entryUser, id, storedUserOf(u))
 		} else {
 			del(entryUser, id)
-		}
-	}
-	for key := range d.sessions {
-		if session, ok := s.sessions[key]; ok {
-			put(entrySession, sessionID(key), storedSession{User: session.user.id, Origin: session.origin, AnyOrigin: session.anyOrigin, Expires: session.expires, Credential: session.credential})
-		} else {
-			del(entrySession, sessionID(key))
 		}
 	}
 	for key := range d.devices {
@@ -698,20 +685,11 @@ func (s *Server) restoreLocked() (map[string]bool, error) {
 			s.touchPush(key)
 		}
 	}
-	for id, raw := range entries[entrySession] {
-		var stored storedSession
-		key, err := hex.DecodeString(id)
-		if err != nil || len(key) != 32 {
-			continue
-		}
-		if err := decode(entrySession, id, raw, &stored); err != nil {
-			return nil, err
-		}
-		if u := s.users[stored.User]; u != nil && u.account() && now.Before(stored.Expires) {
-			s.sessions[[32]byte(key)] = session{user: u, origin: stored.Origin, anyOrigin: stored.AnyOrigin, expires: stored.Expires, credential: stored.Credential}
-		} else {
-			s.touchSession([32]byte(key))
-		}
+	if err := s.sessions.Restore(entries[sessions.EntryKind], func(id string) (*userState, bool) {
+		u := s.users[id]
+		return u, u != nil && u.account()
+	}, now); err != nil {
+		return nil, err
 	}
 	if err := s.restoreInvitationsLocked(entries[entryInvitation], now); err != nil {
 		return nil, err

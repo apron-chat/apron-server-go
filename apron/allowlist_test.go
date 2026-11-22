@@ -132,8 +132,7 @@ func TestRestrictedSignInAtStart(t *testing.T) {
 	app.users["ada"] = ada
 	app.setIdentityLocked(ada, authn.Identity{Scheme: "email", Subject: "ada@example.com"}, nil)
 	key := [32]byte{1}
-	app.sessions[key] = session{user: ada, expires: time.Now().Add(time.Hour)}
-	app.touchSession(key)
+	app.sessions.Put(key, session{User: ada, Expires: time.Now().Add(time.Hour)})
 	admitted := app.admittedLocked(ada)
 	app.unlock()
 	if !admitted {
@@ -150,7 +149,7 @@ func TestRestrictedSignInAtStart(t *testing.T) {
 	}
 	defer app.Shutdown(context.Background())
 	app.mu.RLock()
-	_, kept := app.sessions[key]
+	_, kept := app.sessions.Get(key)
 	app.mu.RUnlock()
 	if kept {
 		t.Fatal("a session of an account taken off the list survived the restart")

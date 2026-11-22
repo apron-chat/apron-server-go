@@ -1,32 +1,18 @@
 package apron
 
 import (
-	"crypto/rand"
 	"crypto/sha256"
-	"encoding/base64"
-	"slices"
 	"strings"
 	"time"
+
+	"github.com/apron-chat/apron-server-go/apron/internal/sessions"
 )
 
-const sessionLifetime = 30 * 24 * time.Hour
-
-// maxSessionsPerUser bounds the sessions kept for one account: far more
-// devices and browsers than one person signs in from.
-const maxSessionsPerUser = 100
-
-// session is a bearer token's sign-in (§3.2): the account it resumes, bound
-// to the frontend origin that signed in, or, for a token from a code
-// (§4.12.4), to no origin (anyOrigin).
-type session struct {
-	user      *userState
-	origin    string
-	anyOrigin bool
-	expires   time.Time
-	// credential names the credential the sign-in that made it proved, as
-	// scheme:id, if any (account.go).
-	credential string
-}
+// session is a bearer token's sign-in (§3.2), which a sessions.Table
+// keeps: the account it resumes, bound to the frontend origin that signed
+// in, or, for a token from a code (§4.12.4), to no origin (AnyOrigin), and
+// the credential the sign-in proved, if any (account.go).
+type session = sessions.Session[*userState]
 
 // signInLocked makes an account the connection's identity after a scheme
 // proved it (applyProvenLocked), with a new bearer token for later
@@ -41,8 +27,7 @@ func (s *Server) signInLocked(c *client, req request, user *userState, now time.
 	if err := s.admitLocked(user); err != nil {
 		return nil, err
 	}
-	delete(s.sessions, c.token)
-	s.touchSession(c.token)
+	s.sessions.Delete(c.token)
 	token, key, err := s.newSessionLocked(user, c.origin, anyOrigin, now)
 	if err != nil {
 		return nil, err
@@ -60,18 +45,10 @@ func (s *Server) signInLocked(c *client, req request, user *userState, now time.
 // origin, or with anyOrigin from any origin or none (§3.2.1), and returns it
 // with the key it is kept under.
 func (s *Server) newSessionLocked(user *userState, origin string, anyOrigin bool, now time.Time) (string, [32]byte, *Error) {
-	secret := make([]byte, 32)
-	if _, err := rand.Read(secret); err != nil {
+	token, key, err := s.sessions.Issue(user, origin, anyOrigin, now)
+	if err != nil {
 		return "", [32]byte{}, &Error{Code: CodeInternalError, Message: "Unable to create a sign-in session"}
 	}
-	token := base64.RawURLEncoding.EncodeToString(secret)
-	key := sha256.Sum256([]byte(token))
-	if anyOrigin {
-		origin = ""
-	}
-	s.sessions[key] = session{user: user, origin: origin, anyOrigin: anyOrigin, expires: now.Add(sessionLifetime)}
-	s.touchSession(key)
-	s.capSessionsLocked(user, key)
 	return token, key, nil
 }
 
@@ -85,41 +62,6 @@ func parseRequested(req request) (name, requested string, err *Error) {
 		return "", "", err
 	}
 	return name, requested, nil
-}
-
-// capSessionsLocked forgets user's sessions beyond maxSessionsPerUser, but
-// never keep, the one just made: the others that expire soonest, which were
-// used least recently, go first. Every sign-in adds a session, so an account
-// signing in again and again in a loop cannot grow the sessions, and the
-// store, without bound.
-func (s *Server) capSessionsLocked(user *userState, keep [32]byte) {
-	var keys [][32]byte
-	for key, session := range s.sessions {
-		if session.user == user && key != keep {
-			keys = append(keys, key)
-		}
-	}
-	excess := len(keys) - (maxSessionsPerUser - 1)
-	if excess <= 0 {
-		return
-	}
-	slices.SortFunc(keys, func(a, b [32]byte) int {
-		return s.sessions[a].expires.Compare(s.sessions[b].expires)
-	})
-	for _, key := range keys[:excess] {
-		delete(s.sessions, key)
-		s.touchSession(key)
-	}
-}
-
-// pruneSessionsLocked forgets expired sessions.
-func (s *Server) pruneSessionsLocked(now time.Time) {
-	for key, session := range s.sessions {
-		if !now.Before(session.expires) {
-			delete(s.sessions, key)
-			s.touchSession(key)
-		}
-	}
 }
 
 // authenticateToken resumes a sign-in through the protocol's token scheme
@@ -144,10 +86,10 @@ func (s *Server) authenticateToken(c *client, req request) (any, *Error) {
 	if strings.HasPrefix(token, serviceTokenPrefix) {
 		return s.authenticateServiceLocked(c, req, token)
 	}
-	s.pruneSessionsLocked(now)
+	s.sessions.Prune(now)
 	key := sha256.Sum256([]byte(token))
-	session, ok := s.sessions[key]
-	if !ok || !session.anyOrigin && session.origin != c.origin || !now.Before(session.expires) {
+	session, ok := s.sessions.Get(key)
+	if !ok || !session.AnyOrigin && session.Origin != c.origin || !now.Before(session.Expires) {
 		// A temporary token approves its proposal with this scheme too, as
 		// a client presents the token of a link that isn't its own
 		// (§4.11.2), with the proposal's state or without (§4.11.3).
@@ -169,16 +111,15 @@ func (s *Server) authenticateToken(c *client, req request) (any, *Error) {
 	// not rotated, since several tabs may share one persisted token: the
 	// result carries the presented token, which clients keep as the latest.
 	// A refused sign-in changes nothing (§3.2.2).
-	if err := s.admitLocked(session.user); err != nil {
+	if err := s.admitLocked(session.User); err != nil {
 		return nil, err
 	}
-	session.expires = now.Add(sessionLifetime)
-	s.sessions[key] = session
-	s.touchSession(key)
+	session.Expires = now.Add(sessions.Lifetime)
+	s.sessions.Put(key, session)
 	c.token = key
-	c.credential = session.credential
+	c.credential = session.Credential
 	c.service, c.serviceManage = [32]byte{}, false
 	// Resuming the user the connection is signed in as is no sign-in
 	// (§4.5), and sends nothing after its result.
-	return s.switchUserLocked(c, req, session.user, token, c.user != session.user, false), nil
+	return s.switchUserLocked(c, req, session.User, token, c.user != session.User, false), nil
 }

@@ -12,6 +12,7 @@ import (
 
 	"golang.org/x/time/rate"
 
+	"github.com/apron-chat/apron-server-go/apron/internal/sessions"
 	"github.com/apron-chat/apron-server-go/store"
 	"github.com/go-webauthn/webauthn/webauthn"
 )
@@ -159,36 +160,36 @@ func TestSessionsPerAccountAreBounded(t *testing.T) {
 	defer app.unlock()
 	u := addAccountLocked(app, "ada")
 	other := addAccountLocked(app, "bea")
-	app.sessions[[32]byte{0xff}] = session{user: other, expires: time.Now().Add(time.Hour)}
+	app.sessions.Put([32]byte{0xff}, session{User: other, Expires: time.Now().Add(time.Hour)})
 	now := time.Now()
 	var newest [32]byte
-	for i := range maxSessionsPerUser + 10 {
+	for i := range sessions.MaxPerUser + 10 {
 		newest = [32]byte{byte(i), byte(i >> 8), 1}
 		// Older sessions expire sooner; the newest expires soonest of all,
 		// and is still kept.
 		expires := now.Add(time.Duration(i+1) * time.Minute)
-		if i == maxSessionsPerUser+9 {
+		if i == sessions.MaxPerUser+9 {
 			expires = now
 		}
-		app.sessions[newest] = session{user: u, expires: expires}
-		app.capSessionsLocked(u, newest)
+		app.sessions.Put(newest, session{User: u, Expires: expires})
+		app.sessions.Cap(u, newest)
 	}
 	count := 0
-	for key, s := range app.sessions {
-		if s.user == u {
+	for key, s := range app.sessions.All() {
+		if s.User == u {
 			count++
-			if expires := s.expires; key != newest && expires.Before(now.Add(11*time.Minute)) {
+			if expires := s.Expires; key != newest && expires.Before(now.Add(11*time.Minute)) {
 				t.Fatalf("kept a session that expires at %v", expires)
 			}
 		}
 	}
-	if count != maxSessionsPerUser {
-		t.Fatalf("%d sessions kept, want %d", count, maxSessionsPerUser)
+	if count != sessions.MaxPerUser {
+		t.Fatalf("%d sessions kept, want %d", count, sessions.MaxPerUser)
 	}
-	if _, kept := app.sessions[newest]; !kept {
+	if _, kept := app.sessions.Get(newest); !kept {
 		t.Fatal("the session just made was forgotten")
 	}
-	if _, kept := app.sessions[[32]byte{0xff}]; !kept {
+	if _, kept := app.sessions.Get([32]byte{0xff}); !kept {
 		t.Fatal("another account's session was forgotten")
 	}
 }

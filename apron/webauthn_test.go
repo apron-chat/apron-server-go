@@ -18,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/apron-chat/apron-server-go/apron/internal/sessions"
 	"github.com/apron-chat/apron-server-go/internal/auth/passkey"
 	"github.com/apron-chat/apron-server-go/store"
 	"github.com/coder/websocket"
@@ -235,9 +236,9 @@ func TestPasskeyRegistrationLoginAndSession(t *testing.T) {
 	// A resume renews the session: a token close to expiry is good for a full
 	// lifetime again after use.
 	app.mu.Lock()
-	for key, session := range app.sessions {
-		session.expires = time.Now().Add(time.Minute)
-		app.sessions[key] = session
+	for key, session := range app.sessions.All() {
+		session.Expires = time.Now().Add(time.Minute)
+		app.sessions.Put(key, session)
 	}
 	app.mu.Unlock()
 	renewed, _ := dialOrigin(t, httpServer, testPasskeyOrigin)
@@ -246,15 +247,16 @@ func TestPasskeyRegistrationLoginAndSession(t *testing.T) {
 		t.Fatalf("resume did not return the presented token: %#v", result["token"])
 	}
 	app.mu.Lock()
-	renewedExpiry := app.sessions[sha256.Sum256([]byte(token))].expires
+	renewed2, _ := app.sessions.Get(sha256.Sum256([]byte(token)))
+	renewedExpiry := renewed2.Expires
 	app.mu.Unlock()
-	if renewedExpiry.Before(time.Now().Add(sessionLifetime - time.Minute)) {
+	if renewedExpiry.Before(time.Now().Add(sessions.Lifetime - time.Minute)) {
 		t.Fatalf("resume did not renew the session: expires %v", renewedExpiry)
 	}
 	app.mu.Lock()
-	for key, session := range app.sessions {
-		session.expires = time.Now().Add(-time.Second)
-		app.sessions[key] = session
+	for key, session := range app.sessions.All() {
+		session.Expires = time.Now().Add(-time.Second)
+		app.sessions.Put(key, session)
 	}
 	app.mu.Unlock()
 	passkeyDenied(t, passkeyCall(t, reconnected, "expired", "token", "", map[string]any{"token": registered["token"]}))
@@ -709,7 +711,7 @@ func TestPasskeyRejectsInvalidRegistration(t *testing.T) {
 	}
 	app.mu.RLock()
 	defer app.mu.RUnlock()
-	if app.schemeLocked(passkey.Name).(*passkey.Scheme).Count() != 0 || len(app.accounts) != 0 || len(app.sessions) != 0 {
+	if app.schemeLocked(passkey.Name).(*passkey.Scheme).Count() != 0 || len(app.accounts) != 0 || app.sessions.Len() != 0 {
 		t.Fatal("failed registration retained an account, credential, or session")
 	}
 }

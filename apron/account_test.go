@@ -112,8 +112,8 @@ func TestManagingPasskeys(t *testing.T) {
 	passkeyDenied(t, passkeyCall(t, again, "resume", "token", "", map[string]any{"token": registered["token"]}))
 	app.mu.RLock()
 	sessions := 0
-	for _, session := range app.sessions {
-		if session.user.id == userID {
+	for _, session := range app.sessions.All() {
+		if session.User.id == userID {
 			sessions++
 		}
 	}

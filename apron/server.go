@@ -28,6 +28,7 @@ import (
 	"github.com/apron-chat/apron-server-go/apron/internal/kv"
 	"github.com/apron-chat/apron-server-go/apron/internal/proposals"
 	"github.com/apron-chat/apron-server-go/apron/internal/roomlog"
+	"github.com/apron-chat/apron-server-go/apron/internal/sessions"
 	"github.com/apron-chat/apron-server-go/apron/internal/uploads"
 	"github.com/apron-chat/apron-server-go/apron/internal/webpush"
 	"github.com/apron-chat/apron-server-go/internal/auth/external"
@@ -502,7 +503,7 @@ type Server struct {
 	storedMeta storedMeta
 	pushes     map[string]*pushRegistration
 	closed     bool
-	sessions   map[[32]byte]session
+	sessions   *sessions.Table[*userState]
 	devices    map[[32]byte]deviceToken
 	// invitations are the outstanding invitations by the SHA-256 of their
 	// tokens (invitations.go).
@@ -602,7 +603,7 @@ func Open(config Config) (*Server, error) {
 		uploads:     list.New(),
 		emoji:       make(map[string]*customEmoji),
 		pushes:      make(map[string]*pushRegistration),
-		sessions:    make(map[[32]byte]session),
+		sessions:    sessions.New[*userState](),
 		devices:     make(map[[32]byte]deviceToken),
 		invitations: make(map[[32]byte]*invitation),
 		services:    make(map[[32]byte]*serviceToken),

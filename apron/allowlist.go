@@ -311,10 +311,9 @@ func (s *Server) signOutLocked(u *userState) {
 	for c := range u.clients {
 		c.closeWithError(&Error{Code: CodeDenied, Message: "This account may no longer sign in to this server"})
 	}
-	for key, session := range s.sessions {
-		if session.user == u {
-			delete(s.sessions, key)
-			s.touchSession(key)
+	for key, session := range s.sessions.All() {
+		if session.User == u {
+			s.sessions.Delete(key)
 		}
 	}
 	for key, device := range s.devices {

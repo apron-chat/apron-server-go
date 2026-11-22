@@ -714,9 +714,9 @@ func (sc schemeCore) Issue(proof authn.Proof, create bool) (string, error) {
 	if err != nil {
 		return "", &authn.Error{Code: err.Code, Message: err.Message}
 	}
-	if session, ok := s.sessions[key]; ok {
-		session.credential = credentialKey(sc.scheme.Name(), proof.Credential)
-		s.sessions[key] = session
+	if session, ok := s.sessions.Get(key); ok {
+		session.Credential = credentialKey(sc.scheme.Name(), proof.Credential)
+		s.sessions.Put(key, session)
 	}
 	if created {
 		s.joinDefaultRoomLocked(user)
