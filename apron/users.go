@@ -343,7 +343,7 @@ func (s *Server) attachLocked(c *client, user *userState) {
 	// dropped, so the connection cannot approve it as the next one
 	// (§4.11.3).
 	if c.proposal != nil {
-		s.dropProposalLocked(c.proposal)
+		s.proposals.Drop(c.proposal)
 		c.proposal = nil
 	}
 	// So is what the schemes kept for it, such as a pending passkey

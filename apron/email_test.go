@@ -15,6 +15,7 @@ import (
 
 	"github.com/coder/websocket"
 
+	"github.com/apron-chat/apron-server-go/apron/internal/proposals"
 	"github.com/apron-chat/apron-server-go/internal/auth/email"
 	"github.com/apron-chat/apron-server-go/internal/authn"
 	"github.com/apron-chat/apron-server-go/store"
@@ -117,7 +118,7 @@ func pendingCode(t *testing.T, app *Server, userID string) string {
 	defer app.mu.Unlock()
 	for c := range app.clients {
 		if c.user != nil && c.user.id == userID && c.proposal != nil {
-			return c.proposal.code
+			return c.proposal.Code
 		}
 	}
 	t.Fatalf("no proposal pending for %s", userID)
@@ -484,7 +485,7 @@ func TestEmailProposalsExpireAndAreInvalidated(t *testing.T) {
 	}
 	c.expectError(t, "auth", "old-link", map[string]any{"scheme": "email", "token": linkToken(t, first)}, CodeDenied)
 	// A few wrong tokens invalidate it.
-	for range maxProposalAttempts - 2 {
+	for range proposals.MaxAttempts - 2 {
 		c.expectError(t, "auth", c.nextID("wrong"), map[string]any{"scheme": "email", "token": "wrong"}, CodeDenied)
 	}
 	c.expectError(t, "auth", "last-wrong", map[string]any{"scheme": "email", "token": "nope"}, CodeDenied)
@@ -495,7 +496,7 @@ func TestEmailProposalsExpireAndAreInvalidated(t *testing.T) {
 	app.mu.Lock()
 	for client := range app.clients {
 		if client.proposal != nil {
-			client.proposal.expires = time.Now().Add(-time.Second)
+			client.proposal.Expires = time.Now().Add(-time.Second)
 		}
 	}
 	app.mu.Unlock()
@@ -560,8 +561,8 @@ func TestEmailProposalsOutliveTheirConnection(t *testing.T) {
 	}
 	// An expired link is denied.
 	app.mu.Lock()
-	for _, p := range app.proposals.links {
-		p.expires = time.Now().Add(-time.Second)
+	for _, p := range app.proposals.Links() {
+		p.Expires = time.Now().Add(-time.Second)
 	}
 	app.mu.Unlock()
 	late := dialTestClient(t, httpServer)
@@ -604,7 +605,7 @@ func TestEmailProposalsKeepNoClosedConnection(t *testing.T) {
 		}
 	}
 	app.mu.RLock()
-	links := len(app.proposals.links)
+	links := len(app.proposals.Links())
 	app.mu.RUnlock()
 	if links != 2 {
 		t.Fatalf("%d proposals kept, want 2", links)
@@ -619,8 +620,8 @@ func TestEmailFailedAttemptsCountFromAnyConnection(t *testing.T) {
 	propose(t, c, "ada@example.com")
 	message := mailbox.receive(t)
 	link := linkToken(t, message)
-	wrong := link[:linkHandleBytes] + strings.Repeat("A", len(link)-linkHandleBytes)
-	for i := range maxProposalAttempts - 1 {
+	wrong := link[:proposals.HandleBytes] + strings.Repeat("A", len(link)-proposals.HandleBytes)
+	for i := range proposals.MaxAttempts - 1 {
 		guesser, _ := dialRaw(t, httpServer)
 		guesser.expectError(t, "auth", fmt.Sprintf("guess-%d", i), map[string]any{"scheme": "email", "token": wrong}, CodeDenied)
 	}
@@ -654,7 +655,7 @@ func TestEmailCodesWorkElsewhereWithTheirState(t *testing.T) {
 	signedIn.expectError(t, "auth", "signed-in", map[string]any{"scheme": "email", "token": code, "state": state}, CodeDenied)
 	// Wrong codes with the state count against the proposal, whichever
 	// connection sends them.
-	for i := range maxProposalAttempts - 2 {
+	for i := range proposals.MaxAttempts - 2 {
 		guesser, _ := dialRaw(t, httpServer)
 		guesser.expectError(t, "auth", fmt.Sprintf("guess-%d", i), map[string]any{"scheme": "email", "token": "000000x", "state": state}, CodeDenied)
 	}
@@ -682,7 +683,7 @@ func TestEmailCodesWorkElsewhereWithTheirState(t *testing.T) {
 	third.result(t, "auth", "propose", map[string]any{"scheme": "email", "email": "carol@example.com", "state": "carol-state"})
 	code = mailbox.receive(t).Code
 	wrong := "wrong"
-	for i := range maxProposalAttempts {
+	for i := range proposals.MaxAttempts {
 		guesser, _ := dialRaw(t, httpServer)
 		guesser.expectError(t, "auth", fmt.Sprintf("cancel-%d", i), map[string]any{"scheme": "email", "token": wrong, "state": "carol-state"}, CodeDenied)
 	}
@@ -695,13 +696,13 @@ func TestEmailCodesWorkElsewhereWithTheirState(t *testing.T) {
 	fourth.result(t, "auth", "propose", map[string]any{"scheme": "email", "email": "dave@example.com", "state": "dave-state"})
 	code = mailbox.receive(t).Code
 	app.mu.Lock()
-	for _, p := range app.proposals.states {
-		p.expires = time.Now().Add(-time.Second)
+	for _, p := range app.proposals.States() {
+		p.Expires = time.Now().Add(-time.Second)
 	}
 	app.mu.Unlock()
 	late.expectError(t, "auth", "expired", map[string]any{"scheme": "email", "token": code, "state": "dave-state"}, CodeDenied)
 	app.mu.RLock()
-	kept := len(app.proposals.states)
+	kept := len(app.proposals.States())
 	app.mu.RUnlock()
 	if kept != 0 {
 		t.Fatalf("%d proposals kept by state, want 0", kept)
@@ -791,8 +792,8 @@ func TestEmailApprovesWithTheTokenScheme(t *testing.T) {
 	third, _ := dialRaw(t, httpServer)
 	propose(t, third, "carol@example.com")
 	link = linkToken(t, mailbox.receive(t))
-	wrong := link[:linkHandleBytes] + strings.Repeat("A", len(link)-linkHandleBytes)
-	for i := range maxProposalAttempts {
+	wrong := link[:proposals.HandleBytes] + strings.Repeat("A", len(link)-proposals.HandleBytes)
+	for i := range proposals.MaxAttempts {
 		guesser, _ := dialRaw(t, httpServer)
 		guesser.expectError(t, "auth", fmt.Sprintf("guess-%d", i), map[string]any{"scheme": "token", "token": wrong}, CodeDenied)
 	}

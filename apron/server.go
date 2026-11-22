@@ -27,6 +27,7 @@ import (
 	"golang.org/x/time/rate"
 
 	"github.com/apron-chat/apron-server-go/apron/internal/durable"
+	"github.com/apron-chat/apron-server-go/apron/internal/proposals"
 	"github.com/apron-chat/apron-server-go/apron/internal/roomlog"
 	"github.com/apron-chat/apron-server-go/internal/auth/external"
 	"github.com/apron-chat/apron-server-go/internal/auth/passkey"
@@ -438,7 +439,7 @@ type client struct {
 	// proposal is the connection's latest proposal (§4.11.1), which may
 	// have been dropped since, and clientKey names its client address for
 	// the limits of all its connections. Guarded by server.mu.
-	proposal  *proposal
+	proposal  *proposals.Proposal
 	clientKey string
 	// idle reports that nobody is attending the connection (§4.5): false
 	// until the connection says otherwise. Guarded by server.mu.
@@ -519,7 +520,7 @@ type Server struct {
 	// of sign-ins that finish out of band (§4.11), in memory only.
 	schemes   []authn.Scheme
 	accounts  map[authn.Identity]*userState
-	proposals proposals
+	proposals *proposals.Table
 	// externalBy names the extension that offers external sign-in.
 	externalBy string
 	// schemeWork tracks the schemes' work in progress, such as email
@@ -610,7 +611,7 @@ func Open(config Config) (*Server, error) {
 		invitations: make(map[[32]byte]*invitation),
 		services:    make(map[[32]byte]*serviceToken),
 		accounts:    make(map[authn.Identity]*userState),
-		proposals:   proposals{links: make(map[string]*proposal), states: make(map[string]*proposal)},
+		proposals:   proposals.NewTable(),
 		dirty:       newDirtySet(),
 		badgeDelay:  badgeDelay,
 		stopped:     make(chan struct{}),
