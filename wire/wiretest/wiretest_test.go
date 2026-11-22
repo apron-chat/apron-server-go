@@ -229,3 +229,127 @@ func TestDial(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// noticeText is the text of a notice frame, or "".
+func noticeText(f wiretest.Frame) string {
+	var m wire.Message
+	if f.Method != "message" || f.Decode(&m) != nil {
+		return ""
+	}
+	return m.Body.Text
+}
+
+// texts are the notices' texts of frames, in order.
+func texts(frames []wiretest.Frame) []string {
+	var out []string
+	for _, f := range frames {
+		out = append(out, noticeText(f))
+	}
+	return out
+}
+
+// CallFrames takes exactly the frames ahead of its reply, and Sync waits
+// for every frame queued before its request was handled.
+func TestCallFramesAndSync(t *testing.T) {
+	ctx := timeout(t)
+	c := newChat()
+	// test.order sends a notice before its reply and one after it.
+	c.server.Handle("test.order", wire.Handler{Serve: func(_ context.Context, conn *wire.Conn, r *wire.Request) error {
+		conn.Notify(wire.Notice("", "before"))
+		r.Reply(nil)
+		conn.Notify(wire.Notice("", "after"))
+		return nil
+	}})
+	ada, bob := wiretest.Connect(c.server), wiretest.Connect(c.server)
+	defer ada.Close()
+	defer bob.Close()
+
+	// Before sign-in, Sync's request is refused, which is reply enough.
+	if err := ada.Sync(ctx); err != nil {
+		t.Fatalf("Sync before sign-in: %v", err)
+	}
+	for _, client := range []*wiretest.Client{ada, bob} {
+		if _, err := client.Auth(ctx, map[string]any{"scheme": "guest"}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := client.Expect(ctx, func(f wiretest.Frame) bool { return noticeText(f) == "welcome" }); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// bob's message was queued to ada before bob's result; once ada's
+	// Sync returns, it has arrived, and stays.
+	if _, err := bob.Call(ctx, "message", map[string]any{"body": map[string]any{"text": "one"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := ada.Sync(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if got := texts(ada.Pending()); len(got) != 1 || got[0] != "one" {
+		t.Fatalf("pending after Sync: %q", got)
+	}
+
+	// The backlog, then what the request sent before its reply, in order;
+	// what it sent after stays.
+	result, before, err := ada.CallFrames(ctx, "test.order", nil)
+	if err != nil || string(result) != "{}" {
+		t.Fatalf("test.order: %s %v", result, err)
+	}
+	if got := texts(before); len(got) != 2 || got[0] != "one" || got[1] != "before" {
+		t.Fatalf("before the reply: %q", got)
+	}
+	if err := ada.Sync(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if got := texts(ada.Pending()); len(got) != 1 || got[0] != "after" {
+		t.Fatalf("after the reply: %q", got)
+	}
+	if _, err := ada.Next(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	// An error reply returns the frames before it too.
+	_, before, err = ada.CallFrames(ctx, "message", map[string]any{})
+	if wire.CodeOf(err) != wire.CodeInvalidParams || len(before) != 0 {
+		t.Fatalf("an invalid message: %v, before %v", err, before)
+	}
+}
+
+// Concurrent calls each get their own reply: CallFrames never takes the
+// reply to another of the Client's requests.
+func TestCallFramesConcurrent(t *testing.T) {
+	ctx := timeout(t)
+	c := newChat()
+	client := wiretest.Connect(c.server)
+	defer client.Close()
+	if _, err := client.Auth(ctx, map[string]any{"scheme": "guest"}); err != nil {
+		t.Fatal(err)
+	}
+	var wg sync.WaitGroup
+	for i := range 16 {
+		wg.Go(func() {
+			for range 10 {
+				var err error
+				switch i % 3 {
+				case 0:
+					var before []wiretest.Frame
+					_, before, err = client.CallFrames(ctx, "history", nil)
+					for _, f := range before {
+						if f.Method == "" && strings.HasPrefix(f.ID, "wiretest-") {
+							t.Errorf("CallFrames took another call's reply: %s", f.Raw)
+						}
+					}
+				case 1:
+					_, err = client.Call(ctx, "message", map[string]any{"body": map[string]any{"text": "x"}})
+				default:
+					err = client.Sync(ctx)
+				}
+				if err != nil {
+					t.Error(err)
+					return
+				}
+			}
+		})
+	}
+	wg.Wait()
+}

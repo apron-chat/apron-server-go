@@ -66,6 +66,9 @@ type Client struct {
 	frames  []Frame
 	changed chan struct{}
 	err     error
+	// calls are the ids of the requests the Client sent and has not
+	// taken the replies of, which CallFrames leaves for their callers.
+	calls map[string]bool
 }
 
 // clientConn is the client's end of a transport.
@@ -109,7 +112,7 @@ func Dial(ctx context.Context, url string) (*Client, error) {
 
 // start reads the connection's frames, and its server frame.
 func start(conn clientConn, served chan struct{}) *Client {
-	c := &Client{conn: conn, served: served, changed: make(chan struct{})}
+	c := &Client{conn: conn, served: served, changed: make(chan struct{}), calls: map[string]bool{}}
 	go c.readAll()
 	// The server frame comes first (§3.1).
 	if f, err := c.take(context.Background(), func(Frame) bool { return true }); err == nil {
@@ -209,6 +212,67 @@ func (c *Client) Auth(ctx context.Context, params any) (wire.AuthResult, error) 
 // result, or its error reply as an *wire.Error. The frames that arrive
 // before the reply are kept for Next and Expect.
 func (c *Client) Call(ctx context.Context, method string, params any) (jsontext.Value, error) {
+	result, _, err := c.call(ctx, method, params, false)
+	return result, err
+}
+
+// CallFrames is Call, and also takes the frames that arrived before the
+// reply, and returns them, in order: every frame the test had not taken
+// ahead of the reply, including those that arrived before the request
+// was sent, but for the replies to the Client's other requests, which
+// stay for their calls. The frames after the reply stay for Next and
+// Expect. A test that wants only what arrived after the request was sent
+// takes the backlog first, such as with Sync and Next. When ctx is done
+// or the connection ends before the reply, nothing is taken.
+func (c *Client) CallFrames(ctx context.Context, method string, params any) (result jsontext.Value, before []Frame, err error) {
+	return c.call(ctx, method, params, true)
+}
+
+// Sync waits until every frame the server queued to the connection before
+// it handled a request Sync sends has arrived; those frames stay for
+// Next, Expect, and Pending. A Server handles a connection's frames one
+// at a time, in order, each to its end, and a request's reply is queued
+// after what its handler sent, so when Sync returns, the replies to the
+// requests sent before it, what their handlers sent, and whatever else
+// was queued to the connection before, such as by a backend's own
+// goroutine, have arrived; frames queued after may have too.
+//
+// The request is wiretest.sync, with an id of the Client's own, which a
+// Server answers error/unsupported, or, before sign-in, error/denied: any
+// reply will do, and Sync takes it. It is not a ping: a ping's pong
+// carries no id, so it cannot tell one Sync's pong from another's or from
+// a ping the test sent itself. A connection that is being closed, as when
+// its account is signed out, answers no request, and Sync waits until ctx
+// is done or the connection ends, and returns that error.
+func (c *Client) Sync(ctx context.Context) error {
+	id, err := c.send(ctx, "wiretest.sync", nil)
+	if err != nil {
+		return err
+	}
+	_, _, err = c.reply(ctx, id, false)
+	return err
+}
+
+// call sends a request and takes its reply, and, with before, the frames
+// ahead of it.
+func (c *Client) call(ctx context.Context, method string, params any, before bool) (jsontext.Value, []Frame, error) {
+	id, err := c.send(ctx, method, params)
+	if err != nil {
+		return nil, nil, err
+	}
+	reply, frames, err := c.reply(ctx, id, before)
+	if err != nil {
+		return nil, nil, err
+	}
+	if reply.Error != nil {
+		return nil, frames, reply.Error
+	}
+	return reply.Result, frames, nil
+}
+
+// send sends a request of method with an id of the Client's own, which it
+// returns.
+func (c *Client) send(ctx context.Context, method string, params any) (string, error) {
 	id := "wiretest-" + strconv.FormatUint(c.nextID.Add(1), 10)
 	frame := map[string]any{"method": method, "id": id}
 	if params != nil {
@@ -216,19 +280,62 @@ func (c *Client) Call(ctx context.Context, method string, params any) (jsontext.
 	}
 	payload, err := wire.Marshal(frame)
 	if err != nil {
-		return nil, err
+		return "", err
 	}
+	c.mu.Lock()
+	c.calls[id] = true
+	c.mu.Unlock()
 	if err := c.Send(ctx, payload); err != nil {
-		return nil, err
+		c.mu.Lock()
+		delete(c.calls, id)
+		c.mu.Unlock()
+		return "", err
 	}
-	reply, err := c.take(ctx, func(f Frame) bool { return f.ID == id && f.Method == "" })
-	if err != nil {
-		return nil, err
+	return id, nil
+}
+
+// reply takes the reply to the request of id, waiting for it until ctx is
+// done or the connection ends, and, with before, the frames ahead of it
+// but for the replies to the Client's other requests. The request is
+// forgotten either way.
+func (c *Client) reply(ctx context.Context, id string, before bool) (Frame, []Frame, error) {
+	defer func() {
+		c.mu.Lock()
+		delete(c.calls, id)
+		c.mu.Unlock()
+	}()
+	for {
+		c.mu.Lock()
+		if i := slices.IndexFunc(c.frames, func(f Frame) bool { return f.ID == id && f.Method == "" }); i >= 0 {
+			reply := c.frames[i]
+			var ahead []Frame
+			if before {
+				kept := c.frames[:0:0]
+				for _, f := range c.frames[:i] {
+					if f.Method == "" && c.calls[f.ID] {
+						kept = append(kept, f)
+					} else {
+						ahead = append(ahead, f)
+					}
+				}
+				c.frames = append(kept, c.frames[i+1:]...)
+			} else {
+				c.frames = slices.Delete(c.frames, i, i+1)
+			}
+			c.mu.Unlock()
+			return reply, ahead, nil
+		}
+		changed, err := c.changed, c.err
+		c.mu.Unlock()
+		if err != nil {
+			return Frame{}, nil, err
+		}
+		select {
+		case <-changed:
+		case <-ctx.Done():
+			return Frame{}, nil, ctx.Err()
+		}
 	}
-	if reply.Error != nil {
-		return nil, reply.Error
-	}
-	return reply.Result, nil
 }
 
 // Notify sends a notification, such as activity, which gets no reply.
@@ -261,8 +368,13 @@ func (c *Client) Expect(ctx context.Context, match func(Frame) bool) (Frame, err
 	return c.take(ctx, match)
 }
 
-// Pending returns the frames that arrived and that the test has not taken,
-// in order, and leaves them.
+// Pending returns the frames that have arrived and that the test has not
+// taken, in order, and leaves them. It does not wait: frames arrive at any
+// time, so it holds those that arrived before it was called, and no more.
+// After Call returns, that is every frame that arrived before the reply,
+// and maybe some that arrived after it (CallFrames returns exactly those
+// before); after Sync returns, every frame the server queued to the
+// connection before it handled Sync's request.
 func (c *Client) Pending() []Frame {
 	c.mu.Lock()
 	defer c.mu.Unlock()

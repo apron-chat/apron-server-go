@@ -23,6 +23,12 @@
 //	result, err := c.Call(ctx, "message", map[string]any{"body": map[string]any{"text": "hi"}})
 //	...
 //	echo, err := c.Expect(ctx, wiretest.Method("message"))
+//
+// Frames arrive whenever the server sends them, so what a test asserts
+// of their order it reads in order: CallFrames returns the frames that
+// arrived before a request's reply, and Sync waits until every frame the
+// server queued before it handled Sync's request has arrived, after which
+// Pending holds them.
 package wiretest
 
 import (
