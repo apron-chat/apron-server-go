@@ -65,7 +65,7 @@ type EditHandler interface {
 // change cleared (CurrentUser.Cleared), whose User becomes the
 // connection's (Conn.SetUser) as Send queues it. The backend tells the
 // user's other connections, and those who share a room with the user,
-// itself, such as with Server.PublishUser (§3.3.3).
+// itself (§3.3.3), such as with Server.PublishUserChange, c its Except.
 type ProfileHandler interface {
 	Me(ctx context.Context, c *Conn, p MeParams, reply Reply[CurrentUser]) error
 }

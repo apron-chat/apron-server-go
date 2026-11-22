@@ -163,4 +163,20 @@ func TestPublishUserChange(t *testing.T) {
 	ada2.expect(t, `{"method":"user","params":{"you":{"user_id":"ada_l","status":"online"}}}`)
 	bob.expect(t, `{"method":"user","params":{"new":{"user_id":"ada_l","status":"online"}}}`)
 	eve.expect(t, `{"method":"user","params":{"new":{"user_id":"ada_l","status":"online"}}}`)
+	marker("7")
+
+	// Except, a connection whose own result carries the change, is sent
+	// nothing, and keeps its identity.
+	named := back
+	named.Name = "Ada"
+	if !s.PublishUserChange(wire.UserChange{Old: back, New: named, Except: ada.l.Conn()}, nil) {
+		t.Fatal("except: no change")
+	}
+	ada2.expect(t, `{"method":"user","params":{"you":{"user_id":"ada_l","name":"Ada"}}}`)
+	bob.expect(t, `{"method":"user","params":{"new":{"user_id":"ada_l","name":"Ada"}}}`)
+	eve.expect(t, `{"method":"user","params":{"new":{"user_id":"ada_l","name":"Ada"}}}`)
+	if u := ada.l.Conn().User(); u.Name != "Ada L" {
+		t.Fatalf("the excepted connection's identity is %+v", u)
+	}
+	marker("8")
 }

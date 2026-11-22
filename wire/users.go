@@ -243,6 +243,11 @@ type UserChange struct {
 	// they hold. A change may be others' alone, such as a shown status
 	// that follows the user's connections while the chosen one stays.
 	OldShown, NewShown User
+	// Except, if set, is one of the user's own connections that is told
+	// of the change otherwise, and is sent nothing, nor given an identity:
+	// the one whose me or auth result carries the user, complete (§3.3.2),
+	// and makes it the connection's as it is sent.
+	Except *Conn
 }
 
 // PublishUserChange announces a change of a user (§3.3.3) whose own
@@ -252,8 +257,8 @@ type UserChange struct {
 // only when that view changed:
 //
 //   - the user's own connections, those signed in as New's user_id or
-//     Old's, get New as their identity (Conn.SetUser), and are sent
-//     {"you": New.Patch(Old)};
+//     Old's, but Except, get New as their identity (Conn.SetUser), and are
+//     sent {"you": New.Patch(Old)};
 //   - the other signed-in connections for which shares returns true, or
 //     every one when shares is nil, are sent
 //     {"new": NewShown.Patch(OldShown)}, with OldShown as old when the
@@ -294,7 +299,7 @@ func (s *Server) PublishUserChange(change UserChange, shares func(*Conn) bool) b
 	}
 	for _, c := range s.Conns() {
 		switch id := c.UserID(); {
-		case id == "":
+		case id == "", c == change.Except:
 		case id == cur.UserID || id == old.UserID:
 			if youChanged {
 				c.SetUser(cur)
