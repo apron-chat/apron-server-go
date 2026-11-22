@@ -217,24 +217,75 @@ func (UserUpdate) Method() string { return "user" }
 // A backend tells others only of users who share a room with them
 // (§3.3.3): shares says who does. A backend whose user's own connections
 // see another object than others do, such as the chosen status rather than
-// the shown one (§4.5.2), sends its own UserUpdates.
+// the shown one (§4.5.2), publishes with PublishUserChange.
 //
 // Like Broadcast, it never blocks, and is meant to be called while the
 // backend holds the lock of the change, so that every connection gets a
 // user's changes in the order they were made; shares is called in the
 // caller's goroutine, so it may read what that lock guards.
 func (s *Server) PublishUser(old, cur User, shares func(*Conn) bool) bool {
-	patch, changed := cur.Patch(old)
-	if !changed {
+	return s.PublishUserChange(UserChange{Old: old, New: cur}, shares)
+}
+
+// UserChange is a change of a user (§3.3.3) as its two audiences see it:
+// the user's own connections, which are sent you, and everyone else, who
+// are sent new. The two see different objects when the user's own see
+// what the user chose, and others what the server shows of it, such as
+// the chosen status and the shown one (§4.5.2).
+type UserChange struct {
+	// Old and New are the user before and after the change as its own
+	// connections see it: what the backend last made their identity and
+	// told their clients, and what it makes them now.
+	Old, New User
+	// OldShown and NewShown are the user before and after the change as
+	// everyone else sees it, when NewShown has a user_id; without one,
+	// others see Old and New. Their user_ids are Old's and New's, whatever
+	// they hold. A change may be others' alone, such as a shown status
+	// that follows the user's connections while the chosen one stays.
+	OldShown, NewShown User
+}
+
+// PublishUserChange announces a change of a user (§3.3.3) whose own
+// connections may see another object than everyone else does, and reports
+// whether there was one: whether either view of it changed anything, as
+// User.Patch tells. Each audience is sent the patch of its own view, and
+// only when that view changed:
+//
+//   - the user's own connections, those signed in as New's user_id or
+//     Old's, get New as their identity (Conn.SetUser), and are sent
+//     {"you": New.Patch(Old)};
+//   - the other signed-in connections for which shares returns true, or
+//     every one when shares is nil, are sent
+//     {"new": NewShown.Patch(OldShown)}, with OldShown as old when the
+//     user_id changed, as when a guest becomes an account.
+//
+// When nothing changed, PublishUserChange does nothing at all, as
+// PublishUser does; when only others' view did, the user's own
+// connections are neither sent anything nor given an identity. It never
+// blocks, and is meant to be called while the backend holds the lock of
+// the change, as PublishUser is.
+func (s *Server) PublishUserChange(change UserChange, shares func(*Conn) bool) bool {
+	old, cur := change.Old, change.New
+	oldShown, curShown := old, cur
+	if change.NewShown.UserID != "" {
+		oldShown, curShown = change.OldShown, change.NewShown
+		oldShown.UserID, curShown.UserID = old.UserID, cur.UserID
+	}
+	yours, youChanged := cur.Patch(old)
+	theirs, othersChanged := curShown.Patch(oldShown)
+	if !youChanged && !othersChanged {
 		return false
 	}
-	update := UserUpdate{New: &patch}
-	if old.UserID != "" && old.UserID != cur.UserID {
-		update.Old = &CurrentUser{User: old.clone()}
+	var you, others Frame
+	var err error
+	if youChanged {
+		you, err = Encode(UserUpdate{You: &yours})
 	}
-	you, err := Encode(UserUpdate{You: &patch})
-	var others Frame
-	if err == nil {
+	if othersChanged && err == nil {
+		update := UserUpdate{New: &theirs}
+		if old.UserID != "" && old.UserID != cur.UserID {
+			update.Old = &CurrentUser{User: oldShown.clone()}
+		}
 		others, err = Encode(update)
 	}
 	if err != nil {
@@ -245,9 +296,11 @@ func (s *Server) PublishUser(old, cur User, shares func(*Conn) bool) bool {
 		switch id := c.UserID(); {
 		case id == "":
 		case id == cur.UserID || id == old.UserID:
-			c.SetUser(cur)
-			if you != nil {
-				c.Send(you)
+			if youChanged {
+				c.SetUser(cur)
+				if you != nil {
+					c.Send(you)
+				}
 			}
 		case others != nil && (shares == nil || shares(c)):
 			c.Send(others)

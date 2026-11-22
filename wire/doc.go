@@ -35,7 +35,9 @@
 //     below 2^53, and a [Clock] that issues them (§2.1);
 //   - user changes as patches ([User.Patch], [CurrentUser]), which carry
 //     what changed and clear what was taken away (§3.3.1), published to the
-//     user's connections and those who share a room ([Server.PublishUser]).
+//     user's connections and those who share a room ([Server.PublishUser]),
+//     or each its own view of the user, such as the chosen status and the
+//     shown one ([Server.PublishUserChange], §4.5.2).
 //
 // # Backends and handlers
 //
@@ -102,9 +104,9 @@
 //
 // Sending never blocks, and calls nothing of the backend's but
 // Broadcast's and PublishUser's filters: [Conn.Send], [Conn.Notify],
-// [Conn.SendBatch], [Server.Broadcast], [Server.PublishUser], [Reply.Send],
-// and [Request.Reply] queue frames, and disconnect a client too slow to
-// take them. So a backend sends while it holds the lock of the change a
+// [Conn.SendBatch], [Server.Broadcast], [Server.PublishUser],
+// [Server.PublishUserChange], [Reply.Send], and [Request.Reply] queue
+// frames, and disconnect a client too slow to take them. So a backend sends while it holds the lock of the change a
 // frame describes, which keeps every connection's frames in the order of
 // the changes, such as messages in log_id order; one that sends after
 // letting go of the lock lets two changes' frames cross.
