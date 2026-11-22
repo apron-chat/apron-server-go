@@ -274,9 +274,9 @@ var helpForm = Form{Name: "help", Group: GroupAll, Help: "list the commands you 
 // methods at the same time, which are safe for concurrent use.
 type Router struct {
 	// Fallback runs a command line whose name the Router has no command
-	// for, with a Call whose Form is nil, such as a gateway's that hands
-	// it to the system behind it. nil answers invalid_params, Unknown
-	// command.
+	// for, but /help, which it answers itself, with a Call whose Form is
+	// nil, such as a gateway's that hands it to the system behind it. nil
+	// answers invalid_params, Unknown command.
 	Fallback func(ctx context.Context, call *Call) error
 
 	commands []Command
