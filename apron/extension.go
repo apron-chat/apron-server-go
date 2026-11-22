@@ -303,24 +303,31 @@ func (r *Registrar) Command(command Command) {
 	})
 }
 
-// runExtensionCommand runs an extension's command, outside s.mu.
-func (s *Server) runExtensionCommand(c *client, req request, command *extensionCommand, call *CommandCall) (any, bool, *Error) {
+// runExtensionCommand runs an extension's command, outside s.mu. Its
+// result, which it renders as an object, goes out as a CommandResult,
+// whose Unknown keeps any field of the extension's own.
+func (s *Server) runExtensionCommand(c *client, command *extensionCommand, call *CommandCall, reply wire.Reply[wire.CommandResult]) *Error {
 	if !command.available(call.User, call.Room) {
-		return nil, false, &Error{Code: CodeDenied, Message: fmt.Sprintf("You cannot use /%s here", command.command.Name)}
+		return &Error{Code: CodeDenied, Message: fmt.Sprintf("You cannot use /%s here", command.command.Name)}
 	}
 	result, err := command.command.Run(s.requestContext(c), call)
 	if err != nil {
-		return nil, false, command.host.protocolError(err)
+		return command.host.protocolError(err)
 	}
 	if result == nil {
 		result = map[string]any{}
 	}
 	encoded, encodeErr := wire.Marshal(result)
 	if encodeErr != nil {
-		return nil, false, command.host.protocolError(fmt.Errorf("/%s returned a result that is not JSON: %w", command.command.Name, encodeErr))
+		return command.host.protocolError(fmt.Errorf("/%s returned a result that is not JSON: %w", command.command.Name, encodeErr))
 	}
-	req.reply(jsontext.Value(encoded))
-	return jsontext.Value(encoded), true, nil
+	var typed wire.CommandResult
+	if err := json.Unmarshal(encoded, &typed); err != nil {
+		s.logger.Error("a command's result is not an object", "error", err)
+		return internalError()
+	}
+	_ = reply.Send(typed)
+	return nil
 }
 
 // MethodCall is one request to an extension's method.

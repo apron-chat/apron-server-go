@@ -35,7 +35,7 @@ type serverCommand struct {
 	// and returns its result, which the caller sends after them (§1).
 	// args is the command line after the command's name, and replyTo the
 	// command's reply_to, if any.
-	run func(s *Server, c *client, r *roomState, body map[string]any, args, replyTo string) (map[string]any, *Error)
+	run func(s *Server, c *client, r *roomState, body map[string]any, args, replyTo string) (wire.CommandResult, *Error)
 	// extension is a command an Extension added, which runs outside s.mu
 	// (runExtensionCommand). Its one form has no May: whether it is
 	// available is the extension's Available, asked outside s.mu.
@@ -95,7 +95,7 @@ func coreCommands() *serverCommands {
 	sc := &serverCommands{runs: make(map[string]serverCommand)}
 	for _, core := range []struct {
 		command commands.Command
-		run     func(s *Server, c *client, r *roomState, body map[string]any, args, replyTo string) (map[string]any, *Error)
+		run     func(s *Server, c *client, r *roomState, body map[string]any, args, replyTo string) (wire.CommandResult, *Error)
 	}{
 		{
 			// command() runs /help itself (s.help).
@@ -310,7 +310,7 @@ func (s *Server) finishUsable(usable usableCommands) []commands.Form {
 // all before the result (§1). Only /embed-terminal and /embed-append make
 // live text, and they make their own embed: a terminal or append embed in a
 // command is invalid_params.
-func (s *Server) command(c *client, req request, p wire.CommandParams) (any, bool, *Error) {
+func (s *Server) command(c *client, p wire.CommandParams, reply wire.Reply[wire.CommandResult]) *Error {
 	roomID, hasRoom := p.RoomID, p.RoomID != ""
 	if !hasRoom {
 		roomID = defaultRoomID
@@ -319,9 +319,9 @@ func (s *Server) command(c *client, req request, p wire.CommandParams) (any, boo
 	if hasReply {
 		replyID = p.ReplyTo.MessageID.String()
 	}
-	body := req.body()
+	body := bodyObject(p.Body)
 	if err := validateBody(body); err != nil {
-		return nil, false, err
+		return err
 	}
 	text, _ := body["text"].(string)
 	// The name ends at the first whitespace, a line break too, as in
@@ -329,11 +329,11 @@ func (s *Server) command(c *client, req request, p wire.CommandParams) (any, boo
 	// /Kick is not /kick.
 	name, args, ok := commands.Parse(text)
 	if !ok {
-		return nil, false, invalidParams("A command starts with /; try /help")
+		return invalidParams("A command starts with /; try /help")
 	}
 	for i, value := range asList(body["embeds"]) {
 		if kind := value.(map[string]any)["kind"]; liveKind(kind) {
-			return nil, false, invalidParams("body.embeds[%d]: a command takes no %s embed; use /embed-%s", i, kind, kind)
+			return invalidParams("body.embeds[%d]: a command takes no %s embed; use /embed-%s", i, kind, kind)
 		}
 	}
 
@@ -342,7 +342,7 @@ func (s *Server) command(c *client, req request, p wire.CommandParams) (any, boo
 	// default room.
 	if !hasRoom {
 		if _, form := s.commands.forms.Find(name, args); form != nil && slices.Contains(form.Requires, commands.FieldRoom) {
-			return nil, false, invalidParams("Send /%s from a room: it needs room_id", form.Name)
+			return invalidParams("Send /%s from a room: it needs room_id", form.Name)
 		}
 	}
 	// The opening text of /embed-append becomes its message's text, so the
@@ -353,7 +353,7 @@ func (s *Server) command(c *client, req request, p wire.CommandParams) (any, boo
 			draft.ReplyTo = replyID
 		}
 		if err := s.filterMessage(c, draft); err != nil {
-			return nil, false, err
+			return err
 		}
 		args = draft.Text()
 	}
@@ -361,24 +361,24 @@ func (s *Server) command(c *client, req request, p wire.CommandParams) (any, boo
 	s.mu.Lock()
 	if c.conn.Closing() {
 		s.unlock()
-		return nil, false, connectionClosing()
+		return connectionClosing()
 	}
 	command, known := s.commands.runs[name]
 	r := s.visibleRoomLocked(c.user, roomID)
 	switch {
 	case r == nil:
 		s.unlock()
-		return nil, false, invalidParams("Unknown room %q", roomID)
+		return invalidParams("Unknown room %q", roomID)
 	case hasReply && s.visibleMessageLocked(c.user, replyID) == nil:
 		s.unlock()
-		return nil, false, invalidParams("reply_to must name an existing message")
+		return invalidParams("reply_to must name an existing message")
 	case !known:
 		s.unlock()
-		return nil, false, invalidParams("Unknown command /%s; try /help", name)
+		return invalidParams("Unknown command /%s; try /help", name)
 	case name == "help":
 		usable := s.usableCommandsLocked(c, r)
 		s.unlock()
-		return s.help(c, req, r.id, usable)
+		return s.help(c, r.id, usable, reply)
 	case command.extension != nil:
 		// An extension's command runs outside s.mu, with copies of what it
 		// is told.
@@ -387,15 +387,17 @@ func (s *Server) command(c *client, req request, p wire.CommandParams) (any, boo
 			Mentions: mentions(body), Body: cloneObject(body), client: c,
 		}
 		s.unlock()
-		return s.runExtensionCommand(c, req, command.extension, call)
+		return s.runExtensionCommand(c, command.extension, call, reply)
 	}
 	defer s.unlock()
+	// The result goes while s.mu is held, after the frames the command
+	// sent (§1).
 	result, err := command.run(s, c, r, body, args, replyID)
 	if err != nil {
-		return nil, false, err
+		return err
 	}
-	c.sendResult(req, result)
-	return result, true, nil
+	_ = reply.Send(result)
+	return nil
 }
 
 // cutWord splits text at its first whitespace, of any kind, into the word
@@ -433,11 +435,10 @@ func (s *Server) postRoomNoticeLocked(r *roomState, text string) {
 // help replies to /help with a ~private notice in the command's room that
 // lists the command forms the sender may use there, as Markdown: what
 // ext:command_list lists, narrowed to the room.
-func (s *Server) help(c *client, req request, roomID string, usable usableCommands) (any, bool, *Error) {
+func (s *Server) help(c *client, roomID string, usable usableCommands, reply wire.Reply[wire.CommandResult]) *Error {
 	c.enqueue(privateNotice(roomID, commands.Help(s.finishUsable(usable))))
-	result := map[string]any{}
-	c.sendResult(req, result)
-	return result, true, nil
+	_ = reply.Send(wire.CommandResult{})
+	return nil
 }
 
 // commandListMethod is ext:command_list's capability and its request
@@ -458,20 +459,18 @@ func (s *Server) listCommands(c *client, _ request) (any, bool, *Error) {
 // avatarCommand takes exactly one upload embed, whose file becomes the
 // sender's avatar when its write finishes (§4.8.6). The result carries the
 // write URL.
-func (s *Server) avatarCommand(c *client, _ *roomState, body map[string]any, _, _ string) (map[string]any, *Error) {
+func (s *Server) avatarCommand(c *client, _ *roomState, body map[string]any, _, _ string) (wire.CommandResult, *Error) {
 	embeds := asList(body["embeds"])
 	if len(embeds) != 1 || embeds[0].(map[string]any)["kind"] != "upload" {
-		return nil, invalidParams("/avatar takes exactly one upload embed: attach an image")
+		return wire.CommandResult{}, invalidParams("/avatar takes exactly one upload embed: attach an image")
 	}
 	if err := s.admitPostLocked(c.user); err != nil {
-		return nil, err
+		return wire.CommandResult{}, err
 	}
 	s.embedNumber++
 	e := s.newWriteLocked(c, fmt.Sprintf("embed_%d", s.embedNumber), "upload", "")
 	e.avatarFor = c.user
-	return map[string]any{
-		"embeds": []any{map[string]any{"embed_id": e.id, "kind": "upload", "write_url": e.baseURL + writePath + e.token}},
-	}, nil
+	return e.writeResult(), nil
 }
 
 const maxKickReasonRunes = 200
@@ -481,21 +480,21 @@ const maxKickReasonRunes = 200
 // (§4.2.2), the target room_update left, and the remaining members a ~room
 // notice with the reason. Only the room's creator and admins or moderators
 // may kick.
-func (s *Server) kickCommand(c *client, r *roomState, body map[string]any, args, _ string) (map[string]any, *Error) {
+func (s *Server) kickCommand(c *client, r *roomState, body map[string]any, args, _ string) (wire.CommandResult, *Error) {
 	u := c.user
 	targets := mentions(body)
 	if len(targets) != 1 {
-		return nil, invalidParams("Usage: /kick @user [<reason>], mentioning exactly one user")
+		return wire.CommandResult{}, invalidParams("Usage: /kick @user [<reason>], mentioning exactly one user")
 	}
 	if !r.mayRemove(u) {
-		return nil, &Error{Code: CodeDenied, Message: fmt.Sprintf("Only the creator of %s or a moderator can remove people from it", r.title())}
+		return wire.CommandResult{}, &Error{Code: CodeDenied, Message: fmt.Sprintf("Only the creator of %s or a moderator can remove people from it", r.title())}
 	}
 	target := r.members[targets[0]]
 	if target == nil {
-		return nil, invalidParams("@%s is not in %s", targets[0], r.title())
+		return wire.CommandResult{}, invalidParams("@%s is not in %s", targets[0], r.title())
 	}
 	if target == u {
-		return nil, invalidParams("You cannot remove yourself; leave the room instead")
+		return wire.CommandResult{}, invalidParams("You cannot remove yourself; leave the room instead")
 	}
 	// The first argument names the target as the user typed it. Only
 	// body.mentions says who it is (§3.5.5); a user_id has no whitespace
@@ -516,5 +515,5 @@ func (s *Server) kickCommand(c *client, r *roomState, body map[string]any, args,
 		text += ": " + reason
 	}
 	s.postRoomNoticeLocked(r, text)
-	return map[string]any{}, nil
+	return wire.CommandResult{}, nil
 }

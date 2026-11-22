@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/apron-chat/apron-server-go/apron/internal/livetext"
+	"github.com/apron-chat/apron-server-go/wire"
 )
 
 // Live text (§4.8.3): terminal (§4.8.6) and append (§4.8.5) embeds, which
@@ -439,7 +440,7 @@ const maxLiveTitleRunes = 200
 
 // embedTerminalCommand prepares a terminal embed titled by the rest of the
 // line, if any: see liveCommand.
-func (s *Server) embedTerminalCommand(c *client, r *roomState, body map[string]any, args, replyTo string) (map[string]any, *Error) {
+func (s *Server) embedTerminalCommand(c *client, r *roomState, body map[string]any, args, replyTo string) (wire.CommandResult, *Error) {
 	title, _, _ := strings.Cut(args, "\n")
 	title = strings.TrimSpace(title)
 	if runes := []rune(title); len(runes) > maxLiveTitleRunes {
@@ -451,7 +452,7 @@ func (s *Server) embedTerminalCommand(c *client, r *roomState, body map[string]a
 // embedAppendCommand prepares an append embed whose message starts with the
 // rest of the line, as Markdown: see liveCommand. A paragraph break follows
 // opening text, so that the streamed text starts a paragraph of its own.
-func (s *Server) embedAppendCommand(c *client, r *roomState, body map[string]any, args, replyTo string) (map[string]any, *Error) {
+func (s *Server) embedAppendCommand(c *client, r *roomState, body map[string]any, args, replyTo string) (wire.CommandResult, *Error) {
 	if args != "" {
 		args += "\n\n"
 	}
@@ -464,17 +465,17 @@ func (s *Server) embedAppendCommand(c *client, r *roomState, body map[string]any
 // URL (§4.8.3), and a ~private notice shows it with ways to use it. A write
 // that does not start in time expires, and nothing is posted. It counts as
 // a new message toward MessagesPerMinute.
-func (s *Server) liveCommand(c *client, r *roomState, body map[string]any, kind, text, replyTo string) (map[string]any, *Error) {
+func (s *Server) liveCommand(c *client, r *roomState, body map[string]any, kind, text, replyTo string) (wire.CommandResult, *Error) {
 	if len(asList(body["embeds"])) > 0 {
-		return nil, invalidParams("/embed-%s takes no embeds: it makes its own", kind)
+		return wire.CommandResult{}, invalidParams("/embed-%s takes no embeds: it makes its own", kind)
 	}
 	if replyTo != "" {
 		if target := s.visibleMessageLocked(c.user, replyTo); target != nil && r.revealsTo(s.rooms[target.roomID]) {
-			return nil, &Error{Code: CodeDenied, Message: "A reply cannot quote a message that fewer people can see"}
+			return wire.CommandResult{}, &Error{Code: CodeDenied, Message: "A reply cannot quote a message that fewer people can see"}
 		}
 	}
 	if err := s.admitPostLocked(c.user); err != nil {
-		return nil, err
+		return wire.CommandResult{}, err
 	}
 	s.embedNumber++
 	e := s.newWriteLocked(c, fmt.Sprintf("embed_%d", s.embedNumber), kind, "")
@@ -485,9 +486,7 @@ func (s *Server) liveCommand(c *client, r *roomState, body map[string]any, kind,
 	}
 	s.startLiveLocked(e, text)
 	c.enqueue(privateNotice(r.id, s.liveNotice(e)))
-	return map[string]any{
-		"embeds": []any{map[string]any{"embed_id": e.id, "kind": kind, "write_url": e.writeURL()}},
-	}, nil
+	return e.writeResult(), nil
 }
 
 // liveNotice tells the sender of /embed-terminal or /embed-append how to

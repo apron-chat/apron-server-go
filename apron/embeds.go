@@ -4,6 +4,7 @@ import (
 	"container/list"
 	"crypto/rand"
 	"crypto/subtle"
+	"encoding/json/jsontext"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -17,6 +18,7 @@ import (
 
 	"github.com/apron-chat/apron-server-go/apron/internal/livetext"
 	"github.com/apron-chat/apron-server-go/apron/internal/uploads"
+	"github.com/apron-chat/apron-server-go/wire"
 )
 
 // HTTP paths for embed content (§4.8.3). Write URLs carry a one-time token;
@@ -206,6 +208,12 @@ func (s *Server) resolveEmbedsLocked(c *client, messageID string, current map[st
 
 func (e *embedState) writeURL() string {
 	return e.baseURL + writePath + e.token
+}
+
+// writeResult is the result of a command that made the embed's write: its
+// write URL (§4.8.2).
+func (e *embedState) writeResult() wire.CommandResult {
+	return wire.CommandResult{Embeds: []jsontext.Value{encodeJSON(map[string]any{"embed_id": e.id, "kind": e.kind, "write_url": e.writeURL()})}}
 }
 
 func asList(value any) []any {

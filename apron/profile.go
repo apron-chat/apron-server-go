@@ -178,37 +178,37 @@ const serverUsage = "Usage: /server to show the server's title, description, and
 // may use it. A change sends every connection a new server frame: at once
 // for the title, the description, and a cleared avatar, and when the
 // upload's write finishes for a new avatar.
-func (s *Server) serverCommand(c *client, r *roomState, body map[string]any, args, _ string) (map[string]any, *Error) {
+func (s *Server) serverCommand(c *client, r *roomState, body map[string]any, args, _ string) (wire.CommandResult, *Error) {
 	if !c.user.hasRole("admin") {
-		return nil, &Error{Code: CodeDenied, Message: "Only an admin can see and change the server's title, description, and avatar"}
+		return wire.CommandResult{}, &Error{Code: CodeDenied, Message: "Only an admin can see and change the server's title, description, and avatar"}
 	}
 	field, value := cutWord(args)
 	// The form's word matches exactly, as command names do: /server Title
 	// is not /server title.
 	embeds := asList(body["embeds"])
 	if len(embeds) > 0 && field != "avatar" {
-		return nil, invalidParams("Only /server avatar takes an attachment")
+		return wire.CommandResult{}, invalidParams("Only /server avatar takes an attachment")
 	}
 	var done string
 	switch field {
 	case "":
 		c.enqueue(privateNotice(r.id, s.profileNoticeLocked()))
-		return map[string]any{}, nil
+		return wire.CommandResult{}, nil
 	case "title":
 		title, err := serverTitle(value)
 		if err != nil {
-			return nil, err
+			return wire.CommandResult{}, err
 		}
 		done = s.setProfileTextLocked(field, &s.profile.title, title)
 	case "description":
 		description, err := serverDescription(value)
 		if err != nil {
-			return nil, err
+			return wire.CommandResult{}, err
 		}
 		done = s.setProfileTextLocked(field, &s.profile.description, description)
 	case "avatar":
 		if value != "" {
-			return nil, invalidParams("/server avatar takes an attached image, not text")
+			return wire.CommandResult{}, invalidParams("/server avatar takes an attached image, not text")
 		}
 		if len(embeds) == 0 {
 			done = "The avatar was not set."
@@ -221,22 +221,20 @@ func (s *Server) serverCommand(c *client, r *roomState, body map[string]any, arg
 			break
 		}
 		if len(embeds) != 1 || embeds[0].(map[string]any)["kind"] != "upload" {
-			return nil, invalidParams("/server avatar takes exactly one upload embed: attach an image")
+			return wire.CommandResult{}, invalidParams("/server avatar takes exactly one upload embed: attach an image")
 		}
 		if !clientsLoad(c.baseURL) {
-			return nil, &Error{Code: CodeDenied, Message: serverAvatarNeedHTTPS}
+			return wire.CommandResult{}, &Error{Code: CodeDenied, Message: serverAvatarNeedHTTPS}
 		}
 		s.embedNumber++
 		e := s.newWriteLocked(c, fmt.Sprintf("embed_%d", s.embedNumber), "upload", "")
 		e.serverAvatarBy = c.user.id
-		return map[string]any{
-			"embeds": []any{map[string]any{"embed_id": e.id, "kind": "upload", "write_url": e.baseURL + writePath + e.token}},
-		}, nil
+		return e.writeResult(), nil
 	default:
-		return nil, invalidParams(serverUsage)
+		return wire.CommandResult{}, invalidParams(serverUsage)
 	}
 	c.enqueue(privateNotice(r.id, done+"\n\n"+s.profileNoticeLocked()))
-	return map[string]any{}, nil
+	return wire.CommandResult{}, nil
 }
 
 // setProfileTextLocked sets the title or description, kept in *target, to

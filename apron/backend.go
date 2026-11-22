@@ -288,24 +288,7 @@ func (b backend) Edit(ctx context.Context, wc *wire.Conn, p wire.EditParams, rep
 	return b.serve(ctx, wc, func(c *client) *Error { return b.s.saveMessage(c, p, reply) })
 }
 
-// Command runs a command. Its result, which a command renders as an
-// object, the extensions' too, goes out as a CommandResult, whose Unknown
-// keeps any field of an extension's own.
+// Command runs a command, which replies with its typed Reply.
 func (b backend) Command(ctx context.Context, wc *wire.Conn, p wire.CommandParams, reply wire.Reply[wire.CommandResult]) error {
-	return b.serve(ctx, wc, func(c *client) *Error {
-		req := request{wireBody: p.Body, send: func(result any, frames []wire.Frame) bool {
-			var typed wire.CommandResult
-			if err := json.Unmarshal(encodeJSON(result), &typed); err != nil {
-				b.s.logger.Error("a command's result is not an object", "error", err)
-				_ = reply.Fail(internalError())
-				return false
-			}
-			return reply.Send(typed, frames...) == nil
-		}}
-		result, replied, err := b.s.command(c, req, p)
-		if err == nil && !replied {
-			req.reply(result)
-		}
-		return err
-	})
+	return b.serve(ctx, wc, func(c *client) *Error { return b.s.command(c, p, reply) })
 }

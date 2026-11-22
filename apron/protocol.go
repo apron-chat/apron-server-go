@@ -41,13 +41,10 @@ func Denied(message string) *Error { return wire.Denied(message) }
 func InvalidParams(message string) *Error { return wire.InvalidParams(message) }
 
 // request is a request as the code that answers it gets it: an operation's
-// (registerOp), whose result goes out raw, a command's, whose result goes
-// out as a wire.CommandResult, or an auth request's, answered with its
-// typed Reply.
+// (registerOp), whose result goes out raw, or an auth request's, answered
+// with its typed Reply.
 type request struct {
 	params wire.Fields
-	// wireBody is a command's body, as package wire read it.
-	wireBody *wire.Body
 	// send sends a result, followed by frames with nothing between them.
 	send func(result any, frames []wire.Frame) bool
 	// auth answers an auth request (sendAuth).
@@ -78,9 +75,6 @@ func (req request) reply(result any, then ...any) bool {
 	}
 	return req.send(result, frames)
 }
-
-// body is a command's body, decoded (bodyObject).
-func (req request) body() map[string]any { return bodyObject(req.wireBody) }
 
 // bodyObject decodes a body package wire read, as the server keeps it:
 // every field as it was sent, those wire does not know too (Body.Unknown),

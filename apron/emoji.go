@@ -324,11 +324,11 @@ func (s *Server) handleEmoji(w http.ResponseWriter, r *http.Request) {
 // upload's write finishes, which checks the catalog again
 // (refuseEmojiLocked). A connection not offered ext:emoji, whose image
 // URLs clients would refuse, may not add one.
-func (s *Server) emojiCommand(c *client, _ *roomState, body map[string]any, args, _ string) (map[string]any, *Error) {
+func (s *Server) emojiCommand(c *client, _ *roomState, body map[string]any, args, _ string) (wire.CommandResult, *Error) {
 	u := c.user
 	action, key := cutWord(args)
 	if !emojiKeyPattern.MatchString(key) || len(key) > maxEmojiBytes {
-		return nil, invalidParams("Usage: /emoji add :<name>: with one image attached, or /emoji remove :<name>:; a name is letters, digits, _, +, and -, at most %d characters", maxEmojiBytes-2)
+		return wire.CommandResult{}, invalidParams("Usage: /emoji add :<name>: with one image attached, or /emoji remove :<name>:; a name is letters, digits, _, +, and -, at most %d characters", maxEmojiBytes-2)
 	}
 	existing := s.emoji[key]
 	// The form's word matches exactly, as command names do.
@@ -336,41 +336,39 @@ func (s *Server) emojiCommand(c *client, _ *roomState, body map[string]any, args
 	case "add":
 		embeds := asList(body["embeds"])
 		if len(embeds) != 1 || embeds[0].(map[string]any)["kind"] != "upload" {
-			return nil, invalidParams("/emoji add takes exactly one upload embed: attach an image")
+			return wire.CommandResult{}, invalidParams("/emoji add takes exactly one upload embed: attach an image")
 		}
 		if s.emojiExt(c.baseURL) == nil {
 			// This connection is not offered ext:emoji: the image's URL
 			// would be one clients refuse.
-			return nil, &Error{Code: CodeDenied, Message: emojiNeedHTTPS}
+			return wire.CommandResult{}, &Error{Code: CodeDenied, Message: emojiNeedHTTPS}
 		}
 		if existing != nil && !s.mayReplaceEmojiLocked(existing, u.id) {
-			return nil, &Error{Code: CodeDenied, Message: fmt.Sprintf("%s is taken; only who added it or an admin can replace it", key)}
+			return wire.CommandResult{}, &Error{Code: CodeDenied, Message: fmt.Sprintf("%s is taken; only who added it or an admin can replace it", key)}
 		}
 		if existing == nil && len(s.emoji) >= maxCustomEmoji {
-			return nil, &Error{Code: CodeDenied, Message: fmt.Sprintf("This server has %d custom emoji, the most it keeps", maxCustomEmoji)}
+			return wire.CommandResult{}, &Error{Code: CodeDenied, Message: fmt.Sprintf("This server has %d custom emoji, the most it keeps", maxCustomEmoji)}
 		}
 		if s.emojiRoomLocked(key) <= 0 {
-			return nil, &Error{Code: CodeDenied, Message: s.emojiFullMessage()}
+			return wire.CommandResult{}, &Error{Code: CodeDenied, Message: s.emojiFullMessage()}
 		}
 		if err := s.admitPostLocked(u); err != nil {
-			return nil, err
+			return wire.CommandResult{}, err
 		}
 		s.embedNumber++
 		e := s.newWriteLocked(c, fmt.Sprintf("embed_%d", s.embedNumber), "upload", "")
 		e.emojiKey, e.emojiBy = key, u.id
 		e.alt = ogImageAlt(embeds[0].(map[string]any)["og"])
-		return map[string]any{
-			"embeds": []any{map[string]any{"embed_id": e.id, "kind": "upload", "write_url": e.baseURL + writePath + e.token}},
-		}, nil
+		return e.writeResult(), nil
 	case "remove":
 		if !u.hasRole("admin") {
-			return nil, &Error{Code: CodeDenied, Message: "Only an admin can remove custom emoji"}
+			return wire.CommandResult{}, &Error{Code: CodeDenied, Message: "Only an admin can remove custom emoji"}
 		}
 		if existing == nil {
-			return nil, invalidParams("There is no custom emoji %s", key)
+			return wire.CommandResult{}, invalidParams("There is no custom emoji %s", key)
 		}
 		s.removeEmojiLocked(key)
-		return map[string]any{}, nil
+		return wire.CommandResult{}, nil
 	}
-	return nil, invalidParams("Usage: /emoji add :<name>: with one image attached, or /emoji remove :<name>:")
+	return wire.CommandResult{}, invalidParams("Usage: /emoji add :<name>: with one image attached, or /emoji remove :<name>:")
 }
