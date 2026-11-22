@@ -4,7 +4,7 @@
 // Emoji_Presentation, from
 // https://www.unicode.org/Public/17.0.0/ucd/emoji/emoji-data.txt.
 
-package apron
+package emoji
 
 import "unicode"
 

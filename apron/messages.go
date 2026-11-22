@@ -8,6 +8,7 @@ import (
 
 	"golang.org/x/time/rate"
 
+	uts51 "github.com/apron-chat/apron-server-go/apron/internal/emoji"
 	"github.com/apron-chat/apron-server-go/apron/internal/roomlog"
 	"github.com/apron-chat/apron-server-go/wire"
 )
@@ -574,7 +575,7 @@ func normalizeEmojis(values []string) ([]string, *Error) {
 	for _, emoji := range values {
 		// Entries that differ only in U+FE0F are the same entry, kept fully
 		// qualified (§4.7).
-		if emoji = qualifyEmoji(emoji); emoji == "" {
+		if emoji = uts51.Qualify(emoji); emoji == "" {
 			return nil, invalidParams("emojis must be non-empty strings")
 		}
 		if len(emoji) > maxEmojiBytes {
