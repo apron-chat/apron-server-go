@@ -1,0 +1,84 @@
+package wire
+
+import (
+	"bufio"
+	"context"
+	"errors"
+	"io"
+	"sync"
+
+	"github.com/coder/websocket"
+)
+
+// Transport carries whole frames both ways (§1): a WebSocket, a line of
+// newline-delimited JSON on a byte stream, or anything else.
+type Transport interface {
+	// Read returns the next frame from the client.
+	Read(ctx context.Context) ([]byte, error)
+	// Write sends one frame to the client.
+	Write(ctx context.Context, frame []byte) error
+	// Ping checks that the client is still there; a transport that cannot
+	// tell returns nil.
+	Ping(ctx context.Context) error
+	// Close ends the transport at once.
+	Close() error
+}
+
+type wsTransport struct{ ws *websocket.Conn }
+
+var errBinaryFrame = errors.New("wire: text frames required")
+
+func (t wsTransport) Read(ctx context.Context) ([]byte, error) {
+	kind, payload, err := t.ws.Read(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if kind != websocket.MessageText {
+		_ = t.ws.Close(websocket.StatusUnsupportedData, "text frames required")
+		return nil, errBinaryFrame
+	}
+	return payload, nil
+}
+
+func (t wsTransport) Write(ctx context.Context, frame []byte) error {
+	return t.ws.Write(ctx, websocket.MessageText, frame)
+}
+
+func (t wsTransport) Ping(ctx context.Context) error { return t.ws.Ping(ctx) }
+func (t wsTransport) Close() error                   { return t.ws.CloseNow() }
+
+// LineTransport carries newline-delimited JSON frames on a byte stream, such
+// as a TCP connection, a pipe, or stdin and stdout (§1).
+func LineTransport(rw io.ReadWriteCloser, maxFrame int) Transport {
+	scanner := bufio.NewScanner(rw)
+	scanner.Buffer(make([]byte, 0, 4096), maxFrame)
+	return &lineTransport{rw: rw, lines: scanner}
+}
+
+type lineTransport struct {
+	rw    io.ReadWriteCloser
+	lines *bufio.Scanner
+	mu    sync.Mutex
+}
+
+func (t *lineTransport) Read(context.Context) ([]byte, error) {
+	for t.lines.Scan() {
+		if line := t.lines.Bytes(); len(line) > 0 {
+			return append([]byte(nil), line...), nil
+		}
+	}
+	if err := t.lines.Err(); err != nil {
+		return nil, err
+	}
+	return nil, io.EOF
+}
+
+func (t *lineTransport) Write(_ context.Context, frame []byte) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	_, err := t.rw.Write(append(frame[:len(frame):len(frame)], '\n'))
+	return err
+}
+
+func (t *lineTransport) Ping(context.Context) error { return nil }
+func (t *lineTransport) Close() error               { return t.rw.Close() }
