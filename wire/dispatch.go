@@ -5,6 +5,7 @@ import (
 	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"fmt"
+	"runtime/debug"
 	"slices"
 	"strconv"
 	"sync"
@@ -95,8 +96,8 @@ func (r *Request) Reply(result any, then ...Frame) bool {
 	if r.replied {
 		return false
 	}
-	r.replied = true
 	frame, encoded, e := r.c.server.encodeReply(r, result, nil)
+	r.replied = true
 	r.outcome = dedupOutcome{encoded, e}
 	if frame == nil {
 		r.c.Close()
@@ -179,11 +180,39 @@ func (s *Server) protocolError(ctx context.Context, method string, err error) *E
 	return internalError()
 }
 
+// recoverFrame recovers a panic in handling r, and is deferred, as recover
+// works only there: the panic is logged, and r, if it is a request without
+// its reply, is answered error/internal_error. A handler's panic is the
+// server's failure, not the client's, so, as in net/http, the connection
+// goes on.
+func (s *Server) recoverFrame(r *Request) {
+	if v := recover(); v != nil {
+		s.logger().Error("wire: a handler panicked", "method", r.Method, "panic", v, "stack", string(debug.Stack()))
+		r.fail(internalError())
+	}
+}
+
+// afterReply logs the error of a handler that had already replied, which
+// no client is told: at debug level for an *Error, which is a refusal that
+// came too late, and as an error for any other.
+func (s *Server) afterReply(ctx context.Context, method string, err error) {
+	switch e, ok := asError(err); {
+	case ok:
+		s.logger().Debug("wire: a request was refused after its reply", "method", method, "error", e)
+	case ctx.Err() != nil:
+		// Cut short by its connection's end.
+	default:
+		s.logger().Error("wire: a request failed after its reply", "method", method, "error", err)
+	}
+}
+
 // processFrame handles one frame from a connection, with ctx as its
-// requests' context.
+// requests' context. A panic while it does is logged, and answered
+// error/internal_error when the frame is a request; the connection goes on.
 func (s *Server) processFrame(ctx context.Context, c *Conn, payload []byte) {
 	parsed, failed := wirecore.ParseRequest(payload)
 	r := &Request{Method: parsed.Method, ID: parsed.ID, Params: parsed.Params, c: c, notification: !parsed.HasID, hasID: parsed.HasID}
+	defer s.recoverFrame(r)
 	if failed != nil {
 		// An error about a frame that has no id omits it (§1.1).
 		r.notification = false
@@ -271,17 +300,7 @@ func (s *Server) processFrame(ctx context.Context, c *Conn, payload []byte) {
 		return
 	}
 
-	result, err := m.Handle(context.WithValue(ctx, requestKey{}, r), c, r)
-	switch {
-	case err != nil && r.Replied():
-		if _, ok := asError(err); !ok {
-			s.logger().Error("wire: a request failed after its reply", "method", r.Method, "error", err)
-		}
-	case err != nil:
-		r.fail(s.protocolError(ctx, r.Method, err))
-	default:
-		r.Reply(result)
-	}
+	s.serve(ctx, c, r, m)
 	if entry != nil {
 		r.mu.Lock()
 		outcome := r.outcome
@@ -289,6 +308,22 @@ func (s *Server) processFrame(ctx context.Context, c *Conn, payload []byte) {
 		// Failed requests are not kept, and neither are reads: a retry
 		// runs again. Concurrent duplicates still share the outcome.
 		s.dedup.finish(userID, r.ID, entry, outcome, outcome.err != nil || m.ReadOnly)
+	}
+}
+
+// serve runs a request's handler, and sends its reply: its result, or its
+// error. A panic in either is the request's error/internal_error, so that
+// the request has its outcome for deduplication all the same.
+func (s *Server) serve(ctx context.Context, c *Conn, r *Request, m Method) {
+	defer s.recoverFrame(r)
+	result, err := m.Handle(context.WithValue(ctx, requestKey{}, r), c, r)
+	switch {
+	case err != nil && r.Replied():
+		s.afterReply(ctx, r.Method, err)
+	case err != nil:
+		r.fail(s.protocolError(ctx, r.Method, err))
+	default:
+		r.Reply(result)
 	}
 }
 
@@ -503,9 +538,15 @@ func (s *Server) authenticate(ctx context.Context, c *Conn, r *Request) {
 	// result (§3.2.2).
 	c.hold()
 	defer c.release()
+	// A panic is answered before the frames held meanwhile are sent, as an
+	// error is.
+	defer s.recoverFrame(r)
 	result, err := s.Backend.Auth(context.WithValue(ctx, requestKey{}, r), c, p)
 	switch {
 	case r.Replied():
+		if err != nil {
+			s.afterReply(ctx, "auth", err)
+		}
 		return
 	case err != nil:
 		r.fail(s.protocolError(ctx, "auth", err))

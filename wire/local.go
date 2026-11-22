@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"sync"
 	"sync/atomic"
+
+	"github.com/apron-chat/apron-server-go/internal/wirecore"
 )
 
 // Errors of a Local connection.
@@ -20,6 +22,10 @@ var (
 	// ErrReentrant is a call made from inside the handling of another call
 	// on the same Local connection, which would wait for itself.
 	ErrReentrant = errors.New("wire: the connection is waiting on this call; use another connection")
+	// ErrNotRequest is a Call of a method clients send only as a
+	// notification, such as ping or activity, which is never answered; send
+	// it with Notify.
+	ErrNotRequest = errors.New("wire: the method is a notification, which gets no reply; use Notify")
 )
 
 // LocalOptions configure a Local connection.
@@ -152,38 +158,19 @@ func (l *Local) shut(err error) {
 // Call sends a request and returns its result, or its error reply as an
 // *Error. The request is handled in the caller's goroutine, with ctx as its
 // context; a call made from inside the handling of another on the same
-// connection is ErrReentrant.
+// connection is ErrReentrant, and one of a method that is only ever a
+// notification, which would wait for a reply forever, is ErrNotRequest.
 func (l *Local) Call(ctx context.Context, method string, params any) (jsontext.Value, error) {
-	if ctx.Value(inFlight{l}) != nil {
-		return nil, ErrReentrant
+	if l.notificationOnly(method) {
+		return nil, ErrNotRequest
 	}
 	id := l.prefix + strconv.FormatUint(l.nextID.Add(1), 10)
-	frame := map[string]any{"method": method, "id": id}
-	if params != nil {
-		frame["params"] = params
-	}
-	payload, err := marshal(frame)
-	if err != nil {
-		return nil, err
-	}
 	reply := make(chan localReply, 1)
 	l.pending.Store(id, reply)
 	defer l.pending.Delete(id)
-	select {
-	case l.turn <- struct{}{}:
-	case <-l.closed:
-		return nil, l.Err()
-	case <-ctx.Done():
-		return nil, ctx.Err()
+	if err := l.process(ctx, method, id, params); err != nil {
+		return nil, err
 	}
-	select {
-	case <-l.closed:
-		<-l.turn
-		return nil, l.Err()
-	default:
-	}
-	l.s.processFrame(context.WithValue(ctx, inFlight{l}, true), l.c, payload)
-	<-l.turn
 	select {
 	case r := <-reply:
 		if r.err != nil {
@@ -195,6 +182,58 @@ func (l *Local) Call(ctx context.Context, method string, params any) (jsontext.V
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
+}
+
+// Notify sends a notification, such as activity, and returns once it is
+// handled, in the caller's goroutine with ctx as its context, as Call does
+// a request. Nothing answers a notification: a method that is not one, or
+// params that are not valid, are ignored (§1.1).
+func (l *Local) Notify(ctx context.Context, method string, params any) error {
+	return l.process(ctx, method, "", params)
+}
+
+// notificationOnly reports whether a method is only ever handled as a
+// notification (§1.1): ping, and the methods registered as notifications.
+func (l *Local) notificationOnly(method string) bool {
+	if wirecore.NotificationOnly[method] {
+		return true
+	}
+	m, found := l.s.method(method)
+	return found && m.Notification
+}
+
+// process sends a frame, a request with id or else a notification, and
+// handles it once the connection's frame before it is done.
+func (l *Local) process(ctx context.Context, method, id string, params any) error {
+	if ctx.Value(inFlight{l}) != nil {
+		return ErrReentrant
+	}
+	frame := map[string]any{"method": method}
+	if id != "" {
+		frame["id"] = id
+	}
+	if params != nil {
+		frame["params"] = params
+	}
+	payload, err := marshal(frame)
+	if err != nil {
+		return err
+	}
+	select {
+	case l.turn <- struct{}{}:
+	case <-l.closed:
+		return l.Err()
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	defer func() { <-l.turn }()
+	select {
+	case <-l.closed:
+		return l.Err()
+	default:
+	}
+	l.s.processFrame(context.WithValue(ctx, inFlight{l}, true), l.c, payload)
+	return nil
 }
 
 // receive takes a frame written to the connection: a reply goes to its

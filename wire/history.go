@@ -53,7 +53,8 @@ type Record struct {
 // in log, in ascending log_id order, between the bounds, at most limit of
 // them, from the oldest with After and the newest without. lower is the
 // log's effective lower bound (history_log_id) and latest its latest_log_id,
-// both 0 for an empty log; records below lower are not returned.
+// both 0 for an empty log; records below lower are not returned. A limit
+// below 1 is 1.
 //
 // A backend whose log is a slice of records, such as a host's recent
 // history, answers history with Page and nothing more.
@@ -66,6 +67,7 @@ func Page(log []Record, p HistoryParams, limit int, lower, latest int64) History
 		h := strconv.FormatInt(lower, 10)
 		result.HistoryLogID = &h
 	}
+	limit = max(limit, 1)
 	if p.Limit > 0 && p.Limit < limit {
 		limit = p.Limit
 	}

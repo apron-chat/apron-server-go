@@ -38,6 +38,8 @@ func TestPage(t *testing.T) {
 		{"client limit under the server's", HistoryParams{Limit: 1}, 10, 10, "50", "50", true, 1},
 		{"below the lower bound", HistoryParams{Before: ptr(25)}, 10, 30, "", "", false, 0},
 		{"empty", HistoryParams{After: ptr(60)}, 10, 10, "", "", false, 0},
+		{"a limit of 0 is 1", HistoryParams{}, 0, 10, "50", "50", true, 1},
+		{"a negative limit is 1", HistoryParams{After: ptr(10)}, -5, 10, "10", "10", true, 1},
 	}
 	for _, c := range cases {
 		r := Page(log, c.p, c.limit, c.lower, 50)
