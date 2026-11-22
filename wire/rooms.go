@@ -33,8 +33,10 @@ type RoomView struct {
 	// (§4.3.3). Decoding, a null is nil, as for any pointer.
 	HistoryLogID *LogID `json:"history_log_id,omitzero"`
 	// Members are current user objects (§4.2.1), each with the fields it
-	// carries empty, such as a status of "" (§4.5.2), in its Cleared.
-	Members     []CurrentUser `json:"members,omitempty"`
+	// carries empty, such as a status of "" (§4.5.2), in its Cleared. With
+	// members, every room has them, empty too (§4.2.1): nil leaves the
+	// field out, and an empty slice sends [].
+	Members     []CurrentUser `json:"members,omitzero"`
 	MemberCount int           `json:"member_count,omitzero"`
 }
 
@@ -98,8 +100,8 @@ type RoomListResult struct {
 	Left      []RoomRef  `json:"left,omitzero"`
 	// Users are the members' complete current objects (§3.3.1), each with
 	// the fields it carries empty, such as a status of "" (§4.5.2), in its
-	// Cleared.
-	Users []CurrentUser `json:"users,omitempty"`
+	// Cleared; an empty slice sends [].
+	Users []CurrentUser `json:"users,omitzero"`
 }
 
 // RoomSetParams are the params of room_set (§4.2.4): a new room without
