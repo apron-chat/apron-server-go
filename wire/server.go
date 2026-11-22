@@ -42,8 +42,10 @@ type Server struct {
 	PingInterval time.Duration
 	PingTimeout  time.Duration
 	// MaxConnections bounds the open network connections, not Local ones;
-	// 0 is unlimited. A connection over it is sent the server frame, then
-	// error retry_after (§1.1), and closed.
+	// 0 is unlimited. A connection over it is refused before the Backend
+	// hears of it, but for its server frame (Hello, without Connecter or
+	// Disconnecter): it is sent that, then error retry_after (§1.1), and
+	// closed.
 	MaxConnections int
 	// DedupSize is how many request ids are kept for deduplication (§1.2)
 	// for each user, of the latest DedupUsers users; 1024 and 4096 by
@@ -182,6 +184,34 @@ func (s *Server) ServeTransport(ctx context.Context, t Transport, remote net.Add
 	c.remote, c.request = remote, r
 	c.rt.Start(true)
 
+	// Capacity is checked first, so that a connection refused for it costs
+	// the backend nothing but its server frame, which every connection is
+	// sent first (§3.1).
+	s.mu.Lock()
+	switch {
+	case s.closed:
+		s.mu.Unlock()
+		c.Close()
+		return
+	case s.MaxConnections > 0 && s.network >= s.MaxConnections:
+		s.mu.Unlock()
+		c.info = s.complete(s.Backend.Hello(c))
+		if frame, err := Encode("server", c.info); err == nil {
+			c.rt.Send(frame)
+		}
+		// An error about the connection as a whole omits id (§1.1).
+		c.CloseWithError(RetryAfter("Server at capacity; try again shortly", 30))
+		s.waitClosed(c)
+		return
+	}
+	s.network++
+	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		s.network--
+		s.mu.Unlock()
+	}()
+
 	if connecter, ok := s.Backend.(Connecter); ok {
 		if err := connecter.Connected(c); err != nil {
 			if e, ok := asError(err); ok {
@@ -202,32 +232,23 @@ func (s *Server) ServeTransport(ctx context.Context, t Transport, remote net.Add
 	if err != nil {
 		s.logger().Error("wire: encoding the server frame", "error", err)
 		c.Close()
+		s.disconnected(c)
 		return
 	}
 
 	s.mu.Lock()
-	switch {
-	case s.closed:
+	if s.closed {
 		s.mu.Unlock()
 		c.Close()
-		return
-	case s.MaxConnections > 0 && s.network >= s.MaxConnections:
-		s.mu.Unlock()
-		// An error about the connection as a whole omits id (§1.1).
-		c.rt.Send(frame)
-		c.CloseWithError(RetryAfter("Server at capacity; try again shortly", 30))
-		s.waitClosed(c)
 		s.disconnected(c)
 		return
 	}
 	s.conns[c] = struct{}{}
-	s.network++
 	s.mu.Unlock()
 	defer func() {
 		c.Close()
 		s.mu.Lock()
 		delete(s.conns, c)
-		s.network--
 		s.mu.Unlock()
 		s.disconnected(c)
 	}()

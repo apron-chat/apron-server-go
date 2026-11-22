@@ -193,3 +193,53 @@ func TestLocalNotify(t *testing.T) {
 		}
 	}
 }
+
+// connecting is a backend that counts the connections it is told of.
+type connecting struct {
+	backend
+	connected atomic.Int64
+}
+
+func (b *connecting) Connected(*wire.Conn) error {
+	b.connected.Add(1)
+	return nil
+}
+
+// A connection over MaxConnections is refused before the backend is told of
+// it, though it is sent the server frame.
+func TestMaxConnectionsFirst(t *testing.T) {
+	b := &connecting{}
+	s := &wire.Server{Backend: b, MaxConnections: 1}
+	c1, _ := serve(t, s)
+	c2, _ := serve(t, s)
+	if f := c2.read(); f.errorCode() != wire.CodeRetryAfter {
+		t.Fatalf("got %v, want retry_after", f)
+	}
+	c2.readEOF()
+	c1.sync()
+	if n := b.connected.Load(); n != 1 {
+		t.Fatalf("Connected %d times, want 1", n)
+	}
+	if n := len(b.disconnectedConns()); n != 0 {
+		t.Fatalf("Disconnected %d times for a refused connection", n)
+	}
+}
+
+// Conn.User and SetUser copy the user, roles and ext included.
+func TestUserCopies(t *testing.T) {
+	s := &wire.Server{Backend: &backend{}}
+	roles := []string{"op"}
+	l, err := s.Local(wire.LocalOptions{User: wire.User{UserID: "bot", Roles: roles, Ext: map[string]any{"x": map[string]any{"y": 1}}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	roles[0] = "changed"
+	u := l.Conn().User()
+	u.Roles[0] = "mutated"
+	u.Ext["x"].(map[string]any)["y"] = 2
+	again := l.Conn().User()
+	if again.Roles[0] != "op" || again.Ext["x"].(map[string]any)["y"] != 1 {
+		t.Fatalf("the connection's user changed: %+v", again)
+	}
+}

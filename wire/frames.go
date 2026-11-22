@@ -2,6 +2,7 @@ package wire
 
 import (
 	"encoding/json/jsontext"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -43,6 +44,45 @@ type User struct {
 	Status string         `json:"status,omitempty"`
 	Seen   string         `json:"seen,omitempty"`
 	Ext    map[string]any `json:"ext,omitempty"`
+}
+
+// clone returns a copy of u that shares nothing with it.
+func (u User) clone() User {
+	u.Roles = slices.Clone(u.Roles)
+	if u.Ext != nil {
+		ext := make(map[string]any, len(u.Ext))
+		for key, value := range u.Ext {
+			ext[key] = cloneJSON(value)
+		}
+		u.Ext = ext
+	}
+	return u
+}
+
+// cloneJSON copies a value decoded from JSON, or made to encode as JSON,
+// with its maps, slices, and raw values; anything else is shared.
+func cloneJSON(v any) any {
+	switch v := v.(type) {
+	case map[string]any:
+		copied := make(map[string]any, len(v))
+		for key, value := range v {
+			copied[key] = cloneJSON(value)
+		}
+		return copied
+	case []any:
+		copied := make([]any, len(v))
+		for i, value := range v {
+			copied[i] = cloneJSON(value)
+		}
+		return copied
+	case jsontext.Value:
+		return slices.Clone(v)
+	case []byte:
+		return slices.Clone(v)
+	case []string:
+		return slices.Clone(v)
+	}
+	return v
 }
 
 // The system identities (Appendix A.1): a message from one says who else

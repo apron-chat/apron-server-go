@@ -15,7 +15,10 @@ import (
 type Backend interface {
 	// Hello returns the server frame for a new connection (§3.1). Server
 	// sets Apron and Ping, and adds the capabilities of what the Backend
-	// handles.
+	// handles. A connection refused at capacity (Server.MaxConnections) is
+	// sent one too, before its error, so Hello is called for it without
+	// Connecter, and must not count on what Connecter keeps with a
+	// connection.
 	Hello(c *Conn) ServerInfo
 	// Auth signs a connection in (§3.2). A result with You set signs the
 	// connection in as You; notifications the backend sends to the
@@ -65,7 +68,8 @@ type Connecter interface {
 }
 
 // Disconnecter is told when a connection ends, signed in or not, network
-// or Local.
+// or Local: every one but those refused as they opened, by Connecter or at
+// capacity (Server.MaxConnections).
 type Disconnecter interface {
 	Disconnected(c *Conn)
 }

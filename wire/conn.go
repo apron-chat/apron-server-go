@@ -36,15 +36,15 @@ type Fence interface {
 	Err() error
 }
 
-// User returns a copy of the connection's identity, or nil before it signs
-// in.
+// User returns a copy of the connection's identity, its roles and ext
+// included, or nil before it signs in.
 func (c *Conn) User() *User {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.user == nil {
 		return nil
 	}
-	u := *c.user
+	u := c.user.clone()
 	return &u
 }
 
@@ -59,9 +59,10 @@ func (c *Conn) UserID() string {
 }
 
 // SetUser changes the connection's identity, as after a sign-in or a
-// rename. It sends nothing: the backend tells clients with a user
-// notification (§3.3.3).
+// rename, to a copy of u. It sends nothing: the backend tells clients with
+// a user notification (§3.3.3).
 func (c *Conn) SetUser(u User) {
+	u = u.clone()
 	c.mu.Lock()
 	c.user = &u
 	c.mu.Unlock()
