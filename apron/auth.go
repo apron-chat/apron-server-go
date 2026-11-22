@@ -293,10 +293,8 @@ func (s *Server) authenticateGuestLocked(c *client, req request) (any, *Error) {
 	if err != nil {
 		return nil, err
 	}
-	requested, err := parseString(req.params, "user_id", false)
-	if err != nil {
-		return nil, err
-	}
+	// A requested user_id is checked like any (authenticate), and ignored:
+	// a guest is always guest_<n>, so it cannot pass as a member (§3.2).
 	if c.user != nil {
 		// Guest auth on a signed-in connection answers with the identity it
 		// has. It signs the connection in as no other user, so it is no
@@ -305,7 +303,7 @@ func (s *Server) authenticateGuestLocked(c *client, req request) (any, *Error) {
 		c.sendResult(req, result)
 		return result, nil
 	}
-	user := s.newUserLocked(s.assignUserIDLocked(requested), normalizeName(name))
+	user := s.newUserLocked(s.assignGuestIDLocked(), normalizeName(name))
 	s.users[user.id] = user
 	s.touchUser(user.id)
 	// A new guest joins the default room, so their room list is not empty.
@@ -528,7 +526,8 @@ func (s *Server) signInProvenLocked(c *client, req request, scheme authn.Scheme,
 // provenAccountLocked returns the account of an identity a scheme proved,
 // after its checks and its Commit: the identity's, or, with create, a new
 // one for an identity that none has, which takes the user_id the proof
-// requested as guests do, or user_<n>; created reports a new one. It
+// requested (assignAccountIDLocked), or user_<n>; created reports a new
+// one. It
 // changes nothing it refuses.
 func (s *Server) provenAccountLocked(scheme authn.Scheme, proof authn.Proof, create bool) (user *userState, created bool, err *Error) {
 	id, err := identityOf(scheme, proof)
@@ -1023,8 +1022,9 @@ func webSocketURL(base string) string {
 	return parsed.String()
 }
 
-// assignAccountIDLocked honors a requested user_id as assignUserIDLocked
-// does, and otherwise assigns the next unused user_<n>.
+// assignAccountIDLocked honors a requested user_id when it is requestable
+// and was never assigned, ignoring case, nor names a room, nor is granted a
+// role; otherwise it assigns the next unused user_<n>.
 func (s *Server) assignAccountIDLocked(requested string) string {
 	if requestable(requested) && s.claimUserIDLocked(requested) {
 		return requested

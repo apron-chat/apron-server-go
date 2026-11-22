@@ -395,25 +395,29 @@ is not configured are schemes the server does not offer, so `unsupported`
 (§3.2).
 
 `auth` with scheme `guest` assigns `guest_<n>` from a server-wide counter
-(`guest_1`, `guest_2`, …) and honors an optional requested `name`. A
-`user_id` is never empty and has no whitespace or control characters
-(§2.4), so requesting one that is (or one that is not a string) is
-`invalid_params` with any scheme, and the `auth` changes nothing. A
-requested `user_id` is honored when it follows the suggested convention for
-user-chosen IDs (Appendix A.3): when it starts with a letter, uses only
-`[A-Za-z0-9_.-]` (ending in a letter, digit, or `_`; at most 64 characters),
-does not start with `guest_` or `user_` in any case, names no room (ignoring case), was never
-assigned, ignoring case, and is not granted a role (`--role`); otherwise the
-guest gets the next unused `guest_<n>`. So no user is ever given a
-`user_id` starting with `~`, which are the system identities `~room` and
-`~private` ([Commands](#commands)). The `guest_` namespace belongs to the
-guest counter, and `user_` to that of accounts made without a guest (by
-email, a passkey registration, an invitation, or external sign-in): a
-request such as `guest_7`, `GUEST_7`, `guest_07` or `guest_x` is refused
-rather than taking a number out of sequence or impersonating a
-counter-assigned guest. Every guest `auth` takes exactly one counter value
-unless its requested ID is honored, so the latest guest number is roughly
-how many guests the server has admitted (the counter is kept in the store). No `user_id` is ever reissued.
+(`guest_1`, `guest_2`, …), in every access mode, and honors an optional
+requested `name`. A requested `user_id` is ignored (§3.2: `you` is what the
+server assigned), so a guest is always `guest_<n>` and cannot pass as a
+member whatever name it shows, as on apron-server-cloudflare. A `user_id`
+is never empty and has no whitespace or control characters (§2.4), so
+requesting one that is (or one that is not a string) is still
+`invalid_params` with any scheme, and the `auth` changes nothing. Every
+guest `auth` takes exactly one counter value, so the latest guest number is
+roughly how many guests the server has admitted (the counter is kept in the
+store).
+
+Accounts may request a `user_id`: a new account takes one that follows the
+suggested convention for user-chosen IDs (Appendix A.3): when it starts
+with a letter, uses only `[A-Za-z0-9_.-]` (ending in a letter, digit, or
+`_`; at most 64 characters), does not start with `guest_` or `user_` in
+any case, names no room (ignoring case), was never assigned, ignoring case,
+and is not granted a role (`--role`); otherwise it gets the next unused
+`user_<n>`. So no user is ever given a `user_id` starting with `~`, which
+are the system identities `~room` and `~private` ([Commands](#commands)).
+The `guest_` namespace belongs to the guest counter, and `user_` to that of
+accounts: a request such as `guest_7`, `GUEST_7`, `guest_07` or `guest_x`
+is refused rather than impersonating a guest. No `user_id` is ever
+reissued.
 
 Accounts are users who signed in with a passkey, an email address, or an
 extension's external sign-in, and extensions' bots ([Extensions](#extensions));
@@ -706,7 +710,9 @@ any other. Members are not joined to it: they join it like any other
 public room, as admins and moderators who want to see introductions do.
 
 Guests and **waiting accounts**, the **restricted users**, see only the
-Lobby and its threads:
+Lobby and its threads. A guest is always `guest_<n>`, in this mode as in
+the others ([Identity and profiles](#identity-and-profiles)), so nobody in
+the Lobby can pass as a member by the `user_id` beside their name:
 
 - Every other room, and every message, reaction, and thread in one,
   answers as one that does not exist (`invalid_params`), in every request
@@ -1818,7 +1824,7 @@ can register,
 since anyone could sign in as a guest first: the begin makes nothing, and
 the finish makes the account as for a new email address, with the `name`
 and `user_id` the begin asked for, else the finish's (a `user_id` by the
-guests' rules, or else `user_<n>`), and joins it to `general` after the
+rules of requested ones, or else `user_<n>`), and joins it to `general` after the
 result.
 Without guests, or with `--webauthn.guest-first`, such a registration is
 `denied` unless it presents an [invitation](#invitations), in words that
@@ -2150,7 +2156,7 @@ code only in an app connected to it (§4.11.2). A sender of its own
   signed in, such as one the link opens. Approving it signs the presenting connection in, which
   must not be signed in already: a known address to its account, an address
   new to the server to a new account, which takes a requested `user_id`
-  by the guests' rules or else `user_<n>`, honors a requested `name`, and
+  by the rules of requested ones or else `user_<n>`, honors a requested `name`, and
   joins `general`, delivered after the result. The `name` and `user_id`
   requested come from the approval, else, only when the proposing
   connection approves, from the proposal (a code with `state` elsewhere
