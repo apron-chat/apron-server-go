@@ -21,6 +21,8 @@
 //     auth and ping before a sign-in, and every notification a sign-in
 //     causes is sent after its result;
 //   - deduplication of retried requests by user_id and id (§1.2);
+//   - replies answered later, by a goroutine of the backend's, while the
+//     connection goes on to its next frame ([Reply.Later]);
 //   - the params of every typed request, read and checked once (see
 //     Validation), with the core rules of a new message (§3.5.1, §3.6);
 //   - typed frames ([User], [Message], [Room] and [RoomView], [ServerInfo],
@@ -96,9 +98,35 @@
 // ([Request.Param]), and [Request.Reply], which sends any result without
 // what Send does with the method's, as a [Handler] replies. A handler's
 // context carries its Request too ([RequestFrom]), for code deep in its
-// calls. A connection's frames are handled one at a time, in order, each
-// to its end before the next: a handler that waits holds up only its own
-// connection.
+// calls.
+//
+// A connection's frames are handled one at a time, in order, each to its
+// end before the next: a handler that waits holds up its own connection,
+// and only it. One whose answer takes long, such as a gateway's that waits
+// for a slow upstream, answers later instead: it calls [Reply.Later] and
+// returns, and the connection goes on to its next frame, while a goroutine
+// of the backend's sends the reply once it has it, with [Reply.Send] or
+// [Reply.Fail]. Its handler's context is the connection's (a Local call's
+// own), canceled when the connection ends, not when the handler returns,
+// and the work that answers uses it; a panic in that work is the backend's, as the goroutine
+// is. A duplicate of the request (§1.2) waits for its reply without holding
+// up its own connection either, and gets its outcome. When the connection
+// ends first, the request fails, so that its duplicates are not left
+// waiting, and is not kept, so that a retry runs again; Send and Fail then
+// return ErrClosed. Auth is a barrier, finished before the frames after it
+// (§3.2.2), and is never answered later. A [Handler] answers later with the
+// Reply of its request ([NewReply]), and [Local.Call] waits for a reply
+// answered later, while the next Call on the connection does not.
+//
+// A reply answered later comes when the backend sends it, maybe after the
+// replies to requests sent after it: a server may reply in any order, and
+// a client that needs one request applied before another waits for the
+// first reply (§1). What does not change is the rest of §1's order: the
+// result still reflects every notification sent before it, and the
+// notifications the request causes on its connection still come before
+// it, which the backend sees to as it does for a result sent at once, by
+// queuing them first. Where that takes more than a lock, see Ordering for
+// asynchronous hosts.
 //
 // # Sending never blocks
 //
@@ -110,6 +138,54 @@
 // frame describes, which keeps every connection's frames in the order of
 // the changes, such as messages in log_id order; one that sends after
 // letting go of the lock lets two changes' frames cross.
+//
+// # Ordering for asynchronous hosts
+//
+// wire keeps a connection's frames in the order they are queued, and no
+// more: §1's order of a connection's frames, a result after the
+// notifications of its request's effects and every notification in the
+// order of the changes, holds when the backend queues each frame in that
+// order, as one that sends while it holds the lock of each change does. A
+// host that applies changes asynchronously, such as another chat system
+// that hands each to a queue or a goroutine of its own and delivers its
+// effects later, has no such lock: when its handler is done, the effects
+// of the request may not be queued yet, and a result sent then overtakes
+// them.
+//
+// Such a backend orders them itself, with a barrier: a marker it sends to
+// the connection through the host's own queue, the way the request's
+// effects go, behind them, whose arrival tells that everything ahead of it
+// was delivered. The handler sends the result once its barrier came
+// through:
+//
+//	host.Apply(change)
+//	arrived := make(chan struct{})
+//	host.Deliver(member, barrier{arrived}) // behind the change's effects
+//	select {
+//	case <-arrived:
+//	case <-ctx.Done():
+//		return ctx.Err()
+//	}
+//	return reply.Send(result)
+//
+// Or, rather than wait, it answers later, and the goroutine that delivers
+// the host's queue to the connection sends the result as it reaches the
+// barrier, right after the effects it delivered, with nothing to wait for
+// and nothing to hold up the connection:
+//
+//	if err := reply.Later(); err != nil {
+//		return err
+//	}
+//	host.Apply(change)
+//	host.Deliver(member, barrier{func() { reply.Send(resultOf(change)) }})
+//	return nil
+//
+// wire has no barrier of its own: only the host knows its queues, and when
+// a change's effects are all in them. Nor is [Conn.Fence] one: it holds
+// the frames queued after it until a condition holds, which suits a change
+// made durable in the background, but a result held behind a fence still
+// goes before the notifications queued after it, which are the effects a
+// barrier waits for.
 //
 // # Errors and panics
 //

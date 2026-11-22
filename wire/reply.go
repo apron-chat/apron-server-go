@@ -60,6 +60,53 @@ func (p Reply[T]) Send(result T, then ...Frame) error {
 	return p.r.send(result, value, apply, then)
 }
 
+// Later marks the request as answered after the handler returns, by Send
+// or Fail from another goroutine, such as one that waits for a slow
+// upstream: the handler returns what Later returns, nil, and the
+// connection goes on to its next frame, rather than wait for this one's
+// reply. A handler calls Later before it hands the Reply to the goroutine
+// that answers, which then answers exactly once.
+//
+// The handler's ctx is not canceled when the handler returns: it is the
+// connection's, canceled when the connection ends (for a Local
+// connection, also when the Call's ctx is), and the work of a reply
+// answered later uses it. A panic in that work is the backend's: the
+// goroutine is the backend's own, and wire does not recover it.
+//
+// The reply then comes when the backend sends it, after the replies to
+// later requests, maybe: replies may come in any order (§1). The
+// notifications a result depends on still come before it as they do for
+// any reply, if the backend queues them first; see the package
+// documentation. A duplicate of the request (§1.2) waits for the reply,
+// without holding up its own connection either, and gets its outcome. When
+// the connection ends before the reply, the request fails, so that its
+// duplicates are not left waiting, and is not kept for deduplication;
+// Send and Fail then return ErrClosed.
+//
+// Later returns nil, and does nothing, for a request that has its reply.
+// Auth is a barrier, answered before the connection's next frame
+// (§3.2.2), and its Later returns an error, which, returned, answers the
+// sign-in error/internal_error. A handler that returns another error after
+// Later, before the reply is sent, is answered with it, as any handler is.
+func (p Reply[T]) Later() error {
+	if p.r == nil {
+		return errors.New("wire: Later on a zero Reply")
+	}
+	return p.r.answerLater()
+}
+
+// Fail sends the request's error reply now: err when it is an *Error, and
+// else error/internal_error, which is logged, as an error a handler
+// returns is. It is how a request answered later (Later) fails, and
+// returns nil once the error is queued, ErrReplied when the request has
+// its reply already, and ErrClosed when the connection is closed.
+func (p Reply[T]) Fail(err error) error {
+	if p.r == nil {
+		return errors.New("wire: Fail on a zero Reply")
+	}
+	return p.r.failWith(err)
+}
+
 // Request is the request the reply answers, raw: its params as they
 // arrived, and Request.Reply, which sends any result, without what Send
 // does with the method's, such as the normalization of a room_list result,
@@ -74,7 +121,7 @@ func (r *Request) send(sent any, value func() (any, error), apply func(), then [
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.replied {
-		return ErrReplied
+		return r.repliedErrLocked()
 	}
 	result, err := value()
 	if err != nil {
@@ -86,6 +133,9 @@ func (r *Request) send(sent any, value func() (any, error), apply func(), then [
 	frame, encoded, e := r.encodeReply(result, nil)
 	r.replied = true
 	r.outcome = dedupOutcome{encoded, e}
+	// Deferred after the unlock, so it runs first, once the reply is
+	// queued.
+	defer r.settleLocked()
 	if r.rec != nil {
 		if e != nil {
 			r.rec.Record(sent, nil, e, nil)
@@ -113,17 +163,18 @@ func (r *Request) send(sent any, value func() (any, error), apply func(), then [
 	return nil
 }
 
-// failLocked queues an error reply, with r.mu held.
-func (r *Request) failLocked(e *Error) {
+// failLocked queues an error reply, with r.mu held, and reports whether it
+// was queued.
+func (r *Request) failLocked(e *Error) bool {
 	r.replied = true
 	r.outcome = dedupOutcome{err: e}
+	defer r.settleLocked()
 	if r.rec != nil {
 		r.rec.Record(nil, nil, e, nil)
-		return
+		return true
 	}
-	if frame, _, _ := r.encodeReply(nil, e); frame != nil {
-		r.c.enqueue([]Frame{frame})
-	}
+	frame, _, _ := r.encodeReply(nil, e)
+	return frame != nil && r.c.enqueue([]Frame{frame})
 }
 
 // isEmpty reports whether T is Empty, whose handlers may return without

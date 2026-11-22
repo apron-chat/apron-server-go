@@ -33,7 +33,9 @@ type Handler struct {
 	// Serve handles a request from a signed-in connection, and replies with
 	// r.Reply, or returns an error: one that is an *Error is the error
 	// reply, and any other is error/internal_error. A Serve that returns
-	// nil without replying has {} sent for it.
+	// nil without replying has {} sent for it, unless it is answered
+	// later, as a typed handler's is, with the Reply of its request
+	// (NewReply): its Later, then its Send or Fail.
 	Serve func(ctx context.Context, c *Conn, r *Request) error
 }
 
@@ -82,10 +84,15 @@ type Request struct {
 	// rec, for a request on no connection, made by package wiretest, gets
 	// its reply.
 	rec testhook.Recorder
+	// entry is the request's deduplication entry (§1.2), or nil.
+	entry *dedupEntry
 
 	mu      sync.Mutex
 	replied bool
 	outcome dedupOutcome
+	// later is set once the request is to be answered after its handler
+	// returns (Reply.Later).
+	later *later
 }
 
 type requestKey struct{}
@@ -329,6 +336,17 @@ func (s *Server) processFrame(ctx context.Context, c *Conn, payload []byte) {
 			r.fail(InvalidParams(fmt.Sprintf("Request id %q was already used for another operation", r.ID)))
 			return
 		}
+		select {
+		case <-prior.Done():
+		default:
+			if prior.Later.Load() {
+				// The original is answered later, and so is its
+				// duplicate, which waits for it without holding up its
+				// connection.
+				s.duplicateLater(c, r, prior)
+				return
+			}
+		}
 		// A duplicate whose connection ends first, or whose Local call's
 		// context does, is sent nothing.
 		select {
@@ -336,28 +354,37 @@ func (s *Server) processFrame(ctx context.Context, c *Conn, payload []byte) {
 		case <-ctx.Done():
 			return
 		}
-		outcome := prior.Value
-		if outcome.err != nil {
-			r.fail(outcome.err)
-			return
-		}
-		var result any = outcome.result
-		if refresh := s.config.refreshDuplicate; refresh != nil {
-			result = refresh(ctx, c, r.Method, outcome.result)
-		}
-		r.Reply(result)
+		s.duplicate(ctx, c, r, prior.Value)
 		return
 	}
 
+	r.entry = entry
 	s.serve(ctx, c, r, m)
 	if entry != nil {
-		r.mu.Lock()
-		outcome := r.outcome
-		r.mu.Unlock()
 		// Failed requests are not kept, and neither are reads: a retry
 		// runs again. Concurrent duplicates still share the outcome.
-		s.dedup.finish(userID, r.ID, entry, outcome, outcome.err != nil || m.noDedup)
+		finish := func(outcome dedupOutcome) {
+			s.dedup.finish(userID, r.ID, entry, outcome, outcome.err != nil || m.noDedup)
+		}
+		// A request answered later finishes as its reply is queued.
+		if outcome, done := r.finishOrDefer(finish); done {
+			finish(outcome)
+		}
 	}
+}
+
+// duplicate answers a duplicate with its original's outcome (§1.2), brought
+// up to date.
+func (s *Server) duplicate(ctx context.Context, c *Conn, r *Request, outcome dedupOutcome) {
+	if outcome.err != nil {
+		r.fail(outcome.err)
+		return
+	}
+	var result any = outcome.result
+	if refresh := s.config.refreshDuplicate; refresh != nil {
+		result = refresh(ctx, c, r.Method, outcome.result)
+	}
+	r.Reply(result)
 }
 
 // serve runs a request's handler, and sends its reply: its result, or its
@@ -369,15 +396,16 @@ func (s *Server) serve(ctx context.Context, c *Conn, r *Request, m method) {
 }
 
 // finish answers a request whose handler returned err: with err, unless it
-// replied, and else with {}, or, when strict, error/internal_error, as a
-// handler that returns nil without replying is a bug.
+// replied, and else, unless it is answered later, with {}, or, when strict,
+// error/internal_error, as a handler that returns nil without replying is a
+// bug.
 func (s *Server) finish(ctx context.Context, r *Request, strict bool, err error) {
-	switch replied := r.Replied(); {
+	switch replied, later := r.state(); {
 	case err != nil && replied:
 		s.afterReply(ctx, r.Method, err)
 	case err != nil:
 		r.fail(s.protocolError(ctx, r.Method, err))
-	case replied:
+	case replied, later:
 	case strict:
 		s.logger().Error(errNoReply(r.Method).Error(), "method", r.Method)
 		r.fail(internalError())

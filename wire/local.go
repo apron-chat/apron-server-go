@@ -84,6 +84,8 @@ type localReply struct {
 	err    *Error
 }
 
+// inFlight is the context key of a call being handled on a Local
+// connection, whose value is set while its handler runs.
 type inFlight struct{ l *Local }
 
 // Local opens an in-process connection, and returns once its server frame
@@ -223,9 +225,11 @@ func (l *Local) shut(err error) {
 
 // Call sends a request and returns its result, or its error reply as an
 // *Error. The request is handled in the caller's goroutine, with ctx as its
-// context; a call made from inside the handling of another on the same
-// connection is ErrReentrant, and one of a method that is only ever a
-// notification, which would wait for a reply forever, is ErrNotRequest.
+// context, and Call waits for its reply, also one answered later
+// (Reply.Later), which the next Call on the connection does not wait for. A
+// call made from inside the handler of another on the same connection is
+// ErrReentrant, and one of a method that is only ever a notification, which
+// would wait for a reply forever, is ErrNotRequest.
 func (l *Local) Call(ctx context.Context, method string, params any) (jsontext.Value, error) {
 	if l.notificationOnly(method) {
 		return nil, ErrNotRequest
@@ -271,7 +275,7 @@ func (l *Local) notificationOnly(method string) bool {
 // process sends a frame, a request with id or else a notification, and
 // handles it once the connection's frame before it is done.
 func (l *Local) process(ctx context.Context, method, id string, params any) error {
-	if ctx.Value(inFlight{l}) != nil {
+	if running, _ := ctx.Value(inFlight{l}).(*atomic.Bool); running != nil && running.Load() {
 		return ErrReentrant
 	}
 	frame := map[string]any{"method": method}
@@ -298,7 +302,12 @@ func (l *Local) process(ctx context.Context, method, id string, params any) erro
 		return l.Err()
 	default:
 	}
-	l.s.processFrame(context.WithValue(ctx, inFlight{l}, true), l.c, payload)
+	// A call from the work of a reply answered later, once the handler
+	// has returned, is no reentrant one.
+	running := new(atomic.Bool)
+	running.Store(true)
+	defer running.Store(false)
+	l.s.processFrame(context.WithValue(ctx, inFlight{l}, running), l.c, payload)
 	return nil
 }
 

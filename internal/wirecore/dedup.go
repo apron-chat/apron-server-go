@@ -1,5 +1,7 @@
 package wirecore
 
+import "sync/atomic"
+
 // Dedup keeps the outcomes of the latest requests (§1.2) by a key, such as
 // a user_id and a request id, oldest forgotten first. Its methods are
 // called holding the caller's lock; the zero Dedup keeps none.
@@ -15,7 +17,11 @@ type Dedup[K comparable, V any] struct {
 type DedupEntry[V any] struct {
 	Fingerprint [32]byte
 	Value       V
-	done        chan struct{}
+	// Later is set once the request is to be answered after its handler
+	// returns, so that its duplicates wait for it without holding up
+	// their own connections.
+	Later atomic.Bool
+	done  chan struct{}
 }
 
 // Done is closed once the request finished, and Value is its outcome.
