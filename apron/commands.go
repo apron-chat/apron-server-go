@@ -2,7 +2,6 @@ package apron
 
 import (
 	"cmp"
-	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -42,12 +41,14 @@ type commandForm struct {
 	// hint describes the text after the name, such as "@user [<reason>]";
 	// "" for none.
 	hint string
-	// description says what the form does, in plain text; never "".
+	// description says what the form does, in plain text on one line; ""
+	// for none, which an extension's command without Help has.
 	description string
 	// uses are the fields of the `command` request, besides body.text,
 	// that the form reads (commandFields): room_id when it acts on the
 	// room it is sent in, and the arguments it takes (§4.1). requires are
-	// those of them it fails without; never room_id.
+	// those of them it fails without; with room_id, the form runs only in
+	// a room the client names, and is refused without one (command).
 	uses, requires []string
 	// group says who may use the form (commandGroups), for display: the
 	// narrowest group that holds everyone its check lets use it.
@@ -83,8 +84,7 @@ const (
 var commandGroups = []string{groupAll, groupGuest, groupMember, groupRoom, groupRole, groupAdmin}
 
 // checkCommandFields checks the uses and requires of a command form:
-// fields of commandFields, each once, requires among uses, and room_id never
-// required, since a command without it goes to the default room.
+// fields of commandFields, each once, and requires among uses.
 func checkCommandFields(uses, requires []string) error {
 	for i, field := range uses {
 		switch {
@@ -96,8 +96,6 @@ func checkCommandFields(uses, requires []string) error {
 	}
 	for i, field := range requires {
 		switch {
-		case field == fieldRoom:
-			return errors.New("room_id cannot be required: a command without it runs in the default room")
 		case !slices.Contains(uses, field):
 			return fmt.Errorf("field %q is required but not in Uses", field)
 		case slices.Contains(requires[:i], field):
@@ -105,6 +103,16 @@ func checkCommandFields(uses, requires []string) error {
 		}
 	}
 	return nil
+}
+
+// helpLine is the form's line in /help, such as
+// "- `/kick @user [<reason>]`: remove someone …", or "- `/quiet`" without a
+// description.
+func (f commandForm) helpLine() string {
+	if f.description == "" {
+		return fmt.Sprintf("- `%s`", f.usage())
+	}
+	return fmt.Sprintf("- `%s`: %s", f.usage(), f.description)
 }
 
 // usage is the form as /help shows it, such as "/kick @user [<reason>]".
@@ -117,7 +125,10 @@ func (f commandForm) usage() string {
 
 // entry is the form as ext:command_list lists it: a Command object.
 func (f commandForm) entry() map[string]any {
-	entry := map[string]any{"name": f.name, "description": f.description}
+	entry := map[string]any{"name": f.name}
+	if f.description != "" {
+		entry["description"] = f.description
+	}
 	if f.group != "" {
 		entry["group"] = f.group
 	}
@@ -160,7 +171,7 @@ func coreCommands() []serverCommand {
 			name: "embed-terminal",
 			forms: []commandForm{{
 				name: "embed-terminal", group: groupAll, hint: "[<title>]", description: "get a URL to stream a program's output into this room, shown as an 80×40 terminal",
-				uses: []string{fieldRoom, fieldReplyTo},
+				uses: []string{fieldRoom, fieldReplyTo}, requires: []string{fieldRoom},
 			}},
 			run: (*Server).embedTerminalCommand,
 		},
@@ -168,7 +179,7 @@ func coreCommands() []serverCommand {
 			name: "embed-append",
 			forms: []commandForm{{
 				name: "embed-append", group: groupAll, hint: "[<markdown>]", description: "get a URL to stream text into this room, as a message that starts with the Markdown given, if any, and grows as the text arrives",
-				uses: []string{fieldRoom, fieldReplyTo},
+				uses: []string{fieldRoom, fieldReplyTo}, requires: []string{fieldRoom},
 			}},
 			run: (*Server).embedAppendCommand,
 		},
@@ -187,7 +198,7 @@ func coreCommands() []serverCommand {
 					name: "emoji add", group: groupAll, hint: ":<name>:", description: "with one image attached, add a custom emoji or replace one you added",
 					uses: embeds, requires: embeds,
 					// A connection not offered ext:emoji may not add one.
-					may: func(s *Server, c *client, _ *roomState) bool { return s.emojiExt(c.baseURL) != nil },
+					may: func(_ *Server, c *client, _ *roomState) bool { return clientsLoad(c.baseURL) },
 				},
 				{
 					name: "emoji remove", group: groupAdmin, hint: ":<name>:", description: "remove a custom emoji",
@@ -216,26 +227,37 @@ func coreCommands() []serverCommand {
 				// A room's creator, a guest too, may kick in it; admins and
 				// moderators anywhere.
 				name: "kick", group: groupRoom, hint: "@user [<reason>]", description: "remove someone from this room (its creator or a moderator)",
-				uses: []string{fieldRoom, fieldMentions}, requires: []string{fieldMentions},
-				may: (*Server).kicksLocked,
+				uses: []string{fieldRoom, fieldMentions}, requires: []string{fieldRoom, fieldMentions},
+				may: (*Server).mayKickLocked,
 			}},
 			run: (*Server).kickCommand,
 		},
 	}
 }
 
-// kicksLocked reports whether c's user may remove others from r, or, for a
-// nil r, from a room it can see.
-func (s *Server) kicksLocked(c *client, r *roomState) bool {
+// mayKickLocked reports whether c's user may remove others from r, or, for
+// a nil r, from a room it can see: an admin or moderator may in any, and
+// otherwise only a room's creator, in that room.
+func (s *Server) mayKickLocked(c *client, r *roomState) bool {
+	u := c.user
 	if r != nil {
-		return r.mayRemove(c.user)
+		return r.mayRemove(u)
 	}
+	moderates := u.hasRole(RoleAdmin) || u.hasRole(RoleModerator)
 	for _, r := range s.rooms {
-		if r.visibleTo(c.user) && r.mayRemove(c.user) {
+		if (moderates || r.creator == u.id) && r.visibleTo(u) {
 			return true
 		}
 	}
 	return false
+}
+
+// usableForm is a command form that /help or ext:command_list may list,
+// with the extension's command that decides whether it does, nil for a
+// form already decided.
+type usableForm struct {
+	form commandForm
+	ask  *extensionCommand
 }
 
 // usableCommands is what /help and ext:command_list list for a connection:
@@ -243,37 +265,39 @@ func (s *Server) kicksLocked(c *client, r *roomState) bool {
 // usableCommandsLocked decides the server's own commands under s.mu, and
 // finishUsable asks the extensions about theirs outside it.
 type usableCommands struct {
-	forms []commandForm
-	// asks holds, for each of forms, the extension's command that decides
-	// whether it is listed, or nil for a form already decided.
-	asks []*extensionCommand
-	user User
+	forms []usableForm
+	user  User
 	// rooms are the rooms in any of which an extension may make its
-	// command available.
-	rooms []*roomState
+	// command available, as it sees them.
+	rooms []Room
 }
 
 // usableCommandsLocked starts listing the command forms c may use in r, as
 // /help does, or, for a nil r, in at least one room it can see, as
-// ext:command_list does, in the order /help shows them.
+// ext:command_list does, in the order /help shows them. For the list it
+// makes the views of every room the user can see, once, if an extension's
+// command has an Available to ask about them.
 func (s *Server) usableCommandsLocked(c *client, r *roomState) usableCommands {
 	usable := usableCommands{user: userViewOf(c.user)}
+	asks := false
 	for _, command := range s.commands {
 		for _, form := range command.forms {
 			if form.may != nil && !form.may(s, c, r) {
 				continue
 			}
-			usable.forms = append(usable.forms, form)
-			usable.asks = append(usable.asks, command.extension)
+			usable.forms = append(usable.forms, usableForm{form, command.extension})
+			asks = asks || command.extension != nil && command.extension.command.Available != nil
 		}
 	}
 	switch {
+	case !asks:
 	case r != nil:
-		usable.rooms = []*roomState{r}
-	case slices.ContainsFunc(usable.asks, func(e *extensionCommand) bool { return e != nil && e.command.Available != nil }):
+		usable.rooms = []Room{s.roomViewLocked(r)}
+	default:
+		var rooms []*roomState
 		for _, room := range s.rooms {
 			if room.visibleTo(c.user) {
-				usable.rooms = append(usable.rooms, room)
+				rooms = append(rooms, room)
 			}
 		}
 		// In a stable order, so that Available sees the rooms the same
@@ -285,38 +309,29 @@ func (s *Server) usableCommandsLocked(c *client, r *roomState) usableCommands {
 			}
 			return 1
 		}
-		slices.SortFunc(usable.rooms, func(a, b *roomState) int {
+		slices.SortFunc(rooms, func(a, b *roomState) int {
 			return cmp.Or(cmp.Compare(rank(a), rank(b)), strings.Compare(a.id, b.id))
 		})
+		usable.rooms = make([]Room, len(rooms))
+		for i, room := range rooms {
+			usable.rooms[i] = s.roomViewLocked(room)
+		}
 	}
 	return usable
 }
 
 // finishUsable asks the extensions, outside s.mu, whether the user may use
-// their commands in any of usable.rooms, and returns the forms it may use.
-// Each room's view is made once, when first asked about.
+// their commands in any of usable.rooms, in order, stopping at the first
+// that says yes, and returns the forms it may use.
 func (s *Server) finishUsable(usable usableCommands) []commandForm {
-	views := make([]*Room, len(usable.rooms))
 	forms := make([]commandForm, 0, len(usable.forms))
-	for i, form := range usable.forms {
-		if ask := usable.asks[i]; ask != nil && ask.command.Available != nil {
-			available := false
-			for j, r := range usable.rooms {
-				if views[j] == nil {
-					s.mu.RLock()
-					view := s.roomViewLocked(r)
-					s.mu.RUnlock()
-					views[j] = &view
-				}
-				if available = ask.command.Available(usable.user, *views[j]); available {
-					break
-				}
-			}
-			if !available {
-				continue
-			}
+	for _, f := range usable.forms {
+		if f.ask != nil && f.ask.command.Available != nil && !slices.ContainsFunc(usable.rooms, func(r Room) bool {
+			return f.ask.command.Available(usable.user, r)
+		}) {
+			continue
 		}
-		forms = append(forms, form)
+		forms = append(forms, f.form)
 	}
 	return forms
 }
@@ -371,6 +386,14 @@ func (s *Server) command(c *client, req request) (any, bool, *Error) {
 	}
 
 	args = strings.TrimSpace(args)
+	// A form that requires room_id acts only on a room the client names
+	// (ext:command_list): without one it is refused, not run in the
+	// default room.
+	if _, has := req.params["room_id"]; !has {
+		if form := s.formOf(name, args); form != nil && slices.Contains(form.requires, fieldRoom) {
+			return nil, false, invalidParams("Send /%s from a room: it needs room_id", form.name)
+		}
+	}
 	// The opening text of /embed-append becomes its message's text, so the
 	// extensions' filters see it as they see messages.
 	if name == "embed-append" {
@@ -430,6 +453,30 @@ func (s *Server) command(c *client, req request) (any, bool, *Error) {
 	return result, true, nil
 }
 
+// formOf returns the form of the command named name that the command
+// line's args select: the one with the most fixed words that start args,
+// matched as the server's commands match them, ignoring case; nil for an
+// unknown command. s.commands does not change once Open returns, so this
+// needs no lock.
+func (s *Server) formOf(name, args string) *commandForm {
+	words := strings.Fields(strings.ToLower(args))
+	var best *commandForm
+	most := -1
+	for i := range s.commands {
+		if s.commands[i].name != name {
+			continue
+		}
+		for j := range s.commands[i].forms {
+			form := &s.commands[i].forms[j]
+			fixed := strings.Fields(form.name)[1:]
+			if len(fixed) > most && len(fixed) <= len(words) && slices.Equal(fixed, words[:len(fixed)]) {
+				best, most = form, len(fixed)
+			}
+		}
+	}
+	return best
+}
+
 // privateNotice renders a notice for the one connection it is queued on:
 // unlogged, without message_id or log_id (Appendix A.1).
 func privateNotice(roomID, text string) map[string]any {
@@ -464,7 +511,7 @@ func (s *Server) help(c *client, req request, roomID string, usable usableComman
 	forms := s.finishUsable(usable)
 	lines := make([]string, len(forms))
 	for i, form := range forms {
-		lines[i] = fmt.Sprintf("- `%s`: %s", form.usage(), form.description)
+		lines[i] = form.helpLine()
 	}
 	c.enqueue(privateNotice(roomID, strings.Join(lines, "\n")))
 	result := map[string]any{}
@@ -522,7 +569,7 @@ func (s *Server) kickCommand(c *client, r *roomState, body map[string]any, args,
 	u := c.user
 	targets := mentions(body)
 	if len(targets) != 1 {
-		return nil, invalidParams("Usage: /kick @user [reason], mentioning exactly one user")
+		return nil, invalidParams("Usage: /kick @user [<reason>], mentioning exactly one user")
 	}
 	if !r.mayRemove(u) {
 		return nil, &Error{Code: CodeDenied, Message: fmt.Sprintf("Only the creator of %s or a moderator can remove people from it", r.title())}

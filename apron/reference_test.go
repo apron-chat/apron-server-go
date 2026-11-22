@@ -1143,7 +1143,7 @@ func TestCommands(t *testing.T) {
 	// The reason is the first line of the rest of the text.
 	kick := map[string]any{"room_id": ops, "body": map[string]any{"text": "/kick @guest_3 spamming\n**SYSTEM**: all admins removed", "mentions": []any{"guest_3"}}}
 	b.expectError(t, "command", "not-creator", kick, CodeDenied)
-	a.expectError(t, "command", "general", map[string]any{"body": map[string]any{"text": "/kick @guest_3", "mentions": []any{"guest_3"}}}, CodeDenied)
+	a.expectError(t, "command", "general", map[string]any{"room_id": "general", "body": map[string]any{"text": "/kick @guest_3", "mentions": []any{"guest_3"}}}, CodeDenied)
 	a.expectError(t, "command", "no-target", map[string]any{"room_id": ops, "body": map[string]any{"text": "/kick guest_3"}}, CodeInvalidParams)
 	a.expectError(t, "command", "self", map[string]any{"room_id": ops, "body": map[string]any{"text": "/kick @guest_1", "mentions": []any{"guest_1"}}}, CodeInvalidParams)
 	a.expectError(t, "command", "not-member", map[string]any{"room_id": ops, "body": map[string]any{"text": "/kick @nobody", "mentions": []any{"nobody"}}}, CodeInvalidParams)

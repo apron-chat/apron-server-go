@@ -38,8 +38,8 @@ func TestSignOutEndsWrites(t *testing.T) {
 	clients := dialGroup(t, httpServer, 2)
 	a, b := clients[0], clients[1]
 
-	_, unusedURL, _ := liveCommand(t, a, "unused", map[string]any{"body": map[string]any{"text": "/embed-terminal later"}})
-	_, liveURL, _ := liveCommand(t, a, "live", map[string]any{"body": map[string]any{"text": "/embed-terminal now"}})
+	_, unusedURL, _ := liveCommand(t, a, "unused", map[string]any{"room_id": "general", "body": map[string]any{"text": "/embed-terminal later"}})
+	_, liveURL, _ := liveCommand(t, a, "live", map[string]any{"room_id": "general", "body": map[string]any{"text": "/embed-terminal now"}})
 	pipe, writerDone := startLiveWrite(t, app, liveURL, "partial")
 	posted := b.notification(t, "message")
 	a.notification(t, "message")
@@ -77,7 +77,7 @@ func TestLeavingAPrivateRoomEndsWritesIntoIt(t *testing.T) {
 	a := dialTestClient(t, httpServer)
 	roomID, _ := saveRoom(t, a, "secret", map[string]any{"title": "Secret", "private": true})
 	_, intoRoom, _ := liveCommand(t, a, "into", map[string]any{"room_id": roomID, "body": map[string]any{"text": "/embed-terminal private"}})
-	_, intoGeneral, _ := liveCommand(t, a, "general", map[string]any{"body": map[string]any{"text": "/embed-terminal public"}})
+	_, intoGeneral, _ := liveCommand(t, a, "general", map[string]any{"room_id": "general", "body": map[string]any{"text": "/embed-terminal public"}})
 
 	leaveRoom(t, a, roomID)
 	if status, _, _ := httpDo(t, http.MethodPut, intoRoom, strings.NewReader("late"), ""); status != http.StatusNotFound {

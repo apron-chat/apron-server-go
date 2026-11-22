@@ -327,7 +327,7 @@ func (s *Server) emojiCommand(c *client, _ *roomState, body map[string]any, args
 	action, key, _ := strings.Cut(args, " ")
 	key = strings.TrimSpace(key)
 	if !emojiKeyPattern.MatchString(key) || len(key) > maxEmojiBytes {
-		return nil, invalidParams("Usage: /emoji add :name: with one image attached, or /emoji remove :name:; a name is letters, digits, _, +, and -, at most %d characters", maxEmojiBytes-2)
+		return nil, invalidParams("Usage: /emoji add :<name>: with one image attached, or /emoji remove :<name>:; a name is letters, digits, _, +, and -, at most %d characters", maxEmojiBytes-2)
 	}
 	existing := s.emoji[key]
 	switch strings.ToLower(action) {
@@ -370,5 +370,5 @@ func (s *Server) emojiCommand(c *client, _ *roomState, body map[string]any, args
 		s.removeEmojiLocked(key)
 		return map[string]any{}, nil
 	}
-	return nil, invalidParams("Usage: /emoji add :name: with one image attached, or /emoji remove :name:")
+	return nil, invalidParams("Usage: /emoji add :<name>: with one image attached, or /emoji remove :<name>:")
 }
