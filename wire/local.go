@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/apron-chat/apron-server-go/internal/wirecore"
 )
@@ -59,8 +60,10 @@ type LocalOptions struct {
 // it while OnConnect and Hello run are sent after the server frame, so a
 // backend that keeps its connections under its own lock adds a Local one,
 // and sends it what a sign-in would, in OnConnect, as for a network
-// connection in Auth; since the Server calls them, the backend does not
-// open a Local connection while it holds a lock they take. It does not
+// connection in Auth. Server.Local calls them in the caller's goroutine
+// and returns their outcome, such as OnConnect's error, so the backend
+// does not open a Local connection while it holds a lock they take: that
+// waits forever, and is logged once it has waited 10 seconds. It does not
 // count toward MaxConnections.
 type Local struct {
 	s      *Server
@@ -78,6 +81,10 @@ type Local struct {
 	errMu     sync.Mutex
 	err       error
 }
+
+// localOpenStall is how long Server.Local waits for OnConnect and Hello
+// before it logs that it does.
+const localOpenStall = 10 * time.Second
 
 type localReply struct {
 	result jsontext.Value
@@ -132,7 +139,14 @@ func (s *Server) Local(options LocalOptions) (*Local, error) {
 	}
 	// In process, there is no transport to ping.
 	c.rt.Start(false)
-	if err := s.openLocal(ctx, c); err != nil {
+	// A caller that holds a lock OnConnect or Hello takes waits for
+	// itself forever, which no runtime check tells, so the wait is logged.
+	stalled := time.AfterFunc(localOpenStall, func() {
+		s.logger().Warn("wire: Server.Local is still waiting for OnConnect and Hello; does its caller hold a lock they take?", "user_id", options.User.UserID, "waited", localOpenStall)
+	})
+	err := s.openLocal(ctx, c)
+	stalled.Stop()
+	if err != nil {
 		c.Close()
 		s.serving.Done()
 		return nil, err

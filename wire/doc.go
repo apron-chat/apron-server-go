@@ -250,9 +250,10 @@
 // client's path, deduplication and all. The frames the backend sends it
 // while OnConnect and Hello run go after the server frame, so a backend
 // that keeps its connections under a lock adds a Local one in OnConnect,
-// as it would sign a network one in; and as the Server calls those hooks,
-// a backend does not open a Local connection while holding a lock they
-// take.
+// as it would sign a network one in. As Server.Local calls those hooks in
+// its caller's goroutine, and returns OnConnect's error, a backend does
+// not open a Local connection while holding a lock they take: that waits
+// forever, which wire logs once it has waited ten seconds.
 //
 // # Hosts that keep less
 //
