@@ -1036,17 +1036,19 @@ func (s *Server) serverParams(baseURL string, revealed bool) wire.ServerInfo {
 		return scheme == "token" || scheme == passkey.Name && (!guests || s.config.GuestFirstPasskeys)
 	})
 	info := wire.ServerInfo{
-		Agent:        "apron-go/10",
-		Capabilities: []string{"history", "edit", "rooms", "reactions", "activity", "embed:upload", "embed:append", "embed:terminal", "command", "status", "ext"},
+		Agent: "apron-go/10",
+		// Package wire adds the capability of each handler and method the
+		// server has, such as rooms, status, and ext:command_list
+		// (methodCapabilities), so this lists only what no method stands
+		// for: what the server keeps and does beyond its requests, and the
+		// extensions that need no method, or that only some connections
+		// are told of.
+		Capabilities: slices.Clone(featureCapabilities),
 		Auth:         authSchemes,
 		// The optional statuses accepted with `me` (§4.5); online and ""
 		// always are, and are not listed.
 		Status: optionalStatuses,
 	}
-	// ext:editors (apron's EXTENSIONS.md) needs no data of its own, and
-	// neither does ext:command_list, which lists the commands that
-	// `command` runs.
-	info.Capabilities = append(info.Capabilities, "ext:editors", commandListMethod)
 	if slices.Contains(authSchemes, external.Name) {
 		// ext:oauth: external sign-in's OAuth extras (SERVER.md), the
 		// server's own authorization server metadata and token endpoint,
@@ -1182,7 +1184,24 @@ func (s *Server) operations() map[string]operation {
 
 // readOnlyOps change nothing, so their results are not kept for
 // deduplication (§1.2): a duplicate after the original finished runs again.
-var readOnlyOps = map[string]bool{"history": true, "room_list": true, commandListMethod: true}
+var readOnlyOps = map[string]bool{commandListMethod: true}
+
+// methodCapabilities are the capabilities of the server's own methods,
+// which package wire lists in the server frame as it does its handlers'
+// (wire.Handler.Capability). A method of a capability that only some
+// connections are told of, such as ext:account's, has none here, and its
+// capability is in serverParams.
+var methodCapabilities = map[string]string{
+	// ext:command_list (apron's extensions/ext_command_list.md) lists the
+	// commands that `command` runs.
+	commandListMethod: commandListMethod,
+}
+
+// featureCapabilities are the capabilities of what the server does beyond
+// its requests, which every connection is told of: the embeds it makes
+// (§4.8), the ext it keeps (§4.12), and ext:editors (apron's
+// EXTENSIONS.md), which needs no method or data of its own.
+var featureCapabilities = []string{"embed:upload", "embed:append", "embed:terminal", "ext", "ext:editors"}
 
 // nextIDLocked returns the next log_id in the server-wide sequence: the commit
 // time in milliseconds, or the previous log_id + 1.

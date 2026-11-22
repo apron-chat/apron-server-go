@@ -55,7 +55,13 @@ func TestServerFrame(t *testing.T) {
 	if params["apron"] != float64(10) || params["agent"] != "apron-go/10" || params["ping"] != float64(30) {
 		t.Fatalf("version, agent, and ping: %#v", params)
 	}
-	if !reflect.DeepEqual(params["capabilities"], []any{"history", "edit", "rooms", "reactions", "activity", "embed:upload", "embed:append", "embed:terminal", "command", "status", "ext", "ext:editors", "ext:command_list", "ext:emoji"}) {
+	// The capabilities of the handlers and methods the server has, and of
+	// what it does beyond them, in no order of meaning.
+	var capabilities []string
+	for _, capability := range asList(params["capabilities"]) {
+		capabilities = append(capabilities, capability.(string))
+	}
+	if slices.Sort(capabilities); !reflect.DeepEqual(capabilities, []string{"activity", "command", "edit", "embed:append", "embed:terminal", "embed:upload", "ext", "ext:command_list", "ext:editors", "ext:emoji", "history", "reactions", "rooms", "status"}) {
 		t.Fatalf("capabilities: %#v", params["capabilities"])
 	}
 	// With capability status, server.status lists the optional statuses

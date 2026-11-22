@@ -71,7 +71,8 @@ func (s *Server) newWire() {
 // registerOp makes an operation a wire method, which replies raw.
 func (s *Server) registerOp(name string, op operation) {
 	s.wire.Handle(name, wire.Handler{
-		NoDedup: readOnlyOps[name],
+		Capability: methodCapabilities[name],
+		NoDedup:    readOnlyOps[name],
 		Serve: func(ctx context.Context, wc *wire.Conn, r *wire.Request) error {
 			return backend{s}.serve(ctx, wc, func(c *client) *Error {
 				req := request{params: r.Fields(), send: func(result any, frames []wire.Frame) bool {
