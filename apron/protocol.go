@@ -1,12 +1,9 @@
 package apron
 
 import (
-	"bytes"
 	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"fmt"
-	"maps"
-	"slices"
 
 	"github.com/apron-chat/apron-server-go/wire"
 )
@@ -44,7 +41,7 @@ func InvalidParams(message string) *Error { return wire.InvalidParams(message) }
 
 type request struct {
 	method string
-	params map[string]jsontext.Value
+	params wire.Fields
 	id     string
 	hasID  bool
 	// w is the request as package wire handles it, which a reply goes
@@ -54,12 +51,7 @@ type request struct {
 
 // newRequest is the request of r, with its params by name.
 func newRequest(r *wire.Request) request {
-	req := request{method: r.Method, id: r.ID, hasID: !r.Notification(), w: r}
-	_ = json.Unmarshal(r.Params, &req.params)
-	if req.params == nil {
-		req.params = map[string]jsontext.Value{}
-	}
-	return req
+	return request{method: r.Method, id: r.ID, hasID: !r.Notification(), w: r, params: r.Fields()}
 }
 
 // reply sends the request's result now, followed by frames, with nothing
@@ -84,78 +76,46 @@ func invalidParams(format string, args ...any) *Error {
 	return &Error{Code: CodeInvalidParams, Message: fmt.Sprintf(format, args...)}
 }
 
-func parseString(params map[string]jsontext.Value, name string, required bool) (string, *Error) {
-	raw, ok := params[name]
-	if !ok {
-		if required {
-			return "", invalidParams("Missing %s", name)
-		}
-		return "", nil
+func parseString(params wire.Fields, name string, required bool) (string, *Error) {
+	value, present, err := params.String(name)
+	if err == nil && required && !present {
+		err = wire.Missing(name)
 	}
-	var value string
-	if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) || json.Unmarshal(raw, &value) != nil {
-		return "", invalidParams("%s must be a string", name)
-	}
-	return value, nil
+	return value, err
 }
 
 // validID reports whether id can be a room_id or user_id (§2.4): one that is
 // not empty and has no whitespace or control characters.
 func validID(id string) bool { return wire.ValidID(id) }
 
-func parseBool(params map[string]jsontext.Value, name string, required bool) (bool, *Error) {
-	raw, ok := params[name]
-	if !ok {
-		if required {
-			return false, invalidParams("Missing %s", name)
-		}
-		return false, nil
+func parseBool(params wire.Fields, name string, required bool) (bool, *Error) {
+	value, present, err := params.Bool(name)
+	if err == nil && required && !present {
+		err = wire.Missing(name)
 	}
-	var value bool
-	if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) || json.Unmarshal(raw, &value) != nil {
-		return false, invalidParams("%s must be a boolean", name)
-	}
-	return value, nil
+	return value, err
 }
-
-func parseObject(params map[string]jsontext.Value, name string, required bool) (map[string]any, *Error) {
-	raw, ok := params[name]
-	if !ok {
-		if required {
-			return nil, invalidParams("Missing %s", name)
+func parseObject(params wire.Fields, name string, required bool) (map[string]any, *Error) {
+	if _, present, err := params.Object(name); err != nil || !present {
+		if err == nil && required {
+			err = wire.Missing(name)
 		}
-		return nil, nil
+		return nil, err
 	}
 	var value map[string]any
-	if json.Unmarshal(raw, &value) != nil || value == nil {
-		return nil, invalidParams("%s must be an object", name)
-	}
+	_ = json.Unmarshal(params[name], &value)
 	return value, nil
 }
 
 // extObject is an ext object (§4.12) keyed by extension name, each value
 // kept as the JSON it arrived as, so a merge or a store keeps it byte for
 // byte, numbers beyond 2^53 included.
-type extObject = map[string]jsontext.Value
+type extObject = wire.Ext
 
 // parseExt reads an optional ext object of a write (§4.12). present reports
 // whether the request carried it.
-func parseExt(params map[string]jsontext.Value, name string) (ext extObject, present bool, err *Error) {
-	raw, ok := params[name]
-	if !ok {
-		return nil, false, nil
-	}
-	if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) || json.Unmarshal(raw, &ext) != nil || ext == nil {
-		return nil, true, invalidParams("%s must be an object", name)
-	}
-	for key, value := range ext {
-		value = slices.Clone(value)
-		if value.Compact() != nil {
-			return nil, true, invalidParams("%s.%s is not valid JSON", name, key)
-		}
-		ext[key] = value
-	}
-	return ext, true, nil
+func parseExt(params wire.Fields, name string) (ext extObject, present bool, err *Error) {
+	return params.Ext(name)
 }
 
 // emptyJSON reports whether a compact JSON value is an empty value ("", [],
@@ -173,21 +133,7 @@ func emptyJSON(value jsontext.Value) bool {
 // empty is removed, and keys the write leaves out stay. null is an ordinary
 // value, and an empty write changes nothing. The result is a new object, or
 // nil when no key is left; kept is not modified.
-func mergeExt(kept, write extObject) extObject {
-	merged := make(extObject, len(kept)+len(write))
-	maps.Copy(merged, kept)
-	for key, value := range write {
-		if emptyJSON(value) {
-			delete(merged, key)
-		} else {
-			merged[key] = value
-		}
-	}
-	if len(merged) == 0 {
-		return nil
-	}
-	return merged
-}
+func mergeExt(kept, write extObject) extObject { return wire.MergeExt(kept, write) }
 
 // clearedExt lists, as their empty values, the keys of a write's ext that
 // cleared a key that was kept, for a notification that carries the change

@@ -70,6 +70,9 @@ func (c *Chat) Message(_ context.Context, conn *wire.Conn, p wire.MessageParams)
 	if p.RoomID != "" && p.RoomID != room {
 		return wire.MessageResult{}, wire.InvalidParams("There is only one room, " + room)
 	}
+	if p.Body.Empty() {
+		return wire.MessageResult{}, wire.InvalidParams("A new message needs text or embeds") // §3.5.1
+	}
 	c.mu.Lock()
 	if p.ReplyTo != nil && !c.messages[p.ReplyTo.MessageID] {
 		c.mu.Unlock()
@@ -79,7 +82,7 @@ func (c *Chat) Message(_ context.Context, conn *wire.Conn, p wire.MessageParams)
 	c.messages[id] = true
 	c.mu.Unlock()
 	frame, err := wire.Encode("message", wire.Message{
-		MessageID: id, LogID: id, RoomID: room, From: *conn.User(), Body: p.Body, ReplyTo: p.ReplyTo, Ext: p.Ext,
+		MessageID: id, LogID: id, RoomID: room, From: *conn.User(), Body: p.Body, ReplyTo: p.ReplyTo,
 	})
 	if err != nil {
 		return wire.MessageResult{}, err

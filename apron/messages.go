@@ -1,8 +1,6 @@
 package apron
 
 import (
-	"bytes"
-	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"fmt"
 	"github.com/apron-chat/apron-server-go/wire"
@@ -75,47 +73,31 @@ func (m *messageState) snapshot() map[string]any {
 // the result carrying its write URL. Posting does not join the room
 // (§4.2.2): a poster who has not joined gets only the result. A new message
 // with no text and no embeds is invalid_params (§3.5.1).
-func (s *Server) saveMessage(c *client, req request) (any, bool, *Error) {
-	roomID, err := parseString(req.params, "room_id", false)
-	if err != nil {
-		return nil, false, err
-	}
-	if _, has := req.params["room_id"]; !has {
+func (s *Server) saveMessage(c *client, req request, p wire.MessageParams) (any, bool, *Error) {
+	roomID := p.RoomID
+	if roomID == "" {
 		roomID = defaultRoomID
 	}
-	messageID, err := parseString(req.params, "message_id", false)
-	if err != nil {
-		return nil, false, err
+	messageID, replacing := p.MessageID, p.MessageID != ""
+	replyID, hasReply := "", p.ReplyTo != nil
+	if hasReply {
+		replyID = p.ReplyTo.MessageID
 	}
-	_, replacing := req.params["message_id"]
-	if replacing && !validMessageID(messageID) {
-		return nil, false, invalidParams("message_id must be a positive decimal string")
-	}
-	replyID, hasReply, err := parseMessageRef(req.params, "reply_to")
-	if err != nil {
-		return nil, false, err
-	}
-	deleted, err := parseBool(req.params, "deleted", false)
-	if err != nil {
-		return nil, false, err
-	}
+	deleted := p.Deleted
 	if deleted && !replacing {
 		return nil, false, invalidParams("Cannot create a deleted message")
 	}
 	var body map[string]any
 	if !deleted {
-		body, err = parseObject(req.params, "body", true)
-		if err != nil {
-			return nil, false, err
+		if p.BodyRaw == nil {
+			return nil, false, wire.Missing("body")
 		}
+		_ = json.Unmarshal(p.BodyRaw, &body)
 		if err := validateBody(body); err != nil {
 			return nil, false, err
 		}
 	}
-	extWrite, _, err := parseExt(req.params, "ext")
-	if err != nil {
-		return nil, false, err
-	}
+	extWrite := p.Ext
 	// The extensions' filters see what is saved, outside s.mu, and may
 	// change it or refuse it (Registrar.FilterMessage).
 	sharedFiltered := false
@@ -252,6 +234,7 @@ func (s *Server) saveMessage(c *client, req request) (any, bool, *Error) {
 	// upload or live text, and releases none (ext:editors).
 	if body != nil && !editor {
 		var embeds []any
+		var err *Error
 		embeds, written, err = s.resolveEmbedsLocked(c, messageID, previous, body)
 		if err != nil {
 			return nil, false, err
@@ -462,24 +445,6 @@ func validMessageID(id string) bool {
 		}
 	}
 	return true
-}
-
-// parseMessageRef reads a message reference (reply_to). Clients
-// send bare references; any other keys, such as an echoed snapshot, are ignored.
-func parseMessageRef(params map[string]jsontext.Value, name string) (string, bool, *Error) {
-	raw, present := params[name]
-	if !present {
-		return "", false, nil
-	}
-	var ref map[string]jsontext.Value
-	if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) || json.Unmarshal(raw, &ref) != nil || ref == nil {
-		return "", false, invalidParams("%s must be a message object", name)
-	}
-	id, err := parseString(ref, "message_id", true)
-	if err != nil || !validMessageID(id) {
-		return "", false, invalidParams("%s.message_id must be a positive decimal string", name)
-	}
-	return id, true, nil
 }
 
 const (

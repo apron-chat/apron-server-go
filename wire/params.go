@@ -10,13 +10,26 @@ import (
 	"strconv"
 )
 
-// The accessors below read one param of a request each, with the
-// protocol's rules for it (§1.1): a param of the wrong type, or a null
-// where a value is needed, is invalid_params. Each reports whether the
-// request has the param at all, as the protocol tells a param sent empty
-// from one left out (§3.3.1). The typed params of the Backend's optional
-// interfaces are read with them, and a Method's handler reads its own the
-// same way.
+// Fields are the fields of a JSON object, such as a request's params, each
+// kept raw. Its accessors read one field each with the protocol's rules
+// for it (§1.1): a field of the wrong type, or a null where a value is
+// needed, is invalid_params. Each reports whether the object has the field
+// at all, as the protocol tells a field sent empty from one left out
+// (§3.3.1). The typed params of the Backend's optional interfaces are read
+// with them, and a Method reads its own the same way, with the Request's
+// accessors, which read its params.
+type Fields map[string]jsontext.Value
+
+// Fields returns the request's params, by name.
+func (r *Request) Fields() Fields {
+	if r.keys == nil {
+		_ = json.Unmarshal(r.Params, &r.keys)
+		if r.keys == nil {
+			r.keys = Fields{}
+		}
+	}
+	return r.keys
+}
 
 // Missing is the error of a request that lacks a required param.
 func Missing(name string) *Error { return InvalidParams("Missing " + name) }
@@ -25,13 +38,13 @@ func isNull(raw jsontext.Value) bool { return bytes.Equal(bytes.TrimSpace(raw), 
 
 // Has reports whether the request has a param, null included.
 func (r *Request) Has(name string) bool {
-	_, ok := r.Param(name)
+	_, ok := r.Fields()[name]
 	return ok
 }
 
 // String reads a string param.
-func (r *Request) String(name string) (value string, present bool, _ *Error) {
-	raw, ok := r.Param(name)
+func (f Fields) String(name string) (value string, present bool, _ *Error) {
+	raw, ok := f[name]
 	if !ok {
 		return "", false, nil
 	}
@@ -43,8 +56,8 @@ func (r *Request) String(name string) (value string, present bool, _ *Error) {
 
 // IDParam reads a room_id or user_id param, which is not empty and has no
 // whitespace or control characters (§2.4).
-func (r *Request) IDParam(name string) (value string, present bool, _ *Error) {
-	value, present, err := r.String(name)
+func (f Fields) IDParam(name string) (value string, present bool, _ *Error) {
+	value, present, err := f.String(name)
 	if err == nil && present && !ValidID(value) {
 		err = InvalidParams(name + " must be an ID: not empty, without whitespace or control characters")
 	}
@@ -52,8 +65,8 @@ func (r *Request) IDParam(name string) (value string, present bool, _ *Error) {
 }
 
 // Bool reads a boolean param.
-func (r *Request) Bool(name string) (value, present bool, _ *Error) {
-	raw, ok := r.Param(name)
+func (f Fields) Bool(name string) (value, present bool, _ *Error) {
+	raw, ok := f[name]
 	if !ok {
 		return false, false, nil
 	}
@@ -64,8 +77,8 @@ func (r *Request) Bool(name string) (value, present bool, _ *Error) {
 }
 
 // Object reads an object param, with its values raw.
-func (r *Request) Object(name string) (value map[string]jsontext.Value, present bool, _ *Error) {
-	raw, ok := r.Param(name)
+func (f Fields) Object(name string) (value Fields, present bool, _ *Error) {
+	raw, ok := f[name]
 	if !ok {
 		return nil, false, nil
 	}
@@ -77,8 +90,8 @@ func (r *Request) Object(name string) (value map[string]jsontext.Value, present 
 
 // Ext reads an ext param (§4.13): an object whose values are any JSON,
 // kept as they arrived, compacted.
-func (r *Request) Ext(name string) (Ext, bool, *Error) {
-	object, present, err := r.Object(name)
+func (f Fields) Ext(name string) (Ext, bool, *Error) {
+	object, present, err := f.Object(name)
 	if err != nil || !present {
 		return nil, present, err
 	}
@@ -95,8 +108,8 @@ func (r *Request) Ext(name string) (Ext, bool, *Error) {
 
 // LogID reads a log_id param, such as a history bound (§2.1): a decimal
 // string of a non-negative number.
-func (r *Request) LogID(name string) (int64, bool, *Error) {
-	raw, ok := r.Param(name)
+func (f Fields) LogID(name string) (int64, bool, *Error) {
+	raw, ok := f[name]
 	if !ok {
 		return 0, false, nil
 	}
@@ -112,8 +125,8 @@ func (r *Request) LogID(name string) (int64, bool, *Error) {
 }
 
 // Count reads a positive integer param, such as a limit.
-func (r *Request) Count(name string) (int, bool, *Error) {
-	raw, ok := r.Param(name)
+func (f Fields) Count(name string) (int, bool, *Error) {
+	raw, ok := f[name]
 	if !ok {
 		return 0, false, nil
 	}
@@ -126,8 +139,8 @@ func (r *Request) Count(name string) (int, bool, *Error) {
 
 // MessageRef reads a reference to a message (§3.5.4), {"message_id": ...},
 // and returns its message_id, a positive decimal string.
-func (r *Request) MessageRef(name string) (string, bool, *Error) {
-	raw, present := r.Param(name)
+func (f Fields) MessageRef(name string) (string, bool, *Error) {
+	raw, present := f[name]
 	if !present {
 		return "", false, nil
 	}
@@ -189,3 +202,14 @@ func emptyJSON(value jsontext.Value) bool {
 	}
 	return false
 }
+
+// The Request's accessors read its params (Fields).
+
+func (r *Request) String(name string) (string, bool, *Error)     { return r.Fields().String(name) }
+func (r *Request) IDParam(name string) (string, bool, *Error)    { return r.Fields().IDParam(name) }
+func (r *Request) Bool(name string) (bool, bool, *Error)         { return r.Fields().Bool(name) }
+func (r *Request) Object(name string) (Fields, bool, *Error)     { return r.Fields().Object(name) }
+func (r *Request) Ext(name string) (Ext, bool, *Error)           { return r.Fields().Ext(name) }
+func (r *Request) LogID(name string) (int64, bool, *Error)       { return r.Fields().LogID(name) }
+func (r *Request) Count(name string) (int, bool, *Error)         { return r.Fields().Count(name) }
+func (r *Request) MessageRef(name string) (string, bool, *Error) { return r.Fields().MessageRef(name) }

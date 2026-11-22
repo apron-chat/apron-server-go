@@ -2,7 +2,9 @@ package apron
 
 import (
 	"cmp"
+	"encoding/json/v2"
 	"fmt"
+	"github.com/apron-chat/apron-server-go/wire"
 	"slices"
 	"strings"
 	"unicode"
@@ -366,31 +368,18 @@ func (s *Server) finishUsable(usable usableCommands) []commandForm {
 // all before the result (§1). Only /embed-terminal and /embed-append make
 // live text, and they make their own embed: a terminal or append embed in a
 // command is invalid_params.
-func (s *Server) command(c *client, req request) (any, bool, *Error) {
-	for _, name := range []string{"message_id", "deleted"} {
-		if _, has := req.params[name]; has {
-			return nil, false, invalidParams("A command has no %s; send it as a message instead", name)
-		}
-	}
-	roomID, err := parseString(req.params, "room_id", false)
-	if err != nil {
-		return nil, false, err
-	}
-	if _, has := req.params["room_id"]; !has {
+func (s *Server) command(c *client, req request, p wire.MessageParams) (any, bool, *Error) {
+	roomID, hasRoom := p.RoomID, p.RoomID != ""
+	if !hasRoom {
 		roomID = defaultRoomID
 	}
-	replyID, hasReply, err := parseMessageRef(req.params, "reply_to")
-	if err != nil {
-		return nil, false, err
+	replyID, hasReply := "", p.ReplyTo != nil
+	if hasReply {
+		replyID = p.ReplyTo.MessageID
 	}
-	body, err := parseObject(req.params, "body", true)
-	if err != nil {
-		return nil, false, err
-	}
+	var body map[string]any
+	_ = json.Unmarshal(p.BodyRaw, &body)
 	if err := validateBody(body); err != nil {
-		return nil, false, err
-	}
-	if _, _, err := parseExt(req.params, "ext"); err != nil {
 		return nil, false, err
 	}
 	text, _ := body["text"].(string)
@@ -412,7 +401,7 @@ func (s *Server) command(c *client, req request) (any, bool, *Error) {
 	// A form that requires room_id acts only on a room the client names
 	// (ext:command_list): without one it is refused, not run in the
 	// default room.
-	if _, has := req.params["room_id"]; !has {
+	if !hasRoom {
 		if form := s.formOf(name, args); form != nil && slices.Contains(form.requires, fieldRoom) {
 			return nil, false, invalidParams("Send /%s from a room: it needs room_id", form.name)
 		}

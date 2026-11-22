@@ -50,6 +50,9 @@ func (b *backend) Auth(_ context.Context, c *wire.Conn, p wire.AuthParams) (wire
 }
 
 func (b *backend) Message(_ context.Context, c *wire.Conn, p wire.MessageParams) (wire.MessageResult, error) {
+	if p.Body.Empty() {
+		return wire.MessageResult{}, wire.InvalidParams("A new message needs text or embeds")
+	}
 	b.messages.Add(1)
 	return wire.MessageResult{MessageID: b.clock.Next()}, nil
 }
@@ -407,11 +410,11 @@ func TestMessageChecks(t *testing.T) {
 	c, _ := serve(t, &wire.Server{Backend: b})
 	c.signIn("a")
 	c.send(`{"method":"message","id":"e","params":{"body":{"text":""}}}`)
-	if f := c.read(); f["error"] != nil || len(f.result()) != 0 {
-		t.Fatalf("an empty message got %v, want {}", f)
+	if f := c.read(); f.errorCode() != wire.CodeInvalidParams {
+		t.Fatalf("an empty message got %v, want invalid_params", f)
 	}
 	if b.messages.Load() != 0 {
-		t.Fatal("an empty message reached the backend")
+		t.Fatal("an empty message was saved")
 	}
 	for i, tc := range []struct {
 		params string

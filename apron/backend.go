@@ -313,3 +313,29 @@ func (b backend) React(ctx context.Context, wc *wire.Conn, p wire.ReactParams) e
 		return b.s.react(c, req, p)
 	})
 }
+
+// Messages (§3.5, §4.4) and commands (§4.1).
+
+var (
+	_ wire.Messenger = backend{}
+	_ wire.Editor    = backend{}
+	_ wire.Commander = backend{}
+)
+
+func (b backend) Message(ctx context.Context, wc *wire.Conn, p wire.MessageParams) (wire.MessageResult, error) {
+	return wire.MessageResult{}, b.run(ctx, wc, func(c *client, req request) (any, bool, *Error) {
+		return b.s.saveMessage(c, req, p)
+	})
+}
+
+// Edit saves an existing message: an edit, a move, or a deletion, as
+// saveMessage handles new ones.
+func (b backend) Edit(ctx context.Context, wc *wire.Conn, p wire.MessageParams) (wire.MessageResult, error) {
+	return b.Message(ctx, wc, p)
+}
+
+func (b backend) Command(ctx context.Context, wc *wire.Conn, p wire.MessageParams) (map[string]any, error) {
+	return nil, b.run(ctx, wc, func(c *client, req request) (any, bool, *Error) {
+		return b.s.command(c, req, p)
+	})
+}

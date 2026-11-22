@@ -43,7 +43,7 @@ type Request struct {
 	c            *Conn
 	notification bool
 	hasID        bool
-	keys         map[string]jsontext.Value
+	keys         Fields
 
 	mu      sync.Mutex
 	replied bool
@@ -68,13 +68,7 @@ func (r *Request) Notification() bool { return r.notification }
 // Param returns the raw value of a param, and whether the request has it:
 // a param sent as "" or null is there.
 func (r *Request) Param(name string) (jsontext.Value, bool) {
-	if r.keys == nil {
-		_ = json.Unmarshal(r.Params, &r.keys)
-		if r.keys == nil {
-			r.keys = map[string]jsontext.Value{}
-		}
-	}
-	value, ok := r.keys[name]
+	value, ok := r.Fields()[name]
 	return value, ok
 }
 
@@ -334,12 +328,14 @@ func (s *Server) builtins() map[string]Method {
 	}
 	if cmd, ok := s.Backend.(Commander); ok {
 		methods["command"] = Method{Capability: "command", Handle: func(ctx context.Context, c *Conn, r *Request) (any, error) {
-			p, err := parseMessage(r.Params)
+			for _, name := range []string{"message_id", "deleted"} {
+				if r.Has(name) {
+					return nil, InvalidParams("A command has no " + name + "; send it as a message instead")
+				}
+			}
+			p, err := parseMessage(r)
 			if err != nil {
 				return nil, err
-			}
-			if p.MessageID != "" || p.Deleted {
-				return nil, InvalidParams("A command is never saved: it has no message_id")
 			}
 			if p.Body == nil {
 				return nil, InvalidParams("A command needs a body")
@@ -367,28 +363,85 @@ func (s *Server) builtins() map[string]Method {
 	return methods
 }
 
-func parseMessage(raw jsontext.Value) (MessageParams, error) {
-	var p MessageParams
-	if err := json.Unmarshal(raw, &p); err != nil {
-		return p, InvalidParams("Invalid message: " + err.Error())
+// parseMessage reads the params of a message or command (§3.5): what each
+// field is, as the protocol defines it. Limits, such as on the count of
+// mentions, are the backend's.
+func parseMessage(r *Request) (p MessageParams, err *Error) {
+	if p.RoomID, _, err = r.IDParam("room_id"); err != nil {
+		return p, err
 	}
-	p.Raw = raw
-	if p.RoomID != "" && !ValidID(p.RoomID) {
-		return p, InvalidParams("Invalid room_id")
+	if id, present, err := r.String("message_id"); err != nil {
+		return p, err
+	} else if present {
+		if !ValidMessageID(id) {
+			return p, InvalidParams("message_id must be a positive decimal string")
+		}
+		p.MessageID = id
 	}
-	if p.Body != nil && p.Body.Format != "" && p.Body.Format != Plain && p.Body.Format != Markdown {
-		return p, InvalidParams(`format is "plain" or "markdown"`)
+	if replyTo, present, err := r.MessageRef("reply_to"); err != nil {
+		return p, err
+	} else if present {
+		p.ReplyTo = &Ref{MessageID: replyTo}
 	}
-	if p.ReplyTo != nil && p.ReplyTo.MessageID == "" {
-		return p, InvalidParams("reply_to needs a message_id")
+	if p.Deleted, _, err = r.Bool("deleted"); err != nil {
+		return p, err
 	}
-	return p, nil
+	if p.Ext, _, err = r.Ext("ext"); err != nil {
+		return p, err
+	}
+	if p.Deleted {
+		// A deletion leaves no body (§4.4): what it sends is ignored.
+		return p, nil
+	}
+	fields, present, err := r.Object("body")
+	if err != nil || !present {
+		return p, err
+	}
+	p.BodyRaw, _ = r.Param("body")
+	body, err := parseBody(fields)
+	p.Body = body
+	return p, err
+}
+
+// parseBody reads a message body's fields (§3.5).
+func parseBody(fields Fields) (*Body, *Error) {
+	body := &Body{}
+	if raw, ok := fields["text"]; ok && (isNull(raw) || json.Unmarshal(raw, &body.Text) != nil) {
+		return nil, InvalidParams("body.text must be a string")
+	}
+	if raw, ok := fields["format"]; ok {
+		if isNull(raw) || json.Unmarshal(raw, &body.Format) != nil || (body.Format != Plain && body.Format != Markdown) {
+			return nil, InvalidParams("body.format must be plain or markdown")
+		}
+	}
+	if raw, ok := fields["mentions"]; ok {
+		if isNull(raw) || json.Unmarshal(raw, &body.Mentions) != nil || slices.ContainsFunc(body.Mentions, func(id string) bool { return !ValidID(id) }) {
+			return nil, InvalidParams("body.mentions must be an array of user_id strings")
+		}
+	}
+	if raw, ok := fields["embeds"]; ok {
+		if isNull(raw) || json.Unmarshal(raw, &body.Embeds) != nil {
+			return nil, InvalidParams("body.embeds must be an array")
+		}
+		for i, embed := range body.Embeds {
+			var kind struct {
+				Kind *string `json:"kind"`
+			}
+			if json.Unmarshal(embed, &kind) != nil || isNull(embed) || embed[0] != '{' {
+				return nil, InvalidParams(fmt.Sprintf("body.embeds[%d] must be an object", i))
+			}
+			if kind.Kind == nil || *kind.Kind == "" {
+				return nil, InvalidParams(fmt.Sprintf("body.embeds[%d].kind must be a non-empty string", i))
+			}
+		}
+	}
+	return body, nil
 }
 
 // message applies the core rules of a message request (§3.5.1, §3.6), and
 // passes it on to the backend.
 func (s *Server) message(ctx context.Context, c *Conn, r *Request) (any, error) {
-	p, err := parseMessage(r.Params)
+	p, err := parseMessage(r)
 	if err != nil {
 		return nil, err
 	}
@@ -400,11 +453,7 @@ func (s *Server) message(ctx context.Context, c *Conn, r *Request) (any, error) 
 		return editor.Edit(ctx, c, p)
 	}
 	if p.Body == nil {
-		return nil, InvalidParams("A new message needs a body")
-	}
-	if p.Body.Text == "" && len(p.Body.Embeds) == 0 {
-		// An empty message is not logged or broadcast (§3.5.1).
-		return nil, nil
+		return nil, Missing("body")
 	}
 	messenger, ok := s.Backend.(Messenger)
 	if !ok {

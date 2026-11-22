@@ -28,10 +28,11 @@ type Backend interface {
 
 // Messenger saves new messages (§3.5.1): the core message request, which
 // every server needs (§3.6), with a Messenger or a method of its own. The
-// body is present, with text or embeds, its format is "", plain, or
-// markdown, and room_id is empty (the default room) or a valid ID. It
-// returns the new message_id; the backend broadcasts the snapshot,
-// including to c, before it returns.
+// body is present and well formed, and room_id is empty (the default room)
+// or a valid ID. It returns the new message_id; the backend broadcasts the
+// snapshot, including to c, before it returns. A message whose body is
+// empty (Body.Empty) is invalid_params, neither saved nor broadcast, once
+// the backend has checked what it names, such as its room.
 type Messenger interface {
 	Message(ctx context.Context, c *Conn, p MessageParams) (MessageResult, error)
 }

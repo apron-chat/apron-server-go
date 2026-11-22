@@ -65,6 +65,10 @@ type Body struct {
 	Embeds   []jsontext.Value `json:"embeds,omitempty"`
 }
 
+// Empty reports whether a body has no text and no embeds: a new message
+// with such a body is invalid_params (§3.5.1).
+func (b *Body) Empty() bool { return b == nil || b.Text == "" && len(b.Embeds) == 0 }
+
 // Formats of a Body.
 const (
 	Plain    = "plain"
@@ -120,15 +124,22 @@ type AuthResult struct {
 }
 
 // MessageParams are the params of a message request, or of a command
-// (§3.5, §4.1). Raw holds every param.
+// (§3.5, §4.1, §4.4).
 type MessageParams struct {
-	MessageID string         `json:"message_id,omitempty"`
-	RoomID    string         `json:"room_id,omitempty"`
-	Body      *Body          `json:"body,omitempty"`
-	ReplyTo   *Ref           `json:"reply_to,omitempty"`
-	Deleted   bool           `json:"deleted,omitzero"`
-	Ext       map[string]any `json:"ext,omitempty"`
-	Raw       jsontext.Value `json:"-"`
+	// MessageID is set on a save of an existing message (§4.4), and empty
+	// on a new one.
+	MessageID string
+	// RoomID is the room, or "" for the default room.
+	RoomID string
+	// Body is nil when the request leaves it out, as a deletion does.
+	Body *Body
+	// BodyRaw is the body exactly as sent, fields this package does not
+	// know included, for a backend that keeps them; nil without a body.
+	BodyRaw jsontext.Value
+	ReplyTo *Ref
+	Deleted bool
+	// Ext merges into the message's ext (§4.13); nil when left out.
+	Ext Ext
 }
 
 // MessageResult is the result of a message request: the new message's
