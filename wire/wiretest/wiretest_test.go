@@ -1,0 +1,231 @@
+package wiretest_test
+
+import (
+	"context"
+	"encoding/json/jsontext"
+	"errors"
+	"fmt"
+	"net/http/httptest"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/apron-chat/apron-server-go/wire"
+	"github.com/apron-chat/apron-server-go/wire/wiretest"
+)
+
+// chat is a test backend: guests, one room whose messages everyone gets,
+// history, and typing.
+type chat struct {
+	server *wire.Server
+	clock  wire.Clock
+
+	mu      sync.Mutex
+	guests  int
+	records []wire.Record
+
+	typing       atomic.Int64
+	disconnected atomic.Int64
+}
+
+func newChat() *chat {
+	c := &chat{}
+	c.server = &wire.Server{Backend: c, Messages: c, History: c, Activity: c, OnDisconnect: func(*wire.Conn) { c.disconnected.Add(1) }}
+	return c
+}
+
+func (*chat) Hello(context.Context, *wire.Conn) wire.ServerInfo {
+	return wire.ServerInfo{Auth: []string{"guest"}, Title: "Test"}
+}
+
+func (c *chat) Auth(_ context.Context, _ *wire.Conn, p wire.AuthParams, reply wire.Reply[wire.AuthResult]) error {
+	if p.Name == "refuse" {
+		return wire.Denied("Not you")
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.guests++
+	welcome, err := wire.Encode(wire.Notice("", "welcome"))
+	if err != nil {
+		return err
+	}
+	return reply.Send(wire.AuthResult{You: &wire.User{UserID: fmt.Sprintf("guest_%d", c.guests)}}, welcome)
+}
+
+func (c *chat) Message(_ context.Context, conn *wire.Conn, p wire.MessageParams, reply wire.Reply[wire.MessageResult]) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	id := c.clock.Next()
+	m := wire.Message{MessageID: id, LogID: id, From: *conn.User(), Body: p.Body}
+	frame, err := wire.Encode(m)
+	if err != nil {
+		return err
+	}
+	c.records = append(c.records, wire.Record{LogID: id, Message: &m})
+	c.server.Broadcast(frame, nil)
+	return reply.Send(wire.MessageResult{MessageID: id})
+}
+
+func (c *chat) History(_ context.Context, _ *wire.Conn, p wire.HistoryParams, reply wire.Reply[wire.HistoryResult]) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	log := wire.Log{Records: c.records, Latest: c.clock.Last()}
+	if len(c.records) > 0 {
+		log.Lower = c.records[0].LogID
+	}
+	return reply.Send(wire.Page(log, p, 50))
+}
+
+func (c *chat) Activity(_ context.Context, _ *wire.Conn, p wire.ActivityParams) {
+	if p.Typing != nil {
+		c.typing.Add(1)
+	}
+}
+
+func timeout(t *testing.T) context.Context {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	t.Cleanup(cancel)
+	return ctx
+}
+
+// A typed handler called directly sends to a recording Reply.
+func TestNewReply(t *testing.T) {
+	c := newChat()
+	c.records = []wire.Record{{LogID: 1, Message: &wire.Message{MessageID: 1, LogID: 1}}}
+	reply, sent := wiretest.NewReply[wire.HistoryResult](nil)
+	if sent.Sent() {
+		t.Fatal("sent before the handler ran")
+	}
+	if err := c.History(context.Background(), nil, wire.HistoryParams{}, reply); err != nil {
+		t.Fatal(err)
+	}
+	if !sent.Sent() || len(sent.Result().Messages) != 1 || !strings.Contains(string(sent.Raw()), `"messages":[`) || sent.Err() != nil {
+		t.Fatalf("sent %v %+v %s %v", sent.Sent(), sent.Result(), sent.Raw(), sent.Err())
+	}
+
+	// What wire does with a method's result is done, and recorded.
+	me, you := wiretest.NewReply[wire.CurrentUser](wiretest.NewRequest("me", map[string]any{"name": "Ada"}))
+	if err := me.Send(wire.CurrentUser{User: wire.User{UserID: "ada", Name: "Ada"}}); err != nil {
+		t.Fatal(err)
+	}
+	if you.Result().Name != "Ada" || string(you.Raw()) != `{"you":{"user_id":"ada","name":"Ada"}}` {
+		t.Fatalf("me: %+v %s", you.Result(), you.Raw())
+	}
+	auth, signedIn := wiretest.NewReply[wire.AuthResult](wiretest.NewRequest("auth", map[string]any{"scheme": "guest"}))
+	if err := auth.Send(wire.AuthResult{You: &wire.User{UserID: "not valid"}}); wire.CodeOf(err) != wire.CodeInternalError || wire.CodeOf(signedIn.Err()) != wire.CodeInternalError {
+		t.Fatalf("an invalid auth result: %v, recorded %v", err, signedIn.Err())
+	}
+}
+
+// A Handler gets a request with params, and its reply and the frames after
+// it are recorded.
+func TestNewRequest(t *testing.T) {
+	h := wire.Handler{Serve: func(_ context.Context, _ *wire.Conn, r *wire.Request) error {
+		d := r.Decoder()
+		text := d.String("text", wire.Required)
+		if err := d.Err(); err != nil {
+			return err
+		}
+		notice, _ := wire.Encode(wire.Notice("", "echoed"))
+		r.Reply(map[string]any{"echo": text}, notice)
+		return nil
+	}}
+	r := wiretest.NewRequest("x_echo", map[string]any{"text": "hi"})
+	if err := h.Serve(context.Background(), nil, r); err != nil {
+		t.Fatal(err)
+	}
+	_, sent := wiretest.NewReply[jsontext.Value](r)
+	if string(sent.Raw()) != `{"echo":"hi"}` || string(sent.Result()) != `{"echo":"hi"}` || len(sent.Then()) != 1 {
+		t.Fatalf("sent %s %s %q", sent.Raw(), sent.Result(), sent.Then())
+	}
+	if err := h.Serve(context.Background(), nil, wiretest.NewRequest("x_echo", nil)); wire.CodeOf(err) != wire.CodeInvalidParams {
+		t.Fatalf("without text: %v", err)
+	}
+	if _, err := wire.ParseHistory(wiretest.NewRequest("history", map[string]any{"limit": 0})); wire.CodeOf(err) != wire.CodeInvalidParams {
+		t.Fatalf("ParseHistory: %v", err)
+	}
+}
+
+// testClient runs the same conversation on a Client of either kind.
+func testClient(t *testing.T, c *chat, client *wiretest.Client) {
+	ctx := timeout(t)
+	if hello := client.Hello(); hello.Title != "Test" || hello.Apron != wire.Version {
+		t.Fatalf("Hello: %+v", hello)
+	}
+	if _, err := client.Call(ctx, "history", nil); wire.CodeOf(err) != wire.CodeDenied {
+		t.Fatalf("before auth: %v", err)
+	}
+	if _, err := client.Auth(ctx, map[string]any{"scheme": "guest", "name": "refuse"}); wire.CodeOf(err) != wire.CodeDenied {
+		t.Fatalf("a refused auth: %v", err)
+	}
+	result, err := client.Auth(ctx, map[string]any{"scheme": "guest"})
+	if err != nil || result.You == nil || !strings.HasPrefix(result.You.UserID, "guest_") {
+		t.Fatalf("auth: %+v %v", result, err)
+	}
+	if f, err := client.Next(ctx); err != nil || f.Method != "message" {
+		t.Fatalf("after auth: %+v %v", f, err)
+	}
+
+	// The message's echo arrives before its result, and is kept.
+	raw, err := client.Call(ctx, "message", map[string]any{"body": map[string]any{"text": "hi"}})
+	if err != nil || !strings.Contains(string(raw), `"message_id"`) {
+		t.Fatalf("message: %s %v", raw, err)
+	}
+	if pending := client.Pending(); len(pending) != 1 {
+		t.Fatalf("pending: %v", pending)
+	}
+	echo, err := client.Expect(ctx, wiretest.Method("message"))
+	var m wire.Message
+	if err != nil || echo.Decode(&m) != nil || m.Body.Text != "hi" {
+		t.Fatalf("echo: %+v %v", echo, err)
+	}
+
+	if _, err := client.Call(ctx, "nope", nil); wire.CodeOf(err) != wire.CodeUnsupported {
+		t.Fatalf("an unknown method: %v", err)
+	}
+	if err := client.Notify(ctx, "activity", map[string]any{"typing": 5}); err != nil {
+		t.Fatal(err)
+	}
+	// Frames are processed in order: once history answers, activity was
+	// handled.
+	if _, err := client.Call(ctx, "history", nil); err != nil || c.typing.Load() != 1 {
+		t.Fatalf("history: %v, typing %d", err, c.typing.Load())
+	}
+	if err := client.Send(ctx, []byte(`{"method":"history","id":7}`)); err != nil {
+		t.Fatal(err)
+	}
+	if f, err := client.Next(ctx); err != nil || f.Error == nil || f.Error.Code != wire.CodeInvalidRequest || f.ID != "" {
+		t.Fatalf("an invalid request: %+v %v", f, err)
+	}
+}
+
+func TestConnect(t *testing.T) {
+	c := newChat()
+	client := wiretest.Connect(c.server)
+	testClient(t, c, client)
+	if err := client.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if n := c.disconnected.Load(); n != 1 {
+		t.Fatalf("%d disconnected after Close", n)
+	}
+	if _, err := client.Next(timeout(t)); !errors.Is(err, wire.ErrClosed) {
+		t.Fatalf("Next after Close: %v", err)
+	}
+}
+
+func TestDial(t *testing.T) {
+	c := newChat()
+	server := httptest.NewServer(c.server)
+	defer server.Close()
+	client, err := wiretest.Dial(timeout(t), "ws"+strings.TrimPrefix(server.URL, "http"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	testClient(t, c, client)
+	if err := client.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
