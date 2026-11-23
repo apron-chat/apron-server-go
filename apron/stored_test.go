@@ -42,7 +42,8 @@ func loadStoredLog(t *testing.T) []store.Entry {
 
 // storedLogScenario makes rooms, a private room and a thread, messages
 // with mentions, ext, and a reply, reactions set and cleared, a read
-// cursor, a rename, a move, a deletion, a room edit, and a leave.
+// cursor, a rename, a move, a deletion, a room edit, a leave, and a
+// message whose body carries embeds and members the server does not know.
 func storedLogScenario(t *testing.T, app *Server, a, b *testClient) {
 	n := 0
 	do := func(c *testClient, method string, params map[string]any) map[string]any {
@@ -67,6 +68,13 @@ func storedLogScenario(t *testing.T, app *Server, a, b *testClient) {
 	do(a, "message", map[string]any{"message_id": m3, "room_id": priv, "deleted": true})
 	do(a, "room_set", map[string]any{"room_id": ops, "title": "Ops 2", "description": "Ops talk"})
 	do(b, "room_leave", map[string]any{"room_id": ops})
+	// A message body keeps what the server does not know, and the server
+	// adds embed_ids to its embeds.
+	media := do(a, "room_set", map[string]any{"title": "Media"})["room_id"]
+	do(a, "message", map[string]any{"room_id": media, "body": map[string]any{
+		"text": "see", "format": "plain", "mentions": []any{}, "color": "red", "zz": map[string]any{"b": 1, "a": []any{true, nil}},
+		"embeds": []any{map[string]any{"kind": "link", "url": "https://example.com/", "title": "Example"}, map[string]any{"kind": "upload", "name": "a.txt"}},
+	}, "ext": map[string]any{"b": "x", "a": jsontext.Value(`{"z":1,"y":2}`)}})
 	if err := app.Sync(context.Background()); err != nil {
 		t.Fatal(err)
 	}
