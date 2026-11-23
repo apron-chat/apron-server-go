@@ -3,6 +3,7 @@ package apron
 import (
 	"cmp"
 	"context"
+	"encoding/json/jsontext"
 	"errors"
 	"fmt"
 	"slices"
@@ -395,12 +396,12 @@ func cutWord(text string) (word, rest string) { return commands.Cut(text) }
 
 // privateNotice renders a notice for the one connection it is queued on:
 // unlogged, without message_id or log_id (Appendix A.1).
-func privateNotice(roomID, text string) map[string]any {
-	return map[string]any{"method": "message", "params": map[string]any{
-		"room_id": roomID,
-		"from":    map[string]any{"user_id": privateNoticeID, "name": "System message to you"},
-		"body":    map[string]any{"text": text, "format": "markdown"},
-	}}
+func privateNotice(roomID, text string) jsontext.Value {
+	return encodeNotification(wire.Message{
+		RoomID: roomID,
+		From:   wire.User{UserID: privateNoticeID, Name: "System message to you"},
+		Body:   &wire.Body{Text: text, Format: wire.Markdown},
+	})
 }
 
 // postRoomNoticeLocked logs and delivers a message from ~room to the room's

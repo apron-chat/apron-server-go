@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"maps"
 	"slices"
-	"strconv"
 
 	"github.com/apron-chat/apron-server-go/apron/internal/roomlog"
 	"github.com/apron-chat/apron-server-go/apron/internal/rooms"
@@ -78,8 +77,8 @@ func (s *Server) cursorFramesLocked(u *userState, r *roomState) []wire.Frame {
 		if u.joined[r.ID()] == nil && userID != u.id {
 			continue
 		}
-		frames = append(frames, wire.Frame(notification("activity", map[string]any{
-			"room_id": r.ID(), "from": cursor.From, "read_message_id": cursor.MessageID,
+		frames = append(frames, wire.Frame(encodeNotification(wire.Activity{
+			RoomID: r.ID(), From: cursor.From.User(), ReadMessageID: wire.LogID(cursor.ID),
 		})))
 	}
 	return frames
@@ -128,16 +127,18 @@ func render(frame any) jsontext.Value {
 	return encodeJSON(frame)
 }
 
-// roomUpdate renders a room_update notification (§4.2.3).
-func roomUpdate(update wire.RoomUpdate) jsontext.Value {
-	return notification(update.Method(), update)
+// encodeNotification renders a typed notification once, such as a
+// room_update (§4.2.3) or an activity (§4.6), for sending to many
+// connections.
+func encodeNotification(n wire.Notification) jsontext.Value {
+	return notification(n.Method(), n)
 }
 
 // deliverMembershipLocked sends a membership record to the room's members
 // but u, as room_update memberships (§4.2.3); u's connections receive it
 // with the room_update that tells them of the change.
 func (s *Server) deliverMembershipLocked(membership wire.Membership, r *roomState, u *userState) {
-	frame := roomUpdate(wire.RoomUpdate{Memberships: []wire.Membership{membership}})
+	frame := encodeNotification(wire.RoomUpdate{Memberships: []wire.Membership{membership}})
 	for id, member := range r.Members() {
 		if id != u.id {
 			member.send(frame)
@@ -200,7 +201,7 @@ func (s *Server) joinLocked(u *userState, r *roomState) bool {
 func (s *Server) joinedUpdateLocked(r *roomState, memberships ...wire.Membership) jsontext.Value {
 	view := s.roomViewOfLocked(r)
 	listed := s.addMembersLocked(&view, r)
-	return roomUpdate(wire.RoomUpdate{Joined: []wire.RoomView{view}, Users: profiles(listed), Memberships: memberships})
+	return encodeNotification(wire.RoomUpdate{Joined: []wire.RoomView{view}, Users: profiles(listed), Memberships: memberships})
 }
 
 // addMembersLocked adds a room's members to its view as bare user
@@ -237,7 +238,7 @@ func (s *Server) leaveLocked(u *userState, r *roomState) bool {
 	delete(u.joined, r.ID())
 	u.leftAt[r.ID()] = record.ID
 	s.touchUser(u.id)
-	u.send(roomUpdate(wire.RoomUpdate{Left: []wire.RoomRef{{RoomID: r.ID()}}, Memberships: []wire.Membership{membership}}))
+	u.send(encodeNotification(wire.RoomUpdate{Left: []wire.RoomRef{{RoomID: r.ID()}}, Memberships: []wire.Membership{membership}}))
 	// The room no longer counts toward the user's unread (§4.9), and
 	// neither do the threads of a private room, joined or not, which the
 	// user can no longer see: their counts are all taken again.
@@ -277,7 +278,7 @@ func (s *Server) hideThreadsLocked(u *userState, r *roomState) {
 	}
 	walk(r)
 	if len(hidden) > 0 {
-		u.send(roomUpdate(wire.RoomUpdate{Left: hidden}))
+		u.send(encodeNotification(wire.RoomUpdate{Left: hidden}))
 	}
 }
 
@@ -292,7 +293,7 @@ func (s *Server) announceRoomLocked(r *roomState, editor *userState) {
 	if editor != nil {
 		audience[editor.id] = editor
 	}
-	frame := roomUpdate(wire.RoomUpdate{Updated: []wire.RoomView{s.roomViewOfLocked(r)}})
+	frame := encodeNotification(wire.RoomUpdate{Updated: []wire.RoomView{s.roomViewOfLocked(r)}})
 	for _, member := range audience {
 		// A thread's record goes to its parent's members who may see it.
 		if r.VisibleTo(member) {
@@ -409,7 +410,7 @@ func (s *Server) setRoom(c *client, p wire.RoomSetParams, reply wire.Reply[wire.
 	u.send(s.joinedUpdateLocked(r, membership))
 	// A private thread's record goes only to its own members.
 	if parent != nil && !r.Private() {
-		frame := roomUpdate(wire.RoomUpdate{Updated: []wire.RoomView{s.roomViewOfLocked(r)}})
+		frame := encodeNotification(wire.RoomUpdate{Updated: []wire.RoomView{s.roomViewOfLocked(r)}})
 		for id, member := range parent.Members() {
 			if id != u.id && r.VisibleTo(member) {
 				member.send(frame)
@@ -718,10 +719,7 @@ func (s *Server) activity(c *client, p wire.ActivityParams) *Error {
 	if roomID == "" {
 		roomID = defaultRoomID
 	}
-	var typing any
-	if p.Typing != nil {
-		typing = *p.Typing
-	}
+	typing := p.Typing
 	readID, hasRead := "", p.ReadMessageID != nil
 	if hasRead {
 		readID = p.ReadMessageID.String()
@@ -750,30 +748,26 @@ func (s *Server) activity(c *client, p wire.ActivityParams) *Error {
 		// reply to carry retry_after.
 		typing = nil
 	}
-	params := map[string]any{"room_id": roomID, "from": u.from()}
-	read := false
+	relay := wire.Activity{RoomID: roomID, From: u.from().User(), Typing: typing}
 	if hasRead {
-		id, _ := strconv.ParseInt(readID, 10, 64)
+		id := int64(*p.ReadMessageID)
 		if s.rooms.Read(r, u.id, rooms.Cursor{From: u.from(), MessageID: readID, ID: id}) {
 			if u.joined[r.ID()] == nil {
 				// A cursor for a room the user has not joined still syncs
 				// across their own connections.
-				u.send(map[string]any{"method": "activity", "params": map[string]any{"room_id": roomID, "from": u.from(), "read_message_id": readID}})
+				u.send(encodeNotification(wire.Activity{RoomID: roomID, From: u.from().User(), ReadMessageID: *p.ReadMessageID}))
 				if id >= r.Log().Latest() {
 					// Read to the end: no earlier mention there counts.
 					delete(u.pings, r.ID())
 					s.touchUser(u.id)
 				}
 			}
-			params["read_message_id"] = readID
-			read = true
+			relay.ReadMessageID = *p.ReadMessageID
 		}
 	}
-	if typing != nil {
-		params["typing"] = typing
-	}
+	read := relay.ReadMessageID != 0
 	if typing != nil || read {
-		s.deliverLocked(map[string]any{"method": "activity", "params": params}, r)
+		s.deliverLocked(encodeNotification(relay), r)
 	}
 	if read {
 		// Reading lowers the unread count the user's other devices show.

@@ -251,9 +251,7 @@ type CommandCall struct {
 // Notice sends a ~private notice (Appendix A.1), Markdown, to the connection
 // that ran the command, before the command's result.
 func (c *CommandCall) Notice(text string) {
-	notice := privateNotice(c.Room.ID, text)
-	notice["params"].(map[string]any)["body"].(map[string]any)["format"] = "markdown"
-	c.client.enqueue(notice)
+	c.client.enqueue(privateNotice(c.Room.ID, text))
 }
 
 var commandNamePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,31}$`)

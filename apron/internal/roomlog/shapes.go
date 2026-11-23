@@ -24,6 +24,13 @@ type Author struct {
 	Unknown jsontext.Value `json:",embed"`
 }
 
+// User is the author as package wire's recorded user object, such as an
+// activity notification's from (§4.6), with the members it has no field
+// for.
+func (a Author) User() wire.User {
+	return wire.User{UserID: a.UserID, Name: a.Name, Unknown: a.Unknown}
+}
+
 // Membership is a membership record (§4.2.2).
 type Membership struct {
 	LogID   string   `json:"log_id"`
