@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/apron-chat/apron-server-go/apron/internal/devices"
+	"github.com/apron-chat/apron-server-go/apron/internal/invitations"
 	"github.com/apron-chat/apron-server-go/apron/internal/roomlog"
 	"github.com/apron-chat/apron-server-go/apron/internal/rooms"
 	"github.com/apron-chat/apron-server-go/apron/internal/services"
@@ -52,6 +53,7 @@ import (
 //	session  hex SHA-256 of the bearer token (sessions)
 //	device   hex SHA-256 of the /invite-device token (devices)
 //	service  hex SHA-256 of a bot's service token (services)
+//	invitation  hex SHA-256 of an invitation's token (invitations)
 //	embed    embed_id
 //	push     user_id, a space, and url (url alone before registrations
 //	         belonged to their user)
@@ -73,22 +75,19 @@ type dirtySet struct {
 	messages map[string]bool
 	users    map[string]bool
 	embeds   map[string]bool
-	// invitations are named by their tokens' SHA-256.
-	invitations map[[32]byte]bool
-	pushes      map[string]bool
-	usedIDs     []string
-	vapid       bool
-	emoji       bool
-	profile     bool
+	pushes   map[string]bool
+	usedIDs  []string
+	vapid    bool
+	emoji    bool
+	profile  bool
 }
 
 func newDirtySet() dirtySet {
 	return dirtySet{
-		messages:    make(map[string]bool),
-		users:       make(map[string]bool),
-		invitations: make(map[[32]byte]bool),
-		embeds:      make(map[string]bool),
-		pushes:      make(map[string]bool),
+		messages: make(map[string]bool),
+		users:    make(map[string]bool),
+		embeds:   make(map[string]bool),
+		pushes:   make(map[string]bool),
 	}
 }
 
@@ -152,7 +151,7 @@ type storedUser struct {
 	Created int64  `json:"created,omitzero"`
 	Bot     string `json:"bot,omitzero"`
 	// Enrolled is what the invitation that made the account left with it.
-	Enrolled *storedEnrollment `json:"enrolled,omitzero"`
+	Enrolled *invitations.Enrollment `json:"enrolled,omitzero"`
 	// Scope is the rooms the account is limited to (scope.go).
 	Scope *storedScope `json:"scope,omitzero"`
 	// Consents are the hosts of apps the account allowed on the external
@@ -226,6 +225,7 @@ func (s *Server) flushLocked() {
 		s.sessions.Entries(userID)
 		s.devices.Entries(userID)
 		s.services.Entries(userID)
+		s.invitations.Entries()
 		s.store.Queue(nil)
 		return
 	}
@@ -234,6 +234,7 @@ func (s *Server) flushLocked() {
 	batch = append(batch, s.sessions.Entries(userID)...)
 	batch = append(batch, s.devices.Entries(userID)...)
 	batch = append(batch, s.services.Entries(userID)...)
+	batch = append(batch, s.invitations.Entries()...)
 	meta := s.metaLocked()
 	if meta != s.storedMeta {
 		s.storedMeta = meta
@@ -274,7 +275,6 @@ func (s *Server) entriesLocked(d dirtySet, records []store.Entry) []store.Entry 
 			del(entryUser, id)
 		}
 	}
-	s.invitationEntriesLocked(d, put, del)
 	for id := range d.embeds {
 		if e := s.embeds[id]; e != nil {
 			put(entryEmbed, id, storedEmbedOf(e))
@@ -320,7 +320,7 @@ func storedUserOf(u *userState) storedUser {
 		Bot: u.botOf, Identities: u.identities, Records: u.records, Grants: u.granted,
 		Email: u.identities[email.Name], External: u.identities[external.Name],
 		Passkey: u.records[passkey.Name], Granted: u.granted[external.Name],
-		Enrolled: u.enrolled.stored(), Scope: storedScopeOf(u.scope), Consents: u.consents,
+		Enrolled: u.enrolled, Scope: storedScopeOf(u.scope), Consents: u.consents,
 	}
 	if !u.created.IsZero() {
 		stored.Created = u.created.UnixMilli()
@@ -569,7 +569,7 @@ func (s *Server) restoreLocked() (map[string]bool, error) {
 	}, now); err != nil {
 		return nil, err
 	}
-	if err := s.restoreInvitationsLocked(entries[entryInvitation], now); err != nil {
+	if err := s.invitations.Restore(entries[invitations.EntryKind], now); err != nil {
 		return nil, err
 	}
 	if err := s.services.Restore(entries[services.EntryKind], func(id string) (*userState, bool) {
@@ -656,7 +656,7 @@ func (s *Server) restoreVAPIDLocked(raw jsontext.Value) error {
 func (s *Server) restoreIdentitiesLocked(u *userState, stored storedUser) error {
 	u.identities, u.records = maps.Clone(stored.Identities), maps.Clone(stored.Records)
 	u.granted = maps.Clone(stored.Grants)
-	u.enrolled = stored.Enrolled.restored()
+	u.enrolled = stored.Enrolled
 	u.scope = stored.Scope.restored()
 	legacy := map[string]string{email.Name: stored.Email, external.Name: stored.External}
 	if len(stored.Passkey) > 0 && u.identities[passkey.Name] == "" {

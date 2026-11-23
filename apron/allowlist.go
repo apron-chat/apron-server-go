@@ -219,7 +219,7 @@ func (s *Server) admittedLocked(u *userState) bool {
 		return true
 	case !u.account():
 		return false
-	case u.enrolled != nil && u.enrolled.admitted:
+	case u.enrolled != nil && u.enrolled.Admitted:
 		return true
 	}
 	return s.listedLocked(u)
@@ -230,7 +230,7 @@ func (s *Server) admittedLocked(u *userState) bool {
 // identity.
 func (s *Server) admittedWithLocked(u *userState, id authn.Identity) bool {
 	switch {
-	case s.allowlist == nil, u.botOf != "", u.enrolled != nil && u.enrolled.admitted:
+	case s.allowlist == nil, u.botOf != "", u.enrolled != nil && u.enrolled.Admitted:
 		return true
 	}
 	return s.allowlist.principals[principalOf(id)] || s.listedLocked(u)

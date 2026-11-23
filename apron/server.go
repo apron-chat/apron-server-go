@@ -25,6 +25,7 @@ import (
 
 	"github.com/apron-chat/apron-server-go/apron/internal/devices"
 	"github.com/apron-chat/apron-server-go/apron/internal/durable"
+	"github.com/apron-chat/apron-server-go/apron/internal/invitations"
 	"github.com/apron-chat/apron-server-go/apron/internal/kv"
 	"github.com/apron-chat/apron-server-go/apron/internal/proposals"
 	"github.com/apron-chat/apron-server-go/apron/internal/roomlog"
@@ -195,9 +196,8 @@ type Server struct {
 	sessions   *sessions.Table[*userState]
 	// devices are the /invite-device tokens (devices.go).
 	devices *devices.Table[*userState]
-	// invitations are the outstanding invitations by the SHA-256 of their
-	// tokens (invitations.go).
-	invitations map[[32]byte]*invitation
+	// invitations are the outstanding invitations (invitations.go).
+	invitations *invitations.Table
 	// services are the bots' service tokens (service.go).
 	services *services.Table[*userState]
 	// schemes are the sign-in schemes the server offers (auth.go), in the
@@ -296,7 +296,7 @@ func Open(config Config) (*Server, error) {
 		pushes:      make(map[string]*pushRegistration),
 		sessions:    sessions.New[*userState](),
 		devices:     devices.New[*userState](),
-		invitations: make(map[[32]byte]*invitation),
+		invitations: invitations.New(),
 		accounts:    make(map[authn.Identity]*userState),
 		proposals:   proposals.NewTable(),
 		dirty:       newDirtySet(),

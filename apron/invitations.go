@@ -3,18 +3,14 @@ package apron
 import (
 	"cmp"
 	"context"
-	"crypto/rand"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json/jsontext"
-	"encoding/json/v2"
 	"errors"
 	"fmt"
 	"maps"
 	"slices"
-	"strings"
 	"time"
 
+	"github.com/apron-chat/apron-server-go/apron/internal/invitations"
 	"github.com/apron-chat/apron-server-go/internal/authn"
 	"github.com/apron-chat/apron-server-go/wire"
 )
@@ -25,82 +21,28 @@ import (
 // (`"invitation"` in the auth params), and the account is made, admitted,
 // given what the invitation grants, and the invitation used up, in one
 // change, which is stored before the reply (fenceLocked). A sign-in that
-// fails, or is abandoned, leaves the invitation until it expires.
+// fails, or is abandoned, leaves the invitation until it expires. An
+// invitations.Table keeps the outstanding invitations; the server keeps
+// what using one makes, and what its enrollment admits.
 
 const (
 	// DefaultInvitationLifetime is how long an invitation lasts unless
 	// InvitationOptions.Lifetime says otherwise.
 	DefaultInvitationLifetime = 7 * 24 * time.Hour
-	// maxInvitations bounds the invitations outstanding at once.
-	maxInvitations = 1000
-	// invitationTokenPrefix starts every invitation token, so that one is
-	// recognizable where it leaks.
-	invitationTokenPrefix = "apron_invite_"
-	entryInvitation       = "invitation"
 	// invitationGrant is the key of the roles an invitation grants in an
 	// account's grants, beside those its identities' schemes grant.
-	invitationGrant    = "invitation"
-	maxInvitationRooms = 32
+	invitationGrant = "invitation"
 )
 
-// invitation is an outstanding invitation, kept by the SHA-256 of its
-// token. Guarded by s.mu.
-type invitation struct {
-	id string
-	// by names the extension that made it, empty for the program that
-	// embeds the server.
-	by               string
-	created, expires time.Time
-	name, userID     string
-	rooms, roles     []string
-	data             jsontext.Value
-}
+// invitation is an outstanding invitation, which an invitations.Table
+// keeps by the SHA-256 of its token. Guarded by s.mu.
+type invitation = invitations.Invitation
 
 // enrollment is what an invitation left with the account it made: kept
 // with the account, so that it is stored in the same change as the
-// account. admitted reports that the invitation still admits the account
+// account. Admitted reports that the invitation still admits the account
 // to a server whose sign-in an extension restricts.
-type enrollment struct {
-	invitation string
-	by         string
-	at         time.Time
-	data       jsontext.Value
-	admitted   bool
-}
-
-type storedInvitation struct {
-	ID      string         `json:"id"`
-	By      string         `json:"by,omitzero"`
-	Created time.Time      `json:"created"`
-	Expires time.Time      `json:"expires"`
-	Name    string         `json:"name,omitzero"`
-	UserID  string         `json:"user_id,omitzero"`
-	Rooms   []string       `json:"rooms,omitzero"`
-	Roles   []string       `json:"roles,omitzero"`
-	Data    jsontext.Value `json:"data,omitzero"`
-}
-
-type storedEnrollment struct {
-	Invitation string         `json:"invitation"`
-	By         string         `json:"by,omitzero"`
-	At         time.Time      `json:"at"`
-	Data       jsontext.Value `json:"data,omitzero"`
-	Admitted   bool           `json:"admitted,omitzero"`
-}
-
-func (e *enrollment) stored() *storedEnrollment {
-	if e == nil {
-		return nil
-	}
-	return &storedEnrollment{Invitation: e.invitation, By: e.by, At: e.at, Data: e.data, Admitted: e.admitted}
-}
-
-func (e *storedEnrollment) restored() *enrollment {
-	if e == nil {
-		return nil
-	}
-	return &enrollment{invitation: e.Invitation, by: e.By, at: e.At, data: e.Data, admitted: e.Admitted}
-}
+type enrollment = invitations.Enrollment
 
 // InvitationOptions describe an invitation to make one account.
 type InvitationOptions struct {
@@ -180,8 +122,8 @@ func (s *Server) invite(ctx context.Context, by string, options InvitationOption
 	if options.UserID != "" && !requestable(options.UserID) {
 		return Invitation{}, fmt.Errorf("apron: %q is no user_id an account can ask for", options.UserID)
 	}
-	if len(options.Rooms) > maxInvitationRooms {
-		return Invitation{}, fmt.Errorf("apron: an invitation joins at most %d rooms", maxInvitationRooms)
+	if len(options.Rooms) > invitations.MaxRooms {
+		return Invitation{}, fmt.Errorf("apron: an invitation joins at most %d rooms", invitations.MaxRooms)
 	}
 	var data jsontext.Value
 	if options.Data != nil {
@@ -191,40 +133,36 @@ func (s *Server) invite(ctx context.Context, by string, options InvitationOption
 		}
 		data = raw
 	}
-	token := invitationTokenPrefix + rand.Text()
+	token := invitations.NewToken()
 	now := time.Now()
 	inv := &invitation{
-		id: "inv_" + strings.ToLower(rand.Text()[:16]), by: by, created: now, expires: now.Add(lifetime),
-		name: normalizeName(options.Name), userID: options.UserID,
-		rooms: slices.Clone(options.Rooms), roles: normalizeRoles(options.Roles), data: data,
+		ID: invitations.NewID(), By: by, Created: now, Expires: now.Add(lifetime),
+		Name: normalizeName(options.Name), UserID: options.UserID,
+		Rooms: slices.Clone(options.Rooms), Roles: normalizeRoles(options.Roles), Data: data,
 	}
 	s.mu.Lock()
 	if s.store.Stopped() {
 		s.unlock()
 		return Invitation{}, ErrServerClosed
 	}
-	s.pruneInvitationsLocked(now)
-	if len(s.invitations) >= maxInvitations {
+	if !s.invitations.Add(token, inv, now) {
 		s.unlock()
-		return Invitation{}, fmt.Errorf("apron: at most %d invitations may be outstanding", maxInvitations)
+		return Invitation{}, fmt.Errorf("apron: at most %d invitations may be outstanding", invitations.Max)
 	}
-	key := sha256.Sum256([]byte(token))
-	s.invitations[key] = inv
-	s.dirty.invitations[key] = true
 	f := s.newFenceLocked()
 	s.unlock()
 	if err := f.Wait(ctx); err != nil {
 		return Invitation{}, err
 	}
-	described := inv.describe()
+	described := describeInvitation(inv)
 	described.Token = token
 	return described, nil
 }
 
-func (inv *invitation) describe() Invitation {
+func describeInvitation(inv *invitation) Invitation {
 	return Invitation{
-		ID: inv.id, By: inv.by, Created: inv.created, Expires: inv.expires,
-		Name: inv.name, UserID: inv.userID, Rooms: slices.Clone(inv.rooms), Roles: slices.Clone(inv.roles),
+		ID: inv.ID, By: inv.By, Created: inv.Created, Expires: inv.Expires,
+		Name: inv.Name, UserID: inv.UserID, Rooms: slices.Clone(inv.Rooms), Roles: slices.Clone(inv.Roles),
 	}
 }
 
@@ -233,16 +171,10 @@ func (inv *invitation) describe() Invitation {
 func (s *Server) Invitations() []Invitation {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	now := time.Now()
 	var list []Invitation
-	for _, inv := range s.invitations {
-		if now.Before(inv.expires) {
-			list = append(list, inv.describe())
-		}
+	for _, inv := range s.invitations.List(time.Now()) {
+		list = append(list, describeInvitation(inv))
 	}
-	slices.SortFunc(list, func(a, b Invitation) int {
-		return cmp.Or(a.Created.Compare(b.Created), cmp.Compare(a.ID, b.ID))
-	})
 	return list
 }
 
@@ -254,14 +186,7 @@ func (h *Host) Invitations() []Invitation { return h.s.Invitations() }
 // presented it fails as it finishes.
 func (s *Server) RevokeInvitation(ctx context.Context, id string) (bool, error) {
 	s.mu.Lock()
-	found := false
-	for key, inv := range s.invitations {
-		if inv.id == id {
-			delete(s.invitations, key)
-			s.dirty.invitations[key] = true
-			found = true
-		}
-	}
+	found := s.invitations.Revoke(id)
 	f := s.newFenceLocked()
 	s.unlock()
 	return found, f.Wait(ctx)
@@ -282,7 +207,7 @@ func (s *Server) Enrollment(userID string) (Enrollment, bool) {
 		return Enrollment{}, false
 	}
 	e := u.enrolled
-	return Enrollment{Invitation: e.invitation, By: e.by, At: e.at, Data: slices.Clone(e.data), Admitted: e.admitted}, true
+	return Enrollment{Invitation: e.Invitation, By: e.By, At: e.At, Data: slices.Clone(e.Data), Admitted: e.Admitted}, true
 }
 
 // Enrollment returns what an invitation left with an account; see
@@ -304,23 +229,13 @@ func (s *Server) RevokeEnrollment(ctx context.Context, userID string) error {
 }
 
 func (s *Server) revokeEnrollmentLocked(u *userState) {
-	u.enrolled.admitted = false
+	u.enrolled.Admitted = false
 	s.touchUser(u.id)
 	if before := u.views(); s.setGrantLocked(u, invitationGrant, nil) && s.grantRolesLocked(u) {
 		s.notifyProfileLocked(u, nil, before)
 	}
 	if s.allowlist != nil && !s.admittedLocked(u) {
 		s.signOutLocked(u)
-	}
-}
-
-// pruneInvitationsLocked forgets the invitations that expired.
-func (s *Server) pruneInvitationsLocked(now time.Time) {
-	for key, inv := range s.invitations {
-		if !now.Before(inv.expires) {
-			delete(s.invitations, key)
-			s.dirty.invitations[key] = true
-		}
 	}
 }
 
@@ -336,8 +251,8 @@ func (s *Server) presentedInvitationLocked(c *client, req request) (*invitation,
 	if c.user != nil {
 		return nil, &Error{Code: CodeDenied, Message: "An invitation makes a new account; sign out first"}
 	}
-	inv := s.invitations[sha256.Sum256([]byte(*token))]
-	if inv == nil || !time.Now().Before(inv.expires) {
+	inv := s.invitations.Presented(*token, time.Now())
+	if inv == nil {
 		return nil, &Error{Code: CodeDenied, Message: "This invitation is invalid, used, or expired"}
 	}
 	return inv, nil
@@ -353,7 +268,7 @@ func (s *Server) enrollLocked(c *client, req request, scheme authn.Scheme, proof
 	if err != nil {
 		return nil, err
 	}
-	if inv == nil || inv.id != invitationID {
+	if inv == nil || inv.ID != invitationID {
 		return nil, &Error{Code: CodeDenied, Message: "This invitation is invalid, used, or expired"}
 	}
 	id, err := identityOf(scheme, proof)
@@ -368,16 +283,14 @@ func (s *Server) enrollLocked(c *client, req request, scheme authn.Scheme, proof
 		return nil, err
 	}
 	now := time.Now()
-	user := newUserState(s.assignAccountIDLocked(cmp.Or(proof.UserID, inv.userID)), normalizeName(cmp.Or(proof.Name, inv.name)))
-	user.enrolled = &enrollment{invitation: inv.id, by: inv.by, at: now, data: inv.data, admitted: true}
+	user := newUserState(s.assignAccountIDLocked(cmp.Or(proof.UserID, inv.UserID)), normalizeName(cmp.Or(proof.Name, inv.Name)))
+	user.enrolled = inv.Enroll(now)
 	s.users[user.id] = user
 	s.setIdentityLocked(user, id, record)
 	s.setGrantLocked(user, id.Scheme, proof.Roles)
-	s.setGrantLocked(user, invitationGrant, inv.roles)
+	s.setGrantLocked(user, invitationGrant, inv.Roles)
 	s.grantRolesLocked(user)
-	key := sha256.Sum256([]byte(mustString(req.params, "invitation")))
-	delete(s.invitations, key)
-	s.dirty.invitations[key] = true
+	s.invitations.Use(mustString(req.params, "invitation"))
 	// Nothing the connection is sent from here on goes before the account
 	// and the used invitation are stored.
 	c.fenceLocked()
@@ -386,7 +299,7 @@ func (s *Server) enrollLocked(c *client, req request, scheme authn.Scheme, proof
 		return nil, err
 	}
 	s.provedLocked(c, scheme, proof, now, true)
-	for _, roomID := range inv.rooms {
+	for _, roomID := range inv.Rooms {
 		r := s.rooms.Get(roomID)
 		if r == nil || (r.Parent() != nil && !r.Parent().VisibleTo(user)) {
 			continue
@@ -402,56 +315,18 @@ func mustString(params map[string]jsontext.Value, name string) string {
 	return value
 }
 
-// invitationEntriesLocked renders the invitations a dirty set names.
-func (s *Server) invitationEntriesLocked(d dirtySet, put func(kind, id string, value any), del func(kind, id string)) {
-	for key := range d.invitations {
-		if inv := s.invitations[key]; inv != nil {
-			put(entryInvitation, hex.EncodeToString(key[:]), storedInvitation{
-				ID: inv.id, By: inv.by, Created: inv.created, Expires: inv.expires,
-				Name: inv.name, UserID: inv.userID, Rooms: inv.rooms, Roles: inv.roles, Data: inv.data,
-			})
-		} else {
-			del(entryInvitation, hex.EncodeToString(key[:]))
-		}
-	}
-}
-
-// restoreInvitationsLocked keeps the stored invitations that have not
-// expired, and forgets the others.
-func (s *Server) restoreInvitationsLocked(entries map[string]jsontext.Value, now time.Time) error {
-	for id, raw := range entries {
-		key, err := hex.DecodeString(id)
-		if err != nil || len(key) != 32 {
-			continue
-		}
-		var stored storedInvitation
-		if err := json.Unmarshal(raw, &stored, decodeOptions); err != nil {
-			return fmt.Errorf("stored invitation %s: %w", id, err)
-		}
-		if !now.Before(stored.Expires) {
-			s.dirty.invitations[[32]byte(key)] = true
-			continue
-		}
-		s.invitations[[32]byte(key)] = &invitation{
-			id: stored.ID, by: stored.By, created: stored.Created, expires: stored.Expires,
-			name: stored.Name, userID: stored.UserID, rooms: stored.Rooms, roles: stored.Roles, data: stored.Data,
-		}
-	}
-	return nil
-}
-
 // enrolledNamedLocked ends the invitation's admission of the accounts a
 // principal names, by user_id or identity, as when Allowlist.Disallow
 // takes it off the list.
 func (s *Server) enrolledNamedLocked(p Principal) {
 	for _, u := range s.users {
-		if u.enrolled == nil || !u.enrolled.admitted {
+		if u.enrolled == nil || !u.enrolled.Admitted {
 			continue
 		}
 		if p == UserID(u.id) || slices.ContainsFunc(slices.Collect(maps.Keys(u.identities)), func(scheme string) bool {
 			return principalOf(authn.Identity{Scheme: scheme, Subject: u.identities[scheme]}) == p
 		}) {
-			u.enrolled.admitted = false
+			u.enrolled.Admitted = false
 			s.touchUser(u.id)
 		}
 	}

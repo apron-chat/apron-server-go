@@ -176,7 +176,7 @@ func (s *Server) authenticate(c *client, req request) (any, *Error) {
 	}
 	r := s.authRequestLocked(c, req, scheme, requestedName, requested)
 	if presented != nil {
-		r.Invitation = &authn.Invitation{ID: presented.id, Name: presented.name, UserID: presented.userID}
+		r.Invitation = &authn.Invitation{ID: presented.ID, Name: presented.Name, UserID: presented.UserID}
 	}
 	s.unlock()
 

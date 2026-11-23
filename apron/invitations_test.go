@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/apron-chat/apron-server-go/apron/internal/invitations"
 	"github.com/apron-chat/apron-server-go/store"
 )
 
@@ -85,7 +86,7 @@ func TestAnInvitationMakesOneAccount(t *testing.T) {
 	var storedUser, storedInvitation bool
 	_ = backing.Load(func(e store.Entry) error {
 		storedUser = storedUser || (e.Kind == entryUser && e.ID == "owner")
-		storedInvitation = storedInvitation || e.Kind == entryInvitation
+		storedInvitation = storedInvitation || e.Kind == invitations.EntryKind
 		return nil
 	})
 	if !storedUser || storedInvitation {
