@@ -1055,6 +1055,10 @@ func TestSignInToExistingAccountIsADeparture(t *testing.T) {
 		expectMembership(t, observer, "general", guest.userID, true)
 		observer.drain(t)
 		guest.request(t, "auth", "resume", map[string]any{"scheme": "token", "token": registered["token"]})
+		// The sign-in's result comes before its handler has sent the rest,
+		// such as the account coming online: a fence after it on the same
+		// connection is answered once the handler has returned.
+		guest.drain(t)
 		expectMembership(t, observer, "general", guest.userID, false)
 		frames := observer.drain(t)
 		switch status {
