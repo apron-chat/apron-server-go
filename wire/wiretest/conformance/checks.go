@@ -102,9 +102,7 @@ var checks = []check{
 	{id: "push.shape.unregister", ref: "4.9.1", title: "unregistering an unknown push url succeeds", needs: advertised(func(s obj) bool { return has(s, "push") }), fn: pushUnregister},
 
 	// Rules checked on every frame along the way.
-	{id: "core.shape.schema", ref: "1", title: "every frame matches schema/apron.schema.json", fn: func(c *checker) {
-		c.skip("not ported: it needs a JSON Schema validator; conform.py checks it")
-	}},
+	{id: "core.shape.schema", ref: "1", title: "every frame matches schema/apron.schema.json", fn: seen("schema")},
 	{id: "core.shape.one-reply", ref: "1.1", title: "every request gets exactly one reply", fn: seen("replies")},
 	{id: "core.shape.ids", ref: "2", title: "IDs are well formed", fn: seen("ids")},
 	{id: "core.delivery.order", ref: "3.5.3", title: "each room's snapshots arrive in ascending log_id", fn: seen("order")},

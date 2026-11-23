@@ -14,18 +14,22 @@ import (
 func (c *conn) inspect(frame obj, raw []byte) {
 	r := c.r
 	if frame == nil {
-		return // core.shape.schema, which is not ported
+		r.violate("schema", fmt.Sprintf("not a JSON object: %.80q", raw))
+		return
 	}
 	if len(c.frames) == 0 && frame["method"] != "server" {
 		r.violate("server-first", fmt.Sprintf("first frame was %.80s", raw))
 	}
 	_, isNotification := frame["method"]
+	method := ""
 	if id, ok := frame["id"].(string); ok && !isNotification {
 		c.answered[id]++
 		if c.answered[id] > c.asked[id] {
 			r.violate("replies", fmt.Sprintf("unexpected reply to id %q", id))
 		}
+		method = c.methods[id]
 	}
+	checkSchema(r, frame, method)
 	checkIDs(r, frame, "")
 	params, _ := frame["params"].(obj)
 	if frame["method"] == "message" && params != nil {

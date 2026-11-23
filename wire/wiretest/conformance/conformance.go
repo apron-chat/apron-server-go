@@ -22,8 +22,9 @@
 // learns something, it still runs, unreported.
 //
 // Every frame from the server is also checked as it arrives, as the Python
-// suite does, and the last checks report what was seen: that every request
-// gets one reply (§1.1), that IDs are well formed (§2), that each room's
+// suite does, and the last checks report what was seen: that it matches
+// the protocol's JSON Schema, schema/apron.schema.json, as do the results
+// it defines (§1), that every request gets one reply (§1.1), that IDs are well formed (§2), that each room's
 // snapshots arrive in ascending log_id (§3.5.3), that listed room records
 // carry their delivery fields (§4.3.3), and that seen follows the shown
 // status (§4.5.2).
@@ -43,7 +44,7 @@
 //   - history: paging, every room at once, and bounds (§4.3);
 //   - edit, rooms and membership, reactions, activity, status, command,
 //     ext, and push_unregister (§4.1 to §4.7, §4.9.1, §4.13);
-//   - the rules checked on every frame, but for the schema.
+//   - the rules checked on every frame, the schema's included.
 //
 // Three more checks are this package's own, of rules wire leaves to the
 // backend (see the Validation section of package wire) that conform.py
@@ -58,10 +59,14 @@
 //     room's log keeps its members in it, with a membership record, and its
 //     effective lower bound never decreases (§4.3.3).
 //
-// Not ported: core.shape.schema, which needs a JSON Schema validator;
-// embeds (§4.8), which need HTTP uploads and live reads; and the sign-in
-// schemes that need a browser, a passkey, an email, or an authorization
-// server (§4.10 to §4.12, ext:oauth). The Python suite covers those.
+// The schema is a copy of the protocol's, checked with a validator of
+// exactly the JSON Schema keywords it uses, as conform.py checks it with
+// the jsonschema package.
+//
+// Not ported: embeds (§4.8), which need HTTP uploads and live reads; and
+// the sign-in schemes that need a browser, a passkey, an email, or an
+// authorization server (§4.10 to §4.12, ext:oauth). The Python suite
+// covers those.
 package conformance
 
 import (
