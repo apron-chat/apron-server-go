@@ -216,10 +216,9 @@ type Server struct {
 	// wire serves the protocol, with s as its Backend (backend.go).
 	wire *wire.Server
 	push *webpush.Deliverer
-	// vapid is the webpush key (§4.9); vapidStored reports that it is the
-	// one kept in the store.
+	// vapid is the webpush key (§4.9): Config's, else storedVAPID's.
 	vapid       *webpush.VAPIDKey
-	vapidStored bool
+	storedVAPID webpush.StoredKey
 	// badgeDelay is how long badge pushes wait to coalesce the changes to
 	// one user's unread count; badges counts the waits in progress.
 	badgeDelay time.Duration

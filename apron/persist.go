@@ -37,7 +37,8 @@ import (
 // Entry kinds and IDs:
 //
 //	meta     "counters"   log_id, guest, embed, and upload sequences
-//	meta     "vapid"      the webpush VAPID private key (§4.9)
+//	meta     "vapid"      the webpush VAPID private key the server made
+//	                      (§4.9, webpush)
 //	meta     "emoji"      the custom emoji catalog (ext:emoji, emoji)
 //	meta     "profile"    the server's title, description, and avatar set
 //	                      with /server (§3.1)
@@ -68,7 +69,6 @@ const (
 
 // dirtySet is the state changed since the last batch, by key.
 type dirtySet struct {
-	vapid   bool
 	profile bool
 }
 
@@ -115,6 +115,7 @@ func (s *Server) flushLocked() {
 		s.invitations.Entries()
 		s.emoji.Entries()
 		s.embeds.Entries(avatarOwner)
+		s.storedVAPID.Entries()
 		s.store.Queue(nil)
 		return
 	}
@@ -129,6 +130,7 @@ func (s *Server) flushLocked() {
 	batch = append(batch, s.invitations.Entries()...)
 	batch = append(batch, s.emoji.Entries()...)
 	batch = append(batch, s.embeds.Entries(avatarOwner)...)
+	batch = append(batch, s.storedVAPID.Entries()...)
 	meta := s.metaLocked()
 	if meta != s.storedMeta {
 		s.storedMeta = meta
@@ -151,9 +153,6 @@ func (s *Server) entriesLocked(d dirtySet, records []store.Entry) []store.Entry 
 		batch = append(batch, store.Entry{Kind: kind, ID: id, Value: encoded})
 	}
 	batch = append(batch, records...)
-	if d.vapid && s.vapidStored {
-		put(entryMeta, "vapid", s.vapid.Encoded())
-	}
 	if d.profile {
 		put(entryMeta, "profile", s.storedProfileLocked())
 	}
@@ -216,8 +215,12 @@ func (s *Server) restoreLocked() (map[string]bool, error) {
 			s.extData.Restore(kind, values)
 		}
 	}
-	if err := s.restoreVAPIDLocked(entries[entryMeta]["vapid"]); err != nil {
-		return nil, err
+	if s.vapid == nil {
+		// The webpush VAPID key (§4.9) is Config's, else the one in the
+		// store, else a new one, which is stored.
+		if s.vapid, err = s.storedVAPID.Restore(entries[webpush.StoreKind][webpush.StoreID]); err != nil {
+			return nil, err
+		}
 	}
 	s.ids.Restore(entries[accounts.UsedKind])
 
@@ -329,31 +332,4 @@ func (s *Server) restoreLocked() (map[string]bool, error) {
 		}
 	}
 	return files, nil
-}
-
-// restoreVAPIDLocked sets the webpush VAPID key (§4.9): Config's, else the
-// one in the store, else a new one, which is stored.
-func (s *Server) restoreVAPIDLocked(raw jsontext.Value) error {
-	if s.vapid != nil {
-		return nil
-	}
-	if raw != nil {
-		var encoded string
-		if err := json.Unmarshal(raw, &encoded); err != nil {
-			return fmt.Errorf("stored VAPID key: %w", err)
-		}
-		key, err := webpush.ParseVAPIDKey(encoded)
-		if err != nil {
-			return fmt.Errorf("stored VAPID key: %w", err)
-		}
-		s.vapid, s.vapidStored = key, true
-		return nil
-	}
-	key, err := webpush.NewVAPIDKey()
-	if err != nil {
-		return err
-	}
-	s.vapid, s.vapidStored = key, true
-	s.dirty.vapid = true
-	return nil
 }
