@@ -76,13 +76,12 @@ func parseBody(raw jsontext.Value, fields Fields) (*Body, error) {
 			return nil, InvalidParams("body.embeds must be an array")
 		}
 		for i, embed := range body.Embeds {
-			var kind struct {
-				Kind *string `json:"kind"`
-			}
-			if json.Unmarshal(embed, &kind) != nil || isNull(embed) || embed[0] != '{' {
+			var object Fields
+			if isNull(embed) || json.Unmarshal(embed, &object) != nil {
 				return nil, InvalidParams(fmt.Sprintf("body.embeds[%d] must be an object", i))
 			}
-			if kind.Kind == nil || *kind.Kind == "" {
+			var kind string
+			if raw, ok := object["kind"]; !ok || isNull(raw) || json.Unmarshal(raw, &kind) != nil || kind == "" {
 				return nil, InvalidParams(fmt.Sprintf("body.embeds[%d].kind must be a non-empty string", i))
 			}
 		}
@@ -93,6 +92,21 @@ func parseBody(raw jsontext.Value, fields Fields) (*Body, error) {
 		return nil, InvalidParams("body must be an object")
 	}
 	return body, nil
+}
+
+// ParseBody reads a message body (§3.5) as the message requests' parsers
+// read one, such as ParseMessage: text a string, format plain or
+// markdown, mentions user_ids, and embeds objects with a kind, with the
+// members this package does not know kept in Unknown. A backend checks
+// with it a body that came from elsewhere, such as one its filter
+// rewrote, as wire checks a client's. Its error is always an *Error,
+// error/invalid_params.
+func ParseBody(raw jsontext.Value) (*Body, error) {
+	fields, _, err := Fields{"body": raw}.Object("body")
+	if err != nil {
+		return nil, err
+	}
+	return parseBody(raw, fields)
 }
 
 // ParseMessage reads the params of a new message (§3.5.1): a message

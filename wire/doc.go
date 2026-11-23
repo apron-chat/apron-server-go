@@ -299,10 +299,12 @@
 //
 //	server.Messages = noShouting{chat}
 //
-// Edits and commands are wrapped the same way. wire has no filter type:
-// what a filter needs to know, such as whether the sender may see the room,
-// or what an edit's message said, is the backend's, so a backend whose
-// filters need its state, as package apron's do, runs them where it has it.
+// Edits and commands are wrapped the same way, and a filter that rewrites
+// a body checks what it made as wire checks a client's ([ParseBody]).
+// wire has no filter type: what a filter needs to know, such as whether
+// the sender may see the room, or what an edit's message said, is the
+// backend's, so a backend whose filters need its state, as package
+// apron's do, runs them where it has it.
 // Nor does wire follow what happened, as package apron's extensions do
 // (Registrar.OnEvent, Follow): that is a log, and the log is the backend's.
 //

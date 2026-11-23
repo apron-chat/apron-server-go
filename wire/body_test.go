@@ -120,3 +120,36 @@ func TestBodyDecode(t *testing.T) {
 		}
 	}
 }
+
+// ParseBody checks a body as the message requests' parsers do.
+func TestParseBody(t *testing.T) {
+	for in, want := range map[string]string{
+		`null`:                         "body must be an object",
+		`[]`:                           "body must be an object",
+		`{"text":null}`:                "body.text must be a string",
+		`{"text":5}`:                   "body.text must be a string",
+		`{"format":"html"}`:            "body.format must be plain or markdown",
+		`{"mentions":"ada"}`:           "body.mentions must be an array of user_id strings",
+		`{"mentions":["a b"]}`:         "body.mentions must be an array of user_id strings",
+		`{"embeds":{}}`:                "body.embeds must be an array",
+		`{"embeds":[null]}`:            "body.embeds[0] must be an object",
+		`{"embeds":[{"kind":"x"},[]]}`: "body.embeds[1] must be an object",
+		`{"embeds":[{}]}`:              "body.embeds[0].kind must be a non-empty string",
+		`{"embeds":[{"kind":""}]}`:     "body.embeds[0].kind must be a non-empty string",
+		`{"embeds":[{"kind":5}]}`:      "body.embeds[0].kind must be a non-empty string",
+		`{"embeds":[{"kind":null}]}`:   "body.embeds[0].kind must be a non-empty string",
+	} {
+		body, err := wire.ParseBody(jsontext.Value(in))
+		if e, ok := err.(*wire.Error); !ok || e.Code != wire.CodeInvalidParams || e.Message != want {
+			t.Errorf("ParseBody(%s) = %v, %v; want %q", in, body, err, want)
+		}
+	}
+	const in = `{"text":"hi","format":"markdown","mentions":["ada"],"embeds":[{"kind":"upload"}],"color":"red"}`
+	body, err := wire.ParseBody(jsontext.Value(in))
+	if err != nil || body.Text != "hi" || len(body.Mentions) != 1 || len(body.Embeds) != 1 || string(body.Unknown) != `{"color":"red"}` {
+		t.Fatalf("ParseBody(%s) = %+v, %v", in, body, err)
+	}
+	if out, _ := json.Marshal(body); string(out) != in {
+		t.Fatalf("parsed body encodes as %s", out)
+	}
+}
