@@ -71,10 +71,19 @@ func newTestRelay(t *testing.T) *testRelay {
 }
 
 // pushes returns the deliveries made so far, sorted by path, after the
-// requests c sent before have finished waking users and their badge
-// pushes have gone out.
+// requests c sent before, and any request whose notification the test has
+// read, have finished waking users and their badge pushes have gone out.
 func (relay *testRelay) pushes(t *testing.T, app *Server, c *testClient) []relayRequest {
 	t.Helper()
+	// A handler sends its notifications holding app.mu, and goes on before
+	// it unlocks, as activity relays a read to the room and schedules its
+	// badge after it sends the reader theirs: a notification the test has
+	// read can come before the others, and before the push it goes with is
+	// scheduled. Taking app.mu waits for such a handler to finish, and the
+	// drain, which a Server answers after c's requests, takes what it sent
+	// c.
+	app.mu.Lock()
+	app.mu.Unlock()
 	c.drain(t)
 	app.badges.Wait()
 	app.push.Wait()
