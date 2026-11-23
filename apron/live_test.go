@@ -65,8 +65,8 @@ func liveURLOf(t *testing.T, app *Server, embedID any) string {
 	t.Helper()
 	app.mu.RLock()
 	defer app.mu.RUnlock()
-	e := app.embeds[embedID.(string)]
-	if e == nil || !liveKind(e.kind) {
+	e := app.embeds.Get(embedID.(string))
+	if e == nil || !liveKind(e.Kind) {
 		t.Fatalf("no live text %v", embedID)
 	}
 	return e.liveURL()
@@ -252,7 +252,7 @@ func waitForLiveText(t *testing.T, app *Server, embedID, want string) {
 	t.Helper()
 	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(5 * time.Millisecond) {
 		app.mu.RLock()
-		e := app.embeds[embedID]
+		e := app.embeds.Get(embedID)
 		arrived := e != nil && e.live != nil && e.live.String() == want
 		app.mu.RUnlock()
 		if arrived {
@@ -528,7 +528,7 @@ func TestEmbedCommandWritesExpire(t *testing.T) {
 	_, appendURL, _ := liveCommand(t, a, "append", map[string]any{"room_id": "general", "body": map[string]any{"text": "/embed-append"}})
 	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(10 * time.Millisecond) {
 		app.mu.RLock()
-		left := len(app.writes) + len(app.embeds)
+		left := app.embeds.WriteCount() + app.embeds.Len()
 		app.mu.RUnlock()
 		if left == 0 {
 			break
@@ -563,7 +563,7 @@ func TestLiveTextEndsWhenItsWriterDisconnects(t *testing.T) {
 		token := writeURL[strings.LastIndex(writeURL, "/")+1:]
 		for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(5 * time.Millisecond) {
 			app.mu.RLock()
-			e := app.writes[token]
+			e := app.embeds.Write(token)
 			arrived := e != nil && e.live.String() == text
 			app.mu.RUnlock()
 			if arrived {
@@ -625,7 +625,7 @@ func TestALiveReaderThatFallsBehindFails(t *testing.T) {
 	_, writeURL, terminal := postLive(t, a, "terminal", map[string]any{"embeds": []any{map[string]any{"kind": "terminal"}}})
 	pipe, writerDone := startLiveWrite(t, app, writeURL, "12345678")
 	app.mu.RLock()
-	live := app.embeds[terminal["embed_id"].(string)].live
+	live := app.embeds.Get(terminal["embed_id"].(string)).live
 	app.mu.RUnlock()
 	waitFor := func(what string, done func(b *livetext.Text) bool) {
 		t.Helper()
@@ -671,7 +671,7 @@ func TestAFinishedTerminalLetsGoOfItsLiveText(t *testing.T) {
 	liveURL := embedsOf(t, startedSnapshot(t, a))[0]["url"].(string)
 	a.notification(t, "message")
 	app.mu.RLock()
-	live := app.embeds[terminal["embed_id"].(string)].live
+	live := app.embeds.Get(terminal["embed_id"].(string)).live
 	app.mu.RUnlock()
 	if live != nil {
 		t.Fatalf("a finished terminal holds its live text: %q", live.String())

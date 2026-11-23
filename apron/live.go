@@ -32,7 +32,7 @@ func liveKind(kind any) bool {
 }
 
 func (e *embedState) liveURL() string {
-	return e.baseURL + livePath + e.id + "/" + e.secret
+	return e.BaseURL + livePath + e.ID + "/" + e.Secret
 }
 
 // terminalDescription is a terminal's og description (§4.8.1), for a
@@ -42,7 +42,7 @@ const terminalDescription = "Terminal output. Open it to watch."
 
 // terminalOG is a terminal embed's og, titled as the embed is.
 func (e *embedState) terminalOG() map[string]any {
-	title := e.title
+	title := e.Title
 	if title == "" {
 		title = "Terminal"
 	}
@@ -64,15 +64,15 @@ type pendingPost struct {
 // after a long opening text, so that the finished body.text stays within
 // the frames the server reads (ReadLimit).
 func (s *Server) startLiveLocked(e *embedState, opening string) {
-	if e.kind == kindTerminal {
+	if e.Kind == kindTerminal {
 		e.live = livetext.New(true, s.config.TerminalKeepBytes, s.config.LiveTextMaxBytes)
 	} else {
 		keep := max(0, min(s.config.AppendMaxBytes, int(s.config.ReadLimit)-len(opening)))
 		e.live = livetext.New(false, keep, s.config.LiveTextMaxBytes)
 	}
-	e.owned = map[string]any{}
-	if e.kind == kindTerminal {
-		e.owned["og"] = e.terminalOG()
+	e.Owned = map[string]any{}
+	if e.Kind == kindTerminal {
+		e.Owned["og"] = e.terminalOG()
 	}
 }
 
@@ -89,19 +89,19 @@ func (s *Server) startWriterLocked(e *embedState) (int, string) {
 		s.failWriteLocked(e)
 		return http.StatusForbidden, writeRevokedMessage
 	}
-	e.owned = map[string]any{"url": e.liveURL()}
-	if e.kind == kindTerminal {
-		e.owned["og"] = e.terminalOG()
+	e.Owned = map[string]any{"url": e.liveURL()}
+	if e.Kind == kindTerminal {
+		e.Owned["og"] = e.terminalOG()
 	}
 	if e.post != nil {
 		if !s.postPendingLocked(e) {
-			s.removeEmbedLocked(e.id)
+			s.removeEmbedLocked(e.ID)
 			return http.StatusGone, "The room or the message this was to reply to is no longer available"
 		}
-	} else if m := s.messages[e.messageID]; m != nil {
-		s.touchEmbed(e.id)
+	} else if m := s.messages[e.MessageID]; m != nil {
+		s.embeds.Touch(e.ID)
 		s.republishLocked(m, func(body map[string]any) bool {
-			return replaceEmbed(body, e.id, func(embed map[string]any) { maps.Copy(embed, cloneObject(e.owned)) })
+			return replaceEmbed(body, e.ID, func(embed map[string]any) { maps.Copy(embed, cloneObject(e.Owned)) })
 		})
 	}
 	e.started = true
@@ -134,12 +134,12 @@ func (s *Server) postPendingLocked(e *embedState) bool {
 	if r == nil {
 		return false
 	}
-	embed := map[string]any{"embed_id": e.id, "kind": e.kind}
-	maps.Copy(embed, cloneObject(e.owned))
+	embed := map[string]any{"embed_id": e.ID, "kind": e.Kind}
+	maps.Copy(embed, cloneObject(e.Owned))
 	body := map[string]any{"text": "", "embeds": []any{embed}}
-	if e.kind == kindTerminal {
-		if e.title != "" {
-			embed["title"] = e.title
+	if e.Kind == kindTerminal {
+		if e.Title != "" {
+			embed["title"] = e.Title
 		}
 	} else {
 		body["text"], body["format"] = p.text, "markdown"
@@ -152,9 +152,9 @@ func (s *Server) postPendingLocked(e *embedState) bool {
 		snapshot.ReplyTo = &roomlog.Ref{MessageID: p.replyTo}
 	}
 	m := s.newMessageLocked(messageID, from, u.id)
-	e.messageID = messageID
+	e.MessageID = messageID
 	e.post = nil
-	s.touchEmbed(e.id)
+	s.embeds.Touch(e.ID)
 	s.commitSnapshotLocked(m, snapshot, logID)
 	s.messageUnreadLocked(m, nil, nil)
 	s.unreadChangedLocked(u, r.ID())
@@ -276,25 +276,25 @@ func (s *Server) writeLive(w http.ResponseWriter, r *http.Request, e *embedState
 // body.text and the embed removed (§4.8.5). The embed lets go of its live
 // text, which only readers still reading it hold on to.
 func (s *Server) finishLiveLocked(e *embedState) {
-	if e.finished || e.removed {
+	if e.Finished || e.removed {
 		return
 	}
-	e.finished = true
+	e.Finished = true
 	e.doneWriting()
 	e.live.End()
 	e.timer.Stop()
-	delete(s.writes, e.token)
-	s.touchEmbed(e.id)
-	m := s.messages[e.messageID]
+	s.embeds.EndWrite(e.token)
+	s.embeds.Touch(e.ID)
+	m := s.messages[e.MessageID]
 	text := e.live.String()
 	e.live = nil
-	if e.kind == kindTerminal {
-		e.owned = map[string]any{"output": text, "og": e.terminalOG()}
+	if e.Kind == kindTerminal {
+		e.Owned = map[string]any{"output": text, "og": e.terminalOG()}
 		if m != nil {
 			s.republishLocked(m, func(body map[string]any) bool {
-				return replaceEmbed(body, e.id, func(embed map[string]any) {
+				return replaceEmbed(body, e.ID, func(embed map[string]any) {
 					delete(embed, "url")
-					maps.Copy(embed, cloneObject(e.owned))
+					maps.Copy(embed, cloneObject(e.Owned))
 				})
 			})
 		}
@@ -302,7 +302,7 @@ func (s *Server) finishLiveLocked(e *embedState) {
 	}
 	if m != nil {
 		s.republishLocked(m, func(body map[string]any) bool {
-			if !replaceEmbed(body, e.id, nil) {
+			if !replaceEmbed(body, e.ID, nil) {
 				return false
 			}
 			// A save may have lengthened body.text since the text started:
@@ -315,7 +315,7 @@ func (s *Server) finishLiveLocked(e *embedState) {
 			return true
 		})
 	}
-	s.removeEmbedLocked(e.id)
+	s.removeEmbedLocked(e.ID)
 	if m != nil {
 		s.releasePushLocked(m)
 	}
@@ -337,16 +337,16 @@ func (s *Server) handleLive(w http.ResponseWriter, r *http.Request) {
 	}
 	s.mu.RLock()
 	e := s.lookupEmbedLocked(strings.TrimPrefix(r.URL.Path, livePath))
-	if e == nil || !liveKind(e.kind) || (e.live == nil && !e.finished) {
+	if e == nil || !liveKind(e.Kind) || (e.live == nil && !e.Finished) {
 		s.mu.RUnlock()
 		http.NotFound(w, r)
 		return
 	}
 	live := e.live
-	output, _ := e.owned["output"].(string)
-	finished := e.finished
+	output, _ := e.Owned["output"].(string)
+	finished := e.Finished
 	liveURL := e.liveURL()
-	terminal := e.kind == kindTerminal
+	terminal := e.Kind == kindTerminal
 	s.mu.RUnlock()
 	header := w.Header()
 	// The viewer reads only https, so an http url (one with no TLS in
@@ -475,7 +475,7 @@ func (s *Server) liveCommand(c *client, r *roomState, body map[string]any, kind,
 	e := s.newWriteLocked(c, fmt.Sprintf("embed_%d", s.embedNumber), kind, "")
 	e.post = &pendingPost{user: c.user, roomID: r.ID(), replyTo: replyTo, text: text}
 	if kind == kindTerminal {
-		e.title = text
+		e.Title = text
 		text = ""
 	}
 	s.startLiveLocked(e, text)
@@ -489,7 +489,7 @@ func (s *Server) liveNotice(e *embedState) string {
 	url := e.writeURL()
 	within := formatDuration(s.config.UploadStartTimeout)
 	duration := formatDuration(s.config.LiveTextMaxDuration)
-	if e.kind == kindTerminal {
+	if e.Kind == kindTerminal {
 		return fmt.Sprintf("Stream a terminal into this room within %s (80×40; it keeps the last %s, for up to %s):\n\n"+
 			"```sh\nscript -qfc 'stty cols 80 rows 40; YOUR_COMMAND' /dev/null | curl -sT - '%s'\n```\n\n"+
 			"Or stream a tmux session, until you `exit` its shell:\n\n"+

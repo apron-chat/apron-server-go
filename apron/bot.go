@@ -628,8 +628,8 @@ func (w *LiveWriter) startLocked() error {
 	s := w.s
 	s.mu.Lock()
 	defer s.unlock()
-	e := s.writes[w.token]
-	if e == nil || e.removed || e.finished || e.live == nil {
+	e := s.embeds.Write(w.token)
+	if e == nil || e.removed || e.Finished || e.live == nil {
 		w.err = errors.New("apron: the live text's write expired; write within Config.UploadStartTimeout of starting it")
 		return w.err
 	}
@@ -651,7 +651,7 @@ func (w *LiveWriter) MessageID() string {
 	}
 	w.s.mu.RLock()
 	defer w.s.mu.RUnlock()
-	return e.messageID
+	return e.MessageID
 }
 
 // Write adds p to the text.

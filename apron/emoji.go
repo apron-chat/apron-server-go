@@ -4,11 +4,9 @@ import (
 	"bytes"
 	"encoding/json/jsontext"
 	"fmt"
-	"maps"
 	"net"
 	"net/http"
 	"net/url"
-	"slices"
 	"strings"
 	"time"
 
@@ -38,10 +36,10 @@ type customEmoji = emoji.Entry[*embedState]
 
 // The embed as a custom emoji's image (emoji.Image): an upload, which the
 // store names by its embed_id.
-func (e *embedState) ImageID() string  { return e.id }
+func (e *embedState) ImageID() string  { return e.ID }
 func (e *embedState) ImageURL() string { return e.fileURL() }
-func (e *embedState) ImageAlt() string { return e.alt }
-func (e *embedState) ImageSize() int64 { return e.size }
+func (e *embedState) ImageAlt() string { return e.Alt }
+func (e *embedState) ImageSize() int64 { return e.Size }
 
 // emojiExt is server.ext.emoji for a connection whose URLs start with
 // baseURL, or nil when clients would ignore its catalog_url: one that is
@@ -92,7 +90,7 @@ func loopbackHost(host string) bool {
 func (s *Server) emojiRoomLocked(key string) int64 {
 	room := s.config.MaxEmojiStorageBytes - s.emoji.Bytes()
 	if previous := s.emoji.Get(key); previous != nil {
-		room += previous.Image.size
+		room += previous.Image.Size
 	}
 	return min(s.config.MaxEmojiBytes, room)
 }
@@ -114,15 +112,15 @@ func (s *Server) mayReplaceEmojiLocked(existing *customEmoji, userID string) boo
 // URL must be one clients load. It returns the
 // HTTP status and message to refuse the write with, or 0.
 func (s *Server) refuseEmojiLocked(e *embedState, size int64) (int, string) {
-	existing := s.emoji.Get(e.emojiKey)
+	existing := s.emoji.Get(e.EmojiKey)
 	switch {
-	case !clientsLoad(e.baseURL):
+	case !clientsLoad(e.BaseURL):
 		return http.StatusForbidden, emojiNeedHTTPS
 	case existing != nil && existing.Image != e && !s.mayReplaceEmojiLocked(existing, e.emojiBy):
-		return http.StatusConflict, fmt.Sprintf("%s was added by someone else meanwhile; only who added it or an admin can replace it", e.emojiKey)
+		return http.StatusConflict, fmt.Sprintf("%s was added by someone else meanwhile; only who added it or an admin can replace it", e.EmojiKey)
 	case existing == nil && s.emoji.Len() >= maxCustomEmoji:
 		return http.StatusConflict, fmt.Sprintf("This server has %d custom emoji, the most it keeps", maxCustomEmoji)
-	case size > s.emojiRoomLocked(e.emojiKey):
+	case size > s.emojiRoomLocked(e.EmojiKey):
 		return http.StatusRequestEntityTooLarge, s.emojiFullMessage()
 	}
 	return 0, ""
@@ -138,22 +136,22 @@ func (s *Server) emojiFullMessage() string {
 // deleting the upload it replaces, and sends every connection the new
 // server frame.
 func (s *Server) setEmojiLocked(e *embedState, og map[string]any) {
-	if previous := s.emoji.Get(e.emojiKey); previous != nil && previous.Image != e {
-		s.removeEmbedLocked(previous.Image.id)
+	if previous := s.emoji.Get(e.EmojiKey); previous != nil && previous.Image != e {
+		s.removeEmbedLocked(previous.Image.ID)
 	}
 	entry := &customEmoji{Image: e, By: e.emojiBy}
 	if image, ok := og["image"].(map[string]any); ok {
 		entry.Width, _ = image["width"].(int)
 		entry.Height, _ = image["height"].(int)
 	}
-	s.emoji.Set(e.emojiKey, entry)
+	s.emoji.Set(e.EmojiKey, entry)
 	s.emojiChangedLocked()
 }
 
 // removeEmojiLocked removes a key from the catalog and deletes its image.
 func (s *Server) removeEmojiLocked(key string) {
 	if entry := s.emoji.Remove(key); entry != nil {
-		s.removeEmbedLocked(entry.Image.id)
+		s.removeEmbedLocked(entry.Image.ID)
 		s.emojiChangedLocked()
 	}
 }
@@ -189,15 +187,15 @@ func (s *Server) emojiChangedLocked() {
 // that no key holds.
 func (s *Server) restoreEmojiLocked(raw jsontext.Value) error {
 	err := s.emoji.Restore(raw, func(id, key string) (*embedState, bool) {
-		e := s.embeds[id]
-		return e, e != nil && e.finished && e.emojiKey == key
+		e := s.embeds.Get(id)
+		return e, e != nil && e.Finished && e.EmojiKey == key
 	})
 	if err != nil {
 		return err
 	}
-	for _, id := range slices.Sorted(maps.Keys(s.embeds)) {
-		if e := s.embeds[id]; e.emojiKey != "" && e.finished {
-			if entry := s.emoji.Get(e.emojiKey); entry == nil || entry.Image != e {
+	for _, id := range s.embeds.IDs() {
+		if e := s.embeds.Get(id); e.EmojiKey != "" && e.Finished {
+			if entry := s.emoji.Get(e.EmojiKey); entry == nil || entry.Image != e {
 				s.removeEmbedLocked(id)
 			}
 		}
@@ -268,8 +266,8 @@ func (s *Server) emojiCommand(c *client, _ *roomState, body map[string]any, args
 		}
 		s.embedNumber++
 		e := s.newWriteLocked(c, fmt.Sprintf("embed_%d", s.embedNumber), "upload", "")
-		e.emojiKey, e.emojiBy = key, u.id
-		e.alt = ogImageAlt(embeds[0].(map[string]any)["og"])
+		e.EmojiKey, e.emojiBy = key, u.id
+		e.Alt = ogImageAlt(embeds[0].(map[string]any)["og"])
 		return e.writeResult(), nil
 	case "remove":
 		if !u.hasRole("admin") {

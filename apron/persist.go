@@ -7,12 +7,12 @@ import (
 	"fmt"
 	"log/slog"
 	"maps"
-	"path/filepath"
 	"slices"
 	"strings"
 	"time"
 
 	"github.com/apron-chat/apron-server-go/apron/internal/devices"
+	"github.com/apron-chat/apron-server-go/apron/internal/embeds"
 	"github.com/apron-chat/apron-server-go/apron/internal/invitations"
 	"github.com/apron-chat/apron-server-go/apron/internal/roomlog"
 	"github.com/apron-chat/apron-server-go/apron/internal/rooms"
@@ -54,7 +54,7 @@ import (
 //	device   hex SHA-256 of the /invite-device token (devices)
 //	service  hex SHA-256 of a bot's service token (services)
 //	invitation  hex SHA-256 of an invitation's token (invitations)
-//	embed    embed_id
+//	embed    embed_id (embeds)
 //	push     user_id, a space, and url (url alone before registrations
 //	         belonged to their user)
 //	ext/<n>  a key        a value Extension <n> keeps (Host.Store, kv)
@@ -64,7 +64,6 @@ const (
 	entryRoom    = rooms.EntryKind
 	entryMessage = rooms.MessageEntryKind
 	entryUser    = "user"
-	entryEmbed   = "embed"
 	entryPush    = "push"
 )
 
@@ -74,7 +73,6 @@ const (
 type dirtySet struct {
 	messages map[string]bool
 	users    map[string]bool
-	embeds   map[string]bool
 	pushes   map[string]bool
 	usedIDs  []string
 	vapid    bool
@@ -85,14 +83,12 @@ func newDirtySet() dirtySet {
 	return dirtySet{
 		messages: make(map[string]bool),
 		users:    make(map[string]bool),
-		embeds:   make(map[string]bool),
 		pushes:   make(map[string]bool),
 	}
 }
 
 func (s *Server) touchMessage(m *messageState) { s.dirty.messages[m.ID()] = true }
 func (s *Server) touchUser(id string)          { s.dirty.users[id] = true }
-func (s *Server) touchEmbed(id string)         { s.dirty.embeds[id] = true }
 func (s *Server) touchPush(key string)         { s.dirty.pushes[key] = true }
 func (s *Server) touchUsedID(lowercased string) {
 	s.dirty.usedIDs = append(s.dirty.usedIDs, lowercased)
@@ -165,25 +161,6 @@ type storedMute struct {
 	Until   time.Time `json:"until,omitzero"`
 }
 
-type storedEmbed struct {
-	Kind      string `json:"kind"`
-	MessageID string `json:"message_id,omitzero"`
-	AvatarFor string `json:"avatar_for,omitzero"`
-	EmojiFor  string `json:"emoji_for,omitzero"`
-	// ServerAvatarBy is who sent a /server avatar upload.
-	ServerAvatarBy string         `json:"server_avatar_by,omitzero"`
-	BaseURL        string         `json:"base_url"`
-	Secret         string         `json:"secret"`
-	Title          string         `json:"title,omitzero"`
-	Alt            string         `json:"alt,omitzero"`
-	Finished       bool           `json:"finished,omitzero"`
-	Owned          map[string]any `json:"owned,omitzero"`
-	File           string         `json:"file,omitzero"`
-	Size           int64          `json:"size,omitzero"`
-	ContentType    string         `json:"content_type,omitzero"`
-	Seq            int64          `json:"seq,omitzero"`
-}
-
 type storedPush struct {
 	User   string `json:"user"`
 	Kind   string `json:"kind"`
@@ -226,6 +203,7 @@ func (s *Server) flushLocked() {
 		s.services.Entries(userID)
 		s.invitations.Entries()
 		s.emoji.Entries()
+		s.embeds.Entries(avatarOwner)
 		s.store.Queue(nil)
 		return
 	}
@@ -236,6 +214,7 @@ func (s *Server) flushLocked() {
 	batch = append(batch, s.services.Entries(userID)...)
 	batch = append(batch, s.invitations.Entries()...)
 	batch = append(batch, s.emoji.Entries()...)
+	batch = append(batch, s.embeds.Entries(avatarOwner)...)
 	meta := s.metaLocked()
 	if meta != s.storedMeta {
 		s.storedMeta = meta
@@ -274,13 +253,6 @@ func (s *Server) entriesLocked(d dirtySet, records []store.Entry) []store.Entry 
 			put(entryUser, id, storedUserOf(u))
 		} else {
 			del(entryUser, id)
-		}
-	}
-	for id := range d.embeds {
-		if e := s.embeds[id]; e != nil {
-			put(entryEmbed, id, storedEmbedOf(e))
-		} else {
-			del(entryEmbed, id)
 		}
 	}
 	for key := range d.pushes {
@@ -339,24 +311,7 @@ func storedUserOf(u *userState) storedUser {
 		}
 	}
 	if u.avatarEmbed != nil {
-		stored.AvatarEmbed = u.avatarEmbed.id
-	}
-	return stored
-}
-
-func storedEmbedOf(e *embedState) storedEmbed {
-	stored := storedEmbed{
-		Kind: e.kind, MessageID: e.messageID, BaseURL: e.baseURL, Secret: e.secret,
-		Title: e.title, Alt: e.alt, Finished: e.finished,
-		Owned: e.owned, Size: e.size, ContentType: e.contentType, Seq: e.seq,
-	}
-	if e.avatarFor != nil {
-		stored.AvatarFor = e.avatarFor.id
-	}
-	stored.EmojiFor = e.emojiKey
-	stored.ServerAvatarBy = e.serverAvatarBy
-	if e.path != "" {
-		stored.File = filepath.Base(e.path)
+		stored.AvatarEmbed = u.avatarEmbed.ID
 	}
 	return stored
 }
@@ -486,36 +441,14 @@ func (s *Server) restoreLocked() (map[string]bool, error) {
 		return u, u != nil
 	})
 
-	files := make(map[string]bool)
-	var uploads []*embedState
-	for id, raw := range entries[entryEmbed] {
-		var stored storedEmbed
-		if err := decode(entryEmbed, id, raw, &stored); err != nil {
-			return nil, err
-		}
-		e := &embedState{
-			id: id, kind: stored.Kind, messageID: stored.MessageID, avatarFor: s.users[stored.AvatarFor], emojiKey: stored.EmojiFor,
-			serverAvatarBy: stored.ServerAvatarBy,
-			baseURL:        stored.BaseURL, secret: stored.Secret, title: stored.Title, alt: stored.Alt,
-			finished: stored.Finished, started: stored.Finished, owned: stored.Owned, size: stored.Size,
-			contentType: stored.ContentType, seq: stored.Seq,
-		}
-		if stored.File != "" {
-			e.path = s.files.Path(stored.File)
-			files[e.path] = true
-			uploads = append(uploads, e)
-		}
-		s.embeds[id] = e
-	}
-	slices.SortFunc(uploads, func(a, b *embedState) int { return int(a.seq - b.seq) })
-	for _, e := range uploads {
-		if !e.apart() {
-			e.upload = s.uploads.PushBack(e)
-			s.uploadBytes += e.size
-		}
+	files, err := s.embeds.Restore(entries[embeds.EntryKind], func(e embeds.Embed, avatarFor string) *embedState {
+		return &embedState{Embed: e, avatarFor: s.users[avatarFor], started: e.Finished}
+	}, s.files.Path)
+	if err != nil {
+		return nil, err
 	}
 	for id, stored := range storedUsers {
-		if e := s.embeds[stored.AvatarEmbed]; e != nil {
+		if e := s.embeds.Get(stored.AvatarEmbed); e != nil {
 			s.users[id].avatarEmbed = e
 		}
 	}
@@ -610,8 +543,8 @@ func (s *Server) restoreLocked() (map[string]bool, error) {
 			}
 		}
 	}
-	for _, id := range slices.Sorted(maps.Keys(s.embeds)) {
-		if e := s.embeds[id]; e != nil && !e.finished {
+	for _, id := range s.embeds.IDs() {
+		if e := s.embeds.Get(id); e != nil && !e.Finished {
 			s.failWriteLocked(e)
 		}
 	}

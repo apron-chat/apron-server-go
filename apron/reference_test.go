@@ -946,7 +946,7 @@ func startLiveWrite(t *testing.T, app *Server, writeURL, first string) (*io.Pipe
 	token := writeURL[strings.LastIndex(writeURL, "/")+1:]
 	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(5 * time.Millisecond) {
 		app.mu.RLock()
-		e := app.writes[token]
+		e := app.embeds.Write(token)
 		writing := e != nil && e.writing
 		app.mu.RUnlock()
 		if writing {

@@ -212,7 +212,7 @@ func TestCustomEmojiSurvivesRestart(t *testing.T) {
 	// Restored emoji images stay out of the uploads that
 	// MaxUploadStorageBytes bounds.
 	app.mu.RLock()
-	uploadCount, uploadBytes := app.uploads.Len(), app.uploadBytes
+	uploadCount, uploadBytes := app.embeds.UploadCount(), app.embeds.UploadBytes()
 	app.mu.RUnlock()
 	if uploadCount != 0 || uploadBytes != 0 {
 		t.Fatalf("restored uploads: %d, %d bytes", uploadCount, uploadBytes)
@@ -438,7 +438,7 @@ func TestCustomEmojiAddNeedsAUsableURL(t *testing.T) {
 	// The write checks the image's URL again when it finishes.
 	writeURL := emojiWriteURL(t, local, ":late:")
 	app.mu.Lock()
-	app.writes[path.Base(writeURL)].baseURL = "http://chat.example"
+	app.embeds.Write(path.Base(writeURL)).BaseURL = "http://chat.example"
 	app.mu.Unlock()
 	if status := putEmoji(t, writeURL, testPNG(t), "image/png"); status != http.StatusForbidden {
 		t.Fatalf("a write whose image URL clients refuse: %d", status)

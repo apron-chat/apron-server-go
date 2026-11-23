@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/apron-chat/apron-server-go/apron/internal/devices"
+	"github.com/apron-chat/apron-server-go/apron/internal/embeds"
 	"github.com/apron-chat/apron-server-go/apron/internal/emoji"
 	"github.com/apron-chat/apron-server-go/apron/internal/invitations"
 	"github.com/apron-chat/apron-server-go/apron/internal/services"
@@ -29,7 +30,7 @@ import (
 const storedAccountsFile = "testdata/stored-accounts.jsonl"
 
 // storedAccountKinds are the kinds of entries the file holds.
-var storedAccountKinds = []string{entryUser, devices.EntryKind, services.EntryKind, invitations.EntryKind, entryEmbed, entryPush, entryMeta}
+var storedAccountKinds = []string{entryUser, devices.EntryKind, services.EntryKind, invitations.EntryKind, embeds.EntryKind, entryPush, entryMeta}
 
 // storedAccountsScenario makes a bot with two service tokens, an
 // outstanding invitation and an account an invitation made, a passkey
@@ -217,12 +218,28 @@ func TestStoredAccountsAreStoredAgain(t *testing.T) {
 	}
 	expectStoredAgain(t, invitations.EntryKind, stored[invitations.EntryKind], invitationTable.Snapshot())
 
+	embedTable := embeds.New[*storedEmbed]()
+	if _, err := embedTable.Restore(stored[embeds.EntryKind], func(e embeds.Embed, avatarFor string) *storedEmbed {
+		return &storedEmbed{e, avatarFor}
+	}, func(file string) string { return "/uploads/" + file }); err != nil {
+		t.Fatal(err)
+	}
+	expectStoredAgain(t, embeds.EntryKind, stored[embeds.EntryKind], embedTable.Snapshot(func(e *storedEmbed) string { return e.avatarFor }))
+
 	catalog := emoji.NewCatalog[storedImage]()
 	if err := catalog.Restore(stored[emoji.StoreKind][emoji.StoreID], func(id, key string) (storedImage, bool) { return storedImage(id), true }); err != nil {
 		t.Fatal(err)
 	}
 	expectStoredAgain(t, emoji.StoreKind, map[string]jsontext.Value{emoji.StoreID: stored[emoji.StoreKind][emoji.StoreID]}, catalog.Snapshot())
 }
+
+// storedEmbed is an embed as the store keeps it.
+type storedEmbed struct {
+	embeds.Embed
+	avatarFor string
+}
+
+func (e *storedEmbed) Hosted() *embeds.Embed { return &e.Embed }
 
 // storedImage is a custom emoji's image as the store names it.
 type storedImage string
@@ -249,6 +266,5 @@ func TestStoredAccountShapesRoundTrip(t *testing.T) {
 		expectStoredAgain(t, kind, stored[kind], again)
 	}
 	roundTrip(entryUser, func() any { return new(storedUser) })
-	roundTrip(entryEmbed, func() any { return new(storedEmbed) })
 	roundTrip(entryPush, func() any { return new(storedPush) })
 }

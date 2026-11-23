@@ -1,7 +1,6 @@
 package apron
 
 import (
-	"container/list"
 	"crypto/rand"
 	"crypto/subtle"
 	"encoding/json/jsontext"
@@ -16,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/apron-chat/apron-server-go/apron/internal/embeds"
 	"github.com/apron-chat/apron-server-go/apron/internal/livetext"
 	"github.com/apron-chat/apron-server-go/apron/internal/uploads"
 	"github.com/apron-chat/apron-server-go/wire"
@@ -34,37 +34,25 @@ const maxEmbedsPerMessage = 32
 
 // embedState is a server-hosted embed: an upload, or live text (terminal or
 // append, live.go). Other embed kinds are body content with only an
-// embed_id.
+// embed_id. An embeds.Table keeps them, with what the store keeps of each
+// (embeds.Embed), and the server keeps what ties them to users, messages,
+// and live text.
 type embedState struct {
-	id   string
-	kind string
-	// messageID is the message the embed belongs to; avatarFor is set instead
-	// for a /avatar upload (§4.8.6), emojiKey for an /emoji add upload,
-	// which emojiBy sent (ext:emoji), and serverAvatarBy, the sender's
-	// user_id, for a /server avatar upload (§3.1).
-	messageID      string
-	avatarFor      *userState
-	emojiKey       string
-	emojiBy        string
-	serverAvatarBy string
-	baseURL        string
-	secret         string
-	token          string
-	title          string
-	// alt is the sender's og.image.alt, kept in the server's og.
-	alt string
+	embeds.Embed
+	// avatarFor is set for a /avatar upload (§4.8.6), and emojiBy for an
+	// /emoji add upload, who sent it (ext:emoji).
+	avatarFor *userState
+	emojiBy   string
+	// token is the one-time token of the write URL.
+	token string
 	// timer expires an unused write URL, then bounds live text's duration.
 	timer   *time.Timer
 	started bool
 	// timedOut is set when live text ends at LiveTextMaxDuration.
 	timedOut bool
-	finished bool
 	removed  bool
 	// writing is set while a writer sends live text.
 	writing bool
-	// owned holds the server fields restored on every save: an upload's url
-	// and og, live text's url, a finished terminal's output.
-	owned map[string]any
 	// post is the message a /embed-terminal or /embed-append command posts
 	// when its write starts; nil for an embed sent in a message.
 	post *pendingPost
@@ -74,31 +62,29 @@ type embedState struct {
 	// revoked is set when it ended that way.
 	author  *userState
 	revoked bool
-
-	// path is the file holding a finished upload's content, size its length,
-	// and upload its element in Server.uploads.
-	path        string
-	size        int64
-	upload      *list.Element
-	seq         int64
-	contentType string
 	// live holds a terminal's or an append's text until it finishes; a
-	// finished terminal serves its output from owned. Restored embeds have none.
+	// finished terminal serves its output from Owned. Restored embeds have
+	// none.
 	live *livetext.Text
+}
+
+// Hosted is what the store keeps of the embed (embeds.Hosted).
+func (e *embedState) Hosted() *embeds.Embed { return &e.Embed }
+
+// avatarOwner names the user an avatar upload is for in the store, "" for
+// an embed that is no avatar.
+func avatarOwner(e *embedState) string {
+	if e.avatarFor == nil {
+		return ""
+	}
+	return e.avatarFor.id
 }
 
 // image reports whether the embed is an avatar, the server's included, or
 // a custom emoji: an image of a type avatars take (§4.8.6) that belongs to
 // no message.
 func (e *embedState) image() bool {
-	return e.avatarFor != nil || e.emojiKey != "" || e.serverAvatarBy != ""
-}
-
-// apart reports whether the upload is kept apart from Server.uploads and
-// MaxUploadStorageBytes: custom emoji have a bound of their own
-// (MaxEmojiStorageBytes), and the server avatar is one image.
-func (e *embedState) apart() bool {
-	return e.emojiKey != "" || e.serverAvatarBy != ""
+	return e.avatarFor != nil || e.EmojiKey != "" || e.ServerAvatarBy != ""
 }
 
 func (e *embedState) endLive() {
@@ -108,7 +94,7 @@ func (e *embedState) endLive() {
 }
 
 func (e *embedState) fileURL() string {
-	return e.baseURL + filePath + e.id + "/" + e.secret
+	return e.BaseURL + filePath + e.ID + "/" + e.Secret
 }
 
 // resolveEmbedsLocked applies embed identity (§4.8.2) to a submitted
@@ -164,18 +150,18 @@ func (s *Server) resolveEmbedsLocked(c *client, messageID string, current map[st
 			embed["kind"] = previous[id]["kind"]
 			delete(embed, "og")
 			delete(embed, "write_url")
-			if e := s.embeds[id]; e != nil {
+			if e := s.embeds.Get(id); e != nil {
 				delete(embed, "url")
 				delete(embed, "output")
-				if e.kind == kindTerminal && e.owned != nil {
+				if e.Kind == kindTerminal && e.Owned != nil {
 					// A renamed terminal's og follows its title.
-					if title, _ := embed["title"].(string); title != e.title {
-						e.title = title
-						e.owned["og"] = e.terminalOG()
-						s.touchEmbed(id)
+					if title, _ := embed["title"].(string); title != e.Title {
+						e.Title = title
+						e.Owned["og"] = e.terminalOG()
+						s.embeds.Touch(id)
 					}
 				}
-				maps.Copy(embed, cloneObject(e.owned))
+				maps.Copy(embed, cloneObject(e.Owned))
 			}
 			embeds = append(embeds, embed)
 			continue
@@ -191,13 +177,13 @@ func (s *Server) resolveEmbedsLocked(c *client, messageID string, current map[st
 			delete(embed, "url")
 			delete(embed, "output")
 			e := s.newWriteLocked(c, id, kind, messageID)
-			e.alt = alt
-			e.title, _ = embed["title"].(string)
+			e.Alt = alt
+			e.Title, _ = embed["title"].(string)
 			if liveKind(kind) {
 				text, _ := body["text"].(string)
 				s.startLiveLocked(e, text)
 				// A terminal's og, which says what it is (§4.8.1).
-				maps.Copy(embed, cloneObject(e.owned))
+				maps.Copy(embed, cloneObject(e.Owned))
 			}
 			written = append(written, map[string]any{"embed_id": id, "kind": kind, "write_url": e.writeURL()})
 		}
@@ -207,13 +193,13 @@ func (s *Server) resolveEmbedsLocked(c *client, messageID string, current map[st
 }
 
 func (e *embedState) writeURL() string {
-	return e.baseURL + writePath + e.token
+	return e.BaseURL + writePath + e.token
 }
 
 // writeResult is the result of a command that made the embed's write: its
 // write URL (§4.8.2).
 func (e *embedState) writeResult() wire.CommandResult {
-	return wire.CommandResult{Embeds: []jsontext.Value{encodeJSON(map[string]any{"embed_id": e.id, "kind": e.kind, "write_url": e.writeURL()})}}
+	return wire.CommandResult{Embeds: []jsontext.Value{encodeJSON(map[string]any{"embed_id": e.ID, "kind": e.Kind, "write_url": e.writeURL()})}}
 }
 
 func asList(value any) []any {
@@ -243,21 +229,16 @@ const maxAltBytes = 1 << 10
 // URL expires, and the embed is dropped.
 func (s *Server) newWriteLocked(c *client, id, kind, messageID string) *embedState {
 	e := &embedState{
-		id:        id,
-		kind:      kind,
-		messageID: messageID,
-		baseURL:   c.baseURL,
-		secret:    rand.Text(),
-		token:     rand.Text(),
-		author:    c.user,
+		Embed:  embeds.Embed{ID: id, Kind: kind, MessageID: messageID, BaseURL: c.baseURL, Secret: rand.Text()},
+		token:  rand.Text(),
+		author: c.user,
 	}
 	if c.user.writes == nil {
 		c.user.writes = make(map[*embedState]struct{})
 	}
 	c.user.writes[e] = struct{}{}
-	s.embeds[id] = e
-	s.touchEmbed(id)
-	s.writes[e.token] = e
+	s.embeds.Add(e)
+	s.embeds.AddWrite(e.token, e)
 	e.timer = time.AfterFunc(s.config.UploadStartTimeout, func() {
 		s.mu.Lock()
 		defer s.unlock()
@@ -294,7 +275,7 @@ func (s *Server) releaseEmbedsLocked(current map[string]any, body map[string]any
 // removeEmbedLocked forgets a hosted embed and its content, invalidating its
 // write, file, and live text URLs.
 func (s *Server) removeEmbedLocked(id string) {
-	e := s.embeds[id]
+	e := s.embeds.Remove(id)
 	if e == nil {
 		return
 	}
@@ -303,17 +284,10 @@ func (s *Server) removeEmbedLocked(id string) {
 		e.timer.Stop()
 	}
 	e.endLive()
-	if e.upload != nil {
-		s.uploads.Remove(e.upload)
-		e.upload = nil
-		s.uploadBytes -= e.size
+	if e.Path != "" {
+		_ = os.Remove(e.Path)
 	}
-	if e.path != "" {
-		_ = os.Remove(e.path)
-	}
-	delete(s.writes, e.token)
-	delete(s.embeds, id)
-	s.touchEmbed(id)
+	s.embeds.EndWrite(e.token)
 	e.doneWriting()
 }
 
@@ -345,7 +319,7 @@ func (s *Server) writeAllowedLocked(e *embedState) bool {
 	roomID := ""
 	if e.post != nil {
 		roomID = e.post.roomID
-	} else if m := s.messages[e.messageID]; m != nil {
+	} else if m := s.messages[e.MessageID]; m != nil {
 		roomID = m.RoomID()
 	}
 	if roomID == "" {
@@ -363,7 +337,7 @@ func (s *Server) writeAllowedLocked(e *embedState) bool {
 // writer's next write fails.
 func (s *Server) endWritesLocked(u *userState, keep func(*embedState) bool) {
 	for e := range u.writes {
-		if e.removed || e.finished {
+		if e.removed || e.Finished {
 			e.doneWriting()
 			continue
 		}
@@ -391,15 +365,15 @@ func (s *Server) endRefusedWritesLocked(u *userState) {
 // published out of its message (§4.8.3). A command's pending message is
 // never posted.
 func (s *Server) failWriteLocked(e *embedState) {
-	if m := s.messages[e.messageID]; m != nil {
+	if m := s.messages[e.MessageID]; m != nil {
 		s.republishLocked(m, func(body map[string]any) bool {
-			return replaceEmbed(body, e.id, nil)
+			return replaceEmbed(body, e.ID, nil)
 		})
-		s.removeEmbedLocked(e.id)
+		s.removeEmbedLocked(e.ID)
 		s.releasePushLocked(m)
 		return
 	}
-	s.removeEmbedLocked(e.id)
+	s.removeEmbedLocked(e.ID)
 }
 
 // replaceEmbed swaps one embed in a body for update, or removes it when
@@ -430,7 +404,7 @@ func replaceEmbed(body map[string]any, id string, update func(map[string]any)) b
 // deleting the content of the one it replaces.
 func (s *Server) setAvatarEmbedLocked(u *userState, e *embedState) {
 	if u.avatarEmbed != nil && u.avatarEmbed != e {
-		s.removeEmbedLocked(u.avatarEmbed.id)
+		s.removeEmbedLocked(u.avatarEmbed.ID)
 	}
 	u.avatarEmbed = e
 	s.touchUser(u.id)
@@ -457,8 +431,8 @@ func (s *Server) handleWrite(w http.ResponseWriter, r *http.Request) {
 	}
 	token := strings.TrimPrefix(r.URL.Path, writePath)
 	s.mu.Lock()
-	e := s.writes[token]
-	if e == nil || e.removed || e.finished || (e.started && e.live == nil) {
+	e := s.embeds.Write(token)
+	if e == nil || e.removed || e.Finished || (e.started && e.live == nil) {
 		s.unlock()
 		refuseWrite(w, "This write URL is unknown, used, or expired", http.StatusNotFound)
 		return
@@ -481,7 +455,7 @@ func (s *Server) handleWrite(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	e.started = true
-	delete(s.writes, token)
+	s.embeds.EndWrite(token)
 	e.timer.Stop()
 	s.unlock()
 	s.writeUpload(w, r, e)
@@ -502,15 +476,15 @@ func (s *Server) writeUpload(w http.ResponseWriter, r *http.Request, e *embedSta
 	tooLargeMessage := ""
 	s.mu.RLock()
 	switch {
-	case e.avatarFor != nil, e.serverAvatarBy != "":
+	case e.avatarFor != nil, e.ServerAvatarBy != "":
 		limit = s.config.MaxAvatarBytes
-	case e.emojiKey != "":
-		limit = s.emojiRoomLocked(e.emojiKey)
+	case e.EmojiKey != "":
+		limit = s.emojiRoomLocked(e.EmojiKey)
 		if limit < s.config.MaxEmojiBytes {
 			tooLargeMessage = s.emojiFullMessage()
 		}
 	default:
-		limit = min(limit, s.config.MaxMessageUploadBytes-s.messageUploadBytesLocked(e.messageID))
+		limit = min(limit, s.config.MaxMessageUploadBytes-s.messageUploadBytesLocked(e.MessageID))
 	}
 	s.mu.RUnlock()
 	if tooLargeMessage == "" {
@@ -519,7 +493,8 @@ func (s *Server) writeUpload(w http.ResponseWriter, r *http.Request, e *embedSta
 	_ = http.NewResponseController(w).SetReadDeadline(time.Now().Add(uploadReadTimeout))
 	file, size, err := s.files.Receive(w, r, limit)
 	// What arrived counts as arriving until the upload is recorded, and so
-	// counted in uploadBytes, or its file removed.
+	// counted among the held uploads (embeds.Table.Hold), or its file
+	// removed.
 	defer s.files.Release(size)
 	var head []byte
 	if file != nil {
@@ -533,8 +508,8 @@ func (s *Server) writeUpload(w http.ResponseWriter, r *http.Request, e *embedSta
 	}
 	var og map[string]any
 	if err == nil {
-		e.contentType = contentType
-		og = uploads.Describe(e.fileURL(), e.contentType, e.title, e.alt, file)
+		e.ContentType = contentType
+		og = uploads.Describe(e.fileURL(), e.ContentType, e.Title, e.Alt, file)
 	}
 	if file != nil {
 		// A finished upload is on disk before the store records it, so a
@@ -590,37 +565,34 @@ func (s *Server) writeUpload(w http.ResponseWriter, r *http.Request, e *embedSta
 	case err != nil:
 		fail(http.StatusBadRequest, "The upload did not finish")
 		return
-	case !e.image() && s.messageUploadBytesLocked(e.messageID)+size > s.config.MaxMessageUploadBytes:
+	case !e.image() && s.messageUploadBytesLocked(e.MessageID)+size > s.config.MaxMessageUploadBytes:
 		// Another upload for the message finished while this one arrived.
 		fail(http.StatusRequestEntityTooLarge, fmt.Sprintf("A message's uploads are limited to %d bytes", s.config.MaxMessageUploadBytes))
 		return
 	}
-	if e.emojiKey != "" {
+	if e.EmojiKey != "" {
 		if status, message := s.refuseEmojiLocked(e, size); status != 0 {
 			fail(status, message)
 			return
 		}
 	}
-	if e.serverAvatarBy != "" {
+	if e.ServerAvatarBy != "" {
 		if status, message := s.refuseServerAvatarLocked(e); status != 0 {
 			fail(status, message)
 			return
 		}
 	}
-	e.finished = true
+	e.Finished = true
 	e.doneWriting()
-	e.path = file.Name()
-	e.size = size
-	if !e.apart() {
-		e.upload = s.uploads.PushBack(e)
-		s.uploadBytes += size
-	}
+	e.Path = file.Name()
+	e.Size = size
+	s.embeds.Hold(e)
 	s.uploadSeq++
-	e.seq = s.uploadSeq
-	s.touchEmbed(e.id)
-	e.owned = map[string]any{"url": e.fileURL()}
+	e.Seq = s.uploadSeq
+	s.embeds.Touch(e.ID)
+	e.Owned = map[string]any{"url": e.fileURL()}
 	if og != nil {
-		e.owned["og"] = og
+		e.Owned["og"] = og
 	}
 	if u := e.avatarFor; u != nil {
 		if s.users[u.id] == u {
@@ -630,16 +602,16 @@ func (s *Server) writeUpload(w http.ResponseWriter, r *http.Request, e *embedSta
 			s.touchUser(u.id)
 			s.notifyProfileLocked(u, nil, before)
 		} else {
-			s.removeEmbedLocked(e.id)
+			s.removeEmbedLocked(e.ID)
 		}
-	} else if e.emojiKey != "" {
+	} else if e.EmojiKey != "" {
 		s.setEmojiLocked(e, og)
-	} else if e.serverAvatarBy != "" {
+	} else if e.ServerAvatarBy != "" {
 		s.setServerAvatarLocked(e)
-	} else if m := s.messages[e.messageID]; m != nil {
+	} else if m := s.messages[e.MessageID]; m != nil {
 		s.republishLocked(m, func(body map[string]any) bool {
-			return replaceEmbed(body, e.id, func(embed map[string]any) {
-				maps.Copy(embed, cloneObject(e.owned))
+			return replaceEmbed(body, e.ID, func(embed map[string]any) {
+				maps.Copy(embed, cloneObject(e.Owned))
 			})
 		})
 	}
@@ -658,9 +630,9 @@ const writeRevokedMessage = "The account that made this write URL may no longer 
 // messageUploadBytesLocked totals the finished uploads of one message.
 func (s *Server) messageUploadBytesLocked(messageID string) int64 {
 	var total int64
-	for element := s.uploads.Front(); element != nil; element = element.Next() {
-		if e := element.Value.(*embedState); e.messageID == messageID && !e.image() {
-			total += e.size
+	for e := range s.embeds.Uploads() {
+		if e.MessageID == messageID && !e.image() {
+			total += e.Size
 		}
 	}
 	return total
@@ -674,17 +646,18 @@ func (s *Server) messageUploadBytesLocked(messageID string) int64 {
 func (s *Server) evictUploadsLocked(keep *embedState) {
 	evicted := make(map[string][]string)
 	var order []string
-	for element := s.uploads.Front(); element != nil && s.uploadBytes > s.config.MaxUploadStorageBytes; {
-		e := element.Value.(*embedState)
-		element = element.Next()
+	for e := range s.embeds.Uploads() {
+		if s.embeds.UploadBytes() <= s.config.MaxUploadStorageBytes {
+			break
+		}
 		if e == keep || e.image() {
 			continue
 		}
-		if _, seen := evicted[e.messageID]; !seen {
-			order = append(order, e.messageID)
+		if _, seen := evicted[e.MessageID]; !seen {
+			order = append(order, e.MessageID)
 		}
-		evicted[e.messageID] = append(evicted[e.messageID], e.id)
-		s.removeEmbedLocked(e.id)
+		evicted[e.MessageID] = append(evicted[e.MessageID], e.ID)
+		s.removeEmbedLocked(e.ID)
 	}
 	for _, messageID := range order {
 		if m := s.messages[messageID]; m != nil {
@@ -711,12 +684,12 @@ func (s *Server) handleFile(w http.ResponseWriter, r *http.Request) {
 	}
 	s.mu.RLock()
 	e := s.lookupEmbedLocked(strings.TrimPrefix(r.URL.Path, filePath))
-	if e == nil || !e.finished || e.kind != "upload" {
+	if e == nil || !e.Finished || e.Kind != "upload" {
 		s.mu.RUnlock()
 		http.NotFound(w, r)
 		return
 	}
-	name, contentType, title := e.path, e.contentType, e.title
+	name, contentType, title := e.Path, e.ContentType, e.Title
 	// An upload removed after this still reads from the open file.
 	content, err := os.Open(name)
 	s.mu.RUnlock()
@@ -744,8 +717,8 @@ func (s *Server) handleFile(w http.ResponseWriter, r *http.Request) {
 // lookupEmbedLocked resolves "embed_id/secret" from a file or live text path.
 func (s *Server) lookupEmbedLocked(path string) *embedState {
 	id, secret, ok := strings.Cut(path, "/")
-	e := s.embeds[id]
-	if !ok || e == nil || subtle.ConstantTimeCompare([]byte(secret), []byte(e.secret)) != 1 {
+	e := s.embeds.Get(id)
+	if !ok || e == nil || subtle.ConstantTimeCompare([]byte(secret), []byte(e.Secret)) != 1 {
 		return nil
 	}
 	return e

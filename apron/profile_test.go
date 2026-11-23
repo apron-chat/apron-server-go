@@ -178,7 +178,7 @@ func TestServerCommand(t *testing.T) {
 		t.Fatalf("server avatar: %d", status)
 	}
 	app.mu.RLock()
-	uploadCount := app.uploads.Len()
+	uploadCount := app.embeds.UploadCount()
 	app.mu.RUnlock()
 	if uploadCount != 0 {
 		t.Fatalf("the server avatar is among %d message uploads", uploadCount)
@@ -292,7 +292,7 @@ func TestServerProfileSurvivesRestart(t *testing.T) {
 		t.Fatalf("restored avatar: %d", status)
 	}
 	app.mu.RLock()
-	uploadCount := app.uploads.Len()
+	uploadCount := app.embeds.UploadCount()
 	app.mu.RUnlock()
 	if uploadCount != 0 {
 		t.Fatalf("the restored server avatar is among %d message uploads", uploadCount)

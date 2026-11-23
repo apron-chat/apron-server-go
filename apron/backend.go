@@ -195,7 +195,7 @@ func (b backend) refresh(_ context.Context, wc *wire.Conn, method string, result
 		for _, value := range asList(original["embeds"]) {
 			written, _ := value.(map[string]any)
 			id, _ := written["embed_id"].(string)
-			if e := s.embeds[id]; e != nil && !e.started && !e.removed && s.writes[e.token] == e {
+			if e := s.embeds.Get(id); e != nil && !e.started && !e.removed && s.embeds.Write(e.token) == e {
 				writes = append(writes, written)
 			}
 		}

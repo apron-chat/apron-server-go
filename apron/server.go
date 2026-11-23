@@ -1,7 +1,6 @@
 package apron
 
 import (
-	"container/list"
 	"context"
 	"encoding/json/jsontext"
 	"errors"
@@ -25,6 +24,7 @@ import (
 
 	"github.com/apron-chat/apron-server-go/apron/internal/devices"
 	"github.com/apron-chat/apron-server-go/apron/internal/durable"
+	"github.com/apron-chat/apron-server-go/apron/internal/embeds"
 	"github.com/apron-chat/apron-server-go/apron/internal/emoji"
 	"github.com/apron-chat/apron-server-go/apron/internal/invitations"
 	"github.com/apron-chat/apron-server-go/apron/internal/kv"
@@ -165,14 +165,10 @@ type Server struct {
 	// accountNumber numbers the user_<n> of new email accounts.
 	accountNumber uint64
 	embedNumber   uint64
-	embeds        map[string]*embedState
-	// writes maps an unused or in-progress write token to its embed.
-	writes map[string]*embedState
-	// uploads lists finished uploads but custom emoji, oldest first, for
-	// eviction beyond MaxUploadStorageBytes; uploadBytes is their total
-	// size. Custom emoji have their own bound, MaxEmojiStorageBytes.
-	uploads     *list.List
-	uploadBytes int64
+	// embeds are the hosted embeds, their writes, and the finished uploads
+	// oldest first, for eviction beyond MaxUploadStorageBytes (embeds.go).
+	// Custom emoji have their own bound, MaxEmojiStorageBytes.
+	embeds *embeds.Table[*embedState]
 	// files holds upload content, and counts the bytes of bodies arriving,
 	// which MaxUploadStorageBytes also bounds.
 	files *uploads.Dir
@@ -288,9 +284,7 @@ func Open(config Config) (*Server, error) {
 		usedIDs:     make(map[string]bool),
 		grantedIDs:  make(map[string]bool),
 		roleHolders: make(map[string][]Principal),
-		embeds:      make(map[string]*embedState),
-		writes:      make(map[string]*embedState),
-		uploads:     list.New(),
+		embeds:      embeds.New[*embedState](),
 		emoji:       emoji.NewCatalog[*embedState](),
 		pushes:      make(map[string]*pushRegistration),
 		sessions:    sessions.New[*userState](),
@@ -507,7 +501,7 @@ func (s *Server) Shutdown(ctx context.Context) error {
 		s.closed = true
 		close(s.stopped)
 		s.extCancel()
-		for _, e := range s.embeds {
+		for _, e := range s.embeds.All() {
 			e.endLive()
 		}
 		s.services.Stop()

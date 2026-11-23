@@ -367,9 +367,6 @@ func (s *Server) dumpLocked() []store.Entry {
 	for id := range s.users {
 		all.users[id] = true
 	}
-	for id := range s.embeds {
-		all.embeds[id] = true
-	}
 	for key := range s.pushes {
 		all.pushes[key] = true
 	}
@@ -379,6 +376,7 @@ func (s *Server) dumpLocked() []store.Entry {
 	records = append(records, s.devices.Snapshot(userID)...)
 	records = append(records, s.services.Snapshot(userID)...)
 	records = append(records, s.invitations.Snapshot()...)
+	records = append(records, s.embeds.Snapshot(avatarOwner)...)
 	if s.emoji.Len() > 0 {
 		// An empty catalog is stored only once one was emptied.
 		records = append(records, s.emoji.Snapshot()...)

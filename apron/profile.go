@@ -5,9 +5,7 @@ import (
 	"encoding/json/v2"
 	"fmt"
 	"github.com/apron-chat/apron-server-go/wire"
-	"maps"
 	"net/http"
-	"slices"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -112,7 +110,7 @@ func (s *Server) announceServerLocked() {
 func (s *Server) storedProfileLocked() storedProfile {
 	stored := storedProfile{Title: s.profile.title, Description: s.profile.description}
 	if s.profile.avatar != nil {
-		stored.AvatarEmbed = s.profile.avatar.id
+		stored.AvatarEmbed = s.profile.avatar.ID
 	}
 	return stored
 }
@@ -128,15 +126,15 @@ func (s *Server) restoreProfileLocked(raw jsontext.Value) error {
 		}
 		s.profile.title, s.profile.description = stored.Title, stored.Description
 		if stored.AvatarEmbed != "" {
-			if e := s.embeds[stored.AvatarEmbed]; e != nil && e.finished && e.serverAvatarBy != "" {
+			if e := s.embeds.Get(stored.AvatarEmbed); e != nil && e.Finished && e.ServerAvatarBy != "" {
 				s.profile.avatar = e
 			} else {
 				s.dirty.profile = true
 			}
 		}
 	}
-	for _, id := range slices.Sorted(maps.Keys(s.embeds)) {
-		if e := s.embeds[id]; e.serverAvatarBy != "" && e.finished && e != s.profile.avatar {
+	for _, id := range s.embeds.IDs() {
+		if e := s.embeds.Get(id); e.ServerAvatarBy != "" && e.Finished && e != s.profile.avatar {
 			s.removeEmbedLocked(id)
 		}
 	}
@@ -151,11 +149,11 @@ const serverAvatarNeedHTTPS = "The server avatar needs an https address" + setPu
 // its sender must still be an admin. It returns the HTTP status and
 // message to refuse the write with, or 0.
 func (s *Server) refuseServerAvatarLocked(e *embedState) (int, string) {
-	u := s.users[e.serverAvatarBy]
+	u := s.users[e.ServerAvatarBy]
 	switch {
 	case u == nil || !u.hasRole("admin"):
 		return http.StatusForbidden, "Only an admin can set the server avatar"
-	case !clientsLoad(e.baseURL):
+	case !clientsLoad(e.BaseURL):
 		return http.StatusForbidden, serverAvatarNeedHTTPS
 	}
 	return 0, ""
@@ -165,7 +163,7 @@ func (s *Server) refuseServerAvatarLocked(e *embedState) (int, string) {
 // avatar, deleting the upload it replaces.
 func (s *Server) setServerAvatarLocked(e *embedState) {
 	if previous := s.profile.avatar; previous != nil && previous != e {
-		s.removeEmbedLocked(previous.id)
+		s.removeEmbedLocked(previous.ID)
 	}
 	s.profile.avatar = e
 	s.profileChangedLocked()
@@ -213,7 +211,7 @@ func (s *Server) serverCommand(c *client, r *roomState, body map[string]any, arg
 		if len(embeds) == 0 {
 			done = "The avatar was not set."
 			if s.profile.avatar != nil {
-				s.removeEmbedLocked(s.profile.avatar.id)
+				s.removeEmbedLocked(s.profile.avatar.ID)
 				s.profile.avatar = nil
 				s.profileChangedLocked()
 				done = "Cleared the avatar."
@@ -228,7 +226,7 @@ func (s *Server) serverCommand(c *client, r *roomState, body map[string]any, arg
 		}
 		s.embedNumber++
 		e := s.newWriteLocked(c, fmt.Sprintf("embed_%d", s.embedNumber), "upload", "")
-		e.serverAvatarBy = c.user.id
+		e.ServerAvatarBy = c.user.id
 		return e.writeResult(), nil
 	default:
 		return wire.CommandResult{}, invalidParams(serverUsage)
