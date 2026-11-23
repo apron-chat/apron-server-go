@@ -389,6 +389,67 @@ func TestDedup(t *testing.T) {
 	}
 }
 
+// returning is a backend whose calls, its commands and the test's "read"
+// requests, come in pairs, an original and its retry: each fails or
+// replies, and the original then does not return until the test ends.
+type returning struct {
+	oneUser
+	calls     atomic.Int64
+	returning chan struct{}
+}
+
+func (b *returning) Command(_ context.Context, _ *wire.Conn, _ wire.CommandParams, reply wire.Reply[wire.CommandResult]) error {
+	n := b.calls.Add(1)
+	_ = reply.Fail(wire.Denied(fmt.Sprintf("call %d", n)))
+	b.stall(n)
+	return nil
+}
+
+// stall holds up call n, after its reply, if it is an original.
+func (b *returning) stall(n int64) {
+	if n%2 == 1 {
+		<-b.returning
+	}
+}
+
+// A request whose outcome is not kept, a read or a failure, is forgotten
+// before its reply is sent: a retry sent once the reply arrives, here on
+// another connection of the same user, runs again, even while the
+// original's handler is still returning, rather than wait for it and get
+// its outcome.
+func TestDedupForgetsBeforeTheReply(t *testing.T) {
+	b := &returning{returning: make(chan struct{})}
+	s := wired(&wire.Server{Backend: b})
+	s.Handle("read", wire.Handler{NoDedup: true, Serve: func(_ context.Context, _ *wire.Conn, r *wire.Request) error {
+		n := b.calls.Add(1)
+		r.Reply(map[string]any{"call": n})
+		b.stall(n)
+		return nil
+	}})
+	// Each original holds up its connection, so each pair of requests
+	// has its own connections, which end after the originals return.
+	conns := []*wiretest.Client{connect(t, s), connect(t, s), connect(t, s), connect(t, s)}
+	t.Cleanup(func() { close(b.returning) })
+	for _, c := range conns {
+		signIn(t, c)
+	}
+	for i, request := range []struct{ raw, first, retry string }{
+		{`{"method":"read","id":"r","params":{}}`, `{"id":"r","result":{"call":1}}`, `{"id":"r","result":{"call":2}}`},
+		{`{"method":"command","id":"f","params":{"body":{"text":"/fail"}}}`,
+			`{"error":{"code":-32001,"message":"call 3"},"id":"f"}`, `{"error":{"code":-32001,"message":"call 4"},"id":"f"}`},
+	} {
+		c1, c2 := conns[2*i], conns[2*i+1]
+		send(t, c1, request.raw)
+		if f := next(t, c1); string(f.Raw) != request.first {
+			t.Fatalf("got %s, want %s", f.Raw, request.first)
+		}
+		send(t, c2, request.raw)
+		if f := next(t, c2); string(f.Raw) != request.retry {
+			t.Fatalf("a retry after the reply got %s, want %s", f.Raw, request.retry)
+		}
+	}
+}
+
 func TestDedupPerUser(t *testing.T) {
 	b := &backend{}
 	s := wired(&wire.Server{Backend: b})

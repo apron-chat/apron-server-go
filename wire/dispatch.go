@@ -83,8 +83,11 @@ type Request struct {
 	// rec, for a request on no connection, made by package wiretest, gets
 	// its reply.
 	rec testhook.Recorder
-	// entry is the request's deduplication entry (§1.2), or nil.
-	entry *dedupEntry
+	// entry is the request's deduplication entry (§1.2), or nil, and
+	// unkept, for an entry, drops it as the reply is queued when its
+	// outcome is not to be kept.
+	entry  *dedupEntry
+	unkept func(dedupOutcome)
 
 	mu      sync.Mutex
 	replied bool
@@ -347,13 +350,23 @@ func (s *Server) processFrame(ctx context.Context, c *Conn, payload []byte) {
 		return
 	}
 
+	// Failed requests are not kept, and neither are reads: a retry runs
+	// again. Concurrent duplicates still share the outcome. Such a request
+	// is forgotten before its reply is queued, as the client may retry as
+	// soon as it has the reply, while the handler may still be returning.
+	kept := func(outcome dedupOutcome) bool { return outcome.err == nil && !m.noDedup }
 	r.entry = entry
+	if entry != nil {
+		r.unkept = func(outcome dedupOutcome) {
+			if !kept(outcome) {
+				s.dedup.forget(userID, r.ID, entry)
+			}
+		}
+	}
 	s.serve(ctx, c, r, m)
 	if entry != nil {
-		// Failed requests are not kept, and neither are reads: a retry
-		// runs again. Concurrent duplicates still share the outcome.
 		finish := func(outcome dedupOutcome) {
-			s.dedup.finish(userID, r.ID, entry, outcome, outcome.err != nil || m.noDedup)
+			s.dedup.finish(userID, r.ID, entry, outcome, !kept(outcome))
 		}
 		// A request answered later finishes as its reply is queued.
 		if outcome, done := r.finishOrDefer(finish); done {

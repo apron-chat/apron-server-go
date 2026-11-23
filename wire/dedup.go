@@ -57,6 +57,17 @@ func (d *dedup) claim(userID, id string, fingerprint [32]byte) (entry, prior *de
 	return element.Value.(*userDedup).cache.Claim(id, fingerprint)
 }
 
+// forget drops a request whose outcome is not kept as its reply is queued,
+// before the client can see the reply, so that a retry the reply prompts
+// runs again, even while the original's handler is still returning.
+func (d *dedup) forget(userID, id string, entry *dedupEntry) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if element := d.caches[userID]; element != nil {
+		element.Value.(*userDedup).cache.Forget(id, entry)
+	}
+}
+
 func (d *dedup) finish(userID, id string, entry *dedupEntry, outcome dedupOutcome, forget bool) {
 	d.mu.Lock()
 	defer d.mu.Unlock()

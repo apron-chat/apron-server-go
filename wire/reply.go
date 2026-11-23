@@ -133,6 +133,7 @@ func (r *Request) send(sent any, value func() (any, error), apply func(), then [
 	frame, encoded, e := r.encodeReply(result, nil)
 	r.replied = true
 	r.outcome = dedupOutcome{encoded, e}
+	r.forgetUnkeptLocked()
 	// Deferred after the unlock, so it runs first, once the reply is
 	// queued.
 	defer r.settleLocked()
@@ -168,6 +169,7 @@ func (r *Request) send(sent any, value func() (any, error), apply func(), then [
 func (r *Request) failLocked(e *Error) bool {
 	r.replied = true
 	r.outcome = dedupOutcome{err: e}
+	r.forgetUnkeptLocked()
 	defer r.settleLocked()
 	if r.rec != nil {
 		r.rec.Record(nil, nil, e, nil)
@@ -175,6 +177,15 @@ func (r *Request) failLocked(e *Error) bool {
 	}
 	frame, _, _ := r.encodeReply(nil, e)
 	return frame != nil && r.c.enqueue([]Frame{frame})
+}
+
+// forgetUnkeptLocked, with r.mu held, drops the request's deduplication
+// entry once it has its outcome, when the outcome is not to be kept,
+// before its reply is queued (§1.2).
+func (r *Request) forgetUnkeptLocked() {
+	if r.unkept != nil {
+		r.unkept(r.outcome)
+	}
 }
 
 // isEmpty reports whether T is Empty, whose handlers may return without

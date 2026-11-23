@@ -72,10 +72,19 @@ func (d *Dedup[K, V]) evict() bool {
 // the requests waiting on it have it, so that a retry runs again.
 func (d *Dedup[K, V]) Finish(key K, entry *DedupEntry[V], value V, forget bool) {
 	entry.Value = value
-	if forget && d.entries[key] == entry {
-		delete(d.entries, key)
+	if forget {
+		d.Forget(key, entry)
 	}
 	close(entry.done)
+}
+
+// Forget drops a claimed request, running or finished, so that a request
+// with its key claimed after it runs again; the requests already waiting
+// on it still get its outcome, once it finishes.
+func (d *Dedup[K, V]) Forget(key K, entry *DedupEntry[V]) {
+	if d.entries[key] == entry {
+		delete(d.entries, key)
+	}
 }
 
 // Kept reports whether a request with key is kept: running, or finished
