@@ -471,7 +471,7 @@ func unknownRoom(c *checker) {
 
 func largeFrame(c *checker) {
 	conn := c.joined("Conformance", false)
-	_, reply, err := c.tryRequest(conn, "message", obj{"room_id": c.r.room, "body": obj{"text": strings.Repeat("x", 250_000)}}, "")
+	_, reply, err := c.tryRequest(conn, "message", obj{"room_id": c.r.room, "body": obj{"text": strings.Repeat("x", 250_000)}}, "", waitFor)
 	if err != "" {
 		c.warn("%s", err)
 	}
@@ -602,12 +602,12 @@ func (c *checker) burst(conn *conn, texts []string) []string {
 }
 
 // logged returns the room's message snapshots and reaction sets from after
-// on, by history, as kinds by log_id.
-func (c *checker) logged(conn *conn, room string, after string) map[int64]string {
+// on, by history, as kinds by log_id, waiting for each page for timeout.
+func (c *checker) logged(conn *conn, room string, after string, timeout time.Duration) map[int64]string {
 	c.t.Helper()
 	found := map[int64]string{}
 	for {
-		page := c.call(conn, "history", obj{"room_id": room, "after": after, "limit": 200})
+		page := c.callWithin(conn, "history", obj{"room_id": room, "after": after, "limit": 200}, timeout)
 		for _, kind := range [][2]string{{"messages", "message"}, {"reactions", "reactions"}} {
 			for _, record := range list(page[kind[0]]) {
 				if logID, ok := parseID(get(record, "log_id")); ok {
@@ -664,7 +664,7 @@ func deliveryBurst(c *checker) {
 	// before the server reads b's next request, and its reply (an error
 	// is as good) comes after them (§1).
 	c.request(b, "me", obj{}, "")
-	loggedIDs := c.logged(b, c.r.room, messageIDs[0])
+	loggedIDs := c.logged(b, c.r.room, messageIDs[0], waitFor)
 	live := delivered(b, start, c.r.room)
 	liveIDs := map[int64]bool{}
 	for _, r := range live {
@@ -722,13 +722,20 @@ func slowReader(c *checker) {
 	for n := range texts {
 		texts[n] = fmt.Sprintf("conformance: flood %d %s", n, filler)
 	}
+	posting := time.Now()
 	messageIDs := c.burst(a, texts)
+	// The burst is 8 MiB, which the server and this client take seconds
+	// to handle, and many more on a busy machine or under -race. What
+	// follows handles as much again, so its waits are as long as the
+	// burst took, where that is longer than their usual ones.
+	took := time.Since(posting)
 	b.resume()
 	// Everything sent has arrived, or the server closed the connection:
 	// wait for the last record, or the close.
-	b.wait(snapshotOf(messageIDs[len(messageIDs)-1], ""), start, 4*waitFor)
+	b.wait(snapshotOf(messageIDs[len(messageIDs)-1], ""), start, max(4*waitFor, took))
 	var loggedIDs []int64
-	for logID, kind := range c.logged(a, c.r.room, messageIDs[0]) {
+	// A page is up to 200 of the burst's messages, in one frame.
+	for logID, kind := range c.logged(a, c.r.room, messageIDs[0], max(waitFor, took)) {
 		if kind == "message" {
 			loggedIDs = append(loggedIDs, logID)
 		}

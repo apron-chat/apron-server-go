@@ -19,7 +19,9 @@ import (
 // The times a check waits. The Python suite waits two seconds for a frame
 // that should come; a check here waits longer, for a busy machine under
 // -race, which makes only a failure slower. It waits as long as the Python
-// suite for a frame that should not come.
+// suite for a frame that should not come. A wait for megabytes, which
+// take the longer the busier the machine, lasts at least as long as the
+// server took to take them in (core.delivery.slow-reader).
 const (
 	waitFor = 5 * time.Second
 	quiet   = 500 * time.Millisecond
@@ -378,16 +380,16 @@ func (c *checker) send(conn *conn, frame obj) {
 // index of its reply and the reply; it fails the check without one.
 func (c *checker) request(conn *conn, method string, params any, id string) (int, obj) {
 	c.t.Helper()
-	i, reply, err := c.tryRequest(conn, method, params, id)
+	i, reply, err := c.tryRequest(conn, method, params, id, waitFor)
 	if err != "" {
 		c.fail("%s", err)
 	}
 	return i, reply
 }
 
-// tryRequest is request, which returns why it got no reply in place of
-// failing.
-func (c *checker) tryRequest(conn *conn, method string, params any, id string) (int, obj, string) {
+// tryRequest is request, which waits for the reply for timeout, and
+// returns why it got none in place of failing.
+func (c *checker) tryRequest(conn *conn, method string, params any, id string, timeout time.Duration) (int, obj, string) {
 	if id == "" {
 		id = c.r.id()
 	}
@@ -399,7 +401,7 @@ func (c *checker) tryRequest(conn *conn, method string, params any, id string) (
 	if err := conn.send(frame); err != nil {
 		return -1, nil, fmt.Sprintf("the server closed the connection before %s", method)
 	}
-	i, reply := conn.reply(id, start, waitFor)
+	i, reply := conn.reply(id, start, timeout)
 	if reply == nil {
 		why := "no reply to " + method
 		if conn.isClosed() {
@@ -421,7 +423,16 @@ func (c *checker) replyTo(conn *conn, method string, params any) obj {
 // the result.
 func (c *checker) call(conn *conn, method string, params any) obj {
 	c.t.Helper()
-	_, reply := c.request(conn, method, params, "")
+	return c.callWithin(conn, method, params, waitFor)
+}
+
+// callWithin is call, which waits for the reply for timeout.
+func (c *checker) callWithin(conn *conn, method string, params any, timeout time.Duration) obj {
+	c.t.Helper()
+	_, reply, err := c.tryRequest(conn, method, params, "", timeout)
+	if err != "" {
+		c.fail("%s", err)
+	}
 	result, ok := reply["result"].(obj)
 	c.must(ok, "%s: %s", method, describe(reply))
 	return result
