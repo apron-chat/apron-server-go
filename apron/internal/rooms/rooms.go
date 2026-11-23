@@ -4,8 +4,8 @@
 // whom a record naming one room would show it to; and each message's place
 // in them (Message): its room, its snapshots, and its reaction sets (§4.7).
 // It logs the records it makes in the server's log (roomlog): rooms,
-// memberships, message snapshots, and reactions. It tracks the rooms it
-// changes, and renders rooms and messages as store entries.
+// memberships, message snapshots, and reactions. It tracks the rooms and
+// messages it changes, and renders them as store entries.
 //
 // A Table knows its members as values of the type U, such as the server's
 // user state, through the methods of Member. It knows nothing of
@@ -338,8 +338,10 @@ func ThreadTitle(description string) string {
 type Table[U Member] struct {
 	log   *roomlog.Log
 	rooms map[string]*Room[U]
-	// dirty are the rooms changed since Entries last took them.
-	dirty map[string]struct{}
+	// dirty are the rooms, and dirtyMessages the messages, changed since
+	// Entries last took them.
+	dirty         map[string]struct{}
+	dirtyMessages map[string]*Message
 	// restoring are the stored members of each room, from Restore until
 	// RestoreMembers.
 	restoring map[string][]string
@@ -347,7 +349,7 @@ type Table[U Member] struct {
 
 // NewTable returns an empty table whose records go to log.
 func NewTable[U Member](log *roomlog.Log) *Table[U] {
-	return &Table[U]{log: log, rooms: make(map[string]*Room[U]), dirty: make(map[string]struct{})}
+	return &Table[U]{log: log, rooms: make(map[string]*Room[U]), dirty: make(map[string]struct{}), dirtyMessages: make(map[string]*Message)}
 }
 
 // Get returns the room named id, or nil.
@@ -539,19 +541,23 @@ func Entry[U Member](r *Room[U]) store.Entry {
 	return store.Entry{Kind: EntryKind, ID: r.id, Value: value}
 }
 
-// Entries returns the entries of the rooms changed since it was last
-// called.
+// Entries returns the entries of the rooms and messages changed since it
+// was last called.
 func (t *Table[U]) Entries() []store.Entry {
-	if len(t.dirty) == 0 {
+	if len(t.dirty) == 0 && len(t.dirtyMessages) == 0 {
 		return nil
 	}
-	entries := make([]store.Entry, 0, len(t.dirty))
+	entries := make([]store.Entry, 0, len(t.dirty)+len(t.dirtyMessages))
 	for id := range t.dirty {
 		if r := t.rooms[id]; r != nil {
 			entries = append(entries, Entry(r))
 		}
 	}
+	for _, m := range t.dirtyMessages {
+		entries = append(entries, MessageEntry(m))
+	}
 	clear(t.dirty)
+	clear(t.dirtyMessages)
 	return entries
 }
 

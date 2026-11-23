@@ -294,7 +294,6 @@ func Open(config Config) (*Server, error) {
 		devices:     devices.New[*userState](),
 		invitations: invitations.New(),
 		proposals:   proposals.NewTable(),
-		dirty:       newDirtySet(),
 		badgeDelay:  badgeDelay,
 		stopped:     make(chan struct{}),
 

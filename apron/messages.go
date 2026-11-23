@@ -304,7 +304,6 @@ func (s *Server) saveMessage(c *client, p wire.EditParams, reply wire.Reply[wire
 func (s *Server) commitSnapshotLocked(m *messageState, snapshot *roomlog.Message, logID int64) bool {
 	record, rooms, moved := s.rooms.Snapshot(m.Message, snapshot, logID)
 	m.cached = nil
-	s.touchMessage(m)
 	s.deliverLocked(rawNotification("message", record.Raw), rooms...)
 	return moved
 }
@@ -410,7 +409,6 @@ func (s *Server) react(c *client, p wire.ReactParams, reply wire.Reply[wire.Empt
 		if err := admitActionLocked(u); err != nil {
 			return err
 		}
-		s.touchMessage(m)
 		record, r := s.rooms.React(m.Message, u.from(), emojis)
 		s.deliverLocked(rawNotification("reactions", record.Raw), r)
 	}

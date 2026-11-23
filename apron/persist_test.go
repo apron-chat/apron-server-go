@@ -350,7 +350,7 @@ func TestRolesAndWelcome(t *testing.T) {
 // dumpLocked renders the whole state as the entries a store holding it
 // would have, for checking that every change reaches the store.
 func (s *Server) dumpLocked() []store.Entry {
-	all := newDirtySet()
+	all := dirtySet{}
 	var records []store.Entry
 	for _, r := range s.rooms.All() {
 		records = append(records, rooms.Entry(r))
@@ -359,8 +359,8 @@ func (s *Server) dumpLocked() []store.Entry {
 	for _, record := range logged {
 		records = append(records, roomlog.Entry(record))
 	}
-	for id := range s.messages {
-		all.messages[id] = true
+	for _, m := range s.messages {
+		records = append(records, rooms.MessageEntry(m.Message))
 	}
 	all.vapid = s.vapidStored
 	meta := s.metaLocked()

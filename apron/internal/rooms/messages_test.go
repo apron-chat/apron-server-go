@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/apron-chat/apron-server-go/apron/internal/roomlog"
+	"github.com/apron-chat/apron-server-go/store"
 	"github.com/apron-chat/apron-server-go/wire"
 )
 
@@ -67,6 +68,7 @@ func TestReactions(t *testing.T) {
 	general := table.Create("general", nil, false, "", roomlog.RoomRecord{})
 	m := NewMessage("1", ada.from(), "ada")
 	snapshot(table, m, general.ID(), "hi")
+	table.Entries()
 	record, r := table.React(m, bob.from(), []string{"👍", "❤️"})
 	if r != general || record.Kind != roomlog.KindReactions || general.Log().Latest() != record.ID {
 		t.Fatalf("reactions %s in %v", record.Raw, r)
@@ -80,6 +82,11 @@ func TestReactions(t *testing.T) {
 		t.Errorf("reactions %+v", got)
 	}
 	entry := MessageEntry(m)
+	// The room's entry changes too, with its latest record.
+	entries := slices.DeleteFunc(table.Entries(), func(e store.Entry) bool { return e.Kind != MessageEntryKind })
+	if len(entries) != 1 || !bytes.Equal(entries[0].Value, entry.Value) || table.Entries() != nil {
+		t.Errorf("reacting stored %d messages, want the message once", len(entries))
+	}
 	records := map[int64]*roomlog.Record{}
 	for _, record := range m.Records() {
 		records[record.ID] = record

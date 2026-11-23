@@ -68,18 +68,9 @@ const (
 
 // dirtySet is the state changed since the last batch, by key.
 type dirtySet struct {
-	messages map[string]bool
-	vapid    bool
-	profile  bool
+	vapid   bool
+	profile bool
 }
-
-func newDirtySet() dirtySet {
-	return dirtySet{
-		messages: make(map[string]bool),
-	}
-}
-
-func (s *Server) touchMessage(m *messageState) { s.dirty.messages[m.ID()] = true }
 
 // unlock writes the changes made under s.mu through to the store, then
 // releases the lock.
@@ -111,7 +102,7 @@ func userID(u *userState) string { return u.id }
 // with the fences waiting for it.
 func (s *Server) flushLocked() {
 	if s.store.Stopped() {
-		s.dirty = newDirtySet()
+		s.dirty = dirtySet{}
 		s.log.Entries()
 		s.users.Entries(avatarEmbedID)
 		s.pushes.Entries()
@@ -143,7 +134,7 @@ func (s *Server) flushLocked() {
 		s.storedMeta = meta
 		batch = append(batch, store.Entry{Kind: entryMeta, ID: "counters", Value: encodeJSON(meta)})
 	}
-	s.dirty = newDirtySet()
+	s.dirty = dirtySet{}
 	s.store.Queue(batch)
 }
 
@@ -160,11 +151,6 @@ func (s *Server) entriesLocked(d dirtySet, records []store.Entry) []store.Entry 
 		batch = append(batch, store.Entry{Kind: kind, ID: id, Value: encoded})
 	}
 	batch = append(batch, records...)
-	for id := range d.messages {
-		if m := s.messages[id]; m != nil {
-			batch = append(batch, rooms.MessageEntry(m.Message))
-		}
-	}
 	if d.vapid && s.vapidStored {
 		put(entryMeta, "vapid", s.vapid.Encoded())
 	}

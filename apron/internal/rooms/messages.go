@@ -97,6 +97,7 @@ func (m *Message) Reactions() []roomlog.Reaction {
 // when emojis is empty, and logs the change as a reactions record in the
 // message's room, which it returns with the room.
 func (t *Table[U]) React(m *Message, from roomlog.Author, emojis []string) (*roomlog.Record, *Room[U]) {
+	t.dirtyMessages[m.id] = m
 	if len(emojis) == 0 {
 		delete(m.reactions, from.UserID)
 	} else {
@@ -143,6 +144,7 @@ func (t *Table[U]) Snapshot(m *Message, snapshot *roomlog.Message, logID int64) 
 	}
 	m.logID = logID
 	m.room = destination.id
+	t.dirtyMessages[m.id] = m
 	record = roomlog.NewMessage(logID, snapshot)
 	m.records = append(m.records, record)
 	t.Append(record, rooms...)
