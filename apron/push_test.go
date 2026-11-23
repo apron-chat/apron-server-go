@@ -1294,14 +1294,12 @@ func TestShutdownStopsTimers(t *testing.T) {
 	addPush(app, dora, pushRegistration{URL: relay.URL + "/dora", Wake: wakeBadge})
 	app.mu.Lock()
 	now := time.Now()
-	dora.Mute = muteState{Until: now.Add(time.Hour)}
-	app.scheduleMuteLocked(dora)
-	dora.RoomMutes["general"] = muteState{Until: now.Add(time.Hour)}
-	app.scheduleRoomMuteLocked(dora, "general")
+	app.users.SetMute(dora, "", muteState{Until: now.Add(time.Hour)})
+	app.users.SetMute(dora, "general", muteState{Until: now.Add(time.Hour)})
 	dora.Presence.SetPublishLimit(rate.NewLimiter(rate.Every(time.Hour), 0))
 	dora.Presence.Chosen = statusNone
 	app.announceStatusLocked(dora)
-	pending := dora.muteTimer != nil && dora.roomMuteTimers["general"] != nil && dora.statusTimer != nil
+	pending := app.users.Pending(dora.id) == 3
 	app.unlock()
 	if !pending {
 		t.Fatal("timers not pending")
@@ -1314,8 +1312,8 @@ func TestShutdownStopsTimers(t *testing.T) {
 	app.mu.Lock()
 	defer app.mu.Unlock()
 	app.scheduleBadgeLocked(dora)
-	app.scheduleMuteLocked(dora)
-	if dora.muteTimer != nil || len(dora.roomMuteTimers) != 0 || dora.statusTimer != nil || app.pushes.BadgePending(dora.id) {
-		t.Fatalf("timers after shutdown: mute %v, room mutes %v, status %v, badge %v", dora.muteTimer, dora.roomMuteTimers, dora.statusTimer, app.pushes.BadgePending(dora.id))
+	app.users.ScheduleMutes(dora)
+	if pending, badge := app.users.Pending(dora.id), app.pushes.BadgePending(dora.id); pending != 0 || badge {
+		t.Fatalf("timers after shutdown: %d, badge %v", pending, badge)
 	}
 }

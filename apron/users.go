@@ -63,12 +63,6 @@ type userState struct {
 	// (admitActionLocked).
 	actions *rate.Limiter
 
-	// statusTimer publishes a change of the shown status held back to
-	// coalesce a flapping user's changes (announceStatusLocked); muteTimer
-	// ends a timed mute, and roomMuteTimers each timed room mute.
-	statusTimer    *time.Timer
-	muteTimer      *time.Timer
-	roomMuteTimers map[string]*time.Timer
 	// unread holds the counts known per room while the user has push
 	// registrations (§4.9) (unread.go); pushDay counts the pushes delivered
 	// to the user today, against maxPushesPerUserDay.
@@ -297,27 +291,9 @@ func (s *Server) retireLocked(u *userState) {
 		s.leaveLocked(u, r)
 		s.rooms.ForgetRead(r, u.id)
 	}
-	s.stopTimersLocked(u)
 	s.setAvatarEmbedLocked(u, nil)
 	s.users.Delete(u.id)
 	s.users.Touch(u.id)
-}
-
-// stopTimersLocked stops u's timers: the ends of its timed mutes, and its
-// coalesced status.
-func (s *Server) stopTimersLocked(u *userState) {
-	if u.muteTimer != nil {
-		u.muteTimer.Stop()
-		u.muteTimer = nil
-	}
-	if u.statusTimer != nil {
-		u.statusTimer.Stop()
-		u.statusTimer = nil
-	}
-	for id, timer := range u.roomMuteTimers {
-		timer.Stop()
-		delete(u.roomMuteTimers, id)
-	}
 }
 
 // send queues a frame to every connection of the user.

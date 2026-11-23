@@ -182,20 +182,16 @@ func (s *Server) applyStatusLocked(c *client, u *userState, update statusUpdate)
 	now := time.Now()
 	mute := update.mute(now)
 	if !update.scoped {
-		u.Mute = mute
-		s.users.Touch(u.id)
-		s.scheduleMuteLocked(u)
+		s.users.SetMute(u, "", mute)
 		u.send(muteFrame("", mute, now))
 		return
 	}
 	id := update.roomID
-	if mute.Active(now) {
-		u.RoomMutes[id] = mute
-	} else {
-		delete(u.RoomMutes, id)
+	if !mute.Active(now) {
+		// A room's mute that ends is forgotten.
+		mute = muteState{}
 	}
-	s.users.Touch(u.id)
-	s.scheduleRoomMuteLocked(u, id)
+	s.users.SetMute(u, id, mute)
 	u.send(muteFrame(id, mute, now))
 	// What counts toward unread changes with a room's mute, in the room and
 	// its threads, at any depth (unread.go), so every count is taken again,
@@ -258,71 +254,29 @@ func (s *Server) sendAfterAuthLocked(c *client) {
 	}
 }
 
-// scheduleMuteLocked ends u's timed mute when its time passes, telling the
-// user's connections it is now false (§4.5).
-func (s *Server) scheduleMuteLocked(u *userState) {
-	if u.muteTimer != nil {
-		u.muteTimer.Stop()
-		u.muteTimer = nil
-	}
-	if s.closed || u.Mute.Forever || u.Mute.Until.IsZero() {
+// muteEnded ends u's timed mute of the room roomID, or everywhere when
+// roomID is "", set until until, when its time passes (users.Timers),
+// unless it changed since, telling the user's connections it is now false
+// (§4.5). What counts toward u's unread changes with a room's mute in the
+// room and its threads, so the counts are taken again and a badge push
+// sent (§4.9).
+func (s *Server) muteEnded(u *userState, roomID string, until time.Time) {
+	s.mu.Lock()
+	defer s.unlock()
+	if s.closed || !s.users.EndMute(u, roomID, until) {
 		return
 	}
-	until := u.Mute.Until
-	u.muteTimer = time.AfterFunc(time.Until(until), func() {
-		s.mu.Lock()
-		defer s.unlock()
-		if s.closed || s.users.Get(u.id) != u || u.Mute.Forever || !u.Mute.Until.Equal(until) {
-			return
-		}
-		u.Mute = muteState{}
-		u.muteTimer = nil
-		s.users.Touch(u.id)
-		u.send(muteFrame("", u.Mute, time.Now()))
-	})
-}
-
-// scheduleRoomMuteLocked ends u's timed mute of room id when its time
-// passes. Its end is sent like the unscoped mute's, and what counts toward
-// u's unread changes with it in the room and its threads, so the counts are
-// taken again and a badge push sent (§4.9).
-func (s *Server) scheduleRoomMuteLocked(u *userState, id string) {
-	if timer := u.roomMuteTimers[id]; timer != nil {
-		timer.Stop()
-		delete(u.roomMuteTimers, id)
-	}
-	mute, ok := u.RoomMutes[id]
-	if s.closed || !ok || mute.Forever || mute.Until.IsZero() {
-		return
-	}
-	if u.roomMuteTimers == nil {
-		u.roomMuteTimers = make(map[string]*time.Timer)
-	}
-	until := mute.Until
-	u.roomMuteTimers[id] = time.AfterFunc(time.Until(until), func() {
-		s.mu.Lock()
-		defer s.unlock()
-		if s.closed || s.users.Get(u.id) != u {
-			return
-		}
-		if mute, ok := u.RoomMutes[id]; !ok || mute.Forever || !mute.Until.Equal(until) {
-			return
-		}
-		s.endRoomMuteLocked(u, id)
+	u.send(muteFrame(roomID, muteState{}, time.Now()))
+	if roomID != "" {
 		s.unreadChangedLocked(u, "")
-	})
+	}
 }
 
 // endRoomMuteLocked forgets u's mute of room id, which has run out, and
 // tells the user's connections it is now false (§4.5). The caller takes
 // the unread counts again.
 func (s *Server) endRoomMuteLocked(u *userState, id string) {
-	if timer := u.roomMuteTimers[id]; timer != nil {
-		timer.Stop()
-		delete(u.roomMuteTimers, id)
-	}
-	delete(u.RoomMutes, id)
-	s.users.Touch(u.id)
+	s.users.SetMute(u, id, muteState{})
 	u.send(muteFrame(id, muteState{}, time.Now()))
 }
 
@@ -420,27 +374,26 @@ func (s *Server) announceStatusLocked(u *userState) {
 		s.publishLocked(u)
 		return
 	}
-	if !u.Presence.Pending() || u.statusTimer != nil {
-		return
-	}
-	if !u.Presence.PublishNow() {
-		u.statusTimer = time.AfterFunc(statusCoalesce, func() {
-			s.mu.Lock()
-			defer s.unlock()
-			u.statusTimer = nil
-			if s.closed || s.users.Get(u.id) != u {
-				return
-			}
-			before := u.views()
-			if s.publishLocked(u) {
-				s.publishUserLocked(u, nil, before)
-			}
-		})
+	if !s.users.PublishStatus(u) {
 		return
 	}
 	before := u.views()
 	s.publishLocked(u)
 	s.publishUserLocked(u, nil, before)
+}
+
+// statusDue publishes u's shown status held back by announceStatusLocked
+// (users.Timers), unless the server closed, or u is gone, since.
+func (s *Server) statusDue(u *userState) {
+	s.mu.Lock()
+	defer s.unlock()
+	if !s.users.ReleaseStatus(u) || s.closed {
+		return
+	}
+	before := u.views()
+	if s.publishLocked(u) {
+		s.publishUserLocked(u, nil, before)
+	}
 }
 
 // sendStatusLocked tells the connections of users u's published shown

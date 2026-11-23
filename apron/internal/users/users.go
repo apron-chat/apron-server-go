@@ -6,12 +6,14 @@
 // extension's bot, an invitation, the rooms a scope limits it to, and the
 // apps it allowed. A Table finds users by user_id and accounts by the
 // identities that prove them, tracks the users changed, and keeps them in
-// the store, guests too, which the server retires at its next start.
+// the store, guests too, which the server retires at its next start. It
+// also ends its users' timed mutes, and publishes their coalesced
+// statuses, on timers that call the server back (Timers).
 //
 // A Table knows its users only as values of the type U, such as the
 // server's user state, which holds a User with the user's live links:
-// connections, joined rooms, and timers. It is not safe for concurrent
-// use: the server calls it holding its lock.
+// connections and joined rooms. It is not safe for concurrent use: the
+// server calls it holding its lock.
 package users
 
 import (
@@ -129,12 +131,17 @@ type Table[U Holder] struct {
 	byIdentity map[authn.Identity]U
 	// dirty are the user_ids of the users added, changed, or deleted since
 	// Entries last took them.
-	dirty map[string]struct{}
+	dirty  map[string]struct{}
+	timers timers[U]
 }
 
-// NewTable returns an empty table.
-func NewTable[U Holder]() *Table[U] {
-	return &Table[U]{byID: make(map[string]U), byIdentity: make(map[authn.Identity]U), dirty: make(map[string]struct{})}
+// NewTable returns an empty table, which calls back timers when a user's
+// timer fires.
+func NewTable[U Holder](callbacks Timers[U]) *Table[U] {
+	return &Table[U]{
+		byID: make(map[string]U), byIdentity: make(map[authn.Identity]U), dirty: make(map[string]struct{}),
+		timers: timers[U]{Timers: callbacks, mutes: make(map[string]map[string]*time.Timer), held: make(map[string]*time.Timer)},
+	}
 }
 
 // Get returns the user with user_id id, or the zero U.
@@ -159,8 +166,10 @@ func (t *Table[U]) Add(u U) {
 	t.Touch(id)
 }
 
-// Delete forgets the user with user_id id, and deletes it from the store.
+// Delete forgets the user with user_id id, stops its timers, and deletes it
+// from the store.
 func (t *Table[U]) Delete(id string) {
+	t.cancel(id)
 	if u, ok := t.byID[id]; ok {
 		for scheme, subject := range u.Kept().Identities {
 			if identity := (authn.Identity{Scheme: scheme, Subject: subject}); t.byIdentity[identity] == u {

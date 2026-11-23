@@ -284,10 +284,7 @@ func (s *Server) restoreLocked() (map[string]bool, error) {
 			s.retireLocked(u)
 		} else {
 			s.grantRolesLocked(u)
-			s.scheduleMuteLocked(u)
-			for id := range u.RoomMutes {
-				s.scheduleRoomMuteLocked(u, id)
-			}
+			s.users.ScheduleMutes(u)
 		}
 	}
 	for _, id := range s.embeds.IDs() {

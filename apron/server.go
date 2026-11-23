@@ -139,9 +139,10 @@ type client struct {
 // apron/internal, which know nothing of Server: the log and its paging
 // (roomlog), rooms, their members, and who may see them (rooms), the store
 // writer and its fences (durable), user_ids (accounts), what the server
-// keeps of each user and the accounts by identity (users), users' statuses
-// (presence), push registrations (push), sessions (sessions), device
-// tokens (devices), service tokens (services, whose expiry takes mu),
+// keeps of each user and the accounts by identity (users, whose timed
+// mutes and coalesced statuses take mu), users' statuses (presence), push
+// registrations (push, whose badge pushes take mu), sessions (sessions),
+// device tokens (devices), service tokens (services, whose expiry takes mu),
 // invitations (invitations), hosted embeds (embeds), the custom emoji
 // (emoji), the profile set with /server (profile), out-of-band sign-in
 // proposals (proposals), and the extensions' values (kv), whose methods
@@ -150,7 +151,8 @@ type client struct {
 // (uploads), which own their own locks or atomics. Each module that keeps
 // state in the store tracks its own changes and renders its own entries
 // (persist.go). Server keeps what ties them together: users' live links,
-// the messages by message_id, mute and status timers, and delivery.
+// the messages by message_id, and delivery, and it acts on the modules'
+// timers, which call it back to take mu.
 type Server struct {
 	config Config
 
@@ -280,7 +282,6 @@ func Open(config Config) (*Server, error) {
 		rooms:       rooms.NewTable[*userState](log),
 		messages:    make(map[string]*messageState),
 		clients:     make(map[*client]struct{}),
-		users:       users.NewTable[*userState](),
 		ids:         accounts.NewIDs(),
 		roleHolders: make(map[string][]Principal),
 		embeds:      embeds.New[*embedState](),
@@ -298,6 +299,7 @@ func Open(config Config) (*Server, error) {
 	}
 	s.services = services.New(s.serviceExpired)
 	s.pushes = push.NewTable(s.badgeDue)
+	s.users = users.NewTable(users.Timers[*userState]{MuteEnded: s.muteEnded, StatusDue: s.statusDue})
 	if s.logger == nil {
 		s.logger = slog.Default()
 	}
@@ -505,9 +507,7 @@ func (s *Server) Shutdown(ctx context.Context) error {
 		// the ends of timed mutes and coalesced statuses would find the
 		// server closed: none is kept waiting past it.
 		s.pushes.Stop()
-		for _, u := range s.users.All() {
-			s.stopTimersLocked(u)
-		}
+		s.users.Stop()
 		s.files.Close()
 	}
 	s.unlock()

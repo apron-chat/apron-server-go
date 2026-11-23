@@ -122,7 +122,7 @@ func TestStoredUsersAreStoredAgain(t *testing.T) {
 func expectUsersStoredAgain(t *testing.T, entries, want map[string]jsontext.Value) {
 	t.Helper()
 	now := time.UnixMilli(1795400000000)
-	table := users.NewTable[*userState]()
+	table := users.NewTable[*userState](users.Timers[*userState]{})
 	avatars, err := table.Restore(entries, restoredUser, now)
 	if err != nil {
 		t.Fatal(err)

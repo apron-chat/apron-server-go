@@ -36,7 +36,7 @@ func entryIDs(entries []store.Entry) (put, deleted []string) {
 }
 
 func TestTableIdentities(t *testing.T) {
-	table := NewTable[*testUser]()
+	table := NewTable[*testUser](Timers[*testUser]{})
 	ada := &testUser{id: "ada", User: New("Ada", time.Now())}
 	table.Add(ada)
 	if ada.Account() || table.Get("ada") != ada || table.Len() != 1 {
@@ -72,7 +72,7 @@ func TestMutes(t *testing.T) {
 	if (Mute{}).Active(now) || !(Mute{Forever: true}).Active(now) || !(Mute{Until: now.Add(time.Second)}).Active(now) || (Mute{Until: now}).Active(now) {
 		t.Fatal("Active")
 	}
-	table := NewTable[*testUser]()
+	table := NewTable[*testUser](Timers[*testUser]{})
 	u := &testUser{id: "u", User: New("", now)}
 	u.Mute = Mute{Until: now.Add(-time.Second)}
 	u.RoomMutes["a"] = Mute{Until: now.Add(-time.Second)}
@@ -89,7 +89,7 @@ func TestMutes(t *testing.T) {
 // again.
 func TestRestore(t *testing.T) {
 	now := time.UnixMilli(1795400000000)
-	table := NewTable[*testUser]()
+	table := NewTable[*testUser](Timers[*testUser]{})
 	avatars, err := table.Restore(map[string]jsontext.Value{
 		"old":   jsontext.Value(`{"name":"Old","email":"old@example.com","external":"github:8","granted":["moderator"],"avatar_embed":"embed_1"}`),
 		"shown": jsontext.Value(`{"identities":{"email":"s@example.com"},"status":"dnd","shown":true,"scope":{"rooms":["general"],"threads":true}}`),
