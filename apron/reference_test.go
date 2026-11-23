@@ -926,8 +926,10 @@ func TestLiveWriteConnectionCanReadLiveText(t *testing.T) {
 }
 
 // startLiveWrite starts a streaming PUT to writeURL with first as its first
-// bytes, waits until the server has taken the write, and returns the body's
-// writer and a channel that receives the response status.
+// bytes, waits until the server has taken the write and has first in the
+// text (or the text ended), and returns the body's writer and a channel
+// that receives the response status. pipe.Write returns once the client
+// has first, which may be before the server does.
 func startLiveWrite(t *testing.T, app *Server, writeURL, first string) (*io.PipeWriter, chan int) {
 	t.Helper()
 	body, pipe := io.Pipe()
@@ -947,9 +949,13 @@ func startLiveWrite(t *testing.T, app *Server, writeURL, first string) (*io.Pipe
 	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(5 * time.Millisecond) {
 		app.mu.RLock()
 		e := app.embeds.Write(token)
-		writing := e != nil && e.writing
+		started := false
+		if e != nil && e.writing && e.live != nil {
+			received, _ := e.live.Progress()
+			started = received >= int64(len(first)) || e.live.Ended()
+		}
 		app.mu.RUnlock()
-		if writing {
+		if started {
 			return pipe, writerDone
 		}
 		if time.Now().After(deadline) {

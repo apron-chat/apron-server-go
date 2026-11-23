@@ -468,8 +468,9 @@ func (s *Server) handleWrite(w http.ResponseWriter, r *http.Request) {
 			refuseWrite(w, message, status)
 			return
 		}
+		live := e.live
 		s.unlock()
-		s.writeLive(w, r, e)
+		s.writeLive(w, r, e, live)
 		return
 	}
 	e.started = true

@@ -198,11 +198,12 @@ func hasLiveAppend(snapshot *roomlog.Message) bool {
 	return false
 }
 
-// writeLive copies the request body into live text until the text ends:
-// the body ends, the writer disconnects, a limit is reached, or the embed is
-// removed. The text keeps what arrived (§4.8.3); a writer cannot continue it.
-func (s *Server) writeLive(w http.ResponseWriter, r *http.Request, e *embedState) {
-	live := e.live
+// writeLive copies the request body into live, e's live text, until the
+// text ends: the body ends, the writer disconnects, a limit is reached, or
+// the embed is removed. The text keeps what arrived (§4.8.3); a writer
+// cannot continue it. The caller reads live under s.mu, as a sign-out may
+// finish e (endWritesLocked), which lets go of e.live, once it unlocks.
+func (s *Server) writeLive(w http.ResponseWriter, r *http.Request, e *embedState, live *livetext.Text) {
 	// The reply may come before the body ends, as when the embed is removed.
 	controller := http.NewResponseController(w)
 	_ = controller.EnableFullDuplex()
