@@ -126,17 +126,23 @@ func (f Fields) MessageID(name string) (LogID, bool, error) {
 	if !ok {
 		return 0, false, nil
 	}
+	id, err := messageID(name, raw)
+	return id, true, err
+}
+
+// messageID reads the message_id raw, the value of the param name.
+func messageID(name string, raw jsontext.Value) (LogID, error) {
 	var value string
 	if isNull(raw) || json.Unmarshal(raw, &value) != nil {
-		return 0, true, InvalidParams(name + " must be a positive decimal string")
+		return 0, InvalidParams(name + " must be a positive decimal string")
 	}
 	switch id, err := parseLogID(value); {
 	case err == nil && id > 0:
-		return id, true, nil
+		return id, nil
 	case err == errLogIDRange:
-		return 0, true, InvalidParams(name + " must be below 2^53")
+		return 0, InvalidParams(name + " must be below 2^53")
 	}
-	return 0, true, InvalidParams(name + " must be a positive decimal string")
+	return 0, InvalidParams(name + " must be a positive decimal string")
 }
 
 // Count reads a positive integer param, such as a limit.
@@ -163,11 +169,12 @@ func (f Fields) MessageRef(name string) (LogID, bool, error) {
 	if isNull(raw) || json.Unmarshal(raw, &ref) != nil || ref == nil {
 		return 0, true, InvalidParams(name + ".message_id must be a positive decimal string")
 	}
-	id, present, err := ref.MessageID("message_id")
-	if err != nil || !present {
+	raw, present = ref["message_id"]
+	if !present {
 		return 0, true, InvalidParams(name + ".message_id must be a positive decimal string")
 	}
-	return id, true, nil
+	id, err := messageID(name+".message_id", raw)
+	return id, true, err
 }
 
 // The Request's accessors read its params (Fields).

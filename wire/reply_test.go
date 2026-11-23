@@ -382,3 +382,33 @@ func TestCheckOrigin(t *testing.T) {
 		t.Error("an origin CheckOrigin refuses opened a WebSocket")
 	}
 }
+
+// badLogIDs sends what holds a LogID that is no log_id (§2.1): a
+// notification past MaxLogID, and then a result with a negative one.
+type badLogIDs struct{ notified chan bool }
+
+func (h badLogIDs) Command(_ context.Context, c *wire.Conn, _ wire.CommandParams, reply wire.Reply[wire.CommandResult]) error {
+	h.notified <- c.Notify(wire.Message{LogID: wire.MaxLogID + 1, RoomID: "r", From: wire.User{UserID: "ada"}, Body: &wire.Body{Text: "x"}})
+	reply.Request().Reply(map[string]any{"log_id": wire.LogID(-1)})
+	return nil
+}
+
+// A LogID that is no log_id is not sent: a result with one is answered
+// error/internal_error, and a notification is dropped, both logged.
+func TestLogIDOutOfRangeNotSent(t *testing.T) {
+	var log logged
+	h := badLogIDs{make(chan bool, 1)}
+	l := local(t, &wire.Server{Backend: &backend{}, Commands: h, Logger: log.logger()})
+	if result, err := call(t, l, "command", `{"body":{"text":"/x"}}`); wire.CodeOf(err) != wire.CodeInternalError {
+		t.Fatalf("got %s %v, want internal_error", result, err)
+	}
+	if <-h.notified {
+		t.Error("a notification with a log_id past 2^53 was sent")
+	}
+	out := log.String()
+	for _, want := range []string{"encoding a notification", "9007199254740992", "a result is not a JSON object", "not negative: -1"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("the log does not say %q: %s", want, out)
+		}
+	}
+}

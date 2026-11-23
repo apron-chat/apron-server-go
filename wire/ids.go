@@ -68,10 +68,18 @@ func parseLogID(s string) (LogID, error) {
 // String returns the log_id as a decimal string, "0" for none.
 func (id LogID) String() string { return strconv.FormatInt(int64(id), 10) }
 
-// MarshalJSON writes the log_id as a decimal string, or null for 0.
+// MarshalJSON writes the log_id as a decimal string, or null for 0. A
+// negative LogID, or one past MaxLogID, is no log_id (§2.1), and is an
+// encoding error rather than sent: a reply whose result has one is logged
+// and answered error/internal_error, and a notification is not sent.
 func (id LogID) MarshalJSON() ([]byte, error) {
-	if id == 0 {
+	switch {
+	case id == 0:
 		return []byte("null"), nil
+	case id < 0:
+		return nil, errors.New("wire: a log_id is not negative: " + id.String())
+	case id > MaxLogID:
+		return nil, errors.New("wire: a log_id is below 2^53: " + id.String())
 	}
 	return strconv.AppendQuote(nil, id.String()), nil
 }

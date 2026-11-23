@@ -59,6 +59,16 @@ func TestLogIDJSON(t *testing.T) {
 			t.Errorf("%v round-trips as %s to %v", id, data, back)
 		}
 	}
+	// Only a log_id is encoded: a negative LogID, or one past MaxLogID, is
+	// an encoding error, as it is no log_id (§2.1).
+	if got, err := marshal(MaxLogID); err != nil || string(got) != `"9007199254740991"` {
+		t.Errorf("MaxLogID encodes as %s, %v", got, err)
+	}
+	for _, id := range []LogID{-1, -1724803200042, MaxLogID + 1, 1<<63 - 1} {
+		if got, err := marshal(fields{Required: 1, Optional: id}); err == nil || !strings.Contains(err.Error(), id.String()) {
+			t.Errorf("%v encodes as %s, %v; want an error that names it", id, got, err)
+		}
+	}
 	for _, bad := range []string{`5`, `"x"`, `"-1"`, `"01"`, `true`, `{}`, `"9007199254740992"`} {
 		var id LogID
 		if err := json.Unmarshal([]byte(bad), &id); err == nil {
@@ -83,8 +93,13 @@ func TestLogIDBound(t *testing.T) {
 			}
 		}
 	}
-	if _, _, err := f.MessageRef("ref"); CodeOf(err) != CodeInvalidParams {
+	if _, _, err := f.MessageRef("ref"); CodeOf(err) != CodeInvalidParams || !strings.Contains(err.Error(), "ref.message_id must be below 2^53") {
 		t.Errorf("ref: %v", err)
+	}
+	for _, ref := range []string{`null`, `{}`, `{"message_id":"0"}`, `{"message_id":"x"}`, `{"message_id":5}`} {
+		if _, _, err := (Fields{"ref": jsontext.Value(ref)}).MessageRef("ref"); err == nil || err.(*Error).Message != "ref.message_id must be a positive decimal string" {
+			t.Errorf("ref %s: %v", ref, err)
+		}
 	}
 	for _, params := range []string{
 		`{"message_id":` + past + `,"body":{"text":"x"}}`,
