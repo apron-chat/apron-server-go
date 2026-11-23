@@ -2,13 +2,12 @@ package apron
 
 import (
 	"encoding/json/v2"
-	"fmt"
 	"slices"
 	"time"
 
 	"golang.org/x/time/rate"
 
-	uts51 "github.com/apron-chat/apron-server-go/apron/internal/emoji"
+	"github.com/apron-chat/apron-server-go/apron/internal/messages"
 	"github.com/apron-chat/apron-server-go/apron/internal/roomlog"
 	"github.com/apron-chat/apron-server-go/apron/internal/rooms"
 	"github.com/apron-chat/apron-server-go/wire"
@@ -91,10 +90,10 @@ func (s *Server) saveMessage(c *client, p wire.EditParams, reply wire.Reply[wire
 		if p.Body == nil {
 			return wire.Missing("body")
 		}
-		body = bodyObject(p.Body)
-		if err := validateBody(body); err != nil {
+		if err := messages.CheckBody(p.Body); err != nil {
 			return err
 		}
+		body = bodyObject(p.Body)
 	}
 	extWrite := p.Ext
 	// The extensions' filters see what is saved, outside s.mu, and may
@@ -209,8 +208,8 @@ func (s *Server) saveMessage(c *client, p wire.EditParams, reply wire.Reply[wire
 		} else {
 			ext = withEditedBy(ext, "")
 		}
-		if encodedSize(ext) > maxMessageExtBytes {
-			return &Error{Code: CodeTooLarge, Message: fmt.Sprintf("The message's ext would be over %d bytes", maxMessageExtBytes)}
+		if err := messages.CheckExt(ext); err != nil {
+			return err
 		}
 	}
 	if !replacing {
@@ -344,7 +343,7 @@ func (s *Server) admitPostLocked(u *userState) *Error {
 	if delay := reservation.DelayFrom(now); delay > 0 {
 		reservation.CancelAt(now)
 		wait := int64((delay + time.Second - 1) / time.Second)
-		return &Error{Code: CodeRetryAfter, Message: "Too many messages; slow down", Data: map[string]any{"retry_after": wait}}
+		return wire.RetryAfter("Too many messages; slow down", int(wait))
 	}
 	return nil
 }
@@ -374,26 +373,6 @@ func admitActionLocked(u *userState) *Error {
 	return nil
 }
 
-func validMessageID(id string) bool {
-	if len(id) == 0 || id[0] < '1' || id[0] > '9' {
-		return false
-	}
-	for _, ch := range id {
-		if ch < '0' || ch > '9' {
-			return false
-		}
-	}
-	return true
-}
-
-const (
-	// maxMentions bounds body.mentions.
-	maxMentions = 256
-	// maxMessageExtBytes bounds a message's ext, merged (§4.12), which
-	// every snapshot of the message carries.
-	maxMessageExtBytes = 64 << 10
-)
-
 // mentions returns a message body's body.mentions (§3.5).
 func mentions(body map[string]any) []string {
 	var ids []string
@@ -405,65 +384,12 @@ func mentions(body map[string]any) []string {
 	return ids
 }
 
-func validateBody(body map[string]any) *Error {
-	if raw, ok := body["text"]; ok {
-		if _, ok := raw.(string); !ok {
-			return invalidParams("body.text must be a string")
-		}
-	}
-	if raw, ok := body["format"]; ok {
-		format, ok := raw.(string)
-		if !ok || (format != "plain" && format != "markdown") {
-			return invalidParams("body.format must be plain or markdown")
-		}
-	}
-	if raw, ok := body["mentions"]; ok {
-		mentions, ok := raw.([]any)
-		if !ok {
-			return invalidParams("body.mentions must be an array of user_id strings")
-		}
-		if len(mentions) > maxMentions {
-			// A count limit the server sets is denied (§1.1).
-			return &Error{Code: CodeDenied, Message: fmt.Sprintf("A message mentions at most %d users", maxMentions)}
-		}
-		for _, value := range mentions {
-			if id, ok := value.(string); !ok || !validID(id) {
-				return invalidParams("body.mentions must be an array of user_id strings")
-			}
-		}
-	}
-	if raw, ok := body["embeds"]; ok {
-		embeds, ok := raw.([]any)
-		if !ok {
-			return invalidParams("body.embeds must be an array")
-		}
-		if len(embeds) > maxEmbedsPerMessage {
-			return &Error{Code: CodeDenied, Message: fmt.Sprintf("A message holds at most %d embeds", maxEmbedsPerMessage)}
-		}
-		for i, value := range embeds {
-			embed, ok := value.(map[string]any)
-			if !ok {
-				return invalidParams("body.embeds[%d] must be an object", i)
-			}
-			if kind, ok := embed["kind"].(string); !ok || kind == "" {
-				return invalidParams("body.embeds[%d].kind must be a non-empty string", i)
-			}
-		}
-	}
-	return nil
-}
-
-const (
-	maxEmojiBytes    = 64
-	maxDistinctEmoji = 20
-)
-
 // react replaces the caller's complete reaction set on one message
 // (§4.7). Entries are kept fully qualified, and duplicates collapse; an
 // unchanged set logs nothing. The broadcast precedes the result (§1).
 func (s *Server) react(c *client, p wire.ReactParams, reply wire.Reply[wire.Empty]) *Error {
 	messageID := p.MessageID.String()
-	emojis, err := normalizeEmojis(p.Emojis)
+	emojis, err := messages.Emojis(p.Emojis)
 	if err != nil {
 		return err
 	}
@@ -492,26 +418,4 @@ func (s *Server) react(c *client, p wire.ReactParams, reply wire.Reply[wire.Empt
 	}
 	_ = reply.Send(wire.Empty{})
 	return nil
-}
-
-func normalizeEmojis(values []string) ([]string, *Error) {
-	emojis := make([]string, 0, len(values))
-	for _, emoji := range values {
-		// Entries that differ only in U+FE0F are the same entry, kept fully
-		// qualified (§4.7).
-		if emoji = uts51.Qualify(emoji); emoji == "" {
-			return nil, invalidParams("emojis must be non-empty strings")
-		}
-		if len(emoji) > maxEmojiBytes {
-			return nil, &Error{Code: CodeTooLarge, Message: fmt.Sprintf("An emoji is at most %d bytes", maxEmojiBytes)}
-		}
-		if !slices.Contains(emojis, emoji) {
-			emojis = append(emojis, emoji)
-		}
-	}
-	if len(emojis) > maxDistinctEmoji {
-		// A count limit the server sets is denied (§1.1).
-		return nil, &Error{Code: CodeDenied, Message: fmt.Sprintf("At most %d distinct emoji per message", maxDistinctEmoji)}
-	}
-	return emojis, nil
 }

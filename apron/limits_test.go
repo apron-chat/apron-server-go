@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/apron-chat/apron-server-go/apron/internal/messages"
 	"github.com/apron-chat/apron-server-go/apron/internal/uploads"
 )
 
@@ -98,13 +99,13 @@ func TestUploadsAreStoredOnDiskWithinLimits(t *testing.T) {
 func TestMessagesAreLimitedToMaxEmbeds(t *testing.T) {
 	_, httpServer := newTestServer(t, DefaultConfig())
 	a := dialTestClient(t, httpServer)
-	embeds := make([]any, maxEmbedsPerMessage+1)
+	embeds := make([]any, messages.MaxEmbeds+1)
 	for i := range embeds {
 		embeds[i] = map[string]any{"kind": "upload"}
 	}
 	// A count limit the server sets is denied (§1.1).
 	a.expectError(t, "message", "many", map[string]any{"room_id": "general", "body": map[string]any{"embeds": embeds}}, CodeDenied)
-	mentions := make([]any, maxMentions+1)
+	mentions := make([]any, messages.MaxMentions+1)
 	for i := range mentions {
 		mentions[i] = fmt.Sprint("user", i)
 	}

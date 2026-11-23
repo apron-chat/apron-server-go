@@ -16,6 +16,7 @@ import (
 
 	"github.com/coder/websocket"
 
+	"github.com/apron-chat/apron-server-go/apron/internal/messages"
 	"github.com/apron-chat/apron-server-go/apron/internal/webpush"
 )
 
@@ -825,7 +826,7 @@ func TestReactions(t *testing.T) {
 	c.result(t, "reactions", "clear-again", map[string]any{"message_id": id, "emojis": []any{}})
 	c.expectQuiet(t)
 
-	tooMany := make([]any, maxDistinctEmoji+1)
+	tooMany := make([]any, messages.MaxDistinctEmoji+1)
 	for i := range tooMany {
 		tooMany[i] = strconv.Itoa(i)
 	}
@@ -843,7 +844,7 @@ func TestReactions(t *testing.T) {
 	// A count limit the server sets is denied, and an emoji over its size is
 	// too_large (§1.1).
 	c.expectError(t, "reactions", "too-many", map[string]any{"message_id": id, "emojis": tooMany}, CodeDenied)
-	c.expectError(t, "reactions", "too-long", map[string]any{"message_id": id, "emojis": []any{strings.Repeat("x", maxEmojiBytes+1)}}, CodeTooLarge)
+	c.expectError(t, "reactions", "too-long", map[string]any{"message_id": id, "emojis": []any{strings.Repeat("x", messages.MaxEmojiBytes+1)}}, CodeTooLarge)
 	c.expectQuiet(t)
 
 	page := historyPage(t, c, "general", map[string]any{})

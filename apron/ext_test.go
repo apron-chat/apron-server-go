@@ -6,6 +6,8 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/apron-chat/apron-server-go/apron/internal/messages"
 )
 
 // bigNumber is above 2^53, so a float64 cannot hold it exactly.
@@ -64,7 +66,7 @@ func TestMessageSavesMergeExt(t *testing.T) {
 
 	// The limit applies to the merged ext: keys that fit one at a time are
 	// too_large together, and the refused save changes nothing.
-	half := strings.Repeat("x", maxMessageExtBytes/2)
+	half := strings.Repeat("x", messages.MaxExtBytes/2)
 	save(t, a, "first-half", map[string]any{"message_id": id, "body": map[string]any{"text": "x"}, "ext": map[string]any{"a": half}})
 	a.expectError(t, "message", "second-half", map[string]any{"message_id": id, "room_id": "general", "body": map[string]any{"text": "x"}, "ext": map[string]any{"b": half}}, CodeTooLarge)
 	_, kept := save(t, a, "after", map[string]any{"message_id": id, "body": map[string]any{"text": "x"}})

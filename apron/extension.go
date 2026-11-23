@@ -14,6 +14,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/apron-chat/apron-server-go/apron/internal/messages"
 	"github.com/apron-chat/apron-server-go/internal/auth/email"
 	"github.com/apron-chat/apron-server-go/wire"
 	"github.com/apron-chat/apron-server-go/wire/commands"
@@ -622,7 +623,7 @@ func (s *Server) filterMessage(c *client, d *Draft) *Error {
 		return internalError()
 	}
 	d.Body = body
-	return validateBody(d.Body)
+	return messages.CheckRaw(encoded)
 }
 
 // User is a user as extensions see it: a copy, which does not change.

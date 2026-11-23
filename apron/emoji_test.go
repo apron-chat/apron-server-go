@@ -17,6 +17,7 @@ import (
 
 	"github.com/coder/websocket"
 
+	"github.com/apron-chat/apron-server-go/apron/internal/messages"
 	"github.com/apron-chat/apron-server-go/apron/internal/uploads"
 	"github.com/apron-chat/apron-server-go/store"
 )
@@ -162,7 +163,7 @@ func TestCustomEmoji(t *testing.T) {
 	if status := addEmoji(t, b, ":text:", []byte("plain text"), "text/plain"); status != http.StatusUnsupportedMediaType {
 		t.Fatalf("a text emoji: %d", status)
 	}
-	for i, text := range []string{"/emoji", "/emoji add party", "/emoji add :a b:", "/emoji drop :party:", "/emoji add :" + strings.Repeat("x", maxEmojiBytes) + ":"} {
+	for i, text := range []string{"/emoji", "/emoji add party", "/emoji add :a b:", "/emoji drop :party:", "/emoji add :" + strings.Repeat("x", messages.MaxEmojiBytes) + ":"} {
 		b.expectError(t, "command", fmt.Sprint("shape-", i), map[string]any{"body": map[string]any{"text": text, "embeds": []any{map[string]any{"kind": "upload"}}}}, CodeInvalidParams)
 	}
 	b.expectError(t, "command", "no-image", map[string]any{"body": map[string]any{"text": "/emoji add :new:"}}, CodeInvalidParams)

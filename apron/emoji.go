@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/apron-chat/apron-server-go/apron/internal/emoji"
+	"github.com/apron-chat/apron-server-go/apron/internal/messages"
 	"github.com/apron-chat/apron-server-go/wire"
 )
 
@@ -236,8 +237,8 @@ func (s *Server) handleEmoji(w http.ResponseWriter, r *http.Request) {
 func (s *Server) emojiCommand(c *client, _ *roomState, body map[string]any, args, _ string) (wire.CommandResult, *Error) {
 	u := c.user
 	action, key := cutWord(args)
-	if !emojiKeyPattern.MatchString(key) || len(key) > maxEmojiBytes {
-		return wire.CommandResult{}, invalidParams("Usage: /emoji add :<name>: with one image attached, or /emoji remove :<name>:; a name is letters, digits, _, +, and -, at most %d characters", maxEmojiBytes-2)
+	if !emojiKeyPattern.MatchString(key) || len(key) > messages.MaxEmojiBytes {
+		return wire.CommandResult{}, invalidParams("Usage: /emoji add :<name>: with one image attached, or /emoji remove :<name>:; a name is letters, digits, _, +, and -, at most %d characters", messages.MaxEmojiBytes-2)
 	}
 	existing := s.emoji.Get(key)
 	// The form's word matches exactly, as command names do.

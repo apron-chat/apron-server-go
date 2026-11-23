@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/apron-chat/apron-server-go/apron/internal/messages"
 	"github.com/apron-chat/apron-server-go/store"
 )
 
@@ -293,6 +294,13 @@ func TestExtensionFilter(t *testing.T) {
 			case strings.Contains(d.Text(), "break the body"):
 				d.Body["text"] = func() {}
 				return nil
+			case strings.Contains(d.Text(), "html"):
+				// What a filter makes is checked as a client's body is.
+				d.Body["format"] = "html"
+				return nil
+			case strings.Contains(d.Text(), "mention all"):
+				d.Body["mentions"] = slices.Repeat([]any{"ada"}, messages.MaxMentions+1)
+				return nil
 			case strings.Contains(d.Text(), "tag"):
 				if err := d.SetExt(map[string]any{"checked": true}); err != nil {
 					return err
@@ -314,6 +322,12 @@ func TestExtensionFilter(t *testing.T) {
 	}
 	if frame := c.call(t, "message", "m3", map[string]any{"room_id": "general", "body": map[string]any{"text": "break the body"}}); errorCode(frame) != CodeInternalError {
 		t.Fatalf("broken body = %#v", frame)
+	}
+	if frame := c.call(t, "message", "m3b", map[string]any{"room_id": "general", "body": map[string]any{"text": "html"}}); errorCode(frame) != CodeInvalidParams {
+		t.Fatalf("filtered to a format = %#v", frame)
+	}
+	if frame := c.call(t, "message", "m3c", map[string]any{"room_id": "general", "body": map[string]any{"text": "mention all"}}); errorCode(frame) != CodeDenied {
+		t.Fatalf("filtered to too many mentions = %#v", frame)
 	}
 	_, snapshot = save(t, c, "m4", map[string]any{"body": map[string]any{"text": "tag me"}})
 	if ext := snapshot["ext"].(map[string]any); ext["clean"].(map[string]any)["checked"] != true {

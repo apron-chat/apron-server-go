@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/apron-chat/apron-server-go/apron/internal/messages"
 	"github.com/apron-chat/apron-server-go/apron/internal/roomlog"
 	"github.com/apron-chat/apron-server-go/wire"
 	"github.com/apron-chat/apron-server-go/wire/commands"
@@ -287,10 +288,10 @@ func (s *Server) visibleRoomsLocked(u *userState) []Room {
 // live text, and they make their own embed: a terminal or append embed in a
 // command is invalid_params.
 func (s *Server) command(c *client, p wire.CommandParams, reply wire.Reply[wire.CommandResult]) *Error {
-	body := bodyObject(p.Body)
-	if err := validateBody(body); err != nil {
+	if err := messages.CheckBody(p.Body); err != nil {
 		return err
 	}
+	body := bodyObject(p.Body)
 	// The name ends at the first whitespace, a line break too, as in
 	// "/embed-append\n# Plan". Names are case-sensitive (ext:command_list):
 	// /Kick is not /kick. A line that is no command is the Router's to

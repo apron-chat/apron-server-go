@@ -32,9 +32,6 @@ const (
 	filePath  = "/files/"
 )
 
-// maxEmbedsPerMessage bounds body.embeds.
-const maxEmbedsPerMessage = 32
-
 // embedState is a server-hosted embed: an upload, or live text (terminal or
 // append, live.go). Other embed kinds are body content with only an
 // embed_id. An embeds.Table keeps them, with what the store keeps of each
