@@ -208,11 +208,7 @@ func (s *Server) applyStatusLocked(c *client, u *userState, update statusUpdate)
 // are a map, not a wire.StatusUpdate, which would send room_id first: the
 // server has always sent its keys sorted.
 func muteFrame(roomID string, mute muteState, now time.Time) jsontext.Value {
-	params := map[string]any{"mute": muteValue(mute, now)}
-	if roomID != "" {
-		params["room_id"] = roomID
-	}
-	return notification("status", params)
+	return encodeNotification(wire.StatusUpdate{RoomID: roomID, Mute: muteValue(mute, now)})
 }
 
 // sendAfterAuthLocked sends a connection that has just signed in, after
