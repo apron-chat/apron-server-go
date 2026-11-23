@@ -265,8 +265,48 @@ type extensionCommand struct {
 	command Command
 }
 
-func (e *extensionCommand) available(u User, r Room) bool {
-	return e.command.Available == nil || e.command.Available(u, r)
+// may is the command's form's May: whether the connection's user may run
+// it in the room roomID, or, for "", in any room it can see, asking
+// Available about each in turn, the default room first, until one is.
+// Available runs outside s.mu, with views of the user and rooms made
+// under it.
+func (e *extensionCommand) may(_ context.Context, wc *wire.Conn, roomID string) bool {
+	c, ok := wire.DataOf[*client](wc)
+	if !ok {
+		return false
+	}
+	s := c.server
+	s.mu.RLock()
+	user := userViewOf(c.user)
+	var rooms []Room
+	switch {
+	case roomID != "":
+		rooms = []Room{s.roomViewLocked(s.rooms[roomID])}
+	case e.command.Available != nil:
+		rooms = s.visibleRoomsLocked(c.user)
+	case !s.seesARoomLocked(c.user):
+		// A user who sees no room can run no command: each runs in a
+		// room.
+		s.mu.RUnlock()
+		return false
+	}
+	s.mu.RUnlock()
+	if e.command.Available == nil {
+		return true
+	}
+	return slices.ContainsFunc(rooms, func(r Room) bool { return e.command.Available(user, r) })
+}
+
+// run is the command's Run, outside s.mu, with copies of what it is told,
+// in the room the Router's Before checked, unless it has gone since. Its
+// result, which it renders as an object, goes out as a CommandResult,
+// whose Unknown keeps any field of the extension's own.
+func (e *extensionCommand) run(_ context.Context, call *commands.Call) error {
+	c, err := clientOf(call.Conn)
+	if err != nil {
+		return err
+	}
+	return replyError(c.server.runExtensionCommand(c, e, call))
 }
 
 // Command adds a command.
@@ -281,16 +321,20 @@ func (r *Registrar) Command(command Command) {
 		// The command's one form takes the hint from Usage, collapses Help
 		// into one line of plain text in /help's Markdown list, and checks
 		// the fields and the group, as package commands does for any
-		// backend; Available is asked outside s.mu, so it is not the
-		// form's May (finishUsable).
+		// backend. Its May asks Available, outside s.mu, and the Router
+		// refuses it where it is not available; Run checks the other
+		// fields it requires itself, but room_id, which the Router does.
 		command.Uses, command.Requires = slices.Clone(command.Uses), slices.Clone(command.Requires)
-		err := r.s.commands.add(commands.Command{
+		e := &extensionCommand{host: r.Host, command: command}
+		err := r.s.commands.router.Add(commands.Command{
 			Name: command.Name,
 			Forms: []commands.Form{{
 				Usage: command.Usage, Help: command.Help, Group: command.Group,
-				Uses: command.Uses, Requires: command.Requires,
+				Uses: command.Uses, Requires: command.Requires, May: e.may,
 			}},
-		}, serverCommand{extension: &extensionCommand{host: r.Host, command: command}})
+			Run:       e.run,
+			RunChecks: commands.CheckForm | commands.CheckRequires,
+		})
 		if err != nil {
 			return err
 		}
@@ -303,13 +347,19 @@ func (r *Registrar) Command(command Command) {
 	})
 }
 
-// runExtensionCommand runs an extension's command, outside s.mu. Its
-// result, which it renders as an object, goes out as a CommandResult,
-// whose Unknown keeps any field of the extension's own.
-func (s *Server) runExtensionCommand(c *client, command *extensionCommand, call *CommandCall, reply wire.Reply[wire.CommandResult]) *Error {
-	if !command.available(call.User, call.Room) {
-		return &Error{Code: CodeDenied, Message: fmt.Sprintf("You cannot use /%s here", command.command.Name)}
+func (s *Server) runExtensionCommand(c *client, command *extensionCommand, cc *commands.Call) *Error {
+	body, replyID := bodyObject(cc.Params.Body), replyIDOf(cc.Params)
+	s.mu.RLock()
+	r := s.visibleRoomLocked(c.user, cc.Params.RoomID)
+	if r == nil {
+		s.mu.RUnlock()
+		return invalidParams("Unknown room %q", cc.Params.RoomID)
 	}
+	call := &CommandCall{
+		User: userViewOf(c.user), Room: s.roomViewLocked(r), Args: cc.Args, ReplyTo: replyID,
+		Mentions: mentions(body), Body: cloneObject(body), client: c,
+	}
+	s.mu.RUnlock()
 	result, err := command.command.Run(s.requestContext(c), call)
 	if err != nil {
 		return command.host.protocolError(err)
@@ -326,7 +376,7 @@ func (s *Server) runExtensionCommand(c *client, command *extensionCommand, call 
 		s.logger.Error("a command's result is not an object", "error", err)
 		return internalError()
 	}
-	_ = reply.Send(typed)
+	_ = cc.Reply.Send(typed)
 	return nil
 }
 

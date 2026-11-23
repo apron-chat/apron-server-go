@@ -3,6 +3,7 @@ package apron
 import (
 	"cmp"
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -19,69 +20,76 @@ const (
 	privateNoticeID = "~private"
 )
 
-// The server's commands (§4.1) are kept in a commands.Router, as any wire
-// backend's may be: their forms, in the order /help shows them, with
-// their hints, descriptions, fields, and groups, and who may use each
-// form, and the form a command line selects. The server runs them itself
-// (command), rather than with the Router's Command: it checks the room
-// and the reply before the command, runs its own commands while it holds
-// s.mu, and asks the extensions whether theirs are available outside it.
+// The server's commands (§4.1) run on a commands.Router, as any wire
+// backend's may: their forms, in the order /help shows them, with their
+// hints, descriptions, fields, and groups, who may use each form, and how
+// each runs. The Router's Before checks what every command needs, first:
+// the room and the reply (beforeCommand). The server's own commands check
+// the rest themselves, with their own errors (commands.CheckAll), and run
+// while they hold s.mu; the extensions' run outside it, and the Router
+// asks whether they are available (extensionCommand.may), also outside
+// it.
 
-// serverCommand is how the server runs one of its commands: run for its
-// own, or extension for one an Extension added. /help has neither:
-// command runs it.
-type serverCommand struct {
-	// run executes the command, under s.mu, sending the frames it causes,
-	// and returns its result, which the caller sends after them (§1).
-	// args is the command line after the command's name, and replyTo the
-	// command's reply_to, if any.
-	run func(s *Server, c *client, r *roomState, body map[string]any, args, replyTo string) (wire.CommandResult, *Error)
-	// extension is a command an Extension added, which runs outside s.mu
-	// (runExtensionCommand). Its one form has no May: whether it is
-	// available is the extension's Available, asked outside s.mu.
-	extension *extensionCommand
-}
-
-// serverCommands are the core commands, then the extensions'. forms keeps
-// what /help and ext:command_list (apron's extensions/ext_command_list.md)
-// show of each; a form's May reads the server's state, so it is asked
-// under s.mu (usableCommandsLocked). runs says how each runs, by name.
-// Neither changes once Open returns, so reading them needs no lock.
+// serverCommands are the core commands, then the extensions'. The Router
+// keeps what /help and ext:command_list (apron's
+// extensions/ext_command_list.md) show of each, and runs them. It does
+// not change once Open returns, so reading it needs no lock; a form's May
+// takes s.mu itself.
 type serverCommands struct {
-	forms commands.Router
-	runs  map[string]serverCommand
+	router commands.Router
 }
 
-// add adds a command: its forms, and how it runs.
-func (sc *serverCommands) add(command commands.Command, run serverCommand) error {
-	if err := sc.forms.Add(command); err != nil {
-		return err
+// coreRun is how one of the server's own commands runs, under s.mu,
+// sending the frames it causes; it returns its result, which the caller
+// sends after them (§1). args is the command line after the command's
+// name, and replyTo the command's reply_to, if any.
+type coreRun func(s *Server, c *client, r *roomState, body map[string]any, args, replyTo string) (wire.CommandResult, *Error)
+
+// clientOf is the client of a command's connection.
+func clientOf(wc *wire.Conn) (*client, *Error) {
+	c, ok := wire.DataOf[*client](wc)
+	if !ok {
+		return nil, internalError()
 	}
-	sc.runs[command.Name] = run
-	return nil
+	return c, nil
 }
 
-// extension returns the Extension's command a form is of, or nil for one
-// of the server's own.
-func (sc *serverCommands) extension(f commands.Form) *extensionCommand {
-	name, _ := commands.Cut(f.Name)
-	return sc.runs[name].extension
+// replyIDOf is the message_id a command replies to, or "".
+func replyIDOf(p wire.CommandParams) string {
+	if p.ReplyTo == nil {
+		return ""
+	}
+	return p.ReplyTo.MessageID.String()
+}
+
+// replyError is an *Error as a command's error: nil stays nil.
+func replyError(err *Error) error {
+	if err == nil {
+		return nil
+	}
+	return err
 }
 
 // mayLocked makes a check of who may use a command form a Form's May: it
 // reports whether c may use the form in r, or, for a nil r, in some room
-// it can see. Callers of May hold s.mu.
+// it can see, under s.mu, which May takes. A user who sees no room may
+// use no command in "some room": each runs in a room.
 func mayLocked(may func(s *Server, c *client, r *roomState) bool) func(context.Context, *wire.Conn, string) bool {
 	return func(_ context.Context, wc *wire.Conn, roomID string) bool {
 		c, ok := wire.DataOf[*client](wc)
 		if !ok {
 			return false
 		}
+		s := c.server
+		s.mu.RLock()
+		defer s.mu.RUnlock()
 		var r *roomState
 		if roomID != "" {
-			r = c.server.rooms[roomID]
+			r = s.rooms[roomID]
+		} else if !s.seesARoomLocked(c.user) {
+			return false
 		}
-		return may(c.server, c, r)
+		return may == nil || may(s, c, r)
 	}
 }
 
@@ -92,16 +100,17 @@ var adminForm = mayLocked(func(_ *Server, c *client, _ *roomState) bool { return
 // them. Open adds the extensions' commands after them.
 func coreCommands() *serverCommands {
 	embeds := []string{commands.FieldEmbeds}
-	sc := &serverCommands{runs: make(map[string]serverCommand)}
+	sc := &serverCommands{}
+	sc.router.Before = beforeCommand
 	for _, core := range []struct {
 		command commands.Command
-		run     func(s *Server, c *client, r *roomState, body map[string]any, args, replyTo string) (wire.CommandResult, *Error)
+		run     coreRun
 	}{
 		{
-			// command() runs /help itself (s.help).
 			command: commands.Command{
 				Name:  "help",
 				Forms: []commands.Form{{Group: commands.GroupAll, Help: "list the commands you can use here"}},
+				Run:   runHelp,
 			},
 		},
 		{
@@ -192,7 +201,21 @@ func coreCommands() *serverCommands {
 			run: (*Server).kickCommand,
 		},
 	} {
-		if err := sc.add(core.command, serverCommand{run: core.run}); err != nil {
+		command := core.command
+		// The server's own commands check the command line, the fields
+		// they need, and who may use them themselves, with errors that say
+		// more than the Router's: their forms' Requires and May are for
+		// /help and ext:command_list.
+		command.RunChecks = commands.CheckAll
+		for i := range command.Forms {
+			if command.Forms[i].May == nil {
+				command.Forms[i].May = mayLocked(nil)
+			}
+		}
+		if core.run != nil {
+			command.Run = runCore(core.run)
+		}
+		if err := sc.router.Add(command); err != nil {
 			panic("apron: " + err.Error())
 		}
 	}
@@ -226,79 +249,31 @@ func (s *Server) seesARoomLocked(u *userState) bool {
 	return false
 }
 
-// usableCommands is what /help and ext:command_list list for a connection:
-// the command forms its user may use in a room, or in any room it can see.
-// usableCommandsLocked decides the server's own commands under s.mu, and
-// finishUsable asks the extensions about theirs outside it.
-type usableCommands struct {
-	forms []commands.Form
-	user  User
-	// rooms are the rooms in any of which an extension may make its
-	// command available, as it sees them.
-	rooms []Room
-}
-
-// usableCommandsLocked starts listing the command forms c may use in r, as
-// /help does, or, for a nil r, in at least one room it can see, as
-// ext:command_list does, in the order /help shows them. For the list it
-// makes the views of every room the user can see, once, if an extension's
-// command has an Available to ask about them.
-func (s *Server) usableCommandsLocked(c *client, r *roomState) usableCommands {
-	usable := usableCommands{user: userViewOf(c.user)}
-	// A user who sees no room can run no command: each runs in a room.
-	if r == nil && !s.seesARoomLocked(c.user) {
-		return usable
+// visibleRoomsLocked lists the rooms u can see, as an extension's
+// Available sees them, in a stable order, so that it sees them the same
+// way on each listing: the default room, where a command without room_id
+// runs, first.
+func (s *Server) visibleRoomsLocked(u *userState) []Room {
+	var rooms []*roomState
+	for _, room := range s.rooms {
+		if room.visibleTo(u) {
+			rooms = append(rooms, room)
+		}
 	}
-	roomID := ""
-	if r != nil {
-		roomID = r.id
+	rank := func(r *roomState) int {
+		if r.id == defaultRoomID {
+			return 0
+		}
+		return 1
 	}
-	usable.forms = s.commands.forms.Usable(s.requestContext(c), c.conn, roomID)
-	asks := slices.ContainsFunc(usable.forms, func(f commands.Form) bool {
-		e := s.commands.extension(f)
-		return e != nil && e.command.Available != nil
+	slices.SortFunc(rooms, func(a, b *roomState) int {
+		return cmp.Or(cmp.Compare(rank(a), rank(b)), strings.Compare(a.id, b.id))
 	})
-	switch {
-	case !asks:
-	case r != nil:
-		usable.rooms = []Room{s.roomViewLocked(r)}
-	default:
-		var rooms []*roomState
-		for _, room := range s.rooms {
-			if room.visibleTo(c.user) {
-				rooms = append(rooms, room)
-			}
-		}
-		// In a stable order, so that Available sees the rooms the same
-		// way on each listing; the default room, where a command without
-		// room_id runs, first.
-		rank := func(r *roomState) int {
-			if r.id == defaultRoomID {
-				return 0
-			}
-			return 1
-		}
-		slices.SortFunc(rooms, func(a, b *roomState) int {
-			return cmp.Or(cmp.Compare(rank(a), rank(b)), strings.Compare(a.id, b.id))
-		})
-		usable.rooms = make([]Room, len(rooms))
-		for i, room := range rooms {
-			usable.rooms[i] = s.roomViewLocked(room)
-		}
+	views := make([]Room, len(rooms))
+	for i, room := range rooms {
+		views[i] = s.roomViewLocked(room)
 	}
-	return usable
-}
-
-// finishUsable asks the extensions, outside s.mu, whether the user may use
-// their commands in any of usable.rooms, in order, stopping at the first
-// that says yes, and returns the forms it may use.
-func (s *Server) finishUsable(usable usableCommands) []commands.Form {
-	return slices.DeleteFunc(usable.forms, func(f commands.Form) bool {
-		e := s.commands.extension(f)
-		return e != nil && e.command.Available != nil && !slices.ContainsFunc(usable.rooms, func(r Room) bool {
-			return e.command.Available(usable.user, r)
-		})
-	})
+	return views
 }
 
 // command runs a `command` request (§4.1). It takes the params of a new
@@ -311,92 +286,105 @@ func (s *Server) finishUsable(usable usableCommands) []commands.Form {
 // live text, and they make their own embed: a terminal or append embed in a
 // command is invalid_params.
 func (s *Server) command(c *client, p wire.CommandParams, reply wire.Reply[wire.CommandResult]) *Error {
-	roomID, hasRoom := p.RoomID, p.RoomID != ""
-	if !hasRoom {
-		roomID = defaultRoomID
-	}
-	replyID, hasReply := "", p.ReplyTo != nil
-	if hasReply {
-		replyID = p.ReplyTo.MessageID.String()
-	}
 	body := bodyObject(p.Body)
 	if err := validateBody(body); err != nil {
 		return err
 	}
-	text, _ := body["text"].(string)
 	// The name ends at the first whitespace, a line break too, as in
 	// "/embed-append\n# Plan". Names are case-sensitive (ext:command_list):
-	// /Kick is not /kick.
-	name, args, ok := commands.Parse(text)
-	if !ok {
-		return invalidParams("A command starts with /; try /help")
-	}
-	for i, value := range asList(body["embeds"]) {
-		if kind := value.(map[string]any)["kind"]; liveKind(kind) {
-			return invalidParams("body.embeds[%d]: a command takes no %s embed; use /embed-%s", i, kind, kind)
+	// /Kick is not /kick. A line that is no command is the Router's to
+	// refuse.
+	if _, _, ok := commands.Parse(p.Body.Text); ok {
+		for i, value := range asList(body["embeds"]) {
+			if kind := value.(map[string]any)["kind"]; liveKind(kind) {
+				return invalidParams("body.embeds[%d]: a command takes no %s embed; use /embed-%s", i, kind, kind)
+			}
 		}
 	}
+	err := s.commands.router.Command(s.requestContext(c), c.conn, p, reply)
+	if err == nil {
+		return nil
+	}
+	if e, ok := errors.AsType[*Error](err); ok && e != nil {
+		return e
+	}
+	s.logger.Error("a command failed", "error", err)
+	return internalError()
+}
 
-	// A form that requires room_id acts only on a room the client names
-	// (ext:command_list): without one it is refused, not run in the
-	// default room.
-	if !hasRoom {
-		if _, form := s.commands.forms.Find(name, args); form != nil && slices.Contains(form.Requires, commands.FieldRoom) {
-			return invalidParams("Send /%s from a room: it needs room_id", form.Name)
-		}
-	}
-	// The opening text of /embed-append becomes its message's text, so the
-	// extensions' filters see it as they see messages.
-	if name == "embed-append" {
-		draft := &Draft{RoomID: roomID, Body: map[string]any{"text": args, "format": "markdown"}}
-		if hasReply {
-			draft.ReplyTo = replyID
-		}
-		if err := s.filterMessage(c, draft); err != nil {
-			return err
-		}
-		args = draft.Text()
-	}
-
-	s.mu.Lock()
-	if c.conn.Closing() {
-		s.unlock()
-		return connectionClosing()
-	}
-	command, known := s.commands.runs[name]
-	r := s.visibleRoomLocked(c.user, roomID)
-	switch {
-	case r == nil:
-		s.unlock()
-		return invalidParams("Unknown room %q", roomID)
-	case hasReply && s.visibleMessageLocked(c.user, replyID) == nil:
-		s.unlock()
-		return invalidParams("reply_to must name an existing message")
-	case !known:
-		s.unlock()
-		return invalidParams("Unknown command /%s; try /help", name)
-	case name == "help":
-		usable := s.usableCommandsLocked(c, r)
-		s.unlock()
-		return s.help(c, r.id, usable, reply)
-	case command.extension != nil:
-		// An extension's command runs outside s.mu, with copies of what it
-		// is told.
-		call := &CommandCall{
-			User: userViewOf(c.user), Room: s.roomViewLocked(r), Args: args, ReplyTo: replyID,
-			Mentions: mentions(body), Body: cloneObject(body), client: c,
-		}
-		s.unlock()
-		return s.runExtensionCommand(c, command.extension, call, reply)
-	}
-	defer s.unlock()
-	// The result goes while s.mu is held, after the frames the command
-	// sent (§1).
-	result, err := command.run(s, c, r, body, args, replyID)
+// beforeCommand is the Router's Before: it checks what every command
+// needs, before the command's name. First the opening text of
+// /embed-append, which becomes its message's text, goes through the
+// extensions' filters, as messages do. Then the connection must still be
+// open, the room, the default room for a command without room_id, which
+// the call then names, one the user may see, and reply_to a message the
+// user may see.
+func beforeCommand(_ context.Context, call *commands.Call) error {
+	c, err := clientOf(call.Conn)
 	if err != nil {
 		return err
 	}
-	_ = reply.Send(result)
+	return replyError(c.server.checkCommand(c, call))
+}
+
+func (s *Server) checkCommand(c *client, call *commands.Call) *Error {
+	p := &call.Params
+	roomID := p.RoomID
+	if roomID == "" {
+		roomID = defaultRoomID
+	}
+	replyID := replyIDOf(*p)
+	if call.Name == "embed-append" {
+		draft := &Draft{RoomID: roomID, Body: map[string]any{"text": call.Args, "format": "markdown"}, ReplyTo: replyID}
+		if err := s.filterMessage(c, draft); err != nil {
+			return err
+		}
+		call.Args = draft.Text()
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	switch {
+	case c.conn.Closing():
+		return connectionClosing()
+	case s.visibleRoomLocked(c.user, roomID) == nil:
+		return invalidParams("Unknown room %q", roomID)
+	case replyID != "" && s.visibleMessageLocked(c.user, replyID) == nil:
+		return invalidParams("reply_to must name an existing message")
+	}
+	p.RoomID = roomID
+	return nil
+}
+
+// runCore makes one of the server's own commands a Router's Run: it runs
+// under s.mu, in the room beforeCommand checked, unless it has gone since,
+// and its result goes while s.mu is held, after the frames the command
+// sent (§1).
+func runCore(run coreRun) func(context.Context, *commands.Call) error {
+	return func(_ context.Context, call *commands.Call) error {
+		c, err := clientOf(call.Conn)
+		if err != nil {
+			return err
+		}
+		return replyError(c.server.runCoreCommand(c, call, run))
+	}
+}
+
+func (s *Server) runCoreCommand(c *client, call *commands.Call, run coreRun) *Error {
+	replyID := replyIDOf(call.Params)
+	s.mu.Lock()
+	defer s.unlock()
+	r := s.visibleRoomLocked(c.user, call.Params.RoomID)
+	switch {
+	case c.conn.Closing():
+		return connectionClosing()
+	case r == nil:
+		return invalidParams("Unknown room %q", call.Params.RoomID)
+	}
+	result, err := run(s, c, r, bodyObject(call.Params.Body), call.Args, replyID)
+	if err != nil {
+		return err
+	}
+	_ = call.Reply.Send(result)
 	return nil
 }
 
@@ -432,12 +420,17 @@ func (s *Server) postRoomNoticeLocked(r *roomState, text string) {
 	}, logID)
 }
 
-// help replies to /help with a ~private notice in the command's room that
+// runHelp answers /help with a ~private notice in the command's room that
 // lists the command forms the sender may use there, as Markdown: what
 // ext:command_list lists, narrowed to the room.
-func (s *Server) help(c *client, roomID string, usable usableCommands, reply wire.Reply[wire.CommandResult]) *Error {
-	c.enqueue(privateNotice(roomID, commands.Help(s.finishUsable(usable))))
-	_ = reply.Send(wire.CommandResult{})
+func runHelp(ctx context.Context, call *commands.Call) error {
+	c, err := clientOf(call.Conn)
+	if err != nil {
+		return err
+	}
+	roomID := call.Params.RoomID
+	c.enqueue(privateNotice(roomID, commands.Help(c.server.commands.router.Usable(ctx, c.conn, roomID))))
+	_ = call.Done()
 	return nil
 }
 
@@ -450,10 +443,7 @@ const commandListMethod = commands.ListMethod
 // each room, as data, one Command object for each form. It takes no params,
 // and ignores any.
 func (s *Server) listCommands(c *client, _ request) (any, bool, *Error) {
-	s.mu.RLock()
-	usable := s.usableCommandsLocked(c, nil)
-	s.mu.RUnlock()
-	return map[string]any{"commands": commands.Entries(s.finishUsable(usable))}, false, nil
+	return map[string]any{"commands": s.commands.router.List(s.requestContext(c), c.conn)}, false, nil
 }
 
 // avatarCommand takes exactly one upload embed, whose file becomes the

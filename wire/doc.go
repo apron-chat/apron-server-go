@@ -269,7 +269,7 @@
 // /help shows, and a Router, a [CommandHandler], that parses the command
 // line, refuses what a form requires and the sender may not use, runs the
 // command, and answers /help, with the same list as data for apron's
-// ext:command_list. Package apron keeps its commands in one too.
+// ext:command_list. Package apron runs its commands on one too.
 //
 // # Testing with wiretest
 //

@@ -260,7 +260,7 @@ func TestCommandListUsage(t *testing.T) {
 // arguments, matched exactly.
 func TestFormOf(t *testing.T) {
 	sc := coreCommands()
-	if err := sc.add(commands.Command{Name: "a", Forms: []commands.Form{{Name: "a"}, {Name: "a b"}, {Name: "a b c"}}}, serverCommand{}); err != nil {
+	if err := sc.router.Add(commands.Command{Name: "a", Forms: []commands.Form{{Name: "a"}, {Name: "a b"}, {Name: "a b c"}}}); err != nil {
 		t.Fatal(err)
 	}
 	for _, test := range []struct{ name, args, want string }{
@@ -279,7 +279,7 @@ func TestFormOf(t *testing.T) {
 		{"nope", "", ""},
 	} {
 		got := ""
-		if _, form := sc.forms.Find(test.name, test.args); form != nil {
+		if _, form := sc.router.Find(test.name, test.args); form != nil {
 			got = form.Name
 		}
 		if got != test.want {
