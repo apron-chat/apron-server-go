@@ -347,3 +347,116 @@ func TestParseUsage(t *testing.T) {
 		t.Errorf("Parse: %q %q %v", name, args, ok)
 	}
 }
+
+// Before checks every command line, once a form that requires room_id has
+// it, before the name, and may settle the room; a command's RunChecks are
+// left to its Run.
+func TestBeforeAndRunChecks(t *testing.T) {
+	var router commands.Router
+	var formOf []string
+	router.Before = func(_ context.Context, call *commands.Call) error {
+		name := "-"
+		if call.Form != nil {
+			name = call.Form.Name
+		}
+		formOf = append(formOf, name)
+		switch call.Params.RoomID {
+		case "gone":
+			return wire.InvalidParams("Unknown room")
+		case "":
+			call.Params.RoomID = "lobby"
+		}
+		call.Args = strings.ToUpper(call.Args)
+		return nil
+	}
+	ran := func(_ context.Context, call *commands.Call) error {
+		form := "-"
+		if call.Form != nil {
+			form = call.Form.Name
+		}
+		call.Notice(call.Params.RoomID + "|" + form + "|" + call.Args)
+		return call.Done()
+	}
+	router.MustAdd(
+		commands.Command{
+			Name: "kick",
+			Forms: []commands.Form{{
+				Uses: []string{commands.FieldRoom, commands.FieldMentions}, Requires: []string{commands.FieldRoom, commands.FieldMentions},
+				May: admin,
+			}},
+			Run:       ran,
+			RunChecks: commands.CheckAll,
+		},
+		commands.Command{
+			Name:      "emoji",
+			Forms:     []commands.Form{{Name: "emoji add"}, {Name: "emoji remove"}},
+			Run:       ran,
+			RunChecks: commands.CheckForm,
+		},
+		commands.Command{
+			Name:  "ban",
+			Forms: []commands.Form{{May: admin}},
+			Run:   ran,
+		},
+	)
+	admin, guest := connect(t, &router)
+	run := func(c *wiretest.Client, roomID, text string) (string, error) {
+		t.Helper()
+		params := map[string]any{"body": map[string]any{"text": text}}
+		if roomID != "" {
+			params["room_id"] = roomID
+		}
+		_, before, err := c.CallFrames(timeout(t), "command", params)
+		if err != nil {
+			return "", err
+		}
+		var m wire.Message
+		if len(before) != 1 || before[0].Decode(&m) != nil {
+			t.Fatalf("%s: before its result %v", text, before)
+		}
+		return m.RoomID + ": " + m.Body.Text, nil
+	}
+	for _, test := range []struct {
+		c          *wiretest.Client
+		room, line string
+		want       string
+		formOf     string
+	}{
+		// Neither the mention it requires nor May is checked.
+		{guest, "r", "/kick bob", "r: r|kick|BOB", "kick"},
+		{guest, "", "/emoji", "lobby: lobby|-|", "-"},
+		{guest, "", "/emoji remove x", "lobby: lobby|emoji remove|REMOVE X", "emoji remove"},
+		{admin, "", "/ban", "lobby: lobby|ban|", "ban"},
+	} {
+		formOf = nil
+		got, err := run(test.c, test.room, test.line)
+		if err != nil || got != test.want || !slices.Equal(formOf, []string{test.formOf}) {
+			t.Errorf("%q: %q %v, Before saw %q; want %q, %q", test.line, got, err, formOf, test.want, test.formOf)
+		}
+	}
+	if got, err := run(guest, "", "/help"); err != nil || !strings.HasPrefix(got, "lobby: - `/help`") || strings.Contains(got, "/ban") {
+		t.Errorf("/help: %q %v", got, err)
+	}
+	for _, test := range []struct {
+		c          *wiretest.Client
+		room, line string
+		code       int
+		message    string
+		before     bool
+	}{
+		// room_id is checked before Before, which may not settle it.
+		{guest, "", "/kick bob", wire.CodeInvalidParams, "Send /kick from a room: it needs room_id", false},
+		// Before comes before the name.
+		{guest, "gone", "/nope", wire.CodeInvalidParams, "Unknown room", true},
+		{guest, "", "/nope", wire.CodeInvalidParams, "Unknown command /nope; try /help", true},
+		// May is checked where the command does not check it itself, in
+		// the room Before settled.
+		{guest, "", "/ban", wire.CodeDenied, "You cannot use /ban here", true},
+	} {
+		formOf = nil
+		_, err := run(test.c, test.room, test.line)
+		if e, ok := errors.AsType[*wire.Error](err); !ok || e.Code != test.code || e.Message != test.message || (len(formOf) == 1) != test.before {
+			t.Errorf("%q: %v, Before saw %q; want %d %q", test.line, err, formOf, test.code, test.message)
+		}
+	}
+}

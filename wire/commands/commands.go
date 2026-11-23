@@ -44,15 +44,35 @@
 // answers a line it cannot run invalid_params with what to do instead,
 // and a form the sender may not use denied.
 //
-// # Backends with their own dispatch
+// # Checks
 //
-// Router.Command checks in one order, and holds no lock of the backend's.
-// A backend whose commands are checked in another order, or under its own
-// lock, such as package apron's, which checks the room before the command
-// and runs its own commands while it holds its lock, keeps its commands
-// in a Router all the same, for their forms, and dispatches them itself,
-// with the parts Router.Command is made of: [Parse], [Router.Find],
-// [Router.Usable], [Help], and [Entries].
+// Router.Command checks a command line in this order, each check's error
+// the reply: the line starts with a slash; a form that requires room_id
+// has one; the backend's own checks of every command line
+// (Router.Before), such as that the room exists and the sender may see
+// it, or that reply_to names a message; the name is a command's, or
+// /help; the line selects one of its forms; the form's other required
+// fields are there; and the sender may use it (Form.May). Before may also
+// settle what the command line leaves to the server, such as the default
+// room of a command sent without room_id, which the checks after it,
+// /help, and Run then see.
+//
+// A command whose Run makes some of the Router's checks itself, with
+// errors that say more, such as who may use it, names them in its
+// RunChecks: the Router skips them, and its forms' Requires and May then
+// only say what /help and a listing show. Package apron's own commands
+// check everything themselves; its extensions' leave who may use them to
+// the Router.
+//
+// The Router holds no lock of the backend's, and calls a form's May
+// without one: a backend that keeps its state under a lock takes it in
+// May, Before, and Run, for as long as each needs it. So May may run code
+// that must not run under the lock, such as package apron's extensions',
+// once it has let go of it.
+//
+// A backend that dispatches commands itself still keeps them in a Router,
+// for their forms, and has the parts Router.Command is made of: [Parse],
+// [Router.Find], [Router.Usable], [Help], and [Entries].
 package commands
 
 import (
@@ -118,7 +138,32 @@ type Command struct {
 	// the Router answers it; or one that a backend with its own dispatch
 	// runs itself.
 	Run func(ctx context.Context, call *Call) error
+	// RunChecks are the checks of a command line that Run makes itself,
+	// with errors of its own, and Router.Command skips (see Checks in the
+	// package documentation). With CheckForm, a line that selects none of
+	// the forms runs with a nil call.Form.
+	RunChecks Checks
 }
+
+// Checks are checks Router.Command makes of a command line before it runs
+// the command (Command.RunChecks).
+type Checks uint8
+
+const (
+	// CheckForm refuses a line that selects none of the command's forms,
+	// as invalid_params with their usage.
+	CheckForm Checks = 1 << iota
+	// CheckRequires refuses a command without a field its form requires
+	// (Form.Requires), as invalid_params, but for room_id, which is
+	// checked for every command, before Router.Before.
+	CheckRequires
+	// CheckMay refuses a form the sender may not use (Form.May), as
+	// denied.
+	CheckMay
+
+	// CheckAll is every check.
+	CheckAll = CheckForm | CheckRequires | CheckMay
+)
 
 // Form is one form of a command, as /help and a listing show it.
 type Form struct {
@@ -273,6 +318,16 @@ var helpForm = Form{Name: "help", Group: GroupAll, Help: "list the commands you 
 // before the Router serves: Add is not safe for use with its other
 // methods at the same time, which are safe for concurrent use.
 type Router struct {
+	// Before, if set, checks each command line that starts with a slash,
+	// once a form that requires room_id has it, before the Router looks
+	// at the name: the backend's checks of what every command needs, such
+	// as that its room exists and the sender may see it, or that reply_to
+	// names a message. Its error is the reply. It may change call.Params
+	// and call.Args, such as to set the room a command without room_id
+	// runs in, or the arguments as a filter rewrites them, and the checks
+	// after it, /help, and Run see the change. call.Form is the form the
+	// line selects, or nil.
+	Before func(ctx context.Context, call *Call) error
 	// Fallback runs a command line whose name the Router has no command
 	// for, but /help, which it answers itself, with a Call whose Form is
 	// nil, such as a gateway's that hands it to the system behind it. nil
@@ -437,11 +492,11 @@ func (r *Router) ListHandler() wire.Handler {
 }
 
 // Command runs a command request (§4.1): it parses the command line,
-// finds its command and form, checks the fields the form requires and
-// whether c may use it, and runs it; it answers /help itself. A line it
-// cannot run is invalid_params, saying what to do instead, and a form c
-// may not use is denied. A backend that checks more than the Router can,
-// such as that the room exists, checks it first, and then calls Command.
+// finds its command and form, checks the fields the form requires, the
+// backend's own checks (Before), and whether c may use the form, and runs
+// it; it answers /help itself. A line it cannot run is invalid_params,
+// saying what to do instead, and a form c may not use is denied. The
+// package documentation lists the checks in their order (Checks).
 func (r *Router) Command(ctx context.Context, c *wire.Conn, p wire.CommandParams, reply wire.Reply[wire.CommandResult]) error {
 	name, args, ok := Parse(p.Body.Text)
 	if !ok {
@@ -449,6 +504,24 @@ func (r *Router) Command(ctx context.Context, c *wire.Conn, p wire.CommandParams
 	}
 	command, form := r.Find(name, args)
 	call := &Call{Conn: c, Params: p, Reply: reply, Name: name, Args: args}
+	if form != nil {
+		// A form that requires room_id acts only on a room the client
+		// names, not on one Before settles for it.
+		if slices.Contains(form.Requires, FieldRoom) && p.RoomID == "" {
+			return missingField(form, FieldRoom)
+		}
+		f := *form
+		call.Form = &f
+	}
+	if r.Before != nil {
+		if err := r.Before(ctx, call); err != nil {
+			return err
+		}
+	}
+	var checks Checks = CheckAll
+	if command != nil {
+		checks &^= command.RunChecks
+	}
 	switch {
 	case command == nil && name == "help":
 		return r.runHelp(ctx, call)
@@ -456,21 +529,21 @@ func (r *Router) Command(ctx context.Context, c *wire.Conn, p wire.CommandParams
 		return r.Fallback(ctx, call)
 	case command == nil:
 		return wire.InvalidParams(fmt.Sprintf("Unknown command /%s; try /help", name))
-	case form == nil:
+	case form == nil && checks&CheckForm != 0:
 		synopses := make([]string, len(command.Forms))
 		for i, f := range command.Forms {
 			synopses[i] = "`" + f.Synopsis() + "`"
 		}
 		return wire.InvalidParams("Usage: " + strings.Join(synopses, " or "))
 	}
-	if err := missing(form, p); err != nil {
-		return err
+	if form != nil && checks&CheckRequires != 0 {
+		if err := missing(form, call.Params); err != nil {
+			return err
+		}
 	}
-	if form.May != nil && !form.May(ctx, c, p.RoomID) {
+	if form != nil && checks&CheckMay != 0 && form.May != nil && !form.May(ctx, c, call.Params.RoomID) {
 		return wire.Denied(fmt.Sprintf("You cannot use /%s here", form.Name))
 	}
-	f := *form
-	call.Form = &f
 	switch {
 	case command.Run != nil:
 		return command.Run(ctx, call)
@@ -481,26 +554,37 @@ func (r *Router) Command(ctx context.Context, c *wire.Conn, p wire.CommandParams
 }
 
 // missing returns the error of a command without a field its form
-// requires, or nil.
+// requires, or nil. room_id was checked before Router.Before.
 func missing(f *Form, p wire.CommandParams) error {
 	for _, field := range f.Requires {
 		var absent bool
-		var message string
 		switch field {
-		case FieldRoom:
-			absent, message = p.RoomID == "", "Send /%s from a room: it needs room_id"
 		case FieldReplyTo:
-			absent, message = p.ReplyTo == nil, "Send /%s as a reply to a message: it needs reply_to"
+			absent = p.ReplyTo == nil
 		case FieldMentions:
-			absent, message = len(p.Body.Mentions) == 0, "Mention someone in /%s: it needs body.mentions"
+			absent = len(p.Body.Mentions) == 0
 		case FieldEmbeds:
-			absent, message = len(p.Body.Embeds) == 0, "Attach something to /%s: it needs body.embeds"
+			absent = len(p.Body.Embeds) == 0
 		}
 		if absent {
-			return wire.InvalidParams(fmt.Sprintf(message, f.Name))
+			return missingField(f, field)
 		}
 	}
 	return nil
+}
+
+// missingMessages say what to do about a field a form requires.
+var missingMessages = map[string]string{
+	FieldRoom:     "Send /%s from a room: it needs room_id",
+	FieldReplyTo:  "Send /%s as a reply to a message: it needs reply_to",
+	FieldMentions: "Mention someone in /%s: it needs body.mentions",
+	FieldEmbeds:   "Attach something to /%s: it needs body.embeds",
+}
+
+// missingField is the error of a command without a field its form
+// requires.
+func missingField(f *Form, field string) *wire.Error {
+	return wire.InvalidParams(fmt.Sprintf(missingMessages[field], f.Name))
 }
 
 // runHelp answers /help: a ~private notice in the command's room that
@@ -523,7 +607,8 @@ type Call struct {
 	// trimmed.
 	Name, Args string
 	// Form is the form the command line selects, a copy; nil for a
-	// Fallback's.
+	// Fallback's, and for a line that selects none, as Before, and the
+	// Run of a command that makes CheckForm itself, may see.
 	Form *Form
 }
 
