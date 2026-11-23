@@ -44,6 +44,7 @@ func TestUnknownMembers(t *testing.T) {
 		{"room view", &wire.RoomView{}, `{"room_id":"r","member_count":2,"new_field":true}`},
 		{"message", &wire.Message{}, `{"message_id":"5","log_id":"5","from":{"user_id":"ada"},"pinned":true}`},
 		{"server", &wire.ServerInfo{}, `{"apron":10,"auth":["guest"],"future":{"x":1}}`},
+		{"activity", &wire.Activity{}, `{"room_id":"r","from":{"user_id":"ada"},"typing":0,"ext:seen_at":"now"}`},
 	} {
 		if err := json.Unmarshal([]byte(c.in), c.v); err != nil {
 			t.Fatalf("%s: %v", c.name, err)
@@ -75,6 +76,9 @@ func TestEncode(t *testing.T) {
 		{wire.UserUpdate{New: &wire.CurrentUser{User: wire.User{UserID: "ada"}, Cleared: []string{"roles"}}}, `{"method":"user","params":{"new":{"user_id":"ada","roles":[]}}}`},
 		{wire.RoomUpdate{Left: []wire.RoomRef{{RoomID: "r"}}}, `{"method":"room_update","params":{"left":[{"room_id":"r"}]}}`},
 		{wire.Notice("", "hi"), `{"method":"message","params":{"from":{"user_id":"~private","name":"Only you"},"body":{"text":"hi"}}}`},
+		{wire.Activity{RoomID: "general", From: wire.User{UserID: "alice"}, Typing: new(8), ReadMessageID: 1724803312050},
+			`{"method":"activity","params":{"from":{"user_id":"alice"},"read_message_id":"1724803312050","room_id":"general","typing":8}}`},
+		{wire.Activity{RoomID: "r", From: wire.User{UserID: "bob", Name: "Bob"}, Typing: new(0)}, `{"method":"activity","params":{"from":{"user_id":"bob","name":"Bob"},"room_id":"r","typing":0}}`},
 	} {
 		frame, err := wire.Encode(c.n)
 		if err != nil || string(frame) != c.want {

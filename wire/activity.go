@@ -2,6 +2,7 @@ package wire
 
 import (
 	"context"
+	"encoding/json/jsontext"
 )
 
 // ReactParams are the params of reactions (§4.7): the sender's whole set
@@ -51,9 +52,31 @@ type ActivityParams struct {
 	ReadMessageID *LogID
 }
 
+// Activity is an activity notification a server sends (§4.6): a change
+// to the transient state of From in a room, such as relayed to the room's
+// members, or to the user's own connections. A field left out (a nil
+// Typing, a zero ReadMessageID) does not change its state. Its members
+// encode in the order of their names.
+type Activity struct {
+	// From is a recorded user object (§3.3.1).
+	From User `json:"from"`
+	// ReadMessageID is the message From has read up to, in the room.
+	ReadMessageID LogID  `json:"read_message_id,omitzero"`
+	RoomID        string `json:"room_id"`
+	// Typing is the seconds to show From as typing, 0 to stop.
+	Typing *int `json:"typing,omitzero"`
+	// Unknown holds the members this package has no field for, as they
+	// arrived, and is sent after the others.
+	Unknown jsontext.Value `json:",embed"`
+}
+
+// Method makes an Activity a Notification.
+func (Activity) Method() string { return "activity" }
+
 // ActivityHandler handles activity notifications, and adds capability
 // activity (§4.6). They get no reply: params that are not valid are
-// ignored.
+// ignored. A backend relays the activity it applies as Activity
+// notifications.
 type ActivityHandler interface {
 	Activity(ctx context.Context, c *Conn, p ActivityParams)
 }
