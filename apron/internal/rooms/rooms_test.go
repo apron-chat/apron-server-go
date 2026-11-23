@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json/jsontext"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/apron-chat/apron-server-go/apron/internal/roomlog"
@@ -166,5 +167,61 @@ func TestStoreRoundTrip(t *testing.T) {
 	}
 	if restored.Entries() != nil {
 		t.Error("restoring changed rooms")
+	}
+}
+
+// A listing sorts joined, unjoined, and left rooms by activity, leaves
+// unjoined threads to their parent's listing and private rooms to their
+// members, and bounds the unjoined.
+func TestList(t *testing.T) {
+	table := newTable()
+	ada, bob := &user{id: "ada"}, &user{id: "bob"}
+	general := table.Create("general", nil, false, "", roomlog.RoomRecord{})
+	ops := table.Create("", nil, false, "", roomlog.RoomRecord{})
+	thread := table.Create("", general, false, "", roomlog.RoomRecord{})
+	secret := table.Create("", nil, true, "", roomlog.RoomRecord{})
+	join(t, table, general, ada)
+	join(t, table, secret, bob)
+	since := table.log.Last()
+	join(t, table, ops, ada)
+	record, _ := table.Leave(ops, ada, ada.from())
+	leftAt := func(id string) int64 {
+		if id == ops.ID() {
+			return record.ID
+		}
+		return 0
+	}
+	ids := func(rooms []*Room[*user]) []string {
+		var ids []string
+		for _, r := range rooms {
+			ids = append(ids, r.ID())
+		}
+		return ids
+	}
+	all := table.All()
+	joined, notJoined, left := List(ada, all, Listing{Joined: true, NotJoined: true}, leftAt)
+	if !slices.Equal(ids(joined), []string{"general"}) || !slices.Equal(ids(notJoined), []string{ops.ID()}) || left != nil {
+		t.Errorf("listed %v %v %v", ids(joined), ids(notJoined), ids(left))
+	}
+	_, notJoined, _ = List(ada, general.Children(), Listing{NotJoined: true, Threads: true, Limit: 1}, leftAt)
+	if !slices.Equal(ids(notJoined), []string{thread.ID()}) {
+		t.Errorf("threads listed %v", ids(notJoined))
+	}
+	joined, notJoined, left = List(ada, all, Listing{Joined: true, NotJoined: true, Since: since, HasSince: true}, leftAt)
+	if joined != nil || !slices.Equal(ids(notJoined), []string{ops.ID()}) || !slices.Equal(ids(left), []string{ops.ID()}) {
+		t.Errorf("listed since %v %v %v", ids(joined), ids(notJoined), ids(left))
+	}
+}
+
+func TestThreadTitle(t *testing.T) {
+	long := strings.Repeat("é", maxThreadTitleRunes+5)
+	for description, want := range map[string]string{
+		"":                      defaultThreadTitle,
+		"  First line\nsecond ": "First line",
+		long:                    strings.Repeat("é", maxThreadTitleRunes) + "…",
+	} {
+		if got := ThreadTitle(description); got != want {
+			t.Errorf("ThreadTitle(%q) = %q, want %q", description, got, want)
+		}
 	}
 }

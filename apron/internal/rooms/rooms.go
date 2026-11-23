@@ -22,6 +22,7 @@ import (
 	"iter"
 	"maps"
 	"slices"
+	"strings"
 
 	"github.com/apron-chat/apron-server-go/apron/internal/roomlog"
 	"github.com/apron-chat/apron-server-go/store"
@@ -214,6 +215,58 @@ func (r *Room[U]) ListedMemberIDs(limit int) (ids []string, truncated bool) {
 	return ids, truncated
 }
 
+// Listing selects what room_list lists of some rooms to a user (§4.2.1).
+type Listing struct {
+	// Joined and NotJoined are the arrays the listing wants.
+	Joined, NotJoined bool
+	// Since, with HasSince, lists only the rooms whose latest_log_id is
+	// greater, and those the user left after it.
+	Since    int64
+	HasSince bool
+	// Threads lists unjoined threads, as a listing of one room or of a
+	// room's threads does; others leave them to their parent's listing.
+	Threads bool
+	// Limit bounds the unjoined rooms listed, the most recently active;
+	// the joined are never truncated.
+	Limit int
+}
+
+// List sorts rooms for u as l selects them: the rooms u joined, the
+// unjoined rooms u may see, and, with Since, the rooms u left after it, as
+// leftAt reports the log_id of u's latest leave of a room; each most
+// recently active first. A left room may be among the unjoined too.
+func List[U Member](u U, rooms []*Room[U], l Listing, leftAt func(id string) int64) (joined, notJoined, left []*Room[U]) {
+	id := u.MemberID()
+	for _, r := range rooms {
+		if l.HasSince && r.log.Latest() <= l.Since {
+			continue
+		}
+		if _, member := r.members[id]; member {
+			if l.Joined {
+				joined = append(joined, r)
+			}
+			continue
+		}
+		if l.HasSince && l.Joined && leftAt(r.id) > l.Since {
+			left = append(left, r)
+		}
+		// A private room is listed only to its members.
+		if l.NotJoined && (l.Threads || r.parent == nil) && r.VisibleTo(u) {
+			notJoined = append(notJoined, r)
+		}
+	}
+	byActivity := func(a, b *Room[U]) int {
+		return cmp.Or(cmp.Compare(b.log.Latest(), a.log.Latest()), cmp.Compare(b.log.Created(), a.log.Created()))
+	}
+	slices.SortFunc(joined, byActivity)
+	slices.SortFunc(notJoined, byActivity)
+	slices.SortFunc(left, byActivity)
+	if l.Limit > 0 && len(notJoined) > l.Limit {
+		notJoined = notJoined[:l.Limit]
+	}
+	return joined, notJoined, left
+}
+
 // Scope limits a user, such as a bot, to some rooms: those it lists, and
 // their threads if it takes threads in.
 type Scope struct {
@@ -258,6 +311,27 @@ func (r *Room[U]) InScope(sc *Scope) bool {
 		}
 	}
 	return false
+}
+
+const (
+	maxThreadTitleRunes = 60
+	defaultThreadTitle  = "Thread"
+)
+
+// ThreadTitle is the title the server gives a thread made without one, so
+// that clients unaware of parent_room_id render it (§4.2.4): the first
+// line of its description, cut at maxThreadTitleRunes, or
+// defaultThreadTitle.
+func ThreadTitle(description string) string {
+	line, _, _ := strings.Cut(strings.TrimSpace(description), "\n")
+	line = strings.TrimSpace(line)
+	if runes := []rune(line); len(runes) > maxThreadTitleRunes {
+		line = strings.TrimSpace(string(runes[:maxThreadTitleRunes])) + "…"
+	}
+	if line == "" {
+		return defaultThreadTitle
+	}
+	return line
 }
 
 // Table is the server's rooms by room_id.

@@ -1,14 +1,12 @@
 package apron
 
 import (
-	"cmp"
 	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"fmt"
 	"maps"
 	"slices"
 	"strconv"
-	"strings"
 
 	"github.com/apron-chat/apron-server-go/apron/internal/roomlog"
 	"github.com/apron-chat/apron-server-go/apron/internal/rooms"
@@ -380,7 +378,7 @@ func (s *Server) setRoom(c *client, p wire.RoomSetParams, reply wire.Reply[wire.
 	}
 	if title == "" && parent != nil {
 		// Servers title threads so clients unaware of parent_room_id render them.
-		title = threadTitle(description)
+		title = rooms.ThreadTitle(description)
 	}
 	// Empty client fields are left out of the record.
 	fields := roomlog.RoomRecord{Title: title, Description: description}
@@ -423,8 +421,6 @@ func (s *Server) setRoom(c *client, p wire.RoomSetParams, reply wire.Reply[wire.
 }
 
 const (
-	maxThreadTitleRunes = 60
-	defaultThreadTitle  = "Thread"
 	// maxTitleBytes bounds a room's title, maxDescriptionBytes its
 	// description, and maxRoomExtBytes its merged ext, which every room
 	// record carries.
@@ -432,20 +428,6 @@ const (
 	maxDescriptionBytes = 16 << 10
 	maxRoomExtBytes     = 16 << 10
 )
-
-// threadTitle derives a default thread title from the first line of its
-// description, or defaultThreadTitle.
-func threadTitle(description string) string {
-	line, _, _ := strings.Cut(strings.TrimSpace(description), "\n")
-	line = strings.TrimSpace(line)
-	if runes := []rune(line); len(runes) > maxThreadTitleRunes {
-		line = strings.TrimSpace(string(runes[:maxThreadTitleRunes])) + "…"
-	}
-	if line == "" {
-		return defaultThreadTitle
-	}
-	return line
-}
 
 // listRooms answers room_list (§4.2.1): the rooms matching its filters,
 // joined ones in `joined` (never truncated) and visible unjoined ones in
@@ -496,36 +478,10 @@ func (s *Server) listRooms(c *client, p wire.RoomListParams, reply wire.Reply[wi
 	default:
 		candidates = s.rooms.All()
 	}
-	var joined, others, left []*roomState
-	for _, r := range candidates {
-		if hasSince && r.Log().Latest() <= since {
-			continue
-		}
-		if u.joined[r.ID()] != nil {
-			if wantJoined {
-				joined = append(joined, r)
-			}
-			continue
-		}
-		if hasSince && wantJoined && u.leftAt[r.ID()] > since {
-			left = append(left, r)
-		}
-		// Without parent_room_id or room_id, unjoined threads are left to
-		// their parent's listing. Private rooms are listed only to their
-		// members.
-		if wantOthers && (hasRoom || hasParent || r.Parent() == nil) && r.VisibleTo(u) {
-			others = append(others, r)
-		}
-	}
-	byActivity := func(a, b *roomState) int {
-		return cmp.Or(cmp.Compare(b.Log().Latest(), a.Log().Latest()), cmp.Compare(b.Log().Created(), a.Log().Created()))
-	}
-	slices.SortFunc(joined, byActivity)
-	slices.SortFunc(others, byActivity)
-	slices.SortFunc(left, byActivity)
-	if len(others) > maxListedRooms {
-		others = others[:maxListedRooms]
-	}
+	joined, others, left := rooms.List(u, candidates, rooms.Listing{
+		Joined: wantJoined, NotJoined: wantOthers, Since: since, HasSince: hasSince,
+		Threads: hasRoom || hasParent, Limit: maxListedRooms,
+	}, func(id string) int64 { return u.leftAt[id] })
 
 	users := make(map[string]*userState)
 	views := func(rooms []*roomState) []wire.RoomView {
