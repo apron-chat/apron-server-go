@@ -351,8 +351,8 @@ func (s *Server) writeAllowedLocked(e *embedState) bool {
 	if roomID == "" {
 		return true
 	}
-	r := s.rooms[roomID]
-	return r != nil && r.visibleTo(u)
+	r := s.rooms.Get(roomID)
+	return r != nil && r.VisibleTo(u)
 }
 
 // endWritesLocked ends u's outstanding writes that keep refuses, or all of

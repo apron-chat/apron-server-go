@@ -44,17 +44,17 @@ const (
 // readPositionLocked is the log_id after which messages in r are unread for
 // u, and false when r does not count for u.
 func (s *Server) readPositionLocked(u *userState, r *roomState) (int64, bool) {
-	cursor := r.reads[u.id]
-	since := cursor.id
+	cursor, _ := r.Read(u.id)
+	since := cursor.ID
 	// A cursor names a message by its message_id; one moved into r arrived
 	// later, at its move.
-	if m := s.messages[cursor.messageID]; m != nil && m.roomID == r.id {
+	if m := s.messages[cursor.MessageID]; m != nil && m.roomID == r.ID() {
 		since = max(since, arrival(m, r))
 	}
-	if u.joined[r.id] != nil {
-		return max(since, r.active[u.id]), true
+	if u.joined[r.ID()] != nil {
+		return max(since, r.Active(u.id)), true
 	}
-	if ping, ok := u.pings[r.id]; ok {
+	if ping, ok := u.pings[r.ID()]; ok {
 		return max(since, ping-1), true
 	}
 	return 0, false
@@ -64,7 +64,7 @@ func (s *Server) readPositionLocked(u *userState, r *roomState) (int64, bool) {
 // r's log, a move snapshot for a message moved there.
 func arrival(m *messageState, r *roomState) int64 {
 	for _, record := range m.records {
-		if slices.Contains(record.Rooms, r.id) {
+		if slices.Contains(record.Rooms, r.ID()) {
 			return record.ID
 		}
 	}
@@ -86,7 +86,7 @@ func (s *Server) countsLocked(u *userState, r *roomState, m *messageState, now t
 		return true
 	case u.roomMuted(r, now):
 		return false
-	case u.joined[r.id] != nil:
+	case u.joined[r.ID()] != nil:
 		return true
 	}
 	target := s.messages[info.replyTo]
@@ -96,17 +96,17 @@ func (s *Server) countsLocked(u *userState, r *roomState, m *messageState, now t
 // recountLocked counts u's unread messages in r from the log.
 func (s *Server) recountLocked(u *userState, r *roomState, now time.Time) int {
 	since, counted := s.readPositionLocked(u, r)
-	if !counted || !r.visibleTo(u) {
+	if !counted || !r.VisibleTo(u) {
 		return 0
 	}
 	count := 0
 	seen := make(map[*messageState]bool)
-	for _, record := range r.log.Since(since, maxUnreadScan) {
+	for _, record := range r.Log().Since(since, maxUnreadScan) {
 		if record.Kind != roomlog.KindMessage {
 			continue
 		}
 		m := s.messages[record.Message]
-		if m == nil || m.roomID != r.id || seen[m] {
+		if m == nil || m.roomID != r.ID() || seen[m] {
 			continue
 		}
 		seen[m] = true
@@ -133,7 +133,7 @@ func (s *Server) unreadLocked(u *userState, now time.Time) int {
 	}
 	rooms := maps.Clone(u.joined)
 	for id := range u.pings {
-		if r := s.rooms[id]; r != nil {
+		if r := s.rooms.Get(id); r != nil {
 			rooms[id] = r
 		}
 	}
@@ -170,7 +170,7 @@ func (s *Server) messageUnreadLocked(m *messageState, previous *roomlog.Message,
 	if len(s.pushes) == 0 {
 		return
 	}
-	r := s.rooms[m.roomID]
+	r := s.rooms.Get(m.roomID)
 	concerned := make(map[string]*userState)
 	add := func(u *userState) {
 		if u != nil && len(u.pushes) > 0 && u.id != m.owner {
@@ -181,7 +181,7 @@ func (s *Server) messageUnreadLocked(m *messageState, previous *roomlog.Message,
 		if room == nil {
 			continue
 		}
-		for _, u := range room.members {
+		for _, u := range room.Members() {
 			add(u)
 		}
 	}
@@ -200,38 +200,38 @@ func (s *Server) messageUnreadLocked(m *messageState, previous *roomlog.Message,
 	messageID := m.records[0].ID
 	for _, id := range slices.Sorted(maps.Keys(concerned)) {
 		u := concerned[id]
-		if !r.visibleTo(u) {
+		if !r.VisibleTo(u) {
 			continue
 		}
 		info := m.info()
-		if u.joined[r.id] == nil && (slices.Contains(info.mentions, u.id) || s.messages[info.replyTo] != nil && s.messages[info.replyTo].owner == u.id) {
+		if u.joined[r.ID()] == nil && (slices.Contains(info.mentions, u.id) || s.messages[info.replyTo] != nil && s.messages[info.replyTo].owner == u.id) {
 			// A room the user has not joined counts from the first message
 			// there that mentioned or replied to them.
-			if since, ok := u.pings[r.id]; !ok || since > messageID {
-				u.pings[r.id] = messageID
+			if since, ok := u.pings[r.ID()]; !ok || since > messageID {
+				u.pings[r.ID()] = messageID
 				s.touchUser(u.id)
-				s.unreadChangedLocked(u, r.id)
+				s.unreadChangedLocked(u, r.ID())
 				continue
 			}
 		}
-		count, known := u.unread[r.id]
+		count, known := u.unread[r.ID()]
 		switch {
 		case previous != nil || from != nil:
 			// An edit, deletion, or move counted again when it touches a
 			// message past the read position.
 			since, counted := s.readPositionLocked(u, r)
 			if from != nil {
-				s.unreadChangedLocked(u, from.id)
-				s.unreadChangedLocked(u, r.id)
+				s.unreadChangedLocked(u, from.ID())
+				s.unreadChangedLocked(u, r.ID())
 			} else if counted && arrival(m, r) > since {
-				s.unreadChangedLocked(u, r.id)
+				s.unreadChangedLocked(u, r.ID())
 			}
 		case !known:
 			if _, counted := s.readPositionLocked(u, r); counted {
 				s.scheduleBadgeLocked(u)
 			}
 		case s.countsLocked(u, r, m, now):
-			u.unread[r.id] = count + 1
+			u.unread[r.ID()] = count + 1
 			s.scheduleBadgeLocked(u)
 		}
 	}

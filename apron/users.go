@@ -288,7 +288,7 @@ func (s *Server) claimUserIDLocked(id string) bool {
 // user_id never passes for a room_id to a reader that folds case. Rooms
 // created by clients have numeric IDs; only the seeded room has letters.
 func (s *Server) roomNamedLocked(id string) bool {
-	return s.rooms[id] != nil || strings.EqualFold(id, defaultRoomID)
+	return s.rooms.Get(id) != nil || strings.EqualFold(id, defaultRoomID)
 }
 
 // switchUserLocked replies with user as `you`, and the token that resumes
@@ -387,7 +387,7 @@ func (s *Server) detachLocked(c *client) {
 func (s *Server) retireLocked(u *userState) {
 	u.retired = true
 	rooms := slices.SortedFunc(maps.Values(u.joined), func(a, b *roomState) int {
-		return cmp.Compare(a.log.Created(), b.log.Created())
+		return cmp.Compare(a.Log().Created(), b.Log().Created())
 	})
 	// Its registrations go first, so its leaves send it no badge pushes.
 	for _, registration := range u.pushes {
@@ -395,7 +395,7 @@ func (s *Server) retireLocked(u *userState) {
 	}
 	for _, r := range rooms {
 		s.leaveLocked(u, r)
-		delete(r.reads, u.id)
+		s.rooms.ForgetRead(r, u.id)
 	}
 	s.stopTimersLocked(u)
 	s.setAvatarEmbedLocked(u, nil)
@@ -432,7 +432,7 @@ func (u *userState) send(frames ...any) {
 func (s *Server) sharersLocked(u *userState) []*userState {
 	seen := make(map[string]*userState)
 	for _, r := range u.joined {
-		for id, member := range r.members {
+		for id, member := range r.Members() {
 			if id != u.id {
 				seen[id] = member
 			}

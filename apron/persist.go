@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/apron-chat/apron-server-go/apron/internal/roomlog"
+	"github.com/apron-chat/apron-server-go/apron/internal/rooms"
 	"github.com/apron-chat/apron-server-go/apron/internal/sessions"
 	"github.com/apron-chat/apron-server-go/apron/internal/webpush"
 	"github.com/apron-chat/apron-server-go/internal/auth/email"
@@ -25,8 +26,8 @@ import (
 // Persistence writes the server's state through to a store.Store. Every
 // change made under s.mu marks what it changed: the server's own state in
 // its dirty set (touch*), and the modules that keep their own, the log
-// (roomlog), the extensions' values (kv), and the sessions (sessions), in
-// theirs. When the lock is released, unlock renders the marked state into
+// (roomlog), the rooms (rooms), the extensions' values (kv), and the
+// sessions (sessions), in theirs. When the lock is released, unlock renders the marked state into
 // one batch, and the store writer (durable) applies batches to the store
 // in order, off the lock. At start, Open rebuilds the state from the
 // store.
@@ -41,7 +42,8 @@ import (
 //	used_id  lowercased user_id ever assigned
 //	record   log_id       a logged record and the rooms whose logs hold it
 //	                      (roomlog)
-//	room     room_id
+//	room     room_id      a room, its members, and their read cursors
+//	                      (rooms)
 //	message  message_id
 //	user     user_id      guests too, retired at the next start
 //	session  hex SHA-256 of the bearer token (sessions)
@@ -53,7 +55,7 @@ import (
 const (
 	entryMeta    = "meta"
 	entryUsedID  = "used_id"
-	entryRoom    = "room"
+	entryRoom    = rooms.EntryKind
 	entryMessage = "message"
 	entryUser    = "user"
 	entryDevice  = "device"
@@ -65,7 +67,6 @@ const (
 // sessions, embeds, and pushes, a key missing from the server's maps at
 // flush time is deleted from the store.
 type dirtySet struct {
-	rooms    map[string]bool
 	messages map[string]bool
 	users    map[string]bool
 	devices  map[[32]byte]bool
@@ -82,7 +83,6 @@ type dirtySet struct {
 
 func newDirtySet() dirtySet {
 	return dirtySet{
-		rooms:       make(map[string]bool),
 		messages:    make(map[string]bool),
 		users:       make(map[string]bool),
 		devices:     make(map[[32]byte]bool),
@@ -93,7 +93,6 @@ func newDirtySet() dirtySet {
 	}
 }
 
-func (s *Server) touchRoom(r *roomState)       { s.dirty.rooms[r.id] = true }
 func (s *Server) touchMessage(m *messageState) { s.dirty.messages[m.id] = true }
 func (s *Server) touchUser(id string)          { s.dirty.users[id] = true }
 func (s *Server) touchDevice(key [32]byte)     { s.dirty.devices[key] = true }
@@ -116,25 +115,6 @@ type storedMeta struct {
 	AccountNumber uint64 `json:"account_number,omitzero"`
 	EmbedNumber   uint64 `json:"embed_number"`
 	UploadSeq     int64  `json:"upload_seq"`
-}
-
-type storedCursor struct {
-	From      roomlog.Author `json:"from"`
-	MessageID string         `json:"message_id"`
-	ID        int64          `json:"id"`
-}
-
-type storedRoom struct {
-	Parent      string                  `json:"parent,omitzero"`
-	Private     bool                    `json:"private,omitzero"`
-	Active      map[string]int64        `json:"active,omitzero"`
-	Record      roomlog.RoomRecord      `json:"record"`
-	RecordLogID int64                   `json:"record_log_id"`
-	CreatedID   int64                   `json:"created_id"`
-	LatestID    int64                   `json:"latest_id"`
-	Members     []string                `json:"members"`
-	Creator     string                  `json:"creator,omitzero"`
-	Reads       map[string]storedCursor `json:"reads,omitzero"`
 }
 
 type storedReaction struct {
@@ -263,12 +243,14 @@ func (s *Server) flushLocked() {
 	if s.store.Stopped() {
 		s.dirty = newDirtySet()
 		s.log.Entries()
+		s.rooms.Entries()
 		s.extData.Entries()
 		s.sessions.Entries(userID)
 		s.store.Queue(nil)
 		return
 	}
-	batch := append(s.entriesLocked(s.dirty, s.log.Entries()), s.extData.Entries()...)
+	batch := append(s.entriesLocked(s.dirty, s.log.Entries()), s.rooms.Entries()...)
+	batch = append(batch, s.extData.Entries()...)
 	batch = append(batch, s.sessions.Entries(userID)...)
 	meta := s.metaLocked()
 	if meta != s.storedMeta {
@@ -298,11 +280,6 @@ func (s *Server) entriesLocked(d dirtySet, records []store.Entry) []store.Entry 
 		put(entryUsedID, id, true)
 	}
 	batch = append(batch, records...)
-	for id := range d.rooms {
-		if r := s.rooms[id]; r != nil {
-			put(entryRoom, id, s.storedRoomLocked(r))
-		}
-	}
 	for id := range d.messages {
 		if m := s.messages[id]; m != nil {
 			put(entryMessage, id, storedMessageOf(m))
@@ -363,29 +340,6 @@ func (s *Server) entriesLocked(d dirtySet, records []store.Entry) []store.Entry 
 	return batch
 }
 
-func (s *Server) storedRoomLocked(r *roomState) storedRoom {
-	stored := storedRoom{
-		Record:      r.record,
-		RecordLogID: r.recordLogID,
-		CreatedID:   r.log.Created(),
-		LatestID:    r.log.Latest(),
-		Members:     slices.Sorted(maps.Keys(r.members)),
-		Creator:     r.creator,
-		Private:     r.private,
-		Active:      r.active,
-	}
-	if r.parent != nil {
-		stored.Parent = r.parent.id
-	}
-	if len(r.reads) > 0 {
-		stored.Reads = make(map[string]storedCursor, len(r.reads))
-		for id, cursor := range r.reads {
-			stored.Reads[id] = storedCursor{From: cursor.from, MessageID: cursor.messageID, ID: cursor.id}
-		}
-	}
-	return stored
-}
-
 func storedMessageOf(m *messageState) storedMessage {
 	stored := storedMessage{From: m.from, LogID: m.logID, Owner: m.owner, RoomID: m.roomID}
 	for _, record := range m.records {
@@ -406,7 +360,7 @@ func storedUserOf(u *userState) storedUser {
 		Bot: u.botOf, Identities: u.identities, Records: u.records, Grants: u.granted,
 		Email: u.identities[email.Name], External: u.identities[external.Name],
 		Passkey: u.records[passkey.Name], Granted: u.granted[external.Name],
-		Enrolled: u.enrolled.stored(), Scope: u.scope.stored(), Consents: u.consents,
+		Enrolled: u.enrolled.stored(), Scope: storedScopeOf(u.scope), Consents: u.consents,
 	}
 	if !u.created.IsZero() {
 		stored.Created = u.created.UnixMilli()
@@ -503,39 +457,12 @@ func (s *Server) restoreLocked() (map[string]bool, error) {
 		s.usedIDs[id] = true
 	}
 
-	storedRooms := make(map[string]storedRoom)
-	for id, raw := range entries[entryRoom] {
-		var stored storedRoom
-		if err := decode(entryRoom, id, raw, &stored); err != nil {
-			return nil, err
-		}
-		storedRooms[id] = stored
-		if stored.Active == nil {
-			stored.Active = make(map[string]int64)
-		}
-		s.rooms[id] = &roomState{
-			id: id, record: stored.Record, recordLogID: stored.RecordLogID,
-			log:     roomlog.NewTimeline(id, stored.CreatedID, stored.LatestID),
-			creator: stored.Creator, private: stored.Private, active: stored.Active,
-			members: make(map[string]*userState), reads: make(map[string]readCursor),
-		}
-	}
-	order := slices.SortedFunc(maps.Keys(s.rooms), func(a, b string) int {
-		return int(s.rooms[a].log.Created() - s.rooms[b].log.Created())
-	})
-	for _, id := range order {
-		r := s.rooms[id]
-		if parent := s.rooms[storedRooms[id].Parent]; parent != nil {
-			r.parent = parent
-			parent.children = append(parent.children, r)
-		}
-		for userID, cursor := range storedRooms[id].Reads {
-			r.reads[userID] = readCursor{from: cursor.From, messageID: cursor.MessageID, id: cursor.ID}
-		}
+	if err := s.rooms.Restore(entries[rooms.EntryKind]); err != nil {
+		return nil, err
 	}
 	records, err := s.log.Restore(entries[roomlog.EntryKind], func(id string) *roomlog.Timeline {
-		if r := s.rooms[id]; r != nil {
-			return r.log
+		if r := s.rooms.Get(id); r != nil {
+			return r.Log()
 		}
 		return nil
 	})
@@ -603,15 +530,13 @@ func (s *Server) restoreLocked() (map[string]bool, error) {
 		u.consents = stored.Consents
 		s.users[id] = u
 	}
-	for _, id := range order {
-		r := s.rooms[id]
-		for _, userID := range storedRooms[id].Members {
-			if u := s.users[userID]; u != nil {
-				r.members[userID] = u
-				u.joined[id] = r
-			}
+	s.rooms.RestoreMembers(func(r *roomState, id string) (*userState, bool) {
+		u := s.users[id]
+		if u != nil {
+			u.joined[r.ID()] = r
 		}
-	}
+		return u, u != nil
+	})
 
 	files := make(map[string]bool)
 	var uploads []*embedState

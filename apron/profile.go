@@ -75,8 +75,8 @@ func (s *Server) profileValueLocked(field string) (string, int) {
 	case field == "description":
 		// A room description longer than a server description is left
 		// out rather than cut, which could break its markup.
-		if room := s.rooms[defaultRoomID]; room != nil {
-			if description := room.record.Description; description != "" && len(description) <= maxServerDescriptionBytes {
+		if room := s.rooms.Get(defaultRoomID); room != nil {
+			if description := room.Record().Description; description != "" && len(description) <= maxServerDescriptionBytes {
 				return description, fromRoom
 			}
 		}
@@ -192,7 +192,7 @@ func (s *Server) serverCommand(c *client, r *roomState, body map[string]any, arg
 	var done string
 	switch field {
 	case "":
-		c.enqueue(privateNotice(r.id, s.profileNoticeLocked()))
+		c.enqueue(privateNotice(r.ID(), s.profileNoticeLocked()))
 		return wire.CommandResult{}, nil
 	case "title":
 		title, err := serverTitle(value)
@@ -233,7 +233,7 @@ func (s *Server) serverCommand(c *client, r *roomState, body map[string]any, arg
 	default:
 		return wire.CommandResult{}, invalidParams(serverUsage)
 	}
-	c.enqueue(privateNotice(r.id, done+"\n\n"+s.profileNoticeLocked()))
+	c.enqueue(privateNotice(r.ID(), done+"\n\n"+s.profileNoticeLocked()))
 	return wire.CommandResult{}, nil
 }
 

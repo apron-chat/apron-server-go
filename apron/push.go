@@ -345,7 +345,7 @@ func (s *Server) wakeLocked(m *messageState, snapshot, previous map[string]any) 
 	if s.config.DisablePush || len(s.pushes) == 0 || snapshot["deleted"] == true || snapshot["message_id"] == nil {
 		return
 	}
-	r := s.rooms[m.roomID]
+	r := s.rooms.Get(m.roomID)
 	reasons := make(map[string]wakeScope)
 	body, _ := snapshot["body"].(map[string]any)
 	for _, id := range mentions(body) {
@@ -357,7 +357,7 @@ func (s *Server) wakeLocked(m *messageState, snapshot, previous map[string]any) 
 				reasons[target.owner] |= wakeReplies
 			}
 		}
-		for id, u := range r.members {
+		for id, u := range r.Members() {
 			if len(u.pushes) > 0 {
 				reasons[id] |= wakeJoined
 			}
@@ -365,7 +365,7 @@ func (s *Server) wakeLocked(m *messageState, snapshot, previous map[string]any) 
 		// private selects messages in the private rooms the user joined and
 		// in their threads (§4.9): those who can see a private room's
 		// thread joined every private room above it.
-		if everyone, audience := r.audience(); !everyone {
+		if everyone, audience := r.Audience(); !everyone {
 			for id, u := range audience {
 				if len(u.pushes) > 0 {
 					reasons[id] |= wakePrivate
@@ -382,7 +382,7 @@ func (s *Server) wakeLocked(m *messageState, snapshot, previous map[string]any) 
 	now := time.Now()
 	for _, id := range slices.Sorted(maps.Keys(reasons)) {
 		u := s.users[id]
-		if u == nil || len(u.pushes) == 0 || !r.visibleTo(u) || u.attended() || u.silenced(now) {
+		if u == nil || len(u.pushes) == 0 || !r.VisibleTo(u) || u.attended() || u.silenced(now) {
 			continue
 		}
 		why := reasons[id]

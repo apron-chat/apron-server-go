@@ -147,8 +147,8 @@ func (s *Server) postPendingLocked(e *embedState) bool {
 	logID := s.log.NextID()
 	messageID := formatID(logID)
 	from := u.from()
-	snapshot := &roomlog.Message{MessageID: messageID, LogID: messageID, RoomID: r.id, From: from, Body: storedBody(body)}
-	if target := s.visibleMessageLocked(u, p.replyTo); target != nil && !r.revealsTo(s.rooms[target.roomID]) {
+	snapshot := &roomlog.Message{MessageID: messageID, LogID: messageID, RoomID: r.ID(), From: from, Body: storedBody(body)}
+	if target := s.visibleMessageLocked(u, p.replyTo); target != nil && !r.RevealsTo(s.rooms.Get(target.roomID)) {
 		snapshot.ReplyTo = &roomlog.Ref{MessageID: p.replyTo}
 	}
 	m := &messageState{id: messageID, from: from, owner: u.id, reactions: make(map[string]reactionSet)}
@@ -158,7 +158,7 @@ func (s *Server) postPendingLocked(e *embedState) bool {
 	s.touchEmbed(e.id)
 	s.commitSnapshotLocked(m, snapshot, logID)
 	s.messageUnreadLocked(m, nil, nil)
-	s.unreadChangedLocked(u, r.id)
+	s.unreadChangedLocked(u, r.ID())
 	s.wakeNewLocked(m, m.snapshot())
 	return true
 }
@@ -465,7 +465,7 @@ func (s *Server) liveCommand(c *client, r *roomState, body map[string]any, kind,
 		return wire.CommandResult{}, invalidParams("/embed-%s takes no embeds: it makes its own", kind)
 	}
 	if replyTo != "" {
-		if target := s.visibleMessageLocked(c.user, replyTo); target != nil && r.revealsTo(s.rooms[target.roomID]) {
+		if target := s.visibleMessageLocked(c.user, replyTo); target != nil && r.RevealsTo(s.rooms.Get(target.roomID)) {
 			return wire.CommandResult{}, &Error{Code: CodeDenied, Message: "A reply cannot quote a message that fewer people can see"}
 		}
 	}
@@ -474,13 +474,13 @@ func (s *Server) liveCommand(c *client, r *roomState, body map[string]any, kind,
 	}
 	s.embedNumber++
 	e := s.newWriteLocked(c, fmt.Sprintf("embed_%d", s.embedNumber), kind, "")
-	e.post = &pendingPost{user: c.user, roomID: r.id, replyTo: replyTo, text: text}
+	e.post = &pendingPost{user: c.user, roomID: r.ID(), replyTo: replyTo, text: text}
 	if kind == kindTerminal {
 		e.title = text
 		text = ""
 	}
 	s.startLiveLocked(e, text)
-	c.enqueue(privateNotice(r.id, s.liveNotice(e)))
+	c.enqueue(privateNotice(r.ID(), s.liveNotice(e)))
 	return e.writeResult(), nil
 }
 

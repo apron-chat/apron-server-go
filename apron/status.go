@@ -273,10 +273,10 @@ func (s *Server) sendAfterAuthLocked(c *client) {
 	}
 	listed := make(map[string]*userState)
 	for _, r := range u.joined {
-		ids, _ := s.listedMemberIDsLocked(r)
+		ids, _ := r.ListedMemberIDs(s.config.MaxListedMembers)
 		for _, id := range ids {
 			if id != u.id {
-				listed[id] = r.members[id]
+				listed[id] = r.Member(id)
 			}
 		}
 	}
@@ -372,8 +372,8 @@ func (u *userState) silenced(now time.Time) bool {
 // thread of, is in effect: it silences r but for mentions of u (§4.5). The
 // unscoped mute applies besides.
 func (u *userState) roomMuted(r *roomState, now time.Time) bool {
-	for room := r; room != nil; room = room.parent {
-		if mute, ok := u.roomMutes[room.id]; ok && mute.active(now) {
+	for room := r; room != nil; room = room.Parent() {
+		if mute, ok := u.roomMutes[room.ID()]; ok && mute.active(now) {
 			return true
 		}
 	}
@@ -550,8 +550,8 @@ func (s *Server) announceJoinStatusLocked(u *userState, r *roomState) {
 	if status := u.status; status == statusOffline || status == statusNone {
 		return
 	}
-	users := make([]*userState, 0, len(r.members))
-	for id, other := range r.members {
+	users := make([]*userState, 0, r.MemberCount())
+	for id, other := range r.Members() {
 		if id != u.id {
 			users = append(users, other)
 		}

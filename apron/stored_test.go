@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/apron-chat/apron-server-go/apron/internal/roomlog"
+	"github.com/apron-chat/apron-server-go/apron/internal/rooms"
 	"github.com/apron-chat/apron-server-go/store"
 )
 
@@ -135,6 +136,7 @@ func TestStoredLogIsUnchanged(t *testing.T) {
 func TestStoredShapesRoundTrip(t *testing.T) {
 	entries := loadStoredLog(t)
 	records := make(map[string]jsontext.Value)
+	stored := make(map[string]jsontext.Value)
 	for _, e := range entries {
 		var value any
 		switch e.Kind {
@@ -142,7 +144,8 @@ func TestStoredShapesRoundTrip(t *testing.T) {
 			records[e.ID] = e.Value
 			continue
 		case entryRoom:
-			value = new(storedRoom)
+			stored[e.ID] = e.Value
+			continue
 		case entryMessage:
 			value = new(storedMessage)
 		}
@@ -153,7 +156,18 @@ func TestStoredShapesRoundTrip(t *testing.T) {
 			t.Errorf("%s %s is stored again as\n%s\nwant\n%s", e.Kind, e.ID, again, e.Value)
 		}
 	}
+	// Rooms are restored with every member they name, and stored again.
 	log := roomlog.NewLog()
+	table := rooms.NewTable[*userState](log)
+	if err := table.Restore(stored); err != nil {
+		t.Fatal(err)
+	}
+	table.RestoreMembers(func(_ *roomState, id string) (*userState, bool) { return newUserState(id, ""), true })
+	for id, value := range stored {
+		if again := rooms.Entry(table.Get(id)).Value; !bytes.Equal(again, value) {
+			t.Errorf("room %s is stored again as\n%s\nwant\n%s", id, again, value)
+		}
+	}
 	restored, err := log.Restore(records, func(string) *roomlog.Timeline { return nil })
 	if err != nil {
 		t.Fatal(err)

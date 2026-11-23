@@ -1,14 +1,12 @@
 package apron
 
 import (
-	"cmp"
 	"context"
 	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"errors"
 	"fmt"
 	"log/slog"
-	"maps"
 	"net/http"
 	"regexp"
 	"slices"
@@ -281,7 +279,7 @@ func (e *extensionCommand) may(_ context.Context, wc *wire.Conn, roomID string) 
 	var rooms []Room
 	switch {
 	case roomID != "":
-		rooms = []Room{s.roomViewLocked(s.rooms[roomID])}
+		rooms = []Room{s.roomViewLocked(s.rooms.Get(roomID))}
 	case e.command.Available != nil:
 		rooms = s.visibleRoomsLocked(c.user)
 	case !s.seesARoomLocked(c.user):
@@ -681,12 +679,12 @@ func (s *Server) roomViewLocked(r *roomState) Room {
 	// Restricted as audience() would say, without copying its members:
 	// a private room on the way up makes the room one some users see.
 	restricted := false
-	for room := r; room != nil && !restricted; room = room.parent {
-		restricted = room.private
+	for room := r; room != nil && !restricted; room = room.Parent() {
+		restricted = room.Private()
 	}
-	room := Room{ID: r.id, Title: r.title(), Restricted: restricted, Members: len(r.members)}
-	if r.parent != nil {
-		room.ParentID = r.parent.id
+	room := Room{ID: r.ID(), Title: r.Title(), Restricted: restricted, Members: r.MemberCount()}
+	if r.Parent() != nil {
+		room.ParentID = r.Parent().ID()
 	}
 	return room
 }
@@ -703,7 +701,7 @@ func (h *Host) User(id string) (User, bool) {
 func (h *Host) Room(id string) (Room, bool) {
 	h.s.mu.RLock()
 	defer h.s.mu.RUnlock()
-	r := h.s.rooms[id]
+	r := h.s.rooms.Get(id)
 	return h.s.roomViewLocked(r), r != nil
 }
 
@@ -712,9 +710,7 @@ func (h *Host) Room(id string) (Room, bool) {
 func (h *Host) Rooms() []Room {
 	h.s.mu.RLock()
 	defer h.s.mu.RUnlock()
-	rooms := slices.SortedFunc(maps.Values(h.s.rooms), func(a, b *roomState) int {
-		return cmp.Compare(a.log.Created(), b.log.Created())
-	})
+	rooms := h.s.rooms.All()
 	views := make([]Room, len(rooms))
 	for i, r := range rooms {
 		views[i] = h.s.roomViewLocked(r)
@@ -729,8 +725,8 @@ func (h *Host) Rooms() []Room {
 func (h *Host) Visible(u User, roomID string) bool {
 	h.s.mu.RLock()
 	defer h.s.mu.RUnlock()
-	r, user := h.s.rooms[roomID], h.s.users[u.ID]
-	return r != nil && user != nil && r.visibleTo(user)
+	r, user := h.s.rooms.Get(roomID), h.s.users[u.ID]
+	return r != nil && user != nil && r.VisibleTo(user)
 }
 
 // Public reports whether anyone may see the room, without an account: it
@@ -742,11 +738,11 @@ func (h *Host) Visible(u User, roomID string) bool {
 func (h *Host) Public(roomID string) bool {
 	h.s.mu.RLock()
 	defer h.s.mu.RUnlock()
-	r := h.s.rooms[roomID]
+	r := h.s.rooms.Get(roomID)
 	if r == nil || !h.s.guestsAllowedLocked() {
 		return false
 	}
-	everyone, _ := r.audience()
+	everyone, _ := r.Audience()
 	return everyone
 }
 
@@ -756,7 +752,7 @@ func (h *Host) RoomNotice(roomID, text string) error {
 	s := h.s
 	s.mu.Lock()
 	defer s.unlock()
-	r := s.rooms[roomID]
+	r := s.rooms.Get(roomID)
 	if r == nil {
 		return invalidParams("Unknown room %q", roomID)
 	}

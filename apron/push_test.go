@@ -120,7 +120,7 @@ func addAccount(t *testing.T, app *Server, id string, others ...*testClient) *us
 	u := newUserState(id, strings.ToUpper(id[:1])+id[1:])
 	u.identities = map[string]string{"webauthn": id}
 	app.users[u.id] = u
-	app.addMemberLocked(u, app.rooms[defaultRoomID])
+	app.addMemberLocked(u, app.rooms.Get(defaultRoomID))
 	app.unlock()
 	for _, other := range others {
 		expectMembership(t, other, "general", id, true)

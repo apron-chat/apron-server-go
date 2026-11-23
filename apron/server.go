@@ -27,6 +27,7 @@ import (
 	"github.com/apron-chat/apron-server-go/apron/internal/kv"
 	"github.com/apron-chat/apron-server-go/apron/internal/proposals"
 	"github.com/apron-chat/apron-server-go/apron/internal/roomlog"
+	"github.com/apron-chat/apron-server-go/apron/internal/rooms"
 	"github.com/apron-chat/apron-server-go/apron/internal/sessions"
 	"github.com/apron-chat/apron-server-go/apron/internal/uploads"
 	"github.com/apron-chat/apron-server-go/apron/internal/webpush"
@@ -128,20 +129,22 @@ type client struct {
 //
 // Its state is guarded by mu. Cohesive parts of it live in modules under
 // apron/internal, which know nothing of Server: the log and its paging
-// (roomlog), the store writer and its fences (durable), sessions
-// (sessions), out-of-band sign-in proposals (proposals), and the
-// extensions' values (kv), whose methods are called holding mu; and push
-// delivery (webpush), live text (livetext), and upload files (uploads),
-// which own their own locks or atomics. Server keeps what ties them
-// together: users, rooms, messages, embeds, status, and delivery.
+// (roomlog), rooms, their members, and who may see them (rooms), the store
+// writer and its fences (durable), sessions (sessions), out-of-band
+// sign-in proposals (proposals), and the extensions' values (kv), whose
+// methods are called holding mu; and push delivery (webpush), live text
+// (livetext), and upload files (uploads), which own their own locks or
+// atomics. Server keeps what ties them together: users, messages, embeds,
+// status, and delivery.
 type Server struct {
 	config Config
 
 	mu sync.RWMutex
 	// log is the single append-only log of every room (roomlog), which
-	// issues the log_id sequence.
+	// issues the log_id sequence; rooms are the rooms (rooms), which log
+	// their records in it.
 	log      *roomlog.Log
-	rooms    map[string]*roomState
+	rooms    *rooms.Table[*userState]
 	messages map[string]*messageState
 	clients  map[*client]struct{}
 	// users holds every live identity: connected guests and passkey users.
@@ -273,9 +276,11 @@ func Open(config Config) (*Server, error) {
 	if config.Store == nil {
 		config.Store = store.NewMemory()
 	}
+	log := roomlog.NewLog()
 	s := &Server{
 		config:      config,
-		rooms:       make(map[string]*roomState),
+		log:         log,
+		rooms:       rooms.NewTable[*userState](log),
 		messages:    make(map[string]*messageState),
 		clients:     make(map[*client]struct{}),
 		users:       make(map[string]*userState),
@@ -300,7 +305,6 @@ func Open(config Config) (*Server, error) {
 		commands:   coreCommands(),
 		advertised: make(map[string]jsontext.Value),
 		extData:    kv.New(),
-		log:        roomlog.NewLog(),
 		logger:     config.Logger,
 	}
 	if s.logger == nil {
@@ -374,10 +378,10 @@ func Open(config Config) (*Server, error) {
 		return fail(fmt.Errorf("restoring the stored state: %w", err))
 	}
 	s.push.VAPID = s.vapid
-	if s.rooms[defaultRoomID] == nil {
+	if s.rooms.Get(defaultRoomID) == nil {
 		// The seeded default room has a logged creation record like any
 		// other room, so its history_log_id is never null.
-		s.commitRoomLocked(defaultRoomID, nil, false, roomlog.RoomRecord{Title: "General"})
+		s.rooms.Create(defaultRoomID, nil, false, "", roomlog.RoomRecord{Title: "General"})
 	}
 	s.files.RemoveStale(files)
 	s.unlock()

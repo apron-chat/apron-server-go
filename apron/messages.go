@@ -170,15 +170,15 @@ func (s *Server) saveMessage(c *client, p wire.EditParams, reply wire.Reply[wire
 			// The save keeps every other field, so it neither moves the
 			// message nor changes what it replies to.
 			editor = true
-			destination = s.rooms[current.roomID]
-			roomID = destination.id
+			destination = s.rooms.Get(current.roomID)
+			roomID = destination.ID()
 			hasReply = false
 		}
 		// A move snapshot is logged in both rooms and names both, so a
 		// message may not move to a room that some who see its room cannot
 		// see, such as a private room: the move would show them its room_id
 		// and the message.
-		if source := s.rooms[current.roomID]; source != destination && source.revealsTo(destination) {
+		if source := s.rooms.Get(current.roomID); source != destination && source.RevealsTo(destination) {
 			return &Error{Code: CodeDenied, Message: "A message cannot move to a room that fewer people can see"}
 		}
 		from = current.from
@@ -190,7 +190,7 @@ func (s *Server) saveMessage(c *client, p wire.EditParams, reply wire.Reply[wire
 		}
 		// A reply names its target's message_id to everyone who sees the
 		// reply, so it may not name a message some of them cannot see.
-		if destination.revealsTo(s.rooms[target.roomID]) {
+		if destination.RevealsTo(s.rooms.Get(target.roomID)) {
 			return &Error{Code: CodeDenied, Message: "A reply cannot quote a message that fewer people can see"}
 		}
 	}
@@ -290,12 +290,12 @@ func (s *Server) saveMessage(c *client, p wire.EditParams, reply wire.Reply[wire
 	}
 	var movedFrom *roomState
 	if moved {
-		movedFrom = s.rooms[source]
+		movedFrom = s.rooms.Get(source)
 	}
 	s.messageUnreadLocked(current, previous, movedFrom)
 	if !replacing {
 		// The author's own message moves their read position (§4.9).
-		s.unreadChangedLocked(u, destination.id)
+		s.unreadChangedLocked(u, destination.ID())
 	}
 	// Push reads the snapshot as a JSON object.
 	object := current.snapshot()
@@ -331,28 +331,28 @@ func (s *Server) commitSnapshotLocked(m *messageState, snapshot *roomlog.Message
 	if m.logID != 0 {
 		snapshot.PrevLogID = formatID(m.logID)
 	}
-	destination := s.rooms[snapshot.RoomID]
+	destination := s.rooms.Get(snapshot.RoomID)
 	rooms := []*roomState{destination}
-	moved := m.roomID != "" && m.roomID != destination.id
+	moved := m.roomID != "" && m.roomID != destination.ID()
 	if moved {
-		source := s.rooms[m.roomID]
+		source := s.rooms.Get(m.roomID)
 		rooms = []*roomState{source, destination}
 		// A move out of a room that some who see the destination cannot see,
 		// such as a private one, does not name it to them.
-		if !destination.revealsTo(source) {
+		if !destination.RevealsTo(source) {
 			snapshot.PrevRoomID = m.roomID
 		}
 	}
 	m.logID = logID
-	m.roomID = destination.id
+	m.roomID = destination.ID()
 	m.cached = nil
-	if !moved && len(m.records) == 0 && destination.members[m.owner] != nil {
-		destination.active[m.owner] = logID
+	if !moved && len(m.records) == 0 {
+		s.rooms.Posted(destination, m.owner, logID)
 	}
 	record := roomlog.NewMessage(logID, snapshot)
 	m.records = append(m.records, record)
 	s.touchMessage(m)
-	s.appendLocked(record, rooms...)
+	s.rooms.Append(record, rooms...)
 	s.deliverLocked(rawNotification("message", record.Raw), rooms...)
 	return moved
 }
@@ -575,9 +575,9 @@ func (s *Server) react(c *client, p wire.ReactParams, reply wire.Reply[wire.Empt
 // message's current room. Reaction sets carry no prev_log_id (§4.3.1).
 func (s *Server) commitReactionsLocked(m *messageState, elements []roomlog.Reaction) {
 	logID := s.log.NextID()
-	r := s.rooms[m.roomID]
+	r := s.rooms.Get(m.roomID)
 	record := roomlog.NewReactions(logID, m.id, m.roomID, elements)
-	s.appendLocked(record, r)
+	s.rooms.Append(record, r)
 	s.deliverLocked(rawNotification("reactions", record.Raw), r)
 }
 

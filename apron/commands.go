@@ -85,7 +85,7 @@ func mayLocked(may func(s *Server, c *client, r *roomState) bool) func(context.C
 		defer s.mu.RUnlock()
 		var r *roomState
 		if roomID != "" {
-			r = s.rooms[roomID]
+			r = s.rooms.Get(roomID)
 		} else if !s.seesARoomLocked(c.user) {
 			return false
 		}
@@ -228,11 +228,11 @@ func coreCommands() *serverCommands {
 func (s *Server) mayKickLocked(c *client, r *roomState) bool {
 	u := c.user
 	if r != nil {
-		return r.mayRemove(u)
+		return mayRemove(r, u)
 	}
 	moderates := u.hasRole(RoleAdmin) || u.hasRole(RoleModerator)
-	for _, r := range s.rooms {
-		if (moderates || r.creator == u.id) && r.visibleTo(u) {
+	for _, r := range s.rooms.All() {
+		if (moderates || r.Creator() == u.id) && r.VisibleTo(u) {
 			return true
 		}
 	}
@@ -241,8 +241,8 @@ func (s *Server) mayKickLocked(c *client, r *roomState) bool {
 
 // seesARoomLocked reports whether u can see at least one room.
 func (s *Server) seesARoomLocked(u *userState) bool {
-	for _, r := range s.rooms {
-		if r.visibleTo(u) {
+	for _, r := range s.rooms.All() {
+		if r.VisibleTo(u) {
 			return true
 		}
 	}
@@ -255,19 +255,19 @@ func (s *Server) seesARoomLocked(u *userState) bool {
 // runs, first.
 func (s *Server) visibleRoomsLocked(u *userState) []Room {
 	var rooms []*roomState
-	for _, room := range s.rooms {
-		if room.visibleTo(u) {
+	for _, room := range s.rooms.All() {
+		if room.VisibleTo(u) {
 			rooms = append(rooms, room)
 		}
 	}
 	rank := func(r *roomState) int {
-		if r.id == defaultRoomID {
+		if r.ID() == defaultRoomID {
 			return 0
 		}
 		return 1
 	}
 	slices.SortFunc(rooms, func(a, b *roomState) int {
-		return cmp.Or(cmp.Compare(rank(a), rank(b)), strings.Compare(a.id, b.id))
+		return cmp.Or(cmp.Compare(rank(a), rank(b)), strings.Compare(a.ID(), b.ID()))
 	})
 	views := make([]Room, len(rooms))
 	for i, room := range rooms {
@@ -408,11 +408,11 @@ func privateNotice(roomID, text string) map[string]any {
 func (s *Server) postRoomNoticeLocked(r *roomState, text string) {
 	logID := s.log.NextID()
 	messageID := formatID(logID)
-	from := roomlog.Author{UserID: roomNoticeID, Name: r.title()}
+	from := roomlog.Author{UserID: roomNoticeID, Name: r.Title()}
 	m := &messageState{id: messageID, from: from, owner: roomNoticeID, reactions: make(map[string]reactionSet)}
 	s.messages[messageID] = m
 	s.commitSnapshotLocked(m, &roomlog.Message{
-		MessageID: messageID, LogID: messageID, RoomID: r.id, From: from,
+		MessageID: messageID, LogID: messageID, RoomID: r.ID(), From: from,
 		Body: &roomlog.Body{Body: wire.Body{Text: text}},
 	}, logID)
 }
@@ -473,12 +473,12 @@ func (s *Server) kickCommand(c *client, r *roomState, body map[string]any, args,
 	if len(targets) != 1 {
 		return wire.CommandResult{}, invalidParams("Usage: /kick @user [<reason>], mentioning exactly one user")
 	}
-	if !r.mayRemove(u) {
-		return wire.CommandResult{}, &Error{Code: CodeDenied, Message: fmt.Sprintf("Only the creator of %s or a moderator can remove people from it", r.title())}
+	if !mayRemove(r, u) {
+		return wire.CommandResult{}, &Error{Code: CodeDenied, Message: fmt.Sprintf("Only the creator of %s or a moderator can remove people from it", r.Title())}
 	}
-	target := r.members[targets[0]]
+	target := r.Member(targets[0])
 	if target == nil {
-		return wire.CommandResult{}, invalidParams("@%s is not in %s", targets[0], r.title())
+		return wire.CommandResult{}, invalidParams("@%s is not in %s", targets[0], r.Title())
 	}
 	if target == u {
 		return wire.CommandResult{}, invalidParams("You cannot remove yourself; leave the room instead")

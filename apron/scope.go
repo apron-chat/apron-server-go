@@ -5,12 +5,14 @@ import (
 	"errors"
 	"maps"
 	"slices"
+
+	"github.com/apron-chat/apron-server-go/apron/internal/rooms"
 )
 
 // Room scopes. An account with a scope, such as a bot that should reach
 // only the rooms it is assigned, sees only the rooms its scope lists, and
 // their threads if it says so. Seeing is the server's one check of who may
-// read and write a room (roomState.visibleTo): history, room_list, joins,
+// read and write a room (rooms.Room.VisibleTo): history, room_list, joins,
 // posts, reactions, threads and their records, unread counts, push, live
 // text, and Host.Visible all go through it, for a client's connection, a
 // bot's in-process one, and one signed in with a service token alike. A
@@ -28,11 +30,9 @@ type RoomScope struct {
 	Threads bool
 }
 
-// roomScope is a RoomScope as the server checks it. Guarded by s.mu.
-type roomScope struct {
-	rooms   map[string]bool
-	threads bool
-}
+// roomScope is a RoomScope as the server checks it (rooms.Room.InScope).
+// Guarded by s.mu.
+type roomScope = rooms.Scope
 
 type storedScope struct {
 	Rooms   []string `json:"rooms"`
@@ -43,25 +43,21 @@ func newRoomScope(scope *RoomScope) *roomScope {
 	if scope == nil {
 		return nil
 	}
-	sc := &roomScope{rooms: make(map[string]bool, len(scope.Rooms)), threads: scope.Threads}
-	for _, id := range scope.Rooms {
-		sc.rooms[id] = true
-	}
-	return sc
+	return rooms.NewScope(scope.Rooms, scope.Threads)
 }
 
-func (sc *roomScope) public() *RoomScope {
+func publicScope(sc *roomScope) *RoomScope {
 	if sc == nil {
 		return nil
 	}
-	return &RoomScope{Rooms: slices.Sorted(maps.Keys(sc.rooms)), Threads: sc.threads}
+	return &RoomScope{Rooms: sc.Rooms(), Threads: sc.Threads()}
 }
 
-func (sc *roomScope) stored() *storedScope {
+func storedScopeOf(sc *roomScope) *storedScope {
 	if sc == nil {
 		return nil
 	}
-	return &storedScope{Rooms: slices.Sorted(maps.Keys(sc.rooms)), Threads: sc.threads}
+	return &storedScope{Rooms: sc.Rooms(), Threads: sc.Threads()}
 }
 
 func (sc *storedScope) restored() *roomScope {
@@ -69,23 +65,6 @@ func (sc *storedScope) restored() *roomScope {
 		return nil
 	}
 	return newRoomScope(&RoomScope{Rooms: sc.Rooms, Threads: sc.Threads})
-}
-
-// allows reports whether r is in the scope: listed, or a thread of a listed
-// room when the scope takes threads in.
-func (sc *roomScope) allows(r *roomState) bool {
-	if sc == nil {
-		return true
-	}
-	for room := r; room != nil; room = room.parent {
-		if sc.rooms[room.id] {
-			return true
-		}
-		if !sc.threads {
-			return false
-		}
-	}
-	return false
 }
 
 // SetScope limits an account to the rooms scope lists, or, with nil, lifts
@@ -116,7 +95,7 @@ func (s *Server) Scope(userID string) *RoomScope {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	if u := s.users[userID]; u != nil {
-		return u.scope.public()
+		return publicScope(u.scope)
 	}
 	return nil
 }
@@ -132,29 +111,21 @@ func (s *Server) setScopeLocked(u *userState, scope *roomScope) {
 		return
 	}
 	// Threads go before the rooms they are threads of.
-	rooms := slices.SortedFunc(maps.Values(u.joined), func(a, b *roomState) int {
-		return depth(b) - depth(a)
+	joined := slices.SortedFunc(maps.Values(u.joined), func(a, b *roomState) int {
+		return b.Depth() - a.Depth()
 	})
-	for _, r := range rooms {
-		if !r.visibleTo(u) {
+	for _, r := range joined {
+		if !r.VisibleTo(u) {
 			s.leaveLocked(u, r)
 		}
 	}
 	for id := range u.pings {
-		if r := s.rooms[id]; r == nil || !r.visibleTo(u) {
+		if r := s.rooms.Get(id); r == nil || !r.VisibleTo(u) {
 			delete(u.pings, id)
 		}
 	}
 	s.unreadChangedLocked(u, "")
 	s.endRefusedWritesLocked(u)
-}
-
-func depth(r *roomState) int {
-	n := 0
-	for room := r.parent; room != nil; room = room.parent {
-		n++
-	}
-	return n
 }
 
 // mayCreateRoomLocked refuses a scoped account a top-level room, and a
@@ -163,7 +134,7 @@ func mayCreateRoomLocked(u *userState, parent *roomState) *Error {
 	if u.scope == nil {
 		return nil
 	}
-	if parent == nil || !u.scope.threads {
+	if parent == nil || !u.scope.Threads() {
 		return &Error{Code: CodeDenied, Message: "This account is limited to some rooms, and may not start one"}
 	}
 	return nil

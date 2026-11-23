@@ -701,7 +701,7 @@ func TestRoomIDScopesOnlyMute(t *testing.T) {
 	app.mu.RLock()
 	defer app.mu.RUnlock()
 	u := app.users[b.userID]
-	if now := time.Now(); u.mute.active(now) || !u.roomMuted(app.rooms["general"], now) {
+	if now := time.Now(); u.mute.active(now) || !u.roomMuted(app.rooms.Get("general"), now) {
 		t.Fatalf("mutes: unscoped %#v, rooms %#v", u.mute, u.roomMutes)
 	}
 }
@@ -834,7 +834,7 @@ func TestStatusRateLimit(t *testing.T) {
 	app.mu.RLock()
 	defer app.mu.RUnlock()
 	u := app.users[b.userID]
-	if now := time.Now(); !u.mute.forever || u.roomMuted(app.rooms["general"], now) || u.shownStatus() != statusIdle {
+	if now := time.Now(); !u.mute.forever || u.roomMuted(app.rooms.Get("general"), now) || u.shownStatus() != statusIdle {
 		t.Fatalf("after limited requests: mute %#v, room mutes %#v, status %s", u.mute, u.roomMutes, u.shownStatus())
 	}
 }
@@ -931,7 +931,7 @@ func TestListingsCarryStatus(t *testing.T) {
 	room, _ := saveRoom(t, none, "room", map[string]any{"title": "Room"})
 	joinRoom(t, invisible, room)
 	app.mu.Lock()
-	app.addMemberLocked(app.users["away"], app.rooms[room])
+	app.addMemberLocked(app.users["away"], app.rooms.Get(room))
 	app.unlock()
 	online.drain(t)
 	before, _ := online.request(t, "room_join", "join", map[string]any{"room_id": room})

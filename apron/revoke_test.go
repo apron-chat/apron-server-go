@@ -106,8 +106,8 @@ func TestAWriteChecksItsAuthorWhenItStarts(t *testing.T) {
 	// Taken out of the room behind the server's back, with no leave to
 	// end the write.
 	app.mu.Lock()
-	r := app.rooms[roomID]
-	delete(r.members, a.userID)
+	u := app.users[a.userID]
+	app.rooms.Leave(app.rooms.Get(roomID), u, u.from())
 	app.unlock()
 	if status, _, body := httpDo(t, http.MethodPut, writeURL, strings.NewReader("late"), ""); status != http.StatusForbidden || !strings.Contains(string(body), "may no longer write") {
 		t.Fatalf("write by an author who lost access: %d %s", status, body)

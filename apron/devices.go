@@ -123,7 +123,7 @@ func (s *Server) inviteDeviceCommand(c *client, r *roomState, _ map[string]any, 
 		lines = append(lines, fmt.Sprintf("Or open this link on **%s**, which signs you in there with any Apron app: <%s>", name, apronLink(server, token)))
 	}
 	lines = append(lines, fmt.Sprintf("To sign in, authenticate with the token scheme: `{\"method\": \"auth\", \"params\": {\"scheme\": \"token\", \"token\": \"%s\"}}`", token))
-	c.enqueue(privateNotice(r.id, strings.Join(lines, "\n\n")))
+	c.enqueue(privateNotice(r.ID(), strings.Join(lines, "\n\n")))
 	return wire.CommandResult{}, nil
 }
 

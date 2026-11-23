@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/apron-chat/apron-server-go/apron/internal/roomlog"
+	"github.com/apron-chat/apron-server-go/apron/internal/rooms"
 	"github.com/apron-chat/apron-server-go/wire"
 )
 
@@ -18,95 +19,17 @@ import (
 // truncated (§4.2.1).
 const maxListedRooms = 200
 
-// roomState is a room's current record, its log, and its members. Every room,
-// including threads (rooms with parent_room_id), is visible to every
-// authenticated user, except that a private room and its threads are visible
-// only to their members (§4.2.4); members are the users who have joined it
-// and receive its deliveries (§3.4, §4.2.2).
-type roomState struct {
-	id       string
-	parent   *roomState
-	children []*roomState
-	// private is fixed at creation and kept in record as "private": true.
-	private bool
-	// record holds the latest logged room record.
-	record      roomlog.RoomRecord
-	recordLogID int64
-	// log is the room's log, from its creation record.
-	log     *roomlog.Timeline
-	members map[string]*userState
-	// active maps each member to the log_id of their latest join or new
-	// message in the room, which ranks members when a listing truncates
-	// them (§4.2.1).
-	active map[string]int64
-	// creator is the user_id that created the room, empty for the seeded
-	// room; only the creator may /kick (§4.1).
-	creator string
-	// reads holds each user's latest read cursor (§4.6).
-	reads map[string]readCursor
-}
+// roomState is a room: its current record, its log, and its members, with
+// the rules of who may see it (rooms.Room). The rooms module keeps them;
+// this file serves the rooms requests and delivers what their changes
+// return.
+type roomState = rooms.Room[*userState]
 
-type readCursor struct {
-	from      roomlog.Author
-	messageID string
-	id        int64
-}
+// MemberID is u's user_id, as rooms know it (rooms.Member).
+func (u *userState) MemberID() string { return u.id }
 
-// visibleTo reports whether u may see the room (§4.2.4): unless u is a
-// member of the room and of every private room it is a thread of, at any
-// depth, it is invisible, and answered like an unknown one. So a thread of a
-// private room is hidden from everyone outside that room, members of the
-// thread included.
-func (r *roomState) visibleTo(u *userState) bool {
-	if !u.scope.allows(r) {
-		return false
-	}
-	for room := r; room != nil; room = room.parent {
-		if room.private && room.members[u.id] == nil {
-			return false
-		}
-	}
-	return true
-}
-
-// audience is who can see the room: everyone, or, for a private room or a
-// thread of one, the users in every private room on the way up.
-func (r *roomState) audience() (everyone bool, users map[string]*userState) {
-	for room := r; room != nil; room = room.parent {
-		if !room.private {
-			continue
-		}
-		if users == nil {
-			users = maps.Clone(room.members)
-			continue
-		}
-		for id := range users {
-			if room.members[id] == nil {
-				delete(users, id)
-			}
-		}
-	}
-	return users == nil, users
-}
-
-// revealsTo reports whether a record in r, such as a move snapshot naming
-// another room, would reach someone who cannot see to.
-func (r *roomState) revealsTo(to *roomState) bool {
-	toEveryone, toUsers := to.audience()
-	if toEveryone {
-		return false
-	}
-	everyone, users := r.audience()
-	if everyone {
-		return true
-	}
-	for id := range users {
-		if toUsers[id] == nil {
-			return true
-		}
-	}
-	return false
-}
+// MemberScope is the rooms u is limited to, nil for none (rooms.Member).
+func (u *userState) MemberScope() *rooms.Scope { return u.scope }
 
 // privateRooms counts the top-level private rooms u is in, which
 // Config.MaxPrivateRooms bounds. Their threads are not counted: only their
@@ -114,7 +37,7 @@ func (r *roomState) revealsTo(to *roomState) bool {
 func (u *userState) privateRooms() int {
 	n := 0
 	for _, r := range u.joined {
-		if r.private && r.parent == nil {
+		if r.Private() && r.Parent() == nil {
 			n++
 		}
 	}
@@ -129,16 +52,13 @@ func (s *Server) privateRoomsFullLocked(u *userState) bool {
 
 // visibleRoomLocked returns the room named id if u may see it, or nil.
 func (s *Server) visibleRoomLocked(u *userState, id string) *roomState {
-	if r := s.rooms[id]; r != nil && r.visibleTo(u) {
-		return r
-	}
-	return nil
+	return s.rooms.Visible(id, u)
 }
 
 // visibleMessageLocked returns the message named id if u may see the room
 // it is in, or nil.
 func (s *Server) visibleMessageLocked(u *userState, id string) *messageState {
-	if m := s.messages[id]; m != nil && s.rooms[m.roomID].visibleTo(u) {
+	if m := s.messages[id]; m != nil && s.rooms.Get(m.roomID).VisibleTo(u) {
 		return m
 	}
 	return nil
@@ -147,16 +67,8 @@ func (s *Server) visibleMessageLocked(u *userState, id string) *messageState {
 // mayRemove reports whether u may remove others from r, with /kick or
 // room_leave's user_id (§4.2.2, §4.1): the room's creator, or a user with
 // the admin or moderator role.
-func (r *roomState) mayRemove(u *userState) bool {
-	return r.creator == u.id || u.hasRole("admin") || u.hasRole("moderator")
-}
-
-// title is the room's display title, falling back to its room_id (§3.4).
-func (r *roomState) title() string {
-	if r.record.Title != "" {
-		return r.record.Title
-	}
-	return r.id
+func mayRemove(r *roomState, u *userState) bool {
+	return r.Creator() == u.id || u.hasRole("admin") || u.hasRole("moderator")
 }
 
 // cursorFramesLocked renders the read cursors kept for a room that the
@@ -164,13 +76,12 @@ func (r *roomState) title() string {
 // has joined, which delivers read receipts, and otherwise only u's own.
 func (s *Server) cursorFramesLocked(u *userState, r *roomState) []wire.Frame {
 	var frames []wire.Frame
-	for _, userID := range slices.Sorted(maps.Keys(r.reads)) {
-		if u.joined[r.id] == nil && userID != u.id {
+	for userID, cursor := range r.Reads() {
+		if u.joined[r.ID()] == nil && userID != u.id {
 			continue
 		}
-		cursor := r.reads[userID]
 		frames = append(frames, wire.Frame(notification("activity", map[string]any{
-			"room_id": r.id, "from": cursor.from, "read_message_id": cursor.messageID,
+			"room_id": r.ID(), "from": cursor.From, "read_message_id": cursor.MessageID,
 		})))
 	}
 	return frames
@@ -182,8 +93,8 @@ func (s *Server) cursorFramesLocked(u *userState, r *roomState) []wire.Frame {
 // room's creation record. The view shares nothing with the room, so it may
 // be encoded after s.mu is released.
 func (s *Server) roomViewOfLocked(r *roomState) wire.RoomView {
-	created := wire.LogID(r.log.Created())
-	return wire.RoomView{Room: decodeRecord[wire.Room](encodeJSON(r.record)), LatestLogID: wire.LogID(r.log.Latest()), HistoryLogID: &created}
+	created := wire.LogID(r.Log().Created())
+	return wire.RoomView{Room: decodeRecord[wire.Room](encodeJSON(r.Record())), LatestLogID: wire.LogID(r.Log().Latest()), HistoryLogID: &created}
 }
 
 // decodeRecord decodes a logged record, which the server encoded, as the
@@ -202,7 +113,7 @@ func (s *Server) deliverLocked(frame any, rooms ...*roomState) {
 	frame = render(frame)
 	seen := make(map[string]bool)
 	for _, r := range rooms {
-		for id, member := range r.members {
+		for id, member := range r.Members() {
 			if !seen[id] {
 				seen[id] = true
 				member.send(frame)
@@ -224,60 +135,44 @@ func roomUpdate(update wire.RoomUpdate) jsontext.Value {
 	return notification(update.Method(), update)
 }
 
-// logMembershipLocked logs one membership record (§4.2.2) of u in r,
-// advancing the room's latest_log_id, and returns the record for delivery
-// in a room_update's memberships (§4.2.3). The record carries u as a
-// recorded object: user_id and name.
-func (s *Server) logMembershipLocked(u *userState, r *roomState, joined bool) wire.Membership {
-	logID := s.log.NextID()
-	record := roomlog.NewMembership(logID, r.id, u.from(), joined)
-	s.appendLocked(record, r)
-	if !joined {
-		u.leftAt[r.id] = logID
-	}
-	return decodeRecord[wire.Membership](record.Raw)
-}
-
-// appendLocked adds a committed record to the log of each room it belongs
-// to.
-func (s *Server) appendLocked(record *roomlog.Record, rooms ...*roomState) {
-	logs := make([]*roomlog.Timeline, len(rooms))
-	for i, r := range rooms {
-		logs[i] = r.log
-		s.touchRoom(r)
-	}
-	s.log.Append(record, logs...)
-}
-
 // deliverMembershipLocked sends a membership record to the room's members
 // but u, as room_update memberships (§4.2.3); u's connections receive it
 // with the room_update that tells them of the change.
 func (s *Server) deliverMembershipLocked(membership wire.Membership, r *roomState, u *userState) {
 	frame := roomUpdate(wire.RoomUpdate{Memberships: []wire.Membership{membership}})
-	for id, member := range r.members {
+	for id, member := range r.Members() {
 		if id != u.id {
 			member.send(frame)
 		}
 	}
 }
 
-// addMemberLocked joins u to r, logs the membership, and delivers it to the
-// room's other members (§4.2.2). It returns the membership record, and
-// false if u was a member already.
-func (s *Server) addMemberLocked(u *userState, r *roomState) (wire.Membership, bool) {
-	if u.joined[r.id] != nil || !u.scope.allows(r) {
+// joinedLocked makes u a member of r and logs the membership
+// (rooms.Table.Join), which it returns for delivery in a room_update's
+// memberships (§4.2.3). It reports false, and changes nothing, if u was a
+// member already or r is outside u's scope.
+func (s *Server) joinedLocked(u *userState, r *roomState) (wire.Membership, bool) {
+	record, added := s.rooms.Join(r, u, u.from())
+	if !added {
 		return wire.Membership{}, false
 	}
-	u.joined[r.id] = r
-	r.members[u.id] = u
-	s.touchRoom(r)
+	u.joined[r.ID()] = r
+	delete(u.leftAt, r.ID())
 	s.touchUser(u.id)
-	delete(u.leftAt, r.id)
-	membership := s.logMembershipLocked(u, r, true)
-	r.active[u.id] = r.log.Latest()
+	return decodeRecord[wire.Membership](record.Raw), true
+}
+
+// addMemberLocked joins u to r (joinedLocked) and delivers the membership
+// to the room's other members (§4.2.2); u's status goes to those who did
+// not share a room with u, and u's unread counts r.
+func (s *Server) addMemberLocked(u *userState, r *roomState) (wire.Membership, bool) {
+	membership, added := s.joinedLocked(u, r)
+	if !added {
+		return wire.Membership{}, false
+	}
 	s.deliverMembershipLocked(membership, r, u)
 	s.announceJoinStatusLocked(u, r)
-	s.unreadChangedLocked(u, r.id)
+	s.unreadChangedLocked(u, r.ID())
 	return membership, true
 }
 
@@ -286,7 +181,7 @@ func (s *Server) addMemberLocked(u *userState, r *roomState) (wire.Membership, b
 // room_update joined with the membership (§4.2.3), after the auth result
 // (§3.2).
 func (s *Server) joinDefaultRoomLocked(u *userState) {
-	s.joinLocked(u, s.rooms[defaultRoomID])
+	s.joinLocked(u, s.rooms.Get(defaultRoomID))
 }
 
 // joinLocked joins u to r: the room's other members receive the membership,
@@ -314,67 +209,47 @@ func (s *Server) joinedUpdateLocked(r *roomState, memberships ...wire.Membership
 // objects, ordered by user_id, and returns them. Each carries the shown
 // status, offline and "" included, and seen with offline, as every current
 // user object a listing carries does (§4.5.2); their complete objects go
-// in `users`. A
-// room with more than Config.MaxListedMembers lists only its most recently
-// active members and adds member_count, the total (§4.2.1).
+// in `users`. A room with more than Config.MaxListedMembers lists only its
+// most recently active members and adds member_count, the total (§4.2.1).
 func (s *Server) addMembersLocked(view *wire.RoomView, r *roomState) map[string]*userState {
-	ids, truncated := s.listedMemberIDsLocked(r)
-	listed := r.members
+	ids, truncated := r.ListedMemberIDs(s.config.MaxListedMembers)
 	if truncated {
-		listed = make(map[string]*userState, len(ids))
-		for _, id := range ids {
-			listed[id] = r.members[id]
-		}
-		view.MemberCount = len(r.members)
+		view.MemberCount = r.MemberCount()
 	}
+	listed := make(map[string]*userState, len(ids))
 	view.Members = make([]wire.CurrentUser, len(ids))
 	for i, id := range ids {
-		view.Members[i] = r.members[id].shownObject()
+		member := r.Member(id)
+		listed[id] = member
+		view.Members[i] = member.shownObject()
 	}
 	return listed
-}
-
-// listedMemberIDsLocked returns the user_ids of the members that r lists
-// (§4.2.1), ordered by user_id: all of them, or, past
-// Config.MaxListedMembers, the most recently active, and then truncated is
-// set.
-func (s *Server) listedMemberIDsLocked(r *roomState) (ids []string, truncated bool) {
-	ids = slices.Collect(maps.Keys(r.members))
-	if limit := s.config.MaxListedMembers; limit > 0 && len(ids) > limit {
-		slices.SortFunc(ids, func(a, b string) int {
-			return cmp.Or(cmp.Compare(r.active[b], r.active[a]), cmp.Compare(a, b))
-		})
-		ids, truncated = ids[:limit], true
-	}
-	slices.Sort(ids)
-	return ids, truncated
 }
 
 // leaveLocked removes u from r (§4.2.2): the room's other members receive
 // the logged membership, and u's connections one room_update with left and
 // the membership. It reports whether u was a member.
 func (s *Server) leaveLocked(u *userState, r *roomState) bool {
-	if u.joined[r.id] == nil {
+	record, left := s.rooms.Leave(r, u, u.from())
+	if !left {
 		return false
 	}
-	membership := s.logMembershipLocked(u, r, false)
+	membership := decodeRecord[wire.Membership](record.Raw)
 	s.deliverMembershipLocked(membership, r, u)
-	delete(u.joined, r.id)
-	s.touchRoom(r)
+	delete(u.joined, r.ID())
+	u.leftAt[r.ID()] = record.ID
 	s.touchUser(u.id)
-	delete(r.members, u.id)
-	delete(r.active, u.id)
-	u.send(roomUpdate(wire.RoomUpdate{Left: []wire.RoomRef{{RoomID: r.id}}, Memberships: []wire.Membership{membership}}))
+	u.send(roomUpdate(wire.RoomUpdate{Left: []wire.RoomRef{{RoomID: r.ID()}}, Memberships: []wire.Membership{membership}}))
 	// The room no longer counts toward the user's unread (§4.9), and
 	// neither do the threads of a private room, joined or not, which the
 	// user can no longer see: their counts are all taken again.
-	if r.private {
+	if r.Private() {
 		s.hideThreadsLocked(u, r)
 		s.unreadChangedLocked(u, "")
 		// Writes into what u can no longer see end.
 		s.endRefusedWritesLocked(u)
 	} else {
-		s.unreadChangedLocked(u, r.id)
+		s.unreadChangedLocked(u, r.ID())
 	}
 	return true
 }
@@ -389,14 +264,14 @@ func (s *Server) hideThreadsLocked(u *userState, r *roomState) {
 	var hidden []wire.RoomRef
 	var walk func(*roomState)
 	walk = func(room *roomState) {
-		for _, thread := range room.children {
+		for _, thread := range room.Children() {
 			switch {
-			case thread.private && thread.members[u.id] == nil:
-			case thread.private:
+			case thread.Private() && thread.Member(u.id) == nil:
+			case thread.Private():
 				s.leaveLocked(u, thread)
 			default:
 				if !s.leaveLocked(u, thread) {
-					hidden = append(hidden, wire.RoomRef{RoomID: thread.id})
+					hidden = append(hidden, wire.RoomRef{RoomID: thread.ID()})
 				}
 				walk(thread)
 			}
@@ -408,48 +283,13 @@ func (s *Server) hideThreadsLocked(u *userState, r *roomState) {
 	}
 }
 
-// commitRoomLocked logs a room record holding the client fields of fields:
-// title, description, and ext. An unknown roomID creates the room, private
-// if asked; an empty one names it by its creation log_id.
-func (s *Server) commitRoomLocked(roomID string, parent *roomState, private bool, fields roomlog.RoomRecord) *roomState {
-	logID := s.log.NextID()
-	r := s.rooms[roomID]
-	if r == nil {
-		if roomID == "" {
-			roomID = formatID(logID)
-		}
-		r = &roomState{
-			id: roomID, parent: parent, private: private, log: roomlog.NewTimeline(roomID, logID, 0),
-			members: make(map[string]*userState), active: make(map[string]int64), reads: make(map[string]readCursor),
-		}
-		s.rooms[roomID] = r
-		if parent != nil {
-			parent.children = append(parent.children, r)
-		}
-	}
-	record := roomlog.RoomRecord{
-		RoomID: r.id, LogID: formatID(logID), Private: r.private,
-		Title: fields.Title, Description: fields.Description, Ext: fields.Ext,
-	}
-	if r.recordLogID != 0 {
-		record.PrevLogID = formatID(r.recordLogID)
-	}
-	if r.parent != nil {
-		record.ParentRoomID = r.parent.id
-	}
-	r.record = record
-	r.recordLogID = logID
-	s.appendLocked(roomlog.New(logID, roomlog.KindRoom, record), r)
-	return r
-}
-
 // announceRoomLocked sends a room's current record as room_update updated to
 // its members, the parent's members for a thread that is not private, and
 // editor, if any.
 func (s *Server) announceRoomLocked(r *roomState, editor *userState) {
-	audience := maps.Clone(r.members)
-	if r.parent != nil && !r.private {
-		maps.Copy(audience, r.parent.members)
+	audience := maps.Collect(r.Members())
+	if r.Parent() != nil && !r.Private() {
+		maps.Insert(audience, r.Parent().Members())
 	}
 	if editor != nil {
 		audience[editor.id] = editor
@@ -457,7 +297,7 @@ func (s *Server) announceRoomLocked(r *roomState, editor *userState) {
 	frame := roomUpdate(wire.RoomUpdate{Updated: []wire.RoomView{s.roomViewOfLocked(r)}})
 	for _, member := range audience {
 		// A thread's record goes to its parent's members who may see it.
-		if r.visibleTo(member) {
+		if r.VisibleTo(member) {
 			member.send(frame)
 		}
 	}
@@ -507,15 +347,15 @@ func (s *Server) setRoom(c *client, p wire.RoomSetParams, reply wire.Reply[wire.
 		if existing == nil {
 			return invalidParams("Unknown room %q", roomID)
 		}
-		parent = existing.parent
-		keptExt = existing.record.Ext
+		parent = existing.Parent()
+		keptExt = existing.Record().Ext
 		// An edit merges into the room's client fields (§4.2.4): a field it
 		// leaves out keeps its value, and "" clears it.
 		if p.Title == nil {
-			title = existing.record.Title
+			title = existing.Record().Title
 		}
 		if p.Description == nil {
-			description = existing.record.Description
+			description = existing.Record().Description
 		}
 	} else if parentID != "" {
 		if parent = s.visibleRoomLocked(u, parentID); parent == nil {
@@ -549,41 +389,36 @@ func (s *Server) setRoom(c *client, p wire.RoomSetParams, reply wire.Reply[wire.
 	}
 	if p.Private == nil && !updating && parent != nil {
 		// A thread created without private takes its parent's (§4.2.4).
-		private = parent.private
+		private = parent.Private()
 	}
 	// The server description may be the default room's.
 	serverDescription, _ := s.profileValueLocked("description")
-	r := s.commitRoomLocked(roomID, parent, private, fields)
-	if !updating {
-		r.creator = u.id
-	}
-	s.touchRoom(r)
 	// Room updates precede the result, so the room is known when it arrives.
 	if updating {
+		r := s.rooms.Get(roomID)
+		s.rooms.Update(r, fields)
 		s.announceRoomLocked(r, u)
 		if description, _ := s.profileValueLocked("description"); description != serverDescription {
 			s.announceServerLocked()
 		}
-	} else {
-		// The room record and the membership are both logged before the
-		// room_update, whose latest_log_id is then the membership's.
-		u.joined[r.id] = r
-		r.members[u.id] = u
-		s.touchUser(u.id)
-		membership := s.logMembershipLocked(u, r, true)
-		r.active[u.id] = r.log.Latest()
-		u.send(s.joinedUpdateLocked(r, membership))
-		// A private thread's record goes only to its own members.
-		if parent != nil && !r.private {
-			frame := roomUpdate(wire.RoomUpdate{Updated: []wire.RoomView{s.roomViewOfLocked(r)}})
-			for id, member := range parent.members {
-				if id != u.id && r.visibleTo(member) {
-					member.send(frame)
-				}
+		_ = reply.Send(wire.RoomSetResult{RoomID: r.ID()})
+		return nil
+	}
+	// The room record and the membership are both logged before the
+	// room_update, whose latest_log_id is then the membership's.
+	r := s.rooms.Create("", parent, private, u.id, fields)
+	membership, _ := s.joinedLocked(u, r)
+	u.send(s.joinedUpdateLocked(r, membership))
+	// A private thread's record goes only to its own members.
+	if parent != nil && !r.Private() {
+		frame := roomUpdate(wire.RoomUpdate{Updated: []wire.RoomView{s.roomViewOfLocked(r)}})
+		for id, member := range parent.Members() {
+			if id != u.id && r.VisibleTo(member) {
+				member.send(frame)
 			}
 		}
 	}
-	_ = reply.Send(wire.RoomSetResult{RoomID: r.id})
+	_ = reply.Send(wire.RoomSetResult{RoomID: r.ID()})
 	return nil
 }
 
@@ -657,33 +492,33 @@ func (s *Server) listRooms(c *client, p wire.RoomListParams, reply wire.Reply[wi
 		if parent == nil {
 			return invalidParams("Unknown parent room %q", parentID)
 		}
-		candidates = parent.children
+		candidates = parent.Children()
 	default:
-		candidates = slices.Collect(maps.Values(s.rooms))
+		candidates = s.rooms.All()
 	}
 	var joined, others, left []*roomState
 	for _, r := range candidates {
-		if hasSince && r.log.Latest() <= since {
+		if hasSince && r.Log().Latest() <= since {
 			continue
 		}
-		if u.joined[r.id] != nil {
+		if u.joined[r.ID()] != nil {
 			if wantJoined {
 				joined = append(joined, r)
 			}
 			continue
 		}
-		if hasSince && wantJoined && u.leftAt[r.id] > since {
+		if hasSince && wantJoined && u.leftAt[r.ID()] > since {
 			left = append(left, r)
 		}
 		// Without parent_room_id or room_id, unjoined threads are left to
 		// their parent's listing. Private rooms are listed only to their
 		// members.
-		if wantOthers && (hasRoom || hasParent || r.parent == nil) && r.visibleTo(u) {
+		if wantOthers && (hasRoom || hasParent || r.Parent() == nil) && r.VisibleTo(u) {
 			others = append(others, r)
 		}
 	}
 	byActivity := func(a, b *roomState) int {
-		return cmp.Or(cmp.Compare(b.log.Latest(), a.log.Latest()), cmp.Compare(b.log.Created(), a.log.Created()))
+		return cmp.Or(cmp.Compare(b.Log().Latest(), a.Log().Latest()), cmp.Compare(b.Log().Created(), a.Log().Created()))
 	}
 	slices.SortFunc(joined, byActivity)
 	slices.SortFunc(others, byActivity)
@@ -700,7 +535,7 @@ func (s *Server) listRooms(c *client, p wire.RoomListParams, reply wire.Reply[wi
 			switch {
 			case withMembers && hasUser:
 				view.Members = []wire.CurrentUser{}
-				if m := r.members[onlyUser]; m != nil {
+				if m := r.Member(onlyUser); m != nil {
 					view.Members = append(view.Members, m.shownObject())
 					users[onlyUser] = m
 				}
@@ -716,7 +551,7 @@ func (s *Server) listRooms(c *client, p wire.RoomListParams, reply wire.Reply[wi
 	if hasSince && wantJoined {
 		result.Left = make([]wire.RoomRef, len(left))
 		for i, r := range left {
-			result.Left[i] = wire.RoomRef{RoomID: r.id}
+			result.Left[i] = wire.RoomRef{RoomID: r.ID()}
 		}
 	}
 	if withMembers {
@@ -761,25 +596,25 @@ func (s *Server) joinRoom(c *client, p wire.RoomJoinParams, reply wire.Reply[wir
 	}
 	target := u
 	if hasTarget && targetID != u.id {
-		if r.members[u.id] == nil {
-			return &Error{Code: CodeDenied, Message: fmt.Sprintf("Join %s before adding others to it", r.title())}
+		if r.Member(u.id) == nil {
+			return &Error{Code: CodeDenied, Message: fmt.Sprintf("Join %s before adding others to it", r.Title())}
 		}
 		if target = s.users[targetID]; target == nil {
 			return invalidParams("Unknown user %q", targetID)
 		}
 		// Adding someone to a thread of a private room takes adding them to
 		// that room first.
-		if r.parent != nil && !r.parent.visibleTo(target) {
-			return &Error{Code: CodeDenied, Message: fmt.Sprintf("Add %s to the private room %s is in first", targetID, r.title())}
+		if r.Parent() != nil && !r.Parent().VisibleTo(target) {
+			return &Error{Code: CodeDenied, Message: fmt.Sprintf("Add %s to the private room %s is in first", targetID, r.Title())}
 		}
-		if !target.scope.allows(r) {
+		if !r.InScope(target.scope) {
 			return &Error{Code: CodeDenied, Message: fmt.Sprintf("%s is limited to other rooms", targetID)}
 		}
-		if r.private && r.parent == nil && r.members[target.id] == nil && s.privateRoomsFullLocked(target) {
+		if r.Private() && r.Parent() == nil && r.Member(target.id) == nil && s.privateRoomsFullLocked(target) {
 			return &Error{Code: CodeDenied, Message: fmt.Sprintf("%s is in as many private rooms as anyone may be, so cannot be added to another", targetID)}
 		}
 	}
-	if r.members[target.id] == nil {
+	if r.Member(target.id) == nil {
 		if err := admitActionLocked(u); err != nil {
 			return err
 		}
@@ -810,14 +645,14 @@ func (s *Server) leaveRoom(c *client, p wire.RoomLeaveParams, reply wire.Reply[w
 	}
 	target := u
 	if hasTarget && targetID != u.id {
-		if !r.mayRemove(u) {
-			return &Error{Code: CodeDenied, Message: fmt.Sprintf("Only the creator of %s or a moderator can remove people from it", r.title())}
+		if !mayRemove(r, u) {
+			return &Error{Code: CodeDenied, Message: fmt.Sprintf("Only the creator of %s or a moderator can remove people from it", r.Title())}
 		}
 		if target = s.users[targetID]; target == nil {
 			return invalidParams("Unknown user %q", targetID)
 		}
 	}
-	if r.members[target.id] != nil {
+	if r.Member(target.id) != nil {
 		if err := admitActionLocked(u); err != nil {
 			return err
 		}
@@ -866,7 +701,7 @@ func (s *Server) history(c *client, p wire.HistoryParams, reply wire.Reply[wire.
 		rooms = []*roomState{r}
 	} else {
 		for _, r := range c.user.joined {
-			if r.visibleTo(c.user) {
+			if r.VisibleTo(c.user) {
 				rooms = append(rooms, r)
 			}
 		}
@@ -874,8 +709,8 @@ func (s *Server) history(c *client, p wire.HistoryParams, reply wire.Reply[wire.
 	logs := make([]*roomlog.Timeline, len(rooms))
 	var latest int64
 	for i, r := range rooms {
-		logs[i] = r.log
-		latest = max(latest, r.log.Latest())
+		logs[i] = r.Log()
+		latest = max(latest, r.Log().Latest())
 	}
 	matching, more := roomlog.Page(logs, roomlog.Query{
 		After: after, HasAfter: hasAfter, Before: before, HasBefore: hasBefore,
@@ -885,9 +720,9 @@ func (s *Server) history(c *client, p wire.HistoryParams, reply wire.Reply[wire.
 	// log of the joined rooms starts where the server's does, at the default
 	// room's creation, whoever is in which room, so the lower bound never
 	// moves (§4.3.3); for a user in no rooms it is empty, ending just before.
-	created := s.rooms[defaultRoomID].log.Created()
+	created := s.rooms.Get(defaultRoomID).Log().Created()
 	if hasRoom {
-		created = rooms[0].log.Created()
+		created = rooms[0].Log().Created()
 	}
 	if len(rooms) == 0 {
 		latest = created - 1
@@ -963,16 +798,14 @@ func (s *Server) activity(c *client, p wire.ActivityParams) *Error {
 	read := false
 	if hasRead {
 		id, _ := strconv.ParseInt(readID, 10, 64)
-		if cursor, ok := r.reads[u.id]; !ok || id > cursor.id {
-			r.reads[u.id] = readCursor{from: u.from(), messageID: readID, id: id}
-			s.touchRoom(r)
-			if u.joined[r.id] == nil {
+		if s.rooms.Read(r, u.id, rooms.Cursor{From: u.from(), MessageID: readID, ID: id}) {
+			if u.joined[r.ID()] == nil {
 				// A cursor for a room the user has not joined still syncs
 				// across their own connections.
 				u.send(map[string]any{"method": "activity", "params": map[string]any{"room_id": roomID, "from": u.from(), "read_message_id": readID}})
-				if id >= r.log.Latest() {
+				if id >= r.Log().Latest() {
 					// Read to the end: no earlier mention there counts.
-					delete(u.pings, r.id)
+					delete(u.pings, r.ID())
 					s.touchUser(u.id)
 				}
 			}
@@ -988,7 +821,7 @@ func (s *Server) activity(c *client, p wire.ActivityParams) *Error {
 	}
 	if read {
 		// Reading lowers the unread count the user's other devices show.
-		s.unreadChangedLocked(u, r.id)
+		s.unreadChangedLocked(u, r.ID())
 	}
 	return nil
 }
