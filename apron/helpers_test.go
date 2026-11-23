@@ -58,6 +58,31 @@ func newTestServer(t *testing.T, config Config) (*Server, *httptest.Server) {
 	return app, httpServer
 }
 
+// ioTimeout bounds a test client's dial, and each frame it reads or writes:
+// generous, as a large frame takes seconds to build and encode with -race on
+// a busy machine. A test that expects nothing to arrive uses a fence (drain)
+// rather than wait for this to run out.
+const ioTimeout = 10 * time.Second
+
+// waitLeftDefault waits until none of userIDs is in the default room, as
+// after their connections closed: the server ends a guest's session after
+// the close, and a connection opened meanwhile hears of the guest leaving.
+func waitLeftDefault(t *testing.T, app *Server, userIDs ...string) {
+	t.Helper()
+	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(5 * time.Millisecond) {
+		app.mu.RLock()
+		general := app.rooms.Get(defaultRoomID)
+		left := !slices.ContainsFunc(userIDs, func(id string) bool { return general.Member(id) != nil })
+		app.mu.RUnlock()
+		if left {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("one of %v is still in the default room", userIDs)
+		}
+	}
+}
+
 // wsURL is the WebSocket endpoint of a test server.
 func wsURL(httpServer *httptest.Server) string {
 	return "ws" + httpServer.URL[len("http"):] + "/ws"
@@ -77,7 +102,7 @@ func dialOrigin(t *testing.T, httpServer *httptest.Server, origin string) (*test
 	if origin != "" {
 		options = &websocket.DialOptions{HTTPHeader: http.Header{"Origin": {origin}}}
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), ioTimeout)
 	ws, _, err := websocket.Dial(ctx, wsURL(httpServer), options)
 	cancel()
 	if err != nil {
@@ -270,7 +295,7 @@ func (c *testClient) write(t *testing.T, value any) {
 	if err != nil {
 		t.Fatalf("marshal frame: %v", err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), ioTimeout)
 	defer cancel()
 	if err := c.ws.Write(ctx, websocket.MessageText, payload); err != nil {
 		t.Fatalf("write frame: %v", err)
@@ -279,7 +304,7 @@ func (c *testClient) write(t *testing.T, value any) {
 
 func (c *testClient) read(t *testing.T) map[string]any {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), ioTimeout)
 	defer cancel()
 	_, payload, err := c.ws.Read(ctx)
 	if err != nil {

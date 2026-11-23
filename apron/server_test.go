@@ -307,7 +307,7 @@ func TestLivenessPing(t *testing.T) {
 	config := DefaultConfig()
 	config.PingInterval = 20 * time.Millisecond
 	config.PingTimeout = 200 * time.Millisecond
-	_, httpServer := newTestServer(t, config)
+	app, httpServer := newTestServer(t, config)
 	c, frame := dialRaw(t, httpServer)
 	if frame["params"].(map[string]any)["ping"] != float64(1) {
 		t.Fatalf("ping interval rounds up to one second: %#v", frame)
@@ -344,6 +344,7 @@ func TestLivenessPing(t *testing.T) {
 			break
 		}
 	}
+	waitLeftDefault(t, app, c.userID)
 	// One that never pinged stays open while it answers WebSocket pings.
 	quiet := dialTestClient(t, httpServer)
 	for deadline := time.Now().Add(500 * time.Millisecond); time.Now().Before(deadline); {

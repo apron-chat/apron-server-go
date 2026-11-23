@@ -353,9 +353,11 @@ func TestPasskeyPageAddition(t *testing.T) {
 func TestPasskeyPageAdditionsFlood(t *testing.T) {
 	p := passkeyPageServer(t)
 	const connections, perConnection = 20, oauth.MaxEntries/20 + 1
+	var flooders []string
 	for range connections {
 		flooder, _ := dialRaw(t, p.http)
 		guestAuth(t, flooder)
+		flooders = append(flooders, flooder.userID)
 		// In batches, which the connection's queues hold.
 		for sent := 0; sent < perConnection; sent += 20 {
 			ids := make([]string, min(20, perConnection-sent))
@@ -376,6 +378,7 @@ func TestPasskeyPageAdditionsFlood(t *testing.T) {
 		}
 		_ = flooder.ws.CloseNow()
 	}
+	waitLeftDefault(t, p.app, flooders...)
 
 	// A guest whose origin the RP accepts runs its own ceremony, with the
 	// page as another way.
