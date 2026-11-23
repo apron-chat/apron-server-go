@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/apron-chat/apron-server-go/apron/internal/roomlog"
+	"github.com/apron-chat/apron-server-go/wire"
 )
 
 // EventKind is the kind of record an Event carries (PROTOCOL.md §2.3).
@@ -230,40 +231,27 @@ func DecodeMessage(e Event) (Message, bool) {
 // decodeMessageRecord decodes a message record, as history and broadcasts
 // carry it.
 func decodeMessageRecord(raw []byte) (Message, bool) {
-	record := decodeObject(raw)
-	if record == nil {
+	snapshot := roomlog.DecodeMessage(raw)
+	if snapshot == nil {
 		return Message{}, false
-	}
-	str := func(object map[string]any, name string) string {
-		value, _ := object[name].(string)
-		return value
 	}
 	id := func(value string) int64 {
 		n, _ := strconv.ParseInt(value, 10, 64)
 		return n
 	}
 	m := Message{
-		ID: str(record, "message_id"), LogID: id(str(record, "log_id")), RoomID: str(record, "room_id"),
-		PrevLogID: id(str(record, "prev_log_id")), PrevRoomID: str(record, "prev_room_id"),
-		Deleted: record["deleted"] == true,
+		ID: snapshot.MessageID, LogID: id(snapshot.LogID), RoomID: snapshot.RoomID,
+		PrevLogID: id(snapshot.PrevLogID), PrevRoomID: snapshot.PrevRoomID,
+		From:    Sender{UserID: snapshot.From.UserID, Name: snapshot.From.Name},
+		Deleted: snapshot.Deleted, ReplyTo: snapshot.ReplyID(), Ext: snapshot.Ext,
 	}
-	if m.ID == "" {
-		return Message{}, false
-	}
-	if from, ok := record["from"].(map[string]any); ok {
-		m.From = Sender{UserID: str(from, "user_id"), Name: str(from, "name")}
-	}
-	if reply, ok := record["reply_to"].(map[string]any); ok {
-		m.ReplyTo = str(reply, "message_id")
-	}
-	if body, ok := record["body"].(map[string]any); ok {
-		m.Body = body
-		m.Text, m.Format = str(body, "text"), str(body, "format")
+	if body := snapshot.Body; body != nil {
+		m.Body = bodyObject(&body.Body)
+		m.Text, m.Format = body.Text, body.Format
 		if m.Format == "" {
-			m.Format = "plain"
+			m.Format = wire.Plain
 		}
-		m.Mentions = mentions(body)
+		m.Mentions = body.Mentions
 	}
-	m.Ext = extOf(record["ext"])
 	return m, true
 }

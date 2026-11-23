@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/apron-chat/apron-server-go/apron/internal/livetext"
+	"github.com/apron-chat/apron-server-go/apron/internal/roomlog"
 	"github.com/apron-chat/apron-server-go/wire"
 )
 
@@ -146,15 +147,9 @@ func (s *Server) postPendingLocked(e *embedState) bool {
 	logID := s.log.NextID()
 	messageID := formatID(logID)
 	from := u.from()
-	snapshot := map[string]any{
-		"message_id": messageID,
-		"log_id":     messageID,
-		"room_id":    r.id,
-		"from":       from,
-		"body":       body,
-	}
+	snapshot := &roomlog.Message{MessageID: messageID, LogID: messageID, RoomID: r.id, From: from, Body: storedBody(body)}
 	if target := s.visibleMessageLocked(u, p.replyTo); target != nil && !r.revealsTo(s.rooms[target.roomID]) {
-		snapshot["reply_to"] = map[string]any{"message_id": p.replyTo}
+		snapshot.ReplyTo = &roomlog.Ref{MessageID: p.replyTo}
 	}
 	m := &messageState{id: messageID, from: from, owner: u.id, reactions: make(map[string]reactionSet)}
 	s.messages[messageID] = m
@@ -164,7 +159,7 @@ func (s *Server) postPendingLocked(e *embedState) bool {
 	s.commitSnapshotLocked(m, snapshot, logID)
 	s.messageUnreadLocked(m, nil, nil)
 	s.unreadChangedLocked(u, r.id)
-	s.wakeNewLocked(m, snapshot)
+	s.wakeNewLocked(m, m.snapshot())
 	return true
 }
 

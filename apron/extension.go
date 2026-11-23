@@ -599,12 +599,9 @@ func (s *Server) filterMessage(c *client, d *Draft) *Error {
 		case m == nil:
 			allowed = false
 		case m.owner == u.id:
-		case sharesText(m.snapshot(), u.id):
-			snapshot := m.snapshot()
-			d.RoomID, d.ReplyTo, d.ext = m.roomID, "", nil
-			if ref, ok := snapshot["reply_to"].(map[string]any); ok {
-				d.ReplyTo, _ = ref["message_id"].(string)
-			}
+		case sharesText(m.current(), u.id):
+			snapshot := m.current()
+			d.RoomID, d.ReplyTo, d.ext = m.roomID, snapshot.ReplyID(), nil
 			d.Body = sharedTextBody(snapshot, d.Body)
 			d.shared = len(filters) > 0
 		default:

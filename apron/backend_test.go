@@ -45,7 +45,9 @@ func TestRecordsAreWireTypes(t *testing.T) {
 			typed, unknown = room, []jsontext.Value{room.Unknown}
 		case roomlog.KindMessage:
 			m := decodeRecord[wire.Message](record.Raw)
-			typed, unknown = m, []jsontext.Value{m.Unknown, m.From.Unknown}
+			// The snapshot's own shape has a field for every member too.
+			stored := roomlog.DecodeMessage(record.Raw)
+			typed, unknown = m, []jsontext.Value{m.Unknown, m.From.Unknown, stored.Unknown, stored.From.Unknown}
 		case roomlog.KindReactions:
 			r := decodeRecord[wire.Reactions](record.Raw)
 			typed = r

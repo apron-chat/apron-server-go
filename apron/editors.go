@@ -5,6 +5,8 @@ import (
 	"encoding/json/v2"
 	"maps"
 	"slices"
+
+	"github.com/apron-chat/apron-server-go/apron/internal/roomlog"
 )
 
 // ext:editors (apron's EXTENSIONS.md) lets a message's sender share the
@@ -25,11 +27,11 @@ const (
 
 // sharesText reports whether userID, who is not its sender, may save the
 // body.text of the message whose current snapshot is snapshot.
-func sharesText(snapshot map[string]any, userID string) bool {
-	if snapshot["deleted"] == true {
+func sharesText(snapshot *roomlog.Message, userID string) bool {
+	if snapshot.Deleted {
 		return false
 	}
-	raw, ok := extOf(snapshot["ext"])[editorsKey]
+	raw, ok := snapshot.Ext[editorsKey]
 	if !ok {
 		return false
 	}
@@ -41,16 +43,17 @@ func sharesText(snapshot map[string]any, userID string) bool {
 	if json.Unmarshal(editors[sharedText], &grant) != nil || grant != mentionedEditors {
 		return false
 	}
-	body, _ := snapshot["body"].(map[string]any)
-	return slices.Contains(mentions(body), userID)
+	return slices.Contains(snapshot.Mentions(), userID)
 }
 
 // sharedTextBody is the body of a save of only body.text: the current
 // snapshot's body, with the text that the request carries, or none when it
 // carries none.
-func sharedTextBody(current map[string]any, request map[string]any) map[string]any {
-	body, _ := current["body"].(map[string]any)
-	body = maps.Clone(body)
+func sharedTextBody(current *roomlog.Message, request map[string]any) map[string]any {
+	var body map[string]any
+	if current.Body != nil {
+		body = bodyObject(&current.Body.Body)
+	}
 	if body == nil {
 		body = make(map[string]any)
 	}

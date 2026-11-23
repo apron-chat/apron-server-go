@@ -1,6 +1,7 @@
 package apron
 
 import (
+	"encoding/json/v2"
 	"fmt"
 	"slices"
 	"sort"
@@ -49,20 +50,33 @@ type messageInfo struct {
 // info returns what unread counts read of the current snapshot.
 func (m *messageState) info() *messageInfo {
 	if m.cached == nil {
-		snapshot := m.snapshot()
-		body, _ := snapshot["body"].(map[string]any)
-		info := &messageInfo{deleted: snapshot["deleted"] == true, mentions: mentions(body)}
-		if ref, ok := snapshot["reply_to"].(map[string]any); ok {
-			info.replyTo, _ = ref["message_id"].(string)
-		}
-		m.cached = info
+		snapshot := m.current()
+		m.cached = &messageInfo{deleted: snapshot.Deleted, mentions: snapshot.Mentions(), replyTo: snapshot.ReplyID()}
 	}
 	return m.cached
 }
 
-// snapshot decodes the message's current snapshot, a copy the caller owns.
+// current decodes the message's current snapshot, a copy the caller owns.
+func (m *messageState) current() *roomlog.Message {
+	if snapshot := roomlog.DecodeMessage(m.records[len(m.records)-1].Raw); snapshot != nil {
+		return snapshot
+	}
+	return &roomlog.Message{MessageID: m.id}
+}
+
+// snapshot decodes the message's current snapshot as a JSON object, for
+// code that edits a body's embeds as objects (embeds.go), a copy the
+// caller owns.
 func (m *messageState) snapshot() map[string]any {
 	return decodeObject(m.records[len(m.records)-1].Raw)
+}
+
+// storedBody is a body the server edited as a JSON object (bodyObject), as
+// a snapshot holds it.
+func storedBody(body map[string]any) *roomlog.Body {
+	stored := new(roomlog.Body)
+	_ = json.Unmarshal(encodeJSON(body), stored)
+	return stored
 }
 
 // saveMessage creates a message (no message_id) or saves an existing one
@@ -141,7 +155,7 @@ func (s *Server) saveMessage(c *client, p wire.EditParams, reply wire.Reply[wire
 			return invalidParams("Unknown message %q", messageID)
 		}
 		if current.owner != u.id {
-			if deleted || !sharesText(current.snapshot(), u.id) {
+			if deleted || !sharesText(current.current(), u.id) {
 				return &Error{Code: CodeDenied, Message: "Only the author may edit, move, or delete this message"}
 			}
 			// Live text is still writing into body.text (§4.8.5).
@@ -180,9 +194,12 @@ func (s *Server) saveMessage(c *client, p wire.EditParams, reply wire.Reply[wire
 			return &Error{Code: CodeDenied, Message: "A reply cannot quote a message that fewer people can see"}
 		}
 	}
-	var previous map[string]any
+	// previous is the snapshot the save replaces, and previousObject the
+	// same as a JSON object, for the embeds (embeds.go) and push.
+	var previous *roomlog.Message
+	var previousObject map[string]any
 	if current != nil {
-		previous = current.snapshot()
+		previous, previousObject = current.current(), current.snapshot()
 	}
 	if editor {
 		body = sharedTextBody(previous, body)
@@ -191,9 +208,8 @@ func (s *Server) saveMessage(c *client, p wire.EditParams, reply wire.Reply[wire
 		if encodedSize(body) > int(s.config.ReadLimit) {
 			return &Error{Code: CodeTooLarge, Message: "The message would be too large to send back"}
 		}
-		if ref, ok := previous["reply_to"].(map[string]any); ok {
-			replyID, hasReply = ref["message_id"].(string)
-		}
+		replyID = previous.ReplyID()
+		hasReply = replyID != ""
 		extWrite = nil
 	}
 	// ext merges into the current snapshot's, and the limit applies to the
@@ -203,8 +219,8 @@ func (s *Server) saveMessage(c *client, p wire.EditParams, reply wire.Reply[wire
 	var ext extObject
 	if !deleted {
 		var kept extObject
-		if previous["deleted"] != true {
-			kept = extOf(previous["ext"])
+		if previous != nil && !previous.Deleted {
+			kept = previous.Ext
 		}
 		ext = mergeExt(kept, extWrite)
 		// ext:editors: edited_by names who saved the snapshot, when not
@@ -239,7 +255,7 @@ func (s *Server) saveMessage(c *client, p wire.EditParams, reply wire.Reply[wire
 	if body != nil && !editor {
 		var embeds []any
 		var err *Error
-		embeds, written, err = s.resolveEmbedsLocked(c, messageID, previous, body)
+		embeds, written, err = s.resolveEmbedsLocked(c, messageID, previousObject, body)
 		if err != nil {
 			return err
 		}
@@ -250,24 +266,14 @@ func (s *Server) saveMessage(c *client, p wire.EditParams, reply wire.Reply[wire
 			delete(body, "embeds")
 		}
 	}
-	s.releaseEmbedsLocked(previous, body)
+	s.releaseEmbedsLocked(previousObject, body)
 
-	snapshot := map[string]any{
-		"message_id": messageID,
-		"log_id":     formatID(logID),
-		"room_id":    roomID,
-		"from":       from,
-	}
-	if deleted {
-		snapshot["deleted"] = true
-	} else {
-		snapshot["body"] = body
+	snapshot := &roomlog.Message{MessageID: messageID, LogID: formatID(logID), RoomID: roomID, From: from, Deleted: deleted, Ext: ext}
+	if !deleted {
+		snapshot.Body = storedBody(body)
 	}
 	if hasReply {
-		snapshot["reply_to"] = map[string]any{"message_id": replyID}
-	}
-	if len(ext) > 0 {
-		snapshot["ext"] = ext
+		snapshot.ReplyTo = &roomlog.Ref{MessageID: replyID}
 	}
 
 	if current == nil {
@@ -291,16 +297,18 @@ func (s *Server) saveMessage(c *client, p wire.EditParams, reply wire.Reply[wire
 		// The author's own message moves their read position (§4.9).
 		s.unreadChangedLocked(u, destination.id)
 	}
+	// Push reads the snapshot as a JSON object.
+	object := current.snapshot()
 	switch {
 	case !replacing:
-		s.wakeNewLocked(current, snapshot)
+		s.wakeNewLocked(current, object)
 	case current.pushHeld:
 		// A save that ends the live append text sends the held push.
-		if deleted || !hasLiveAppend(snapshot) {
+		if deleted || !hasLiveAppend(object) {
 			s.releasePushLocked(current)
 		}
 	default:
-		s.wakeLocked(current, snapshot, previous)
+		s.wakeLocked(current, object, previousObject)
 	}
 	result := wire.MessageResult{MessageID: wire.LogID(logID)}
 	if replacing {
@@ -318,12 +326,12 @@ func (s *Server) saveMessage(c *client, p wire.EditParams, reply wire.Reply[wire
 // a move snapshot names the previous room in prev_room_id, since the
 // previous snapshot is in that room's log (§4.3.1). It reports whether the
 // snapshot moved the message.
-func (s *Server) commitSnapshotLocked(m *messageState, snapshot map[string]any, logID int64) bool {
-	delete(snapshot, "prev_room_id")
+func (s *Server) commitSnapshotLocked(m *messageState, snapshot *roomlog.Message, logID int64) bool {
+	snapshot.PrevRoomID = ""
 	if m.logID != 0 {
-		snapshot["prev_log_id"] = formatID(m.logID)
+		snapshot.PrevLogID = formatID(m.logID)
 	}
-	destination := s.rooms[snapshot["room_id"].(string)]
+	destination := s.rooms[snapshot.RoomID]
 	rooms := []*roomState{destination}
 	moved := m.roomID != "" && m.roomID != destination.id
 	if moved {
@@ -332,7 +340,7 @@ func (s *Server) commitSnapshotLocked(m *messageState, snapshot map[string]any, 
 		// A move out of a room that some who see the destination cannot see,
 		// such as a private one, does not name it to them.
 		if !destination.revealsTo(source) {
-			snapshot["prev_room_id"] = m.roomID
+			snapshot.PrevRoomID = m.roomID
 		}
 	}
 	m.logID = logID
@@ -341,8 +349,7 @@ func (s *Server) commitSnapshotLocked(m *messageState, snapshot map[string]any, 
 	if !moved && len(m.records) == 0 && destination.members[m.owner] != nil {
 		destination.active[m.owner] = logID
 	}
-	record := roomlog.New(logID, roomlog.KindMessage, snapshot)
-	record.Message = m.id
+	record := roomlog.NewMessage(logID, snapshot)
 	m.records = append(m.records, record)
 	s.touchMessage(m)
 	s.appendLocked(record, rooms...)
@@ -354,13 +361,17 @@ func (s *Server) commitSnapshotLocked(m *messageState, snapshot map[string]any, 
 // finished upload or live text (§4.8.3): edit rewrites a copy of the
 // current body, and nothing is published when it reports no change.
 func (s *Server) republishLocked(m *messageState, edit func(body map[string]any) bool) {
-	snapshot := m.snapshot()
-	body, _ := snapshot["body"].(map[string]any)
-	if body == nil || snapshot["deleted"] == true || !edit(body) {
+	snapshot := m.current()
+	if snapshot.Body == nil || snapshot.Deleted {
 		return
 	}
+	body := bodyObject(&snapshot.Body.Body)
+	if !edit(body) {
+		return
+	}
+	snapshot.Body = storedBody(body)
 	logID := s.log.NextID()
-	snapshot["log_id"] = formatID(logID)
+	snapshot.LogID = formatID(logID)
 	s.commitSnapshotLocked(m, snapshot, logID)
 }
 

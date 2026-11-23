@@ -23,8 +23,10 @@ import (
 	"github.com/coder/websocket"
 	"golang.org/x/time/rate"
 
+	"github.com/apron-chat/apron-server-go/apron/internal/roomlog"
 	"github.com/apron-chat/apron-server-go/apron/internal/webpush"
 	"github.com/apron-chat/apron-server-go/store"
+	"github.com/apron-chat/apron-server-go/wire"
 )
 
 type relayRequest struct {
@@ -390,7 +392,7 @@ func TestPushWakeScopes(t *testing.T) {
 	own := formatID(logID)
 	m := &messageState{id: own, from: carol.from(), owner: carol.id, reactions: make(map[string]reactionSet)}
 	app.messages[own] = m
-	app.commitSnapshotLocked(m, map[string]any{"message_id": own, "log_id": own, "room_id": "general", "from": carol.from(), "body": map[string]any{"text": "carol's"}}, logID)
+	app.commitSnapshotLocked(m, &roomlog.Message{MessageID: own, LogID: own, RoomID: "general", From: carol.from(), Body: &roomlog.Body{Body: wire.Body{Text: "carol's"}}}, logID)
 	app.unlock()
 	a.notification(t, "message")
 	post(map[string]any{"body": map[string]any{"text": "re"}, "reply_to": map[string]any{"message_id": own}})
@@ -546,7 +548,7 @@ func serverMessage(t *testing.T, app *Server, userID string) int64 {
 	id := formatID(logID)
 	m := &messageState{id: id, from: u.from(), owner: u.id, reactions: make(map[string]reactionSet)}
 	app.messages[id] = m
-	app.commitSnapshotLocked(m, map[string]any{"message_id": id, "log_id": id, "room_id": "general", "from": u.from(), "body": map[string]any{"text": "theirs"}}, logID)
+	app.commitSnapshotLocked(m, &roomlog.Message{MessageID: id, LogID: id, RoomID: "general", From: u.from(), Body: &roomlog.Body{Body: wire.Body{Text: "theirs"}}}, logID)
 	return logID
 }
 

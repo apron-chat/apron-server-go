@@ -5,11 +5,11 @@
 //
 // It knows nothing of users, connections, or delivery: the server builds a
 // record, appends it to the rooms whose logs hold it, and sends Raw as it
-// is. The records the server builds itself have typed shapes here
-// (Membership, Reactions, RoomRecord, Author) that encode exactly as the
-// maps the server built before them did, keys sorted, so stored and sent
-// bytes are unchanged. Message snapshots carry a client's body as it
-// arrived, and stay JSON objects the server edits.
+// is. Every record has a typed shape here (Membership, Reactions,
+// RoomRecord, Message, and the Author and Body they carry) that encodes
+// exactly as the maps the server built before them did, keys sorted, so
+// stored and sent bytes are unchanged. A message's Body is a wire.Body,
+// which keeps what its sender sent and left out.
 //
 // A Log is not safe for concurrent use: every method is called holding the
 // server's lock, which a reader may release while it holds a Record's Raw,

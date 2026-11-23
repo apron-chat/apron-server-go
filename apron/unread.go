@@ -166,7 +166,7 @@ func (s *Server) unreadChangedLocked(u *userState, roomID string) {
 // messageUnreadLocked keeps the counts of the users a new or saved message
 // concerns. previous is the snapshot the save replaced, nil for a new
 // message, and from the room it was in before, for a move.
-func (s *Server) messageUnreadLocked(m *messageState, previous map[string]any, from *roomState) {
+func (s *Server) messageUnreadLocked(m *messageState, previous *roomlog.Message, from *roomState) {
 	if len(s.pushes) == 0 {
 		return
 	}
@@ -185,19 +185,15 @@ func (s *Server) messageUnreadLocked(m *messageState, previous map[string]any, f
 			add(u)
 		}
 	}
-	snapshots := []map[string]any{m.snapshot()}
-	if previous != nil {
-		snapshots = append(snapshots, previous)
-	}
-	for _, snapshot := range snapshots {
-		body, _ := snapshot["body"].(map[string]any)
-		for _, id := range mentions(body) {
+	for _, snapshot := range []*roomlog.Message{m.current(), previous} {
+		if snapshot == nil {
+			continue
+		}
+		for _, id := range snapshot.Mentions() {
 			add(s.users[id])
 		}
-		if ref, ok := snapshot["reply_to"].(map[string]any); ok {
-			if target := s.messages[ref["message_id"].(string)]; target != nil {
-				add(s.users[target.owner])
-			}
+		if target := s.messages[snapshot.ReplyID()]; target != nil {
+			add(s.users[target.owner])
 		}
 	}
 	now := time.Now()

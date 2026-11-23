@@ -145,12 +145,6 @@ func emptyJSON(value jsontext.Value) bool {
 // nil when no key is left; kept is not modified.
 func mergeExt(kept, write extObject) extObject { return wire.MergeExt(kept, write) }
 
-// extOf returns the ext of an object decoded with decodeObject, or nil.
-func extOf(value any) extObject {
-	ext, _ := value.(extObject)
-	return ext
-}
-
 // decodeObject decodes a JSON object, keeping the values of a top-level
 // ext as raw JSON so that re-encoding the object keeps them exactly.
 func decodeObject(raw []byte) map[string]any {

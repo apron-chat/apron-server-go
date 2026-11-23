@@ -411,12 +411,9 @@ func (s *Server) postRoomNoticeLocked(r *roomState, text string) {
 	from := roomlog.Author{UserID: roomNoticeID, Name: r.title()}
 	m := &messageState{id: messageID, from: from, owner: roomNoticeID, reactions: make(map[string]reactionSet)}
 	s.messages[messageID] = m
-	s.commitSnapshotLocked(m, map[string]any{
-		"message_id": messageID,
-		"log_id":     messageID,
-		"room_id":    r.id,
-		"from":       from,
-		"body":       map[string]any{"text": text},
+	s.commitSnapshotLocked(m, &roomlog.Message{
+		MessageID: messageID, LogID: messageID, RoomID: r.id, From: from,
+		Body: &roomlog.Body{Body: wire.Body{Text: text}},
 	}, logID)
 }
 

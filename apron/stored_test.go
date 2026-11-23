@@ -172,17 +172,7 @@ func TestStoredShapesRoundTrip(t *testing.T) {
 		case roomlog.KindReactions:
 			shape = new(roomlog.Reactions)
 		case roomlog.KindMessage:
-			// A snapshot stays an object; its from is an Author.
-			var snapshot struct {
-				From roomlog.Author `json:"from"`
-			}
-			if err := json.Unmarshal(record.Raw, &snapshot); err != nil {
-				t.Fatal(err)
-			}
-			if from := decodeObject(record.Raw)["from"]; !bytes.Equal(encodeJSON(snapshot.From), encodeJSON(from)) {
-				t.Errorf("record %d: from %s is %s", record.ID, encodeJSON(from), encodeJSON(snapshot.From))
-			}
-			continue
+			shape = new(roomlog.Message)
 		}
 		if err := json.Unmarshal(record.Raw, shape); err != nil {
 			t.Fatal(err)
