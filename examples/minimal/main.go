@@ -70,10 +70,11 @@ func NewChat() *Chat {
 	return c
 }
 
-// echo is the bot's: it answers a message that mentions it with what it
-// said, as a reply.
+// echo is the bot's: it answers a message that mentions it, or names it
+// in its text, as in "echo: hi" from a client that sends no mentions, with
+// what it said, as a reply.
 func echo(ctx context.Context, b *bot.Bot, m wire.Message) {
-	if b.Mentioned(m) {
+	if b.Addressed(m) {
 		_, _ = b.Reply(ctx, m, m.From.Name+" said: "+m.Body.Text)
 	}
 }

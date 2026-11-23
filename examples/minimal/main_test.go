@@ -100,29 +100,35 @@ func TestChat(t *testing.T) {
 	}
 }
 
-// The bot answers a mention, as a reply that everyone gets.
+// The bot answers a mention, or its name in the text, as a reply that
+// everyone gets.
 func TestEcho(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	chat := NewChat()
 	ada, _ := signIn(t, ctx, chat, "Ada")
 	bob, _ := signIn(t, ctx, chat, "Bob")
-	result, err := ada.Call(ctx, "message", map[string]any{"body": map[string]any{"text": "@echo hi", "mentions": []string{"echo"}}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	var asked wire.MessageResult
-	if err := json.Unmarshal(result, &asked); err != nil {
-		t.Fatal(err)
-	}
-	for _, c := range []*wiretest.Client{ada, bob} {
-		f, err := c.Expect(ctx, func(f wiretest.Frame) bool {
+	for _, body := range []map[string]any{
+		{"text": "@echo hi", "mentions": []string{"echo"}},
+		{"text": "echo: hi"},
+	} {
+		result, err := ada.Call(ctx, "message", map[string]any{"body": body})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var asked wire.MessageResult
+		if err := json.Unmarshal(result, &asked); err != nil {
+			t.Fatal(err)
+		}
+		for _, c := range []*wiretest.Client{ada, bob} {
+			f, err := c.Expect(ctx, func(f wiretest.Frame) bool {
+				var m wire.Message
+				return f.Method == "message" && f.Decode(&m) == nil && m.From.UserID == "echo"
+			})
 			var m wire.Message
-			return f.Method == "message" && f.Decode(&m) == nil && m.From.UserID == "echo"
-		})
-		var m wire.Message
-		if err != nil || f.Decode(&m) != nil || m.Body.Text != "Ada said: @echo hi" || m.ReplyTo == nil || m.ReplyTo.MessageID != asked.MessageID {
-			t.Fatalf("the bot's reply %s: %v", f.Raw, err)
+			if err != nil || f.Decode(&m) != nil || m.Body.Text != "Ada said: "+body["text"].(string) || m.ReplyTo == nil || m.ReplyTo.MessageID != asked.MessageID {
+				t.Fatalf("the bot's reply %s: %v", f.Raw, err)
+			}
 		}
 	}
 }
