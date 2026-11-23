@@ -136,16 +136,17 @@ type AuthResult struct {
 }
 
 // MessageParams are the params of a new message (§3.5.1): a message
-// request without message_id.
+// request without message_id. They encode as a client sends them, such as
+// a bot (package wire/bot).
 type MessageParams struct {
 	// RoomID is the room, or "" for the default room.
-	RoomID string
+	RoomID string `json:"room_id,omitempty"`
 	// Body is never nil. Its Unknown holds the fields this package does
 	// not know, for a backend that keeps them.
-	Body    *Body
-	ReplyTo *Ref
+	Body    *Body `json:"body,omitzero"`
+	ReplyTo *Ref  `json:"reply_to,omitempty"`
 	// Ext is the message's ext (§4.13); nil when left out.
-	Ext Ext
+	Ext Ext `json:"ext,omitempty"`
 }
 
 // EditParams are the params of a save of an existing message (§4.4): a
@@ -168,14 +169,14 @@ type EditParams struct {
 
 // CommandParams are the params of a command (§4.1): those of a new
 // message, whose body.text is the command line, and whose other fields
-// are its arguments.
+// are its arguments. They encode as a client sends them.
 type CommandParams struct {
 	// RoomID is the room the command runs in, or "" for the default room.
-	RoomID string
+	RoomID string `json:"room_id,omitempty"`
 	// Body is never nil.
-	Body    *Body
-	ReplyTo *Ref
-	Ext     Ext
+	Body    *Body `json:"body,omitzero"`
+	ReplyTo *Ref  `json:"reply_to,omitempty"`
+	Ext     Ext   `json:"ext,omitempty"`
 }
 
 // CommandResult is the result of a command (§4.1): empty, or the write

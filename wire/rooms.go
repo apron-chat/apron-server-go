@@ -126,10 +126,11 @@ type RoomSetResult struct {
 }
 
 // RoomJoinParams are the params of room_join (§4.2.2): the room, a valid
-// ID, and the user to add, or "" for the sender.
+// ID, and the user to add, or "" for the sender. They encode as a client
+// sends them.
 type RoomJoinParams struct {
-	RoomID string
-	UserID string
+	RoomID string `json:"room_id"`
+	UserID string `json:"user_id,omitempty"`
 }
 
 // RoomLeaveParams are the params of room_leave (§4.2.2): the room, a valid

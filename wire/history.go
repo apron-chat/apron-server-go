@@ -9,12 +9,12 @@ import (
 // room the connection receives; After and Before are inclusive log_id
 // bounds, nil when left out, which also sets the direction: from the oldest
 // with After, and from the newest without; Limit is positive, 0 for the
-// backend's default.
+// backend's default. They encode as a client sends them.
 type HistoryParams struct {
-	RoomID string
-	After  *LogID
-	Before *LogID
-	Limit  int
+	RoomID string `json:"room_id,omitempty"`
+	After  *LogID `json:"after,omitempty"`
+	Before *LogID `json:"before,omitempty"`
+	Limit  int    `json:"limit,omitzero"`
 }
 
 // HistoryResult is the result of history (§4.3). Its rooms are logged

@@ -269,7 +269,42 @@
 // /help shows, and a Router, a [CommandHandler], that parses the command
 // line, refuses what a form requires and the sender may not use, runs the
 // command, and answers /help, with the same list as data for apron's
-// ext:command_list. Package apron runs its commands on one too.
+// ext:command_list. A backend checks what every command needs first
+// (Router.Before), and a command may check the rest itself
+// (Command.RunChecks). Package apron runs its commands on one too.
+//
+// # Bots, filters, and what else extends a backend
+//
+// Package bot (wire/bot) runs bots on any backend: a user of the server's
+// own on a Local connection, which a Bot keeps open, with typed requests
+// (Conn.Post, Conn.Command, Conn.Join, Conn.History) and handlers for what
+// it receives, such as a message that mentions it (Bot.Mentioned,
+// Bot.Reply). Package apron's bots make their requests on its Conn, and
+// examples/minimal has a Bot. The params of the requests a client sends,
+// such as [MessageParams], encode as it sends them.
+//
+// A message filter, which checks or rewrites what people post before the
+// backend saves it, is a handler that wraps the backend's: the handler
+// fields are interfaces, so a filter is a type that embeds the handler
+// it wraps.
+//
+//	type noShouting struct{ wire.MessageHandler }
+//
+//	func (f noShouting) Message(ctx context.Context, c *wire.Conn, p wire.MessageParams, reply wire.Reply[wire.MessageResult]) error {
+//		if text := p.Body.Text; text != strings.ToLower(text) && text == strings.ToUpper(text) {
+//			return wire.InvalidParams("Please don't shout")
+//		}
+//		return f.MessageHandler.Message(ctx, c, p, reply)
+//	}
+//
+//	server.Messages = noShouting{chat}
+//
+// Edits and commands are wrapped the same way. wire has no filter type:
+// what a filter needs to know, such as whether the sender may see the room,
+// or what an edit's message said, is the backend's, so a backend whose
+// filters need its state, as package apron's do, runs them where it has it.
+// Nor does wire follow what happened, as package apron's extensions do
+// (Registrar.OnEvent, Follow): that is a log, and the log is the backend's.
 //
 // # Testing with wiretest
 //
