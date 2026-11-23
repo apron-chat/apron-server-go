@@ -2,19 +2,19 @@ package apron
 
 import (
 	"encoding/json/jsontext"
-	"encoding/json/v2"
 	"fmt"
-	"github.com/apron-chat/apron-server-go/wire"
 	"net/http"
 	"strings"
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/apron-chat/apron-server-go/wire"
 )
 
 // The server's profile, the server frame's title, description, and avatar
 // (§3.1): Config sets them, and admins override each with /server, §4.1's
-// suggested convention. The store keeps what /server sets; clearing a
-// value there falls back to Config's. Without either, the description is
+// suggested convention. The store keeps what /server sets (profile);
+// clearing a value there falls back to Config's. Without either, the description is
 // the default room's, unless that is longer than a server description may
 // be.
 
@@ -35,33 +35,18 @@ const (
 // flag that sets its default.
 var profileFields = []string{"title", "description", "avatar"}
 
-// serverProfile is what admins set with /server; an empty value or nil
-// avatar falls back to Config's.
-type serverProfile struct {
-	title       string
-	description string
-	// avatar is the finished /server avatar upload.
-	avatar *embedState
-}
-
-type storedProfile struct {
-	Title       string `json:"title,omitzero"`
-	Description string `json:"description,omitzero"`
-	AvatarEmbed string `json:"avatar_embed,omitzero"`
-}
-
 // profileValueLocked returns the current value of a profile field and
 // where it comes from.
 func (s *Server) profileValueLocked(field string) (string, int) {
 	var set, configured string
 	switch field {
 	case "title":
-		set, configured = s.profile.title, s.config.Title
+		set, configured = s.profile.Title(), s.config.Title
 	case "description":
-		set, configured = s.profile.description, s.config.Description
+		set, configured = s.profile.Description(), s.config.Description
 	case "avatar":
-		if s.profile.avatar != nil {
-			set = s.profile.avatar.fileURL()
+		if avatar := s.profile.Avatar(); avatar != nil {
+			set = avatar.fileURL()
 		}
 		configured = s.config.Avatar
 	}
@@ -80,12 +65,6 @@ func (s *Server) profileValueLocked(field string) (string, int) {
 		}
 	}
 	return "", fromNowhere
-}
-
-// profileChangedLocked stores the profile and announces it.
-func (s *Server) profileChangedLocked() {
-	s.dirty.profile = true
-	s.announceServerLocked()
 }
 
 // announceServerLocked sends every connection, signed in or not, a new
@@ -107,34 +86,19 @@ func (s *Server) announceServerLocked() {
 	}
 }
 
-func (s *Server) storedProfileLocked() storedProfile {
-	stored := storedProfile{Title: s.profile.title, Description: s.profile.description}
-	if s.profile.avatar != nil {
-		stored.AvatarEmbed = s.profile.avatar.ID
-	}
-	return stored
-}
-
 // restoreProfileLocked restores the profile from the store, after the
 // embeds. An avatar whose upload is gone is dropped, and so is a finished
 // /server avatar upload that is not the avatar.
 func (s *Server) restoreProfileLocked(raw jsontext.Value) error {
-	if raw != nil {
-		var stored storedProfile
-		if err := json.Unmarshal(raw, &stored); err != nil {
-			return fmt.Errorf("stored profile: %w", err)
-		}
-		s.profile.title, s.profile.description = stored.Title, stored.Description
-		if stored.AvatarEmbed != "" {
-			if e := s.embeds.Get(stored.AvatarEmbed); e != nil && e.Finished && e.ServerAvatarBy != "" {
-				s.profile.avatar = e
-			} else {
-				s.dirty.profile = true
-			}
-		}
+	err := s.profile.Restore(raw, func(id string) (*embedState, bool) {
+		e := s.embeds.Get(id)
+		return e, e != nil && e.Finished && e.ServerAvatarBy != ""
+	})
+	if err != nil {
+		return err
 	}
 	for _, id := range s.embeds.IDs() {
-		if e := s.embeds.Get(id); e.ServerAvatarBy != "" && e.Finished && e != s.profile.avatar {
+		if e := s.embeds.Get(id); e.ServerAvatarBy != "" && e.Finished && e != s.profile.Avatar() {
 			s.removeEmbedLocked(id)
 		}
 	}
@@ -162,11 +126,11 @@ func (s *Server) refuseServerAvatarLocked(e *embedState) (int, string) {
 // setServerAvatarLocked makes a finished /server avatar upload the server's
 // avatar, deleting the upload it replaces.
 func (s *Server) setServerAvatarLocked(e *embedState) {
-	if previous := s.profile.avatar; previous != nil && previous != e {
+	if previous := s.profile.Avatar(); previous != nil && previous != e {
 		s.removeEmbedLocked(previous.ID)
 	}
-	s.profile.avatar = e
-	s.profileChangedLocked()
+	s.profile.SetAvatar(e)
+	s.announceServerLocked()
 }
 
 const serverUsage = "Usage: /server to show the server's title, description, and avatar; /server title <text> or /server description <text> to set one, or without the text to clear it; /server avatar with one image attached to set the avatar, or without one to clear it"
@@ -197,23 +161,23 @@ func (s *Server) serverCommand(c *client, r *roomState, body map[string]any, arg
 		if err != nil {
 			return wire.CommandResult{}, err
 		}
-		done = s.setProfileTextLocked(field, &s.profile.title, title)
+		done = s.setProfileTextLocked(field, title)
 	case "description":
 		description, err := serverDescription(value)
 		if err != nil {
 			return wire.CommandResult{}, err
 		}
-		done = s.setProfileTextLocked(field, &s.profile.description, description)
+		done = s.setProfileTextLocked(field, description)
 	case "avatar":
 		if value != "" {
 			return wire.CommandResult{}, invalidParams("/server avatar takes an attached image, not text")
 		}
 		if len(embeds) == 0 {
 			done = "The avatar was not set."
-			if s.profile.avatar != nil {
-				s.removeEmbedLocked(s.profile.avatar.ID)
-				s.profile.avatar = nil
-				s.profileChangedLocked()
+			if avatar := s.profile.Avatar(); avatar != nil {
+				s.removeEmbedLocked(avatar.ID)
+				s.profile.SetAvatar(nil)
+				s.announceServerLocked()
 				done = "Cleared the avatar."
 			}
 			break
@@ -235,17 +199,21 @@ func (s *Server) serverCommand(c *client, r *roomState, body map[string]any, arg
 	return wire.CommandResult{}, nil
 }
 
-// setProfileTextLocked sets the title or description, kept in *target, to
-// value, empty to clear it, and describes what it did.
-func (s *Server) setProfileTextLocked(field string, target *string, value string) string {
+// setProfileTextLocked sets the title or description, as field names it,
+// to value, empty to clear it, announces it, and describes what it did.
+func (s *Server) setProfileTextLocked(field string, value string) string {
+	current, set := s.profile.Title(), s.profile.SetTitle
+	if field == "description" {
+		current, set = s.profile.Description(), s.profile.SetDescription
+	}
 	switch {
-	case value == *target && value == "":
+	case value == current && value == "":
 		return fmt.Sprintf("The %s was not set.", field)
-	case value == *target:
+	case value == current:
 		return fmt.Sprintf("The %s is unchanged.", field)
 	}
-	*target = value
-	s.profileChangedLocked()
+	set(value)
+	s.announceServerLocked()
 	if value == "" {
 		return fmt.Sprintf("Cleared the %s.", field)
 	}

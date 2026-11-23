@@ -29,6 +29,7 @@ import (
 	"github.com/apron-chat/apron-server-go/apron/internal/emoji"
 	"github.com/apron-chat/apron-server-go/apron/internal/invitations"
 	"github.com/apron-chat/apron-server-go/apron/internal/kv"
+	"github.com/apron-chat/apron-server-go/apron/internal/profile"
 	"github.com/apron-chat/apron-server-go/apron/internal/proposals"
 	"github.com/apron-chat/apron-server-go/apron/internal/push"
 	"github.com/apron-chat/apron-server-go/apron/internal/roomlog"
@@ -142,13 +143,14 @@ type client struct {
 // (presence), push registrations (push), sessions (sessions), device
 // tokens (devices), service tokens (services, whose expiry takes mu),
 // invitations (invitations), hosted embeds (embeds), the custom emoji
-// (emoji), out-of-band sign-in proposals (proposals), and the extensions'
-// values (kv), whose methods are called holding mu; and push delivery
-// (webpush), live text (livetext), and upload files (uploads), which own
-// their own locks or atomics. Each module that keeps state in the store
-// tracks its own changes and renders its own entries (persist.go). Server
-// keeps what ties them together: users' live links, messages, mute and
-// status timers, and delivery.
+// (emoji), the profile set with /server (profile), out-of-band sign-in
+// proposals (proposals), and the extensions' values (kv), whose methods
+// are called holding mu; and push delivery (webpush, which also keeps the
+// VAPID key the server made), live text (livetext), and upload files
+// (uploads), which own their own locks or atomics. Each module that keeps
+// state in the store tracks its own changes and renders its own entries
+// (persist.go). Server keeps what ties them together: users' live links,
+// the messages by message_id, mute and status timers, and delivery.
 type Server struct {
 	config Config
 
@@ -182,12 +184,11 @@ type Server struct {
 	// and the name it renders.
 	emoji *emoji.Catalog[*embedState]
 	// profile is the server's title, description, and avatar as admins set
-	// them with /server (§3.1), which override Config's.
-	profile serverProfile
+	// them with /server (§3.1), which override Config's (profile).
+	profile profile.Profile[*embedState]
 
-	// dirty is the state changed under mu since it was last written to the
-	// store; store writes it, in batches, in the background (durable.go).
-	dirty      dirtySet
+	// store writes the changes made under mu, in batches, in the
+	// background (persist.go); storedMeta are the counters it last wrote.
 	store      *durable.Writer
 	storedMeta storedMeta
 	// pushes are the users' push registrations (push.go).

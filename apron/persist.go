@@ -5,6 +5,7 @@ import (
 	"encoding/json/v2"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strings"
 	"time"
 
@@ -12,6 +13,7 @@ import (
 	"github.com/apron-chat/apron-server-go/apron/internal/devices"
 	"github.com/apron-chat/apron-server-go/apron/internal/embeds"
 	"github.com/apron-chat/apron-server-go/apron/internal/invitations"
+	"github.com/apron-chat/apron-server-go/apron/internal/profile"
 	"github.com/apron-chat/apron-server-go/apron/internal/push"
 	"github.com/apron-chat/apron-server-go/apron/internal/roomlog"
 	"github.com/apron-chat/apron-server-go/apron/internal/rooms"
@@ -23,16 +25,17 @@ import (
 )
 
 // Persistence writes the server's state through to a store.Store. Every
-// change made under s.mu marks what it changed: the server's own state in
-// its dirty set (touch*), and the modules that keep their own, the log
-// (roomlog), the rooms (rooms), the user_ids used (accounts), the users
-// (users), the push registrations (push), the extensions' values (kv),
-// the sessions (sessions), the device tokens (devices), the service tokens
-// (services), the invitations (invitations), the hosted embeds (embeds),
-// and the custom emoji (emoji), in theirs.
-// When the lock is released, unlock renders the marked state into one
-// batch, and the store writer (durable) applies batches to the store in
-// order, off the lock. At start, Open rebuilds the state from the store.
+// change made under s.mu is marked by the module that keeps what it
+// changed: the log (roomlog), the rooms and messages (rooms), the user_ids
+// used (accounts), the users (users), the push registrations (push), the
+// extensions' values (kv), the sessions (sessions), the device tokens
+// (devices), the service tokens (services), the invitations
+// (invitations), the hosted embeds (embeds), the custom emoji (emoji), the
+// VAPID key the server made (webpush), and the server's profile (profile).
+// When the lock is released, unlock has each render what it marked, and
+// the counters if they moved, into one batch, and the store writer
+// (durable) applies batches to the store in order, off the lock. At start,
+// Open rebuilds the state from the store.
 //
 // Entry kinds and IDs:
 //
@@ -41,7 +44,7 @@ import (
 //	                      (§4.9, webpush)
 //	meta     "emoji"      the custom emoji catalog (ext:emoji, emoji)
 //	meta     "profile"    the server's title, description, and avatar set
-//	                      with /server (§3.1)
+//	                      with /server (§3.1, profile)
 //	used_id  lowercased user_id ever assigned (accounts)
 //	record   log_id       a logged record and the rooms whose logs hold it
 //	                      (roomlog)
@@ -66,11 +69,6 @@ const (
 	entryUser    = users.EntryKind
 	entryPush    = push.EntryKind
 )
-
-// dirtySet is the state changed since the last batch, by key.
-type dirtySet struct {
-	profile bool
-}
 
 // unlock writes the changes made under s.mu through to the store, then
 // releases the lock.
@@ -99,64 +97,30 @@ func sessionID(key [32]byte) string { return sessions.ID(key) }
 func userID(u *userState) string { return u.id }
 
 // flushLocked queues the marked changes as one batch for the store writer,
-// with the fences waiting for it.
+// with the fences waiting for it. Once the writer is stopped, the batch is
+// dropped (durable.Writer.Queue), but the changes are still taken.
 func (s *Server) flushLocked() {
-	if s.store.Stopped() {
-		s.dirty = dirtySet{}
-		s.log.Entries()
-		s.users.Entries(avatarEmbedID)
-		s.pushes.Entries()
-		s.rooms.Entries()
-		s.ids.Entries()
-		s.extData.Entries()
-		s.sessions.Entries(userID)
-		s.devices.Entries(userID)
-		s.services.Entries(userID)
-		s.invitations.Entries()
-		s.emoji.Entries()
-		s.embeds.Entries(avatarOwner)
-		s.storedVAPID.Entries()
-		s.store.Queue(nil)
-		return
-	}
-	batch := append(s.ids.Entries(), s.entriesLocked(s.dirty, s.log.Entries())...)
-	batch = append(batch, s.users.Entries(avatarEmbedID)...)
-	batch = append(batch, s.pushes.Entries()...)
-	batch = append(batch, s.rooms.Entries()...)
-	batch = append(batch, s.extData.Entries()...)
-	batch = append(batch, s.sessions.Entries(userID)...)
-	batch = append(batch, s.devices.Entries(userID)...)
-	batch = append(batch, s.services.Entries(userID)...)
-	batch = append(batch, s.invitations.Entries()...)
-	batch = append(batch, s.emoji.Entries()...)
-	batch = append(batch, s.embeds.Entries(avatarOwner)...)
-	batch = append(batch, s.storedVAPID.Entries()...)
-	meta := s.metaLocked()
-	if meta != s.storedMeta {
+	batch := slices.Concat(
+		s.ids.Entries(),
+		s.log.Entries(),
+		s.rooms.Entries(),
+		s.users.Entries(avatarEmbedID),
+		s.pushes.Entries(),
+		s.extData.Entries(),
+		s.sessions.Entries(userID),
+		s.devices.Entries(userID),
+		s.services.Entries(userID),
+		s.invitations.Entries(),
+		s.emoji.Entries(),
+		s.embeds.Entries(avatarOwner),
+		s.storedVAPID.Entries(),
+		s.profile.Entries(),
+	)
+	if meta := s.metaLocked(); meta != s.storedMeta {
 		s.storedMeta = meta
 		batch = append(batch, store.Entry{Kind: entryMeta, ID: "counters", Value: encodeJSON(meta)})
 	}
-	s.dirty = dirtySet{}
 	s.store.Queue(batch)
-}
-
-// entriesLocked renders the state named by a dirty set as store entries,
-// with records', those of the log.
-func (s *Server) entriesLocked(d dirtySet, records []store.Entry) []store.Entry {
-	var batch []store.Entry
-	put := func(kind, id string, value any) {
-		encoded := encodeJSON(value)
-		if encoded == nil {
-			slog.Error("cannot encode state for the store", "kind", kind, "id", id)
-			return
-		}
-		batch = append(batch, store.Entry{Kind: kind, ID: id, Value: encoded})
-	}
-	batch = append(batch, records...)
-	if d.profile {
-		put(entryMeta, "profile", s.storedProfileLocked())
-	}
-	return batch
 }
 
 // avatarEmbedID names the hosted embed behind a user's avatar in what the
@@ -275,7 +239,7 @@ func (s *Server) restoreLocked() (map[string]bool, error) {
 	if err := s.restoreEmojiLocked(entries[entryMeta]["emoji"]); err != nil {
 		return nil, err
 	}
-	if err := s.restoreProfileLocked(entries[entryMeta]["profile"]); err != nil {
+	if err := s.restoreProfileLocked(entries[profile.StoreKind][profile.StoreID]); err != nil {
 		return nil, err
 	}
 

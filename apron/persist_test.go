@@ -350,7 +350,6 @@ func TestRolesAndWelcome(t *testing.T) {
 // dumpLocked renders the whole state as the entries a store holding it
 // would have, for checking that every change reaches the store.
 func (s *Server) dumpLocked() []store.Entry {
-	all := dirtySet{}
 	var records []store.Entry
 	for _, r := range s.rooms.All() {
 		records = append(records, rooms.Entry(r))
@@ -376,5 +375,6 @@ func (s *Server) dumpLocked() []store.Entry {
 		// An empty catalog is stored only once one was emptied.
 		records = append(records, s.emoji.Snapshot()...)
 	}
-	return append(s.entriesLocked(all, records), store.Entry{Kind: entryMeta, ID: "counters", Value: encodeJSON(meta)})
+	records = append(records, s.profile.Snapshot()...)
+	return append(records, store.Entry{Kind: entryMeta, ID: "counters", Value: encodeJSON(meta)})
 }

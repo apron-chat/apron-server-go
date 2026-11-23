@@ -17,6 +17,7 @@ import (
 	"github.com/apron-chat/apron-server-go/apron/internal/embeds"
 	"github.com/apron-chat/apron-server-go/apron/internal/emoji"
 	"github.com/apron-chat/apron-server-go/apron/internal/invitations"
+	"github.com/apron-chat/apron-server-go/apron/internal/profile"
 	"github.com/apron-chat/apron-server-go/apron/internal/push"
 	"github.com/apron-chat/apron-server-go/apron/internal/services"
 	"github.com/apron-chat/apron-server-go/apron/internal/users"
@@ -260,6 +261,12 @@ func TestStoredAccountsAreStoredAgain(t *testing.T) {
 		t.Error("a restored VAPID key is stored again unchanged")
 	}
 	expectStoredAgain(t, webpush.StoreKind, map[string]jsontext.Value{webpush.StoreID: stored[webpush.StoreKind][webpush.StoreID]}, vapid.Snapshot())
+
+	var serverProfile profile.Profile[storedImage]
+	if err := serverProfile.Restore(stored[profile.StoreKind][profile.StoreID], func(id string) (storedImage, bool) { return storedImage(id), true }); err != nil {
+		t.Fatal(err)
+	}
+	expectStoredAgain(t, profile.StoreKind, map[string]jsontext.Value{profile.StoreID: stored[profile.StoreKind][profile.StoreID]}, serverProfile.Snapshot())
 }
 
 // storedEmbed is an embed as the store keeps it.
