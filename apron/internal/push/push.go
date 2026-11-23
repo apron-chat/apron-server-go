@@ -6,7 +6,8 @@
 // keeps what its deliveries left: the unread count its endpoint last
 // accepted, and the push in flight, so a badge push goes out only when the
 // count differs; and a Day counts the pushes a user's endpoints accepted
-// on one UTC day.
+// on one UTC day. A Table also schedules each user's badge pushes, after
+// BadgeDelay, which it hands back to the server to send.
 //
 // Delivery itself is webpush's, and who is woken, and the unread counts,
 // the server's. A Table is not safe for concurrent use: the server calls
@@ -203,12 +204,17 @@ type Table struct {
 	byKey  map[string]*Registration
 	byUser map[string]map[string]*Registration
 	// dirty are the keys added or removed since Entries last took them.
-	dirty map[string]struct{}
+	dirty  map[string]struct{}
+	badges badges
 }
 
-// NewTable returns an empty table.
-func NewTable() *Table {
-	return &Table{byKey: make(map[string]*Registration), byUser: make(map[string]map[string]*Registration), dirty: make(map[string]struct{})}
+// NewTable returns an empty table, which calls due, from the timer's
+// goroutine, when a badge push it scheduled (ScheduleBadge) is due.
+func NewTable(due func(userID string, b *PendingBadge)) *Table {
+	return &Table{
+		byKey: make(map[string]*Registration), byUser: make(map[string]map[string]*Registration), dirty: make(map[string]struct{}),
+		badges: badges{delay: BadgeDelay, pending: make(map[string]*PendingBadge), due: due},
+	}
 }
 
 // Len counts the registrations.
@@ -263,7 +269,7 @@ func (t *Table) Add(p *Registration) {
 }
 
 // Remove forgets p, if it is still the one kept, and reports whether it
-// was.
+// was. A user left without registrations has no badge push pending.
 func (t *Table) Remove(p *Registration) bool {
 	key := Key(p.User, p.URL)
 	if t.byKey[key] != p {
@@ -273,6 +279,7 @@ func (t *Table) Remove(p *Registration) bool {
 	delete(t.byUser[p.User], p.URL)
 	if len(t.byUser[p.User]) == 0 {
 		delete(t.byUser, p.User)
+		t.cancelBadge(p.User)
 	}
 	t.dirty[key] = struct{}{}
 	return true

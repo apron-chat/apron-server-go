@@ -5,6 +5,7 @@ import (
 	"slices"
 	"time"
 
+	"github.com/apron-chat/apron-server-go/apron/internal/push"
 	"github.com/apron-chat/apron-server-go/apron/internal/roomlog"
 )
 
@@ -36,9 +37,6 @@ import (
 const (
 	maxUnread     = 999
 	maxUnreadScan = 5000
-	// badgeDelay is how long a user's badge pushes wait, so that one push
-	// carries the count after a burst of changes.
-	badgeDelay = 2 * time.Second
 )
 
 // readPositionLocked is the log_id after which messages in r are unread for
@@ -226,31 +224,24 @@ func (s *Server) messageUnreadLocked(m *messageState, previous *roomlog.Message,
 	}
 }
 
-// scheduleBadgeLocked sends u's badge pushes after badgeDelay, when u has a
-// registration with scope badge (§4.9). Later changes within the delay ride
-// along. Nothing is scheduled once the server is shutting down.
-func (s *Server) scheduleBadgeLocked(u *userState) {
-	if s.closed || u.badgeTimer != nil || !slices.ContainsFunc(s.pushes.Of(u.id), (*pushRegistration).TakesBadges) {
+// scheduleBadgeLocked sends u's badge pushes after push.BadgeDelay, when
+// u has a registration with scope badge (§4.9). Later changes within the
+// delay ride along. Nothing is scheduled once the server is shutting down
+// (push.Table.Stop).
+func (s *Server) scheduleBadgeLocked(u *userState) { s.pushes.ScheduleBadge(u.id) }
+
+// badgeDue sends the badge pushes of the user id once they have waited,
+// unless they were canceled since (push.Table.TakeBadge), or the server
+// is closed.
+func (s *Server) badgeDue(id string, b *push.PendingBadge) {
+	s.mu.Lock()
+	defer s.unlock()
+	if !s.pushes.TakeBadge(id, b) || s.closed {
 		return
 	}
-	s.badges.Add(1)
-	u.badgeTimer = time.AfterFunc(s.badgeDelay, func() {
-		defer s.badges.Done()
-		s.mu.Lock()
-		defer s.unlock()
-		u.badgeTimer = nil
-		if !s.closed && s.users.Get(u.id) == u {
-			s.badgeLocked(u, time.Now())
-		}
-	})
-}
-
-// stopBadgeLocked cancels u's pending badge pushes.
-func (s *Server) stopBadgeLocked(u *userState) {
-	if u.badgeTimer != nil && u.badgeTimer.Stop() {
-		s.badges.Done()
+	if u := s.users.Get(id); u != nil {
+		s.badgeLocked(u, time.Now())
 	}
-	u.badgeTimer = nil
 }
 
 // badgeLocked sends a badge push (§4.9), {push_id, unread} without a

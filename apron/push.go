@@ -60,14 +60,14 @@ const (
 var pushIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
 
 // removePushLocked forgets a registration, if it is still the one kept. A
-// user left without registrations has no unread counts kept.
+// user left without registrations has no unread counts kept, nor badge
+// push pending (push.Table.Remove).
 func (s *Server) removePushLocked(p *pushRegistration) {
 	if !s.pushes.Remove(p) || s.pushes.Count(p.User) > 0 {
 		return
 	}
 	if u := s.users.Get(p.User); u != nil {
 		u.unread = nil
-		s.stopBadgeLocked(u)
 	}
 }
 

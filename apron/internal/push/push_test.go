@@ -21,7 +21,7 @@ func TestWake(t *testing.T) {
 
 func TestTable(t *testing.T) {
 	now := time.Now()
-	table := NewTable()
+	table := NewTable(nil)
 	a := New(Registration{User: "ada", Kind: "relay", URL: "https://b.example", Renewed: now})
 	b := New(Registration{User: "ada", Kind: "relay", URL: "https://a.example", Renewed: now.Add(-Expiry)})
 	c := New(Registration{User: "bob", Kind: "webpush", URL: "https://a.example", Wake: Badge, Renewed: now})
@@ -97,7 +97,7 @@ func TestDay(t *testing.T) {
 // Restore keeps what keep accepts, deletes the others from the store, and
 // keeps a registration stored by its url alone by its key.
 func TestRestore(t *testing.T) {
-	table := NewTable()
+	table := NewTable(nil)
 	err := table.Restore(map[string]jsontext.Value{
 		"https://old.example":     jsontext.Value(`{"user":"ada","kind":"relay","url":"https://old.example","wake":["mentions"]}`),
 		"gone https://x.example":  jsontext.Value(`{"user":"gone","kind":"relay","url":"https://x.example","wake":[]}`),

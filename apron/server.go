@@ -220,10 +220,6 @@ type Server struct {
 	// vapid is the webpush key (§4.9): Config's, else storedVAPID's.
 	vapid       *webpush.VAPIDKey
 	storedVAPID webpush.StoredKey
-	// badgeDelay is how long badge pushes wait to coalesce the changes to
-	// one user's unread count; badges counts the waits in progress.
-	badgeDelay time.Duration
-	badges     sync.WaitGroup
 	// stopped ends the background sweep of expired push registrations.
 	stopped chan struct{}
 
@@ -289,12 +285,10 @@ func Open(config Config) (*Server, error) {
 		roleHolders: make(map[string][]Principal),
 		embeds:      embeds.New[*embedState](),
 		emoji:       emoji.NewCatalog[*embedState](),
-		pushes:      push.NewTable(),
 		sessions:    sessions.New[*userState](),
 		devices:     devices.New[*userState](),
 		invitations: invitations.New(),
 		proposals:   proposals.NewTable(),
-		badgeDelay:  badgeDelay,
 		stopped:     make(chan struct{}),
 
 		commands:   coreCommands(),
@@ -303,6 +297,7 @@ func Open(config Config) (*Server, error) {
 		logger:     config.Logger,
 	}
 	s.services = services.New(s.serviceExpired)
+	s.pushes = push.NewTable(s.badgeDue)
 	if s.logger == nil {
 		s.logger = slog.Default()
 	}
@@ -509,6 +504,7 @@ func (s *Server) Shutdown(ctx context.Context) error {
 		// Pending badge pushes would only be dropped once they fire, and
 		// the ends of timed mutes and coalesced statuses would find the
 		// server closed: none is kept waiting past it.
+		s.pushes.Stop()
 		for _, u := range s.users.All() {
 			s.stopTimersLocked(u)
 		}
@@ -523,7 +519,7 @@ func (s *Server) Shutdown(ctx context.Context) error {
 		if s.wire != nil {
 			_ = s.wire.Shutdown(ctx)
 		}
-		s.badges.Wait()
+		s.pushes.Wait()
 		s.push.Wait()
 		s.schemeWork.Wait()
 		// Extensions may keep values as they stop, so the store closes

@@ -247,7 +247,7 @@ func TestStoredAccountsAreStoredAgain(t *testing.T) {
 
 	expectUsersStoredAgain(t, stored[entryUser], stored[entryUser])
 
-	pushTable := push.NewTable()
+	pushTable := push.NewTable(nil)
 	if err := pushTable.Restore(stored[push.EntryKind], func(*push.Registration) bool { return true }); err != nil {
 		t.Fatal(err)
 	}

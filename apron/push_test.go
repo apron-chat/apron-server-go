@@ -87,7 +87,7 @@ func (relay *testRelay) pushes(t *testing.T, app *Server, c *testClient) []relay
 	app.mu.Lock()
 	app.mu.Unlock()
 	c.drain(t)
-	app.badges.Wait()
+	app.pushes.Wait()
 	app.push.Wait()
 	// A later Add to either WaitGroup must happen after these Waits, and a
 	// server timer, such as a mute running out, can add one at any time. The
@@ -119,7 +119,7 @@ func pushTestServer(t *testing.T) (*Server, *httptest.Server) {
 	config := DefaultConfig()
 	config.AllowInsecurePush = true
 	app, httpServer := newTestServer(t, config)
-	app.badgeDelay = 0
+	app.pushes.SetBadgeDelay(0)
 	return app, httpServer
 }
 
@@ -157,7 +157,7 @@ func addPush(app *Server, u *userState, p pushRegistration) *pushRegistration {
 
 // pushEntries are the store entries of registrations.
 func pushEntries(registrations ...*pushRegistration) []store.Entry {
-	table := push.NewTable()
+	table := push.NewTable(nil)
 	for _, p := range registrations {
 		table.Add(p)
 	}
@@ -569,12 +569,12 @@ func serverMessage(t *testing.T, app *Server, userID string) int64 {
 	return logID
 }
 
-// Badge pushes wait badgeDelay, so one push carries the count after a burst
+// Badge pushes wait push.BadgeDelay, so one push carries the count after a burst
 // of changes; a guest's retirement sends none.
 func TestBadgePushesCoalesce(t *testing.T) {
 	relay := newTestRelay(t)
 	app, httpServer := pushTestServer(t)
-	app.badgeDelay = 300 * time.Millisecond
+	app.pushes.SetBadgeDelay(300 * time.Millisecond)
 	clients := dialGroup(t, httpServer, 2)
 	a, b := clients[0], clients[1]
 	b.result(t, "push_register", "phone", map[string]any{"kind": "relay", "url": relay.URL + "/phone", "wake": []any{"badge"}})
@@ -604,17 +604,18 @@ func TestBadgePushesCoalesce(t *testing.T) {
 	}
 }
 
-// Shutdown cancels pending badge pushes rather than waiting out badgeDelay.
+// Shutdown cancels pending badge pushes rather than waiting out
+// push.BadgeDelay.
 func TestShutdownCancelsPendingBadges(t *testing.T) {
 	relay := newTestRelay(t)
 	app, httpServer := pushTestServer(t)
-	app.badgeDelay = time.Hour
+	app.pushes.SetBadgeDelay(time.Hour)
 	a := dialTestClient(t, httpServer)
 	dora := addAccount(t, app, "dora", a)
 	addPush(app, dora, pushRegistration{URL: relay.URL + "/dora", Wake: wakeBadge})
 	save(t, a, "post", map[string]any{"body": map[string]any{"text": "hi"}})
 	app.mu.Lock()
-	pending := dora.badgeTimer != nil
+	pending := app.pushes.BadgePending(dora.id)
 	app.mu.Unlock()
 	if !pending {
 		t.Fatal("no badge push pending")
@@ -1287,7 +1288,7 @@ func TestLeavingPrivateRoomRecountsThreads(t *testing.T) {
 func TestShutdownStopsTimers(t *testing.T) {
 	relay := newTestRelay(t)
 	app, httpServer := pushTestServer(t)
-	app.badgeDelay = time.Hour
+	app.pushes.SetBadgeDelay(time.Hour)
 	a := dialTestClient(t, httpServer)
 	dora := addAccount(t, app, "dora", a)
 	addPush(app, dora, pushRegistration{URL: relay.URL + "/dora", Wake: wakeBadge})
@@ -1314,7 +1315,7 @@ func TestShutdownStopsTimers(t *testing.T) {
 	defer app.mu.Unlock()
 	app.scheduleBadgeLocked(dora)
 	app.scheduleMuteLocked(dora)
-	if dora.muteTimer != nil || len(dora.roomMuteTimers) != 0 || dora.statusTimer != nil || dora.badgeTimer != nil {
-		t.Fatalf("timers after shutdown: mute %v, room mutes %v, status %v, badge %v", dora.muteTimer, dora.roomMuteTimers, dora.statusTimer, dora.badgeTimer)
+	if dora.muteTimer != nil || len(dora.roomMuteTimers) != 0 || dora.statusTimer != nil || app.pushes.BadgePending(dora.id) {
+		t.Fatalf("timers after shutdown: mute %v, room mutes %v, status %v, badge %v", dora.muteTimer, dora.roomMuteTimers, dora.statusTimer, app.pushes.BadgePending(dora.id))
 	}
 }

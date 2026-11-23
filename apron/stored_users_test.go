@@ -93,7 +93,7 @@ func TestStoredPushesAreStoredAgain(t *testing.T) {
 	if len(entries) == 0 {
 		t.Fatal("no registrations")
 	}
-	table := push.NewTable()
+	table := push.NewTable(nil)
 	if err := table.Restore(entries, func(*push.Registration) bool { return true }); err != nil {
 		t.Fatal(err)
 	}

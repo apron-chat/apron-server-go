@@ -70,12 +70,10 @@ type userState struct {
 	muteTimer      *time.Timer
 	roomMuteTimers map[string]*time.Timer
 	// unread holds the counts known per room while the user has push
-	// registrations (§4.9), and badgeTimer a pending badge push
-	// (unread.go); pushDay counts the pushes delivered to the user today,
-	// against maxPushesPerUserDay.
-	unread     map[string]int
-	badgeTimer *time.Timer
-	pushDay    push.Day
+	// registrations (§4.9) (unread.go); pushDay counts the pushes delivered
+	// to the user today, against maxPushesPerUserDay.
+	unread  map[string]int
+	pushDay push.Day
 }
 
 // newUserState returns a new user named name.
@@ -305,8 +303,8 @@ func (s *Server) retireLocked(u *userState) {
 	s.users.Touch(u.id)
 }
 
-// stopTimersLocked stops u's timers: the ends of its timed mutes, its
-// coalesced status, and its pending badge pushes.
+// stopTimersLocked stops u's timers: the ends of its timed mutes, and its
+// coalesced status.
 func (s *Server) stopTimersLocked(u *userState) {
 	if u.muteTimer != nil {
 		u.muteTimer.Stop()
@@ -320,7 +318,6 @@ func (s *Server) stopTimersLocked(u *userState) {
 		timer.Stop()
 		delete(u.roomMuteTimers, id)
 	}
-	s.stopBadgeLocked(u)
 }
 
 // send queues a frame to every connection of the user.
