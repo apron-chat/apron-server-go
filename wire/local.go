@@ -83,8 +83,8 @@ type Local struct {
 }
 
 // localOpenStall is how long Server.Local waits for OnConnect and Hello
-// before it logs that it does.
-const localOpenStall = 10 * time.Second
+// before it logs that it does. Tests shorten it.
+var localOpenStall = 10 * time.Second
 
 type localReply struct {
 	result jsontext.Value
@@ -141,8 +141,9 @@ func (s *Server) Local(options LocalOptions) (*Local, error) {
 	c.rt.Start(false)
 	// A caller that holds a lock OnConnect or Hello takes waits for
 	// itself forever, which no runtime check tells, so the wait is logged.
-	stalled := time.AfterFunc(localOpenStall, func() {
-		s.logger().Warn("wire: Server.Local is still waiting for OnConnect and Hello; does its caller hold a lock they take?", "user_id", options.User.UserID, "waited", localOpenStall)
+	stall := localOpenStall
+	stalled := time.AfterFunc(stall, func() {
+		s.logger().Warn("wire: Server.Local is still waiting for OnConnect and Hello; does its caller hold a lock they take?", "user_id", options.User.UserID, "waited", stall)
 	})
 	err := s.openLocal(ctx, c)
 	stalled.Stop()
