@@ -171,15 +171,8 @@ func (b backend) Hello(_ context.Context, wc *wire.Conn) wire.ServerInfo {
 // identity's in the same hold (attachLocked), so that every notification
 // it sends after the result reaches the connection. The schemes read
 // params of their own, such as a ceremony's, from the request's.
-func (b backend) Auth(ctx context.Context, wc *wire.Conn, p wire.AuthParams, reply wire.Reply[wire.AuthResult]) error {
-	var params wire.Fields
-	if err := json.Unmarshal(p.Raw, &params); err != nil {
-		return internalError()
-	}
-	return b.serve(ctx, wc, func(c *client) *Error {
-		_, err := b.s.authenticate(c, request{params: params, auth: reply})
-		return err
-	})
+func (b backend) Auth(ctx context.Context, wc *wire.Conn, _ wire.AuthParams, reply wire.Reply[wire.AuthResult]) error {
+	return b.serve(ctx, wc, func(c *client) *Error { return b.s.authenticate(c, reply) })
 }
 
 // refresh brings a duplicate's result up to date (§1.2): `me` answers with

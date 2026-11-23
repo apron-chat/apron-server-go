@@ -109,21 +109,21 @@ func (s *Server) restoreSchemesLocked() error {
 // authenticate runs an auth request (§3.2): the guest and token schemes
 // under s.mu, and the others by their scheme, outside it, whose result is
 // applied under it.
-func (s *Server) authenticate(c *client, req request) (any, *Error) {
+func (s *Server) authenticate(c *client, reply wire.Reply[wire.AuthResult]) *Error {
 	s.mu.Lock()
 	if c.conn.Closing() {
 		s.unlock()
-		return nil, connectionClosing()
+		return connectionClosing()
 	}
 	if c.restrictedService() {
 		// It may not add to the account, nor become another.
 		s.unlock()
-		return nil, serviceRefusal()
+		return serviceRefusal()
 	}
-	name, err := parseString(req.params, "scheme", required)
+	name, err := parseString(authParams(reply), "scheme", required)
 	if err != nil {
 		s.unlock()
-		return nil, err
+		return err
 	}
 	// A scheme this document defines but the server does not offer is
 	// unsupported (§3.2), whatever else the request holds.
@@ -131,7 +131,7 @@ func (s *Server) authenticate(c *client, req request) (any, *Error) {
 	switch {
 	case name == "guest" && !s.guestsAllowedLocked():
 		err = &Error{Code: CodeUnsupported, Message: "This server has no guests; sign in with an account"}
-	case name == "token" && len(s.schemes) == 0 && !presentsServiceToken(req):
+	case name == "token" && len(s.schemes) == 0 && !presentsServiceToken(reply):
 		err = &Error{Code: CodeUnsupported, Message: "This server has no sign-in sessions; use guest"}
 	case name == "guest", name == "token", scheme != nil:
 	case disabledSchemes[name] != "":
@@ -146,7 +146,7 @@ func (s *Server) authenticate(c *client, req request) (any, *Error) {
 	// invalid_params, with any scheme. One that could be, but that this
 	// server would not assign, is ignored where the scheme assigns one.
 	if err == nil {
-		d := req.params.Decoder()
+		d := authParams(reply).Decoder()
 		if requested := d.String("user_id", optional); d.Has("user_id") && d.Err() == nil && !validID(requested) {
 			d.Fail(invalidParams("user_id must not be empty, or contain whitespace or control characters"))
 		}
@@ -154,27 +154,27 @@ func (s *Server) authenticate(c *client, req request) (any, *Error) {
 	}
 	if err != nil {
 		s.unlock()
-		return nil, err
+		return err
 	}
 	switch name {
 	case "guest":
 		defer s.unlock()
-		return s.authenticateGuestLocked(c, req)
+		return s.authenticateGuestLocked(c, reply)
 	case "token":
 		defer s.unlock()
-		return s.authenticateToken(c, req)
+		return s.authenticateToken(c, reply)
 	}
-	requestedName, requested, err := parseRequested(req)
+	requestedName, requested, err := parseRequested(reply)
 	if err != nil {
 		s.unlock()
-		return nil, err
+		return err
 	}
-	presented, err := s.presentedInvitationLocked(c, req)
+	presented, err := s.presentedInvitationLocked(c, reply)
 	if err != nil {
 		s.unlock()
-		return nil, err
+		return err
 	}
-	r := s.authRequestLocked(c, req, scheme, requestedName, requested)
+	r := s.authRequestLocked(c, reply, scheme, requestedName, requested)
 	if presented != nil {
 		r.Invitation = &authn.Invitation{ID: presented.ID, Name: presented.Name, UserID: presented.UserID}
 	}
@@ -182,39 +182,44 @@ func (s *Server) authenticate(c *client, req request) (any, *Error) {
 
 	result, schemeErr := scheme.Auth(s.requestContext(c), r)
 	if schemeErr != nil {
-		return nil, authError(schemeErr)
+		return authError(schemeErr)
 	}
-	if reply, ok := result.(*authn.Reply); ok && reply != nil {
+	if own, ok := result.(*authn.Reply); ok && own != nil {
 		// A scheme's own result, such as a ceremony's options, signs
 		// nothing in, and names neither you nor token.
-		answer := wire.AuthResult{Extra: resultFields(reply.Result)}
-		req.sendAuth(answer)
-		return answer, nil
+		_ = reply.Send(wire.AuthResult{Extra: resultFields(own.Result)})
+		return nil
 	}
 	s.mu.Lock()
 	defer s.unlock()
 	if c.conn.Closing() {
-		return nil, connectionClosing()
+		return connectionClosing()
 	}
 	switch result := result.(type) {
 	case *authn.Approve:
 		if result != nil {
-			return s.approveLocked(c, req, result.Token, result.State, requestedName, requested)
+			return s.approveLocked(c, reply, result.Token, result.State, requestedName, requested)
 		}
 	case *authn.SignIn:
 		if result != nil && result.Invitation != "" {
-			return s.enrollLocked(c, req, scheme, result.Proof, result.Invitation, result.AnyOrigin)
+			return s.enrollLocked(c, reply, scheme, result.Proof, result.Invitation, result.AnyOrigin)
 		}
 		if result != nil {
-			return s.signInProvenLocked(c, req, scheme, result.Proof, result.Create, result.AnyOrigin)
+			return s.signInProvenLocked(c, reply, scheme, result.Proof, result.Create, result.AnyOrigin)
 		}
 	case *authn.Add:
 		if result != nil {
-			return s.addProvenLocked(c, req, scheme, result.Proof, result.Session, result.AnyOrigin)
+			return s.addProvenLocked(c, reply, scheme, result.Proof, result.Session, result.AnyOrigin)
 		}
 	}
 	s.logger.Error("a sign-in scheme answered with no result", "scheme", name, "result", fmt.Sprintf("%T", result))
-	return nil, internalError()
+	return internalError()
+}
+
+// authParams are an auth request's params, as they arrived, which the
+// schemes read too.
+func authParams(reply wire.Reply[wire.AuthResult]) wire.Fields {
+	return reply.Request().Fields()
 }
 
 // resultFields are the fields of a scheme's own result, an object, which
@@ -230,17 +235,17 @@ func resultFields(result any) map[string]any {
 
 // presentsServiceToken reports whether a token auth presents a bot's
 // service token, which signs in on a server without sign-in schemes too.
-func presentsServiceToken(req request) bool {
-	token, _ := parseString(req.params, "token", optional)
+func presentsServiceToken(reply wire.Reply[wire.AuthResult]) bool {
+	token, _ := parseString(authParams(reply), "token", optional)
 	return strings.HasPrefix(token, serviceTokenPrefix)
 }
 
 // authenticateGuestLocked signs the connection in as a new guest, or
 // answers with the identity a signed-in connection has.
-func (s *Server) authenticateGuestLocked(c *client, req request) (any, *Error) {
-	name, requested, err := parseRequested(req)
+func (s *Server) authenticateGuestLocked(c *client, reply wire.Reply[wire.AuthResult]) *Error {
+	name, requested, err := parseRequested(reply)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	if c.user != nil {
 		// Guest auth on a signed-in connection answers with the identity it
@@ -248,21 +253,22 @@ func (s *Server) authenticateGuestLocked(c *client, req request) (any, *Error) {
 		// sign-in and sends nothing after its result (§4.5).
 		you := c.user.you()
 		result := wire.AuthResult{You: &you}
-		req.sendAuth(result)
-		return result, nil
+		_ = reply.Send(result)
+		return nil
 	}
 	user := newUserState(s.assignUserIDLocked(requested), normalizeName(name))
 	s.users[user.id] = user
 	s.touchUser(user.id)
 	// A new guest joins the default room, so their room list is not empty.
-	return s.switchUserLocked(c, req, user, "", true, true), nil
+	s.switchUserLocked(c, reply, user, "", true, true)
+	return nil
 }
 
 // authRequestLocked is the copy of an auth request a scheme sees.
-func (s *Server) authRequestLocked(c *client, req request, scheme authn.Scheme, name, requested string) *authn.Request {
+func (s *Server) authRequestLocked(c *client, reply wire.Reply[wire.AuthResult], scheme authn.Scheme, name, requested string) *authn.Request {
 	now := time.Now()
 	r := &authn.Request{
-		Params: maps.Clone(req.params), Name: normalizeName(name), UserID: requested,
+		Params: maps.Clone(authParams(reply)), Name: normalizeName(name), UserID: requested,
 		Origin: c.origin, BaseURL: c.baseURL, ClientKey: c.clientKey, Now: now,
 		Conn:   &schemeConn{s: s, c: c, scheme: scheme, name: name, userID: requested, now: now},
 		Guests: s.guestsAllowedLocked(),
@@ -322,29 +328,29 @@ func commit(proof authn.Proof) (jsontext.Value, *Error) {
 // a bearer token, which anyOrigin lets resume from any origin; otherwise
 // with the account as you. Every check, the allowlist's included, comes
 // before anything changes (§3.2.2).
-func (s *Server) addProvenLocked(c *client, req request, scheme authn.Scheme, proof authn.Proof, session, anyOrigin bool) (any, *Error) {
+func (s *Server) addProvenLocked(c *client, reply wire.Reply[wire.AuthResult], scheme authn.Scheme, proof authn.Proof, session, anyOrigin bool) *Error {
 	id, err := identityOf(scheme, proof)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	label := scheme.Label()
 	account := c.user
 	switch owner := s.accounts[id]; {
 	case account == nil:
-		return nil, &Error{Code: CodeDenied, Message: "Sign in before adding a " + label}
+		return &Error{Code: CodeDenied, Message: "Sign in before adding a " + label}
 	case owner != nil && owner != account:
-		return nil, &Error{Code: CodeDenied, Message: "This " + label + " belongs to an account"}
+		return &Error{Code: CodeDenied, Message: "This " + label + " belongs to an account"}
 	case account.identities[id.Scheme] != "" && account.identities[id.Scheme] != id.Subject:
-		return nil, &Error{Code: CodeDenied, Message: "This account has another " + label + " already"}
+		return &Error{Code: CodeDenied, Message: "This account has another " + label + " already"}
 	case !s.admittedWithLocked(account, id):
-		return nil, notAdmitted()
+		return notAdmitted()
 	}
 	if _, manages := scheme.(authn.Credentials); manages && account.identities[id.Scheme] != "" && !s.config.AddCredentialWithoutReauth {
 		// Another passkey for an account that has one: a stolen session
 		// token must not add a way back in, nor one it could then sign in
 		// with to pass as the owner.
 		if err := s.reauthenticatedLocked(c); err != nil {
-			return nil, err
+			return err
 		}
 	}
 	// Only a guest's first identity counts as proof of the account: it is
@@ -352,7 +358,7 @@ func (s *Server) addProvenLocked(c *client, req request, scheme authn.Scheme, pr
 	wasGuest := !account.account()
 	record, err := commit(proof)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	becomesAccount := !account.account()
 	before := account.views()
@@ -372,38 +378,37 @@ func (s *Server) addProvenLocked(c *client, req request, scheme authn.Scheme, pr
 	}
 	if session {
 		now := time.Now()
-		result, err := s.signInLocked(c, req, account, now, false, false, anyOrigin)
+		err := s.signInLocked(c, reply, account, now, false, false, anyOrigin)
 		if err == nil {
 			s.provedLocked(c, scheme, proof, now, wasGuest)
 		}
-		return result, err
+		return err
 	}
 	s.provedLocked(c, scheme, proof, time.Now(), wasGuest)
 	you := account.you()
-	result := wire.AuthResult{You: &you}
-	req.sendAuth(result)
-	return result, nil
+	_ = reply.Send(wire.AuthResult{You: &you})
+	return nil
 }
 
 // signInProvenLocked signs the connection in to the account of an identity
 // a scheme proved, making one if none has it and the proof may (create),
 // with a token that anyOrigin lets resume from any origin. Every check, the
 // allowlist's included, comes before anything changes (§3.2.2).
-func (s *Server) signInProvenLocked(c *client, req request, scheme authn.Scheme, proof authn.Proof, create, anyOrigin bool) (any, *Error) {
+func (s *Server) signInProvenLocked(c *client, reply wire.Reply[wire.AuthResult], scheme authn.Scheme, proof authn.Proof, create, anyOrigin bool) *Error {
 	user, created, err := s.provenAccountLocked(scheme, proof, create)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	now := time.Now()
 	// A new account joins the default room, as a new guest does, after
 	// the result (§3.2.2). Signing in again as the user the connection is
 	// signed in as changes no user: it is no sign-in (§4.5), but it is a
 	// reauthentication.
-	result, err := s.signInLocked(c, req, user, now, created || c.user != user, created, anyOrigin)
+	err = s.signInLocked(c, reply, user, now, created || c.user != user, created, anyOrigin)
 	if err == nil {
 		s.provedLocked(c, scheme, proof, now, true)
 	}
-	return result, err
+	return err
 }
 
 // provenAccountLocked returns the account of an identity a scheme proved,
@@ -496,10 +501,10 @@ func (s *Server) setGrantLocked(u *userState, scheme string, roles []string) boo
 // a connection signed in to the proposing account, adds the identity to
 // that account and returns it as you. A token presented on a connection that may
 // not approve it is denied, and its proposal stays for one that may.
-func (s *Server) approveLocked(c *client, req request, token, state, name, requested string) (any, *Error) {
+func (s *Server) approveLocked(c *client, reply wire.Reply[wire.AuthResult], token, state, name, requested string) *Error {
 	p := s.proposalLocked(c, token, state, time.Now())
 	if p == nil || p.Proof == nil {
-		return nil, &Error{Code: CodeDenied, Message: "The code is invalid or expired; ask for a new one"}
+		return &Error{Code: CodeDenied, Message: "The code is invalid or expired; ask for a new one"}
 	}
 	proof := *p.Proof
 	if p.Add {
@@ -507,17 +512,17 @@ func (s *Server) approveLocked(c *client, req request, token, state, name, reque
 		// someone could lead a victim to add the victim's identity to the
 		// other person's account.
 		if c.user == nil || c.user.id != p.AccountID {
-			return nil, &Error{Code: CodeDenied, Message: "Open this link where the account that asked for it is signed in"}
+			return &Error{Code: CodeDenied, Message: "Open this link where the account that asked for it is signed in"}
 		}
 		s.proposals.Drop(p)
 		// An addition names nobody: the account keeps its name.
 		proof.Name, proof.UserID = "", ""
-		return s.addProvenLocked(c, req, p.Scheme, proof, false, false)
+		return s.addProvenLocked(c, reply, p.Scheme, proof, false, false)
 	}
 	// A sign-in authenticates a connection that is not signed in; the
 	// proposal stays for one that is not.
 	if c.user != nil {
-		return nil, &Error{Code: CodeDenied, Message: "Sign-in codes work on a connection that is not signed in"}
+		return &Error{Code: CodeDenied, Message: "Sign-in codes work on a connection that is not signed in"}
 	}
 	own := c.proposal == p
 	s.proposals.Drop(p)
@@ -529,7 +534,7 @@ func (s *Server) approveLocked(c *client, req request, token, state, name, reque
 		name, requested = cmp.Or(name, p.Name), cmp.Or(requested, p.UserID)
 	}
 	proof.Name, proof.UserID = cmp.Or(name, proof.Name), cmp.Or(requested, proof.UserID)
-	return s.signInProvenLocked(c, req, p.Scheme, proof, true, false)
+	return s.signInProvenLocked(c, reply, p.Scheme, proof, true, false)
 }
 
 // mayApproveLocked reports whether token is one that proposalLocked would

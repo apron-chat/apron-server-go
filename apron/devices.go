@@ -105,20 +105,21 @@ func (s *Server) revokeDeviceLocked(c *client, old, replacement [32]byte) {
 // authenticateDeviceLocked signs the connection in with a device token,
 // from any origin or none. The result carries no session token: the device
 // keeps its own.
-func (s *Server) authenticateDeviceLocked(c *client, req request, token string) (any, *Error) {
+func (s *Server) authenticateDeviceLocked(c *client, reply wire.Reply[wire.AuthResult], token string) *Error {
 	key := sha256.Sum256([]byte(token))
 	device, ok := s.devices.Get(key)
 	if !ok {
-		return nil, &Error{Code: CodeDenied, Message: "This device token is not valid; get a new one with /invite-device on a signed-in device"}
+		return &Error{Code: CodeDenied, Message: "This device token is not valid; get a new one with /invite-device on a signed-in device"}
 	}
 	// A refused sign-in changes nothing (§3.2.2).
 	if err := s.admitLocked(device.User); err != nil {
-		return nil, err
+		return err
 	}
 	c.device = key
 	c.service, c.serviceManage = [32]byte{}, false
 	c.token, c.credential = [32]byte{}, ""
-	return s.switchUserLocked(c, req, device.User, "", c.user != device.User, false), nil
+	s.switchUserLocked(c, reply, device.User, "", c.user != device.User, false)
+	return nil
 }
 
 // apronLink is a link that any Apron app opens to sign in to server with

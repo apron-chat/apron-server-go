@@ -7,6 +7,7 @@ import (
 
 	"github.com/apron-chat/apron-server-go/apron/internal/devices"
 	"github.com/apron-chat/apron-server-go/apron/internal/sessions"
+	"github.com/apron-chat/apron-server-go/wire"
 )
 
 // session is a bearer token's sign-in (§3.2), which a sessions.Table
@@ -24,14 +25,14 @@ type session = sessions.Session[*userState]
 // a sign-in (§4.5). joinDefault joins a new account to the default room.
 // The token resumes from the connection's origin, or with anyOrigin from
 // any.
-func (s *Server) signInLocked(c *client, req request, user *userState, now time.Time, signIn, joinDefault, anyOrigin bool) (any, *Error) {
+func (s *Server) signInLocked(c *client, reply wire.Reply[wire.AuthResult], user *userState, now time.Time, signIn, joinDefault, anyOrigin bool) *Error {
 	if err := s.admitLocked(user); err != nil {
-		return nil, err
+		return err
 	}
 	s.sessions.Delete(c.token)
 	token, key, err := s.newSessionLocked(user, c.origin, anyOrigin, now)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	c.token = key
 	c.service, c.serviceManage = [32]byte{}, false
@@ -39,7 +40,8 @@ func (s *Server) signInLocked(c *client, req request, user *userState, now time.
 	// device token the connection signed in with stays its own, so that
 	// replacing that token still closes it.
 	c.credential = ""
-	return s.switchUserLocked(c, req, user, token, signIn, joinDefault), nil
+	s.switchUserLocked(c, reply, user, token, signIn, joinDefault)
+	return nil
 }
 
 // newSessionLocked makes a bearer token that resumes user's sign-in from
@@ -55,8 +57,8 @@ func (s *Server) newSessionLocked(user *userState, origin string, anyOrigin bool
 
 // parseRequested parses the name and user_id that an auth request may request
 // for a new account.
-func parseRequested(req request) (name, requested string, err *Error) {
-	d := req.params.Decoder()
+func parseRequested(reply wire.Reply[wire.AuthResult]) (name, requested string, err *Error) {
+	d := authParams(reply).Decoder()
 	name = d.String("name", optional)
 	requested = d.String("user_id", optional)
 	if err := paramError(d.Err()); err != nil {
@@ -68,24 +70,24 @@ func parseRequested(req request) (name, requested string, err *Error) {
 // authenticateToken resumes a sign-in through the protocol's token scheme
 // (§3.2), signs in with a device token (devices.go), or approves a
 // proposal with its temporary token (§4.11.2). Called holding s.mu.
-func (s *Server) authenticateToken(c *client, req request) (any, *Error) {
+func (s *Server) authenticateToken(c *client, reply wire.Reply[wire.AuthResult]) *Error {
 	// Any token auth ends the schemes' pending work on the connection, such
 	// as a passkey ceremony, whether or not it signs in.
 	c.authStates = nil
 	now := time.Now()
-	d := req.params.Decoder()
+	d := authParams(reply).Decoder()
 	token := d.String("token", required)
 	if d.Err() == nil && token == "" {
 		d.Fail(invalidParams("token must be a non-empty string"))
 	}
 	if err := paramError(d.Err()); err != nil {
-		return nil, err
+		return err
 	}
 	if strings.HasPrefix(token, devices.Prefix) {
-		return s.authenticateDeviceLocked(c, req, token)
+		return s.authenticateDeviceLocked(c, reply, token)
 	}
 	if strings.HasPrefix(token, serviceTokenPrefix) {
-		return s.authenticateServiceLocked(c, req, token)
+		return s.authenticateServiceLocked(c, reply, token)
 	}
 	s.sessions.Prune(now)
 	key := sha256.Sum256([]byte(token))
@@ -94,18 +96,18 @@ func (s *Server) authenticateToken(c *client, req request) (any, *Error) {
 		// A temporary token approves its proposal with this scheme too, as
 		// a client presents the token of a link that isn't its own
 		// (§4.11.2), with the proposal's state or without (§4.11.3).
-		state, err := parseString(req.params, "state", optional)
+		state, err := parseString(authParams(reply), "state", optional)
 		if err != nil {
-			return nil, err
+			return err
 		}
 		if s.mayApproveLocked(c, token, state) {
-			name, requested, err := parseRequested(req)
+			name, requested, err := parseRequested(reply)
 			if err != nil {
-				return nil, err
+				return err
 			}
-			return s.approveLocked(c, req, token, state, name, requested)
+			return s.approveLocked(c, reply, token, state, name, requested)
 		}
-		return nil, &Error{Code: CodeDenied, Message: "Session expired; sign in again"}
+		return &Error{Code: CodeDenied, Message: "Session expired; sign in again"}
 	}
 	// Each successful resume renews the session for a full lifetime, so an
 	// active user is never forced back through a ceremony. The token itself is
@@ -113,7 +115,7 @@ func (s *Server) authenticateToken(c *client, req request) (any, *Error) {
 	// result carries the presented token, which clients keep as the latest.
 	// A refused sign-in changes nothing (§3.2.2).
 	if err := s.admitLocked(session.User); err != nil {
-		return nil, err
+		return err
 	}
 	session.Expires = now.Add(sessions.Lifetime)
 	s.sessions.Put(key, session)
@@ -122,5 +124,6 @@ func (s *Server) authenticateToken(c *client, req request) (any, *Error) {
 	c.service, c.serviceManage = [32]byte{}, false
 	// Resuming the user the connection is signed in as is no sign-in
 	// (§4.5), and sends nothing after its result.
-	return s.switchUserLocked(c, req, session.User, token, c.user != session.User, false), nil
+	s.switchUserLocked(c, reply, session.User, token, c.user != session.User, false)
+	return nil
 }

@@ -242,8 +242,8 @@ func (s *Server) revokeEnrollmentLocked(u *userState) {
 // presentedInvitationLocked returns the invitation an auth request presents
 // with "invitation", if any, and refuses one that is unknown, used, or
 // expired, or presented on a connection signed in already.
-func (s *Server) presentedInvitationLocked(c *client, req request) (*invitation, *Error) {
-	d := req.params.Decoder()
+func (s *Server) presentedInvitationLocked(c *client, reply wire.Reply[wire.AuthResult]) (*invitation, *Error) {
+	d := authParams(reply).Decoder()
 	token := wire.Opt(d, "invitation", d.String)
 	if err := paramError(d.Err()); err != nil || token == nil {
 		return nil, err
@@ -263,24 +263,24 @@ func (s *Server) presentedInvitationLocked(c *client, req request) (*invitation,
 // invitation, the identity, and the allowlist are checked again first,
 // since the scheme ran outside s.mu, and nothing changes unless all pass.
 // The reply waits until the change is stored.
-func (s *Server) enrollLocked(c *client, req request, scheme authn.Scheme, proof authn.Proof, invitationID string, anyOrigin bool) (any, *Error) {
-	inv, err := s.presentedInvitationLocked(c, req)
+func (s *Server) enrollLocked(c *client, reply wire.Reply[wire.AuthResult], scheme authn.Scheme, proof authn.Proof, invitationID string, anyOrigin bool) *Error {
+	inv, err := s.presentedInvitationLocked(c, reply)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	if inv == nil || inv.ID != invitationID {
-		return nil, &Error{Code: CodeDenied, Message: "This invitation is invalid, used, or expired"}
+		return &Error{Code: CodeDenied, Message: "This invitation is invalid, used, or expired"}
 	}
 	id, err := identityOf(scheme, proof)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	if s.accounts[id] != nil {
-		return nil, &Error{Code: CodeDenied, Message: "This " + scheme.Label() + " belongs to an account"}
+		return &Error{Code: CodeDenied, Message: "This " + scheme.Label() + " belongs to an account"}
 	}
 	record, err := commit(proof)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	now := time.Now()
 	user := newUserState(s.assignAccountIDLocked(cmp.Or(proof.UserID, inv.UserID)), normalizeName(cmp.Or(proof.Name, inv.Name)))
@@ -290,13 +290,12 @@ func (s *Server) enrollLocked(c *client, req request, scheme authn.Scheme, proof
 	s.setGrantLocked(user, id.Scheme, proof.Roles)
 	s.setGrantLocked(user, invitationGrant, inv.Roles)
 	s.grantRolesLocked(user)
-	s.invitations.Use(mustString(req.params, "invitation"))
+	s.invitations.Use(mustString(authParams(reply), "invitation"))
 	// Nothing the connection is sent from here on goes before the account
 	// and the used invitation are stored.
 	c.fenceLocked()
-	result, err := s.signInLocked(c, req, user, now, true, true, anyOrigin)
-	if err != nil {
-		return nil, err
+	if err := s.signInLocked(c, reply, user, now, true, true, anyOrigin); err != nil {
+		return err
 	}
 	s.provedLocked(c, scheme, proof, now, true)
 	for _, roomID := range inv.Rooms {
@@ -306,7 +305,7 @@ func (s *Server) enrollLocked(c *client, req request, scheme authn.Scheme, proof
 		}
 		s.joinLocked(user, r)
 	}
-	return result, nil
+	return nil
 }
 
 // mustString is a string param that parsing found already.

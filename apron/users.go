@@ -302,10 +302,9 @@ func (s *Server) roomNamedLocked(id string) bool {
 // signs in again as the same user, is not one, and is sent nothing after
 // its result. No room_update is sent for rooms the identity had already
 // joined: the client lists them with room_list.
-func (s *Server) switchUserLocked(c *client, req request, user *userState, token string, signIn, joinDefault bool) wire.AuthResult {
+func (s *Server) switchUserLocked(c *client, reply wire.Reply[wire.AuthResult], user *userState, token string, signIn, joinDefault bool) {
 	you := user.you()
-	result := wire.AuthResult{You: &you, Token: token}
-	req.sendAuth(result)
+	_ = reply.Send(wire.AuthResult{You: &you, Token: token})
 	// A connection that got only what signing in needs gets the whole
 	// server frame now (§3.1).
 	if !s.revealedLocked(c) {
@@ -318,7 +317,6 @@ func (s *Server) switchUserLocked(c *client, req request, user *userState, token
 	if signIn {
 		s.sendAfterAuthLocked(c)
 	}
-	return result
 }
 
 // attachLocked makes user the connection's identity and announces the

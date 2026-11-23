@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/apron-chat/apron-server-go/apron/internal/services"
+	"github.com/apron-chat/apron-server-go/wire"
 )
 
 // Service tokens are a bot's credentials for a client outside the server's
@@ -221,19 +222,20 @@ func (s *Server) revokeServicesOfLocked(u *userState) {
 
 // authenticateServiceLocked signs the connection in with a service token,
 // from any origin.
-func (s *Server) authenticateServiceLocked(c *client, req request, token string) (any, *Error) {
+func (s *Server) authenticateServiceLocked(c *client, reply wire.Reply[wire.AuthResult], token string) *Error {
 	key := sha256.Sum256([]byte(token))
 	t := s.services.Get(key)
 	if t == nil || !time.Now().Before(t.Expires) {
-		return nil, &Error{Code: CodeDenied, Message: "This service token is not valid"}
+		return &Error{Code: CodeDenied, Message: "This service token is not valid"}
 	}
 	if err := s.admitLocked(t.User); err != nil {
-		return nil, err
+		return err
 	}
 	c.service, c.serviceManage = key, t.Manage
 	// It signs in with no session, device token, or credential.
 	c.token, c.device, c.credential = [32]byte{}, [32]byte{}, ""
-	return s.switchUserLocked(c, req, t.User, "", c.user != t.User, false), nil
+	s.switchUserLocked(c, reply, t.User, "", c.user != t.User, false)
+	return nil
 }
 
 // restrictedService reports whether the connection signed in with a service
