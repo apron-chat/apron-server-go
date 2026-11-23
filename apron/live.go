@@ -148,11 +148,10 @@ func (s *Server) postPendingLocked(e *embedState) bool {
 	messageID := formatID(logID)
 	from := u.from()
 	snapshot := &roomlog.Message{MessageID: messageID, LogID: messageID, RoomID: r.ID(), From: from, Body: storedBody(body)}
-	if target := s.visibleMessageLocked(u, p.replyTo); target != nil && !r.RevealsTo(s.rooms.Get(target.roomID)) {
+	if target := s.visibleMessageLocked(u, p.replyTo); target != nil && !r.RevealsTo(s.rooms.Get(target.RoomID())) {
 		snapshot.ReplyTo = &roomlog.Ref{MessageID: p.replyTo}
 	}
-	m := &messageState{id: messageID, from: from, owner: u.id, reactions: make(map[string]reactionSet)}
-	s.messages[messageID] = m
+	m := s.newMessageLocked(messageID, from, u.id)
 	e.messageID = messageID
 	e.post = nil
 	s.touchEmbed(e.id)
@@ -465,7 +464,7 @@ func (s *Server) liveCommand(c *client, r *roomState, body map[string]any, kind,
 		return wire.CommandResult{}, invalidParams("/embed-%s takes no embeds: it makes its own", kind)
 	}
 	if replyTo != "" {
-		if target := s.visibleMessageLocked(c.user, replyTo); target != nil && r.RevealsTo(s.rooms.Get(target.roomID)) {
+		if target := s.visibleMessageLocked(c.user, replyTo); target != nil && r.RevealsTo(s.rooms.Get(target.RoomID())) {
 			return wire.CommandResult{}, &Error{Code: CodeDenied, Message: "A reply cannot quote a message that fewer people can see"}
 		}
 	}

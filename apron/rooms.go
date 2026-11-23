@@ -58,7 +58,7 @@ func (s *Server) visibleRoomLocked(u *userState, id string) *roomState {
 // visibleMessageLocked returns the message named id if u may see the room
 // it is in, or nil.
 func (s *Server) visibleMessageLocked(u *userState, id string) *messageState {
-	if m := s.messages[id]; m != nil && s.rooms.Get(m.roomID).VisibleTo(u) {
+	if m := s.messages[id]; m != nil && s.rooms.Get(m.RoomID()).VisibleTo(u) {
 		return m
 	}
 	return nil
@@ -780,7 +780,7 @@ func (s *Server) activity(c *client, p wire.ActivityParams) *Error {
 	// A cursor reads the room up to a message in it (§4.6): one naming a
 	// message elsewhere would be relayed to the room's members as a receipt,
 	// and its log_id would stand for the room's read position.
-	if m := s.visibleMessageLocked(c.user, readID); hasRead && (m == nil || m.roomID != roomID) {
+	if m := s.visibleMessageLocked(c.user, readID); hasRead && (m == nil || m.RoomID() != roomID) {
 		return invalidParams("Unknown read_message_id %q in room %q", readID, roomID)
 	}
 	// The relays this request causes are queued before package wire sends

@@ -137,23 +137,15 @@ func TestStoredShapesRoundTrip(t *testing.T) {
 	entries := loadStoredLog(t)
 	records := make(map[string]jsontext.Value)
 	stored := make(map[string]jsontext.Value)
+	messages := make(map[string]jsontext.Value)
 	for _, e := range entries {
-		var value any
 		switch e.Kind {
 		case roomlog.EntryKind:
 			records[e.ID] = e.Value
-			continue
 		case entryRoom:
 			stored[e.ID] = e.Value
-			continue
 		case entryMessage:
-			value = new(storedMessage)
-		}
-		if err := json.Unmarshal(e.Value, value); err != nil {
-			t.Fatalf("%s %s: %v", e.Kind, e.ID, err)
-		}
-		if again := encodeJSON(value); !bytes.Equal(again, e.Value) {
-			t.Errorf("%s %s is stored again as\n%s\nwant\n%s", e.Kind, e.ID, again, e.Value)
+			messages[e.ID] = e.Value
 		}
 	}
 	// Rooms are restored with every member they name, and stored again.
@@ -171,6 +163,16 @@ func TestStoredShapesRoundTrip(t *testing.T) {
 	restored, err := log.Restore(records, func(string) *roomlog.Timeline { return nil })
 	if err != nil {
 		t.Fatal(err)
+	}
+	// Messages are restored with their records, and stored again.
+	for id, value := range messages {
+		m, err := rooms.RestoreMessage(id, value, restored)
+		if err != nil || m == nil {
+			t.Fatalf("message %s: %v", id, err)
+		}
+		if again := rooms.MessageEntry(m).Value; !bytes.Equal(again, value) {
+			t.Errorf("message %s is stored again as\n%s\nwant\n%s", id, again, value)
+		}
 	}
 	for _, record := range restored {
 		entry := roomlog.Entry(record)

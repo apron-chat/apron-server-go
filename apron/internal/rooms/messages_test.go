@@ -1,0 +1,97 @@
+package rooms
+
+import (
+	"bytes"
+	"slices"
+	"strings"
+	"testing"
+
+	"github.com/apron-chat/apron-server-go/apron/internal/roomlog"
+	"github.com/apron-chat/apron-server-go/wire"
+)
+
+func snapshot(t *Table[*user], m *Message, room, text string) (*roomlog.Record, []*Room[*user], bool) {
+	logID := t.log.NextID()
+	return t.Snapshot(m, &roomlog.Message{
+		MessageID: m.ID(), LogID: roomlog.FormatID(logID), RoomID: room, From: m.From(),
+		Body: &roomlog.Body{Body: wire.Body{Text: text}},
+	}, logID)
+}
+
+// A snapshot names the previous one, and a move is logged in both rooms;
+// it names the room it left only to those who may see that room.
+func TestSnapshots(t *testing.T) {
+	table := newTable()
+	ada, bob := &user{id: "ada"}, &user{id: "bob"}
+	general := table.Create("general", nil, false, "", roomlog.RoomRecord{})
+	ops := table.Create("", nil, false, "", roomlog.RoomRecord{})
+	secret := table.Create("", nil, true, "", roomlog.RoomRecord{})
+	join(t, table, general, ada, bob)
+	join(t, table, secret, ada)
+	m := NewMessage("1", ada.from(), "ada")
+	first, rooms, moved := snapshot(table, m, general.ID(), "hi")
+	if moved || len(rooms) != 1 || strings.Contains(string(first.Raw), "prev_") || first.Message != "1" {
+		t.Fatalf("first snapshot %s in %d rooms, moved %v", first.Raw, len(rooms), moved)
+	}
+	if general.Active("ada") != first.ID {
+		t.Error("posting did not make the sender active")
+	}
+	second, rooms, moved := snapshot(table, m, ops.ID(), "moved")
+	if !moved || len(rooms) != 2 || m.RoomID() != ops.ID() || m.Arrival(ops.ID()) != second.ID || m.Arrival(general.ID()) != first.ID {
+		t.Fatalf("move %s in %d rooms, moved %v", second.Raw, len(rooms), moved)
+	}
+	current := m.Current()
+	if current.PrevLogID != roomlog.FormatID(first.ID) || current.PrevRoomID != general.ID() || current.Body.Text != "moved" {
+		t.Errorf("move snapshot %s", second.Raw)
+	}
+	// Out of a private room into one more people see, the snapshot does not
+	// name the private room.
+	hidden := NewMessage("2", ada.from(), "ada")
+	snapshot(table, hidden, secret.ID(), "secret")
+	if record, _, _ := snapshot(table, hidden, general.ID(), "out"); hidden.Current().PrevRoomID != "" {
+		t.Errorf("a move out of a private room names it: %s", record.Raw)
+	}
+	table.Redact(hidden)
+	for _, record := range hidden.Records() {
+		if !strings.Contains(string(record.Raw), `"deleted":true`) || strings.Contains(string(record.Raw), "body") {
+			t.Errorf("redacted snapshot %s", record.Raw)
+		}
+	}
+}
+
+// Reaction sets replace each other, are logged in the message's room, and
+// are stored with the message.
+func TestReactions(t *testing.T) {
+	table := newTable()
+	ada, bob := &user{id: "ada"}, &user{id: "bob"}
+	general := table.Create("general", nil, false, "", roomlog.RoomRecord{})
+	m := NewMessage("1", ada.from(), "ada")
+	snapshot(table, m, general.ID(), "hi")
+	record, r := table.React(m, bob.from(), []string{"👍", "❤️"})
+	if r != general || record.Kind != roomlog.KindReactions || general.Log().Latest() != record.ID {
+		t.Fatalf("reactions %s in %v", record.Raw, r)
+	}
+	if !m.SameEmojis("bob", []string{"❤️", "👍"}) || m.SameEmojis("bob", []string{"👍"}) {
+		t.Error("SameEmojis is not set equality")
+	}
+	table.React(m, ada.from(), []string{"👍"})
+	table.React(m, ada.from(), nil)
+	if got := m.Reactions(); len(got) != 1 || got[0].From.UserID != "bob" || !slices.Equal(m.Emojis("bob"), []string{"👍", "❤️"}) {
+		t.Errorf("reactions %+v", got)
+	}
+	entry := MessageEntry(m)
+	records := map[int64]*roomlog.Record{}
+	for _, record := range m.Records() {
+		records[record.ID] = record
+	}
+	restored, err := RestoreMessage(m.ID(), entry.Value, records)
+	if err != nil || restored == nil {
+		t.Fatal(err)
+	}
+	if again := MessageEntry(restored); !bytes.Equal(again.Value, entry.Value) {
+		t.Errorf("message is stored again as\n%s\nwant\n%s", again.Value, entry.Value)
+	}
+	if gone, err := RestoreMessage(m.ID(), entry.Value, nil); gone != nil || err != nil {
+		t.Error("a message without its records was restored")
+	}
+}

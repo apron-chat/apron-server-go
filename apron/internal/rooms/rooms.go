@@ -1,15 +1,17 @@
 // Package rooms keeps a server's rooms (PROTOCOL.md §4.2): each room's
 // current record and log, its place among threads, its members and their
 // read cursors (§4.6), and the rules of who may see a room (§4.2.4) and of
-// whom a record naming one room would show it to. It logs the room and
-// membership records it makes in the server's log (roomlog), tracks the
-// rooms it changes, and keeps them in a store.
+// whom a record naming one room would show it to; and each message's place
+// in them (Message): its room, its snapshots, and its reaction sets (§4.7).
+// It logs the records it makes in the server's log (roomlog): rooms,
+// memberships, message snapshots, and reactions. It tracks the rooms it
+// changes, and renders rooms and messages as store entries.
 //
 // A Table knows its members as values of the type U, such as the server's
 // user state, through the methods of Member. It knows nothing of
-// connections or delivery: the server sends what a change returns. It is
-// not safe for concurrent use: every method is called holding the server's
-// lock.
+// connections, delivery, or what a message says: the server builds
+// snapshots, and sends what a change returns. It is not safe for
+// concurrent use: every method is called holding the server's lock.
 package rooms
 
 import (

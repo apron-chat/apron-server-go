@@ -346,7 +346,7 @@ func (s *Server) writeAllowedLocked(e *embedState) bool {
 	if e.post != nil {
 		roomID = e.post.roomID
 	} else if m := s.messages[e.messageID]; m != nil {
-		roomID = m.roomID
+		roomID = m.RoomID()
 	}
 	if roomID == "" {
 		return true

@@ -4,39 +4,35 @@ import (
 	"encoding/json/v2"
 	"fmt"
 	"slices"
-	"sort"
 	"time"
 
 	"golang.org/x/time/rate"
 
 	uts51 "github.com/apron-chat/apron-server-go/apron/internal/emoji"
 	"github.com/apron-chat/apron-server-go/apron/internal/roomlog"
+	"github.com/apron-chat/apron-server-go/apron/internal/rooms"
 	"github.com/apron-chat/apron-server-go/wire"
 )
 
-type reactionSet struct {
-	from   roomlog.Author
-	emojis []string
-}
-
-// messageState is the current state of one message. Only non-empty reaction
-// sets are kept; clearing removes the user's entry.
+// messageState is a message as the rooms module keeps it (rooms.Message):
+// its room, sender, snapshots, and reaction sets; with what the server
+// keeps of it beyond them.
 type messageState struct {
-	id string
-	// from is the author identity of every snapshot.
-	from      roomlog.Author
-	logID     int64
-	owner     string
-	roomID    string
-	reactions map[string]reactionSet
-	// records are every logged snapshot, for redaction; the last is current.
-	records []*roomlog.Record
+	*rooms.Message
 	// cached is what push counting reads of the current snapshot, decoded
 	// once; nil until read, and after a new snapshot.
 	cached *messageInfo
 	// pushHeld is set while the push of a new message waits for its live
 	// append text to end (§4.8.5).
 	pushHeld bool
+}
+
+// newMessageLocked keeps a new message named id, which owner sends as
+// from, before its first snapshot.
+func (s *Server) newMessageLocked(id string, from roomlog.Author, owner string) *messageState {
+	m := &messageState{Message: rooms.NewMessage(id, from, owner)}
+	s.messages[id] = m
+	return m
 }
 
 // messageInfo is what unread counts (§4.9) read of a message's current
@@ -50,25 +46,18 @@ type messageInfo struct {
 // info returns what unread counts read of the current snapshot.
 func (m *messageState) info() *messageInfo {
 	if m.cached == nil {
-		snapshot := m.current()
+		snapshot := m.Current()
 		m.cached = &messageInfo{deleted: snapshot.Deleted, mentions: snapshot.Mentions(), replyTo: snapshot.ReplyID()}
 	}
 	return m.cached
-}
-
-// current decodes the message's current snapshot, a copy the caller owns.
-func (m *messageState) current() *roomlog.Message {
-	if snapshot := roomlog.DecodeMessage(m.records[len(m.records)-1].Raw); snapshot != nil {
-		return snapshot
-	}
-	return &roomlog.Message{MessageID: m.id}
 }
 
 // snapshot decodes the message's current snapshot as a JSON object, for
 // code that edits a body's embeds as objects (embeds.go), a copy the
 // caller owns.
 func (m *messageState) snapshot() map[string]any {
-	return decodeObject(m.records[len(m.records)-1].Raw)
+	records := m.Records()
+	return decodeObject(records[len(records)-1].Raw)
 }
 
 // storedBody is a body the server edited as a JSON object (bodyObject), as
@@ -154,8 +143,8 @@ func (s *Server) saveMessage(c *client, p wire.EditParams, reply wire.Reply[wire
 		if current == nil {
 			return invalidParams("Unknown message %q", messageID)
 		}
-		if current.owner != u.id {
-			if deleted || !sharesText(current.current(), u.id) {
+		if current.Owner() != u.id {
+			if deleted || !sharesText(current.Current(), u.id) {
 				return &Error{Code: CodeDenied, Message: "Only the author may edit, move, or delete this message"}
 			}
 			// Live text is still writing into body.text (§4.8.5).
@@ -170,7 +159,7 @@ func (s *Server) saveMessage(c *client, p wire.EditParams, reply wire.Reply[wire
 			// The save keeps every other field, so it neither moves the
 			// message nor changes what it replies to.
 			editor = true
-			destination = s.rooms.Get(current.roomID)
+			destination = s.rooms.Get(current.RoomID())
 			roomID = destination.ID()
 			hasReply = false
 		}
@@ -178,10 +167,10 @@ func (s *Server) saveMessage(c *client, p wire.EditParams, reply wire.Reply[wire
 		// message may not move to a room that some who see its room cannot
 		// see, such as a private room: the move would show them its room_id
 		// and the message.
-		if source := s.rooms.Get(current.roomID); source != destination && source.RevealsTo(destination) {
+		if source := s.rooms.Get(current.RoomID()); source != destination && source.RevealsTo(destination) {
 			return &Error{Code: CodeDenied, Message: "A message cannot move to a room that fewer people can see"}
 		}
-		from = current.from
+		from = current.From()
 	}
 	if hasReply {
 		target := s.visibleMessageLocked(u, replyID)
@@ -190,7 +179,7 @@ func (s *Server) saveMessage(c *client, p wire.EditParams, reply wire.Reply[wire
 		}
 		// A reply names its target's message_id to everyone who sees the
 		// reply, so it may not name a message some of them cannot see.
-		if destination.RevealsTo(s.rooms.Get(target.roomID)) {
+		if destination.RevealsTo(s.rooms.Get(target.RoomID())) {
 			return &Error{Code: CodeDenied, Message: "A reply cannot quote a message that fewer people can see"}
 		}
 	}
@@ -199,7 +188,7 @@ func (s *Server) saveMessage(c *client, p wire.EditParams, reply wire.Reply[wire
 	var previous *roomlog.Message
 	var previousObject map[string]any
 	if current != nil {
-		previous, previousObject = current.current(), current.snapshot()
+		previous, previousObject = current.Current(), current.snapshot()
 	}
 	if editor {
 		body = sharedTextBody(previous, body)
@@ -277,16 +266,17 @@ func (s *Server) saveMessage(c *client, p wire.EditParams, reply wire.Reply[wire
 	}
 
 	if current == nil {
-		current = &messageState{id: messageID, from: from, owner: u.id, reactions: make(map[string]reactionSet)}
-		s.messages[messageID] = current
+		current = s.newMessageLocked(messageID, from, u.id)
 	}
-	source := current.roomID
+	source := current.RoomID()
 	moved := s.commitSnapshotLocked(current, snapshot, logID)
 	if deleted {
-		s.redactLocked(current)
+		s.rooms.Redact(current.Message)
 	}
-	if moved && len(current.reactions) > 0 {
-		s.commitReactionsLocked(current, current.reactionElements())
+	if reactions := current.Reactions(); moved && len(reactions) > 0 {
+		// The reactions follow the message into its room.
+		record, r := s.rooms.LogReactions(current.Message, reactions)
+		s.deliverLocked(rawNotification("reactions", record.Raw), r)
 	}
 	var movedFrom *roomState
 	if moved {
@@ -321,38 +311,14 @@ func (s *Server) saveMessage(c *client, p wire.EditParams, reply wire.Reply[wire
 	return nil
 }
 
-// commitSnapshotLocked logs and delivers a message snapshot, adding
-// prev_log_id, in the message's room and, for a move, the previous one too;
-// a move snapshot names the previous room in prev_room_id, since the
-// previous snapshot is in that room's log (§4.3.1). It reports whether the
-// snapshot moved the message.
+// commitSnapshotLocked logs a message snapshot (rooms.Table.Snapshot) and
+// delivers it to the rooms whose logs hold it: the message's, and for a
+// move the previous one too. It reports whether the snapshot moved the
+// message.
 func (s *Server) commitSnapshotLocked(m *messageState, snapshot *roomlog.Message, logID int64) bool {
-	snapshot.PrevRoomID = ""
-	if m.logID != 0 {
-		snapshot.PrevLogID = formatID(m.logID)
-	}
-	destination := s.rooms.Get(snapshot.RoomID)
-	rooms := []*roomState{destination}
-	moved := m.roomID != "" && m.roomID != destination.ID()
-	if moved {
-		source := s.rooms.Get(m.roomID)
-		rooms = []*roomState{source, destination}
-		// A move out of a room that some who see the destination cannot see,
-		// such as a private one, does not name it to them.
-		if !destination.RevealsTo(source) {
-			snapshot.PrevRoomID = m.roomID
-		}
-	}
-	m.logID = logID
-	m.roomID = destination.ID()
+	record, rooms, moved := s.rooms.Snapshot(m.Message, snapshot, logID)
 	m.cached = nil
-	if !moved && len(m.records) == 0 {
-		s.rooms.Posted(destination, m.owner, logID)
-	}
-	record := roomlog.NewMessage(logID, snapshot)
-	m.records = append(m.records, record)
 	s.touchMessage(m)
-	s.rooms.Append(record, rooms...)
 	s.deliverLocked(rawNotification("message", record.Raw), rooms...)
 	return moved
 }
@@ -361,7 +327,7 @@ func (s *Server) commitSnapshotLocked(m *messageState, snapshot *roomlog.Message
 // finished upload or live text (§4.8.3): edit rewrites a copy of the
 // current body, and nothing is published when it reports no change.
 func (s *Server) republishLocked(m *messageState, edit func(body map[string]any) bool) {
-	snapshot := m.current()
+	snapshot := m.Current()
 	if snapshot.Body == nil || snapshot.Deleted {
 		return
 	}
@@ -373,16 +339,6 @@ func (s *Server) republishLocked(m *messageState, edit func(body map[string]any)
 	logID := s.log.NextID()
 	snapshot.LogID = formatID(logID)
 	s.commitSnapshotLocked(m, snapshot, logID)
-}
-
-// redactLocked rewrites a deleted message's earlier snapshots into
-// tombstones at their original log_ids (§4.4). At an equal log_id a
-// tombstone wins (§2.3), so a client that kept one of them as it was
-// replaces it with the redacted one it reads later.
-func (s *Server) redactLocked(m *messageState) {
-	for _, record := range m.records {
-		s.log.Redact(record)
-	}
 }
 
 // admitPostLocked applies MessagesPerMinute to new messages, room_set,
@@ -429,21 +385,6 @@ func admitActionLocked(u *userState) *Error {
 		return retryAfter("Too many changes; slow down", delay)
 	}
 	return nil
-}
-
-// reactionElements returns every non-empty reaction set, ordered by user ID.
-func (m *messageState) reactionElements() []roomlog.Reaction {
-	users := make([]string, 0, len(m.reactions))
-	for userID := range m.reactions {
-		users = append(users, userID)
-	}
-	sort.Strings(users)
-	elements := make([]roomlog.Reaction, 0, len(users))
-	for _, userID := range users {
-		set := m.reactions[userID]
-		elements = append(elements, roomlog.Reaction{From: set.from, Emojis: slices.Clone(set.emojis)})
-	}
-	return elements
 }
 
 func validMessageID(id string) bool {
@@ -550,35 +491,20 @@ func (s *Server) react(c *client, p wire.ReactParams, reply wire.Reply[wire.Empt
 	// already, so that a removed one does not keep the user from changing
 	// the rest of their set.
 	for _, emoji := range emojis {
-		if emojiKeyPattern.MatchString(emoji) && s.emoji[emoji] == nil && !slices.Contains(m.reactions[u.id].emojis, emoji) {
+		if emojiKeyPattern.MatchString(emoji) && s.emoji[emoji] == nil && !slices.Contains(m.Emojis(u.id), emoji) {
 			return invalidParams("Unknown custom emoji %s", emoji)
 		}
 	}
-	if !sameEmojiSet(m.reactions[u.id].emojis, emojis) {
+	if !m.SameEmojis(u.id, emojis) {
 		if err := admitActionLocked(u); err != nil {
 			return err
 		}
 		s.touchMessage(m)
-		from := u.from()
-		if len(emojis) == 0 {
-			delete(m.reactions, u.id)
-		} else {
-			m.reactions[u.id] = reactionSet{from: from, emojis: emojis}
-		}
-		s.commitReactionsLocked(m, []roomlog.Reaction{{From: from, Emojis: slices.Clone(emojis)}})
+		record, r := s.rooms.React(m.Message, u.from(), emojis)
+		s.deliverLocked(rawNotification("reactions", record.Raw), r)
 	}
 	_ = reply.Send(wire.Empty{})
 	return nil
-}
-
-// commitReactionsLocked logs and delivers one reactions record in the
-// message's current room. Reaction sets carry no prev_log_id (§4.3.1).
-func (s *Server) commitReactionsLocked(m *messageState, elements []roomlog.Reaction) {
-	logID := s.log.NextID()
-	r := s.rooms.Get(m.roomID)
-	record := roomlog.NewReactions(logID, m.id, m.roomID, elements)
-	s.rooms.Append(record, r)
-	s.deliverLocked(rawNotification("reactions", record.Raw), r)
 }
 
 func normalizeEmojis(values []string) ([]string, *Error) {
@@ -601,16 +527,4 @@ func normalizeEmojis(values []string) ([]string, *Error) {
 		return nil, &Error{Code: CodeDenied, Message: fmt.Sprintf("At most %d distinct emoji per message", maxDistinctEmoji)}
 	}
 	return emojis, nil
-}
-
-func sameEmojiSet(a, b []string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for _, emoji := range a {
-		if !slices.Contains(b, emoji) {
-			return false
-		}
-	}
-	return true
 }

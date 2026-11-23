@@ -44,7 +44,8 @@ import (
 //	                      (roomlog)
 //	room     room_id      a room, its members, and their read cursors
 //	                      (rooms)
-//	message  message_id
+//	message  message_id   a message's room, sender, snapshots, and
+//	                      reactions (rooms)
 //	user     user_id      guests too, retired at the next start
 //	session  hex SHA-256 of the bearer token (sessions)
 //	device   hex SHA-256 of the /invite-device token
@@ -56,7 +57,7 @@ const (
 	entryMeta    = "meta"
 	entryUsedID  = "used_id"
 	entryRoom    = rooms.EntryKind
-	entryMessage = "message"
+	entryMessage = rooms.MessageEntryKind
 	entryUser    = "user"
 	entryDevice  = "device"
 	entryEmbed   = "embed"
@@ -93,7 +94,7 @@ func newDirtySet() dirtySet {
 	}
 }
 
-func (s *Server) touchMessage(m *messageState) { s.dirty.messages[m.id] = true }
+func (s *Server) touchMessage(m *messageState) { s.dirty.messages[m.ID()] = true }
 func (s *Server) touchUser(id string)          { s.dirty.users[id] = true }
 func (s *Server) touchDevice(key [32]byte)     { s.dirty.devices[key] = true }
 func (s *Server) touchEmbed(id string)         { s.dirty.embeds[id] = true }
@@ -115,20 +116,6 @@ type storedMeta struct {
 	AccountNumber uint64 `json:"account_number,omitzero"`
 	EmbedNumber   uint64 `json:"embed_number"`
 	UploadSeq     int64  `json:"upload_seq"`
-}
-
-type storedReaction struct {
-	From   roomlog.Author `json:"from"`
-	Emojis []string       `json:"emojis"`
-}
-
-type storedMessage struct {
-	From      roomlog.Author            `json:"from"`
-	LogID     int64                     `json:"log_id"`
-	Owner     string                    `json:"owner"`
-	RoomID    string                    `json:"room_id"`
-	Reactions map[string]storedReaction `json:"reactions,omitzero"`
-	Records   []int64                   `json:"records"`
 }
 
 type storedUser struct {
@@ -282,7 +269,7 @@ func (s *Server) entriesLocked(d dirtySet, records []store.Entry) []store.Entry 
 	batch = append(batch, records...)
 	for id := range d.messages {
 		if m := s.messages[id]; m != nil {
-			put(entryMessage, id, storedMessageOf(m))
+			batch = append(batch, rooms.MessageEntry(m.Message))
 		}
 	}
 	for id := range d.users {
@@ -338,20 +325,6 @@ func (s *Server) entriesLocked(d dirtySet, records []store.Entry) []store.Entry 
 		put(entryMeta, "profile", s.storedProfileLocked())
 	}
 	return batch
-}
-
-func storedMessageOf(m *messageState) storedMessage {
-	stored := storedMessage{From: m.from, LogID: m.logID, Owner: m.owner, RoomID: m.roomID}
-	for _, record := range m.records {
-		stored.Records = append(stored.Records, record.ID)
-	}
-	if len(m.reactions) > 0 {
-		stored.Reactions = make(map[string]storedReaction, len(m.reactions))
-		for id, set := range m.reactions {
-			stored.Reactions[id] = storedReaction{From: set.from, Emojis: set.emojis}
-		}
-	}
-	return stored
 }
 
 func storedUserOf(u *userState) storedUser {
@@ -471,24 +444,14 @@ func (s *Server) restoreLocked() (map[string]bool, error) {
 	}
 
 	for id, raw := range entries[entryMessage] {
-		var stored storedMessage
-		if err := decode(entryMessage, id, raw, &stored); err != nil {
+		m, err := rooms.RestoreMessage(id, raw, records)
+		if err != nil {
 			return nil, err
 		}
-		m := &messageState{id: id, from: stored.From, logID: stored.LogID, owner: stored.Owner, roomID: stored.RoomID, reactions: make(map[string]reactionSet)}
-		for userID, set := range stored.Reactions {
-			m.reactions[userID] = reactionSet{from: set.From, emojis: set.Emojis}
-		}
-		for _, logID := range stored.Records {
-			if record := records[logID]; record != nil {
-				record.Message = id
-				m.records = append(m.records, record)
-			}
-		}
-		if len(m.records) == 0 {
+		if m == nil {
 			continue // A message without its records cannot be served.
 		}
-		s.messages[id] = m
+		s.messages[id] = &messageState{Message: m}
 	}
 
 	storedUsers := make(map[string]storedUser)

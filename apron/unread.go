@@ -48,8 +48,8 @@ func (s *Server) readPositionLocked(u *userState, r *roomState) (int64, bool) {
 	since := cursor.ID
 	// A cursor names a message by its message_id; one moved into r arrived
 	// later, at its move.
-	if m := s.messages[cursor.MessageID]; m != nil && m.roomID == r.ID() {
-		since = max(since, arrival(m, r))
+	if m := s.messages[cursor.MessageID]; m != nil && m.RoomID() == r.ID() {
+		since = max(since, m.Arrival(r.ID()))
 	}
 	if u.joined[r.ID()] != nil {
 		return max(since, r.Active(u.id)), true
@@ -60,21 +60,10 @@ func (s *Server) readPositionLocked(u *userState, r *roomState) (int64, bool) {
 	return 0, false
 }
 
-// arrival is the log_id at which m arrived in room r: its first snapshot in
-// r's log, a move snapshot for a message moved there.
-func arrival(m *messageState, r *roomState) int64 {
-	for _, record := range m.records {
-		if slices.Contains(record.Rooms, r.ID()) {
-			return record.ID
-		}
-	}
-	return 0
-}
-
 // countsLocked reports whether m, in room r, counts toward u's unread once
 // it is past the read position.
 func (s *Server) countsLocked(u *userState, r *roomState, m *messageState, now time.Time) bool {
-	if m.owner == u.id {
+	if m.Owner() == u.id {
 		return false
 	}
 	info := m.info()
@@ -90,7 +79,7 @@ func (s *Server) countsLocked(u *userState, r *roomState, m *messageState, now t
 		return true
 	}
 	target := s.messages[info.replyTo]
-	return target != nil && target.owner == u.id
+	return target != nil && target.Owner() == u.id
 }
 
 // recountLocked counts u's unread messages in r from the log.
@@ -106,11 +95,11 @@ func (s *Server) recountLocked(u *userState, r *roomState, now time.Time) int {
 			continue
 		}
 		m := s.messages[record.Message]
-		if m == nil || m.roomID != r.ID() || seen[m] {
+		if m == nil || m.RoomID() != r.ID() || seen[m] {
 			continue
 		}
 		seen[m] = true
-		if arrival(m, r) > since && s.countsLocked(u, r, m, now) {
+		if m.Arrival(r.ID()) > since && s.countsLocked(u, r, m, now) {
 			count++
 		}
 	}
@@ -170,10 +159,10 @@ func (s *Server) messageUnreadLocked(m *messageState, previous *roomlog.Message,
 	if len(s.pushes) == 0 {
 		return
 	}
-	r := s.rooms.Get(m.roomID)
+	r := s.rooms.Get(m.RoomID())
 	concerned := make(map[string]*userState)
 	add := func(u *userState) {
-		if u != nil && len(u.pushes) > 0 && u.id != m.owner {
+		if u != nil && len(u.pushes) > 0 && u.id != m.Owner() {
 			concerned[u.id] = u
 		}
 	}
@@ -185,7 +174,7 @@ func (s *Server) messageUnreadLocked(m *messageState, previous *roomlog.Message,
 			add(u)
 		}
 	}
-	for _, snapshot := range []*roomlog.Message{m.current(), previous} {
+	for _, snapshot := range []*roomlog.Message{m.Current(), previous} {
 		if snapshot == nil {
 			continue
 		}
@@ -193,18 +182,18 @@ func (s *Server) messageUnreadLocked(m *messageState, previous *roomlog.Message,
 			add(s.users[id])
 		}
 		if target := s.messages[snapshot.ReplyID()]; target != nil {
-			add(s.users[target.owner])
+			add(s.users[target.Owner()])
 		}
 	}
 	now := time.Now()
-	messageID := m.records[0].ID
+	messageID := m.Records()[0].ID
 	for _, id := range slices.Sorted(maps.Keys(concerned)) {
 		u := concerned[id]
 		if !r.VisibleTo(u) {
 			continue
 		}
 		info := m.info()
-		if u.joined[r.ID()] == nil && (slices.Contains(info.mentions, u.id) || s.messages[info.replyTo] != nil && s.messages[info.replyTo].owner == u.id) {
+		if u.joined[r.ID()] == nil && (slices.Contains(info.mentions, u.id) || s.messages[info.replyTo] != nil && s.messages[info.replyTo].Owner() == u.id) {
 			// A room the user has not joined counts from the first message
 			// there that mentioned or replied to them.
 			if since, ok := u.pings[r.ID()]; !ok || since > messageID {
@@ -223,7 +212,7 @@ func (s *Server) messageUnreadLocked(m *messageState, previous *roomlog.Message,
 			if from != nil {
 				s.unreadChangedLocked(u, from.ID())
 				s.unreadChangedLocked(u, r.ID())
-			} else if counted && arrival(m, r) > since {
+			} else if counted && m.Arrival(r.ID()) > since {
 				s.unreadChangedLocked(u, r.ID())
 			}
 		case !known:

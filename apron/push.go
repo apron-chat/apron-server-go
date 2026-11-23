@@ -345,7 +345,7 @@ func (s *Server) wakeLocked(m *messageState, snapshot, previous map[string]any) 
 	if s.config.DisablePush || len(s.pushes) == 0 || snapshot["deleted"] == true || snapshot["message_id"] == nil {
 		return
 	}
-	r := s.rooms.Get(m.roomID)
+	r := s.rooms.Get(m.RoomID())
 	reasons := make(map[string]wakeScope)
 	body, _ := snapshot["body"].(map[string]any)
 	for _, id := range mentions(body) {
@@ -354,7 +354,7 @@ func (s *Server) wakeLocked(m *messageState, snapshot, previous map[string]any) 
 	if previous == nil {
 		if ref, ok := snapshot["reply_to"].(map[string]any); ok {
 			if target := s.messages[ref["message_id"].(string)]; target != nil {
-				reasons[target.owner] |= wakeReplies
+				reasons[target.Owner()] |= wakeReplies
 			}
 		}
 		for id, u := range r.Members() {
@@ -378,7 +378,7 @@ func (s *Server) wakeLocked(m *messageState, snapshot, previous map[string]any) 
 			delete(reasons, id)
 		}
 	}
-	delete(reasons, m.owner)
+	delete(reasons, m.Owner())
 	now := time.Now()
 	for _, id := range slices.Sorted(maps.Keys(reasons)) {
 		u := s.users[id]

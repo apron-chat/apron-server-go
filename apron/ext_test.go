@@ -54,7 +54,8 @@ func TestMessageSavesMergeExt(t *testing.T) {
 		}
 		// Values are kept as they arrived, integers past 2^53 included.
 		app.mu.RLock()
-		raw := string(app.messages[id].records[len(app.messages[id].records)-1].Raw)
+		records := app.messages[id].Records()
+		raw := string(records[len(records)-1].Raw)
 		app.mu.RUnlock()
 		if !strings.Contains(raw, `"big":`+bigNumber) {
 			t.Fatalf("step %d: stored snapshot lost the exact number: %s", i, raw)
