@@ -21,6 +21,7 @@ file sets in a table of that name (`[sso]`). Run one with
 lines on package [`wire`](../wire), which speaks the protocol for a program
 that keeps its own state, such as a gateway in front of another chat system.
 Its commands are a [`wire/commands`](../wire/commands) Router, which answers
-`/help` and lists them. It takes only `--addr`, and its test uses package
+`/help` and lists them, and its bot, which answers when someone mentions
+`@echo`, a [`wire/bot`](../wire/bot) Bot. It takes only `--addr`, and its test uses package
 [`wiretest`](../wire/wiretest). Run the conformance checks against it with
 `conform.py ws://127.0.0.1:8080/ws`.

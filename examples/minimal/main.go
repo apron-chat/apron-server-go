@@ -1,8 +1,9 @@
 // Command minimal is a whole Apron server in about a hundred lines, built on
-// package wire rather than package apron: one room, guests, profiles, and
-// commands (package wire/commands), with its state in a map. It is the
-// starting point for a server that keeps its own state, such as a bridge or
-// a gateway in front of another chat system.
+// package wire rather than package apron: one room, guests, profiles,
+// commands (package wire/commands), and a bot that answers its mentions
+// (package wire/bot), with its state in a map. It is the starting point
+// for a server that keeps its own state, such as a bridge or a gateway in
+// front of another chat system.
 //
 //	go run ./examples/minimal --addr 127.0.0.1:8080
 package main
@@ -17,6 +18,7 @@ import (
 	"sync"
 
 	"github.com/apron-chat/apron-server-go/wire"
+	"github.com/apron-chat/apron-server-go/wire/bot"
 	"github.com/apron-chat/apron-server-go/wire/commands"
 )
 
@@ -60,7 +62,20 @@ func NewChat() *Chat {
 		CheckOrigin: wire.AnyOrigin,
 	}
 	c.Server.Handle(commands.ListMethod, c.commands.ListHandler())
+	// The bot is a user on a connection of its own, in process: what it
+	// posts goes through Message, as anyone's does.
+	if _, err := bot.Start(c.Server, bot.Options{User: wire.User{UserID: "echo", Name: "Echo"}, OnMessage: echo}); err != nil {
+		panic(err) // A Server that is not shut down opens it.
+	}
 	return c
+}
+
+// echo is the bot's: it answers a message that mentions it with what it
+// said, as a reply.
+func echo(ctx context.Context, b *bot.Bot, m wire.Message) {
+	if b.Mentioned(m) {
+		_, _ = b.Reply(ctx, m, m.From.Name+" said: "+m.Body.Text)
+	}
 }
 
 func (*Chat) Hello(context.Context, *wire.Conn) wire.ServerInfo {
