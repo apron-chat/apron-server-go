@@ -255,7 +255,7 @@ func TestExternalAddsToSignedInAccount(t *testing.T) {
 		t.Fatalf("addition = %#v", result)
 	}
 	app.mu.RLock()
-	added := app.accounts[authn.Identity{Scheme: "external", Subject: "idp:2"}]
+	added := app.accounts.Get(authn.Identity{Scheme: "external", Subject: "idp:2"})
 	app.mu.RUnlock()
 	if added == nil || added.name != "Grace" || added.id != you["user_id"] {
 		t.Fatalf("the account the identity was added to = %#v", added)

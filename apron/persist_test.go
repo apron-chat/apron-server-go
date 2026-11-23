@@ -350,9 +350,6 @@ func TestRolesAndWelcome(t *testing.T) {
 // would have, for checking that every change reaches the store.
 func (s *Server) dumpLocked() []store.Entry {
 	all := newDirtySet()
-	for id := range s.usedIDs {
-		all.usedIDs = append(all.usedIDs, id)
-	}
 	var records []store.Entry
 	for _, r := range s.rooms.All() {
 		records = append(records, rooms.Entry(r))
@@ -373,6 +370,7 @@ func (s *Server) dumpLocked() []store.Entry {
 	all.vapid = s.vapidStored
 	meta := s.metaLocked()
 	records = append(records, s.sessions.Snapshot(userID)...)
+	records = append(records, s.ids.Snapshot()...)
 	records = append(records, s.devices.Snapshot(userID)...)
 	records = append(records, s.services.Snapshot(userID)...)
 	records = append(records, s.invitations.Snapshot()...)

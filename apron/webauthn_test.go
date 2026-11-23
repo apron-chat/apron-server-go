@@ -711,7 +711,7 @@ func TestPasskeyRejectsInvalidRegistration(t *testing.T) {
 	}
 	app.mu.RLock()
 	defer app.mu.RUnlock()
-	if app.schemeLocked(passkey.Name).(*passkey.Scheme).Count() != 0 || len(app.accounts) != 0 || app.sessions.Len() != 0 {
+	if app.schemeLocked(passkey.Name).(*passkey.Scheme).Count() != 0 || app.accounts.Len() != 0 || app.sessions.Len() != 0 {
 		t.Fatal("failed registration retained an account, credential, or session")
 	}
 }

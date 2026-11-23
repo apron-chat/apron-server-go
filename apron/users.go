@@ -13,6 +13,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/apron-chat/apron-server-go/apron/internal/accounts"
 	"github.com/apron-chat/apron-server-go/apron/internal/roomlog"
 	"github.com/apron-chat/apron-server-go/internal/authn"
 	"github.com/apron-chat/apron-server-go/wire"
@@ -231,57 +232,14 @@ func validAvatar(value string) bool {
 	return strings.HasPrefix(value, "https://") && len(value) <= 2048 && !strings.ContainsAny(value, " \t\r\n\"'<>")
 }
 
-// requestableUserID is the shape of a user_id a guest may request: the
-// suggested convention for user-chosen IDs (Appendix A.3), letters, digits,
-// _, ., and -, starting with a letter, so it never looks like a system
-// identity or a log_id-derived room_id, and ending with a letter, digit, or
-// _, so a mention of it ends where it does.
-var requestableUserID = regexp.MustCompile(`^[A-Za-z](?:[A-Za-z0-9_.-]{0,62}[A-Za-z0-9_])?$`)
-
-// guestIDPrefix starts every counter-assigned guest ID. The guest_
-// namespace, ignoring case, belongs to the counter: requests in it are never
-// honored, so guest numbers are taken only in sequence and the latest one
-// counts the guests the server has admitted.
-const guestIDPrefix = "guest_"
-
-// requestable reports whether a user may request id: it has the requestable
-// shape and lies outside the counters' guest_ and user_ namespaces.
-func requestable(id string) bool {
-	for _, prefix := range []string{guestIDPrefix, accountIDPrefix} {
-		if len(id) >= len(prefix) && strings.EqualFold(id[:len(prefix)], prefix) {
-			return false
-		}
-	}
-	return requestableUserID.MatchString(id)
-}
+// requestable reports whether a user may request id (accounts.Requestable).
+func requestable(id string) bool { return accounts.Requestable(id) }
 
 // assignUserIDLocked honors a requested user_id when it is requestable and
 // was never assigned, ignoring case, nor names a room; otherwise it assigns
-// the next unused guest_<n> (§3.2). Each call that does not honor a request
-// takes exactly one counter value: with guest_ requests refused, only the
-// counter assigns guest_<n>, so the skip over taken IDs is a safeguard.
+// the next unused guest_<n> (§3.2, accounts.IDs.Guest).
 func (s *Server) assignUserIDLocked(requested string) string {
-	if requestable(requested) && s.claimUserIDLocked(requested) {
-		return requested
-	}
-	for {
-		s.guestNumber++
-		if id := fmt.Sprintf("%s%d", guestIDPrefix, s.guestNumber); s.claimUserIDLocked(id) {
-			return id
-		}
-	}
-}
-
-// claimUserIDLocked marks id used and reports whether it was free: never
-// assigned, ignoring case, not a room's name, and not granted a role.
-func (s *Server) claimUserIDLocked(id string) bool {
-	key := strings.ToLower(id)
-	if s.usedIDs[key] || s.roomNamedLocked(id) || s.grantedIDs[key] {
-		return false
-	}
-	s.usedIDs[key] = true
-	s.touchUsedID(key)
-	return true
+	return s.ids.Guest(requested, s.roomNamedLocked)
 }
 
 // roomNamedLocked reports whether id names a room, ignoring case, so a

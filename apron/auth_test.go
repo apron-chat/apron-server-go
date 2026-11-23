@@ -33,8 +33,8 @@ func TestStoredIdentitiesConvert(t *testing.T) {
 		t.Fatal(err)
 	}
 	app.mu.RLock()
-	ada := app.accounts[authn.Identity{Scheme: "email", Subject: "ada@example.com"}]
-	bob := app.accounts[authn.Identity{Scheme: "external", Subject: "github:7"}]
+	ada := app.accounts.Get(authn.Identity{Scheme: "email", Subject: "ada@example.com"})
+	bob := app.accounts.Get(authn.Identity{Scheme: "external", Subject: "github:7"})
 	app.mu.RUnlock()
 	if ada == nil || ada.id != "ada" || !ada.hasRole(RoleAdmin) {
 		t.Fatalf("ada = %#v", ada)
@@ -76,7 +76,7 @@ func TestIdentitiesBelongToOneAccount(t *testing.T) {
 		t.Fatalf("adding another account's address = %#v", frame)
 	}
 	app.mu.RLock()
-	owner := app.accounts[authn.Identity{Scheme: "email", Subject: "ada@example.com"}]
+	owner := app.accounts.Get(authn.Identity{Scheme: "email", Subject: "ada@example.com"})
 	identities := slices.Collect(maps.Keys(owner.identities))
 	app.mu.RUnlock()
 	if owner.id != first.userID || !slices.Equal(identities, []string{"email"}) {

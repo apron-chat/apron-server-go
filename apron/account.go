@@ -148,7 +148,7 @@ func (s *Server) removeCredentialLocked(u *userState, scheme, id string, except 
 		// The identity proves nothing more, and leaves the account.
 		delete(u.identities, scheme)
 		delete(u.records, scheme)
-		delete(s.accounts, authn.Identity{Scheme: scheme, Subject: subject})
+		s.accounts.Delete(authn.Identity{Scheme: scheme, Subject: subject})
 		s.setGrantLocked(u, scheme, nil)
 		// Roles that Config.Roles granted the identity go with it.
 		if before := u.views(); s.grantRolesLocked(u) {

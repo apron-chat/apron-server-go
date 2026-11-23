@@ -26,7 +26,7 @@ func (sc schemeCore) Consented(subject, redirect string) bool {
 	s := sc.s
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	u := s.accounts[authn.Identity{Scheme: sc.scheme.Name(), Subject: subject}]
+	u := s.accounts.Get(authn.Identity{Scheme: sc.scheme.Name(), Subject: subject})
 	if u == nil || redirect == "" {
 		return false
 	}
@@ -40,7 +40,7 @@ func (sc schemeCore) Consent(subject, redirect string) {
 	s := sc.s
 	s.mu.Lock()
 	defer s.unlock()
-	u := s.accounts[authn.Identity{Scheme: sc.scheme.Name(), Subject: subject}]
+	u := s.accounts.Get(authn.Identity{Scheme: sc.scheme.Name(), Subject: subject})
 	if u == nil || redirect == "" {
 		return
 	}

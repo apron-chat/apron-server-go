@@ -17,6 +17,7 @@ import (
 
 	"golang.org/x/time/rate"
 
+	"github.com/apron-chat/apron-server-go/apron/internal/accounts"
 	"github.com/apron-chat/apron-server-go/apron/internal/proposals"
 	"github.com/apron-chat/apron-server-go/internal/auth/email"
 	"github.com/apron-chat/apron-server-go/internal/auth/external"
@@ -41,7 +42,7 @@ const (
 	proposalRefill         = 2 * time.Minute
 	// accountIDPrefix starts the user_ids assigned to new accounts that did
 	// not request one.
-	accountIDPrefix = "user_"
+	accountIDPrefix = accounts.AccountPrefix
 )
 
 // disabledSchemes say why each scheme this server knows may be off.
@@ -335,7 +336,7 @@ func (s *Server) addProvenLocked(c *client, reply wire.Reply[wire.AuthResult], s
 	}
 	label := scheme.Label()
 	account := c.user
-	switch owner := s.accounts[id]; {
+	switch owner := s.accounts.Get(id); {
 	case account == nil:
 		return &Error{Code: CodeDenied, Message: "Sign in before adding a " + label}
 	case owner != nil && owner != account:
@@ -421,7 +422,7 @@ func (s *Server) provenAccountLocked(scheme authn.Scheme, proof authn.Proof, cre
 	if err != nil {
 		return nil, false, err
 	}
-	owner := s.accounts[id]
+	owner := s.accounts.Get(id)
 	if owner == nil {
 		switch {
 		case !create:
@@ -469,7 +470,7 @@ func (s *Server) setIdentityLocked(u *userState, id authn.Identity, record jsont
 		}
 		u.records[id.Scheme] = record
 	}
-	s.accounts[id] = u
+	s.accounts.Set(id, u)
 	s.touchUser(u.id)
 }
 
@@ -637,7 +638,7 @@ func (sc *schemeConn) CanProve(subject string) bool {
 	id := authn.Identity{Scheme: sc.scheme.Name(), Subject: subject}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	owner := s.accounts[id]
+	owner := s.accounts.Get(id)
 	if c.user != nil {
 		return owner == nil && c.user.identities[id.Scheme] == "" && s.admittedWithLocked(c.user, id)
 	}
@@ -677,7 +678,7 @@ func (sc schemeCore) Lookup(subject string) (authn.Account, bool) {
 	s := sc.s
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	u := s.accounts[authn.Identity{Scheme: sc.scheme.Name(), Subject: subject}]
+	u := s.accounts.Get(authn.Identity{Scheme: sc.scheme.Name(), Subject: subject})
 	if u == nil {
 		return authn.Account{}, false
 	}
@@ -691,7 +692,7 @@ func (sc schemeCore) Admits(subject string, create bool) bool {
 	id := authn.Identity{Scheme: sc.scheme.Name(), Subject: subject}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	if owner := s.accounts[id]; owner != nil {
+	if owner := s.accounts.Get(id); owner != nil {
 		return s.admittedLocked(owner)
 	}
 	return create && s.admitsNewLocked(id)
@@ -794,15 +795,7 @@ func webSocketURL(base string) string {
 // assignAccountIDLocked honors a requested user_id as assignUserIDLocked
 // does, and otherwise assigns the next unused user_<n>.
 func (s *Server) assignAccountIDLocked(requested string) string {
-	if requestable(requested) && s.claimUserIDLocked(requested) {
-		return requested
-	}
-	for {
-		s.accountNumber++
-		if id := fmt.Sprintf("%s%d", accountIDPrefix, s.accountNumber); s.claimUserIDLocked(id) {
-			return id
-		}
-	}
+	return s.ids.Account(requested, s.roomNamedLocked)
 }
 
 // normalizeRoles lowercases and sorts roles, without blanks or repeats.

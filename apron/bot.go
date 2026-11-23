@@ -83,13 +83,10 @@ func (r *Registrar) Bot(userID string, options BotOptions) (*Bot, error) {
 		s.unlock()
 		return nil, fmt.Errorf("apron: user_id %q belongs to someone who is not a bot", userID)
 	default:
-		key := strings.ToLower(userID)
-		if s.usedIDs[key] || s.roomNamedLocked(userID) {
+		if !s.ids.ClaimGranted(userID, s.roomNamedLocked) {
 			s.unlock()
 			return nil, fmt.Errorf("apron: user_id %q was used by someone else", userID)
 		}
-		s.usedIDs[key] = true
-		s.touchUsedID(key)
 		u = newUserState(userID, normalizeName(options.Name))
 		u.botOf = r.name
 		s.users[userID] = u

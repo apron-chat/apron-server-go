@@ -22,6 +22,7 @@ import (
 	"github.com/go-webauthn/webauthn/protocol"
 	"golang.org/x/time/rate"
 
+	"github.com/apron-chat/apron-server-go/apron/internal/accounts"
 	"github.com/apron-chat/apron-server-go/apron/internal/devices"
 	"github.com/apron-chat/apron-server-go/apron/internal/durable"
 	"github.com/apron-chat/apron-server-go/apron/internal/embeds"
@@ -153,18 +154,12 @@ type Server struct {
 	clients  map[*client]struct{}
 	// users holds every live identity: connected guests and passkey users.
 	users map[string]*userState
-	// usedIDs holds every user_id ever assigned, lowercased, so none is
-	// reissued (§3.3).
-	usedIDs map[string]bool
-	// grantedIDs holds the user_ids Config.Roles names, lowercased, which
-	// are never assigned to a new identity unless already used; roleHolders
-	// are the principals Config.Roles grants each role, lowercased.
-	grantedIDs  map[string]bool
+	// ids assigns user_ids, none twice (§3.3), and never one Config.Roles
+	// names to a new identity unless already used; roleHolders are the
+	// principals Config.Roles grants each role, lowercased.
+	ids         *accounts.IDs
 	roleHolders map[string][]Principal
-	guestNumber uint64
-	// accountNumber numbers the user_<n> of new email accounts.
-	accountNumber uint64
-	embedNumber   uint64
+	embedNumber uint64
 	// embeds are the hosted embeds, their writes, and the finished uploads
 	// oldest first, for eviction beyond MaxUploadStorageBytes (embeds.go).
 	// Custom emoji have their own bound, MaxEmojiStorageBytes.
@@ -200,7 +195,7 @@ type Server struct {
 	// identities that prove them; proposals are the outstanding proposals
 	// of sign-ins that finish out of band (§4.11), in memory only.
 	schemes   []authn.Scheme
-	accounts  map[authn.Identity]*userState
+	accounts  *accounts.Index[*userState]
 	proposals *proposals.Table
 	// externalBy names the extension that offers external sign-in.
 	externalBy string
@@ -281,8 +276,7 @@ func Open(config Config) (*Server, error) {
 		messages:    make(map[string]*messageState),
 		clients:     make(map[*client]struct{}),
 		users:       make(map[string]*userState),
-		usedIDs:     make(map[string]bool),
-		grantedIDs:  make(map[string]bool),
+		ids:         accounts.NewIDs(),
 		roleHolders: make(map[string][]Principal),
 		embeds:      embeds.New[*embedState](),
 		emoji:       emoji.NewCatalog[*embedState](),
@@ -290,7 +284,7 @@ func Open(config Config) (*Server, error) {
 		sessions:    sessions.New[*userState](),
 		devices:     devices.New[*userState](),
 		invitations: invitations.New(),
-		accounts:    make(map[authn.Identity]*userState),
+		accounts:    accounts.NewIndex[*userState](),
 		proposals:   proposals.NewTable(),
 		dirty:       newDirtySet(),
 		badgeDelay:  badgeDelay,
@@ -318,7 +312,7 @@ func Open(config Config) (*Server, error) {
 			}
 			for _, p := range principals {
 				if p.kind == principalUser {
-					s.grantedIDs[p.value] = true
+					s.ids.Grant(p.value)
 				}
 			}
 			s.roleHolders[role] = append(s.roleHolders[role], principals...)

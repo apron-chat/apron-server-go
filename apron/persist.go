@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/apron-chat/apron-server-go/apron/internal/accounts"
 	"github.com/apron-chat/apron-server-go/apron/internal/devices"
 	"github.com/apron-chat/apron-server-go/apron/internal/embeds"
 	"github.com/apron-chat/apron-server-go/apron/internal/invitations"
@@ -42,7 +43,7 @@ import (
 //	meta     "emoji"      the custom emoji catalog (ext:emoji, emoji)
 //	meta     "profile"    the server's title, description, and avatar set
 //	                      with /server (§3.1)
-//	used_id  lowercased user_id ever assigned
+//	used_id  lowercased user_id ever assigned (accounts)
 //	record   log_id       a logged record and the rooms whose logs hold it
 //	                      (roomlog)
 //	room     room_id      a room, its members, and their read cursors
@@ -60,7 +61,6 @@ import (
 //	ext/<n>  a key        a value Extension <n> keeps (Host.Store, kv)
 const (
 	entryMeta    = "meta"
-	entryUsedID  = "used_id"
 	entryRoom    = rooms.EntryKind
 	entryMessage = rooms.MessageEntryKind
 	entryUser    = "user"
@@ -74,7 +74,6 @@ type dirtySet struct {
 	messages map[string]bool
 	users    map[string]bool
 	pushes   map[string]bool
-	usedIDs  []string
 	vapid    bool
 	profile  bool
 }
@@ -90,9 +89,6 @@ func newDirtySet() dirtySet {
 func (s *Server) touchMessage(m *messageState) { s.dirty.messages[m.ID()] = true }
 func (s *Server) touchUser(id string)          { s.dirty.users[id] = true }
 func (s *Server) touchPush(key string)         { s.dirty.pushes[key] = true }
-func (s *Server) touchUsedID(lowercased string) {
-	s.dirty.usedIDs = append(s.dirty.usedIDs, lowercased)
-}
 
 // unlock writes the changes made under s.mu through to the store, then
 // releases the lock.
@@ -182,7 +178,8 @@ type storedPush struct {
 
 // metaLocked is the counters entry of the current state.
 func (s *Server) metaLocked() storedMeta {
-	return storedMeta{LastID: s.log.LastIssued(), GuestNumber: s.guestNumber, AccountNumber: s.accountNumber, EmbedNumber: s.embedNumber, UploadSeq: s.uploadSeq}
+	guests, accounts := s.ids.Counters()
+	return storedMeta{LastID: s.log.LastIssued(), GuestNumber: guests, AccountNumber: accounts, EmbedNumber: s.embedNumber, UploadSeq: s.uploadSeq}
 }
 
 func sessionID(key [32]byte) string { return sessions.ID(key) }
@@ -197,6 +194,7 @@ func (s *Server) flushLocked() {
 		s.dirty = newDirtySet()
 		s.log.Entries()
 		s.rooms.Entries()
+		s.ids.Entries()
 		s.extData.Entries()
 		s.sessions.Entries(userID)
 		s.devices.Entries(userID)
@@ -207,7 +205,8 @@ func (s *Server) flushLocked() {
 		s.store.Queue(nil)
 		return
 	}
-	batch := append(s.entriesLocked(s.dirty, s.log.Entries()), s.rooms.Entries()...)
+	batch := append(s.ids.Entries(), s.entriesLocked(s.dirty, s.log.Entries())...)
+	batch = append(batch, s.rooms.Entries()...)
 	batch = append(batch, s.extData.Entries()...)
 	batch = append(batch, s.sessions.Entries(userID)...)
 	batch = append(batch, s.devices.Entries(userID)...)
@@ -238,9 +237,6 @@ func (s *Server) entriesLocked(d dirtySet, records []store.Entry) []store.Entry 
 	}
 	del := func(kind, id string) {
 		batch = append(batch, store.Entry{Kind: kind, ID: id})
-	}
-	for _, id := range d.usedIDs {
-		put(entryUsedID, id, true)
 	}
 	batch = append(batch, records...)
 	for id := range d.messages {
@@ -355,7 +351,7 @@ func (s *Server) restoreLocked() (map[string]bool, error) {
 			return nil, err
 		}
 		s.log.RestoreSequence(s.storedMeta.LastID)
-		s.guestNumber, s.accountNumber = s.storedMeta.GuestNumber, s.storedMeta.AccountNumber
+		s.ids.RestoreCounters(s.storedMeta.GuestNumber, s.storedMeta.AccountNumber)
 		s.embedNumber, s.uploadSeq = s.storedMeta.EmbedNumber, s.storedMeta.UploadSeq
 	}
 	for kind, values := range entries {
@@ -366,9 +362,7 @@ func (s *Server) restoreLocked() (map[string]bool, error) {
 	if err := s.restoreVAPIDLocked(entries[entryMeta]["vapid"]); err != nil {
 		return nil, err
 	}
-	for id := range entries[entryUsedID] {
-		s.usedIDs[id] = true
-	}
+	s.ids.Restore(entries[accounts.UsedKind])
 
 	if err := s.rooms.Restore(entries[rooms.EntryKind]); err != nil {
 		return nil, err
@@ -618,7 +612,7 @@ func (s *Server) restoreIdentitiesLocked(u *userState, stored storedUser) error 
 		s.touchUser(u.id)
 	}
 	for scheme, subject := range u.identities {
-		s.accounts[authn.Identity{Scheme: scheme, Subject: subject}] = u
+		s.accounts.Set(authn.Identity{Scheme: scheme, Subject: subject}, u)
 	}
 	return nil
 }

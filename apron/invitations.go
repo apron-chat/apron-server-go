@@ -275,7 +275,7 @@ func (s *Server) enrollLocked(c *client, reply wire.Reply[wire.AuthResult], sche
 	if err != nil {
 		return err
 	}
-	if s.accounts[id] != nil {
+	if s.accounts.Get(id) != nil {
 		return &Error{Code: CodeDenied, Message: "This " + scheme.Label() + " belongs to an account"}
 	}
 	record, err := commit(proof)
