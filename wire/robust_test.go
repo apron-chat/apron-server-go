@@ -108,10 +108,21 @@ func TestErrorAfterReply(t *testing.T) {
 	if _, err := c.Call(wait(t), "late", nil); err != nil {
 		t.Fatal(err)
 	}
-	mu.Lock()
-	defer mu.Unlock()
-	if out := logged.String(); !strings.Contains(out, "level=DEBUG") || !strings.Contains(out, "too late") {
-		t.Fatalf("log: %s", out)
+	// The client has the reply before the handler returns its error, which
+	// is logged once it does.
+	logs := func() string {
+		mu.Lock()
+		defer mu.Unlock()
+		return logged.String()
+	}
+	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(time.Millisecond) {
+		out := logs()
+		if strings.Contains(out, "level=DEBUG") && strings.Contains(out, "too late") {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("log: %s", out)
+		}
 	}
 }
 
