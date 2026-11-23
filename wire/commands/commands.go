@@ -55,14 +55,22 @@
 // fields are there; and the sender may use it (Form.May). Before may also
 // settle what the command line leaves to the server, such as the default
 // room of a command sent without room_id, which the checks after it,
-// /help, and Run then see.
+// /help, and Run then see; and what it works out that Run needs too, such
+// as the sender's record, or the command line as the backend rewrote it,
+// it passes on in [Call].Data.
 //
 // A command whose Run makes some of the Router's checks itself, with
 // errors that say more, such as who may use it, names them in its
 // RunChecks: the Router skips them, and its forms' Requires and May then
-// only say what /help and a listing show. Package apron's own commands
-// check everything themselves; its extensions' leave who may use them to
-// the Router.
+// only say what /help and a listing show. A backend whose commands all
+// check something themselves, such as a gateway whose host checks every
+// command, names it once, in Router.RunChecks. Package apron's own
+// commands check everything themselves; its extensions' leave who may use
+// them to the Router.
+//
+// A command that runs but is not shown, such as an alias, or one people
+// are not meant to find, is Unlisted: /help and a listing leave it out,
+// and the Router runs it as any other.
 //
 // The Router holds no lock of the backend's, and calls a form's May
 // without one: a backend that keeps its state under a lock takes it in
@@ -140,9 +148,15 @@ type Command struct {
 	Run func(ctx context.Context, call *Call) error
 	// RunChecks are the checks of a command line that Run makes itself,
 	// with errors of its own, and Router.Command skips (see Checks in the
-	// package documentation). With CheckForm, a line that selects none of
-	// the forms runs with a nil call.Form.
+	// package documentation), with those of Router.RunChecks. With
+	// CheckForm, a line that selects none of the forms runs with a nil
+	// call.Form.
 	RunChecks Checks
+	// Unlisted keeps the command out of /help and listings (Router.Usable,
+	// Router.List), while the Router finds and runs it as any other: an
+	// alias, or a command people are not meant to find. Its forms still
+	// say what it uses and requires, which the Router checks.
+	Unlisted bool
 }
 
 // Checks are checks Router.Command makes of a command line before it runs
@@ -333,6 +347,11 @@ type Router struct {
 	// nil, such as a gateway's that hands it to the system behind it. nil
 	// answers invalid_params, Unknown command.
 	Fallback func(ctx context.Context, call *Call) error
+	// RunChecks are checks every command's Run makes itself, as if each
+	// named them in its own Command.RunChecks, which add to them: such as
+	// CheckAll for a gateway whose host checks every command line, and
+	// says what is wrong with it. A command cannot take one back.
+	RunChecks Checks
 
 	commands []Command
 	// hasHelp is whether commands has one named help.
@@ -453,13 +472,16 @@ func (r *Router) Find(name, args string) (*Command, *Form) {
 // Usable returns the forms c may use in the room roomID (Form.May), as
 // /help lists them, or, for "", in a room it can see, as a listing does,
 // in the order of their commands: /help first, unless a command named
-// help was added.
+// help was added. Unlisted commands are left out.
 func (r *Router) Usable(ctx context.Context, c *wire.Conn, roomID string) []Form {
 	var forms []Form
 	if !r.hasHelp {
 		forms = append(forms, helpForm)
 	}
 	for _, command := range r.commands {
+		if command.Unlisted {
+			continue
+		}
 		for _, f := range command.Forms {
 			if f.May == nil || f.May(ctx, c, roomID) {
 				forms = append(forms, f)
@@ -520,7 +542,7 @@ func (r *Router) Command(ctx context.Context, c *wire.Conn, p wire.CommandParams
 	}
 	var checks Checks = CheckAll
 	if command != nil {
-		checks &^= command.RunChecks
+		checks &^= r.RunChecks | command.RunChecks
 	}
 	switch {
 	case command == nil && name == "help":
@@ -610,6 +632,12 @@ type Call struct {
 	// Fallback's, and for a line that selects none, as Before, and the
 	// Run of a command that makes CheckForm itself, may see.
 	Form *Form
+	// Data is the backend's, for this run alone: nil until Before sets
+	// it, then passed on as it is to Run, or to Fallback. It carries what
+	// Before works out that Run needs too, such as the sender's record or
+	// the command line as the backend rewrote it, so that Before need not
+	// fold it into Params, and Run need not work it out again.
+	Data any
 }
 
 // Rest is the command line after the form's fixed words, trimmed, such as

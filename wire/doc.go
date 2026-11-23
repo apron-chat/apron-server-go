@@ -279,8 +279,11 @@
 // line, refuses what a form requires and the sender may not use, runs the
 // command, and answers /help, with the same list as data for apron's
 // ext:command_list. A backend checks what every command needs first
-// (Router.Before), and a command may check the rest itself
-// (Command.RunChecks). Package apron runs its commands on one too.
+// (Router.Before), passing what it works out on to the command
+// (Call.Data), and a command may check the rest itself
+// (Command.RunChecks), or every command (Router.RunChecks); a command
+// may run without being listed (Command.Unlisted). Package apron runs its
+// commands on one too.
 //
 // # Bots, filters, and what else extends a backend
 //

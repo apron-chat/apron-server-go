@@ -460,3 +460,78 @@ func TestBeforeAndRunChecks(t *testing.T) {
 		}
 	}
 }
+
+// What Before sets in call.Data reaches Run and Fallback as it is; the
+// Router's RunChecks add to each command's own; an Unlisted command runs,
+// as any other, but /help and a listing leave it out.
+func TestDataRunChecksAndUnlisted(t *testing.T) {
+	type line struct{ text string }
+	router := commands.Router{
+		Before: func(_ context.Context, call *commands.Call) error {
+			if call.Data != nil {
+				t.Errorf("Data before Before: %v", call.Data)
+			}
+			call.Data = &line{strings.ToUpper(call.Params.Body.Text)}
+			return nil
+		},
+		RunChecks: commands.CheckMay,
+	}
+	run := func(_ context.Context, call *commands.Call) error {
+		l, ok := call.Data.(*line)
+		if !ok {
+			return errors.New("no data")
+		}
+		call.Notice(l.text)
+		return call.Done()
+	}
+	router.Fallback = run
+	router.MustAdd(
+		commands.Command{
+			Name:  "ban",
+			Forms: []commands.Form{{Uses: []string{commands.FieldMentions}, Requires: []string{commands.FieldMentions}, May: admin}},
+			Run:   run,
+		},
+		commands.Command{Name: "b", Forms: []commands.Form{{Help: "an alias", May: admin}}, Run: run, Unlisted: true},
+	)
+	admin, guest := connect(t, &router)
+	for _, test := range []struct {
+		c     *wiretest.Client
+		line  string
+		want  string
+		code  int
+		about string
+	}{
+		// May is the command's to check, by the Router's RunChecks.
+		{guest, "/ban @x", "/BAN @X", 0, "a form May refuses"},
+		// Requires is still the Router's.
+		{guest, "/ban", "", wire.CodeInvalidParams, "a missing mention"},
+		{guest, "/b", "/B", 0, "an unlisted command"},
+		{admin, "/upstream x", "/UPSTREAM X", 0, "a Fallback"},
+	} {
+		var mentions []string
+		if strings.Contains(test.line, "@") {
+			mentions = []string{"x"}
+		}
+		texts, err := command(t, test.c, "", test.line, mentions...)
+		if test.code != 0 {
+			if wire.CodeOf(err) != test.code {
+				t.Errorf("%s: %q %v, want code %d", test.about, texts, err, test.code)
+			}
+			continue
+		}
+		if err != nil || !slices.Equal(texts, []string{test.want}) {
+			t.Errorf("%s: %q %v, want %q", test.about, texts, err, test.want)
+		}
+	}
+	texts, err := command(t, admin, "", "/help")
+	if err != nil || len(texts) != 1 || strings.Contains(texts[0], "alias") || !strings.Contains(texts[0], "/ban") {
+		t.Errorf("/help: %q %v", texts, err)
+	}
+	raw, err := admin.Call(timeout(t), commands.ListMethod, nil)
+	if want := `{"commands":[{"description":"list the commands you can use here","group":"all","name":"help"},{"name":"ban","requires":["body.mentions"],"uses":["body.mentions"]}]}`; err != nil || string(raw) != want {
+		t.Errorf("list: %s %v, want %s", raw, err, want)
+	}
+	if command, _ := router.Find("b", ""); command == nil || !command.Unlisted {
+		t.Errorf("Find(b): %+v", command)
+	}
+}
