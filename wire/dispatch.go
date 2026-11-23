@@ -384,9 +384,29 @@ func (s *Server) duplicate(ctx context.Context, c *Conn, r *Request, outcome ded
 	}
 	var result any = outcome.result
 	if refresh := s.config.refreshDuplicate; refresh != nil {
-		result = refresh(ctx, c, r.Method, outcome.result)
+		result = s.refreshed(r.Method, outcome.result, refresh(ctx, c, r.Method, outcome.result))
 	}
 	r.Reply(result)
+}
+
+// refreshed returns the result RefreshDuplicate brought up to date, as it
+// is sent: a me result's CurrentUser in the {"you": ...} of me's result.
+func (s *Server) refreshed(method string, original jsontext.Value, result any) any {
+	if method != "me" {
+		return result
+	}
+	switch you := result.(type) {
+	case CurrentUser:
+		return meResult{You: you}
+	case *CurrentUser:
+		if you != nil {
+			return meResult{You: *you}
+		}
+	case jsontext.Value:
+		return you
+	}
+	s.logger().Error("wire: RefreshDuplicate brought a me result up to date as something other than a CurrentUser", "type", fmt.Sprintf("%T", result))
+	return original
 }
 
 // serve runs a request's handler, and sends its reply: its result, or its

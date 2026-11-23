@@ -63,7 +63,11 @@ type Server struct {
 	// RefreshDuplicate, if set, brings the result of a request up to date
 	// for a duplicate of it (§1.2), which gets the original's outcome as
 	// the state is now, such as the user's current profile for a repeated
-	// me. Without it, a duplicate gets the original result as it was.
+	// me. It returns result as it was, or the result as the method's
+	// handler sends it: for me a CurrentUser, which the Server sends as
+	// me's result, {"you": ...}, as Reply.Send does; any other value for me
+	// is a bug, which the Server logs, and the duplicate gets the original.
+	// Without it, a duplicate gets the original result as it was.
 	RefreshDuplicate func(ctx context.Context, c *Conn, method string, result jsontext.Value) any
 	// CheckScheme, if set, decides which auth schemes a connection may use,
 	// such as one the server frame does not list for everyone. Without it,

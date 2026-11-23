@@ -184,7 +184,7 @@ func (b backend) refresh(_ context.Context, wc *wire.Conn, method string, result
 	}
 	switch method {
 	case "me":
-		return map[string]any{"you": u.you()}
+		return u.you() // Sent as me's result, {"you": ...}.
 	case "message", "command":
 		var original map[string]any
 		if json.Unmarshal(result, &original) != nil || original["embeds"] == nil {

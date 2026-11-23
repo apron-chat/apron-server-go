@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json/jsontext"
 	"errors"
+	"fmt"
 	"slices"
 	"strings"
 	"sync"
@@ -78,10 +79,20 @@ func TestNotificationMethod(t *testing.T) {
 type refreshing struct {
 	backend
 	version int
+	wrong   bool
 }
 
-func (b *refreshing) Refresh(_ context.Context, _ *wire.Conn, method string, result jsontext.Value) any {
-	return map[string]any{"method": method, "version": b.version}
+// Refresh brings a me result up to date as the user's current object, and
+// any other method's as it likes; wrong brings me's up as a map, which a
+// me result may not be.
+func (b *refreshing) Refresh(_ context.Context, c *wire.Conn, method string, _ jsontext.Value) any {
+	switch {
+	case method != "me":
+		return map[string]any{"method": method, "version": b.version}
+	case b.wrong:
+		return map[string]any{"you": map[string]any{"name": "wrong"}}
+	}
+	return &wire.CurrentUser{User: wire.User{UserID: c.User().UserID, Name: fmt.Sprintf("v%d", b.version)}}
 }
 
 func (b *refreshing) Me(_ context.Context, c *wire.Conn, _ wire.MeParams, reply wire.Reply[wire.CurrentUser]) error {
@@ -89,15 +100,42 @@ func (b *refreshing) Me(_ context.Context, c *wire.Conn, _ wire.MeParams, reply 
 	return reply.Send(wire.CurrentUser{User: *c.User()})
 }
 
+// A duplicate's result brought up to date is sent as its method's result:
+// a me result's CurrentUser as {"you": ...}, and any other as it is. A me
+// result brought up to date as anything else is logged, and the duplicate
+// gets the original.
 func TestRefreshDuplicate(t *testing.T) {
+	var log logged
 	b := &refreshing{}
-	c := connect(t, wired(&wire.Server{Backend: b, RefreshDuplicate: b.Refresh}))
-	signIn(t, c)
+	s := wired(&wire.Server{Backend: b, RefreshDuplicate: b.Refresh, Logger: log.logger()})
+	s.Handle("ext:count", wire.Handler{Serve: func(_ context.Context, _ *wire.Conn, r *wire.Request) error {
+		r.Reply(map[string]any{"version": 0})
+		return nil
+	}})
+	c := connect(t, s)
+	userID := signIn(t, c)
 	send(t, c, `{"method":"me","id":"m","params":{"name":"x"}}`)
-	next(t, c)
+	original := next(t, c)
 	b.version = 7
 	send(t, c, `{"method":"me","id":"m","params":{"name":"x"}}`)
-	if f := fields(next(t, c)); f["version"] != float64(7) || f["method"] != "me" {
+	var me struct {
+		You wire.CurrentUser `json:"you"`
+	}
+	if f := next(t, c); f.Decode(&me) != nil || me.You.Name != "v7" || me.You.UserID != userID || len(fields(f)) != 1 {
+		t.Fatalf("duplicate: %s", f.Raw)
+	}
+	b.wrong = true
+	send(t, c, `{"method":"me","id":"m","params":{"name":"x"}}`)
+	if f := next(t, c); string(f.Result) != string(original.Result) {
+		t.Fatalf("a duplicate brought up to date wrong got %s, want the original %s", f.Result, original.Result)
+	}
+	if out := log.String(); !strings.Contains(out, "level=ERROR") || !strings.Contains(out, "other than a CurrentUser") {
+		t.Fatalf("the wrong me result was not logged: %s", out)
+	}
+	send(t, c, `{"method":"ext:count","id":"n"}`)
+	next(t, c)
+	send(t, c, `{"method":"ext:count","id":"n"}`)
+	if f := fields(next(t, c)); f["version"] != float64(7) || f["method"] != "ext:count" {
 		t.Fatalf("duplicate: %v", f)
 	}
 }
