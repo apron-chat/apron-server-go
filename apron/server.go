@@ -217,8 +217,8 @@ type Server struct {
 	// wire serves the protocol, with s as its Backend (backend.go).
 	wire *wire.Server
 	push *webpush.Deliverer
-	// vapid is the webpush key (§4.9): Config's, else storedVAPID's.
-	vapid       *webpush.VAPIDKey
+	// storedVAPID is the webpush key (§4.9) the server made, which push
+	// signs with unless Config sets one.
 	storedVAPID webpush.StoredKey
 	// stopped ends the background sweep of expired push registrations.
 	stopped chan struct{}
@@ -328,7 +328,7 @@ func Open(config Config) (*Server, error) {
 		if err != nil {
 			return fail(err)
 		}
-		s.vapid = key
+		s.push.VAPID = key
 	}
 	s.push.Subject = config.VAPIDSubject
 	if s.push.Subject == "" && strings.HasPrefix(config.PublicURL, "https://") {
@@ -368,7 +368,6 @@ func Open(config Config) (*Server, error) {
 		s.mu.Unlock()
 		return fail(fmt.Errorf("restoring the stored state: %w", err))
 	}
-	s.push.VAPID = s.vapid
 	if s.rooms.Get(defaultRoomID) == nil {
 		// The seeded default room has a logged creation record like any
 		// other room, so its history_log_id is never null.
@@ -682,8 +681,8 @@ func (s *Server) serverParams(baseURL string, revealed bool) wire.ServerInfo {
 	}
 	if !s.config.DisablePush {
 		push := map[string]any{"relay": map[string]any{}, "wake": (urgentScopes | wakeJoined | wakeBadge).Names()}
-		if s.vapid != nil {
-			push["webpush"] = map[string]any{"key": s.vapid.Public}
+		if s.push.VAPID != nil {
+			push["webpush"] = map[string]any{"key": s.push.VAPID.Public}
 		}
 		info.Push = push
 	}

@@ -986,7 +986,7 @@ func TestPushAndStatusSurviveRestart(t *testing.T) {
 	configured, _ := webpush.NewVAPIDKey()
 	config := DefaultConfig()
 	config.VAPIDPrivateKey = configured.Encoded()
-	if app, _ := newTestServer(t, config); app.vapid.Public != configured.Public {
+	if app, _ := newTestServer(t, config); app.push.VAPID.Public != configured.Public {
 		t.Fatal("the configured VAPID key is not used")
 	}
 	config.VAPIDPrivateKey = "nope"

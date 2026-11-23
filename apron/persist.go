@@ -12,6 +12,7 @@ import (
 	"github.com/apron-chat/apron-server-go/apron/internal/accounts"
 	"github.com/apron-chat/apron-server-go/apron/internal/devices"
 	"github.com/apron-chat/apron-server-go/apron/internal/embeds"
+	"github.com/apron-chat/apron-server-go/apron/internal/emoji"
 	"github.com/apron-chat/apron-server-go/apron/internal/invitations"
 	"github.com/apron-chat/apron-server-go/apron/internal/profile"
 	"github.com/apron-chat/apron-server-go/apron/internal/push"
@@ -158,16 +159,9 @@ func (s *Server) restoreLocked() (map[string]bool, error) {
 	if err != nil {
 		return nil, err
 	}
-	decode := func(kind, id string, raw jsontext.Value, into any) error {
-		if err := json.Unmarshal(raw, into); err != nil {
-			return fmt.Errorf("stored %s %q: %w", kind, id, err)
-		}
-		return nil
-	}
-
 	if raw, ok := entries[entryMeta]["counters"]; ok {
-		if err := decode(entryMeta, "counters", raw, &s.storedMeta); err != nil {
-			return nil, err
+		if err := json.Unmarshal(raw, &s.storedMeta); err != nil {
+			return nil, fmt.Errorf("stored %s %q: %w", entryMeta, "counters", err)
 		}
 		s.log.RestoreSequence(s.storedMeta.LastID)
 		s.ids.RestoreCounters(s.storedMeta.GuestNumber, s.storedMeta.AccountNumber)
@@ -178,10 +172,10 @@ func (s *Server) restoreLocked() (map[string]bool, error) {
 			s.extData.Restore(kind, values)
 		}
 	}
-	if s.vapid == nil {
+	if s.push.VAPID == nil {
 		// The webpush VAPID key (§4.9) is Config's, else the one in the
 		// store, else a new one, which is stored.
-		if s.vapid, err = s.storedVAPID.Restore(entries[webpush.StoreKind][webpush.StoreID]); err != nil {
+		if s.push.VAPID, err = s.storedVAPID.Restore(entries[webpush.StoreKind][webpush.StoreID]); err != nil {
 			return nil, err
 		}
 	}
@@ -235,7 +229,7 @@ func (s *Server) restoreLocked() (map[string]bool, error) {
 			s.users.Get(id).avatarEmbed = e
 		}
 	}
-	if err := s.restoreEmojiLocked(entries[entryMeta]["emoji"]); err != nil {
+	if err := s.restoreEmojiLocked(entries[emoji.StoreKind][emoji.StoreID]); err != nil {
 		return nil, err
 	}
 	if err := s.restoreProfileLocked(entries[profile.StoreKind][profile.StoreID]); err != nil {
