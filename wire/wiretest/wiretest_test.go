@@ -353,3 +353,75 @@ func TestCallFramesConcurrent(t *testing.T) {
 	}
 	wg.Wait()
 }
+
+// slow answers each command but /fast later, once its upstream does:
+// answers takes the text to answer the next one with.
+type slow struct {
+	asked   chan string
+	answers chan string
+}
+
+func newSlow() *slow { return &slow{asked: make(chan string, 4), answers: make(chan string)} }
+
+func (s *slow) Command(_ context.Context, _ *wire.Conn, p wire.CommandParams, reply wire.Reply[wire.CommandResult]) error {
+	if p.Body.Text == "/fast" {
+		return reply.Send(wire.CommandResult{})
+	}
+	if err := reply.Later(); err != nil {
+		return err
+	}
+	s.asked <- p.Body.Text
+	go func() {
+		answer := <-s.answers
+		_ = reply.Send(wire.CommandResult{Unknown: jsontext.Value(`{"answer":"` + answer + `"}`)})
+	}()
+	return nil
+}
+
+// A request answered later has no reply when its handler returns; Wait
+// waits for it, and a Client's Call of it returns once it comes, without
+// holding up the requests after it.
+func TestLater(t *testing.T) {
+	ctx := timeout(t)
+	s := newSlow()
+	reply, sent := wiretest.NewReply[wire.CommandResult](wiretest.NewRequest("command", nil))
+	if err := s.Command(ctx, nil, wire.CommandParams{Body: &wire.Body{Text: "/slow"}}, reply); err != nil || sent.Sent() {
+		t.Fatalf("command: %v, sent %v; want it answered later", err, sent.Sent())
+	}
+	waiting, cancel := context.WithTimeout(ctx, 10*time.Millisecond)
+	defer cancel()
+	if err := sent.Wait(waiting); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Wait before the reply: %v", err)
+	}
+	s.answers <- "42"
+	if err := sent.Wait(ctx); err != nil || !sent.Sent() || string(sent.Raw()) != `{"answer":"42"}` {
+		t.Fatalf("Wait: %v, sent %v %s", err, sent.Sent(), sent.Raw())
+	}
+
+	client := wiretest.Connect(&wire.Server{Backend: newChat(), Commands: s})
+	defer client.Close()
+	if _, err := client.Auth(ctx, map[string]any{"scheme": "guest"}); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan string, 1)
+	go func() {
+		result, err := client.Call(ctx, "command", map[string]any{"body": map[string]any{"text": "/slow"}})
+		if err != nil {
+			t.Error(err)
+		}
+		done <- string(result)
+	}()
+	<-s.asked
+	if _, err := client.Call(ctx, "command", map[string]any{"body": map[string]any{"text": "/fast"}}); err != nil {
+		t.Fatalf("a request after one answered later: %v", err)
+	}
+	select {
+	case result := <-done:
+		t.Fatalf("the request answered later returned %s before its answer", result)
+	default:
+	}
+	s.answers <- "later"
+	if result := <-done; result != `{"answer":"later"}` {
+		t.Fatalf("got %s", result)
+	}
+}

@@ -24,6 +24,37 @@
 //	...
 //	echo, err := c.Expect(ctx, wiretest.Method("message"))
 //
+// A handler that answers later (wire.Reply.Later) returns before its
+// reply is sent, which a goroutine of the backend's own sends: called
+// directly, its Recorded's Sent is false when it returns, and Wait waits
+// for the reply:
+//
+//	reply, sent := wiretest.NewReply[wire.CommandResult](wiretest.NewRequest("command", nil))
+//	if err := backend.Command(ctx, conn, p, reply); err != nil || sent.Sent() {
+//		t.Fatalf("command: %v, sent %v; want it answered later", err, sent.Sent())
+//	}
+//	upstream.answer()
+//	if err := sent.Wait(ctx); err != nil || sent.Err() != nil {
+//		t.Fatalf("command: %v %v", err, sent.Err())
+//	}
+//
+// An error the handler returns after Later is its own return value, as
+// any is. Through a Client, a request's Call returns once its reply comes,
+// so a test makes the Call of one answered later from a goroutine, and
+// meanwhile sees the requests sent after it answered first, as replies may
+// come in any order (§1):
+//
+//	done := make(chan error, 1)
+//	go func() { _, err := c.Call(ctx, "command", slow); done <- err }()
+//	upstream.waitFor(slow)
+//	if _, err := c.Call(ctx, "command", fast); err != nil { // Not held up.
+//		t.Fatal(err)
+//	}
+//	upstream.answer()
+//	if err := <-done; err != nil {
+//		t.Fatal(err)
+//	}
+//
 // Frames arrive whenever the server sends them, so what a test asserts
 // of their order it reads in order: CallFrames returns the frames that
 // arrived before a request's reply, and Sync waits until every frame the
@@ -36,6 +67,7 @@
 package wiretest
 
 import (
+	"context"
 	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"slices"
@@ -60,7 +92,7 @@ func NewRequest(method string, params any) *wire.Request {
 		}
 		raw = encoded
 	}
-	r, err := testhook.NewRequest(method, raw, &recording{})
+	r, err := testhook.NewRequest(method, raw, &recording{done: make(chan struct{})})
 	if err != nil {
 		panic("wiretest: " + err.Error())
 	}
@@ -100,11 +132,16 @@ type recording struct {
 	raw   jsontext.Value
 	err   error
 	then  []wire.Frame
+	// done is closed once the request has its reply.
+	done chan struct{}
 }
 
 func (r *recording) Record(sent any, raw jsontext.Value, err error, then [][]byte) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if !r.sent {
+		close(r.done)
+	}
 	r.sent, r.value, r.raw, r.err = true, sent, raw, err
 	r.then = nil
 	for _, frame := range then {
@@ -112,11 +149,24 @@ func (r *recording) Record(sent any, raw jsontext.Value, err error, then [][]byt
 	}
 }
 
-// Sent reports whether the request has its reply.
+// Sent reports whether the request has its reply: false for one answered
+// later (wire.Reply.Later) until it is sent, which Wait waits for.
 func (r *Recorded[T]) Sent() bool {
 	r.rec.mu.Lock()
 	defer r.rec.mu.Unlock()
 	return r.rec.sent
+}
+
+// Wait waits until the request has its reply, such as one a handler sends
+// after it returns (wire.Reply.Later), or until ctx is done, and returns
+// ctx's error then.
+func (r *Recorded[T]) Wait(ctx context.Context) error {
+	select {
+	case <-r.rec.done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // Result returns the result the handler sent: the value it gave Send, or
