@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -23,6 +24,9 @@ type chat struct {
 	server   *wire.Server
 	clock    wire.Clock
 	commands commands.Router
+
+	// rename, if set, is who OnConnect makes a Local connection.
+	rename func(wire.User) wire.User
 
 	mu        sync.Mutex
 	guests    int
@@ -43,6 +47,9 @@ func newChat() *chat {
 			defer c.mu.Unlock()
 			if data, ok := conn.Data().(string); ok {
 				c.connected = append(c.connected, data)
+			}
+			if c.rename != nil && conn.Local() {
+				conn.SetUser(c.rename(*conn.User()))
 			}
 			return nil
 		},
@@ -253,5 +260,187 @@ func TestReopen(t *testing.T) {
 	}
 	if err := c.server.Shutdown(ctx); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// say posts text as a new guest, with mentions, and returns its message.
+func say(t *testing.T, c *chat, text string, mentions ...string) (*wiretest.Client, wire.LogID) {
+	t.Helper()
+	ctx := timeout(t)
+	client := wiretest.Connect(c.server)
+	t.Cleanup(func() { client.Close() })
+	if _, err := client.Auth(ctx, map[string]any{"scheme": "guest"}); err != nil {
+		t.Fatal(err)
+	}
+	body := map[string]any{"text": text}
+	if len(mentions) > 0 {
+		body["mentions"] = mentions
+	}
+	raw, err := client.Call(ctx, "message", map[string]any{"body": body})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var result wire.MessageResult
+	if err := json.Unmarshal(raw, &result); err != nil {
+		t.Fatal(err)
+	}
+	return client, result.MessageID
+}
+
+// A bot the backend makes another user as it opens is that user: it is
+// told so, User says so, its own messages are told by that user_id, and
+// its mentions are of it.
+func TestUserFromBackend(t *testing.T) {
+	c := newChat()
+	c.rename = func(u wire.User) wire.User {
+		return wire.User{UserID: "b1", Name: strings.ToLower(u.Name)}
+	}
+	heard := make(chan wire.Message, 8)
+	you := make(chan string, 8)
+	echo, err := bot.Start(c.server, bot.Options{
+		User: wire.User{UserID: "echo", Name: "Echo"},
+		OnMessage: func(ctx context.Context, b *bot.Bot, m wire.Message) {
+			heard <- m
+			if b.Mentioned(m) {
+				if _, err := b.Reply(ctx, m, "hi"); err != nil {
+					t.Error(err)
+				}
+			}
+		},
+		OnFrame: func(_ context.Context, _ *bot.Bot, f wire.Frame) {
+			var n struct {
+				Method string          `json:"method"`
+				Params wire.UserUpdate `json:"params"`
+			}
+			if json.Unmarshal(f, &n) == nil && n.Method == "user" && n.Params.You != nil {
+				you <- n.Params.You.UserID + " " + n.Params.You.Name
+			}
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { echo.Close() })
+	if u := echo.User(); u.UserID != "b1" || u.Name != "echo" || echo.UserID() != "b1" {
+		t.Fatalf("User %+v, UserID %s", u, echo.UserID())
+	}
+	if got := <-you; got != "b1 echo" {
+		t.Fatalf("told %q", got)
+	}
+	// Mentions of the user_id it asked for are not of it.
+	say(t, c, "@echo", "echo")
+	if m := <-heard; m.Body.Text != "@echo" {
+		t.Fatalf("heard %+v", m)
+	}
+	client, asked := say(t, c, "@b1", "b1")
+	if _, err := client.Expect(timeout(t), func(f wiretest.Frame) bool {
+		var m wire.Message
+		return f.Method == "message" && f.Decode(&m) == nil && m.From.UserID == "b1" && m.ReplyTo != nil && m.ReplyTo.MessageID == asked
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// It heard the mention, and not its own reply.
+	if m := <-heard; m.Body.Text != "@b1" {
+		t.Fatalf("heard %+v", m)
+	}
+	select {
+	case m := <-heard:
+		t.Fatalf("heard %+v", m)
+	case <-time.After(50 * time.Millisecond):
+	}
+}
+
+// Addressed takes a message that names the bot in its text, as well as
+// one that mentions it.
+func TestAddressed(t *testing.T) {
+	c := newChat()
+	addressed := make(chan string, 8)
+	echo, err := bot.Start(c.server, bot.Options{
+		User: wire.User{UserID: "echo_1", Name: "Echo"},
+		OnMessage: func(_ context.Context, b *bot.Bot, m wire.Message) {
+			if b.Addressed(m) {
+				addressed <- m.Body.Text
+			}
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { echo.Close() })
+	for _, text := range []string{"hello all", "echo: hi", "thanks @ECHO!", "ping @echo_1", "mail me@echo"} {
+		say(t, c, text)
+	}
+	say(t, c, "you there?", "echo_1")
+	for _, want := range []string{"echo: hi", "thanks @ECHO!", "ping @echo_1", "you there?"} {
+		if got := <-addressed; got != want {
+			t.Fatalf("addressed %q, want %q", got, want)
+		}
+	}
+}
+
+func TestAddresses(t *testing.T) {
+	for _, test := range []struct {
+		text, name string
+		want       bool
+	}{
+		{"@echo", "echo", true},
+		{"hi @Echo, how are you", "echo", true},
+		{"ask @echo.", "echo", true},
+		{"(@echo)", "echo", true},
+		{"echo: hi", "echo", true},
+		{"  Echo, hi", "echo", true},
+		{"@echo bot hi", "echo bot", true},
+		{"@écho", "ÉCHO", true},
+		{"echo hi", "echo", false},
+		{"hi echo: there", "echo", false},
+		{"@echoes", "echo", false},
+		{"@echo-1", "echo", false},
+		{"@echo_1", "echo", false},
+		{"@echo.org", "echo", false},
+		{"me@echo", "echo", false},
+		{"a.@echo", "echo", false},
+		{"@@echo", "echo", false},
+		{"@ech", "echo", false},
+		{"@", "echo", false},
+		{"@echo", "", false},
+	} {
+		if got := bot.Addresses(test.text, test.name); got != test.want {
+			t.Errorf("Addresses(%q, %q) = %v", test.text, test.name, got)
+		}
+	}
+}
+
+// A handler may make requests and wait for their results, more of them
+// than its queue holds frames: results do not wait behind the frames the
+// handler has yet to take.
+func TestRequestsFromHandler(t *testing.T) {
+	c := newChat()
+	done := make(chan error, 1)
+	echo, err := bot.Start(c.server, bot.Options{
+		User:  wire.User{UserID: "echo"},
+		Queue: 2,
+		OnMessage: func(ctx context.Context, b *bot.Bot, m wire.Message) {
+			for range 10 {
+				if _, err := b.History(ctx, wire.HistoryParams{Limit: 5}); err != nil {
+					done <- err
+					return
+				}
+			}
+			_, err := b.Reply(ctx, m, "read it")
+			done <- err
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { echo.Close() })
+	say(t, c, "hello")
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-timeout(t).Done():
+		t.Fatal("the handler's requests got no results")
 	}
 }

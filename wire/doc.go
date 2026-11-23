@@ -290,8 +290,9 @@
 // Package bot (wire/bot) runs bots on any backend: a user of the server's
 // own on a Local connection, which a Bot keeps open, with typed requests
 // (Conn.Post, Conn.Command, Conn.Join, Conn.History) and handlers for what
-// it receives, such as a message that mentions it (Bot.Mentioned,
-// Bot.Reply). Package apron's bots make their requests on its Conn, and
+// it receives, such as a message that mentions it, or names it in its
+// text (Bot.Mentioned, Bot.Addressed, Bot.Reply), and as the user the
+// backend made it (Bot.User). Package apron's bots make their requests on its Conn, and
 // examples/minimal has a Bot. The params of the requests a client sends,
 // such as [MessageParams], encode as it sends them.
 //

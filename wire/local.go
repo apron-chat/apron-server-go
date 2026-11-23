@@ -43,6 +43,13 @@ type LocalOptions struct {
 	// replies to Call, which go to Call, in order, on a goroutine of the
 	// connection's own: the server frame first, then notifications and
 	// connection errors. Without it, they are dropped.
+	//
+	// OnFrame may Call, and wait for the reply: a reply goes straight to
+	// its Call, never through OnFrame's queue, so it is not held up by
+	// the frames OnFrame has yet to take, and the wait cannot be for
+	// itself. Those frames, the ones sent while it waits, such as the
+	// notifications its own request causes, wait in the queue meanwhile,
+	// and count toward Queue.
 	OnFrame func(Frame)
 	// Queue bounds the frames waiting to be written to the connection, and
 	// those waiting for OnFrame; 1024 by default. An OnFrame that lets more
