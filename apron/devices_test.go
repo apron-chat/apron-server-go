@@ -128,7 +128,7 @@ func expectClosedWithError(t *testing.T, c *testClient, code int, message string
 func pushURLs(app *Server, userID string) []string {
 	app.mu.Lock()
 	defer app.unlock()
-	return slices.Sorted(maps.Keys(app.users[userID].pushes))
+	return slices.Sorted(maps.Keys(app.users.Get(userID).pushes))
 }
 
 func TestInviteDeviceSignsInFromAnyOrigin(t *testing.T) {
@@ -303,7 +303,7 @@ func TestDeviceTokensSurviveRestart(t *testing.T) {
 			// A registration stored before /invite-device existed records
 			// no device token.
 			app.mu.Lock()
-			u := app.users[adaID]
+			u := app.users.Get(adaID)
 			app.unlock()
 			addPush(app, u, pushRegistration{url: "https://push.example/untagged"})
 			stop()

@@ -652,8 +652,8 @@ func userViewOf(u *userState) User {
 		return User{}
 	}
 	return User{
-		ID: u.id, Name: u.name, Roles: slices.Clone(u.roles), Account: u.account(), Bot: u.botOf != "",
-		Email: u.identities[email.Name], Created: u.created,
+		ID: u.id, Name: u.Name, Roles: slices.Clone(u.roles), Account: u.Account(), Bot: u.Bot != "",
+		Email: u.Identities[email.Name], Created: u.Created,
 	}
 }
 
@@ -693,7 +693,7 @@ func (s *Server) roomViewLocked(r *roomState) Room {
 func (h *Host) User(id string) (User, bool) {
 	h.s.mu.RLock()
 	defer h.s.mu.RUnlock()
-	u := h.s.users[id]
+	u := h.s.users.Get(id)
 	return userViewOf(u), u != nil
 }
 
@@ -725,7 +725,7 @@ func (h *Host) Rooms() []Room {
 func (h *Host) Visible(u User, roomID string) bool {
 	h.s.mu.RLock()
 	defer h.s.mu.RUnlock()
-	r, user := h.s.rooms.Get(roomID), h.s.users[u.ID]
+	r, user := h.s.rooms.Get(roomID), h.s.users.Get(u.ID)
 	return r != nil && user != nil && r.VisibleTo(user)
 }
 

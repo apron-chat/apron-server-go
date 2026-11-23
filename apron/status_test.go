@@ -16,6 +16,7 @@ import (
 	"github.com/coder/websocket"
 	"golang.org/x/time/rate"
 
+	"github.com/apron-chat/apron-server-go/apron/internal/users"
 	"github.com/apron-chat/apron-server-go/store"
 )
 
@@ -502,7 +503,7 @@ func TestAfterAuthMutesAndStatuses(t *testing.T) {
 	addAccount(t, app, "away", clients...)
 	addAccount(t, app, "busy", clients...)
 	app.mu.Lock()
-	app.users["busy"].presence.Chosen = statusDND
+	app.users.Get("busy").Presence.Chosen = statusDND
 	app.unlock()
 
 	owner, _ := dialOrigin(t, httpServer, testPasskeyOrigin)
@@ -555,7 +556,7 @@ func TestAfterAuthMutesAndStatuses(t *testing.T) {
 	_ = owner.ws.Close(websocket.StatusNormalClosure, "bye")
 	attended.expectQuiet(t)
 	app.mu.RLock()
-	status := app.users[owner.userID].shownStatus()
+	status := app.users.Get(owner.userID).shownStatus()
 	app.mu.RUnlock()
 	if status != statusOnline {
 		t.Fatalf("owner status: %s", status)
@@ -703,9 +704,9 @@ func TestRoomIDScopesOnlyMute(t *testing.T) {
 	a.expectQuiet(t)
 	app.mu.RLock()
 	defer app.mu.RUnlock()
-	u := app.users[b.userID]
-	if now := time.Now(); u.mute.active(now) || !u.roomMuted(app.rooms.Get("general"), now) {
-		t.Fatalf("mutes: unscoped %#v, rooms %#v", u.mute, u.roomMutes)
+	u := app.users.Get(b.userID)
+	if now := time.Now(); u.Mute.Active(now) || !u.roomMuted(app.rooms.Get("general"), now) {
+		t.Fatalf("mutes: unscoped %#v, rooms %#v", u.Mute, u.RoomMutes)
 	}
 }
 
@@ -754,10 +755,10 @@ func TestStatusIsARequest(t *testing.T) {
 	b.expectQuiet(t)
 	a.expectQuiet(t)
 	app.mu.RLock()
-	u := app.users[b.userID]
-	if now := time.Now(); u.mute.active(now) || u.shownStatus() != statusOnline {
+	u := app.users.Get(b.userID)
+	if now := time.Now(); u.Mute.Active(now) || u.shownStatus() != statusOnline {
 		app.mu.RUnlock()
-		t.Fatalf("after status notifications: mute %#v, status %s", u.mute, u.shownStatus())
+		t.Fatalf("after status notifications: mute %#v, status %s", u.Mute, u.shownStatus())
 	}
 	app.mu.RUnlock()
 
@@ -819,7 +820,7 @@ func TestStatusRateLimit(t *testing.T) {
 
 	// A limit of two, refilled hourly.
 	app.mu.Lock()
-	app.users[b.userID].presence.SetRequestLimit(rate.NewLimiter(rate.Every(time.Hour), 2))
+	app.users.Get(b.userID).Presence.SetRequestLimit(rate.NewLimiter(rate.Every(time.Hour), 2))
 	app.unlock()
 	b.status(t, map[string]any{"idle": 300})
 	expectStatus(t, a, b.userID, "idle")
@@ -836,9 +837,9 @@ func TestStatusRateLimit(t *testing.T) {
 	a.expectQuiet(t)
 	app.mu.RLock()
 	defer app.mu.RUnlock()
-	u := app.users[b.userID]
-	if now := time.Now(); !u.mute.forever || u.roomMuted(app.rooms.Get("general"), now) || u.shownStatus() != statusIdle {
-		t.Fatalf("after limited requests: mute %#v, room mutes %#v, status %s", u.mute, u.roomMutes, u.shownStatus())
+	u := app.users.Get(b.userID)
+	if now := time.Now(); !u.Mute.Forever || u.roomMuted(app.rooms.Get("general"), now) || u.shownStatus() != statusIdle {
+		t.Fatalf("after limited requests: mute %#v, room mutes %#v, status %s", u.Mute, u.RoomMutes, u.shownStatus())
 	}
 }
 
@@ -934,7 +935,7 @@ func TestListingsCarryStatus(t *testing.T) {
 	room, _ := saveRoom(t, none, "room", map[string]any{"title": "Room"})
 	joinRoom(t, invisible, room)
 	app.mu.Lock()
-	app.addMemberLocked(app.users["away"], app.rooms.Get(room))
+	app.addMemberLocked(app.users.Get("away"), app.rooms.Get(room))
 	app.unlock()
 	online.drain(t)
 	before, _ := online.request(t, "room_join", "join", map[string]any{"room_id": room})
@@ -980,7 +981,7 @@ func TestMeStatusChangesAreLimited(t *testing.T) {
 	watching(a)
 	a.drain(t)
 	app.mu.Lock()
-	app.users[b.userID].presence.SetRequestLimit(rate.NewLimiter(rate.Every(time.Hour), 1))
+	app.users.Get(b.userID).Presence.SetRequestLimit(rate.NewLimiter(rate.Every(time.Hour), 1))
 	app.unlock()
 	if got := setStatus(t, b, "dnd"); got != "dnd" {
 		t.Fatalf("status = %v", got)
@@ -997,8 +998,8 @@ func TestMeStatusChangesAreLimited(t *testing.T) {
 	a.expectQuiet(t)
 	app.mu.RLock()
 	defer app.mu.RUnlock()
-	if u := app.users[b.userID]; u.presence.Chosen != statusDND || u.name == "Bea" {
-		t.Fatalf("after a limited me: status %q name %q", u.presence.Chosen, u.name)
+	if u := app.users.Get(b.userID); u.Presence.Chosen != statusDND || u.Name == "Bea" {
+		t.Fatalf("after a limited me: status %q name %q", u.Presence.Chosen, u.Name)
 	}
 }
 
@@ -1010,9 +1011,9 @@ func TestRoomMutesAreBounded(t *testing.T) {
 	room, _ := saveRoom(t, c, "room", map[string]any{"title": "Room"})
 	expectEcho(t, c, map[string]any{"room_id": room, "mute": true}, room, true)
 	app.mu.Lock()
-	u := app.users[c.userID]
+	u := app.users.Get(c.userID)
 	for i := range maxRoomMutes - 1 {
-		u.roomMutes[fmt.Sprintf("gone-%d", i)] = muteState{forever: true}
+		u.RoomMutes[fmt.Sprintf("gone-%d", i)] = muteState{Forever: true}
 	}
 	app.unlock()
 	c.statusError(t, map[string]any{"room_id": "general", "mute": 60}, CodeDenied)
@@ -1087,7 +1088,7 @@ func waitConnections(t *testing.T, app *Server, userID string, n int) {
 	t.Helper()
 	for deadline := time.Now().Add(time.Second); ; time.Sleep(time.Millisecond) {
 		app.mu.RLock()
-		open := len(app.users[userID].clients)
+		open := len(app.users.Get(userID).clients)
 		app.mu.RUnlock()
 		if open == n {
 			return
@@ -1408,7 +1409,7 @@ func TestHiddenFlapKeepsSeen(t *testing.T) {
 	a.drain(t)
 	// b has one change of its burst left, which refills no more.
 	app.mu.Lock()
-	app.users[userID].presence.SetPublishLimit(rate.NewLimiter(rate.Every(time.Hour), 1))
+	app.users.Get(userID).Presence.SetPublishLimit(rate.NewLimiter(rate.Every(time.Hour), 1))
 	app.unlock()
 	_ = b.ws.Close(websocket.StatusNormalClosure, "bye")
 	seen := expectStatus(t, a, userID, "offline")
@@ -1428,7 +1429,7 @@ func TestHiddenFlapKeepsSeen(t *testing.T) {
 	a.expectQuiet(t)
 	expectListedSeen(t, a, userID, "offline", seen)
 	app.mu.RLock()
-	kept := app.users[userID].presence.Seen
+	kept := app.users.Get(userID).Presence.Seen
 	app.mu.RUnlock()
 	if kept != seenMillis(t, seen) {
 		t.Fatalf("seen after a hidden flap = %d, want %s", kept, seen)
@@ -1460,7 +1461,7 @@ func TestSeenOnlyWithTheLastConnection(t *testing.T) {
 	a.expectQuiet(t)
 	expectListedSeen(t, a, userID, "online", "")
 	app.mu.RLock()
-	kept := app.users[userID].presence.Seen
+	kept := app.users.Get(userID).Presence.Seen
 	app.mu.RUnlock()
 	if kept != seenMillis(t, seen) {
 		t.Fatalf("seen after closing one of two connections = %d, want %s", kept, seen)
@@ -1544,7 +1545,7 @@ func TestListingsCarrySeen(t *testing.T) {
 // expectStored waits until app has written every change it made so far to
 // its store (Server.Sync), then requires the SQLite store at path to hold a
 // user entry for userID that want accepts, and returns it.
-func expectStored(t *testing.T, app *Server, path, userID string, want func(storedUser) bool) storedUser {
+func expectStored(t *testing.T, app *Server, path, userID string, want func(users.Stored) bool) users.Stored {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
@@ -1555,7 +1556,7 @@ func expectStored(t *testing.T, app *Server, path, userID string, want func(stor
 	if err != nil {
 		t.Fatal(err)
 	}
-	var stored storedUser
+	var stored users.Stored
 	found := false
 	err = s.Load(func(e store.Entry) error {
 		if e.Kind != entryUser || e.ID != userID {
@@ -1634,10 +1635,10 @@ func TestSeenAfterCrash(t *testing.T) {
 
 	// The store has all of it, and the server crashes: it goes on running,
 	// unseen, while another starts on the same file.
-	expectStored(t, app, path, back.userID, func(u storedUser) bool { return u.Shown && u.Seen == left })
-	expectStored(t, app, path, fresh.userID, func(u storedUser) bool { return u.Shown && u.Seen == 0 })
-	expectStored(t, app, path, hidden.userID, func(u storedUser) bool { return !u.Shown && u.Seen == seenMillis(t, hiddenSeen) })
-	expectStored(t, app, path, none.userID, func(u storedUser) bool { return u.Shown && u.Seen == 0 })
+	expectStored(t, app, path, back.userID, func(u users.Stored) bool { return u.Shown && u.Seen == left })
+	expectStored(t, app, path, fresh.userID, func(u users.Stored) bool { return u.Shown && u.Seen == 0 })
+	expectStored(t, app, path, hidden.userID, func(u users.Stored) bool { return !u.Shown && u.Seen == seenMillis(t, hiddenSeen) })
+	expectStored(t, app, path, none.userID, func(u users.Stored) bool { return u.Shown && u.Seen == 0 })
 	crashed := time.Now().UnixMilli()
 	restarted, httpServer, _ := startWithStore(t, open(), filepath.Join(dir, "uploads"))
 	restored := time.Now().UnixMilli()
@@ -1648,7 +1649,7 @@ func TestSeenAfterCrash(t *testing.T) {
 		seen, _ := user["seen"].(string)
 		expectSeenBetween(t, id+" after a crash", seen, max(crashed, returned), restored)
 		expectListedSeen(t, g, id, "offline", seen)
-		expectStored(t, restarted, path, id, func(u storedUser) bool { return !u.Shown && u.Seen == seenMillis(t, seen) })
+		expectStored(t, restarted, path, id, func(u users.Stored) bool { return !u.Shown && u.Seen == seenMillis(t, seen) })
 	}
 	expectListedSeen(t, g, hidden.userID, "offline", hiddenSeen)
 	expectListedSeen(t, g, none.userID, "", "")

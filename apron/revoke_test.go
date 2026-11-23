@@ -12,7 +12,7 @@ import (
 func waitNoWrites(t *testing.T, app *Server, userID string) {
 	t.Helper()
 	app.mu.RLock()
-	u := app.users[userID]
+	u := app.users.Get(userID)
 	app.mu.RUnlock()
 	if u == nil {
 		t.Fatalf("no user %s", userID)
@@ -45,7 +45,7 @@ func TestSignOutEndsWrites(t *testing.T) {
 	a.notification(t, "message")
 
 	app.mu.Lock()
-	u := app.users[a.userID]
+	u := app.users.Get(a.userID)
 	app.signOutLocked(u)
 	app.unlock()
 
@@ -85,7 +85,7 @@ func TestLeavingAPrivateRoomEndsWritesIntoIt(t *testing.T) {
 	}
 	// A write elsewhere goes on.
 	app.mu.RLock()
-	n := len(app.users[a.userID].writes)
+	n := len(app.users.Get(a.userID).writes)
 	app.mu.RUnlock()
 	if n != 1 {
 		t.Fatalf("writes left: %d", n)
@@ -106,7 +106,7 @@ func TestAWriteChecksItsAuthorWhenItStarts(t *testing.T) {
 	// Taken out of the room behind the server's back, with no leave to
 	// end the write.
 	app.mu.Lock()
-	u := app.users[a.userID]
+	u := app.users.Get(a.userID)
 	app.rooms.Leave(app.rooms.Get(roomID), u, u.from())
 	app.unlock()
 	if status, _, body := httpDo(t, http.MethodPut, writeURL, strings.NewReader("late"), ""); status != http.StatusForbidden || !strings.Contains(string(body), "may no longer write") {
@@ -126,7 +126,7 @@ func TestAGuestsWriteOutlivesItsConnection(t *testing.T) {
 	_ = a.ws.CloseNow()
 	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(5 * time.Millisecond) {
 		app.mu.RLock()
-		gone := app.users[a.userID] == nil
+		gone := app.users.Get(a.userID) == nil
 		app.mu.RUnlock()
 		if gone {
 			break

@@ -110,7 +110,7 @@ func TestAScopedBotSeesOnlyItsRooms(t *testing.T) {
 		t.Fatal(err)
 	}
 	app.mu.RLock()
-	_, inGeneral := app.users["agent"].joined[defaultRoomID]
+	_, inGeneral := app.users.Get("agent").joined[defaultRoomID]
 	app.mu.RUnlock()
 	if inGeneral || host.Scope("agent").Rooms[0] != other {
 		t.Fatalf("still in general: %v, scope %#v", inGeneral, host.Scope("agent"))

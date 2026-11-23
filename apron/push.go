@@ -161,7 +161,7 @@ func (s *Server) removePushLocked(p *pushRegistration) {
 	}
 	delete(s.pushes, key)
 	s.touchPush(key)
-	if u := s.users[p.userID]; u != nil && u.pushes[p.url] == p {
+	if u := s.users.Get(p.userID); u != nil && u.pushes[p.url] == p {
 		delete(u.pushes, p.url)
 		if len(u.pushes) == 0 {
 			u.unread = nil
@@ -316,8 +316,8 @@ func (s *Server) sweepPushes() {
 		case <-ticker.C:
 			s.mu.Lock()
 			now := time.Now()
-			for _, id := range slices.Sorted(maps.Keys(s.users)) {
-				s.expirePushesLocked(s.users[id], now)
+			for _, id := range s.users.IDs() {
+				s.expirePushesLocked(s.users.Get(id), now)
 			}
 			s.unlock()
 		}
@@ -381,7 +381,7 @@ func (s *Server) wakeLocked(m *messageState, snapshot, previous *roomlog.Message
 	delete(reasons, m.Owner())
 	now := time.Now()
 	for _, id := range slices.Sorted(maps.Keys(reasons)) {
-		u := s.users[id]
+		u := s.users.Get(id)
 		if u == nil || len(u.pushes) == 0 || !r.VisibleTo(u) || u.attended() || u.silenced(now) {
 			continue
 		}
@@ -432,7 +432,7 @@ func (s *Server) deliverPushLocked(p *pushRegistration, unread int, payload []by
 	if s.closed {
 		return
 	}
-	if u := s.users[p.userID]; u == nil || u.pushesTodayLocked(time.Now()) >= maxPushesPerUserDay {
+	if u := s.users.Get(p.userID); u == nil || u.pushesTodayLocked(time.Now()) >= maxPushesPerUserDay {
 		return
 	}
 	p.sent++
@@ -449,7 +449,7 @@ func (s *Server) deliverPushLocked(p *pushRegistration, unread int, payload []by
 		if !accepted && !gone {
 			return
 		}
-		u := s.users[p.userID]
+		u := s.users.Get(p.userID)
 		switch {
 		case u == nil:
 		case accepted:

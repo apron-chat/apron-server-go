@@ -127,7 +127,7 @@ func (s *Server) startWriterLocked(e *embedState) (int, string) {
 func (s *Server) postPendingLocked(e *embedState) bool {
 	p := e.post
 	u := p.user
-	if s.users[u.id] != u {
+	if s.users.Get(u.id) != u {
 		return false
 	}
 	r := s.visibleRoomLocked(u, p.roomID)

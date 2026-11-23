@@ -34,11 +34,6 @@ type RoomScope struct {
 // Guarded by s.mu.
 type roomScope = rooms.Scope
 
-type storedScope struct {
-	Rooms   []string `json:"rooms"`
-	Threads bool     `json:"threads,omitzero"`
-}
-
 func newRoomScope(scope *RoomScope) *roomScope {
 	if scope == nil {
 		return nil
@@ -53,20 +48,6 @@ func publicScope(sc *roomScope) *RoomScope {
 	return &RoomScope{Rooms: sc.Rooms(), Threads: sc.Threads()}
 }
 
-func storedScopeOf(sc *roomScope) *storedScope {
-	if sc == nil {
-		return nil
-	}
-	return &storedScope{Rooms: sc.Rooms(), Threads: sc.Threads()}
-}
-
-func (sc *storedScope) restored() *roomScope {
-	if sc == nil {
-		return nil
-	}
-	return newRoomScope(&RoomScope{Rooms: sc.Rooms, Threads: sc.Threads})
-}
-
 // SetScope limits an account to the rooms scope lists, or, with nil, lifts
 // its limit, and returns once that is stored. The account leaves the rooms
 // and threads it is in that the scope leaves out, and its writes into them
@@ -74,7 +55,7 @@ func (sc *storedScope) restored() *roomScope {
 // Bot.Join.
 func (s *Server) SetScope(ctx context.Context, userID string, scope *RoomScope) error {
 	s.mu.Lock()
-	u := s.users[userID]
+	u := s.users.Get(userID)
 	if u == nil {
 		s.unlock()
 		return errors.New("apron: no such user")
@@ -94,8 +75,8 @@ func (h *Host) SetScope(ctx context.Context, userID string, scope *RoomScope) er
 func (s *Server) Scope(userID string) *RoomScope {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	if u := s.users[userID]; u != nil {
-		return publicScope(u.scope)
+	if u := s.users.Get(userID); u != nil {
+		return publicScope(u.Scope)
 	}
 	return nil
 }
@@ -105,8 +86,8 @@ func (h *Host) Scope(userID string) *RoomScope { return h.s.Scope(userID) }
 
 // setScopeLocked sets u's scope, and takes u out of what it leaves out.
 func (s *Server) setScopeLocked(u *userState, scope *roomScope) {
-	u.scope = scope
-	s.touchUser(u.id)
+	u.Scope = scope
+	s.users.Touch(u.id)
 	if scope == nil {
 		return
 	}
@@ -119,9 +100,9 @@ func (s *Server) setScopeLocked(u *userState, scope *roomScope) {
 			s.leaveLocked(u, r)
 		}
 	}
-	for id := range u.pings {
+	for id := range u.Pings {
 		if r := s.rooms.Get(id); r == nil || !r.VisibleTo(u) {
-			delete(u.pings, id)
+			delete(u.Pings, id)
 		}
 	}
 	s.unreadChangedLocked(u, "")
@@ -131,10 +112,10 @@ func (s *Server) setScopeLocked(u *userState, scope *roomScope) {
 // mayCreateRoomLocked refuses a scoped account a top-level room, and a
 // thread its scope does not take in.
 func mayCreateRoomLocked(u *userState, parent *roomState) *Error {
-	if u.scope == nil {
+	if u.Scope == nil {
 		return nil
 	}
-	if parent == nil || !u.scope.Threads() {
+	if parent == nil || !u.Scope.Threads() {
 		return &Error{Code: CodeDenied, Message: "This account is limited to some rooms, and may not start one"}
 	}
 	return nil

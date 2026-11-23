@@ -409,7 +409,7 @@ func TestFreshRegistrationMakesAnAccount(t *testing.T) {
 		t.Fatalf("passkey not labelled with the normalized requested name: %#v", user)
 	}
 	app.mu.RLock()
-	users := len(app.users)
+	users := app.users.Len()
 	app.mu.RUnlock()
 	if users != 0 {
 		t.Fatal("the begin made a user")
@@ -711,7 +711,7 @@ func TestPasskeyRejectsInvalidRegistration(t *testing.T) {
 	}
 	app.mu.RLock()
 	defer app.mu.RUnlock()
-	if app.schemeLocked(passkey.Name).(*passkey.Scheme).Count() != 0 || app.accounts.Len() != 0 || app.sessions.Len() != 0 {
+	if app.schemeLocked(passkey.Name).(*passkey.Scheme).Count() != 0 || app.users.Identities() != 0 || app.sessions.Len() != 0 {
 		t.Fatal("failed registration retained an account, credential, or session")
 	}
 }

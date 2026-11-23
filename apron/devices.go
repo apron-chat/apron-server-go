@@ -36,7 +36,7 @@ func isASCIIAlphanumeric(b byte) bool {
 // this connection only, in a ~private notice before the result (§1).
 func (s *Server) inviteDeviceCommand(c *client, r *roomState, _ map[string]any, args, _ string) (wire.CommandResult, *Error) {
 	u := c.user
-	if !u.account() {
+	if !u.Account() {
 		return wire.CommandResult{}, &Error{Code: CodeDenied, Message: "Sign in with an account to use /invite-device"}
 	}
 	if c.restrictedService() {

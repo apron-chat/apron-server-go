@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/apron-chat/apron-server-go/apron/internal/presence"
+	"github.com/apron-chat/apron-server-go/apron/internal/users"
 	"github.com/apron-chat/apron-server-go/wire"
 )
 
@@ -61,26 +62,18 @@ var optionalStatuses = presence.Optional
 func settableStatus(value string) bool { return presence.Settable(value) }
 
 // muteState is a mute (§4.5): until a time, forever, or, when zero, none.
-type muteState struct {
-	forever bool
-	until   time.Time
-}
+type muteState = users.Mute
 
-// active reports whether the mute is in effect at now.
-func (m muteState) active(now time.Time) bool {
-	return m.forever || now.Before(m.until)
-}
-
-// wire is the mute as a `status` notification carries it: true, the
+// muteValue is a mute as a `status` notification carries it: true, the
 // seconds left, rounded up, or false when there is none.
-func (m muteState) wire(now time.Time) any {
+func muteValue(m muteState, now time.Time) any {
 	switch {
-	case m.forever:
+	case m.Forever:
 		return true
-	case !m.active(now):
+	case !m.Active(now):
 		return false
 	}
-	return int64((m.until.Sub(now) + time.Second - 1) / time.Second)
+	return int64((m.Until.Sub(now) + time.Second - 1) / time.Second)
 }
 
 // statusUpdate is one parsed `status` request. A nil field was absent.
@@ -119,13 +112,13 @@ func statusUpdateOf(p wire.StatusParams) statusUpdate {
 // mute returns the mute an update sets, starting at now.
 func (update statusUpdate) mute(now time.Time) muteState {
 	if update.muteForever {
-		return muteState{forever: true}
+		return muteState{Forever: true}
 	}
 	if update.muteSeconds == 0 {
 		// mute: false
 		return muteState{}
 	}
-	return muteState{until: now.Add(time.Duration(update.muteSeconds) * time.Second)}
+	return muteState{Until: now.Add(time.Duration(update.muteSeconds) * time.Second)}
 }
 
 // status applies a `status` request (§4.5) and answers {} once it has: the
@@ -143,13 +136,13 @@ func (s *Server) status(c *client, p wire.StatusParams, reply wire.Reply[wire.Em
 	// A room mute the user has stays clearable after the room is no longer
 	// visible to them, such as a private room they left, so it does not keep
 	// counting toward maxRoomMutes, or come back if they are added again.
-	_, hasRoomMute := u.roomMutes[update.roomID]
+	_, hasRoomMute := u.RoomMutes[update.roomID]
 	clearing := hasRoomMute && update.muteSeconds == 0 && !update.muteForever
 	if update.hasMute && update.scoped && !clearing && s.visibleRoomLocked(u, update.roomID) == nil {
 		return invalidParams("Unknown room %q", update.roomID)
 	}
-	if now := time.Now(); update.hasMute && update.scoped && update.mute(now).active(now) {
-		if _, muted := u.roomMutes[update.roomID]; !muted && len(u.roomMutes) >= maxRoomMutes {
+	if now := time.Now(); update.hasMute && update.scoped && update.mute(now).Active(now) {
+		if _, muted := u.RoomMutes[update.roomID]; !muted && len(u.RoomMutes) >= maxRoomMutes {
 			return &Error{Code: CodeDenied, Message: fmt.Sprintf("At most %d rooms can be muted; unmute one first", maxRoomMutes)}
 		}
 	}
@@ -169,7 +162,7 @@ func (s *Server) status(c *client, p wire.StatusParams, reply wire.Reply[wire.Em
 // a client flipping idle or its mutes in a loop cannot make the server
 // announce, store, and recount for it without end.
 func admitStatusLocked(u *userState) *Error {
-	if delay := u.presence.Admit(time.Now()); delay > 0 {
+	if delay := u.Presence.Admit(time.Now()); delay > 0 {
 		return retryAfter("Too many status changes; slow down", delay)
 	}
 	return nil
@@ -189,19 +182,19 @@ func (s *Server) applyStatusLocked(c *client, u *userState, update statusUpdate)
 	now := time.Now()
 	mute := update.mute(now)
 	if !update.scoped {
-		u.mute = mute
-		s.touchUser(u.id)
+		u.Mute = mute
+		s.users.Touch(u.id)
 		s.scheduleMuteLocked(u)
 		u.send(muteFrame("", mute, now))
 		return
 	}
 	id := update.roomID
-	if mute.active(now) {
-		u.roomMutes[id] = mute
+	if mute.Active(now) {
+		u.RoomMutes[id] = mute
 	} else {
-		delete(u.roomMutes, id)
+		delete(u.RoomMutes, id)
 	}
-	s.touchUser(u.id)
+	s.users.Touch(u.id)
 	s.scheduleRoomMuteLocked(u, id)
 	u.send(muteFrame(id, mute, now))
 	// What counts toward unread changes with a room's mute, in the room and
@@ -213,7 +206,7 @@ func (s *Server) applyStatusLocked(c *client, u *userState, update statusUpdate)
 // muteFrame is the `status` notification that tells the user's connections
 // of a mute, everywhere or, with roomID, of that room (§4.5).
 func muteFrame(roomID string, mute muteState, now time.Time) jsontext.Value {
-	params := map[string]any{"mute": mute.wire(now)}
+	params := map[string]any{"mute": muteValue(mute, now)}
 	if roomID != "" {
 		params["room_id"] = roomID
 	}
@@ -236,11 +229,11 @@ func (s *Server) sendAfterAuthLocked(c *client) {
 	}
 	now := time.Now()
 	var frames []any
-	if u.mute.active(now) {
-		frames = append(frames, muteFrame("", u.mute, now))
+	if u.Mute.Active(now) {
+		frames = append(frames, muteFrame("", u.Mute, now))
 	}
-	for _, id := range slices.Sorted(maps.Keys(u.roomMutes)) {
-		if mute := u.roomMutes[id]; mute.active(now) && s.visibleRoomLocked(u, id) != nil {
+	for _, id := range slices.Sorted(maps.Keys(u.RoomMutes)) {
+		if mute := u.RoomMutes[id]; mute.Active(now) && s.visibleRoomLocked(u, id) != nil {
 			frames = append(frames, muteFrame(id, mute, now))
 		}
 	}
@@ -255,7 +248,7 @@ func (s *Server) sendAfterAuthLocked(c *client) {
 	}
 	var shown []*userState
 	for _, id := range slices.Sorted(maps.Keys(listed)) {
-		if other := listed[id]; other.presence.Status != statusOffline && other.presence.Status != statusNone {
+		if other := listed[id]; other.Presence.Status != statusOffline && other.Presence.Status != statusNone {
 			shown = append(shown, other)
 		}
 	}
@@ -274,20 +267,20 @@ func (s *Server) scheduleMuteLocked(u *userState) {
 		u.muteTimer.Stop()
 		u.muteTimer = nil
 	}
-	if s.closed || u.mute.forever || u.mute.until.IsZero() {
+	if s.closed || u.Mute.Forever || u.Mute.Until.IsZero() {
 		return
 	}
-	until := u.mute.until
+	until := u.Mute.Until
 	u.muteTimer = time.AfterFunc(time.Until(until), func() {
 		s.mu.Lock()
 		defer s.unlock()
-		if s.closed || s.users[u.id] != u || u.mute.forever || !u.mute.until.Equal(until) {
+		if s.closed || s.users.Get(u.id) != u || u.Mute.Forever || !u.Mute.Until.Equal(until) {
 			return
 		}
-		u.mute = muteState{}
+		u.Mute = muteState{}
 		u.muteTimer = nil
-		s.touchUser(u.id)
-		u.send(muteFrame("", u.mute, time.Now()))
+		s.users.Touch(u.id)
+		u.send(muteFrame("", u.Mute, time.Now()))
 	})
 }
 
@@ -300,21 +293,21 @@ func (s *Server) scheduleRoomMuteLocked(u *userState, id string) {
 		timer.Stop()
 		delete(u.roomMuteTimers, id)
 	}
-	mute, ok := u.roomMutes[id]
-	if s.closed || !ok || mute.forever || mute.until.IsZero() {
+	mute, ok := u.RoomMutes[id]
+	if s.closed || !ok || mute.Forever || mute.Until.IsZero() {
 		return
 	}
 	if u.roomMuteTimers == nil {
 		u.roomMuteTimers = make(map[string]*time.Timer)
 	}
-	until := mute.until
+	until := mute.Until
 	u.roomMuteTimers[id] = time.AfterFunc(time.Until(until), func() {
 		s.mu.Lock()
 		defer s.unlock()
-		if s.closed || s.users[u.id] != u {
+		if s.closed || s.users.Get(u.id) != u {
 			return
 		}
-		if mute, ok := u.roomMutes[id]; !ok || mute.forever || !mute.until.Equal(until) {
+		if mute, ok := u.RoomMutes[id]; !ok || mute.Forever || !mute.Until.Equal(until) {
 			return
 		}
 		s.endRoomMuteLocked(u, id)
@@ -330,15 +323,15 @@ func (s *Server) endRoomMuteLocked(u *userState, id string) {
 		timer.Stop()
 		delete(u.roomMuteTimers, id)
 	}
-	delete(u.roomMutes, id)
-	s.touchUser(u.id)
+	delete(u.RoomMutes, id)
+	s.users.Touch(u.id)
 	u.send(muteFrame(id, muteState{}, time.Now()))
 }
 
 // silenced reports whether u's notifications are silenced everywhere: by
 // the unscoped mute, or by a dnd status (§4.5).
 func (u *userState) silenced(now time.Time) bool {
-	return u.mute.active(now) || u.presence.Chosen == statusDND
+	return u.Mute.Active(now) || u.Presence.Chosen == statusDND
 }
 
 // roomMuted reports whether u's own mute of room r, or of a room r is a
@@ -346,7 +339,7 @@ func (u *userState) silenced(now time.Time) bool {
 // unscoped mute applies besides.
 func (u *userState) roomMuted(r *roomState, now time.Time) bool {
 	for room := r; room != nil; room = room.Parent() {
-		if mute, ok := u.roomMutes[room.ID()]; ok && mute.active(now) {
+		if mute, ok := u.RoomMutes[room.ID()]; ok && mute.Active(now) {
 			return true
 		}
 	}
@@ -367,20 +360,20 @@ func (u *userState) attended() bool {
 // shownStatus is the user's shown status, from the chosen status and the
 // presence (§4.5.1).
 func (u *userState) shownStatus() string {
-	return u.presence.Shown(u.attended(), len(u.clients) > 0)
+	return u.Presence.Shown(u.attended(), len(u.clients) > 0)
 }
 
 // you is the user's own current object (§3.3): its profile, with the
 // chosen status in place of the shown one, and never seen (§4.5.2).
 func (u *userState) you() wire.CurrentUser {
-	return u.current(u.presence.Chosen, false)
+	return u.current(u.Presence.Chosen, false)
 }
 
 // noteShownLocked notes u's shown status after a change to its chosen
 // status or its connections, and when it has just become offline, the
 // time it did. Others do not see it until it is published.
 func (s *Server) noteShownLocked(u *userState) {
-	u.presence.Note(u.attended(), len(u.clients) > 0, time.Now())
+	u.Presence.Note(u.attended(), len(u.clients) > 0, time.Now())
 }
 
 // publishLocked notes u's shown status and makes it the one others see
@@ -391,9 +384,9 @@ func (s *Server) noteShownLocked(u *userState) {
 // restoreLocked gives the users who were shown otherwise a seen then.
 func (s *Server) publishLocked(u *userState) bool {
 	s.noteShownLocked(u)
-	changed, stored := u.presence.Publish(time.Now())
+	changed, stored := u.Presence.Publish(time.Now())
 	if stored {
-		s.touchUser(u.id)
+		s.users.Touch(u.id)
 	}
 	return changed
 }
@@ -402,7 +395,7 @@ func (s *Server) publishLocked(u *userState) bool {
 // the published shown status, "" too, with seen when it is offline, if it
 // is known (§4.5.2).
 func (u *userState) shownObject() wire.CurrentUser {
-	status, seen := u.presence.Status, u.presence.Seen
+	status, seen := u.Presence.Status, u.Presence.Seen
 	object := wire.CurrentUser{User: wire.User{UserID: u.id, Status: status}}
 	switch {
 	case status == statusNone:
@@ -429,15 +422,15 @@ func (s *Server) announceStatusLocked(u *userState) {
 		s.publishLocked(u)
 		return
 	}
-	if !u.presence.Pending() || u.statusTimer != nil {
+	if !u.Presence.Pending() || u.statusTimer != nil {
 		return
 	}
-	if !u.presence.PublishNow() {
+	if !u.Presence.PublishNow() {
 		u.statusTimer = time.AfterFunc(statusCoalesce, func() {
 			s.mu.Lock()
 			defer s.unlock()
 			u.statusTimer = nil
-			if s.closed || s.users[u.id] != u {
+			if s.closed || s.users.Get(u.id) != u {
 				return
 			}
 			before := u.views()
@@ -476,7 +469,7 @@ func statusFrame(u *userState) jsontext.Value {
 // leaves out offline and "", which would tell who is invisible or opted
 // out.
 func (s *Server) announceJoinStatusLocked(u *userState, r *roomState) {
-	if status := u.presence.Status; status == statusOffline || status == statusNone {
+	if status := u.Presence.Status; status == statusOffline || status == statusNone {
 		return
 	}
 	users := make([]*userState, 0, r.MemberCount())

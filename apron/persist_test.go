@@ -18,6 +18,7 @@ import (
 
 	"github.com/apron-chat/apron-server-go/apron/internal/roomlog"
 	"github.com/apron-chat/apron-server-go/apron/internal/rooms"
+	"github.com/apron-chat/apron-server-go/apron/internal/users"
 	"github.com/apron-chat/apron-server-go/store"
 )
 
@@ -151,7 +152,7 @@ func TestStateSurvivesRestart(t *testing.T) {
 			// Shutdown closes the owner's connection, which shows them
 			// offline, so it adds their seen and stores them as no longer
 			// shown otherwise (§4.5.2).
-			var ownerUser storedUser
+			var ownerUser users.Stored
 			if err := json.Unmarshal([]byte(stored["user/"+owner.userID]), &ownerUser); err != nil || ownerUser.Seen < stopping || ownerUser.Shown {
 				t.Fatalf("owner after shutdown: seen %d, shown %v (%v), want seen at least %d, not shown", ownerUser.Seen, ownerUser.Shown, err, stopping)
 			}
@@ -235,7 +236,7 @@ func TestRestoreAfterACrash(t *testing.T) {
 
 	restored, httpServer, _ := startWithStore(t, crashed, t.TempDir())
 	restored.mu.RLock()
-	_, guestKept := restored.users[guest.userID]
+	guestKept := restored.users.Get(guest.userID) != nil
 	restored.mu.RUnlock()
 	if guestKept {
 		t.Fatal("a guest outlived the restart")
@@ -361,14 +362,12 @@ func (s *Server) dumpLocked() []store.Entry {
 	for id := range s.messages {
 		all.messages[id] = true
 	}
-	for id := range s.users {
-		all.users[id] = true
-	}
 	for key := range s.pushes {
 		all.pushes[key] = true
 	}
 	all.vapid = s.vapidStored
 	meta := s.metaLocked()
+	records = append(records, s.users.Snapshot(avatarEmbedID)...)
 	records = append(records, s.sessions.Snapshot(userID)...)
 	records = append(records, s.ids.Snapshot()...)
 	records = append(records, s.devices.Snapshot(userID)...)

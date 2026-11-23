@@ -3,7 +3,6 @@ package apron
 import (
 	"cmp"
 	"context"
-	"encoding/json/jsontext"
 	"errors"
 	"maps"
 	"slices"
@@ -107,12 +106,12 @@ type Credential struct {
 // credentialsLocked lists u's credentials, by scheme then creation.
 func (s *Server) credentialsLocked(u *userState) []Credential {
 	var list []Credential
-	for _, scheme := range slices.Sorted(maps.Keys(u.identities)) {
+	for _, scheme := range slices.Sorted(maps.Keys(u.Identities)) {
 		manager, ok := s.schemeLocked(scheme).(authn.Credentials)
 		if !ok {
 			continue
 		}
-		for _, c := range manager.Credentials(u.identities[scheme]) {
+		for _, c := range manager.Credentials(u.Identities[scheme]) {
 			list = append(list, Credential{Scheme: scheme, ID: c.ID, Name: c.Name, Created: c.Created, LastUsed: c.LastUsed})
 		}
 	}
@@ -129,7 +128,7 @@ func (s *Server) credentialsLocked(u *userState) []Credential {
 // close, except except, which closes after its result.
 func (s *Server) removeCredentialLocked(u *userState, scheme, id string, except *client) *Error {
 	manager, ok := s.schemeLocked(scheme).(authn.Credentials)
-	subject := u.identities[scheme]
+	subject := u.Identities[scheme]
 	if !ok || subject == "" {
 		return invalidParams("This account has no %s credentials", scheme)
 	}
@@ -137,7 +136,7 @@ func (s *Server) removeCredentialLocked(u *userState, scheme, id string, except 
 	if !slices.ContainsFunc(credentials, func(c authn.Credential) bool { return c.ID == id }) {
 		return invalidParams("Unknown credential %q", id)
 	}
-	if len(credentials) == 1 && len(u.identities) == 1 {
+	if len(credentials) == 1 && len(u.Identities) == 1 {
 		return lastCredential
 	}
 	record, err := manager.RemoveCredential(subject, id)
@@ -146,21 +145,15 @@ func (s *Server) removeCredentialLocked(u *userState, scheme, id string, except 
 	}
 	if record == nil {
 		// The identity proves nothing more, and leaves the account.
-		delete(u.identities, scheme)
-		delete(u.records, scheme)
-		s.accounts.Delete(authn.Identity{Scheme: scheme, Subject: subject})
+		s.users.DeleteIdentity(u, scheme)
 		s.setGrantLocked(u, scheme, nil)
 		// Roles that Config.Roles granted the identity go with it.
 		if before := u.views(); s.grantRolesLocked(u) {
 			s.notifyProfileLocked(u, nil, before)
 		}
 	} else {
-		if u.records == nil {
-			u.records = make(map[string]jsontext.Value)
-		}
-		u.records[scheme] = record
+		s.users.SetRecord(u, scheme, record)
 	}
-	s.touchUser(u.id)
 	key := credentialKey(scheme, id)
 	ended := make(map[[32]byte]bool)
 	for token, session := range s.sessions.All() {
@@ -244,7 +237,7 @@ func accountLocked(c *client) *Error {
 	if c.restrictedService() {
 		return serviceRefusal()
 	}
-	if !c.user.account() {
+	if !c.user.Account() {
 		return &Error{Code: CodeDenied, Message: "Sign in with an account to manage it"}
 	}
 	return nil
@@ -325,15 +318,14 @@ func (s *Server) renameCredential(c *client, r *wire.Request) *Error {
 	}
 	u := c.user
 	manager, ok := s.schemeLocked(scheme).(authn.Credentials)
-	if !ok || u.identities[scheme] == "" {
+	if !ok || u.Identities[scheme] == "" {
 		return invalidParams("This account has no %s credentials", scheme)
 	}
-	record, schemeErr := manager.RenameCredential(u.identities[scheme], id, name)
+	record, schemeErr := manager.RenameCredential(u.Identities[scheme], id, name)
 	if schemeErr != nil {
 		return authError(schemeErr)
 	}
-	u.records[scheme] = record
-	s.touchUser(u.id)
+	s.users.SetRecord(u, scheme, record)
 	return nil
 }
 
@@ -413,7 +405,7 @@ func (s *Server) signOut(c *client, r *wire.Request) *Error {
 func (s *Server) Credentials(userID string) []Credential {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	u := s.users[userID]
+	u := s.users.Get(userID)
 	if u == nil {
 		return nil
 	}
@@ -439,7 +431,7 @@ var ErrLastCredential = errors.New("apron: this is the account's last way to sig
 // program or extension that calls it decides who may.
 func (s *Server) RemoveCredential(ctx context.Context, userID, scheme, id string) error {
 	s.mu.Lock()
-	u := s.users[userID]
+	u := s.users.Get(userID)
 	if u == nil {
 		s.unlock()
 		return errors.New("apron: no such user")
@@ -468,7 +460,7 @@ func (h *Host) RemoveCredential(ctx context.Context, userID, scheme, id string) 
 // again.
 func (s *Server) SignOut(ctx context.Context, userID string) error {
 	s.mu.Lock()
-	if u := s.users[userID]; u != nil {
+	if u := s.users.Get(userID); u != nil {
 		s.signOutLocked(u)
 	}
 	f := s.newFenceLocked()

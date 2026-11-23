@@ -149,7 +149,7 @@ const serverAvatarNeedHTTPS = "The server avatar needs an https address" + setPu
 // its sender must still be an admin. It returns the HTTP status and
 // message to refuse the write with, or 0.
 func (s *Server) refuseServerAvatarLocked(e *embedState) (int, string) {
-	u := s.users[e.ServerAvatarBy]
+	u := s.users.Get(e.ServerAvatarBy)
 	switch {
 	case u == nil || !u.hasRole("admin"):
 		return http.StatusForbidden, "Only an admin can set the server avatar"

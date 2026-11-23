@@ -132,8 +132,8 @@ func TestRestrictedSignInAtStart(t *testing.T) {
 	}
 	app.mu.Lock()
 	ada := newUserState("ada", "Ada")
-	app.users["ada"] = ada
-	app.setIdentityLocked(ada, authn.Identity{Scheme: "email", Subject: "ada@example.com"}, nil)
+	app.users.Add(ada)
+	app.users.SetIdentity(ada, authn.Identity{Scheme: "email", Subject: "ada@example.com"}, nil)
 	key := [32]byte{1}
 	app.sessions.Put(key, session{User: ada, Expires: time.Now().Add(time.Hour)})
 	admitted := app.admittedLocked(ada)

@@ -254,7 +254,7 @@ func TestExternalForeignIssuer(t *testing.T) {
 		t.Fatalf("sign-in = %#v", result)
 	}
 	app.mu.RLock()
-	account := app.accounts.Get(authn.Identity{Scheme: "external", Subject: issuer.URL + "#user-42"})
+	account := app.users.ByIdentity(authn.Identity{Scheme: "external", Subject: issuer.URL + "#user-42"})
 	app.mu.RUnlock()
 	if account == nil || account.id != "pat" {
 		t.Fatalf("the identity is the issuer and sub: %#v", account)

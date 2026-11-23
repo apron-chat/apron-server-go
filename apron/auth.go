@@ -95,9 +95,9 @@ func (s *Server) restoreSchemesLocked() error {
 			continue
 		}
 		name := scheme.Name()
-		for _, id := range slices.Sorted(maps.Keys(s.users)) {
-			u := s.users[id]
-			if subject, record := u.identities[name], u.records[name]; subject != "" && record != nil {
+		for _, id := range s.users.IDs() {
+			u := s.users.Get(id)
+			if subject, record := u.Identities[name], u.Records[name]; subject != "" && record != nil {
 				if err := restorer.Restore(subject, record); err != nil {
 					return fmt.Errorf("stored user %q: %s record: %w", id, name, err)
 				}
@@ -258,8 +258,7 @@ func (s *Server) authenticateGuestLocked(c *client, reply wire.Reply[wire.AuthRe
 		return nil
 	}
 	user := newUserState(s.assignUserIDLocked(requested), normalizeName(name))
-	s.users[user.id] = user
-	s.touchUser(user.id)
+	s.users.Add(user)
 	// A new guest joins the default room, so their room list is not empty.
 	s.switchUserLocked(c, reply, user, "", true, true)
 	return nil
@@ -276,8 +275,8 @@ func (s *Server) authRequestLocked(c *client, reply wire.Reply[wire.AuthResult],
 	}
 	if c.user != nil {
 		r.Account = &authn.Account{
-			UserID: c.user.id, Name: c.user.name, Guest: !c.user.account(),
-			Identities: maps.Clone(c.user.identities),
+			UserID: c.user.id, Name: c.user.Name, Guest: !c.user.Account(),
+			Identities: maps.Clone(c.user.Identities),
 		}
 	}
 	if c.authStates == nil {
@@ -336,17 +335,17 @@ func (s *Server) addProvenLocked(c *client, reply wire.Reply[wire.AuthResult], s
 	}
 	label := scheme.Label()
 	account := c.user
-	switch owner := s.accounts.Get(id); {
+	switch owner := s.users.ByIdentity(id); {
 	case account == nil:
 		return &Error{Code: CodeDenied, Message: "Sign in before adding a " + label}
 	case owner != nil && owner != account:
 		return &Error{Code: CodeDenied, Message: "This " + label + " belongs to an account"}
-	case account.identities[id.Scheme] != "" && account.identities[id.Scheme] != id.Subject:
+	case account.Identities[id.Scheme] != "" && account.Identities[id.Scheme] != id.Subject:
 		return &Error{Code: CodeDenied, Message: "This account has another " + label + " already"}
 	case !s.admittedWithLocked(account, id):
 		return notAdmitted()
 	}
-	if _, manages := scheme.(authn.Credentials); manages && account.identities[id.Scheme] != "" && !s.config.AddCredentialWithoutReauth {
+	if _, manages := scheme.(authn.Credentials); manages && account.Identities[id.Scheme] != "" && !s.config.AddCredentialWithoutReauth {
 		// Another passkey for an account that has one: a stolen session
 		// token must not add a way back in, nor one it could then sign in
 		// with to pass as the owner.
@@ -356,18 +355,18 @@ func (s *Server) addProvenLocked(c *client, reply wire.Reply[wire.AuthResult], s
 	}
 	// Only a guest's first identity counts as proof of the account: it is
 	// the account's only one.
-	wasGuest := !account.account()
+	wasGuest := !account.Account()
 	record, err := commit(proof)
 	if err != nil {
 		return err
 	}
-	becomesAccount := !account.account()
+	becomesAccount := !account.Account()
 	before := account.views()
-	s.setIdentityLocked(account, id, record)
+	s.users.SetIdentity(account, id, record)
 	name := normalizeName(proof.Name)
-	renamed := becomesAccount && name != "" && name != account.name
+	renamed := becomesAccount && name != "" && name != account.Name
 	if renamed {
-		account.name = name
+		account.Name = name
 	}
 	s.setGrantLocked(account, id.Scheme, proof.Roles)
 	// An account takes the roles its user_id or new identity is granted.
@@ -422,7 +421,7 @@ func (s *Server) provenAccountLocked(scheme authn.Scheme, proof authn.Proof, cre
 	if err != nil {
 		return nil, false, err
 	}
-	owner := s.accounts.Get(id)
+	owner := s.users.ByIdentity(id)
 	if owner == nil {
 		switch {
 		case !create:
@@ -435,8 +434,8 @@ func (s *Server) provenAccountLocked(scheme authn.Scheme, proof authn.Proof, cre
 			return nil, false, err
 		}
 		user := newUserState(s.assignAccountIDLocked(proof.UserID), normalizeName(proof.Name))
-		s.users[user.id] = user
-		s.setIdentityLocked(user, id, record)
+		s.users.Add(user)
+		s.users.SetIdentity(user, id, record)
 		s.setGrantLocked(user, id.Scheme, proof.Roles)
 		s.grantRolesLocked(user)
 		return user, true, nil
@@ -449,7 +448,7 @@ func (s *Server) provenAccountLocked(scheme authn.Scheme, proof authn.Proof, cre
 		return nil, false, err
 	}
 	if record != nil {
-		s.setIdentityLocked(owner, id, record)
+		s.users.SetIdentity(owner, id, record)
 	}
 	if before := owner.views(); s.setGrantLocked(owner, id.Scheme, proof.Roles) && s.grantRolesLocked(owner) {
 		s.notifyProfileLocked(owner, nil, before)
@@ -457,39 +456,22 @@ func (s *Server) provenAccountLocked(scheme authn.Scheme, proof authn.Proof, cre
 	return owner, false, nil
 }
 
-// setIdentityLocked gives an account an identity, with its scheme's record
-// if any.
-func (s *Server) setIdentityLocked(u *userState, id authn.Identity, record jsontext.Value) {
-	if u.identities == nil {
-		u.identities = make(map[string]string)
-	}
-	u.identities[id.Scheme] = id.Subject
-	if record != nil {
-		if u.records == nil {
-			u.records = make(map[string]jsontext.Value)
-		}
-		u.records[id.Scheme] = record
-	}
-	s.accounts.Set(id, u)
-	s.touchUser(u.id)
-}
-
 // setGrantLocked sets the roles an account's identity of scheme grants it,
 // and reports whether they changed; grantRolesLocked then applies them.
 func (s *Server) setGrantLocked(u *userState, scheme string, roles []string) bool {
 	roles = normalizeRoles(roles)
-	if slices.Equal(u.granted[scheme], roles) {
+	if slices.Equal(u.Granted[scheme], roles) {
 		return false
 	}
 	if len(roles) == 0 {
-		delete(u.granted, scheme)
+		delete(u.Granted, scheme)
 	} else {
-		if u.granted == nil {
-			u.granted = make(map[string][]string)
+		if u.Granted == nil {
+			u.Granted = make(map[string][]string)
 		}
-		u.granted[scheme] = roles
+		u.Granted[scheme] = roles
 	}
-	s.touchUser(u.id)
+	s.users.Touch(u.id)
 	return true
 }
 
@@ -638,9 +620,9 @@ func (sc *schemeConn) CanProve(subject string) bool {
 	id := authn.Identity{Scheme: sc.scheme.Name(), Subject: subject}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	owner := s.accounts.Get(id)
+	owner := s.users.ByIdentity(id)
 	if c.user != nil {
-		return owner == nil && c.user.identities[id.Scheme] == "" && s.admittedWithLocked(c.user, id)
+		return owner == nil && c.user.Identities[id.Scheme] == "" && s.admittedWithLocked(c.user, id)
 	}
 	if owner != nil {
 		return s.admittedLocked(owner)
@@ -678,11 +660,11 @@ func (sc schemeCore) Lookup(subject string) (authn.Account, bool) {
 	s := sc.s
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	u := s.accounts.Get(authn.Identity{Scheme: sc.scheme.Name(), Subject: subject})
+	u := s.users.ByIdentity(authn.Identity{Scheme: sc.scheme.Name(), Subject: subject})
 	if u == nil {
 		return authn.Account{}, false
 	}
-	return authn.Account{UserID: u.id, Name: u.name, Guest: !u.account(), Identities: maps.Clone(u.identities)}, true
+	return authn.Account{UserID: u.id, Name: u.Name, Guest: !u.Account(), Identities: maps.Clone(u.Identities)}, true
 }
 
 // Admits reports whether an identity of the scheme could sign in: to its
@@ -692,7 +674,7 @@ func (sc schemeCore) Admits(subject string, create bool) bool {
 	id := authn.Identity{Scheme: sc.scheme.Name(), Subject: subject}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	if owner := s.accounts.Get(id); owner != nil {
+	if owner := s.users.ByIdentity(id); owner != nil {
 		return s.admittedLocked(owner)
 	}
 	return create && s.admitsNewLocked(id)

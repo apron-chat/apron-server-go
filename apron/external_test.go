@@ -255,9 +255,9 @@ func TestExternalAddsToSignedInAccount(t *testing.T) {
 		t.Fatalf("addition = %#v", result)
 	}
 	app.mu.RLock()
-	added := app.accounts.Get(authn.Identity{Scheme: "external", Subject: "idp:2"})
+	added := app.users.ByIdentity(authn.Identity{Scheme: "external", Subject: "idp:2"})
 	app.mu.RUnlock()
-	if added == nil || added.name != "Grace" || added.id != you["user_id"] {
+	if added == nil || added.Name != "Grace" || added.id != you["user_id"] {
 		t.Fatalf("the account the identity was added to = %#v", added)
 	}
 
@@ -654,7 +654,7 @@ func TestExternalRemembersConsent(t *testing.T) {
 		t.Fatal("signing out everywhere did not forget the app, or allowing it did not remember")
 	}
 	app.mu.Lock()
-	app.signOutOthersLocked(app.users["rem"], nil)
+	app.signOutOthersLocked(app.users.Get("rem"), nil)
 	app.unlock()
 	if !asks("https://chat.alice.dev/cb") {
 		t.Fatal("signing out the other sessions did not forget the app")

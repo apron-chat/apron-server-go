@@ -2,7 +2,6 @@ package apron
 
 import (
 	"cmp"
-	"encoding/json/jsontext"
 	"fmt"
 	"maps"
 	"regexp"
@@ -14,8 +13,8 @@ import (
 	"unicode/utf8"
 
 	"github.com/apron-chat/apron-server-go/apron/internal/accounts"
-	"github.com/apron-chat/apron-server-go/apron/internal/presence"
 	"github.com/apron-chat/apron-server-go/apron/internal/roomlog"
+	"github.com/apron-chat/apron-server-go/apron/internal/users"
 	"github.com/apron-chat/apron-server-go/internal/authn"
 	"github.com/apron-chat/apron-server-go/wire"
 	"golang.org/x/text/secure/precis"
@@ -33,58 +32,29 @@ const (
 	maxProfileExtBytes = 16 << 10
 )
 
-// userState is everything the server keeps for one user_id across its
-// connections: the profile (§3.3), joined rooms (§4.2.2), request
-// deduplication (§1.2), and push registrations (§4.9). Guest users
-// are retired when their last connection closes; accounts (passkey users)
+// userState is a user (§3.3): what the server keeps of it across
+// connections and restarts (users.User), and its live links: its
+// connections, the rooms it joined (§4.2.2), its roles, the writes and
+// limits of its requests, its timers, and its push registrations (§4.9).
+// Guest users are retired when their last connection closes; accounts
 // persist.
 type userState struct {
-	id     string
-	name   string
-	avatar string
-	ext    extObject
-	// identities are what prove the account, by scheme (auth.go): its
-	// email address, its passkeys' user handle, its external sign-in. A
-	// guest has none. records are what each scheme keeps with the account,
-	// such as passkey credentials.
-	identities map[string]string
-	records    map[string]jsontext.Value
+	id string
+	users.User
 	// roles are the server roles (§3.3) the account holds, sorted; guests
-	// have none. They are derived from Config.Roles, granted, and bot
+	// have none. They are derived from Config.Roles, Granted, and Bot
 	// (grantRolesLocked), and not stored themselves.
 	roles []string
-	// granted are the roles the account's identities grant it, by scheme,
-	// as of each identity's latest proof (authn.Proof.Roles), such as an
-	// external sign-in's (§4.12).
-	granted map[string][]string
-	// created is when the user was made; zero for users stored before it
-	// was kept.
-	created time.Time
-	// botOf names the Extension whose bot the account is (Registrar.Bot),
-	// which holds the "bot" role (§3.3.4).
-	botOf string
-	// avatarEmbed is the hosted /avatar upload behind avatar, if any.
+	// avatarEmbed is the hosted /avatar upload behind Avatar, if any.
 	avatarEmbed *embedState
 	// writes are the user's writes that have not finished (embedState.author).
 	writes map[*embedState]struct{}
 	// retired is set on a guest retired when its last connection closed,
 	// whose writes go on as they could when it left (writeAllowedLocked).
 	retired bool
-	// enrolled is what the invitation that made the account left with it,
-	// nil if none did (invitations.go).
-	enrolled *enrollment
-	// scope limits the rooms the account may see, nil for none (scope.go).
-	scope *roomScope
-	// consents are the https redirect URIs of apps the account allowed on
-	// the external sign-in page, with when, in Unix milliseconds
-	// (consents.go).
-	consents map[string]int64
 
 	clients map[*client]struct{}
 	joined  map[string]*roomState
-	// leftAt maps each room the user left, and has not rejoined, to the
-	// log_id of the leave, for room_list's `left` (§4.2.1).
-	leftAt map[string]int64
 	// posts limits the user's new messages, room_set requests, and /avatar
 	// commands to MessagesPerMinute; nil when unlimited.
 	posts *rate.Limiter
@@ -92,25 +62,16 @@ type userState struct {
 	// (admitActionLocked).
 	actions *rate.Limiter
 
-	// presence is the status (§4.5): the chosen status, set with `me`
-	// (§4.5.1), and the shown status, as noted (noteShownLocked) and as
-	// published to others (publishLocked), with its seen (§4.5.2);
-	// statusTimer publishes a change held back to coalesce a flapping
-	// user's changes. mute and roomMutes are the user's mutes; muteTimer
+	// statusTimer publishes a change of the shown status held back to
+	// coalesce a flapping user's changes (announceStatusLocked); muteTimer
 	// ends a timed mute, and roomMuteTimers each timed room mute.
-	presence       presence.State
 	statusTimer    *time.Timer
-	mute           muteState
-	roomMutes      map[string]muteState
 	muteTimer      *time.Timer
 	roomMuteTimers map[string]*time.Timer
-	// pushes are the user's push registrations by url (§4.9), and pings the
-	// rooms they have not joined where a message mentioned or replied to
-	// them, from the first such message, for unread counts. unread holds
+	// pushes are the user's push registrations by url (§4.9). unread holds
 	// the counts known per room while the user has registrations, and
 	// badgeTimer a pending badge push (unread.go).
 	pushes     map[string]*pushRegistration
-	pings      map[string]int64
 	unread     map[string]int
 	badgeTimer *time.Timer
 	// pushDay is the UTC day pushesToday counts the pushes delivered to the
@@ -119,33 +80,31 @@ type userState struct {
 	pushesToday int
 }
 
+// newUserState returns a new user named name.
 func newUserState(id, name string) *userState {
+	return restoredUser(id, users.New(name, time.Now()))
+}
+
+// restoredUser returns the state of a user that is kept as stored.
+func restoredUser(id string, stored users.User) *userState {
 	return &userState{
-		id:        id,
-		name:      name,
-		clients:   make(map[*client]struct{}),
-		joined:    make(map[string]*roomState),
-		leftAt:    make(map[string]int64),
-		roomMutes: make(map[string]muteState),
-		presence:  presence.New(),
-		pushes:    make(map[string]*pushRegistration),
-		pings:     make(map[string]int64),
-		created:   time.Now(),
+		id:      id,
+		User:    stored,
+		clients: make(map[*client]struct{}),
+		joined:  make(map[string]*roomState),
+		pushes:  make(map[string]*pushRegistration),
 	}
 }
+
+// UserID and Kept make a userState a users.Holder.
+func (u *userState) UserID() string    { return u.id }
+func (u *userState) Kept() *users.User { return &u.User }
 
 // from is the recorded user object carried in logged records (a message's
 // or reaction's from, a membership's user): user_id and name. Avatars and
 // ext travel only in current objects (§3.3, §4.8.6).
 func (u *userState) from() roomlog.Author {
-	return roomlog.Author{UserID: u.id, Name: u.name}
-}
-
-// account reports whether the user signed in with a credential (a passkey,
-// an email address, or an external identity) or is an Extension's bot, so
-// it persists across connections and restarts, rather than being a guest.
-func (u *userState) account() bool {
-	return len(u.identities) > 0 || u.botOf != ""
+	return roomlog.Author{UserID: u.id, Name: u.Name}
 }
 
 // hasRole reports whether the user holds a server role.
@@ -157,7 +116,7 @@ func (u *userState) hasRole(role string) bool {
 // with the published shown status, and seen when it is offline (§4.5.2);
 // you has the chosen status instead.
 func (u *userState) profile() wire.CurrentUser {
-	return u.current(u.presence.Status, true)
+	return u.current(u.Presence.Status, true)
 }
 
 // current is the user's complete current object with status, and seen
@@ -167,16 +126,16 @@ func (u *userState) profile() wire.CurrentUser {
 // none.
 func (u *userState) current(status string, withSeen bool) wire.CurrentUser {
 	object := wire.CurrentUser{User: wire.User{
-		UserID: u.id, Name: u.name, Avatar: u.avatar, Status: status,
-		Roles: slices.Clone(u.roles), Ext: maps.Clone(u.ext),
+		UserID: u.id, Name: u.Name, Avatar: u.Avatar, Status: status,
+		Roles: slices.Clone(u.roles), Ext: maps.Clone(u.Ext),
 	}}
-	if withSeen && status == statusOffline && u.presence.Seen > 0 {
-		object.Seen = strconv.FormatInt(u.presence.Seen, 10)
+	if withSeen && status == statusOffline && u.Presence.Seen > 0 {
+		object.Seen = strconv.FormatInt(u.Presence.Seen, 10)
 	}
 	if status == "" {
 		object.Cleared = append(object.Cleared, "status")
 	}
-	if len(u.roles) == 0 && u.account() {
+	if len(u.roles) == 0 && u.Account() {
 		object.Cleared = append(object.Cleared, "roles")
 	}
 	return object
@@ -302,7 +261,7 @@ func (s *Server) attachLocked(c *client, user *userState) {
 	// status.
 	switch {
 	case previous == nil:
-	case len(previous.clients) == 0 && !previous.account():
+	case len(previous.clients) == 0 && !previous.Account():
 		s.retireLocked(previous)
 	default:
 		s.announceStatusLocked(previous)
@@ -319,7 +278,7 @@ func (s *Server) detachLocked(c *client) {
 	delete(user.clients, c)
 	c.user = nil
 	c.conn.SignOut()
-	if len(user.clients) == 0 && !user.account() {
+	if len(user.clients) == 0 && !user.Account() {
 		s.retireLocked(user)
 		return
 	}
@@ -345,8 +304,8 @@ func (s *Server) retireLocked(u *userState) {
 	}
 	s.stopTimersLocked(u)
 	s.setAvatarEmbedLocked(u, nil)
-	delete(s.users, u.id)
-	s.touchUser(u.id)
+	s.users.Delete(u.id)
+	s.users.Touch(u.id)
 }
 
 // stopTimersLocked stops u's timers: the ends of its timed mutes, its
@@ -409,8 +368,8 @@ func (u *userState) views() userViews {
 // never clears it: a user object carries seen only with a shown offline.
 func (u *userState) shownView() wire.User {
 	shown := u.profile().User
-	if u.presence.Seen > 0 {
-		shown.Seen = strconv.FormatInt(u.presence.Seen, 10)
+	if u.Presence.Seen > 0 {
+		shown.Seen = strconv.FormatInt(u.Presence.Seen, 10)
 	}
 	return shown
 }
@@ -483,7 +442,7 @@ func (s *Server) updateProfile(c *client, p wire.MeParams, reply wire.Reply[wire
 	s.mu.Lock()
 	defer s.unlock()
 	u := c.user
-	if hasAvatar && avatar != "" && avatar != u.avatar && !validAvatar(avatar) {
+	if hasAvatar && avatar != "" && avatar != u.Avatar && !validAvatar(avatar) {
 		if strings.HasPrefix(avatar, "data:") && len(avatar) > maxAvatarDataURLBytes {
 			return &Error{Code: CodeTooLarge, Message: fmt.Sprintf("An avatar data: URL is at most %d bytes; upload larger images with /avatar", maxAvatarDataURLBytes)}
 		}
@@ -494,9 +453,9 @@ func (s *Server) updateProfile(c *client, p wire.MeParams, reply wire.Reply[wire
 	}
 	// ext merges into the kept one (§4.12), and the limit applies to the
 	// result.
-	ext := u.ext
+	ext := u.Ext
 	if hasExt {
-		ext = mergeExt(u.ext, extWrite)
+		ext = mergeExt(u.Ext, extWrite)
 		if encodedSize(ext) > maxProfileExtBytes {
 			return &Error{Code: CodeTooLarge, Message: fmt.Sprintf("Your profile's ext would be over %d bytes", maxProfileExtBytes)}
 		}
@@ -504,38 +463,38 @@ func (s *Server) updateProfile(c *client, p wire.MeParams, reply wire.Reply[wire
 	// A status change counts against the user's limit on status changes,
 	// as a `status` request does (§4.5), so `me` flipping it in a loop
 	// cannot make the server announce it to every sharer without end.
-	if hasStatus && status != u.presence.Chosen {
+	if hasStatus && status != u.Presence.Chosen {
 		if err := admitStatusLocked(u); err != nil {
 			return err
 		}
 	}
 	// A change of name, avatar, or ext goes to everyone who shares a room
 	// with the user.
-	if (hasName && normalizeName(name) != u.name) || (hasAvatar && avatar != u.avatar) || (hasExt && !jsonEqual(ext, u.ext)) {
+	if (hasName && normalizeName(name) != u.Name) || (hasAvatar && avatar != u.Avatar) || (hasExt && !jsonEqual(ext, u.Ext)) {
 		if err := admitActionLocked(u); err != nil {
 			return err
 		}
 	}
 	before := u.views()
-	s.touchUser(u.id)
+	s.users.Touch(u.id)
 	var removed []string
 	if hasName {
-		u.name = normalizeName(name)
-		if u.name == "" {
+		u.Name = normalizeName(name)
+		if u.Name == "" {
 			removed = append(removed, "name")
 		}
 	}
-	if hasAvatar && avatar != u.avatar {
+	if hasAvatar && avatar != u.Avatar {
 		s.setAvatarEmbedLocked(u, nil)
-		u.avatar = avatar
+		u.Avatar = avatar
 	}
 	if hasAvatar && avatar == "" {
 		removed = append(removed, "avatar")
 	}
-	u.ext = ext
+	u.Ext = ext
 	if hasStatus {
 		// A change of the chosen status is sent at once, with the profile.
-		u.presence.Chosen = status
+		u.Presence.Chosen = status
 		s.publishLocked(u)
 	}
 	s.notifyProfileLocked(u, c, before)
@@ -558,9 +517,9 @@ func jsonEqual(a, b any) bool {
 // a granted user_id that was never used.
 func (s *Server) grantRolesLocked(u *userState) bool {
 	var roles []string
-	if u.account() {
+	if u.Account() {
 		holders := []Principal{UserID(u.id)}
-		for scheme, subject := range u.identities {
+		for scheme, subject := range u.Identities {
 			holders = append(holders, principalOf(authn.Identity{Scheme: scheme, Subject: subject}))
 		}
 		for role, granted := range s.roleHolders {
@@ -568,10 +527,10 @@ func (s *Server) grantRolesLocked(u *userState) bool {
 				roles = append(roles, role)
 			}
 		}
-		for _, granted := range u.granted {
+		for _, granted := range u.Granted {
 			roles = append(roles, granted...)
 		}
-		if u.botOf != "" {
+		if u.Bot != "" {
 			roles = append(roles, "bot")
 		}
 		slices.Sort(roles)

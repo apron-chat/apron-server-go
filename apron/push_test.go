@@ -24,6 +24,7 @@ import (
 	"golang.org/x/time/rate"
 
 	"github.com/apron-chat/apron-server-go/apron/internal/roomlog"
+	"github.com/apron-chat/apron-server-go/apron/internal/users"
 	"github.com/apron-chat/apron-server-go/apron/internal/webpush"
 	"github.com/apron-chat/apron-server-go/store"
 	"github.com/apron-chat/apron-server-go/wire"
@@ -127,8 +128,8 @@ func addAccount(t *testing.T, app *Server, id string, others ...*testClient) *us
 	t.Helper()
 	app.mu.Lock()
 	u := newUserState(id, strings.ToUpper(id[:1])+id[1:])
-	u.identities = map[string]string{"webauthn": id}
-	app.users[u.id] = u
+	u.Identities = map[string]string{"webauthn": id}
+	app.users.Add(u)
 	app.addMemberLocked(u, app.rooms.Get(defaultRoomID))
 	app.unlock()
 	for _, other := range others {
@@ -311,7 +312,7 @@ func TestPushRegistration(t *testing.T) {
 	registration := func(u string) *pushRegistration {
 		app.mu.RLock()
 		defer app.mu.RUnlock()
-		return app.users[u].pushes[endpoint]
+		return app.users.Get(u).pushes[endpoint]
 	}
 	// A registration belongs to its user and url: another user's of the
 	// same url is their own, and re-registering replaces only the caller's.
@@ -332,7 +333,7 @@ func TestPushRegistration(t *testing.T) {
 	// Another spelling of the same endpoint is the same registration.
 	a.result(t, "push_register", "spelling", map[string]any{"kind": "relay", "url": "HTTPS://Push.Example.NET:443/s/abc", "keys": keys, "wake": []any{}})
 	app.mu.RLock()
-	spellings := len(app.users[a.userID].pushes)
+	spellings := len(app.users.Get(a.userID).pushes)
 	app.mu.RUnlock()
 	if spellings != 1 {
 		t.Fatalf("registrations of one endpoint under two spellings: %d", spellings)
@@ -356,7 +357,7 @@ func TestPushRegistration(t *testing.T) {
 	a.result(t, "push_register", "eleventh", map[string]any{"kind": "relay", "url": endpoint + "new"})
 	app.mu.RLock()
 	var urls []string
-	for url := range app.users[a.userID].pushes {
+	for url := range app.users.Get(a.userID).pushes {
 		urls = append(urls, strings.TrimPrefix(url, endpoint))
 	}
 	app.mu.RUnlock()
@@ -551,7 +552,7 @@ func serverMessage(t *testing.T, app *Server, userID string) int64 {
 	t.Helper()
 	app.mu.Lock()
 	defer app.unlock()
-	u := app.users[userID]
+	u := app.users.Get(userID)
 	logID := app.log.NextID()
 	id := formatID(logID)
 	m := app.newMessageLocked(id, u.from(), u.id)
@@ -696,7 +697,7 @@ func TestWebPushDelivery(t *testing.T) {
 		t.Fatalf("deliveries: %v", got)
 	}
 	app.mu.RLock()
-	_, kept := app.users[c.userID].pushes[relay.URL+"/web/missing"]
+	_, kept := app.users.Get(c.userID).pushes[relay.URL+"/web/missing"]
 	app.mu.RUnlock()
 	if kept {
 		t.Fatal("a webpush subscription answering 404 was kept")
@@ -905,7 +906,7 @@ func TestPushAndStatusSurviveRestart(t *testing.T) {
 	memory := store.NewMemory()
 	_, keys := testSubscription(t)
 	if err := memory.Apply([]store.Entry{
-		{Kind: entryUser, ID: "erin", Value: encodeJSON(storedUser{Name: "Erin", Passkey: jsontext.Value(`{"handle":"aA=="}`)})},
+		{Kind: entryUser, ID: "erin", Value: encodeJSON(users.Stored{Name: "Erin", Passkey: jsontext.Value(`{"handle":"aA=="}`)})},
 		{Kind: entryUser, ID: "finn", Value: []byte(`{"name":"Finn","passkey":{"handle":"aA=="},"status":"invisible"}`)},
 		{Kind: entryUser, ID: "gail", Value: []byte(`{"name":"Gail","passkey":{"handle":"aQ=="},"status":"away"}`)},
 		{Kind: entryPush, ID: pushKey("erin", "https://relay.example/erin"), Value: encodeJSON(storedPush{User: "erin", Kind: "relay", URL: "https://relay.example/erin", Token: "tok", Wake: defaultWake.names(), Renewed: time.Now()})},
@@ -916,7 +917,7 @@ func TestPushAndStatusSurviveRestart(t *testing.T) {
 	_, frame := dialRaw(t, httpServer)
 	key := frame["params"].(map[string]any)["push"].(map[string]any)["webpush"].(map[string]any)["key"]
 	app.mu.Lock()
-	erin := app.users["erin"]
+	erin := app.users.Get("erin")
 	relay := erin.pushes["https://relay.example/erin"]
 	if relay == nil || relay.token != "tok" || relay.wake != defaultWake || !relay.live(time.Now()) {
 		app.mu.Unlock()
@@ -927,16 +928,16 @@ func TestPushAndStatusSurviveRestart(t *testing.T) {
 		userID: "erin", kind: "webpush", url: "https://push.example/s", pushID: "p1", keys: &subscription,
 		wake: wakeJoined | wakeBadge, renewed: time.Now(), lastUnread: -1,
 	})
-	if finn, gail := app.users["finn"], app.users["gail"]; finn.presence.Chosen != statusInvisible || gail.presence.Chosen != statusNone || erin.presence.Chosen != statusOnline {
+	if finn, gail := app.users.Get("finn"), app.users.Get("gail"); finn.Presence.Chosen != statusInvisible || gail.Presence.Chosen != statusNone || erin.Presence.Chosen != statusOnline {
 		app.mu.Unlock()
-		t.Fatalf("loaded statuses: erin %q finn %q gail %q", erin.presence.Chosen, finn.presence.Chosen, gail.presence.Chosen)
+		t.Fatalf("loaded statuses: erin %q finn %q gail %q", erin.Presence.Chosen, finn.Presence.Chosen, gail.Presence.Chosen)
 	}
-	erin.presence.Chosen = statusDND
-	app.users["finn"].presence.Chosen = statusNone
-	erin.mute = muteState{until: time.Now().Add(time.Hour)}
-	erin.roomMutes["general"] = muteState{forever: true}
-	app.touchUser("erin")
-	app.touchUser("finn")
+	erin.Presence.Chosen = statusDND
+	app.users.Get("finn").Presence.Chosen = statusNone
+	erin.Mute = muteState{Until: time.Now().Add(time.Hour)}
+	erin.RoomMutes["general"] = muteState{Forever: true}
+	app.users.Touch("erin")
+	app.users.Touch("finn")
 	app.unlock()
 	stop()
 
@@ -946,7 +947,7 @@ func TestPushAndStatusSurviveRestart(t *testing.T) {
 		t.Fatalf("VAPID key changed across a restart: %v then %v", key, again)
 	}
 	app.mu.RLock()
-	erin = app.users["erin"]
+	erin = app.users.Get("erin")
 	web := erin.pushes["https://push.example/s"]
 	if web == nil || web.kind != "webpush" || web.pushID != "p1" || web.wake != wakeJoined|wakeBadge || web.keys == nil || webpush.EncodeBase64URL(web.keys.Auth) != keys["auth"] {
 		t.Fatalf("webpush registration after restart: %#v", web)
@@ -954,8 +955,8 @@ func TestPushAndStatusSurviveRestart(t *testing.T) {
 	if erin.pushes["https://relay.example/erin"] == nil || len(app.pushes) != 2 {
 		t.Fatalf("registrations after restart: %v", app.pushes)
 	}
-	if erin.presence.Chosen != statusDND || app.users["finn"].presence.Chosen != statusNone || !erin.mute.active(time.Now()) || !erin.roomMutes["general"].forever {
-		t.Fatalf("status after restart: %q %q %v %v", erin.presence.Chosen, app.users["finn"].presence.Chosen, erin.mute, erin.roomMutes)
+	if erin.Presence.Chosen != statusDND || app.users.Get("finn").Presence.Chosen != statusNone || !erin.Mute.Active(time.Now()) || !erin.RoomMutes["general"].Forever {
+		t.Fatalf("status after restart: %q %q %v %v", erin.Presence.Chosen, app.users.Get("finn").Presence.Chosen, erin.Mute, erin.RoomMutes)
 	}
 	app.mu.RUnlock()
 	var stored []string
@@ -1035,7 +1036,7 @@ func TestDisabledPushIgnoresStoredRegistrations(t *testing.T) {
 	memory := store.NewMemory()
 	url := "https://relay.example/erin"
 	if err := memory.Apply([]store.Entry{
-		{Kind: entryUser, ID: "erin", Value: encodeJSON(storedUser{Name: "Erin", Passkey: jsontext.Value(`{"handle":"aA=="}`)})},
+		{Kind: entryUser, ID: "erin", Value: encodeJSON(users.Stored{Name: "Erin", Passkey: jsontext.Value(`{"handle":"aA=="}`)})},
 		{Kind: entryPush, ID: pushKey("erin", url), Value: encodeJSON(storedPush{User: "erin", Kind: "relay", URL: url, Renewed: time.Now()})},
 	}); err != nil {
 		t.Fatal(err)
@@ -1043,7 +1044,7 @@ func TestDisabledPushIgnoresStoredRegistrations(t *testing.T) {
 	pushesOf := func(app *Server) int {
 		app.mu.RLock()
 		defer app.mu.RUnlock()
-		return len(app.pushes) + len(app.users["erin"].pushes)
+		return len(app.pushes) + len(app.users.Get("erin").pushes)
 	}
 	app, _, stop := startWith(t, memory, t.TempDir(), func(c *Config) { c.DisablePush = true })
 	if pushes := pushesOf(app); pushes != 0 {
@@ -1125,7 +1126,7 @@ func TestWakeNamesPastTheBoundsAreIgnored(t *testing.T) {
 		a.result(t, "push_register", id, map[string]any{"kind": "relay", "url": endpoint, "wake": wake})
 		app.mu.RLock()
 		defer app.mu.RUnlock()
-		return app.users[a.userID].pushes[endpoint].wake
+		return app.users.Get(a.userID).pushes[endpoint].wake
 	}
 	many := make([]any, maxWakeScopes+4)
 	for i := range many {
@@ -1149,7 +1150,7 @@ func TestPrivateWakesForThreadsOfJoinedRooms(t *testing.T) {
 	carol := addAccount(t, app, "carol", a)
 	addPush(app, carol, pushRegistration{url: relay.URL + "/private", wake: wakePrivate})
 	addAccount(t, app, "dave", a)
-	addPush(app, app.users["dave"], pushRegistration{url: relay.URL + "/dave", wake: wakePrivate | wakeJoined})
+	addPush(app, app.users.Get("dave"), pushRegistration{url: relay.URL + "/dave", wake: wakePrivate | wakeJoined})
 	secret, _ := saveRoom(t, a, "secret", map[string]any{"title": "Secret", "private": true})
 	a.request(t, "room_join", "add-carol", map[string]any{"room_id": secret, "user_id": "carol"})
 	thread, _ := saveRoom(t, a, "thread", map[string]any{"parent_room_id": secret, "private": false})
@@ -1278,12 +1279,12 @@ func TestShutdownStopsTimers(t *testing.T) {
 	addPush(app, dora, pushRegistration{url: relay.URL + "/dora", wake: wakeBadge})
 	app.mu.Lock()
 	now := time.Now()
-	dora.mute = muteState{until: now.Add(time.Hour)}
+	dora.Mute = muteState{Until: now.Add(time.Hour)}
 	app.scheduleMuteLocked(dora)
-	dora.roomMutes["general"] = muteState{until: now.Add(time.Hour)}
+	dora.RoomMutes["general"] = muteState{Until: now.Add(time.Hour)}
 	app.scheduleRoomMuteLocked(dora, "general")
-	dora.presence.SetPublishLimit(rate.NewLimiter(rate.Every(time.Hour), 0))
-	dora.presence.Chosen = statusNone
+	dora.Presence.SetPublishLimit(rate.NewLimiter(rate.Every(time.Hour), 0))
+	dora.Presence.Chosen = statusNone
 	app.announceStatusLocked(dora)
 	pending := dora.muteTimer != nil && dora.roomMuteTimers["general"] != nil && dora.statusTimer != nil
 	app.unlock()

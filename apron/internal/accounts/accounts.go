@@ -1,12 +1,10 @@
 // Package accounts keeps what names the server's users: the user_ids it
-// assigns (PROTOCOL.md §3.2, §3.3), none of which is ever assigned again,
-// and the accounts by the identities that prove them, such as an email
-// address or a passkey's user handle.
+// assigns (PROTOCOL.md §3.2, §3.3), none of which is ever assigned again.
+// The accounts by the identities that prove them are the users module's.
 //
 // IDs assigns user_ids, and keeps every user_id ever assigned in the
-// store; Index finds an account by an identity, knowing accounts only as
-// values of the type U, such as the server's user state. Neither is safe
-// for concurrent use: the server calls them holding its lock.
+// store. It is not safe for concurrent use: the server calls it holding
+// its lock.
 package accounts
 
 import (
@@ -15,7 +13,6 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/apron-chat/apron-server-go/internal/authn"
 	"github.com/apron-chat/apron-server-go/store"
 )
 
@@ -159,25 +156,3 @@ func (ids *IDs) Restore(entries map[string]jsontext.Value) {
 		ids.used[id] = true
 	}
 }
-
-// Index is the accounts by the identities that prove them.
-type Index[U comparable] struct {
-	byIdentity map[authn.Identity]U
-}
-
-// NewIndex returns an empty index.
-func NewIndex[U comparable]() *Index[U] {
-	return &Index[U]{byIdentity: make(map[authn.Identity]U)}
-}
-
-// Get returns the account id proves, or the zero U.
-func (x *Index[U]) Get(id authn.Identity) U { return x.byIdentity[id] }
-
-// Set makes id prove account.
-func (x *Index[U]) Set(id authn.Identity, account U) { x.byIdentity[id] = account }
-
-// Len counts the identities that prove accounts.
-func (x *Index[U]) Len() int { return len(x.byIdentity) }
-
-// Delete forgets id, which proves no account any more.
-func (x *Index[U]) Delete(id authn.Identity) { delete(x.byIdentity, id) }

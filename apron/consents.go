@@ -10,7 +10,7 @@ import (
 // confirmation, and return at once, when the account it signs in to
 // allowed the same https redirect_uri before. An account keeps
 // those redirect URIs, with when each was last allowed, with its other data
-// (storedUser.Consents), at most maxConsents of them, and forgets them all
+// (users.User.Consents), at most maxConsents of them, and forgets them all
 // when it signs out everywhere: its other sessions (account.sign_out with
 // others), or Server.SignOut and anything else that signs it out
 // (signOutLocked). The page never remembers an app's scheme or a loopback
@@ -26,11 +26,11 @@ func (sc schemeCore) Consented(subject, redirect string) bool {
 	s := sc.s
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	u := s.accounts.Get(authn.Identity{Scheme: sc.scheme.Name(), Subject: subject})
+	u := s.users.ByIdentity(authn.Identity{Scheme: sc.scheme.Name(), Subject: subject})
 	if u == nil || redirect == "" {
 		return false
 	}
-	_, ok := u.consents[redirect]
+	_, ok := u.Consents[redirect]
 	return ok
 }
 
@@ -40,30 +40,30 @@ func (sc schemeCore) Consent(subject, redirect string) {
 	s := sc.s
 	s.mu.Lock()
 	defer s.unlock()
-	u := s.accounts.Get(authn.Identity{Scheme: sc.scheme.Name(), Subject: subject})
+	u := s.users.ByIdentity(authn.Identity{Scheme: sc.scheme.Name(), Subject: subject})
 	if u == nil || redirect == "" {
 		return
 	}
-	if u.consents == nil {
-		u.consents = make(map[string]int64)
+	if u.Consents == nil {
+		u.Consents = make(map[string]int64)
 	}
-	u.consents[redirect] = time.Now().UnixMilli()
-	for len(u.consents) > maxConsents {
+	u.Consents[redirect] = time.Now().UnixMilli()
+	for len(u.Consents) > maxConsents {
 		oldest := ""
-		for h, at := range u.consents {
-			if oldest == "" || at < u.consents[oldest] {
+		for h, at := range u.Consents {
+			if oldest == "" || at < u.Consents[oldest] {
 				oldest = h
 			}
 		}
-		delete(u.consents, oldest)
+		delete(u.Consents, oldest)
 	}
-	s.touchUser(u.id)
+	s.users.Touch(u.id)
 }
 
 // forgetConsentsLocked forgets the apps u allowed.
 func (s *Server) forgetConsentsLocked(u *userState) {
-	if len(u.consents) > 0 {
-		u.consents = nil
-		s.touchUser(u.id)
+	if len(u.Consents) > 0 {
+		u.Consents = nil
+		s.users.Touch(u.id)
 	}
 }

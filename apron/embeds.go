@@ -422,7 +422,7 @@ func (s *Server) setAvatarEmbedLocked(u *userState, e *embedState) {
 		s.removeEmbedLocked(u.avatarEmbed.ID)
 	}
 	u.avatarEmbed = e
-	s.touchUser(u.id)
+	s.users.Touch(u.id)
 }
 
 func setEmbedCORS(w http.ResponseWriter, methods string) {
@@ -611,11 +611,11 @@ func (s *Server) writeUpload(w http.ResponseWriter, r *http.Request, e *embedSta
 		e.Owned["og"] = og
 	}
 	if u := e.avatarFor; u != nil {
-		if s.users[u.id] == u {
+		if s.users.Get(u.id) == u {
 			before := u.views()
 			s.setAvatarEmbedLocked(u, e)
-			u.avatar = e.fileURL()
-			s.touchUser(u.id)
+			u.Avatar = e.fileURL()
+			s.users.Touch(u.id)
 			s.notifyProfileLocked(u, nil, before)
 		} else {
 			s.removeEmbedLocked(e.ID)

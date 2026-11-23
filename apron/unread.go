@@ -22,7 +22,7 @@ import (
 // cursor (§4.6), where the message it names arrived in the room, their
 // join, and their latest message there. A room the
 // user has not joined counts only once a message there mentioned or replied
-// to them (userState.pings), from that message. The unscoped mute and a dnd
+// to them (users.User.Pings), from that message. The unscoped mute and a dnd
 // status silence pushes but not the count (§4.9).
 //
 // Counts are kept per user and room for users with push registrations
@@ -54,7 +54,7 @@ func (s *Server) readPositionLocked(u *userState, r *roomState) (int64, bool) {
 	if u.joined[r.ID()] != nil {
 		return max(since, r.Active(u.id)), true
 	}
-	if ping, ok := u.pings[r.ID()]; ok {
+	if ping, ok := u.Pings[r.ID()]; ok {
 		return max(since, ping-1), true
 	}
 	return 0, false
@@ -111,8 +111,8 @@ func (s *Server) recountLocked(u *userState, r *roomState, now time.Time) int {
 func (s *Server) unreadLocked(u *userState, now time.Time) int {
 	// A room mute that ran out, its timer not yet run, changes what counts
 	// in the room and its threads: it ends, and the counts are forgotten.
-	for _, id := range slices.Sorted(maps.Keys(u.roomMutes)) {
-		if !u.roomMutes[id].active(now) {
+	for _, id := range slices.Sorted(maps.Keys(u.RoomMutes)) {
+		if !u.RoomMutes[id].Active(now) {
 			s.endRoomMuteLocked(u, id)
 			u.unread = nil
 		}
@@ -121,7 +121,7 @@ func (s *Server) unreadLocked(u *userState, now time.Time) int {
 		u.unread = make(map[string]int)
 	}
 	rooms := maps.Clone(u.joined)
-	for id := range u.pings {
+	for id := range u.Pings {
 		if r := s.rooms.Get(id); r != nil {
 			rooms[id] = r
 		}
@@ -179,10 +179,10 @@ func (s *Server) messageUnreadLocked(m *messageState, previous *roomlog.Message,
 			continue
 		}
 		for _, id := range snapshot.Mentions() {
-			add(s.users[id])
+			add(s.users.Get(id))
 		}
 		if target := s.messages[snapshot.ReplyID()]; target != nil {
-			add(s.users[target.Owner()])
+			add(s.users.Get(target.Owner()))
 		}
 	}
 	now := time.Now()
@@ -196,9 +196,9 @@ func (s *Server) messageUnreadLocked(m *messageState, previous *roomlog.Message,
 		if u.joined[r.ID()] == nil && (slices.Contains(info.mentions, u.id) || s.messages[info.replyTo] != nil && s.messages[info.replyTo].Owner() == u.id) {
 			// A room the user has not joined counts from the first message
 			// there that mentioned or replied to them.
-			if since, ok := u.pings[r.ID()]; !ok || since > messageID {
-				u.pings[r.ID()] = messageID
-				s.touchUser(u.id)
+			if since, ok := u.Pings[r.ID()]; !ok || since > messageID {
+				u.Pings[r.ID()] = messageID
+				s.users.Touch(u.id)
 				s.unreadChangedLocked(u, r.ID())
 				continue
 			}
@@ -239,7 +239,7 @@ func (s *Server) scheduleBadgeLocked(u *userState) {
 		s.mu.Lock()
 		defer s.unlock()
 		u.badgeTimer = nil
-		if !s.closed && s.users[u.id] == u {
+		if !s.closed && s.users.Get(u.id) == u {
 			s.badgeLocked(u, time.Now())
 		}
 	})

@@ -5,8 +5,6 @@ import (
 	"fmt"
 	"slices"
 	"testing"
-
-	"github.com/apron-chat/apron-server-go/internal/authn"
 )
 
 func TestRequestable(t *testing.T) {
@@ -62,18 +60,5 @@ func TestIDs(t *testing.T) {
 	restored.RestoreCounters(ids.Counters())
 	if restored.Claim("Ada", named) || restored.Guest("", named) != "guest_6" || len(restored.Snapshot()) != len(entries)+1 {
 		t.Fatal("restored IDs reissue a user_id")
-	}
-}
-
-func TestIndex(t *testing.T) {
-	x := NewIndex[string]()
-	id := authn.Identity{Scheme: "email", Subject: "ada@example.com"}
-	x.Set(id, "ada")
-	if x.Get(id) != "ada" || x.Len() != 1 || x.Get(authn.Identity{Scheme: "webauthn", Subject: "ada@example.com"}) != "" {
-		t.Fatal("Get")
-	}
-	x.Delete(id)
-	if x.Get(id) != "" || x.Len() != 0 {
-		t.Fatal("Delete")
 	}
 }

@@ -507,7 +507,7 @@ func TestSessionThatFallsBehindIsForgotten(t *testing.T) {
 	// Only the bot's own connection is left.
 	app.mu.RLock()
 	_, kept := app.clients[session.c]
-	sessions, connected := app.sessionCount, len(app.users["slow"].clients)
+	sessions, connected := app.sessionCount, len(app.users.Get("slow").clients)
 	app.mu.RUnlock()
 	if kept || sessions != 1 || connected != 1 {
 		t.Fatalf("kept %v, sessions %d, bot connections %d after the session closed", kept, sessions, connected)

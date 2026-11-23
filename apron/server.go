@@ -35,6 +35,7 @@ import (
 	"github.com/apron-chat/apron-server-go/apron/internal/services"
 	"github.com/apron-chat/apron-server-go/apron/internal/sessions"
 	"github.com/apron-chat/apron-server-go/apron/internal/uploads"
+	"github.com/apron-chat/apron-server-go/apron/internal/users"
 	"github.com/apron-chat/apron-server-go/apron/internal/webpush"
 	"github.com/apron-chat/apron-server-go/internal/auth/external"
 	"github.com/apron-chat/apron-server-go/internal/auth/passkey"
@@ -135,16 +136,18 @@ type client struct {
 // Its state is guarded by mu. Cohesive parts of it live in modules under
 // apron/internal, which know nothing of Server: the log and its paging
 // (roomlog), rooms, their members, and who may see them (rooms), the store
-// writer and its fences (durable), user_ids and the accounts by identity
-// (accounts), users' statuses (presence), sessions (sessions), device
-// tokens (devices), service tokens (services, whose expiry takes mu),
-// invitations (invitations), hosted embeds (embeds), the custom emoji
-// (emoji), out-of-band sign-in proposals (proposals), and the extensions'
-// values (kv), whose methods are called holding mu; and push delivery
+// writer and its fences (durable), user_ids (accounts), what the server
+// keeps of each user and the accounts by identity (users), users' statuses
+// (presence), sessions (sessions), device tokens (devices), service tokens
+// (services, whose expiry takes mu), invitations (invitations), hosted
+// embeds (embeds), the custom emoji (emoji), out-of-band sign-in proposals
+// (proposals), and the extensions' values (kv), whose methods are called
+// holding mu; and push delivery
 // (webpush), live text (livetext), and upload files (uploads), which own
 // their own locks or atomics. Each module that keeps state in the store
 // tracks its own changes and renders its own entries (persist.go). Server
-// keeps what ties them together: users, messages, mutes, and delivery.
+// keeps what ties them together: users' live links, messages, mute and
+// status timers, and delivery.
 type Server struct {
 	config Config
 
@@ -156,8 +159,9 @@ type Server struct {
 	rooms    *rooms.Table[*userState]
 	messages map[string]*messageState
 	clients  map[*client]struct{}
-	// users holds every live identity: connected guests and passkey users.
-	users map[string]*userState
+	// users are the users, connected guests and accounts, and the accounts
+	// by the identities that prove them (users).
+	users *users.Table[*userState]
 	// ids assigns user_ids, none twice (§3.3), and never one Config.Roles
 	// names to a new identity unless already used; roleHolders are the
 	// principals Config.Roles grants each role, lowercased.
@@ -195,11 +199,10 @@ type Server struct {
 	// services are the bots' service tokens (service.go).
 	services *services.Table[*userState]
 	// schemes are the sign-in schemes the server offers (auth.go), in the
-	// order the server frame lists them; accounts are the accounts by the
-	// identities that prove them; proposals are the outstanding proposals
-	// of sign-ins that finish out of band (§4.11), in memory only.
+	// order the server frame lists them; proposals are the outstanding
+	// proposals of sign-ins that finish out of band (§4.11), in memory
+	// only.
 	schemes   []authn.Scheme
-	accounts  *accounts.Index[*userState]
 	proposals *proposals.Table
 	// externalBy names the extension that offers external sign-in.
 	externalBy string
@@ -279,7 +282,7 @@ func Open(config Config) (*Server, error) {
 		rooms:       rooms.NewTable[*userState](log),
 		messages:    make(map[string]*messageState),
 		clients:     make(map[*client]struct{}),
-		users:       make(map[string]*userState),
+		users:       users.NewTable[*userState](),
 		ids:         accounts.NewIDs(),
 		roleHolders: make(map[string][]Principal),
 		embeds:      embeds.New[*embedState](),
@@ -288,7 +291,6 @@ func Open(config Config) (*Server, error) {
 		sessions:    sessions.New[*userState](),
 		devices:     devices.New[*userState](),
 		invitations: invitations.New(),
-		accounts:    accounts.NewIndex[*userState](),
 		proposals:   proposals.NewTable(),
 		dirty:       newDirtySet(),
 		badgeDelay:  badgeDelay,
@@ -506,7 +508,7 @@ func (s *Server) Shutdown(ctx context.Context) error {
 		// Pending badge pushes would only be dropped once they fire, and
 		// the ends of timed mutes and coalesced statuses would find the
 		// server closed: none is kept waiting past it.
-		for _, u := range s.users {
+		for _, u := range s.users.All() {
 			s.stopTimersLocked(u)
 		}
 		s.files.Close()

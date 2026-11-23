@@ -245,7 +245,7 @@ func TestServerAvatarWriteRechecksAdmin(t *testing.T) {
 	signInAdmin(t, admin, mailbox)
 	writeURL := serverAvatarWriteURL(t, admin)
 	app.mu.Lock()
-	app.users[admin.userID].roles = nil
+	app.users.Get(admin.userID).roles = nil
 	app.mu.Unlock()
 	if status, _, _ := httpDo(t, http.MethodPut, writeURL, bytes.NewReader(testPNG(t)), "image/png"); status != http.StatusForbidden {
 		t.Fatalf("a former admin's write: %d", status)

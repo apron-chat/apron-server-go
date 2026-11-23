@@ -6,17 +6,23 @@ import (
 	"context"
 	"encoding/json/jsontext"
 	"encoding/json/v2"
+	"fmt"
+	"maps"
 	"os"
+	"regexp"
 	"testing"
+	"time"
 
+	"github.com/apron-chat/apron-server-go/apron/internal/users"
 	"github.com/apron-chat/apron-server-go/store"
 )
 
 // testdata/stored-users.jsonl holds user and push entries with every field
 // their shapes have, as the server at 909c09b stored them from users and
 // registrations built by hand, and user entries as servers stored them
-// before identities, each with the entry this server stores again for it
-// ("stored"). Each of the others is stored again byte for byte.
+// before identities, each with the entry that server stored again for it
+// ("stored"). Each of the others is stored again byte for byte, but for
+// the users stored as shown other than offline (expectUsersStoredAgain).
 
 const storedUsersFile = "testdata/stored-users.jsonl"
 
@@ -67,7 +73,7 @@ func TestStoredUserShapesRoundTrip(t *testing.T) {
 		var value any
 		switch line.Kind {
 		case entryUser:
-			value = new(storedUser)
+			value = new(users.Stored)
 		case entryPush:
 			value = new(storedPush)
 		default:
@@ -81,6 +87,89 @@ func TestStoredUserShapesRoundTrip(t *testing.T) {
 		}
 	}
 }
+
+// TestStoredUsersAreStoredAgain restores the file's users into a table,
+// and checks that the table stores each again as the file says.
+func TestStoredUsersAreStoredAgain(t *testing.T) {
+	entries := make(map[string]jsontext.Value)
+	want := make(map[string]jsontext.Value)
+	for _, line := range loadStoredUsers(t) {
+		if line.Kind == entryUser {
+			entries[line.ID], want[line.ID] = line.Value, line.Stored
+		}
+	}
+	expectUsersStoredAgain(t, entries, want)
+}
+
+// expectUsersStoredAgain restores stored users into a table, and checks
+// that it stores each again as want has it, and those Restore changed,
+// stored again at once, also as want has them: but a user stored as shown
+// other than offline (a crash) is stored again as no longer shown, with
+// seen when it was restored (users.Table.Restore), and without its mutes
+// that ran out since, and want has it as it was before.
+func expectUsersStoredAgain(t *testing.T, entries, want map[string]jsontext.Value) {
+	t.Helper()
+	now := time.UnixMilli(1795400000000)
+	table := users.NewTable[*userState]()
+	avatars, err := table.Restore(entries, restoredUser, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	avatarEmbed := func(u *userState) string { return avatars[u.id] }
+	changed := table.Entries(avatarEmbed)
+	again := table.Snapshot(avatarEmbed)
+	want = maps.Clone(want)
+	for id, value := range want {
+		want[id] = withoutRanOutMutes(t, value, time.Now())
+	}
+	for _, e := range changed {
+		if u := table.Get(e.ID); u.Presence.Status == statusOffline && shownField.Match(entries[e.ID]) {
+			want[e.ID] = shownField.ReplaceAll(want[e.ID], fmt.Appendf(nil, `"seen":%d`, now.UnixMilli()))
+		}
+	}
+	byID := make(map[string]jsontext.Value)
+	for _, e := range changed {
+		byID[e.ID] = e.Value
+	}
+	for id, value := range byID {
+		if !bytes.Equal(value, want[id]) {
+			t.Errorf("user %s is stored again at once as\n%s\nwant\n%s", id, value, want[id])
+		}
+	}
+	expectStoredAgain(t, entryUser, want, again)
+}
+
+// withoutRanOutMutes is a stored user without its mutes that ran out at
+// now, which it is not stored again with: decoded and encoded again
+// (TestStoredUserShapesRoundTrip) when it has any.
+func withoutRanOutMutes(t *testing.T, value jsontext.Value, now time.Time) jsontext.Value {
+	t.Helper()
+	var stored users.Stored
+	if err := json.Unmarshal(value, &stored); err != nil {
+		t.Fatal(err)
+	}
+	ranOut := false
+	if m := stored.Mute; m != nil && !m.Forever && !now.Before(m.Until) {
+		stored.Mute, ranOut = nil, true
+	}
+	for id, m := range stored.RoomMutes {
+		if !m.Forever && !now.Before(m.Until) {
+			delete(stored.RoomMutes, id)
+			ranOut = true
+		}
+	}
+	if !ranOut {
+		return value
+	}
+	if len(stored.RoomMutes) == 0 {
+		stored.RoomMutes = nil
+	}
+	return encodeJSON(stored)
+}
+
+// shownField is the stored fields of a user shown other than offline: seen,
+// if known, and shown.
+var shownField = regexp.MustCompile(`("seen":\d+,)?"shown":true`)
 
 // TestLegacyUsersAreStoredAgain restores the users the file holds as
 // servers stored them before identities, and checks that they are stored

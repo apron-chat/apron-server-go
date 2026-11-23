@@ -73,12 +73,12 @@ func (r *Registrar) Bot(userID string, options BotOptions) (*Bot, error) {
 		return nil, fmt.Errorf("apron: %q is no user_id a bot can have", userID)
 	}
 	s.mu.Lock()
-	u := s.users[userID]
+	u := s.users.Get(userID)
 	switch {
-	case u != nil && u.botOf == r.name:
-	case u != nil && u.botOf != "":
+	case u != nil && u.Bot == r.name:
+	case u != nil && u.Bot != "":
 		s.unlock()
-		return nil, fmt.Errorf("apron: user_id %q is extension %s's bot", userID, u.botOf)
+		return nil, fmt.Errorf("apron: user_id %q is extension %s's bot", userID, u.Bot)
 	case u != nil:
 		s.unlock()
 		return nil, fmt.Errorf("apron: user_id %q belongs to someone who is not a bot", userID)
@@ -88,11 +88,10 @@ func (r *Registrar) Bot(userID string, options BotOptions) (*Bot, error) {
 			return nil, fmt.Errorf("apron: user_id %q was used by someone else", userID)
 		}
 		u = newUserState(userID, normalizeName(options.Name))
-		u.botOf = r.name
-		s.users[userID] = u
-		s.touchUser(userID)
+		u.Bot = r.name
+		s.users.Add(u)
 		s.grantRolesLocked(u)
-		u.scope = newRoomScope(options.Scope)
+		u.Scope = newRoomScope(options.Scope)
 		s.joinDefaultRoomLocked(u)
 	}
 	if options.Scope != nil {
@@ -251,11 +250,11 @@ func (s *Server) connectSession(c *client, wc *wire.Conn) error {
 	b := c.session.bot
 	s.mu.Lock()
 	defer s.unlock()
-	u := s.users[b.userID]
+	u := s.users.Get(b.userID)
 	switch {
 	case s.closed:
 		return ErrServerClosed
-	case u == nil || u.botOf != b.host.name:
+	case u == nil || u.Bot != b.host.name:
 		return fmt.Errorf("apron: %s is not extension %s's bot", b.userID, b.host.name)
 	}
 	c.conn = wc

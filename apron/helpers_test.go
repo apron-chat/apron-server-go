@@ -73,7 +73,7 @@ func waitDisconnected(t *testing.T, app *Server, userIDs ...string) {
 	t.Helper()
 	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(5 * time.Millisecond) {
 		app.mu.RLock()
-		open := slices.ContainsFunc(userIDs, func(id string) bool { u := app.users[id]; return u != nil && len(u.clients) > 0 })
+		open := slices.ContainsFunc(userIDs, func(id string) bool { u := app.users.Get(id); return u != nil && len(u.clients) > 0 })
 		app.mu.RUnlock()
 		if !open {
 			return

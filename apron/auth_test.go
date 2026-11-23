@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/apron-chat/apron-server-go/apron/internal/users"
 	"github.com/apron-chat/apron-server-go/internal/auth/email"
 	"github.com/apron-chat/apron-server-go/internal/authn"
 	"github.com/apron-chat/apron-server-go/store"
@@ -33,8 +34,8 @@ func TestStoredIdentitiesConvert(t *testing.T) {
 		t.Fatal(err)
 	}
 	app.mu.RLock()
-	ada := app.accounts.Get(authn.Identity{Scheme: "email", Subject: "ada@example.com"})
-	bob := app.accounts.Get(authn.Identity{Scheme: "external", Subject: "github:7"})
+	ada := app.users.ByIdentity(authn.Identity{Scheme: "email", Subject: "ada@example.com"})
+	bob := app.users.ByIdentity(authn.Identity{Scheme: "external", Subject: "github:7"})
 	app.mu.RUnlock()
 	if ada == nil || ada.id != "ada" || !ada.hasRole(RoleAdmin) {
 		t.Fatalf("ada = %#v", ada)
@@ -45,7 +46,7 @@ func TestStoredIdentitiesConvert(t *testing.T) {
 	if err := app.Shutdown(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	var stored storedUser
+	var stored users.Stored
 	if err := memory.Load(func(e store.Entry) error {
 		if e.Kind == entryUser && e.ID == "ada" {
 			return json.Unmarshal(e.Value, &stored)
@@ -76,8 +77,8 @@ func TestIdentitiesBelongToOneAccount(t *testing.T) {
 		t.Fatalf("adding another account's address = %#v", frame)
 	}
 	app.mu.RLock()
-	owner := app.accounts.Get(authn.Identity{Scheme: "email", Subject: "ada@example.com"})
-	identities := slices.Collect(maps.Keys(owner.identities))
+	owner := app.users.ByIdentity(authn.Identity{Scheme: "email", Subject: "ada@example.com"})
+	identities := slices.Collect(maps.Keys(owner.Identities))
 	app.mu.RUnlock()
 	if owner.id != first.userID || !slices.Equal(identities, []string{"email"}) {
 		t.Fatalf("owner %s with %v, want %s with its address", owner.id, identities, first.userID)
@@ -104,8 +105,8 @@ func TestRolesNameHoldersByPrincipal(t *testing.T) {
 		defer app.unlock()
 		u := newUserState(id, id)
 		for _, identity := range identities {
-			app.users[id] = u
-			app.setIdentityLocked(u, identity, nil)
+			app.users.Add(u)
+			app.users.SetIdentity(u, identity, nil)
 		}
 		app.grantRolesLocked(u)
 		return u.roles

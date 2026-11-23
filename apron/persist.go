@@ -6,8 +6,6 @@ import (
 	"encoding/json/v2"
 	"fmt"
 	"log/slog"
-	"maps"
-	"slices"
 	"strings"
 	"time"
 
@@ -19,21 +17,19 @@ import (
 	"github.com/apron-chat/apron-server-go/apron/internal/rooms"
 	"github.com/apron-chat/apron-server-go/apron/internal/services"
 	"github.com/apron-chat/apron-server-go/apron/internal/sessions"
+	"github.com/apron-chat/apron-server-go/apron/internal/users"
 	"github.com/apron-chat/apron-server-go/apron/internal/webpush"
-	"github.com/apron-chat/apron-server-go/internal/auth/email"
-	"github.com/apron-chat/apron-server-go/internal/auth/external"
-	"github.com/apron-chat/apron-server-go/internal/auth/passkey"
-	"github.com/apron-chat/apron-server-go/internal/authn"
 	"github.com/apron-chat/apron-server-go/store"
 )
 
 // Persistence writes the server's state through to a store.Store. Every
 // change made under s.mu marks what it changed: the server's own state in
 // its dirty set (touch*), and the modules that keep their own, the log
-// (roomlog), the rooms (rooms), the user_ids used (accounts), the
-// extensions' values (kv), the sessions (sessions), the device tokens
-// (devices), the service tokens (services), the invitations (invitations),
-// the hosted embeds (embeds), and the custom emoji (emoji), in theirs.
+// (roomlog), the rooms (rooms), the user_ids used (accounts), the users
+// (users), the extensions' values (kv), the sessions (sessions), the
+// device tokens (devices), the service tokens (services), the invitations
+// (invitations), the hosted embeds (embeds), and the custom emoji (emoji),
+// in theirs.
 // When the lock is released, unlock renders the marked state into one
 // batch, and the store writer (durable) applies batches to the store in
 // order, off the lock. At start, Open rebuilds the state from the store.
@@ -52,7 +48,8 @@ import (
 //	                      (rooms)
 //	message  message_id   a message's room, sender, snapshots, and
 //	                      reactions (rooms)
-//	user     user_id      guests too, retired at the next start
+//	user     user_id      a user, guests too, retired at the next start
+//	                      (users)
 //	session  hex SHA-256 of the bearer token (sessions)
 //	device   hex SHA-256 of the /invite-device token (devices)
 //	service  hex SHA-256 of a bot's service token (services)
@@ -65,16 +62,15 @@ const (
 	entryMeta    = "meta"
 	entryRoom    = rooms.EntryKind
 	entryMessage = rooms.MessageEntryKind
-	entryUser    = "user"
+	entryUser    = users.EntryKind
 	entryPush    = "push"
 )
 
-// dirtySet is the state changed since the last batch, by key. For users,
-// sessions, embeds, and pushes, a key missing from the server's maps at
-// flush time is deleted from the store.
+// dirtySet is the state changed since the last batch, by key. For pushes,
+// a key missing from the server's map at flush time is deleted from the
+// store.
 type dirtySet struct {
 	messages map[string]bool
-	users    map[string]bool
 	pushes   map[string]bool
 	vapid    bool
 	profile  bool
@@ -83,13 +79,11 @@ type dirtySet struct {
 func newDirtySet() dirtySet {
 	return dirtySet{
 		messages: make(map[string]bool),
-		users:    make(map[string]bool),
 		pushes:   make(map[string]bool),
 	}
 }
 
 func (s *Server) touchMessage(m *messageState) { s.dirty.messages[m.ID()] = true }
-func (s *Server) touchUser(id string)          { s.dirty.users[id] = true }
 func (s *Server) touchPush(key string)         { s.dirty.pushes[key] = true }
 
 // unlock writes the changes made under s.mu through to the store, then
@@ -105,58 +99,6 @@ type storedMeta struct {
 	AccountNumber uint64 `json:"account_number,omitzero"`
 	EmbedNumber   uint64 `json:"embed_number"`
 	UploadSeq     int64  `json:"upload_seq"`
-}
-
-type storedUser struct {
-	Name        string           `json:"name,omitzero"`
-	Avatar      string           `json:"avatar,omitzero"`
-	Ext         extObject        `json:"ext,omitzero"`
-	AvatarEmbed string           `json:"avatar_embed,omitzero"`
-	LeftAt      map[string]int64 `json:"left_at,omitzero"`
-	// Identities are what prove the account, by scheme; Records what each
-	// scheme keeps with it; and Grants the roles each identity grants it
-	// (auth.go).
-	Identities map[string]string         `json:"identities,omitzero"`
-	Records    map[string]jsontext.Value `json:"records,omitzero"`
-	Grants     map[string][]string       `json:"grants,omitzero"`
-	// Passkey, Email, External, and Granted are the identities, and the
-	// external sign-in's roles, as servers stored them before Identities:
-	// they are stored still, so such a server can read what this one
-	// stored, and read where Identities lacks their scheme.
-	Passkey jsontext.Value `json:"passkey,omitzero"`
-	Email   string         `json:"email,omitzero"`
-	// Status is the chosen status (§4.5.1), absent for online; Seen the
-	// Unix milliseconds when the shown status others are sent last became
-	// offline, absent if unknown, as for users stored before it was kept
-	// (§4.5.2); Shown true while that status is other than offline, which a
-	// restart after a crash finds still set; and Mute and RoomMutes their
-	// mutes.
-	// Pings are the rooms they have not joined that count toward unread.
-	Status    *string               `json:"status,omitzero"`
-	Seen      int64                 `json:"seen,omitzero"`
-	Shown     bool                  `json:"shown,omitzero"`
-	Mute      *storedMute           `json:"mute,omitzero"`
-	RoomMutes map[string]storedMute `json:"room_mutes,omitzero"`
-	Pings     map[string]int64      `json:"pings,omitzero"`
-	// Created is when the user was made, in Unix milliseconds; absent for
-	// users stored before it was kept. Bot names the Extension whose bot
-	// the account is (Registrar.Bot).
-	Created int64  `json:"created,omitzero"`
-	Bot     string `json:"bot,omitzero"`
-	// Enrolled is what the invitation that made the account left with it.
-	Enrolled *invitations.Enrollment `json:"enrolled,omitzero"`
-	// Scope is the rooms the account is limited to (scope.go).
-	Scope *storedScope `json:"scope,omitzero"`
-	// Consents are the hosts of apps the account allowed on the external
-	// sign-in page, with when, in Unix milliseconds (consents.go).
-	Consents map[string]int64 `json:"consents,omitzero"`
-	External string           `json:"external,omitzero"`
-	Granted  []string         `json:"granted,omitzero"`
-}
-
-type storedMute struct {
-	Forever bool      `json:"forever,omitzero"`
-	Until   time.Time `json:"until,omitzero"`
 }
 
 type storedPush struct {
@@ -195,6 +137,7 @@ func (s *Server) flushLocked() {
 	if s.store.Stopped() {
 		s.dirty = newDirtySet()
 		s.log.Entries()
+		s.users.Entries(avatarEmbedID)
 		s.rooms.Entries()
 		s.ids.Entries()
 		s.extData.Entries()
@@ -208,6 +151,7 @@ func (s *Server) flushLocked() {
 		return
 	}
 	batch := append(s.ids.Entries(), s.entriesLocked(s.dirty, s.log.Entries())...)
+	batch = append(batch, s.users.Entries(avatarEmbedID)...)
 	batch = append(batch, s.rooms.Entries()...)
 	batch = append(batch, s.extData.Entries()...)
 	batch = append(batch, s.sessions.Entries(userID)...)
@@ -246,13 +190,6 @@ func (s *Server) entriesLocked(d dirtySet, records []store.Entry) []store.Entry 
 			batch = append(batch, rooms.MessageEntry(m.Message))
 		}
 	}
-	for id := range d.users {
-		if u := s.users[id]; u != nil {
-			put(entryUser, id, storedUserOf(u))
-		} else {
-			del(entryUser, id)
-		}
-	}
 	for key := range d.pushes {
 		if p := s.pushes[key]; p != nil {
 			stored := storedPush{
@@ -282,36 +219,13 @@ func (s *Server) entriesLocked(d dirtySet, records []store.Entry) []store.Entry 
 	return batch
 }
 
-func storedUserOf(u *userState) storedUser {
-	stored := storedUser{
-		Name: u.name, Avatar: u.avatar, Ext: u.ext, LeftAt: u.leftAt, Pings: u.pings, Seen: u.presence.Seen, Shown: u.presence.Status != statusOffline,
-		Bot: u.botOf, Identities: u.identities, Records: u.records, Grants: u.granted,
-		Email: u.identities[email.Name], External: u.identities[external.Name],
-		Passkey: u.records[passkey.Name], Granted: u.granted[external.Name],
-		Enrolled: u.enrolled, Scope: storedScopeOf(u.scope), Consents: u.consents,
+// avatarEmbedID names the hosted embed behind a user's avatar in what the
+// store keeps, "" for none.
+func avatarEmbedID(u *userState) string {
+	if u.avatarEmbed == nil {
+		return ""
 	}
-	if !u.created.IsZero() {
-		stored.Created = u.created.UnixMilli()
-	}
-	if status := u.presence.Chosen; status != statusOnline {
-		stored.Status = &status
-	}
-	now := time.Now()
-	if u.mute.active(now) {
-		stored.Mute = &storedMute{Forever: u.mute.forever, Until: u.mute.until}
-	}
-	for id, mute := range u.roomMutes {
-		if mute.active(now) {
-			if stored.RoomMutes == nil {
-				stored.RoomMutes = make(map[string]storedMute)
-			}
-			stored.RoomMutes[id] = storedMute{Forever: mute.forever, Until: mute.until}
-		}
-	}
-	if u.avatarEmbed != nil {
-		stored.AvatarEmbed = u.avatarEmbed.ID
-	}
-	return stored
+	return u.avatarEmbed.ID
 }
 
 // closeStoreLocked writes the last changes, stops the store writer, and
@@ -390,47 +304,13 @@ func (s *Server) restoreLocked() (map[string]bool, error) {
 		s.messages[id] = &messageState{Message: m}
 	}
 
-	storedUsers := make(map[string]storedUser)
-	for id, raw := range entries[entryUser] {
-		var stored storedUser
-		if err := decode(entryUser, id, raw, &stored); err != nil {
-			return nil, err
-		}
-		storedUsers[id] = stored
-		u := newUserState(id, stored.Name)
-		u.avatar, u.ext = stored.Avatar, stored.Ext
-		u.created = time.Time{}
-		if stored.Created != 0 {
-			u.created = time.UnixMilli(stored.Created)
-		}
-		u.botOf = stored.Bot
-		if err := s.restoreIdentitiesLocked(u, stored); err != nil {
-			return nil, fmt.Errorf("stored user %q: %w", id, err)
-		}
-		if stored.LeftAt != nil {
-			u.leftAt = stored.LeftAt
-		}
-		switch {
-		case stored.Status != nil && settableStatus(*stored.Status):
-			u.presence.Chosen = *stored.Status
-		case stored.Status != nil:
-			u.presence.Chosen = statusNone
-		}
-		u.presence.Seen = stored.Seen
-		if stored.Mute != nil {
-			u.mute = muteState{forever: stored.Mute.Forever, until: stored.Mute.Until}
-		}
-		for id, mute := range stored.RoomMutes {
-			u.roomMutes[id] = muteState{forever: mute.Forever, until: mute.Until}
-		}
-		if stored.Pings != nil {
-			u.pings = stored.Pings
-		}
-		u.consents = stored.Consents
-		s.users[id] = u
+	now := time.Now()
+	avatarEmbeds, err := s.users.Restore(entries[users.EntryKind], restoredUser, now)
+	if err != nil {
+		return nil, err
 	}
 	s.rooms.RestoreMembers(func(r *roomState, id string) (*userState, bool) {
-		u := s.users[id]
+		u := s.users.Get(id)
 		if u != nil {
 			u.joined[r.ID()] = r
 		}
@@ -438,14 +318,14 @@ func (s *Server) restoreLocked() (map[string]bool, error) {
 	})
 
 	files, err := s.embeds.Restore(entries[embeds.EntryKind], func(e embeds.Embed, avatarFor string) *embedState {
-		return &embedState{Embed: e, avatarFor: s.users[avatarFor], started: e.Finished}
+		return &embedState{Embed: e, avatarFor: s.users.Get(avatarFor), started: e.Finished}
 	}, s.files.Path)
 	if err != nil {
 		return nil, err
 	}
-	for id, stored := range storedUsers {
-		if e := s.embeds.Get(stored.AvatarEmbed); e != nil {
-			s.users[id].avatarEmbed = e
+	for id, embed := range avatarEmbeds {
+		if e := s.embeds.Get(embed); e != nil {
+			s.users.Get(id).avatarEmbed = e
 		}
 	}
 	if err := s.restoreEmojiLocked(entries[entryMeta]["emoji"]); err != nil {
@@ -455,7 +335,6 @@ func (s *Server) restoreLocked() (map[string]bool, error) {
 		return nil, err
 	}
 
-	now := time.Now()
 	// With push disabled, stored registrations stay in the store, unused,
 	// for when push is enabled again.
 	storedPushes := entries[entryPush]
@@ -484,15 +363,15 @@ func (s *Server) restoreLocked() (map[string]bool, error) {
 		if session, err := hex.DecodeString(stored.Session); err == nil && len(session) == 32 {
 			p.session = [32]byte(session)
 		}
-		if u := s.users[stored.User]; u != nil && p.live(now) {
+		if u := s.users.Get(stored.User); u != nil && p.live(now) {
 			s.addPushLocked(u, p)
 		} else {
 			s.touchPush(key)
 		}
 	}
 	if err := s.sessions.Restore(entries[sessions.EntryKind], func(id string) (*userState, bool) {
-		u := s.users[id]
-		return u, u != nil && u.account()
+		u := s.users.Get(id)
+		return u, u != nil && u.Account()
 	}, now); err != nil {
 		return nil, err
 	}
@@ -500,39 +379,29 @@ func (s *Server) restoreLocked() (map[string]bool, error) {
 		return nil, err
 	}
 	if err := s.services.Restore(entries[services.EntryKind], func(id string) (*userState, bool) {
-		u := s.users[id]
+		u := s.users.Get(id)
 		return u, u != nil
 	}, now); err != nil {
 		return nil, err
 	}
 	if err := s.devices.Restore(entries[devices.EntryKind], func(id string) (*userState, bool) {
-		u := s.users[id]
-		return u, u != nil && u.account()
+		u := s.users.Get(id)
+		return u, u != nil && u.Account()
 	}); err != nil {
 		return nil, err
 	}
 
-	// Nothing is connected yet: guests are retired as if their last
-	// connections had just closed, and writes that had not finished fail.
-	// An account stored as shown other than offline was connected when the
-	// server stopped without closing its connections, as in a crash, which
-	// stores nothing. The shown status becomes offline now, so seen is now,
-	// as for a disconnect (§4.5.2): no earlier time is known not to be
-	// before others last saw the account, since the store holds no time of
-	// the crash, and nobody could see it in between. A shutdown, which
-	// closes every connection first, leaves no account stored so; an
-	// invisible one is never stored so, so its connections never move seen.
-	for _, id := range slices.Sorted(maps.Keys(s.users)) {
-		if u := s.users[id]; !u.account() {
+	// Nothing is connected yet (users.Table.Restore): guests are retired as
+	// if their last connections had just closed, and writes that had not
+	// finished fail.
+	for _, id := range s.users.IDs() {
+		if u := s.users.Get(id); !u.Account() {
 			s.retireLocked(u)
 		} else {
 			s.grantRolesLocked(u)
 			s.scheduleMuteLocked(u)
-			for id := range u.roomMutes {
+			for id := range u.RoomMutes {
 				s.scheduleRoomMuteLocked(u, id)
-			}
-			if u.presence.Restore(storedUsers[id].Shown, now) {
-				s.touchUser(id)
 			}
 		}
 	}
@@ -568,50 +437,5 @@ func (s *Server) restoreVAPIDLocked(raw jsontext.Value) error {
 	}
 	s.vapid, s.vapidStored = key, true
 	s.dirty.vapid = true
-	return nil
-}
-
-// restoreIdentitiesLocked gives a stored account its identities, their
-// records, and the roles they grant; the schemes get the records once they
-// are all added (restoreSchemesLocked). An account stored by a server from
-// before Identities has its email address, passkeys, external identity, and
-// the external sign-in's roles in fields of their own, and is stored again
-// with them as identities.
-func (s *Server) restoreIdentitiesLocked(u *userState, stored storedUser) error {
-	u.identities, u.records = maps.Clone(stored.Identities), maps.Clone(stored.Records)
-	u.granted = maps.Clone(stored.Grants)
-	u.enrolled = stored.Enrolled
-	u.scope = stored.Scope.restored()
-	legacy := map[string]string{email.Name: stored.Email, external.Name: stored.External}
-	if len(stored.Passkey) > 0 && u.identities[passkey.Name] == "" {
-		var old struct {
-			Handle []byte `json:"handle"`
-		}
-		if err := json.Unmarshal(stored.Passkey, &old); err != nil {
-			return err
-		}
-		legacy[passkey.Name] = passkey.Subject(old.Handle)
-		if u.records == nil {
-			u.records = make(map[string]jsontext.Value)
-		}
-		u.records[passkey.Name] = stored.Passkey
-	}
-	for scheme, subject := range legacy {
-		if subject == "" || u.identities[scheme] != "" {
-			continue
-		}
-		if u.identities == nil {
-			u.identities = make(map[string]string)
-		}
-		u.identities[scheme] = subject
-		s.touchUser(u.id)
-	}
-	if len(stored.Granted) > 0 && stored.Grants == nil {
-		u.granted = map[string][]string{external.Name: stored.Granted}
-		s.touchUser(u.id)
-	}
-	for scheme, subject := range u.identities {
-		s.accounts.Set(authn.Identity{Scheme: scheme, Subject: subject}, u)
-	}
 	return nil
 }

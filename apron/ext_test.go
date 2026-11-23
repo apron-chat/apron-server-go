@@ -181,7 +181,7 @@ func TestProfileExtLimitAppliesToTheMergedExt(t *testing.T) {
 		t.Fatalf("a refused me changed the profile: %#v", you)
 	}
 	app.mu.RLock()
-	raw := string(app.users[a.userID].ext["big"])
+	raw := string(app.users.Get(a.userID).Ext["big"])
 	app.mu.RUnlock()
 	if raw != bigNumber {
 		t.Fatalf("stored ext value %s, want %s", raw, bigNumber)

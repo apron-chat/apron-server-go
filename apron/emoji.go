@@ -102,7 +102,7 @@ func (s *Server) mayReplaceEmojiLocked(existing *customEmoji, userID string) boo
 	if existing.By == userID {
 		return true
 	}
-	u := s.users[userID]
+	u := s.users.Get(userID)
 	return u != nil && u.hasRole("admin")
 }
 

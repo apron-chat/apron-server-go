@@ -202,11 +202,11 @@ func (h *Host) RevokeInvitation(ctx context.Context, id string) (bool, error) {
 func (s *Server) Enrollment(userID string) (Enrollment, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	u := s.users[userID]
-	if u == nil || u.enrolled == nil {
+	u := s.users.Get(userID)
+	if u == nil || u.Enrolled == nil {
 		return Enrollment{}, false
 	}
-	e := u.enrolled
+	e := u.Enrolled
 	return Enrollment{Invitation: e.Invitation, By: e.By, At: e.At, Data: slices.Clone(e.Data), Admitted: e.Admitted}, true
 }
 
@@ -220,7 +220,7 @@ func (h *Host) Enrollment(userID string) (Enrollment, bool) { return h.s.Enrollm
 // and the enrollment's Data, stay. It returns once that is stored.
 func (s *Server) RevokeEnrollment(ctx context.Context, userID string) error {
 	s.mu.Lock()
-	if u := s.users[userID]; u != nil && u.enrolled != nil {
+	if u := s.users.Get(userID); u != nil && u.Enrolled != nil {
 		s.revokeEnrollmentLocked(u)
 	}
 	f := s.newFenceLocked()
@@ -229,8 +229,8 @@ func (s *Server) RevokeEnrollment(ctx context.Context, userID string) error {
 }
 
 func (s *Server) revokeEnrollmentLocked(u *userState) {
-	u.enrolled.Admitted = false
-	s.touchUser(u.id)
+	u.Enrolled.Admitted = false
+	s.users.Touch(u.id)
 	if before := u.views(); s.setGrantLocked(u, invitationGrant, nil) && s.grantRolesLocked(u) {
 		s.notifyProfileLocked(u, nil, before)
 	}
@@ -275,7 +275,7 @@ func (s *Server) enrollLocked(c *client, reply wire.Reply[wire.AuthResult], sche
 	if err != nil {
 		return err
 	}
-	if s.accounts.Get(id) != nil {
+	if s.users.ByIdentity(id) != nil {
 		return &Error{Code: CodeDenied, Message: "This " + scheme.Label() + " belongs to an account"}
 	}
 	record, err := commit(proof)
@@ -284,9 +284,9 @@ func (s *Server) enrollLocked(c *client, reply wire.Reply[wire.AuthResult], sche
 	}
 	now := time.Now()
 	user := newUserState(s.assignAccountIDLocked(cmp.Or(proof.UserID, inv.UserID)), normalizeName(cmp.Or(proof.Name, inv.Name)))
-	user.enrolled = inv.Enroll(now)
-	s.users[user.id] = user
-	s.setIdentityLocked(user, id, record)
+	user.Enrolled = inv.Enroll(now)
+	s.users.Add(user)
+	s.users.SetIdentity(user, id, record)
 	s.setGrantLocked(user, id.Scheme, proof.Roles)
 	s.setGrantLocked(user, invitationGrant, inv.Roles)
 	s.grantRolesLocked(user)
@@ -318,15 +318,15 @@ func mustString(params map[string]jsontext.Value, name string) string {
 // principal names, by user_id or identity, as when Allowlist.Disallow
 // takes it off the list.
 func (s *Server) enrolledNamedLocked(p Principal) {
-	for _, u := range s.users {
-		if u.enrolled == nil || !u.enrolled.Admitted {
+	for _, u := range s.users.All() {
+		if u.Enrolled == nil || !u.Enrolled.Admitted {
 			continue
 		}
-		if p == UserID(u.id) || slices.ContainsFunc(slices.Collect(maps.Keys(u.identities)), func(scheme string) bool {
-			return principalOf(authn.Identity{Scheme: scheme, Subject: u.identities[scheme]}) == p
+		if p == UserID(u.id) || slices.ContainsFunc(slices.Collect(maps.Keys(u.Identities)), func(scheme string) bool {
+			return principalOf(authn.Identity{Scheme: scheme, Subject: u.Identities[scheme]}) == p
 		}) {
-			u.enrolled.Admitted = false
-			s.touchUser(u.id)
+			u.Enrolled.Admitted = false
+			s.users.Touch(u.id)
 		}
 	}
 }

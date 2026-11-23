@@ -13,6 +13,7 @@ import (
 	"golang.org/x/time/rate"
 
 	"github.com/apron-chat/apron-server-go/apron/internal/sessions"
+	"github.com/apron-chat/apron-server-go/apron/internal/users"
 	"github.com/apron-chat/apron-server-go/store"
 	"github.com/go-webauthn/webauthn/webauthn"
 )
@@ -58,7 +59,7 @@ func TestActionsAreLimited(t *testing.T) {
 	// The user's limit refills too slowly to matter while the test runs, so
 	// exactly a burst is admitted however long it takes.
 	app.mu.Lock()
-	app.users[c.userID].actions = rate.NewLimiter(rate.Every(time.Hour), actionBurst)
+	app.users.Get(c.userID).actions = rate.NewLimiter(rate.Every(time.Hour), actionBurst)
 	app.unlock()
 	// Toggling a reaction logs a record each time, until the user's limit.
 	admitted := 0
@@ -127,7 +128,7 @@ func TestPasskeyLoginStoresTheSignCounter(t *testing.T) {
 	storedCounter := func() uint32 {
 		var counter uint32
 		err := memory.Load(func(e store.Entry) error {
-			var stored storedUser
+			var stored users.Stored
 			if e.Kind != entryUser || json.Unmarshal(e.Value, &stored) != nil || stored.Records["webauthn"] == nil {
 				return nil
 			}
@@ -197,8 +198,8 @@ func TestSessionsPerAccountAreBounded(t *testing.T) {
 // addAccountLocked adds an account without a connection or rooms.
 func addAccountLocked(app *Server, id string) *userState {
 	u := newUserState(id, id)
-	u.identities = map[string]string{"webauthn": id}
-	app.users[id] = u
+	u.Identities = map[string]string{"webauthn": id}
+	app.users.Add(u)
 	return u
 }
 

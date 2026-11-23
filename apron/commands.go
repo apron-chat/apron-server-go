@@ -150,7 +150,7 @@ func coreCommands() *serverCommands {
 				Name: "invite-device",
 				Forms: []commands.Form{{
 					Group: commands.GroupMember, Hint: "<name>", Help: fmt.Sprintf("get a token that signs in as you on another device, named <name>; at most %d names, and a name again replaces its token", maxDeviceTokens),
-					May: mayLocked(func(_ *Server, c *client, _ *roomState) bool { return c.user.account() && !c.restrictedService() }),
+					May: mayLocked(func(_ *Server, c *client, _ *roomState) bool { return c.user.Account() && !c.restrictedService() }),
 				}},
 			},
 			run: (*Server).inviteDeviceCommand,

@@ -26,7 +26,7 @@ type roomState = rooms.Room[*userState]
 func (u *userState) MemberID() string { return u.id }
 
 // MemberScope is the rooms u is limited to, nil for none (rooms.Member).
-func (u *userState) MemberScope() *rooms.Scope { return u.scope }
+func (u *userState) MemberScope() *rooms.Scope { return u.Scope }
 
 // privateRooms counts the top-level private rooms u is in, which
 // Config.MaxPrivateRooms bounds. Their threads are not counted: only their
@@ -156,8 +156,8 @@ func (s *Server) joinedLocked(u *userState, r *roomState) (wire.Membership, bool
 		return wire.Membership{}, false
 	}
 	u.joined[r.ID()] = r
-	delete(u.leftAt, r.ID())
-	s.touchUser(u.id)
+	delete(u.LeftAt, r.ID())
+	s.users.Touch(u.id)
 	return decodeRecord[wire.Membership](record.Raw), true
 }
 
@@ -236,8 +236,8 @@ func (s *Server) leaveLocked(u *userState, r *roomState) bool {
 	membership := decodeRecord[wire.Membership](record.Raw)
 	s.deliverMembershipLocked(membership, r, u)
 	delete(u.joined, r.ID())
-	u.leftAt[r.ID()] = record.ID
-	s.touchUser(u.id)
+	u.LeftAt[r.ID()] = record.ID
+	s.users.Touch(u.id)
 	u.send(encodeNotification(wire.RoomUpdate{Left: []wire.RoomRef{{RoomID: r.ID()}}, Memberships: []wire.Membership{membership}}))
 	// The room no longer counts toward the user's unread (§4.9), and
 	// neither do the threads of a private room, joined or not, which the
@@ -482,7 +482,7 @@ func (s *Server) listRooms(c *client, p wire.RoomListParams, reply wire.Reply[wi
 	joined, others, left := rooms.List(u, candidates, rooms.Listing{
 		Joined: wantJoined, NotJoined: wantOthers, Since: since, HasSince: hasSince,
 		Threads: hasRoom || hasParent, Limit: maxListedRooms,
-	}, func(id string) int64 { return u.leftAt[id] })
+	}, func(id string) int64 { return u.LeftAt[id] })
 
 	users := make(map[string]*userState)
 	views := func(rooms []*roomState) []wire.RoomView {
@@ -556,7 +556,7 @@ func (s *Server) joinRoom(c *client, p wire.RoomJoinParams, reply wire.Reply[wir
 		if r.Member(u.id) == nil {
 			return &Error{Code: CodeDenied, Message: fmt.Sprintf("Join %s before adding others to it", r.Title())}
 		}
-		if target = s.users[targetID]; target == nil {
+		if target = s.users.Get(targetID); target == nil {
 			return invalidParams("Unknown user %q", targetID)
 		}
 		// Adding someone to a thread of a private room takes adding them to
@@ -564,7 +564,7 @@ func (s *Server) joinRoom(c *client, p wire.RoomJoinParams, reply wire.Reply[wir
 		if r.Parent() != nil && !r.Parent().VisibleTo(target) {
 			return &Error{Code: CodeDenied, Message: fmt.Sprintf("Add %s to the private room %s is in first", targetID, r.Title())}
 		}
-		if !r.InScope(target.scope) {
+		if !r.InScope(target.Scope) {
 			return &Error{Code: CodeDenied, Message: fmt.Sprintf("%s is limited to other rooms", targetID)}
 		}
 		if r.Private() && r.Parent() == nil && r.Member(target.id) == nil && s.privateRoomsFullLocked(target) {
@@ -605,7 +605,7 @@ func (s *Server) leaveRoom(c *client, p wire.RoomLeaveParams, reply wire.Reply[w
 		if !mayRemove(r, u) {
 			return &Error{Code: CodeDenied, Message: fmt.Sprintf("Only the creator of %s or a moderator can remove people from it", r.Title())}
 		}
-		if target = s.users[targetID]; target == nil {
+		if target = s.users.Get(targetID); target == nil {
 			return invalidParams("Unknown user %q", targetID)
 		}
 	}
@@ -758,8 +758,8 @@ func (s *Server) activity(c *client, p wire.ActivityParams) *Error {
 				u.send(encodeNotification(wire.Activity{RoomID: roomID, From: u.from().User(), ReadMessageID: *p.ReadMessageID}))
 				if id >= r.Log().Latest() {
 					// Read to the end: no earlier mention there counts.
-					delete(u.pings, r.ID())
-					s.touchUser(u.id)
+					delete(u.Pings, r.ID())
+					s.users.Touch(u.id)
 				}
 			}
 			relay.ReadMessageID = *p.ReadMessageID

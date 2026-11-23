@@ -136,7 +136,7 @@ func (s *Server) issueServiceToken(ctx context.Context, userID string, options S
 		s.unlock()
 		return ServiceToken{}, ErrServerClosed
 	}
-	u := s.users[userID]
+	u := s.users.Get(userID)
 	if u == nil {
 		s.unlock()
 		return ServiceToken{}, errors.New("apron: no such user")

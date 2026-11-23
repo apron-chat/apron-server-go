@@ -188,8 +188,8 @@ func (a *Allowlist) Disallow(principals ...Principal) {
 		delete(s.allowlist.principals, p)
 		s.enrolledNamedLocked(p)
 	}
-	for _, u := range s.users {
-		if u.account() && !s.admittedLocked(u) {
+	for _, u := range s.users.All() {
+		if u.Account() && !s.admittedLocked(u) {
 			s.signOutLocked(u)
 		}
 	}
@@ -215,11 +215,11 @@ func (s *Server) guestsAllowedLocked() bool {
 // bot always may; a guest never may on a restricted server.
 func (s *Server) admittedLocked(u *userState) bool {
 	switch {
-	case s.allowlist == nil, u.botOf != "":
+	case s.allowlist == nil, u.Bot != "":
 		return true
-	case !u.account():
+	case !u.Account():
 		return false
-	case u.enrolled != nil && u.enrolled.Admitted:
+	case u.Enrolled != nil && u.Enrolled.Admitted:
 		return true
 	}
 	return s.listedLocked(u)
@@ -230,7 +230,7 @@ func (s *Server) admittedLocked(u *userState) bool {
 // identity.
 func (s *Server) admittedWithLocked(u *userState, id authn.Identity) bool {
 	switch {
-	case s.allowlist == nil, u.botOf != "", u.enrolled != nil && u.enrolled.Admitted:
+	case s.allowlist == nil, u.Bot != "", u.Enrolled != nil && u.Enrolled.Admitted:
 		return true
 	}
 	return s.allowlist.principals[principalOf(id)] || s.listedLocked(u)
@@ -243,7 +243,7 @@ func (s *Server) listedLocked(u *userState) bool {
 	if allowed[UserID(u.id)] {
 		return true
 	}
-	for scheme, subject := range u.identities {
+	for scheme, subject := range u.Identities {
 		if allowed[principalOf(authn.Identity{Scheme: scheme, Subject: subject})] {
 			return true
 		}
@@ -280,8 +280,8 @@ func (s *Server) startSignIn() error {
 		return errors.New("nobody can sign in: without guests, the server needs a sign-in scheme, such as passkeys, email sign-in, or an extension's external sign-in")
 	}
 	if s.allowlist != nil {
-		for _, u := range s.users {
-			if u.account() && !s.admittedLocked(u) {
+		for _, u := range s.users.All() {
+			if u.Account() && !s.admittedLocked(u) {
 				s.signOutLocked(u)
 			}
 		}

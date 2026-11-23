@@ -139,7 +139,7 @@ func emailSchemeOf(app *Server) *email.Scheme {
 
 // accountWithEmail is the account an address proves, if any.
 func accountWithEmail(app *Server, address string) *userState {
-	return app.accounts.Get(authn.Identity{Scheme: email.Name, Subject: address})
+	return app.users.ByIdentity(authn.Identity{Scheme: email.Name, Subject: address})
 }
 
 // dialFrom connects as a client at ip, for a server that reads
