@@ -474,8 +474,7 @@ func (s *Server) liveCommand(c *client, r *roomState, body map[string]any, kind,
 	if err := s.admitPostLocked(c.user); err != nil {
 		return wire.CommandResult{}, err
 	}
-	s.embedNumber++
-	e := s.newWriteLocked(c, fmt.Sprintf("embed_%d", s.embedNumber), kind, "")
+	e := s.newWriteLocked(c, s.embeds.NewID(), kind, "")
 	e.post = &pendingPost{user: c.user, roomID: r.ID(), replyTo: replyTo, text: text}
 	if kind == kindTerminal {
 		e.Title = text

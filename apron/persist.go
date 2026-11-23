@@ -88,10 +88,9 @@ type storedMeta struct {
 // metaLocked is the counters entry of the current state.
 func (s *Server) metaLocked() storedMeta {
 	guests, accounts := s.ids.Counters()
-	return storedMeta{LastID: s.log.LastIssued(), GuestNumber: guests, AccountNumber: accounts, EmbedNumber: s.embedNumber, UploadSeq: s.uploadSeq}
+	embeds, uploads := s.embeds.Counters()
+	return storedMeta{LastID: s.log.LastIssued(), GuestNumber: guests, AccountNumber: accounts, EmbedNumber: embeds, UploadSeq: uploads}
 }
-
-func sessionID(key [32]byte) string { return sessions.ID(key) }
 
 // userID names a user in what the store keeps.
 func userID(u *userState) string { return u.id }
@@ -172,7 +171,7 @@ func (s *Server) restoreLocked() (map[string]bool, error) {
 		}
 		s.log.RestoreSequence(s.storedMeta.LastID)
 		s.ids.RestoreCounters(s.storedMeta.GuestNumber, s.storedMeta.AccountNumber)
-		s.embedNumber, s.uploadSeq = s.storedMeta.EmbedNumber, s.storedMeta.UploadSeq
+		s.embeds.RestoreCounters(s.storedMeta.EmbedNumber, s.storedMeta.UploadSeq)
 	}
 	for kind, values := range entries {
 		if strings.HasPrefix(kind, extEntryPrefix) {

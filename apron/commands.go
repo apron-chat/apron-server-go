@@ -456,8 +456,7 @@ func (s *Server) avatarCommand(c *client, _ *roomState, body map[string]any, _, 
 	if err := s.admitPostLocked(c.user); err != nil {
 		return wire.CommandResult{}, err
 	}
-	s.embedNumber++
-	e := s.newWriteLocked(c, fmt.Sprintf("embed_%d", s.embedNumber), "upload", "")
+	e := s.newWriteLocked(c, s.embeds.NewID(), "upload", "")
 	e.avatarFor = c.user
 	return e.writeResult(), nil
 }

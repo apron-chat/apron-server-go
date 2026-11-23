@@ -188,8 +188,7 @@ func (s *Server) serverCommand(c *client, r *roomState, body map[string]any, arg
 		if !clientsLoad(c.baseURL) {
 			return wire.CommandResult{}, &Error{Code: CodeDenied, Message: serverAvatarNeedHTTPS}
 		}
-		s.embedNumber++
-		e := s.newWriteLocked(c, fmt.Sprintf("embed_%d", s.embedNumber), "upload", "")
+		e := s.newWriteLocked(c, s.embeds.NewID(), "upload", "")
 		e.ServerAvatarBy = c.user.id
 		return e.writeResult(), nil
 	default:

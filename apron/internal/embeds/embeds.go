@@ -2,8 +2,9 @@
 // upload, or live text, a terminal or an append. A Table keeps each embed
 // by its embed_id, the unused or in-progress writes by their one-time
 // tokens, and the finished uploads oldest first with their total size, for
-// the server to evict the oldest beyond its bound; and it keeps the embeds
-// in the store, by embed_id.
+// the server to evict the oldest beyond its bound; it names new embeds and
+// orders finished uploads; and it keeps the embeds in the store, by
+// embed_id.
 //
 // A Table knows the server's embeds only as values of the type E, each of
 // which holds an Embed, the state the store keeps, and whatever else the
@@ -87,12 +88,36 @@ type Table[E Hosted] struct {
 	// dirty are the embed_ids added, changed, or removed since Entries last
 	// took them.
 	dirty map[string]struct{}
+	// number is the latest embed_id's (NewID), and seq the latest finished
+	// upload's Seq (NextSeq).
+	number uint64
+	seq    int64
 }
 
 // New returns an empty table.
 func New[E Hosted]() *Table[E] {
 	return &Table[E]{byID: make(map[string]E), writes: make(map[string]E), uploads: list.New(), dirty: make(map[string]struct{})}
 }
+
+// NewID returns an embed_id never used before, embed_<n>.
+func (t *Table[E]) NewID() string {
+	t.number++
+	return fmt.Sprintf("embed_%d", t.number)
+}
+
+// NextSeq returns the Seq of an upload that has just finished, after every
+// other's, across restarts.
+func (t *Table[E]) NextSeq() int64 {
+	t.seq++
+	return t.seq
+}
+
+// Counters are the latest embed_id's number and upload Seq, which the
+// server stores with its other counters.
+func (t *Table[E]) Counters() (number uint64, seq int64) { return t.number, t.seq }
+
+// RestoreCounters takes the stored counters.
+func (t *Table[E]) RestoreCounters(number uint64, seq int64) { t.number, t.seq = number, seq }
 
 // Get returns the embed with embed_id id, or the zero E.
 func (t *Table[E]) Get(id string) E { return t.byID[id] }

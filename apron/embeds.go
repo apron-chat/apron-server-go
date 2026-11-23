@@ -166,8 +166,7 @@ func (s *Server) resolveEmbedsLocked(c *client, messageID string, current *rooml
 			continue
 		}
 		kind := embed["kind"].(string)
-		s.embedNumber++
-		id := fmt.Sprintf("embed_%d", s.embedNumber)
+		id := s.embeds.NewID()
 		alt := ogImageAlt(embed["og"])
 		delete(embed, "og")
 		delete(embed, "write_url")
@@ -609,8 +608,7 @@ func (s *Server) writeUpload(w http.ResponseWriter, r *http.Request, e *embedSta
 	e.Path = file.Name()
 	e.Size = size
 	s.embeds.Hold(e)
-	s.uploadSeq++
-	e.Seq = s.uploadSeq
+	e.Seq = s.embeds.NextSeq()
 	s.embeds.Touch(e.ID)
 	e.Owned = map[string]any{"url": e.fileURL()}
 	if og != nil {

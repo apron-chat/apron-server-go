@@ -265,8 +265,7 @@ func (s *Server) emojiCommand(c *client, _ *roomState, body map[string]any, args
 		if err := s.admitPostLocked(u); err != nil {
 			return wire.CommandResult{}, err
 		}
-		s.embedNumber++
-		e := s.newWriteLocked(c, fmt.Sprintf("embed_%d", s.embedNumber), "upload", "")
+		e := s.newWriteLocked(c, s.embeds.NewID(), "upload", "")
 		e.EmojiKey, e.emojiBy = key, u.id
 		e.Alt = ogImageAlt(embeds[0].(map[string]any)["og"])
 		return e.writeResult(), nil

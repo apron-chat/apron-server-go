@@ -97,3 +97,16 @@ func TestTable(t *testing.T) {
 		t.Fatal("an embed that is no object restored")
 	}
 }
+
+// New embed_ids and upload sequence numbers go on from the stored counters.
+func TestCounters(t *testing.T) {
+	table := New[*hosted]()
+	if id := table.NewID(); id != "embed_1" || table.NextSeq() != 1 {
+		t.Fatalf("first embed_id %s", id)
+	}
+	restored := New[*hosted]()
+	restored.RestoreCounters(table.Counters())
+	if id := restored.NewID(); id != "embed_2" || restored.NextSeq() != 2 {
+		t.Errorf("restored counters issued %s", id)
+	}
+}

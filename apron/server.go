@@ -172,16 +172,14 @@ type Server struct {
 	// principals Config.Roles grants each role, lowercased.
 	ids         *accounts.IDs
 	roleHolders map[string][]Principal
-	embedNumber uint64
 	// embeds are the hosted embeds, their writes, and the finished uploads
-	// oldest first, for eviction beyond MaxUploadStorageBytes (embeds.go).
+	// oldest first, for eviction beyond MaxUploadStorageBytes (embeds.go),
+	// which name new embeds and order the finished uploads across restarts.
 	// Custom emoji have their own bound, MaxEmojiStorageBytes.
 	embeds *embeds.Table[*embedState]
 	// files holds upload content, and counts the bytes of bodies arriving,
 	// which MaxUploadStorageBytes also bounds.
 	files *uploads.Dir
-	// uploadSeq orders finished uploads across restarts.
-	uploadSeq int64
 	// emoji is the custom emoji catalog (ext:emoji), served at emojiPath
 	// and the name it renders.
 	emoji *emoji.Catalog[*embedState]
