@@ -66,9 +66,8 @@ type method struct {
 // Request is a request, or a notification, as a handler gets it: its
 // method, id, and params, raw, which a Handler reads with its accessors,
 // such as Request.String, or its Decoder, and answers with Request.Reply.
-// A typed handler's Reply has it too (Reply.Request), and its context
-// carries it (RequestFrom). Its params are decoded once, as the frame is
-// read, and may be read from any goroutine.
+// A typed handler's Reply has it too (Reply.Request). Its params are
+// decoded once, as the frame is read, and may be read from any goroutine.
 type Request struct {
 	// Method is the request's method, and ID its id, or "" for a
 	// notification.
@@ -93,16 +92,6 @@ type Request struct {
 	// later is set once the request is to be answered after its handler
 	// returns (Reply.Later).
 	later *later
-}
-
-type requestKey struct{}
-
-// RequestFrom returns the request a handler's context was made for, or nil,
-// for code deep in a handler's calls that has the context but not the
-// handler's Request or Reply.
-func RequestFrom(ctx context.Context) *Request {
-	r, _ := ctx.Value(requestKey{}).(*Request)
-	return r
 }
 
 // Conn is the connection the request came on.
@@ -297,7 +286,7 @@ func (s *Server) processFrame(ctx context.Context, c *Conn, payload []byte) {
 		// (§3.2.2).
 		r.notification = true
 		if c.UserID() != "" && !c.Closing() {
-			m.notify(context.WithValue(ctx, requestKey{}, r), c, r)
+			m.notify(ctx, c, r)
 		}
 		return
 	}
@@ -392,7 +381,7 @@ func (s *Server) duplicate(ctx context.Context, c *Conn, r *Request, outcome ded
 // the request has its outcome for deduplication all the same.
 func (s *Server) serve(ctx context.Context, c *Conn, r *Request, m method) {
 	defer s.recoverFrame(r)
-	s.finish(ctx, r, m.strict, m.serve(context.WithValue(ctx, requestKey{}, r), c, r))
+	s.finish(ctx, r, m.strict, m.serve(ctx, c, r))
 }
 
 // finish answers a request whose handler returned err: with err, unless it
@@ -557,6 +546,6 @@ func (s *Server) authenticate(ctx context.Context, c *Conn, r *Request) {
 	// A panic is answered before the frames held meanwhile are let go, as
 	// an error is.
 	defer s.recoverFrame(r)
-	err = s.Backend.Auth(context.WithValue(ctx, requestKey{}, r), c, p, replyFor[AuthResult](r, p))
+	err = s.Backend.Auth(ctx, c, p, replyFor[AuthResult](r, p))
 	s.finish(ctx, r, true, err)
 }

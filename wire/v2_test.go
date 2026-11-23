@@ -23,7 +23,7 @@ func TestReplyInHandler(t *testing.T) {
 		mu.Lock()
 		defer mu.Unlock()
 		after, _ := wire.EncodeRaw("cursor", map[string]any{"n": 1})
-		if wire.RequestFrom(ctx) != r || !r.Reply(map[string]any{"state": 1}, after) {
+		if !r.Reply(map[string]any{"state": 1}, after) {
 			t.Error("Reply failed")
 		}
 		if r.Reply(map[string]any{"state": 2}) {

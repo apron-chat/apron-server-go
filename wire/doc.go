@@ -96,9 +96,9 @@
 //
 // [Reply.Request] is the request, raw: its params, with presence
 // ([Request.Param]), and [Request.Reply], which sends any result without
-// what Send does with the method's, as a [Handler] replies. A handler's
-// context carries its Request too ([RequestFrom]), for code deep in its
-// calls.
+// what Send does with the method's, as a [Handler] replies. Code deep in
+// a handler's calls that needs the request gets it, or the Reply, passed
+// down: a handler's context carries no Request.
 //
 // A connection's frames are handled one at a time, in order, each to its
 // end before the next: a handler that waits holds up its own connection,
