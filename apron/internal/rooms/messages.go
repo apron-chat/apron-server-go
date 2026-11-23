@@ -4,6 +4,7 @@ import (
 	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"fmt"
+	"iter"
 	"maps"
 	"slices"
 
@@ -30,11 +31,45 @@ type Message struct {
 	records []*roomlog.Record
 }
 
-// NewMessage returns a message that owner sends as from, named id, before
-// its first snapshot.
-func NewMessage(id string, from roomlog.Author, owner string) *Message {
+// MessageHolder is the type of the values a Table keeps for messages: a
+// message's state, which holds its Message. A *Message is one by itself,
+// and so is a struct embedding one.
+type MessageHolder interface {
+	comparable
+	// Kept is the message as the table keeps it.
+	Kept() *Message
+}
+
+// Kept is m itself, which makes a *Message a MessageHolder.
+func (m *Message) Kept() *Message { return m }
+
+func newMessage(id string, from roomlog.Author, owner string) *Message {
 	return &Message{id: id, from: from, owner: owner, reactions: make(map[string]roomlog.Reaction)}
 }
+
+// NewMessage keeps a new message named id, which owner sends as from,
+// before its first snapshot, which stores it.
+func (t *Table[U, M]) NewMessage(id string, from roomlog.Author, owner string) M {
+	m := t.hold(newMessage(id, from, owner))
+	t.messages[id] = m
+	return m
+}
+
+// Message returns the message named id, or the zero M.
+func (t *Table[U, M]) Message(id string) M { return t.messages[id] }
+
+// VisibleMessage returns the message named id if u may see the room it is
+// in, or the zero M.
+func (t *Table[U, M]) VisibleMessage(id string, u U) M {
+	if m, ok := t.messages[id]; ok && t.rooms[m.Kept().room].VisibleTo(u) {
+		return m
+	}
+	var none M
+	return none
+}
+
+// Messages lists the messages by message_id, in no order.
+func (t *Table[U, M]) Messages() iter.Seq2[string, M] { return maps.All(t.messages) }
 
 // ID is the message's message_id.
 func (m *Message) ID() string { return m.id }
@@ -96,7 +131,7 @@ func (m *Message) Reactions() []roomlog.Reaction {
 // React replaces the reaction set of the user from with emojis, removing it
 // when emojis is empty, and logs the change as a reactions record in the
 // message's room, which it returns with the room.
-func (t *Table[U]) React(m *Message, from roomlog.Author, emojis []string) (*roomlog.Record, *Room[U]) {
+func (t *Table[U, M]) React(m *Message, from roomlog.Author, emojis []string) (*roomlog.Record, *Room[U]) {
 	t.dirtyMessages[m.id] = m
 	if len(emojis) == 0 {
 		delete(m.reactions, from.UserID)
@@ -109,7 +144,7 @@ func (t *Table[U]) React(m *Message, from roomlog.Author, emojis []string) (*roo
 // LogReactions logs a reactions record of the given sets in the message's
 // room, which it returns with the room. Reaction sets carry no prev_log_id
 // (§4.3.1).
-func (t *Table[U]) LogReactions(m *Message, reactions []roomlog.Reaction) (*roomlog.Record, *Room[U]) {
+func (t *Table[U, M]) LogReactions(m *Message, reactions []roomlog.Reaction) (*roomlog.Record, *Room[U]) {
 	r := t.rooms[m.room]
 	record := roomlog.NewReactions(t.log.NextID(), m.id, m.room, reactions)
 	t.Append(record, r)
@@ -124,7 +159,7 @@ func (t *Table[U]) LogReactions(m *Message, reactions []roomlog.Reaction) (*room
 // but a move out of a room that some who see the destination cannot see,
 // such as a private one, does not name it to them. A new message makes
 // its sender more recently active in its room (§4.2.1).
-func (t *Table[U]) Snapshot(m *Message, snapshot *roomlog.Message, logID int64) (record *roomlog.Record, rooms []*Room[U], moved bool) {
+func (t *Table[U, M]) Snapshot(m *Message, snapshot *roomlog.Message, logID int64) (record *roomlog.Record, rooms []*Room[U], moved bool) {
 	snapshot.PrevLogID, snapshot.PrevRoomID = "", ""
 	if m.logID != 0 {
 		snapshot.PrevLogID = roomlog.FormatID(m.logID)
@@ -155,7 +190,7 @@ func (t *Table[U]) Snapshot(m *Message, snapshot *roomlog.Message, logID int64) 
 // its original log_id (§4.4). At an equal log_id a tombstone wins (§2.3),
 // so a client that kept one of them as it was replaces it with the
 // redacted one it reads later.
-func (t *Table[U]) Redact(m *Message) {
+func (t *Table[U, M]) Redact(m *Message) {
 	for _, record := range m.records {
 		t.log.Redact(record)
 	}
@@ -197,15 +232,32 @@ func MessageEntry(m *Message) store.Entry {
 	return store.Entry{Kind: MessageEntryKind, ID: m.id, Value: value}
 }
 
-// RestoreMessage rebuilds the message named id from its store entry, with
-// the snapshots among records, the log's records by log_id. It returns nil
-// for a message none of whose records is kept, which cannot be served.
-func RestoreMessage(id string, raw jsontext.Value, records map[int64]*roomlog.Record) (*Message, error) {
+// RestoreMessages rebuilds the messages from the store's message entries,
+// with their snapshots among records, the log's records by log_id, once
+// the rooms and the log are restored. A message none of whose records is
+// kept cannot be served, and is left out.
+func (t *Table[U, M]) RestoreMessages(entries map[string]jsontext.Value, records map[int64]*roomlog.Record) error {
+	for id, raw := range entries {
+		m, err := restoreMessage(id, raw, records)
+		if err != nil {
+			return err
+		}
+		if m != nil {
+			t.messages[id] = t.hold(m)
+		}
+	}
+	return nil
+}
+
+// restoreMessage rebuilds the message named id from its store entry, with
+// the snapshots among records. It returns nil for a message none of whose
+// records is kept.
+func restoreMessage(id string, raw jsontext.Value, records map[int64]*roomlog.Record) (*Message, error) {
 	var s storedMessage
 	if err := json.Unmarshal(raw, &s); err != nil {
 		return nil, fmt.Errorf("stored %s %q: %w", MessageEntryKind, id, err)
 	}
-	m := NewMessage(id, s.From, s.Owner)
+	m := newMessage(id, s.From, s.Owner)
 	m.logID, m.room = s.LogID, s.RoomID
 	for userID, set := range s.Reactions {
 		m.reactions[userID] = roomlog.Reaction{From: set.From, Emojis: set.Emojis}

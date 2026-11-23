@@ -15,7 +15,8 @@ import (
 
 // messageState is a message as the rooms module keeps it (rooms.Message):
 // its room, sender, snapshots, and reaction sets; with what the server
-// keeps of it beyond them.
+// keeps of it beyond them. It is the rooms.MessageHolder of the server's
+// rooms.Table, which keeps it by message_id.
 type messageState struct {
 	*rooms.Message
 	// cached is what push counting reads of the current snapshot, decoded
@@ -26,13 +27,8 @@ type messageState struct {
 	pushHeld bool
 }
 
-// newMessageLocked keeps a new message named id, which owner sends as
-// from, before its first snapshot.
-func (s *Server) newMessageLocked(id string, from roomlog.Author, owner string) *messageState {
-	m := &messageState{Message: rooms.NewMessage(id, from, owner)}
-	s.messages[id] = m
-	return m
-}
+// holdMessage is the state the server keeps of a new or restored message.
+func holdMessage(m *rooms.Message) *messageState { return &messageState{Message: m} }
 
 // messageInfo is what unread counts (§4.9) read of a message's current
 // snapshot.
@@ -255,7 +251,7 @@ func (s *Server) saveMessage(c *client, p wire.EditParams, reply wire.Reply[wire
 	}
 
 	if current == nil {
-		current = s.newMessageLocked(messageID, from, u.id)
+		current = s.rooms.NewMessage(messageID, from, u.id)
 	}
 	source := current.RoomID()
 	moved := s.commitSnapshotLocked(current, snapshot, logID)

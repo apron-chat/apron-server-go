@@ -136,33 +136,33 @@ type client struct {
 //
 // Its state is guarded by mu. Cohesive parts of it live in modules under
 // apron/internal, which know nothing of Server: the log and its paging
-// (roomlog), rooms, their members, and who may see them (rooms), the store
-// writer and its fences (durable), user_ids (accounts), what the server
-// keeps of each user and the accounts by identity (users, whose timed
-// mutes and coalesced statuses take mu), users' statuses (presence), push
-// registrations (push, whose badge pushes take mu), sessions (sessions),
-// device tokens (devices), service tokens (services, whose expiry takes mu),
-// invitations (invitations), hosted embeds (embeds), the custom emoji
-// (emoji), the profile set with /server (profile), out-of-band sign-in
-// proposals (proposals), and the extensions' values (kv), whose methods
-// are called holding mu; and push delivery (webpush, which also keeps the
-// VAPID key the server made), live text (livetext), and upload files
-// (uploads), which own their own locks or atomics. Each module that keeps
-// state in the store tracks its own changes and renders its own entries
-// (persist.go). Server keeps what ties them together: users' live links,
-// the messages by message_id, and delivery, and it acts on the modules'
-// timers, which call it back to take mu.
+// (roomlog), rooms, their members, who may see them, and the messages by
+// message_id (rooms), the store writer and its fences (durable), user_ids
+// (accounts), what the server keeps of each user and the accounts by
+// identity (users, whose timed mutes and coalesced statuses take mu),
+// users' statuses (presence), push registrations (push, whose badge pushes
+// take mu), sessions (sessions), device tokens (devices), service tokens
+// (services, whose expiry takes mu), invitations (invitations), hosted
+// embeds (embeds), the custom emoji (emoji), the profile set with /server
+// (profile), out-of-band sign-in proposals (proposals), and the
+// extensions' values (kv), whose methods are called holding mu; and push
+// delivery (webpush, which also keeps the VAPID key the server made), live
+// text (livetext), and upload files (uploads), which own their own locks
+// or atomics. Each module that keeps state in the store tracks its own
+// changes and renders its own entries (persist.go). Server keeps what ties
+// them together: users' live links, what it keeps of each user and
+// message beyond the modules (userState, messageState), and delivery, and
+// it acts on the modules' timers, which call it back to take mu.
 type Server struct {
 	config Config
 
 	mu sync.RWMutex
 	// log is the single append-only log of every room (roomlog), which
-	// issues the log_id sequence; rooms are the rooms (rooms), which log
-	// their records in it.
-	log      *roomlog.Log
-	rooms    *rooms.Table[*userState]
-	messages map[string]*messageState
-	clients  map[*client]struct{}
+	// issues the log_id sequence; rooms are the rooms and the messages by
+	// message_id (rooms), which log their records in it.
+	log     *roomlog.Log
+	rooms   *rooms.Table[*userState, *messageState]
+	clients map[*client]struct{}
 	// users are the users, connected guests and accounts, and the accounts
 	// by the identities that prove them (users).
 	users *users.Table[*userState]
@@ -276,8 +276,7 @@ func Open(config Config) (*Server, error) {
 	s := &Server{
 		config:      config,
 		log:         log,
-		rooms:       rooms.NewTable[*userState](log),
-		messages:    make(map[string]*messageState),
+		rooms:       rooms.NewTable[*userState](log, holdMessage),
 		clients:     make(map[*client]struct{}),
 		ids:         accounts.NewIDs(),
 		roleHolders: make(map[string][]Principal),

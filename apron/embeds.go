@@ -334,7 +334,7 @@ func (s *Server) writeAllowedLocked(e *embedState) bool {
 	roomID := ""
 	if e.post != nil {
 		roomID = e.post.roomID
-	} else if m := s.messages[e.MessageID]; m != nil {
+	} else if m := s.rooms.Message(e.MessageID); m != nil {
 		roomID = m.RoomID()
 	}
 	if roomID == "" {
@@ -380,7 +380,7 @@ func (s *Server) endRefusedWritesLocked(u *userState) {
 // published out of its message (§4.8.3). A command's pending message is
 // never posted.
 func (s *Server) failWriteLocked(e *embedState) {
-	if m := s.messages[e.MessageID]; m != nil {
+	if m := s.rooms.Message(e.MessageID); m != nil {
 		s.republishLocked(m, func(body *roomlog.Body) bool {
 			return replaceEmbed(body, e.ID, nil)
 		})
@@ -628,7 +628,7 @@ func (s *Server) writeUpload(w http.ResponseWriter, r *http.Request, e *embedSta
 		s.setEmojiLocked(e, og)
 	} else if e.ServerAvatarBy != "" {
 		s.setServerAvatarLocked(e)
-	} else if m := s.messages[e.MessageID]; m != nil {
+	} else if m := s.rooms.Message(e.MessageID); m != nil {
 		s.republishLocked(m, func(body *roomlog.Body) bool {
 			return replaceEmbed(body, e.ID, func(embed map[string]any) {
 				maps.Copy(embed, cloneObject(e.Owned))
@@ -680,7 +680,7 @@ func (s *Server) evictUploadsLocked(keep *embedState) {
 		s.removeEmbedLocked(e.ID)
 	}
 	for _, messageID := range order {
-		if m := s.messages[messageID]; m != nil {
+		if m := s.rooms.Message(messageID); m != nil {
 			ids := evicted[messageID]
 			s.republishLocked(m, func(body *roomlog.Body) bool {
 				changed := false

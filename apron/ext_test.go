@@ -56,7 +56,7 @@ func TestMessageSavesMergeExt(t *testing.T) {
 		}
 		// Values are kept as they arrived, integers past 2^53 included.
 		app.mu.RLock()
-		records := app.messages[id].Records()
+		records := app.rooms.Message(id).Records()
 		raw := string(records[len(records)-1].Raw)
 		app.mu.RUnlock()
 		if !strings.Contains(raw, `"big":`+bigNumber) {

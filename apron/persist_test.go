@@ -358,7 +358,7 @@ func (s *Server) dumpLocked() []store.Entry {
 	for _, record := range logged {
 		records = append(records, roomlog.Entry(record))
 	}
-	for _, m := range s.messages {
+	for _, m := range s.rooms.Messages() {
 		records = append(records, rooms.MessageEntry(m.Message))
 	}
 	records = append(records, s.storedVAPID.Snapshot()...)

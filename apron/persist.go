@@ -194,15 +194,8 @@ func (s *Server) restoreLocked() (map[string]bool, error) {
 		return nil, err
 	}
 
-	for id, raw := range entries[entryMessage] {
-		m, err := rooms.RestoreMessage(id, raw, records)
-		if err != nil {
-			return nil, err
-		}
-		if m == nil {
-			continue // A message without its records cannot be served.
-		}
-		s.messages[id] = &messageState{Message: m}
+	if err := s.rooms.RestoreMessages(entries[entryMessage], records); err != nil {
+		return nil, err
 	}
 
 	now := time.Now()

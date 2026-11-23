@@ -251,7 +251,7 @@ func (s *Server) wakeLocked(m *messageState, snapshot, previous *roomlog.Message
 	}
 	if previous == nil {
 		if replyID := snapshot.ReplyID(); replyID != "" {
-			if target := s.messages[replyID]; target != nil {
+			if target := s.rooms.Message(replyID); target != nil {
 				reasons[target.Owner()] |= wakeReplies
 			}
 		}

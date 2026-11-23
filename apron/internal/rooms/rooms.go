@@ -1,17 +1,20 @@
 // Package rooms keeps a server's rooms (PROTOCOL.md §4.2): each room's
 // current record and log, its place among threads, its members and their
 // read cursors (§4.6), and the rules of who may see a room (§4.2.4) and of
-// whom a record naming one room would show it to; and each message's place
-// in them (Message): its room, its snapshots, and its reaction sets (§4.7).
-// It logs the records it makes in the server's log (roomlog): rooms,
-// memberships, message snapshots, and reactions. It tracks the rooms and
-// messages it changes, and renders them as store entries.
+// whom a record naming one room would show it to; and its messages by
+// message_id (Message): each one's room, snapshots, and reaction sets
+// (§4.7). It logs the records it makes in the server's log (roomlog):
+// rooms, memberships, message snapshots, and reactions. It tracks the rooms
+// and messages it changes, renders them as store entries, and restores
+// them.
 //
 // A Table knows its members as values of the type U, such as the server's
-// user state, through the methods of Member. It knows nothing of
-// connections, delivery, or what a message says: the server builds
-// snapshots, and sends what a change returns. It is not safe for
-// concurrent use: every method is called holding the server's lock.
+// user state, through the methods of Member, and keeps each message as a
+// value of the type M, a Message with whatever else the server keeps of it
+// (MessageHolder). It knows nothing of connections, delivery, or what a
+// message says: the server builds snapshots, and sends what a change
+// returns. It is not safe for concurrent use: every method is called
+// holding the server's lock.
 package rooms
 
 import (
@@ -334,10 +337,14 @@ func ThreadTitle(description string) string {
 	return line
 }
 
-// Table is the server's rooms by room_id.
-type Table[U Member] struct {
+// Table is the server's rooms by room_id, and its messages by message_id.
+type Table[U Member, M MessageHolder] struct {
 	log   *roomlog.Log
 	rooms map[string]*Room[U]
+	// messages are every message, and hold, wraps a new or restored one in
+	// the server's M.
+	messages map[string]M
+	hold     func(*Message) M
 	// dirty are the rooms, and dirtyMessages the messages, changed since
 	// Entries last took them.
 	dirty         map[string]struct{}
@@ -347,16 +354,20 @@ type Table[U Member] struct {
 	restoring map[string][]string
 }
 
-// NewTable returns an empty table whose records go to log.
-func NewTable[U Member](log *roomlog.Log) *Table[U] {
-	return &Table[U]{log: log, rooms: make(map[string]*Room[U]), dirty: make(map[string]struct{}), dirtyMessages: make(map[string]*Message)}
+// NewTable returns an empty table whose records go to log, which keeps
+// each message as hold wraps it.
+func NewTable[U Member, M MessageHolder](log *roomlog.Log, hold func(*Message) M) *Table[U, M] {
+	return &Table[U, M]{
+		log: log, rooms: make(map[string]*Room[U]), messages: make(map[string]M), hold: hold,
+		dirty: make(map[string]struct{}), dirtyMessages: make(map[string]*Message),
+	}
 }
 
 // Get returns the room named id, or nil.
-func (t *Table[U]) Get(id string) *Room[U] { return t.rooms[id] }
+func (t *Table[U, M]) Get(id string) *Room[U] { return t.rooms[id] }
 
 // Visible returns the room named id if u may see it, or nil.
-func (t *Table[U]) Visible(id string, u U) *Room[U] {
+func (t *Table[U, M]) Visible(id string, u U) *Room[U] {
 	if r := t.rooms[id]; r != nil && r.VisibleTo(u) {
 		return r
 	}
@@ -364,20 +375,20 @@ func (t *Table[U]) Visible(id string, u U) *Room[U] {
 }
 
 // All lists the rooms, oldest first.
-func (t *Table[U]) All() []*Room[U] {
+func (t *Table[U, M]) All() []*Room[U] {
 	return slices.SortedFunc(maps.Values(t.rooms), func(a, b *Room[U]) int {
 		return cmp.Compare(a.log.Created(), b.log.Created())
 	})
 }
 
 // Touch marks r as changed, for a change the table does not make itself.
-func (t *Table[U]) Touch(r *Room[U]) { t.dirty[r.id] = struct{}{} }
+func (t *Table[U, M]) Touch(r *Room[U]) { t.dirty[r.id] = struct{}{} }
 
 // Create logs the creation record of a room holding the client fields of
 // fields: title, description, and ext. The room is named id, or by its
 // creation log_id when id is "", is a thread of parent, if any, is private
 // if asked, and was made by the user creator, if any.
-func (t *Table[U]) Create(id string, parent *Room[U], private bool, creator string, fields roomlog.RoomRecord) *Room[U] {
+func (t *Table[U, M]) Create(id string, parent *Room[U], private bool, creator string, fields roomlog.RoomRecord) *Room[U] {
 	logID := t.log.NextID()
 	if id == "" {
 		id = roomlog.FormatID(logID)
@@ -396,11 +407,11 @@ func (t *Table[U]) Create(id string, parent *Room[U], private bool, creator stri
 
 // Update logs a room record of r holding the client fields of fields,
 // which replace its own (§4.2.4).
-func (t *Table[U]) Update(r *Room[U], fields roomlog.RoomRecord) {
+func (t *Table[U, M]) Update(r *Room[U], fields roomlog.RoomRecord) {
 	t.commit(r, t.log.NextID(), fields)
 }
 
-func (t *Table[U]) commit(r *Room[U], logID int64, fields roomlog.RoomRecord) {
+func (t *Table[U, M]) commit(r *Room[U], logID int64, fields roomlog.RoomRecord) {
 	record := roomlog.RoomRecord{
 		RoomID: r.id, LogID: roomlog.FormatID(logID), Private: r.private,
 		Title: fields.Title, Description: fields.Description, Ext: fields.Ext,
@@ -418,7 +429,7 @@ func (t *Table[U]) commit(r *Room[U], logID int64, fields roomlog.RoomRecord) {
 
 // Append adds a committed record to the log of each room it belongs to,
 // whose latest_log_id it becomes.
-func (t *Table[U]) Append(record *roomlog.Record, rooms ...*Room[U]) {
+func (t *Table[U, M]) Append(record *roomlog.Record, rooms ...*Room[U]) {
 	logs := make([]*roomlog.Timeline, len(rooms))
 	for i, r := range rooms {
 		logs[i] = r.log
@@ -430,7 +441,7 @@ func (t *Table[U]) Append(record *roomlog.Record, rooms ...*Room[U]) {
 // Join makes u, recorded as from, a member of r, and logs the membership
 // record (§4.2.2), which it returns. It does nothing and reports false
 // when u is a member already, or r is outside u's scope.
-func (t *Table[U]) Join(r *Room[U], u U, from roomlog.Author) (*roomlog.Record, bool) {
+func (t *Table[U, M]) Join(r *Room[U], u U, from roomlog.Author) (*roomlog.Record, bool) {
 	id := u.MemberID()
 	if _, member := r.members[id]; member || !r.InScope(u.MemberScope()) {
 		return nil, false
@@ -444,7 +455,7 @@ func (t *Table[U]) Join(r *Room[U], u U, from roomlog.Author) (*roomlog.Record, 
 // Leave takes u, recorded as from, out of r, and logs the membership
 // record (§4.2.2), which it returns. It does nothing and reports false
 // when u is not a member.
-func (t *Table[U]) Leave(r *Room[U], u U, from roomlog.Author) (*roomlog.Record, bool) {
+func (t *Table[U, M]) Leave(r *Room[U], u U, from roomlog.Author) (*roomlog.Record, bool) {
 	id := u.MemberID()
 	if _, member := r.members[id]; !member {
 		return nil, false
@@ -458,7 +469,7 @@ func (t *Table[U]) Leave(r *Room[U], u U, from roomlog.Author) (*roomlog.Record,
 // logMembership logs one membership record of the user from in r,
 // advancing the room's latest_log_id. The record carries the user as a
 // recorded object: user_id and name.
-func (t *Table[U]) logMembership(r *Room[U], from roomlog.Author, joined bool) *roomlog.Record {
+func (t *Table[U, M]) logMembership(r *Room[U], from roomlog.Author, joined bool) *roomlog.Record {
 	record := roomlog.NewMembership(t.log.NextID(), r.id, from, joined)
 	t.Append(record, r)
 	return record
@@ -466,7 +477,7 @@ func (t *Table[U]) logMembership(r *Room[U], from roomlog.Author, joined bool) *
 
 // Posted notes the first snapshot of a message the user id posted in r at
 // logID, which makes a member more recently active (§4.2.1).
-func (t *Table[U]) Posted(r *Room[U], id string, logID int64) {
+func (t *Table[U, M]) Posted(r *Room[U], id string, logID int64) {
 	if _, member := r.members[id]; member {
 		r.active[id] = logID
 		t.Touch(r)
@@ -475,7 +486,7 @@ func (t *Table[U]) Posted(r *Room[U], id string, logID int64) {
 
 // Read moves the user's read cursor in r to cursor, if it is past the one
 // kept (§4.6), and reports whether it moved.
-func (t *Table[U]) Read(r *Room[U], id string, cursor Cursor) bool {
+func (t *Table[U, M]) Read(r *Room[U], id string, cursor Cursor) bool {
 	if kept, ok := r.reads[id]; ok && cursor.ID <= kept.ID {
 		return false
 	}
@@ -485,7 +496,7 @@ func (t *Table[U]) Read(r *Room[U], id string, cursor Cursor) bool {
 }
 
 // ForgetRead forgets the user's read cursor in r.
-func (t *Table[U]) ForgetRead(r *Room[U], id string) {
+func (t *Table[U, M]) ForgetRead(r *Room[U], id string) {
 	if _, ok := r.reads[id]; ok {
 		delete(r.reads, id)
 		t.Touch(r)
@@ -543,7 +554,7 @@ func Entry[U Member](r *Room[U]) store.Entry {
 
 // Entries returns the entries of the rooms and messages changed since it
 // was last called.
-func (t *Table[U]) Entries() []store.Entry {
+func (t *Table[U, M]) Entries() []store.Entry {
 	if len(t.dirty) == 0 && len(t.dirtyMessages) == 0 {
 		return nil
 	}
@@ -564,7 +575,7 @@ func (t *Table[U]) Entries() []store.Entry {
 // Restore rebuilds the rooms from the store's room entries, without their
 // members, whom RestoreMembers adds once the users are restored. The
 // rooms' logs are empty until the server's log is restored into them.
-func (t *Table[U]) Restore(entries map[string]jsontext.Value) error {
+func (t *Table[U, M]) Restore(entries map[string]jsontext.Value) error {
 	t.restoring = make(map[string][]string, len(entries))
 	parents := make(map[string]string)
 	for id, raw := range entries {
@@ -601,7 +612,7 @@ func (t *Table[U]) Restore(entries map[string]jsontext.Value) error {
 // RestoreMembers adds each room's stored members, oldest room first, as
 // member returns them; one it reports false for, such as a user who is
 // gone, is left out.
-func (t *Table[U]) RestoreMembers(member func(r *Room[U], id string) (U, bool)) {
+func (t *Table[U, M]) RestoreMembers(member func(r *Room[U], id string) (U, bool)) {
 	for _, r := range t.All() {
 		for _, id := range t.restoring[r.id] {
 			if u, ok := member(r, id); ok {

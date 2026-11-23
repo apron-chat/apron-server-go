@@ -19,9 +19,9 @@ func (u *user) MemberID() string     { return u.id }
 func (u *user) MemberScope() *Scope  { return u.scope }
 func (u *user) from() roomlog.Author { return roomlog.Author{UserID: u.id} }
 
-func newTable() *Table[*user] { return NewTable[*user](roomlog.NewLog()) }
+func newTable() *Table[*user, *Message] { return NewTable[*user](roomlog.NewLog(), (*Message).Kept) }
 
-func join(t *testing.T, table *Table[*user], r *Room[*user], users ...*user) {
+func join(t *testing.T, table *Table[*user, *Message], r *Room[*user], users ...*user) {
 	t.Helper()
 	for _, u := range users {
 		if _, ok := table.Join(r, u, u.from()); !ok {

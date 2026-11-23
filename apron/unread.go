@@ -46,7 +46,7 @@ func (s *Server) readPositionLocked(u *userState, r *roomState) (int64, bool) {
 	since := cursor.ID
 	// A cursor names a message by its message_id; one moved into r arrived
 	// later, at its move.
-	if m := s.messages[cursor.MessageID]; m != nil && m.RoomID() == r.ID() {
+	if m := s.rooms.Message(cursor.MessageID); m != nil && m.RoomID() == r.ID() {
 		since = max(since, m.Arrival(r.ID()))
 	}
 	if u.joined[r.ID()] != nil {
@@ -76,7 +76,7 @@ func (s *Server) countsLocked(u *userState, r *roomState, m *messageState, now t
 	case u.joined[r.ID()] != nil:
 		return true
 	}
-	target := s.messages[info.replyTo]
+	target := s.rooms.Message(info.replyTo)
 	return target != nil && target.Owner() == u.id
 }
 
@@ -92,7 +92,7 @@ func (s *Server) recountLocked(u *userState, r *roomState, now time.Time) int {
 		if record.Kind != roomlog.KindMessage {
 			continue
 		}
-		m := s.messages[record.Message]
+		m := s.rooms.Message(record.Message)
 		if m == nil || m.RoomID() != r.ID() || seen[m] {
 			continue
 		}
@@ -179,7 +179,7 @@ func (s *Server) messageUnreadLocked(m *messageState, previous *roomlog.Message,
 		for _, id := range snapshot.Mentions() {
 			add(s.users.Get(id))
 		}
-		if target := s.messages[snapshot.ReplyID()]; target != nil {
+		if target := s.rooms.Message(snapshot.ReplyID()); target != nil {
 			add(s.users.Get(target.Owner()))
 		}
 	}
@@ -191,7 +191,7 @@ func (s *Server) messageUnreadLocked(m *messageState, previous *roomlog.Message,
 			continue
 		}
 		info := m.info()
-		if u.joined[r.ID()] == nil && (slices.Contains(info.mentions, u.id) || s.messages[info.replyTo] != nil && s.messages[info.replyTo].Owner() == u.id) {
+		if u.joined[r.ID()] == nil && (slices.Contains(info.mentions, u.id) || s.rooms.Message(info.replyTo) != nil && s.rooms.Message(info.replyTo).Owner() == u.id) {
 			// A room the user has not joined counts from the first message
 			// there that mentioned or replied to them.
 			if since, ok := u.Pings[r.ID()]; !ok || since > messageID {

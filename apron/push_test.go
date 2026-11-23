@@ -409,7 +409,7 @@ func TestPushWakeScopes(t *testing.T) {
 	app.mu.Lock()
 	logID := app.log.NextID()
 	own := formatID(logID)
-	m := app.newMessageLocked(own, carol.from(), carol.id)
+	m := app.rooms.NewMessage(own, carol.from(), carol.id)
 	app.commitSnapshotLocked(m, &roomlog.Message{MessageID: own, LogID: own, RoomID: "general", From: carol.from(), Body: &roomlog.Body{Body: wire.Body{Text: "carol's"}}}, logID)
 	app.unlock()
 	a.notification(t, "message")
@@ -564,7 +564,7 @@ func serverMessage(t *testing.T, app *Server, userID string) int64 {
 	u := app.users.Get(userID)
 	logID := app.log.NextID()
 	id := formatID(logID)
-	m := app.newMessageLocked(id, u.from(), u.id)
+	m := app.rooms.NewMessage(id, u.from(), u.id)
 	app.commitSnapshotLocked(m, &roomlog.Message{MessageID: id, LogID: id, RoomID: "general", From: u.from(), Body: &roomlog.Body{Body: wire.Body{Text: "theirs"}}}, logID)
 	return logID
 }

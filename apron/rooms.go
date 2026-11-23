@@ -55,10 +55,7 @@ func (s *Server) visibleRoomLocked(u *userState, id string) *roomState {
 // visibleMessageLocked returns the message named id if u may see the room
 // it is in, or nil.
 func (s *Server) visibleMessageLocked(u *userState, id string) *messageState {
-	if m := s.messages[id]; m != nil && s.rooms.Get(m.RoomID()).VisibleTo(u) {
-		return m
-	}
-	return nil
+	return s.rooms.VisibleMessage(id, u)
 }
 
 // mayRemove reports whether u may remove others from r, with /kick or

@@ -150,7 +150,7 @@ func TestStoredShapesRoundTrip(t *testing.T) {
 	}
 	// Rooms are restored with every member they name, and stored again.
 	log := roomlog.NewLog()
-	table := rooms.NewTable[*userState](log)
+	table := rooms.NewTable[*userState](log, holdMessage)
 	if err := table.Restore(stored); err != nil {
 		t.Fatal(err)
 	}
@@ -165,12 +165,15 @@ func TestStoredShapesRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Messages are restored with their records, and stored again.
+	if err := table.RestoreMessages(messages, restored); err != nil {
+		t.Fatal(err)
+	}
 	for id, value := range messages {
-		m, err := rooms.RestoreMessage(id, value, restored)
-		if err != nil || m == nil {
-			t.Fatalf("message %s: %v", id, err)
+		m := table.Message(id)
+		if m == nil {
+			t.Fatalf("message %s was not restored", id)
 		}
-		if again := rooms.MessageEntry(m).Value; !bytes.Equal(again, value) {
+		if again := rooms.MessageEntry(m.Message).Value; !bytes.Equal(again, value) {
 			t.Errorf("message %s is stored again as\n%s\nwant\n%s", id, again, value)
 		}
 	}

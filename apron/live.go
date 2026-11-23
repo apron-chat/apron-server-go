@@ -98,7 +98,7 @@ func (s *Server) startWriterLocked(e *embedState) (int, string) {
 			s.removeEmbedLocked(e.ID)
 			return http.StatusGone, "The room or the message this was to reply to is no longer available"
 		}
-	} else if m := s.messages[e.MessageID]; m != nil {
+	} else if m := s.rooms.Message(e.MessageID); m != nil {
 		s.embeds.Touch(e.ID)
 		s.republishLocked(m, func(body *roomlog.Body) bool {
 			return replaceEmbed(body, e.ID, func(embed map[string]any) { maps.Copy(embed, cloneObject(e.Owned)) })
@@ -151,7 +151,7 @@ func (s *Server) postPendingLocked(e *embedState) bool {
 	if target := s.visibleMessageLocked(u, p.replyTo); target != nil && !r.RevealsTo(s.rooms.Get(target.RoomID())) {
 		snapshot.ReplyTo = &roomlog.Ref{MessageID: p.replyTo}
 	}
-	m := s.newMessageLocked(messageID, from, u.id)
+	m := s.rooms.NewMessage(messageID, from, u.id)
 	e.MessageID = messageID
 	e.post = nil
 	s.embeds.Touch(e.ID)
@@ -289,7 +289,7 @@ func (s *Server) finishLiveLocked(e *embedState) {
 	e.timer.Stop()
 	s.embeds.EndWrite(e.token)
 	s.embeds.Touch(e.ID)
-	m := s.messages[e.MessageID]
+	m := s.rooms.Message(e.MessageID)
 	text := e.live.String()
 	e.live = nil
 	if e.Kind == kindTerminal {
