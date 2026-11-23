@@ -30,11 +30,13 @@ import (
 // Persistence writes the server's state through to a store.Store. Every
 // change made under s.mu marks what it changed: the server's own state in
 // its dirty set (touch*), and the modules that keep their own, the log
-// (roomlog), the rooms (rooms), the extensions' values (kv), and the
-// sessions (sessions), in theirs. When the lock is released, unlock renders the marked state into
-// one batch, and the store writer (durable) applies batches to the store
-// in order, off the lock. At start, Open rebuilds the state from the
-// store.
+// (roomlog), the rooms (rooms), the user_ids used (accounts), the
+// extensions' values (kv), the sessions (sessions), the device tokens
+// (devices), the service tokens (services), the invitations (invitations),
+// the hosted embeds (embeds), and the custom emoji (emoji), in theirs.
+// When the lock is released, unlock renders the marked state into one
+// batch, and the store writer (durable) applies batches to the store in
+// order, off the lock. At start, Open rebuilds the state from the store.
 //
 // Entry kinds and IDs:
 //

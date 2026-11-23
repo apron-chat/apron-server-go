@@ -3,7 +3,6 @@ package apron
 import (
 	"bytes"
 	"cmp"
-	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"fmt"
 	"maps"
@@ -207,7 +206,7 @@ func (s *Server) registerPush(c *client, r *wire.Request) *Error {
 	if d.Has("push_id") && !pushIDPattern.MatchString(pushID) {
 		return invalidParams("push_id is 1 to 64 letters, digits, _ or -")
 	}
-	keys, err := parseKeysParam(r.Fields())
+	keys, err := parseKeysParam(r)
 	if err != nil {
 		return err
 	}
@@ -252,12 +251,12 @@ func (s *Server) registerPush(c *client, r *wire.Request) *Error {
 }
 
 // parseKeysParam reads a registration's optional keys (§4.9).
-func parseKeysParam(params map[string]jsontext.Value) (*webpush.Keys, *Error) {
-	if _, has := params["keys"]; !has {
+func parseKeysParam(r *wire.Request) (*webpush.Keys, *Error) {
+	raw, present, objectErr := r.Object("keys")
+	if !present {
 		return nil, nil
 	}
-	var raw map[string]jsontext.Value
-	if json.Unmarshal(params["keys"], &raw) != nil || raw == nil {
+	if objectErr != nil {
 		return nil, invalidParams("keys must be an object with p256dh and auth")
 	}
 	p256dh, err := parseString(raw, "p256dh", required)

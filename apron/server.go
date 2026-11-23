@@ -135,12 +135,16 @@ type client struct {
 // Its state is guarded by mu. Cohesive parts of it live in modules under
 // apron/internal, which know nothing of Server: the log and its paging
 // (roomlog), rooms, their members, and who may see them (rooms), the store
-// writer and its fences (durable), sessions (sessions), out-of-band
-// sign-in proposals (proposals), and the extensions' values (kv), whose
-// methods are called holding mu; and push delivery (webpush), live text
-// (livetext), and upload files (uploads), which own their own locks or
-// atomics. Server keeps what ties them together: users, messages, embeds,
-// status, and delivery.
+// writer and its fences (durable), user_ids and the accounts by identity
+// (accounts), users' statuses (presence), sessions (sessions), device
+// tokens (devices), service tokens (services, whose expiry takes mu),
+// invitations (invitations), hosted embeds (embeds), the custom emoji
+// (emoji), out-of-band sign-in proposals (proposals), and the extensions'
+// values (kv), whose methods are called holding mu; and push delivery
+// (webpush), live text (livetext), and upload files (uploads), which own
+// their own locks or atomics. Each module that keeps state in the store
+// tracks its own changes and renders its own entries (persist.go). Server
+// keeps what ties them together: users, messages, mutes, and delivery.
 type Server struct {
 	config Config
 
