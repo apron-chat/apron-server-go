@@ -231,14 +231,15 @@ func TestLocalFellBehind(t *testing.T) {
 
 // A Local connection opens as a network one does: OnConnect, signed in
 // already, then Hello, whose server frame goes before anything sent to it
-// meanwhile. An error of OnConnect is Local's, and no OnDisconnect follows.
+// meanwhile. An error of OnConnect is Local's, and OnDisconnect follows it
+// before Local returns.
 func TestLocalOpens(t *testing.T) {
 	refuse := errors.New("refused")
 	var disconnects atomic.Int64
 	s := wired(&wire.Server{Backend: &backend{}})
 	s.OnConnect = func(_ context.Context, c *wire.Conn) error {
-		if c.HTTPRequest() != nil || c.Data() == nil {
-			t.Errorf("OnConnect: request %v, data %v", c.HTTPRequest(), c.Data())
+		if c.HTTPRequest() != nil || c.Data() == nil || !c.Local() {
+			t.Errorf("OnConnect: request %v, data %v, local %v", c.HTTPRequest(), c.Data(), c.Local())
 		}
 		if c.UserID() == "nobody" {
 			return refuse
@@ -264,6 +265,9 @@ func TestLocalOpens(t *testing.T) {
 	if _, err := s.Local(wire.LocalOptions{User: wire.User{UserID: "nobody"}, Data: 1}); err != refuse {
 		t.Fatalf("a refused Local: %v", err)
 	}
+	if n := disconnects.Load(); n != 1 {
+		t.Fatalf("%d disconnects once a Local was refused, want its own", n)
+	}
 	if err := l.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
@@ -274,10 +278,136 @@ func TestLocalOpens(t *testing.T) {
 	if err := s.Shutdown(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if n := disconnects.Load(); n != 1 {
-		t.Fatalf("%d disconnects, want the one of the connection that opened", n)
+	if n := disconnects.Load(); n != 2 {
+		t.Fatalf("%d disconnects, want the refused connection's and the one that opened", n)
 	}
 	if _, err := s.Local(wire.LocalOptions{User: wire.User{UserID: "bot"}}); !errors.Is(err, wire.ErrClosed) {
 		t.Fatalf("after Shutdown: %v", err)
+	}
+}
+
+// Conn.Local tells a Local connection from one of any other transport,
+// though neither has an HTTP request.
+func TestConnLocal(t *testing.T) {
+	local := make(chan bool, 2)
+	s := wired(&wire.Server{Backend: &backend{}})
+	s.OnConnect = func(_ context.Context, c *wire.Conn) error {
+		if c.HTTPRequest() != nil {
+			t.Errorf("OnConnect: request %v", c.HTTPRequest())
+		}
+		local <- c.Local()
+		return nil
+	}
+	client := connect(t, s)
+	if err := client.Sync(wait(t)); err != nil {
+		t.Fatal(err)
+	}
+	if <-local {
+		t.Error("a ServeTransport connection is Local")
+	}
+	l, err := s.Local(wire.LocalOptions{User: wire.User{UserID: "bot"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	if !<-local || !l.Conn().Local() {
+		t.Error("a Local connection is not Local")
+	}
+}
+
+// OnDisconnect follows a network connection OnConnect refused, with an
+// *Error or any other error, so that the backend undoes what OnConnect did
+// in one place.
+func TestDisconnectAfterRefusal(t *testing.T) {
+	for _, refusal := range []error{wire.Denied("No"), errors.New("no")} {
+		b := &backend{}
+		s := wired(&wire.Server{Backend: b})
+		s.OnConnect = func(_ context.Context, c *wire.Conn) error {
+			c.SetData("half done")
+			return refusal
+		}
+		client := connect(t, s)
+		for {
+			// The server frame and the error, for an *Error.
+			if _, err := client.Next(wait(t)); err != nil {
+				if !errors.Is(err, wire.ErrClosed) {
+					t.Fatalf("refused with %v: %v", refusal, err)
+				}
+				break
+			}
+		}
+		deadline := time.Now().Add(5 * time.Second)
+		for len(b.disconnectedConns()) == 0 && time.Now().Before(deadline) {
+			time.Sleep(time.Millisecond)
+		}
+		if d := b.disconnectedConns(); len(d) != 1 || d[0].Data() != "half done" {
+			t.Fatalf("refused with %v: disconnected %v", refusal, d)
+		}
+	}
+}
+
+// OnConnect may make a Local connection another user than its caller
+// asked for, which the connection is told of as a user notification right
+// after its server frame, before what OnConnect sent it; it may not leave
+// it signed out.
+func TestLocalUserFromOnConnect(t *testing.T) {
+	s := wired(&wire.Server{Backend: &backend{}})
+	var signedOut atomic.Int64
+	s.OnDisconnect = func(c *wire.Conn) {
+		if c.User() == nil {
+			signedOut.Add(1)
+		}
+	}
+	s.OnConnect = func(_ context.Context, c *wire.Conn) error {
+		u := c.User()
+		switch u.UserID {
+		case "echo":
+			// A user_id of the backend's own.
+			c.SetUser(wire.User{UserID: "u7", Name: "echo", Status: "online"})
+		case "same":
+			// The name normalized.
+			u.Name = "Same"
+			c.SetUser(*u)
+		case "gone":
+			c.SignOut()
+		}
+		c.Notify(wire.Notice("", "welcome"))
+		return nil
+	}
+	for _, tc := range []struct {
+		asked wire.User
+		you   string // the user notification, or "" for none
+		is    string
+	}{
+		{wire.User{UserID: "echo", Name: "Echo!"}, `{"method":"user","params":{"you":{"user_id":"u7","name":"echo","status":"online"}}}`, "u7"},
+		{wire.User{UserID: "same", Name: "same", Roles: []string{"bot"}}, `{"method":"user","params":{"you":{"user_id":"same","name":"Same"}}}`, "same"},
+		{wire.User{UserID: "kept", Name: "Kept"}, "", "kept"},
+	} {
+		frames := make(chan string, 8)
+		l, err := s.Local(wire.LocalOptions{User: tc.asked, OnFrame: func(f wire.Frame) { frames <- string(f) }})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if f := <-frames; !strings.HasPrefix(f, `{"method":"server"`) {
+			t.Fatalf("%s: first frame %s", tc.asked.UserID, f)
+		}
+		if tc.you != "" {
+			if f := <-frames; f != tc.you {
+				t.Fatalf("%s: second frame %s, want %s", tc.asked.UserID, f, tc.you)
+			}
+		}
+		if f := <-frames; !strings.Contains(f, "welcome") {
+			t.Fatalf("%s: then %s, want the welcome", tc.asked.UserID, f)
+		}
+		if got := l.Conn().UserID(); got != tc.is {
+			t.Fatalf("%s: the connection is %s, want %s", tc.asked.UserID, got, tc.is)
+		}
+		l.Close()
+	}
+	if _, err := s.Local(wire.LocalOptions{User: wire.User{UserID: "gone"}}); err == nil {
+		t.Fatal("a Local connection OnConnect signed out opened")
+	}
+	if n := signedOut.Load(); n != 1 {
+		t.Fatalf("%d disconnects of the connection OnConnect signed out, want 1", n)
 	}
 }

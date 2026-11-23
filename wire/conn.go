@@ -16,6 +16,7 @@ type Conn struct {
 	info    ServerInfo
 	remote  net.Addr
 	request *http.Request
+	local   bool
 	ctx     context.Context
 	cancel  context.CancelFunc
 
@@ -60,7 +61,8 @@ func (c *Conn) UserID() string {
 
 // SetUser changes the connection's identity, as after a sign-in or a
 // rename, to a copy of u. It sends nothing: the backend tells clients with
-// a user notification (§3.3.3).
+// a user notification (§3.3.3), but for a Local connection's identity
+// changed in OnConnect, which the Server tells it of (Server.Local).
 func (c *Conn) SetUser(u User) {
 	u = u.clone()
 	c.mu.Lock()
@@ -135,6 +137,14 @@ func (c *Conn) RemoteAddr() net.Addr { return c.remote }
 // HTTPRequest is the HTTP request that opened the connection, or nil, as
 // for a Local connection or a transport served without one.
 func (c *Conn) HTTPRequest() *http.Request { return c.request }
+
+// Local reports whether the connection is in process (Server.Local): one
+// the program opened itself, such as a bot's, signed in from the start as
+// its LocalOptions.User, where any other signs in with auth. A Local
+// connection has no HTTPRequest or RemoteAddr, but nor may one served with
+// ServeTransport, such as a test's, so Local is what tells them apart, as
+// in OnConnect.
+func (c *Conn) Local() bool { return c.local }
 
 // Context is canceled when the connection ends.
 func (c *Conn) Context() context.Context { return c.ctx }

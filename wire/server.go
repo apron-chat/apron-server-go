@@ -42,14 +42,23 @@ type Server struct {
 
 	// OnConnect, if set, is told of a new connection before its server
 	// frame is made, with ctx the connection's context, such as to keep
-	// the backend's own state for it (Conn.SetData). A Local connection is
-	// signed in already, and has its LocalOptions.Data. An error closes
-	// the connection: a network client is sent an *Error first, after the
-	// server frame, and Server.Local returns it.
+	// the backend's own state for it (Conn.SetData). A Local connection
+	// (Conn.Local) is signed in already, as the user its caller asked for,
+	// and has its LocalOptions.Data; OnConnect may make it another user
+	// (Conn.SetUser), such as one with a user_id of the backend's own,
+	// which the Server tells the connection of (Server.Local). An error
+	// closes the connection: a network client is sent an *Error first,
+	// after the server frame, and Server.Local returns it. OnDisconnect
+	// follows, even then.
 	OnConnect func(ctx context.Context, c *Conn) error
-	// OnDisconnect, if set, is told when a connection ends, signed in or
-	// not, network or Local: every one but those refused as they opened,
-	// by OnConnect or at capacity (MaxConnections).
+	// OnDisconnect, if set, is told once when a connection ends, signed in
+	// or not, network or Local: every connection the Server told OnConnect
+	// of, or would have had it been set, even one OnConnect refused, so
+	// that it undoes what OnConnect did, all of it or part, in one place.
+	// The only connections it is not told of are those refused before
+	// that, at capacity (MaxConnections) or as the Server shuts down, of
+	// which the backend heard nothing but Hello. For a Local connection,
+	// it has returned when Server.Local returns OnConnect's error.
 	OnDisconnect func(c *Conn)
 	// RefreshDuplicate, if set, brings the result of a request up to date
 	// for a duplicate of it (§1.2), which gets the original's outcome as
@@ -353,6 +362,7 @@ func (s *Server) ServeTransport(ctx context.Context, t Transport, remote net.Add
 			} else {
 				c.Close()
 			}
+			s.disconnected(c)
 			return
 		}
 	}

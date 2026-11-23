@@ -249,11 +249,20 @@
 // ([Local.Call]) and notifications ([Local.Notify]) take a network
 // client's path, deduplication and all. The frames the backend sends it
 // while OnConnect and Hello run go after the server frame, so a backend
-// that keeps its connections under a lock adds a Local one in OnConnect,
-// as it would sign a network one in. As Server.Local calls those hooks in
-// its caller's goroutine, and returns OnConnect's error, a backend does
-// not open a Local connection while holding a lock they take: that waits
-// forever, which wire logs once it has waited ten seconds.
+// that keeps its connections under a lock adds a Local one in OnConnect
+// ([Conn.Local] tells it from a network one), as it would sign a network
+// one in. There the backend may also make it another user than its
+// caller asked for ([Conn.SetUser]), such as one with a user_id of the
+// backend's own, which wire tells the connection of, as a user
+// notification right after the server frame. As Server.Local calls those
+// hooks in its caller's goroutine, and returns OnConnect's error, a
+// backend does not open a Local connection while holding a lock they
+// take: that waits forever, which wire logs once it has waited ten
+// seconds.
+//
+// OnDisconnect follows every connection OnConnect was told of, network or
+// Local, even one it refused: a backend undoes what OnConnect did in
+// OnDisconnect alone, whether OnConnect did all of it, or failed halfway.
 //
 // # Hosts that keep less
 //

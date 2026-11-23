@@ -32,7 +32,8 @@ var (
 
 // LocalOptions configure a Local connection.
 type LocalOptions struct {
-	// User is who the connection is signed in as, from the start.
+	// User is who the connection asks to be: it is signed in as User from
+	// the start, unless OnConnect makes it another user (see Local).
 	User User
 	// Data is the backend's value for the connection (Conn.SetData), set
 	// before OnConnect is called, such as the backend's own record of the
@@ -55,16 +56,26 @@ type LocalOptions struct {
 //
 // It is signed in from the start, as LocalOptions.User, without Auth, and
 // otherwise opens as a network connection does: the Server calls OnConnect
-// for it, with Conn.HTTPRequest nil, then Hello, whose server frame is its
-// first frame, and OnDisconnect when it ends. The frames the backend sends
-// it while OnConnect and Hello run are sent after the server frame, so a
-// backend that keeps its connections under its own lock adds a Local one,
-// and sends it what a sign-in would, in OnConnect, as for a network
-// connection in Auth. Server.Local calls them in the caller's goroutine
-// and returns their outcome, such as OnConnect's error, so the backend
-// does not open a Local connection while it holds a lock they take: that
-// waits forever, and is logged once it has waited 10 seconds. It does not
-// count toward MaxConnections.
+// for it, with Conn.Local true, then Hello, whose server frame is its
+// first frame, and OnDisconnect when it ends, or when OnConnect refuses
+// it. The frames the backend sends it while OnConnect and Hello run are
+// sent after the server frame, so a backend that keeps its connections
+// under its own lock adds a Local one, and sends it what a sign-in would,
+// in OnConnect, as for a network connection in Auth. Server.Local calls
+// them in the caller's goroutine and returns their outcome, such as
+// OnConnect's error, so the backend does not open a Local connection while
+// it holds a lock they take: that waits forever, and is logged once it has
+// waited 10 seconds. It does not count toward MaxConnections.
+//
+// Its caller says who it is, but the backend has the last word: OnConnect
+// may make the connection another user (Conn.SetUser), such as one with a
+// user_id of the backend's own, or the name it asked for normalized, as a
+// network client's auth result may differ from what it asked for. The
+// connection is then sent a user notification right after its server
+// frame, before anything else, {"you": patch}, the patch of the user it
+// asked for (User.Patch, §3.3.3), as a network client learns who it is
+// from its auth result; and Conn().User() is who it is. OnConnect may not
+// sign it out: a Local connection opens signed in.
 type Local struct {
 	s      *Server
 	c      *Conn
@@ -111,6 +122,7 @@ func (s *Server) Local(options LocalOptions) (*Local, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 	c := s.newConn(ctx, cancel, localWriter{l}, queue, func() { l.shut(ErrFellBehind) })
 	l.c = c
+	c.local = true
 	c.SetUser(options.User)
 	c.SetData(options.Data)
 
@@ -145,10 +157,9 @@ func (s *Server) Local(options LocalOptions) (*Local, error) {
 	stalled := time.AfterFunc(stall, func() {
 		s.logger().Warn("wire: Server.Local is still waiting for OnConnect and Hello; does its caller hold a lock they take?", "user_id", options.User.UserID, "waited", stall)
 	})
-	err := s.openLocal(ctx, c)
+	err := s.openLocal(ctx, c, options.User)
 	stalled.Stop()
 	if err != nil {
-		c.Close()
 		s.serving.Done()
 		return nil, err
 	}
@@ -165,25 +176,43 @@ func (s *Server) Local(options LocalOptions) (*Local, error) {
 }
 
 // openLocal opens a Local connection as a network one opens (ServeTransport):
-// OnConnect, then the server frame, which goes before anything the backend
-// sends meanwhile. OnDisconnect is called for a connection that OnConnect
-// accepted but that does not open.
-func (s *Server) openLocal(ctx context.Context, c *Conn) error {
+// OnConnect, then the server frame, and the user notification of the user
+// OnConnect made it, if another than asked, which go before anything the
+// backend sends meanwhile. A connection that does not open is closed, and
+// OnDisconnect called for it, once OnConnect was.
+func (s *Server) openLocal(ctx context.Context, c *Conn, asked User) error {
 	c.hold()
+	fail := func(err error) error {
+		c.release(true)
+		c.Close()
+		s.disconnected(c)
+		return err
+	}
 	if connect := s.config.onConnect; connect != nil {
 		if err := connect(ctx, c); err != nil {
-			c.release(true)
-			return err
+			return fail(err)
 		}
+	}
+	user := c.User()
+	if user == nil || !ValidID(user.UserID) {
+		return fail(errors.New("wire: OnConnect left a Local connection without a user"))
 	}
 	var info ServerInfo
 	if s.Backend != nil {
 		info = s.Backend.Hello(ctx, c)
 	}
 	info = s.complete(info)
+	frames := make([]Frame, 1, 2)
 	frame, err := Encode(info)
 	if err != nil {
 		s.logger().Error("wire: encoding the server frame", "error", err)
+	}
+	frames[0] = frame
+	if you, changed := user.Patch(asked); changed && err == nil {
+		if frame, err = Encode(UserUpdate{You: &you}); err != nil {
+			s.logger().Error("wire: encoding a Local connection's user", "error", err)
+		}
+		frames = append(frames, frame)
 	}
 	s.mu.Lock()
 	if err == nil && s.closed {
@@ -191,16 +220,14 @@ func (s *Server) openLocal(ctx context.Context, c *Conn) error {
 	}
 	if err != nil {
 		s.mu.Unlock()
-		c.release(true)
-		s.disconnected(c)
-		return err
+		return fail(err)
 	}
 	s.conns[c] = struct{}{}
 	s.mu.Unlock()
 	c.mu.Lock()
 	c.info = info
 	c.mu.Unlock()
-	c.enqueue([]Frame{frame})
+	c.enqueue(frames)
 	c.release(false)
 	return nil
 }
