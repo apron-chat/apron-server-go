@@ -30,6 +30,7 @@ import (
 	"github.com/apron-chat/apron-server-go/apron/internal/invitations"
 	"github.com/apron-chat/apron-server-go/apron/internal/kv"
 	"github.com/apron-chat/apron-server-go/apron/internal/proposals"
+	"github.com/apron-chat/apron-server-go/apron/internal/push"
 	"github.com/apron-chat/apron-server-go/apron/internal/roomlog"
 	"github.com/apron-chat/apron-server-go/apron/internal/rooms"
 	"github.com/apron-chat/apron-server-go/apron/internal/services"
@@ -138,11 +139,11 @@ type client struct {
 // (roomlog), rooms, their members, and who may see them (rooms), the store
 // writer and its fences (durable), user_ids (accounts), what the server
 // keeps of each user and the accounts by identity (users), users' statuses
-// (presence), sessions (sessions), device tokens (devices), service tokens
-// (services, whose expiry takes mu), invitations (invitations), hosted
-// embeds (embeds), the custom emoji (emoji), out-of-band sign-in proposals
-// (proposals), and the extensions' values (kv), whose methods are called
-// holding mu; and push delivery
+// (presence), push registrations (push), sessions (sessions), device
+// tokens (devices), service tokens (services, whose expiry takes mu),
+// invitations (invitations), hosted embeds (embeds), the custom emoji
+// (emoji), out-of-band sign-in proposals (proposals), and the extensions'
+// values (kv), whose methods are called holding mu; and push delivery
 // (webpush), live text (livetext), and upload files (uploads), which own
 // their own locks or atomics. Each module that keeps state in the store
 // tracks its own changes and renders its own entries (persist.go). Server
@@ -189,9 +190,10 @@ type Server struct {
 	dirty      dirtySet
 	store      *durable.Writer
 	storedMeta storedMeta
-	pushes     map[string]*pushRegistration
-	closed     bool
-	sessions   *sessions.Table[*userState]
+	// pushes are the users' push registrations (push.go).
+	pushes   *push.Table
+	closed   bool
+	sessions *sessions.Table[*userState]
 	// devices are the /invite-device tokens (devices.go).
 	devices *devices.Table[*userState]
 	// invitations are the outstanding invitations (invitations.go).
@@ -287,7 +289,7 @@ func Open(config Config) (*Server, error) {
 		roleHolders: make(map[string][]Principal),
 		embeds:      embeds.New[*embedState](),
 		emoji:       emoji.NewCatalog[*embedState](),
-		pushes:      make(map[string]*pushRegistration),
+		pushes:      push.NewTable(),
 		sessions:    sessions.New[*userState](),
 		devices:     devices.New[*userState](),
 		invitations: invitations.New(),
@@ -686,7 +688,7 @@ func (s *Server) serverParams(baseURL string, revealed bool) wire.ServerInfo {
 		ext = ext.With("emoji", emoji)
 	}
 	if !s.config.DisablePush {
-		push := map[string]any{"relay": map[string]any{}, "wake": (urgentScopes | wakeJoined | wakeBadge).names()}
+		push := map[string]any{"relay": map[string]any{}, "wake": (urgentScopes | wakeJoined | wakeBadge).Names()}
 		if s.vapid != nil {
 			push["webpush"] = map[string]any{"key": s.vapid.Public}
 		}

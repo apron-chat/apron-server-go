@@ -17,6 +17,7 @@ import (
 	"github.com/apron-chat/apron-server-go/apron/internal/embeds"
 	"github.com/apron-chat/apron-server-go/apron/internal/emoji"
 	"github.com/apron-chat/apron-server-go/apron/internal/invitations"
+	"github.com/apron-chat/apron-server-go/apron/internal/push"
 	"github.com/apron-chat/apron-server-go/apron/internal/services"
 	"github.com/apron-chat/apron-server-go/apron/internal/users"
 	"github.com/apron-chat/apron-server-go/store"
@@ -234,6 +235,12 @@ func TestStoredAccountsAreStoredAgain(t *testing.T) {
 	expectStoredAgain(t, emoji.StoreKind, map[string]jsontext.Value{emoji.StoreID: stored[emoji.StoreKind][emoji.StoreID]}, catalog.Snapshot())
 
 	expectUsersStoredAgain(t, stored[entryUser], stored[entryUser])
+
+	pushTable := push.NewTable()
+	if err := pushTable.Restore(stored[push.EntryKind], func(*push.Registration) bool { return true }); err != nil {
+		t.Fatal(err)
+	}
+	expectStoredAgain(t, push.EntryKind, stored[push.EntryKind], pushTable.Snapshot())
 }
 
 // storedEmbed is an embed as the store keeps it.
@@ -269,5 +276,4 @@ func TestStoredAccountShapesRoundTrip(t *testing.T) {
 		expectStoredAgain(t, kind, stored[kind], again)
 	}
 	roundTrip(entryUser, func() any { return new(users.Stored) })
-	roundTrip(entryPush, func() any { return new(storedPush) })
 }

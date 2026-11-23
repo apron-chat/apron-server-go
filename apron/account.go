@@ -162,8 +162,8 @@ func (s *Server) removeCredentialLocked(u *userState, scheme, id string, except 
 			ended[token] = true
 		}
 	}
-	for _, registration := range u.pushes {
-		if ended[registration.session] {
+	for _, registration := range s.pushes.Of(u.id) {
+		if ended[registration.Session] {
 			s.removePushLocked(registration)
 		}
 	}
@@ -209,9 +209,9 @@ func (s *Server) signOutOthersLocked(u *userState, keep *client) {
 			s.devices.Delete(key)
 		}
 	}
-	for _, registration := range u.pushes {
-		kept := (session != [32]byte{} && registration.session == session) ||
-			(device != [32]byte{} && registration.device == device && registration.session == [32]byte{})
+	for _, registration := range s.pushes.Of(u.id) {
+		kept := (session != [32]byte{} && registration.Session == session) ||
+			(device != [32]byte{} && registration.Device == device && registration.Session == [32]byte{})
 		if !kept {
 			s.removePushLocked(registration)
 		}
@@ -382,8 +382,8 @@ func (s *Server) signOut(c *client, r *wire.Request) *Error {
 	}
 	// What the connection signed in with signs in no more, nor wakes it.
 	session, device, service := c.sessionKeyLocked(), c.device, c.service
-	for _, registration := range c.user.pushes {
-		if (session != [32]byte{} && registration.session == session) || (device != [32]byte{} && registration.device == device) {
+	for _, registration := range s.pushes.Of(c.user.id) {
+		if (session != [32]byte{} && registration.Session == session) || (device != [32]byte{} && registration.Device == device) {
 			s.removePushLocked(registration)
 		}
 	}

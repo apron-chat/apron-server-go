@@ -321,7 +321,7 @@ func (s *Server) signOutLocked(u *userState) {
 			s.devices.Delete(key)
 		}
 	}
-	for _, registration := range u.pushes {
+	for _, registration := range s.pushes.Of(u.id) {
 		s.removePushLocked(registration)
 	}
 }

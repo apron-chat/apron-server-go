@@ -201,8 +201,8 @@ func TestSigningOutRemovesWhatTheSessionsMade(t *testing.T) {
 	keep.result(t, "account.sign_out", "others", map[string]any{"others": true})
 	expectClosed(t, other)
 	app.mu.RLock()
-	_, kept := app.users.Get(userID).pushes["https://push.example/keep"]
-	n := len(app.users.Get(userID).pushes)
+	kept := app.pushes.Get(userID, "https://push.example/keep") != nil
+	n := app.pushes.Count(userID)
 	app.mu.RUnlock()
 	if !kept || n != 1 {
 		t.Fatalf("pushes after signing out the others: kept %v, %d left", kept, n)

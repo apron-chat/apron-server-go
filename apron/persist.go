@@ -1,7 +1,6 @@
 package apron
 
 import (
-	"encoding/hex"
 	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"fmt"
@@ -13,6 +12,7 @@ import (
 	"github.com/apron-chat/apron-server-go/apron/internal/devices"
 	"github.com/apron-chat/apron-server-go/apron/internal/embeds"
 	"github.com/apron-chat/apron-server-go/apron/internal/invitations"
+	"github.com/apron-chat/apron-server-go/apron/internal/push"
 	"github.com/apron-chat/apron-server-go/apron/internal/roomlog"
 	"github.com/apron-chat/apron-server-go/apron/internal/rooms"
 	"github.com/apron-chat/apron-server-go/apron/internal/services"
@@ -26,10 +26,10 @@ import (
 // change made under s.mu marks what it changed: the server's own state in
 // its dirty set (touch*), and the modules that keep their own, the log
 // (roomlog), the rooms (rooms), the user_ids used (accounts), the users
-// (users), the extensions' values (kv), the sessions (sessions), the
-// device tokens (devices), the service tokens (services), the invitations
-// (invitations), the hosted embeds (embeds), and the custom emoji (emoji),
-// in theirs.
+// (users), the push registrations (push), the extensions' values (kv),
+// the sessions (sessions), the device tokens (devices), the service tokens
+// (services), the invitations (invitations), the hosted embeds (embeds),
+// and the custom emoji (emoji), in theirs.
 // When the lock is released, unlock renders the marked state into one
 // batch, and the store writer (durable) applies batches to the store in
 // order, off the lock. At start, Open rebuilds the state from the store.
@@ -56,22 +56,19 @@ import (
 //	invitation  hex SHA-256 of an invitation's token (invitations)
 //	embed    embed_id (embeds)
 //	push     user_id, a space, and url (url alone before registrations
-//	         belonged to their user)
+//	         belonged to their user) (push)
 //	ext/<n>  a key        a value Extension <n> keeps (Host.Store, kv)
 const (
 	entryMeta    = "meta"
 	entryRoom    = rooms.EntryKind
 	entryMessage = rooms.MessageEntryKind
 	entryUser    = users.EntryKind
-	entryPush    = "push"
+	entryPush    = push.EntryKind
 )
 
-// dirtySet is the state changed since the last batch, by key. For pushes,
-// a key missing from the server's map at flush time is deleted from the
-// store.
+// dirtySet is the state changed since the last batch, by key.
 type dirtySet struct {
 	messages map[string]bool
-	pushes   map[string]bool
 	vapid    bool
 	profile  bool
 }
@@ -79,12 +76,10 @@ type dirtySet struct {
 func newDirtySet() dirtySet {
 	return dirtySet{
 		messages: make(map[string]bool),
-		pushes:   make(map[string]bool),
 	}
 }
 
 func (s *Server) touchMessage(m *messageState) { s.dirty.messages[m.ID()] = true }
-func (s *Server) touchPush(key string)         { s.dirty.pushes[key] = true }
 
 // unlock writes the changes made under s.mu through to the store, then
 // releases the lock.
@@ -99,25 +94,6 @@ type storedMeta struct {
 	AccountNumber uint64 `json:"account_number,omitzero"`
 	EmbedNumber   uint64 `json:"embed_number"`
 	UploadSeq     int64  `json:"upload_seq"`
-}
-
-type storedPush struct {
-	User   string `json:"user"`
-	Kind   string `json:"kind"`
-	URL    string `json:"url,omitzero"`
-	Token  string `json:"token,omitzero"`
-	PushID string `json:"push_id,omitzero"`
-	// Device is the hex SHA-256 of the /invite-device token the registering
-	// connection signed in with.
-	Device string `json:"device,omitzero"`
-	// Session is the hex SHA-256 of the session token it signed in with.
-	Session string `json:"session,omitzero"`
-	// P256DH and Auth are the subscription's keys, in base64url.
-	P256DH string `json:"p256dh,omitzero"`
-	Auth   string `json:"auth,omitzero"`
-	// Wake lists the registration's scopes.
-	Wake    []string  `json:"wake"`
-	Renewed time.Time `json:"renewed,omitzero"`
 }
 
 // metaLocked is the counters entry of the current state.
@@ -138,6 +114,7 @@ func (s *Server) flushLocked() {
 		s.dirty = newDirtySet()
 		s.log.Entries()
 		s.users.Entries(avatarEmbedID)
+		s.pushes.Entries()
 		s.rooms.Entries()
 		s.ids.Entries()
 		s.extData.Entries()
@@ -152,6 +129,7 @@ func (s *Server) flushLocked() {
 	}
 	batch := append(s.ids.Entries(), s.entriesLocked(s.dirty, s.log.Entries())...)
 	batch = append(batch, s.users.Entries(avatarEmbedID)...)
+	batch = append(batch, s.pushes.Entries()...)
 	batch = append(batch, s.rooms.Entries()...)
 	batch = append(batch, s.extData.Entries()...)
 	batch = append(batch, s.sessions.Entries(userID)...)
@@ -181,33 +159,10 @@ func (s *Server) entriesLocked(d dirtySet, records []store.Entry) []store.Entry 
 		}
 		batch = append(batch, store.Entry{Kind: kind, ID: id, Value: encoded})
 	}
-	del := func(kind, id string) {
-		batch = append(batch, store.Entry{Kind: kind, ID: id})
-	}
 	batch = append(batch, records...)
 	for id := range d.messages {
 		if m := s.messages[id]; m != nil {
 			batch = append(batch, rooms.MessageEntry(m.Message))
-		}
-	}
-	for key := range d.pushes {
-		if p := s.pushes[key]; p != nil {
-			stored := storedPush{
-				User: p.userID, Kind: p.kind, URL: p.url, Token: p.token, PushID: p.pushID,
-				Wake: p.wake.names(), Renewed: p.renewed,
-			}
-			if p.device != [32]byte{} {
-				stored.Device = sessionID(p.device)
-			}
-			if p.session != [32]byte{} {
-				stored.Session = sessionID(p.session)
-			}
-			if p.keys != nil {
-				stored.P256DH, stored.Auth = webpush.EncodeBase64URL(p.keys.P256DH), webpush.EncodeBase64URL(p.keys.Auth)
-			}
-			put(entryPush, key, stored)
-		} else {
-			del(entryPush, key)
 		}
 	}
 	if d.vapid && s.vapidStored {
@@ -341,33 +296,10 @@ func (s *Server) restoreLocked() (map[string]bool, error) {
 	if s.config.DisablePush {
 		storedPushes = nil
 	}
-	for key, raw := range storedPushes {
-		var stored storedPush
-		if err := decode(entryPush, key, raw, &stored); err != nil {
-			return nil, err
-		}
-		p := &pushRegistration{
-			userID: stored.User, kind: stored.Kind, url: stored.URL, token: stored.Token, pushID: stored.PushID,
-			wake: parseWakeNames(stored.Wake), renewed: stored.Renewed, lastUnread: -1,
-		}
-		if stored.P256DH != "" {
-			keys, err := webpush.ParseKeys(stored.P256DH, stored.Auth)
-			if err != nil {
-				return nil, fmt.Errorf("stored push %q: %w", key, err)
-			}
-			p.keys = &keys
-		}
-		if device, err := hex.DecodeString(stored.Device); err == nil && len(device) == 32 {
-			p.device = [32]byte(device)
-		}
-		if session, err := hex.DecodeString(stored.Session); err == nil && len(session) == 32 {
-			p.session = [32]byte(session)
-		}
-		if u := s.users.Get(stored.User); u != nil && p.live(now) {
-			s.addPushLocked(u, p)
-		} else {
-			s.touchPush(key)
-		}
+	if err := s.pushes.Restore(storedPushes, func(p *pushRegistration) bool {
+		return s.users.Get(p.User) != nil && p.Live(now)
+	}); err != nil {
+		return nil, err
 	}
 	if err := s.sessions.Restore(entries[sessions.EntryKind], func(id string) (*userState, bool) {
 		u := s.users.Get(id)

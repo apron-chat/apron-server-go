@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/apron-chat/apron-server-go/apron/internal/push"
 	"github.com/apron-chat/apron-server-go/apron/internal/users"
 	"github.com/apron-chat/apron-server-go/store"
 )
@@ -62,30 +63,41 @@ func loadStoredUsers(t *testing.T) []storedUserLine {
 	return lines
 }
 
-// TestStoredUserShapesRoundTrip decodes each entry of the file stored as
-// it is into the shape that stores it, and checks that it encodes again as
-// it was.
+// TestStoredUserShapesRoundTrip decodes each user the file holds as stored
+// into the shape that stores it, and checks that it encodes again as it
+// was.
 func TestStoredUserShapesRoundTrip(t *testing.T) {
 	for _, line := range loadStoredUsers(t) {
-		if !bytes.Equal(line.Value, line.Stored) {
+		if line.Kind != entryUser || !bytes.Equal(line.Value, line.Stored) {
 			continue
 		}
-		var value any
-		switch line.Kind {
-		case entryUser:
-			value = new(users.Stored)
-		case entryPush:
-			value = new(storedPush)
-		default:
-			t.Fatalf("%s entry in %s", line.Kind, storedUsersFile)
-		}
-		if err := json.Unmarshal(line.Value, value); err != nil {
+		var value users.Stored
+		if err := json.Unmarshal(line.Value, &value); err != nil {
 			t.Fatalf("%s %s: %v", line.Kind, line.ID, err)
 		}
 		if again := encodeJSON(value); !bytes.Equal(again, line.Value) {
 			t.Errorf("%s %s is stored again as\n%s\nwant\n%s", line.Kind, line.ID, again, line.Value)
 		}
 	}
+}
+
+// TestStoredPushesAreStoredAgain restores the file's registrations into a
+// table, and checks that it stores each again as it was.
+func TestStoredPushesAreStoredAgain(t *testing.T) {
+	entries := make(map[string]jsontext.Value)
+	for _, line := range loadStoredUsers(t) {
+		if line.Kind == entryPush {
+			entries[line.ID] = line.Value
+		}
+	}
+	if len(entries) == 0 {
+		t.Fatal("no registrations")
+	}
+	table := push.NewTable()
+	if err := table.Restore(entries, func(*push.Registration) bool { return true }); err != nil {
+		t.Fatal(err)
+	}
+	expectStoredAgain(t, entryPush, entries, table.Snapshot())
 }
 
 // TestStoredUsersAreStoredAgain restores the file's users into a table,

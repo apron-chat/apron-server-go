@@ -362,12 +362,10 @@ func (s *Server) dumpLocked() []store.Entry {
 	for id := range s.messages {
 		all.messages[id] = true
 	}
-	for key := range s.pushes {
-		all.pushes[key] = true
-	}
 	all.vapid = s.vapidStored
 	meta := s.metaLocked()
 	records = append(records, s.users.Snapshot(avatarEmbedID)...)
+	records = append(records, s.pushes.Snapshot()...)
 	records = append(records, s.sessions.Snapshot(userID)...)
 	records = append(records, s.ids.Snapshot()...)
 	records = append(records, s.devices.Snapshot(userID)...)

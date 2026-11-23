@@ -13,6 +13,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/apron-chat/apron-server-go/apron/internal/accounts"
+	"github.com/apron-chat/apron-server-go/apron/internal/push"
 	"github.com/apron-chat/apron-server-go/apron/internal/roomlog"
 	"github.com/apron-chat/apron-server-go/apron/internal/users"
 	"github.com/apron-chat/apron-server-go/internal/authn"
@@ -35,7 +36,7 @@ const (
 // userState is a user (§3.3): what the server keeps of it across
 // connections and restarts (users.User), and its live links: its
 // connections, the rooms it joined (§4.2.2), its roles, the writes and
-// limits of its requests, its timers, and its push registrations (§4.9).
+// limits of its requests, its timers, and its unread counts (§4.9).
 // Guest users are retired when their last connection closes; accounts
 // persist.
 type userState struct {
@@ -68,16 +69,13 @@ type userState struct {
 	statusTimer    *time.Timer
 	muteTimer      *time.Timer
 	roomMuteTimers map[string]*time.Timer
-	// pushes are the user's push registrations by url (§4.9). unread holds
-	// the counts known per room while the user has registrations, and
-	// badgeTimer a pending badge push (unread.go).
-	pushes     map[string]*pushRegistration
+	// unread holds the counts known per room while the user has push
+	// registrations (§4.9), and badgeTimer a pending badge push
+	// (unread.go); pushDay counts the pushes delivered to the user today,
+	// against maxPushesPerUserDay.
 	unread     map[string]int
 	badgeTimer *time.Timer
-	// pushDay is the UTC day pushesToday counts the pushes delivered to the
-	// user on, against maxPushesPerUserDay.
-	pushDay     string
-	pushesToday int
+	pushDay    push.Day
 }
 
 // newUserState returns a new user named name.
@@ -92,7 +90,6 @@ func restoredUser(id string, stored users.User) *userState {
 		User:    stored,
 		clients: make(map[*client]struct{}),
 		joined:  make(map[string]*roomState),
-		pushes:  make(map[string]*pushRegistration),
 	}
 }
 
@@ -295,7 +292,7 @@ func (s *Server) retireLocked(u *userState) {
 		return cmp.Compare(a.Log().Created(), b.Log().Created())
 	})
 	// Its registrations go first, so its leaves send it no badge pushes.
-	for _, registration := range u.pushes {
+	for _, registration := range s.pushes.Of(u.id) {
 		s.removePushLocked(registration)
 	}
 	for _, r := range rooms {

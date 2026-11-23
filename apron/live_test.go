@@ -727,7 +727,7 @@ func TestAppendPushWaitsForTheText(t *testing.T) {
 	app, httpServer := pushTestServer(t)
 	a := dialTestClient(t, httpServer)
 	alice := addAccount(t, app, "alice", a)
-	addPush(app, alice, pushRegistration{url: relay.URL + "/alice", wake: defaultWake})
+	addPush(app, alice, pushRegistration{URL: relay.URL + "/alice", Wake: defaultWake})
 	messagePushes := func() []map[string]any {
 		t.Helper()
 		var bodies []map[string]any

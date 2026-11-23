@@ -156,13 +156,13 @@ func (s *Server) unreadChangedLocked(u *userState, roomID string) {
 // concerns. previous is the snapshot the save replaced, nil for a new
 // message, and from the room it was in before, for a move.
 func (s *Server) messageUnreadLocked(m *messageState, previous *roomlog.Message, from *roomState) {
-	if len(s.pushes) == 0 {
+	if s.pushes.Len() == 0 {
 		return
 	}
 	r := s.rooms.Get(m.RoomID())
 	concerned := make(map[string]*userState)
 	add := func(u *userState) {
-		if u != nil && len(u.pushes) > 0 && u.id != m.Owner() {
+		if u != nil && s.pushes.Count(u.id) > 0 && u.id != m.Owner() {
 			concerned[u.id] = u
 		}
 	}
@@ -230,7 +230,7 @@ func (s *Server) messageUnreadLocked(m *messageState, previous *roomlog.Message,
 // registration with scope badge (§4.9). Later changes within the delay ride
 // along. Nothing is scheduled once the server is shutting down.
 func (s *Server) scheduleBadgeLocked(u *userState) {
-	if s.closed || u.badgeTimer != nil || !slices.ContainsFunc(slices.Collect(maps.Values(u.pushes)), (*pushRegistration).takesBadges) {
+	if s.closed || u.badgeTimer != nil || !slices.ContainsFunc(s.pushes.Of(u.id), (*pushRegistration).TakesBadges) {
 		return
 	}
 	s.badges.Add(1)
@@ -259,19 +259,19 @@ func (s *Server) stopBadgeLocked(u *userState) {
 // mute silences still changes the count.
 func (s *Server) badgeLocked(u *userState, now time.Time) {
 	unread := -1
-	for _, p := range sortedPushes(u) {
-		if !p.takesBadges() || !p.live(now) {
+	for _, p := range s.pushes.Of(u.id) {
+		if !p.TakesBadges() || !p.Live(now) {
 			continue
 		}
 		if unread < 0 {
 			unread = s.unreadLocked(u, now)
 		}
-		if unread == p.lastUnread || p.inFlight && unread == p.pendingUnread {
+		if !p.WantsBadge(unread) {
 			continue
 		}
 		payload := map[string]any{"unread": unread}
-		if p.pushID != "" {
-			payload["push_id"] = p.pushID
+		if p.PushID != "" {
+			payload["push_id"] = p.PushID
 		}
 		s.deliverPushLocked(p, unread, encodeJSON(payload), "low", true)
 	}

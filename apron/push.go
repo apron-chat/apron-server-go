@@ -2,7 +2,6 @@ package apron
 
 import (
 	"bytes"
-	"cmp"
 	"encoding/json/v2"
 	"fmt"
 	"maps"
@@ -12,6 +11,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/apron-chat/apron-server-go/apron/internal/push"
 	"github.com/apron-chat/apron-server-go/apron/internal/roomlog"
 	"github.com/apron-chat/apron-server-go/apron/internal/webpush"
 	"github.com/apron-chat/apron-server-go/wire"
@@ -19,7 +19,7 @@ import (
 
 const (
 	maxPushTextRunes = 1000
-	maxPushesPerUser = 10
+	maxPushesPerUser = push.MaxPerUser
 	maxPushURLBytes  = 512
 	maxPushTokenLen  = 4096
 	// maxPushPayloadBytes bounds the JSON payload every kind delivers (§4.9).
@@ -30,143 +30,44 @@ const (
 	maxWakeScopes     = 16
 	maxWakeScopeBytes = 64
 	// pushExpiry is how long a registration lasts unless registered again
-	// (§4.9); clients register on each connection. pushSweepInterval is how
-	// often expired registrations are looked for.
-	pushExpiry        = 30 * 24 * time.Hour
+	// (§4.9, push.Expiry). pushSweepInterval is how often expired
+	// registrations are looked for.
+	pushExpiry        = push.Expiry
 	pushSweepInterval = time.Hour
 	// maxPushesPerUserDay bounds the pushes delivered to one user in a UTC
 	// day, counting only those the endpoint accepted (2xx).
 	maxPushesPerUserDay = 1000
 )
 
-// wakeScope is a set of wake scopes (§4.9).
-type wakeScope uint8
-
-const (
-	wakeMentions wakeScope = 1 << iota
-	wakeReplies
-	wakePrivate
-	wakeJoined
-	wakeBadge
-	// defaultWake is the scopes of a registration without wake.
-	defaultWake = wakeMentions | wakeReplies
-	// urgentScopes push with Urgency high; joined is normal, badge low.
-	urgentScopes = wakeMentions | wakeReplies | wakePrivate
+// pushRegistration is one push endpoint of a user (§4.9), and wakeScope a
+// set of wake scopes (push).
+type (
+	pushRegistration = push.Registration
+	wakeScope        = push.Wake
 )
 
-// wakeScopeNames lists the scopes this server implements, in the order
-// server.push.wake advertises them.
-var wakeScopeNames = []struct {
-	name  string
-	scope wakeScope
-}{{"mentions", wakeMentions}, {"replies", wakeReplies}, {"private", wakePrivate}, {"joined", wakeJoined}, {"badge", wakeBadge}}
-
-// names lists the scopes in a set, in advertised order.
-func (w wakeScope) names() []string {
-	names := []string{}
-	for _, scope := range wakeScopeNames {
-		if w&scope.scope != 0 {
-			names = append(names, scope.name)
-		}
-	}
-	return names
-}
-
-// parseWakeNames reads a wake list, ignoring scopes this server does not
-// implement (§4.9).
-func parseWakeNames(names []string) wakeScope {
-	var wake wakeScope
-	for _, name := range names {
-		for _, scope := range wakeScopeNames {
-			if scope.name == name {
-				wake |= scope.scope
-			}
-		}
-	}
-	return wake
-}
+const (
+	wakeMentions = push.Mentions
+	wakeReplies  = push.Replies
+	wakePrivate  = push.Private
+	wakeJoined   = push.Joined
+	wakeBadge    = push.Badge
+	defaultWake  = push.DefaultWake
+	urgentScopes = push.Urgent
+)
 
 // pushIDPattern is the shape of a client's push_id (§4.9).
 var pushIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
 
-// pushRegistration is one push endpoint of a user (§4.9), identified by the
-// user and its url.
-type pushRegistration struct {
-	userID string
-	kind   string
-	url    string
-	// token is a relay's bearer token.
-	token  string
-	pushID string
-	// device is the key of the /invite-device token the registering
-	// connection signed in with, zero for none, so replacing that token
-	// removes only the registrations it made.
-	device [32]byte
-	// session is the key of the session token the registering connection
-	// signed in or resumed with, zero for none, so ending that session
-	// (account.go) removes the registrations it made.
-	session [32]byte
-	// keys, for webpush and optionally relay, encrypt the payload.
-	keys *webpush.Keys
-	wake wakeScope
-	// renewed is when the client last registered it; it expires pushExpiry
-	// later.
-	renewed time.Time
-	// lastUnread is the unread count the endpoint last accepted, -1 when
-	// none was since the server started; a badge push is sent only when the
-	// count differs (§4.9). sent numbers the pushes handed to the deliverer
-	// and accepted the latest of them the endpoint accepted, so a push
-	// accepted late does not record an older count.
-	lastUnread int
-	sent       uint64
-	accepted   uint64
-	// pendingUnread is the count of the latest push sent, while inFlight:
-	// a badge push for the same count waits on its outcome.
-	pendingUnread int
-	inFlight      bool
-}
-
-// live reports whether the registration has not expired at now.
-func (p *pushRegistration) live(now time.Time) bool {
-	return now.Before(p.renewed.Add(pushExpiry))
-}
-
-// takesBadges reports whether the registration gets badge pushes: it has
-// scope badge, which webpush ignores (§4.9).
-func (p *pushRegistration) takesBadges() bool {
-	return p.wake&wakeBadge != 0 && p.kind != "webpush"
-}
-
-// pushKey identifies a registration in Server.pushes and the store: its
-// user and url, which holds no space.
-func pushKey(userID, url string) string {
-	return userID + " " + url
-}
-
-// addPushLocked records a registration, replacing the user's registration
-// of the same url.
-func (s *Server) addPushLocked(u *userState, p *pushRegistration) {
-	u.pushes[p.url] = p
-	key := pushKey(u.id, p.url)
-	s.pushes[key] = p
-	s.touchPush(key)
-}
-
-// removePushLocked forgets a registration, if it is still the one recorded.
-// A user left without registrations has no unread counts kept.
+// removePushLocked forgets a registration, if it is still the one kept. A
+// user left without registrations has no unread counts kept.
 func (s *Server) removePushLocked(p *pushRegistration) {
-	key := pushKey(p.userID, p.url)
-	if s.pushes[key] != p {
+	if !s.pushes.Remove(p) || s.pushes.Count(p.User) > 0 {
 		return
 	}
-	delete(s.pushes, key)
-	s.touchPush(key)
-	if u := s.users.Get(p.userID); u != nil && u.pushes[p.url] == p {
-		delete(u.pushes, p.url)
-		if len(u.pushes) == 0 {
-			u.unread = nil
-			s.stopBadgeLocked(u)
-		}
+	if u := s.users.Get(p.User); u != nil {
+		u.unread = nil
+		s.stopBadgeLocked(u)
 	}
 }
 
@@ -227,7 +128,7 @@ func (s *Server) registerPush(c *client, r *wire.Request) *Error {
 		// Past the bounds, names are ignored like unknown scopes.
 		names = names[:min(len(names), maxWakeScopes)]
 		names = slices.DeleteFunc(names, func(name string) bool { return len(name) > maxWakeScopeBytes })
-		wake = parseWakeNames(names)
+		wake = push.ParseWake(names)
 	}
 
 	s.mu.Lock()
@@ -238,16 +139,13 @@ func (s *Server) registerPush(c *client, r *wire.Request) *Error {
 	u := c.user
 	now := time.Now()
 	s.expirePushesLocked(u, now)
-	if _, replacing := u.pushes[endpoint]; !replacing && len(u.pushes) >= maxPushesPerUser {
-		oldest := slices.MinFunc(slices.Collect(maps.Values(u.pushes)), func(a, b *pushRegistration) int {
-			return a.renewed.Compare(b.renewed)
-		})
-		s.removePushLocked(oldest)
+	if s.pushes.Get(u.id, endpoint) == nil && s.pushes.Count(u.id) >= maxPushesPerUser {
+		s.removePushLocked(s.pushes.Oldest(u.id))
 	}
-	s.addPushLocked(u, &pushRegistration{
-		userID: u.id, kind: kind, url: endpoint, token: token, pushID: pushID, device: c.device, session: c.sessionKeyLocked(),
-		keys: keys, wake: wake, renewed: now, lastUnread: -1,
-	})
+	s.pushes.Add(push.New(pushRegistration{
+		User: u.id, Kind: kind, URL: endpoint, Token: token, PushID: pushID, Device: c.device, Session: c.sessionKeyLocked(),
+		Keys: keys, Wake: wake, Renewed: now,
+	}))
 	return nil
 }
 
@@ -287,7 +185,7 @@ func (s *Server) unregisterPush(c *client, r *wire.Request) *Error {
 	}
 	s.mu.Lock()
 	defer s.unlock()
-	if registration := c.user.pushes[endpoint]; registration != nil {
+	if registration := s.pushes.Get(c.user.id, endpoint); registration != nil {
 		s.removePushLocked(registration)
 	}
 	return nil
@@ -296,8 +194,8 @@ func (s *Server) unregisterPush(c *client, r *wire.Request) *Error {
 // expirePushesLocked forgets the user's registrations that were not
 // registered again within pushExpiry.
 func (s *Server) expirePushesLocked(u *userState, now time.Time) {
-	for _, p := range u.pushes {
-		if !p.live(now) {
+	for _, p := range s.pushes.Of(u.id) {
+		if !p.Live(now) {
 			s.removePushLocked(p)
 		}
 	}
@@ -315,9 +213,8 @@ func (s *Server) sweepPushes() {
 			return
 		case <-ticker.C:
 			s.mu.Lock()
-			now := time.Now()
-			for _, id := range s.users.IDs() {
-				s.expirePushesLocked(s.users.Get(id), now)
+			for _, p := range s.pushes.Expired(time.Now()) {
+				s.removePushLocked(p)
 			}
 			s.unlock()
 		}
@@ -344,7 +241,7 @@ func (s *Server) sweepPushes() {
 // urgent Urgency of the scopes that select it.
 func (s *Server) wakeLocked(m *messageState, snapshot, previous *roomlog.Message) {
 	// Transient notices, which have no message_id, are never pushed (§4.9).
-	if s.config.DisablePush || len(s.pushes) == 0 || snapshot.Deleted || snapshot.MessageID == "" {
+	if s.config.DisablePush || s.pushes.Len() == 0 || snapshot.Deleted || snapshot.MessageID == "" {
 		return
 	}
 	r := s.rooms.Get(m.RoomID())
@@ -358,8 +255,8 @@ func (s *Server) wakeLocked(m *messageState, snapshot, previous *roomlog.Message
 				reasons[target.Owner()] |= wakeReplies
 			}
 		}
-		for id, u := range r.Members() {
-			if len(u.pushes) > 0 {
+		for id := range r.Members() {
+			if s.pushes.Count(id) > 0 {
 				reasons[id] |= wakeJoined
 			}
 		}
@@ -367,8 +264,8 @@ func (s *Server) wakeLocked(m *messageState, snapshot, previous *roomlog.Message
 		// in their threads (§4.9): those who can see a private room's
 		// thread joined every private room above it.
 		if everyone, audience := r.Audience(); !everyone {
-			for id, u := range audience {
-				if len(u.pushes) > 0 {
+			for id := range audience {
+				if s.pushes.Count(id) > 0 {
 					reasons[id] |= wakePrivate
 				}
 			}
@@ -382,7 +279,7 @@ func (s *Server) wakeLocked(m *messageState, snapshot, previous *roomlog.Message
 	now := time.Now()
 	for _, id := range slices.Sorted(maps.Keys(reasons)) {
 		u := s.users.Get(id)
-		if u == nil || len(u.pushes) == 0 || !r.VisibleTo(u) || u.attended() || u.silenced(now) {
+		if u == nil || s.pushes.Count(id) == 0 || !r.VisibleTo(u) || u.attended() || u.silenced(now) {
 			continue
 		}
 		why := reasons[id]
@@ -394,8 +291,8 @@ func (s *Server) wakeLocked(m *messageState, snapshot, previous *roomlog.Message
 		}
 		s.expirePushesLocked(u, now)
 		unread := -1
-		for _, p := range sortedPushes(u) {
-			scopes := why & p.wake
+		for _, p := range s.pushes.Of(id) {
+			scopes := why & p.Wake
 			if scopes == 0 {
 				continue
 			}
@@ -406,17 +303,9 @@ func (s *Server) wakeLocked(m *messageState, snapshot, previous *roomlog.Message
 			if scopes&urgentScopes != 0 {
 				urgency = "high"
 			}
-			s.deliverPushLocked(p, unread, pushPayload(p.pushID, unread, snapshot), urgency, false)
+			s.deliverPushLocked(p, unread, pushPayload(p.PushID, unread, snapshot), urgency, false)
 		}
 	}
-}
-
-// sortedPushes lists the user's registrations by url, so deliveries go out
-// in a stable order.
-func sortedPushes(u *userState) []*pushRegistration {
-	return slices.SortedFunc(maps.Values(u.pushes), func(a, b *pushRegistration) int {
-		return cmp.Compare(a.url, b.url)
-	})
 }
 
 // deliverPushLocked hands a payload carrying the count unread to the
@@ -432,50 +321,30 @@ func (s *Server) deliverPushLocked(p *pushRegistration, unread int, payload []by
 	if s.closed {
 		return
 	}
-	if u := s.users.Get(p.userID); u == nil || u.pushesTodayLocked(time.Now()) >= maxPushesPerUserDay {
+	if u := s.users.Get(p.User); u == nil || u.pushDay.Count(time.Now()) >= maxPushesPerUserDay {
 		return
 	}
-	p.sent++
-	seq := p.sent
-	p.pendingUnread, p.inFlight = unread, true
+	seq := p.Sending(unread)
 	done := func(status int) {
 		accepted := status >= 200 && status < 300
 		gone := status == http.StatusNotFound || status == http.StatusGone
 		s.mu.Lock()
 		defer s.unlock()
-		if seq == p.sent {
-			p.inFlight = false
-		}
-		if !accepted && !gone {
-			return
-		}
-		u := s.users.Get(p.userID)
+		p.Delivered(seq, unread, accepted)
+		u := s.users.Get(p.User)
 		switch {
 		case u == nil:
 		case accepted:
-			u.pushesTodayLocked(time.Now())
-			u.pushesToday++
-			if seq > p.accepted {
-				p.accepted, p.lastUnread = seq, unread
-			}
-		default:
+			u.pushDay.Accepted(time.Now())
+		case gone:
 			s.removePushLocked(p)
 		}
 	}
 	latest := ""
 	if badge {
-		latest = pushKey(p.userID, p.url)
+		latest = push.Key(p.User, p.URL)
 	}
-	s.push.Deliver(webpush.Target{UserID: p.userID, Kind: p.kind, URL: p.url, Token: p.token, Keys: p.keys}, payload, urgency, latest, done)
-}
-
-// pushesTodayLocked is how many pushes the user's endpoints accepted on
-// now's UTC day.
-func (u *userState) pushesTodayLocked(now time.Time) int {
-	if day := now.UTC().Format(time.DateOnly); day != u.pushDay {
-		u.pushDay, u.pushesToday = day, 0
-	}
-	return u.pushesToday
+	s.push.Deliver(p.Target(), payload, urgency, latest, done)
 }
 
 // pushPayload is the payload every kind delivers (§4.9): push_id, unread,

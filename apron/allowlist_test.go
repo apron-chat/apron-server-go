@@ -186,7 +186,7 @@ func TestClosingConnectionsDoNothing(t *testing.T) {
 	if _, err := l.Call(ctx, "push_register", map[string]any{"kind": "relay", "url": "https://push.example/x", "token": "t"}); !errors.Is(err, wire.ErrClosed) {
 		t.Fatalf("a closing connection's request: %v", err)
 	}
-	if len(app.pushes) != 0 {
-		t.Fatalf("a closing connection's request ran: %d pushes", len(app.pushes))
+	if app.pushes.Len() != 0 {
+		t.Fatalf("a closing connection's request ran: %d pushes", app.pushes.Len())
 	}
 }

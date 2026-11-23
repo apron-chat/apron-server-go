@@ -95,8 +95,8 @@ func (s *Server) revokeDeviceLocked(c *client, old, replacement [32]byte) {
 			peer.closeWithError(&Error{Code: CodeDenied, Message: "Device token replaced; sign in with the new one"})
 		}
 	}
-	for _, registration := range c.user.pushes {
-		if registration.device == old {
+	for _, registration := range s.pushes.Of(c.user.id) {
+		if registration.Device == old {
 			s.removePushLocked(registration)
 		}
 	}

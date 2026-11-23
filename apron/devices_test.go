@@ -3,7 +3,6 @@ package apron
 import (
 	"context"
 	"fmt"
-	"maps"
 	"net/http/httptest"
 	"path/filepath"
 	"reflect"
@@ -128,7 +127,11 @@ func expectClosedWithError(t *testing.T, c *testClient, code int, message string
 func pushURLs(app *Server, userID string) []string {
 	app.mu.Lock()
 	defer app.unlock()
-	return slices.Sorted(maps.Keys(app.users.Get(userID).pushes))
+	var urls []string
+	for _, p := range app.pushes.Of(userID) {
+		urls = append(urls, p.URL)
+	}
+	return urls
 }
 
 func TestInviteDeviceSignsInFromAnyOrigin(t *testing.T) {
@@ -305,7 +308,7 @@ func TestDeviceTokensSurviveRestart(t *testing.T) {
 			app.mu.Lock()
 			u := app.users.Get(adaID)
 			app.unlock()
-			addPush(app, u, pushRegistration{url: "https://push.example/untagged"})
+			addPush(app, u, pushRegistration{URL: "https://push.example/untagged"})
 			stop()
 
 			app, httpServer, _ = startWithStore(t, open(t, dbPath), uploadDir)

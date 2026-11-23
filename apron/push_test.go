@@ -23,6 +23,7 @@ import (
 	"github.com/coder/websocket"
 	"golang.org/x/time/rate"
 
+	"github.com/apron-chat/apron-server-go/apron/internal/push"
 	"github.com/apron-chat/apron-server-go/apron/internal/roomlog"
 	"github.com/apron-chat/apron-server-go/apron/internal/users"
 	"github.com/apron-chat/apron-server-go/apron/internal/webpush"
@@ -142,17 +143,25 @@ func addAccount(t *testing.T, app *Server, id string, others ...*testClient) *us
 func addPush(app *Server, u *userState, p pushRegistration) *pushRegistration {
 	app.mu.Lock()
 	defer app.unlock()
-	p.userID = u.id
-	if p.kind == "" {
-		p.kind = "relay"
+	p.User = u.id
+	if p.Kind == "" {
+		p.Kind = "relay"
 	}
-	if p.renewed.IsZero() {
-		p.renewed = time.Now()
+	if p.Renewed.IsZero() {
+		p.Renewed = time.Now()
 	}
-	p.lastUnread = -1
-	registration := &p
-	app.addPushLocked(u, registration)
+	registration := push.New(p)
+	app.pushes.Add(registration)
 	return registration
+}
+
+// pushEntries are the store entries of registrations.
+func pushEntries(registrations ...*pushRegistration) []store.Entry {
+	table := push.NewTable()
+	for _, p := range registrations {
+		table.Add(p)
+	}
+	return table.Entries()
 }
 
 // goIdle tells the server nobody attends c, which tells c nothing.
@@ -169,8 +178,8 @@ func TestPushWakesMentionsAndRepliesOfIdleUsers(t *testing.T) {
 	clients := dialGroup(t, httpServer, 2)
 	a, b := clients[0], clients[1]
 	alice := addAccount(t, app, "alice", a, b)
-	addPush(app, alice, pushRegistration{url: relay.URL + "/alice", token: "tok", pushID: "alice-phone", wake: defaultWake})
-	addPush(app, alice, pushRegistration{url: relay.URL + "/alice/gone", wake: defaultWake})
+	addPush(app, alice, pushRegistration{URL: relay.URL + "/alice", Token: "tok", PushID: "alice-phone", Wake: defaultWake})
+	addPush(app, alice, pushRegistration{URL: relay.URL + "/alice/gone", Wake: defaultWake})
 	post := func(id string, params map[string]any) string {
 		t.Helper()
 		messageID, _ := save(t, a, id, params)
@@ -204,7 +213,7 @@ func TestPushWakesMentionsAndRepliesOfIdleUsers(t *testing.T) {
 	}
 	// An endpoint that answers 410 loses its registration.
 	app.mu.RLock()
-	_, kept := alice.pushes[relay.URL+"/alice/gone"]
+	kept := app.pushes.Get(alice.id, relay.URL+"/alice/gone") != nil
 	app.mu.RUnlock()
 	if kept {
 		t.Fatal("gone registration was kept")
@@ -312,7 +321,7 @@ func TestPushRegistration(t *testing.T) {
 	registration := func(u string) *pushRegistration {
 		app.mu.RLock()
 		defer app.mu.RUnlock()
-		return app.users.Get(u).pushes[endpoint]
+		return app.pushes.Get(u, endpoint)
 	}
 	// A registration belongs to its user and url: another user's of the
 	// same url is their own, and re-registering replaces only the caller's.
@@ -320,20 +329,20 @@ func TestPushRegistration(t *testing.T) {
 	a.result(t, "push_register", "webpush", map[string]any{"kind": "webpush", "url": endpoint, "keys": keys, "push_id": "t65S5XBst9bSDpjJ", "wake": []any{"mentions", "private", "ext:later", "unknown"}, "token": "ignored"})
 	b.result(t, "push_register", "relay", map[string]any{"kind": "relay", "url": endpoint, "token": "tok"})
 	first := registration(a.userID)
-	if first.kind != "webpush" || first.token != "" || first.pushID != "t65S5XBst9bSDpjJ" || first.wake != wakeMentions|wakePrivate || first.keys == nil {
+	if first.Kind != "webpush" || first.Token != "" || first.PushID != "t65S5XBst9bSDpjJ" || first.Wake != wakeMentions|wakePrivate || first.Keys == nil {
 		t.Fatalf("webpush registration: %#v", first)
 	}
-	if other := registration(b.userID); other.kind != "relay" || other.token != "tok" || other.wake != defaultWake || other.keys != nil {
+	if other := registration(b.userID); other.Kind != "relay" || other.Token != "tok" || other.Wake != defaultWake || other.Keys != nil {
 		t.Fatalf("relay registration: %#v", other)
 	}
 	a.result(t, "push_register", "again", map[string]any{"kind": "relay", "url": endpoint, "keys": keys, "wake": []any{}})
-	if again := registration(a.userID); again == first || again.kind != "relay" || again.keys == nil || again.pushID != "" || again.wake != 0 || again.renewed.Before(first.renewed) {
+	if again := registration(a.userID); again == first || again.Kind != "relay" || again.Keys == nil || again.PushID != "" || again.Wake != 0 || again.Renewed.Before(first.Renewed) {
 		t.Fatalf("re-registration: %#v", again)
 	}
 	// Another spelling of the same endpoint is the same registration.
 	a.result(t, "push_register", "spelling", map[string]any{"kind": "relay", "url": "HTTPS://Push.Example.NET:443/s/abc", "keys": keys, "wake": []any{}})
 	app.mu.RLock()
-	spellings := len(app.users.Get(a.userID).pushes)
+	spellings := app.pushes.Count(a.userID)
 	app.mu.RUnlock()
 	if spellings != 1 {
 		t.Fatalf("registrations of one endpoint under two spellings: %d", spellings)
@@ -357,8 +366,8 @@ func TestPushRegistration(t *testing.T) {
 	a.result(t, "push_register", "eleventh", map[string]any{"kind": "relay", "url": endpoint + "new"})
 	app.mu.RLock()
 	var urls []string
-	for url := range app.users.Get(a.userID).pushes {
-		urls = append(urls, strings.TrimPrefix(url, endpoint))
+	for _, p := range app.pushes.Of(a.userID) {
+		urls = append(urls, strings.TrimPrefix(p.URL, endpoint))
 	}
 	app.mu.RUnlock()
 	if len(urls) != maxPushesPerUser || slices.Contains(urls, "1") || !slices.Contains(urls, "0") || !slices.Contains(urls, "new") {
@@ -378,7 +387,7 @@ func TestPushWakeScopes(t *testing.T) {
 	for name, wake := range map[string]wakeScope{
 		"default": defaultWake, "joined": wakeJoined, "private": wakePrivate, "replies": wakeReplies, "mentions": wakeMentions, "nothing": 0,
 	} {
-		addPush(app, carol, pushRegistration{url: relay.URL + "/" + name, wake: wake})
+		addPush(app, carol, pushRegistration{URL: relay.URL + "/" + name, Wake: wake})
 	}
 	post := func(params map[string]any) string {
 		t.Helper()
@@ -602,7 +611,7 @@ func TestShutdownCancelsPendingBadges(t *testing.T) {
 	app.badgeDelay = time.Hour
 	a := dialTestClient(t, httpServer)
 	dora := addAccount(t, app, "dora", a)
-	addPush(app, dora, pushRegistration{url: relay.URL + "/dora", wake: wakeBadge})
+	addPush(app, dora, pushRegistration{URL: relay.URL + "/dora", Wake: wakeBadge})
 	save(t, a, "post", map[string]any{"body": map[string]any{"text": "hi"}})
 	app.mu.Lock()
 	pending := dora.badgeTimer != nil
@@ -697,7 +706,7 @@ func TestWebPushDelivery(t *testing.T) {
 		t.Fatalf("deliveries: %v", got)
 	}
 	app.mu.RLock()
-	_, kept := app.users.Get(c.userID).pushes[relay.URL+"/web/missing"]
+	kept := app.pushes.Get(c.userID, relay.URL+"/web/missing") != nil
 	app.mu.RUnlock()
 	if kept {
 		t.Fatal("a webpush subscription answering 404 was kept")
@@ -768,17 +777,16 @@ func TestPushRegistrationsExpire(t *testing.T) {
 	app, httpServer := pushTestServer(t)
 	a := dialTestClient(t, httpServer)
 	dora := addAccount(t, app, "dora", a)
-	stale := addPush(app, dora, pushRegistration{url: relay.URL + "/stale", wake: defaultWake, renewed: time.Now().Add(-pushExpiry - time.Minute)})
-	addPush(app, dora, pushRegistration{url: relay.URL + "/fresh", wake: defaultWake, renewed: time.Now().Add(-pushExpiry + time.Hour)})
+	stale := addPush(app, dora, pushRegistration{URL: relay.URL + "/stale", Wake: defaultWake, Renewed: time.Now().Add(-pushExpiry - time.Minute)})
+	addPush(app, dora, pushRegistration{URL: relay.URL + "/fresh", Wake: defaultWake, Renewed: time.Now().Add(-pushExpiry + time.Hour)})
 	save(t, a, "mention", map[string]any{"body": map[string]any{"text": "@dora", "mentions": []any{"dora"}}})
 	if got := paths(relay.pushes(t, app, a)); !reflect.DeepEqual(got, []string{"/fresh"}) {
 		t.Fatalf("deliveries: %v", got)
 	}
 	app.mu.RLock()
-	_, kept := dora.pushes[stale.url]
-	_, indexed := app.pushes[pushKey("dora", stale.url)]
+	kept := app.pushes.Get("dora", stale.URL) != nil
 	app.mu.RUnlock()
-	if kept || indexed {
+	if kept {
 		t.Fatal("an expired registration was kept")
 	}
 }
@@ -909,8 +917,10 @@ func TestPushAndStatusSurviveRestart(t *testing.T) {
 		{Kind: entryUser, ID: "erin", Value: encodeJSON(users.Stored{Name: "Erin", Passkey: jsontext.Value(`{"handle":"aA=="}`)})},
 		{Kind: entryUser, ID: "finn", Value: []byte(`{"name":"Finn","passkey":{"handle":"aA=="},"status":"invisible"}`)},
 		{Kind: entryUser, ID: "gail", Value: []byte(`{"name":"Gail","passkey":{"handle":"aQ=="},"status":"away"}`)},
-		{Kind: entryPush, ID: pushKey("erin", "https://relay.example/erin"), Value: encodeJSON(storedPush{User: "erin", Kind: "relay", URL: "https://relay.example/erin", Token: "tok", Wake: defaultWake.names(), Renewed: time.Now()})},
 	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := memory.Apply(pushEntries(&pushRegistration{User: "erin", Kind: "relay", URL: "https://relay.example/erin", Token: "tok", Wake: defaultWake, Renewed: time.Now()})); err != nil {
 		t.Fatal(err)
 	}
 	app, httpServer, stop := startWithStore(t, memory, t.TempDir())
@@ -918,16 +928,16 @@ func TestPushAndStatusSurviveRestart(t *testing.T) {
 	key := frame["params"].(map[string]any)["push"].(map[string]any)["webpush"].(map[string]any)["key"]
 	app.mu.Lock()
 	erin := app.users.Get("erin")
-	relay := erin.pushes["https://relay.example/erin"]
-	if relay == nil || relay.token != "tok" || relay.wake != defaultWake || !relay.live(time.Now()) {
+	relay := app.pushes.Get("erin", "https://relay.example/erin")
+	if relay == nil || relay.Token != "tok" || relay.Wake != defaultWake || !relay.Live(time.Now()) {
 		app.mu.Unlock()
 		t.Fatalf("relay registration: %#v", relay)
 	}
 	subscription, _ := webpush.ParseKeys(keys["p256dh"].(string), keys["auth"].(string))
-	app.addPushLocked(erin, &pushRegistration{
-		userID: "erin", kind: "webpush", url: "https://push.example/s", pushID: "p1", keys: &subscription,
-		wake: wakeJoined | wakeBadge, renewed: time.Now(), lastUnread: -1,
-	})
+	app.pushes.Add(push.New(pushRegistration{
+		User: "erin", Kind: "webpush", URL: "https://push.example/s", PushID: "p1", Keys: &subscription,
+		Wake: wakeJoined | wakeBadge, Renewed: time.Now(),
+	}))
 	if finn, gail := app.users.Get("finn"), app.users.Get("gail"); finn.Presence.Chosen != statusInvisible || gail.Presence.Chosen != statusNone || erin.Presence.Chosen != statusOnline {
 		app.mu.Unlock()
 		t.Fatalf("loaded statuses: erin %q finn %q gail %q", erin.Presence.Chosen, finn.Presence.Chosen, gail.Presence.Chosen)
@@ -948,11 +958,11 @@ func TestPushAndStatusSurviveRestart(t *testing.T) {
 	}
 	app.mu.RLock()
 	erin = app.users.Get("erin")
-	web := erin.pushes["https://push.example/s"]
-	if web == nil || web.kind != "webpush" || web.pushID != "p1" || web.wake != wakeJoined|wakeBadge || web.keys == nil || webpush.EncodeBase64URL(web.keys.Auth) != keys["auth"] {
+	web := app.pushes.Get("erin", "https://push.example/s")
+	if web == nil || web.Kind != "webpush" || web.PushID != "p1" || web.Wake != wakeJoined|wakeBadge || web.Keys == nil || webpush.EncodeBase64URL(web.Keys.Auth) != keys["auth"] {
 		t.Fatalf("webpush registration after restart: %#v", web)
 	}
-	if erin.pushes["https://relay.example/erin"] == nil || len(app.pushes) != 2 {
+	if app.pushes.Get("erin", "https://relay.example/erin") == nil || app.pushes.Len() != 2 {
 		t.Fatalf("registrations after restart: %v", app.pushes)
 	}
 	if erin.Presence.Chosen != statusDND || app.users.Get("finn").Presence.Chosen != statusNone || !erin.Mute.Active(time.Now()) || !erin.RoomMutes["general"].Forever {
@@ -991,7 +1001,7 @@ func TestPushesPerUserDay(t *testing.T) {
 	app, httpServer := pushTestServer(t)
 	a := dialTestClient(t, httpServer)
 	dora := addAccount(t, app, "dora", a)
-	addPush(app, dora, pushRegistration{url: relay.URL + "/broken/missing", wake: defaultWake})
+	addPush(app, dora, pushRegistration{URL: relay.URL + "/broken/missing", Wake: defaultWake})
 	mention := func() int {
 		t.Helper()
 		save(t, a, a.nextID("mention"), map[string]any{"body": map[string]any{"text": "@dora", "mentions": []any{"dora"}}})
@@ -1002,18 +1012,20 @@ func TestPushesPerUserDay(t *testing.T) {
 		t.Fatalf("deliveries: %d", got)
 	}
 	app.mu.Lock()
-	count := dora.pushesTodayLocked(time.Now())
+	count := dora.pushDay.Count(time.Now())
 	app.unlock()
 	if count != 0 {
 		t.Fatalf("a refused push counted: %d", count)
 	}
-	addPush(app, dora, pushRegistration{url: relay.URL + "/dora", wake: defaultWake})
+	addPush(app, dora, pushRegistration{URL: relay.URL + "/dora", Wake: defaultWake})
 	if got := mention(); got != 1 {
 		t.Fatalf("deliveries: %d", got)
 	}
 	app.mu.Lock()
-	count = dora.pushesTodayLocked(time.Now())
-	dora.pushesToday = maxPushesPerUserDay
+	count = dora.pushDay.Count(time.Now())
+	for range maxPushesPerUserDay - count {
+		dora.pushDay.Accepted(time.Now())
+	}
 	app.unlock()
 	if count != 1 {
 		t.Fatalf("an accepted push counted %d", count)
@@ -1023,7 +1035,7 @@ func TestPushesPerUserDay(t *testing.T) {
 	}
 	// A new day starts over.
 	app.mu.Lock()
-	dora.pushDay = "2000-01-01"
+	dora.pushDay = push.Day{}
 	app.unlock()
 	if got := mention(); got != 1 {
 		t.Fatalf("deliveries on a new day: %d", got)
@@ -1037,14 +1049,16 @@ func TestDisabledPushIgnoresStoredRegistrations(t *testing.T) {
 	url := "https://relay.example/erin"
 	if err := memory.Apply([]store.Entry{
 		{Kind: entryUser, ID: "erin", Value: encodeJSON(users.Stored{Name: "Erin", Passkey: jsontext.Value(`{"handle":"aA=="}`)})},
-		{Kind: entryPush, ID: pushKey("erin", url), Value: encodeJSON(storedPush{User: "erin", Kind: "relay", URL: url, Renewed: time.Now()})},
 	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := memory.Apply(pushEntries(&pushRegistration{User: "erin", Kind: "relay", URL: url, Renewed: time.Now()})); err != nil {
 		t.Fatal(err)
 	}
 	pushesOf := func(app *Server) int {
 		app.mu.RLock()
 		defer app.mu.RUnlock()
-		return len(app.pushes) + len(app.users.Get("erin").pushes)
+		return app.pushes.Len()
 	}
 	app, _, stop := startWith(t, memory, t.TempDir(), func(c *Config) { c.DisablePush = true })
 	if pushes := pushesOf(app); pushes != 0 {
@@ -1052,7 +1066,7 @@ func TestDisabledPushIgnoresStoredRegistrations(t *testing.T) {
 	}
 	stop()
 	app, _, _ = startWithStore(t, memory, t.TempDir())
-	if pushes := pushesOf(app); pushes != 2 {
+	if pushes := pushesOf(app); pushes != 1 {
 		t.Fatalf("with push enabled again: %d registrations", pushes)
 	}
 }
@@ -1065,7 +1079,7 @@ func TestBadgeCountRecordedOnlyWhenAccepted(t *testing.T) {
 	app, httpServer := pushTestServer(t)
 	a := dialTestClient(t, httpServer)
 	alice := addAccount(t, app, "alice", a)
-	addPush(app, alice, pushRegistration{url: relay.URL + "/flaky", wake: wakeBadge})
+	addPush(app, alice, pushRegistration{URL: relay.URL + "/flaky", Wake: wakeBadge})
 	relay.failing.Store(true)
 	save(t, a, "post", map[string]any{"body": map[string]any{"text": "hi"}})
 	if got := relay.pushes(t, app, a); len(got) != 1 || got[0].payload["unread"] != float64(1) {
@@ -1126,7 +1140,7 @@ func TestWakeNamesPastTheBoundsAreIgnored(t *testing.T) {
 		a.result(t, "push_register", id, map[string]any{"kind": "relay", "url": endpoint, "wake": wake})
 		app.mu.RLock()
 		defer app.mu.RUnlock()
-		return app.users.Get(a.userID).pushes[endpoint].wake
+		return app.pushes.Get(a.userID, endpoint).Wake
 	}
 	many := make([]any, maxWakeScopes+4)
 	for i := range many {
@@ -1148,9 +1162,9 @@ func TestPrivateWakesForThreadsOfJoinedRooms(t *testing.T) {
 	app, httpServer := pushTestServer(t)
 	a := dialTestClient(t, httpServer)
 	carol := addAccount(t, app, "carol", a)
-	addPush(app, carol, pushRegistration{url: relay.URL + "/private", wake: wakePrivate})
+	addPush(app, carol, pushRegistration{URL: relay.URL + "/private", Wake: wakePrivate})
 	addAccount(t, app, "dave", a)
-	addPush(app, app.users.Get("dave"), pushRegistration{url: relay.URL + "/dave", wake: wakePrivate | wakeJoined})
+	addPush(app, app.users.Get("dave"), pushRegistration{URL: relay.URL + "/dave", Wake: wakePrivate | wakeJoined})
 	secret, _ := saveRoom(t, a, "secret", map[string]any{"title": "Secret", "private": true})
 	a.request(t, "room_join", "add-carol", map[string]any{"room_id": secret, "user_id": "carol"})
 	thread, _ := saveRoom(t, a, "thread", map[string]any{"parent_room_id": secret, "private": false})
@@ -1178,9 +1192,9 @@ func TestMentionsWakeInPrivateRooms(t *testing.T) {
 	app, httpServer := pushTestServer(t)
 	a := dialTestClient(t, httpServer)
 	carol := addAccount(t, app, "carol", a)
-	addPush(app, carol, pushRegistration{url: relay.URL + "/carol", wake: wakeMentions})
+	addPush(app, carol, pushRegistration{URL: relay.URL + "/carol", Wake: wakeMentions})
 	dave := addAccount(t, app, "dave", a)
-	addPush(app, dave, pushRegistration{url: relay.URL + "/dave", wake: wakeMentions})
+	addPush(app, dave, pushRegistration{URL: relay.URL + "/dave", Wake: wakeMentions})
 	dm, _ := saveRoom(t, a, "dm", map[string]any{"private": true})
 	a.request(t, "room_join", "add-carol", map[string]any{"room_id": dm, "user_id": "carol"})
 	relay.pushes(t, app, a)
@@ -1216,7 +1230,7 @@ func TestRoomMuteRecountsThreads(t *testing.T) {
 	app, httpServer := pushTestServer(t)
 	a := dialTestClient(t, httpServer)
 	carol := addAccount(t, app, "carol", a)
-	addPush(app, carol, pushRegistration{url: relay.URL + "/badge", wake: wakeBadge})
+	addPush(app, carol, pushRegistration{URL: relay.URL + "/badge", Wake: wakeBadge})
 	thread, _ := saveRoom(t, a, "thread", map[string]any{"parent_room_id": "general", "title": "T"})
 	a.request(t, "room_join", "add-carol", map[string]any{"room_id": thread, "user_id": "carol"})
 	save(t, a, "p1", map[string]any{"room_id": thread, "body": map[string]any{"text": "one"}})
@@ -1250,7 +1264,7 @@ func TestLeavingPrivateRoomRecountsThreads(t *testing.T) {
 	app, httpServer := pushTestServer(t)
 	a := dialTestClient(t, httpServer)
 	carol := addAccount(t, app, "carol", a)
-	addPush(app, carol, pushRegistration{url: relay.URL + "/badge", wake: wakeBadge})
+	addPush(app, carol, pushRegistration{URL: relay.URL + "/badge", Wake: wakeBadge})
 	secret, _ := saveRoom(t, a, "secret", map[string]any{"title": "Secret", "private": true})
 	a.request(t, "room_join", "add-carol", map[string]any{"room_id": secret, "user_id": "carol"})
 	thread, _ := saveRoom(t, a, "thread", map[string]any{"parent_room_id": secret, "private": false})
@@ -1276,7 +1290,7 @@ func TestShutdownStopsTimers(t *testing.T) {
 	app.badgeDelay = time.Hour
 	a := dialTestClient(t, httpServer)
 	dora := addAccount(t, app, "dora", a)
-	addPush(app, dora, pushRegistration{url: relay.URL + "/dora", wake: wakeBadge})
+	addPush(app, dora, pushRegistration{URL: relay.URL + "/dora", Wake: wakeBadge})
 	app.mu.Lock()
 	now := time.Now()
 	dora.Mute = muteState{Until: now.Add(time.Hour)}
