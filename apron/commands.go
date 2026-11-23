@@ -441,7 +441,7 @@ const commandListMethod = commands.ListMethod
 // each room, as data, one Command object for each form. It takes no params,
 // and ignores any.
 func (s *Server) listCommands(c *client, r *wire.Request) *Error {
-	r.Reply(map[string]any{"commands": s.commands.router.List(s.requestContext(c), c.conn)})
+	r.Reply(commands.ListResult{Commands: s.commands.router.List(s.requestContext(c), c.conn)})
 	return nil
 }
 
