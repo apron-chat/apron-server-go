@@ -917,12 +917,12 @@ func TestPushAndStatusSurviveRestart(t *testing.T) {
 		userID: "erin", kind: "webpush", url: "https://push.example/s", pushID: "p1", keys: &subscription,
 		wake: wakeJoined | wakeBadge, renewed: time.Now(), lastUnread: -1,
 	})
-	if finn, gail := app.users["finn"], app.users["gail"]; finn.chosen != statusInvisible || gail.chosen != statusNone || erin.chosen != statusOnline {
+	if finn, gail := app.users["finn"], app.users["gail"]; finn.presence.Chosen != statusInvisible || gail.presence.Chosen != statusNone || erin.presence.Chosen != statusOnline {
 		app.mu.Unlock()
-		t.Fatalf("loaded statuses: erin %q finn %q gail %q", erin.chosen, finn.chosen, gail.chosen)
+		t.Fatalf("loaded statuses: erin %q finn %q gail %q", erin.presence.Chosen, finn.presence.Chosen, gail.presence.Chosen)
 	}
-	erin.chosen = statusDND
-	app.users["finn"].chosen = statusNone
+	erin.presence.Chosen = statusDND
+	app.users["finn"].presence.Chosen = statusNone
 	erin.mute = muteState{until: time.Now().Add(time.Hour)}
 	erin.roomMutes["general"] = muteState{forever: true}
 	app.touchUser("erin")
@@ -944,8 +944,8 @@ func TestPushAndStatusSurviveRestart(t *testing.T) {
 	if erin.pushes["https://relay.example/erin"] == nil || len(app.pushes) != 2 {
 		t.Fatalf("registrations after restart: %v", app.pushes)
 	}
-	if erin.chosen != statusDND || app.users["finn"].chosen != statusNone || !erin.mute.active(time.Now()) || !erin.roomMutes["general"].forever {
-		t.Fatalf("status after restart: %q %q %v %v", erin.chosen, app.users["finn"].chosen, erin.mute, erin.roomMutes)
+	if erin.presence.Chosen != statusDND || app.users["finn"].presence.Chosen != statusNone || !erin.mute.active(time.Now()) || !erin.roomMutes["general"].forever {
+		t.Fatalf("status after restart: %q %q %v %v", erin.presence.Chosen, app.users["finn"].presence.Chosen, erin.mute, erin.roomMutes)
 	}
 	app.mu.RUnlock()
 	var stored []string
@@ -1272,8 +1272,8 @@ func TestShutdownStopsTimers(t *testing.T) {
 	app.scheduleMuteLocked(dora)
 	dora.roomMutes["general"] = muteState{until: now.Add(time.Hour)}
 	app.scheduleRoomMuteLocked(dora, "general")
-	dora.statusLimit = rate.NewLimiter(rate.Every(time.Hour), 0)
-	dora.chosen = statusNone
+	dora.presence.SetPublishLimit(rate.NewLimiter(rate.Every(time.Hour), 0))
+	dora.presence.Chosen = statusNone
 	app.announceStatusLocked(dora)
 	pending := dora.muteTimer != nil && dora.roomMuteTimers["general"] != nil && dora.statusTimer != nil
 	app.unlock()

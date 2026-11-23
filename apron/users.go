@@ -14,6 +14,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/apron-chat/apron-server-go/apron/internal/accounts"
+	"github.com/apron-chat/apron-server-go/apron/internal/presence"
 	"github.com/apron-chat/apron-server-go/apron/internal/roomlog"
 	"github.com/apron-chat/apron-server-go/internal/authn"
 	"github.com/apron-chat/apron-server-go/wire"
@@ -91,27 +92,18 @@ type userState struct {
 	// (admitActionLocked).
 	actions *rate.Limiter
 
-	// chosen is the chosen status, set with `me` (§4.5.1), and mute and
-	// roomMutes their mutes; muteTimer ends a timed mute, and
-	// roomMuteTimers each timed room mute. shown is the shown status as
-	// last noted (noteShownLocked), and offlineAt the Unix milliseconds
-	// when it last became offline. status is the shown status published to
-	// others (publishLocked), the one every object they are sent carries,
-	// and seen the Unix milliseconds when it last became offline, 0 if
-	// unknown (§4.5.2); statusLimit and statusTimer coalesce a flapping
-	// user's changes. statusRequests limits the user's `status` requests.
-	chosen         string
+	// presence is the status (§4.5): the chosen status, set with `me`
+	// (§4.5.1), and the shown status, as noted (noteShownLocked) and as
+	// published to others (publishLocked), with its seen (§4.5.2);
+	// statusTimer publishes a change held back to coalesce a flapping
+	// user's changes. mute and roomMutes are the user's mutes; muteTimer
+	// ends a timed mute, and roomMuteTimers each timed room mute.
+	presence       presence.State
+	statusTimer    *time.Timer
 	mute           muteState
 	roomMutes      map[string]muteState
 	muteTimer      *time.Timer
 	roomMuteTimers map[string]*time.Timer
-	shown          string
-	offlineAt      int64
-	seen           int64
-	status         string
-	statusLimit    *rate.Limiter
-	statusTimer    *time.Timer
-	statusRequests *rate.Limiter
 	// pushes are the user's push registrations by url (§4.9), and pings the
 	// rooms they have not joined where a message mentioned or replied to
 	// them, from the first such message, for unread counts. unread holds
@@ -135,9 +127,7 @@ func newUserState(id, name string) *userState {
 		joined:    make(map[string]*roomState),
 		leftAt:    make(map[string]int64),
 		roomMutes: make(map[string]muteState),
-		chosen:    statusOnline,
-		shown:     statusOffline,
-		status:    statusOffline,
+		presence:  presence.New(),
 		pushes:    make(map[string]*pushRegistration),
 		pings:     make(map[string]int64),
 		created:   time.Now(),
@@ -167,7 +157,7 @@ func (u *userState) hasRole(role string) bool {
 // with the published shown status, and seen when it is offline (§4.5.2);
 // you has the chosen status instead.
 func (u *userState) profile() wire.CurrentUser {
-	return u.current(u.status, true)
+	return u.current(u.presence.Status, true)
 }
 
 // current is the user's complete current object with status, and seen
@@ -180,8 +170,8 @@ func (u *userState) current(status string, withSeen bool) wire.CurrentUser {
 		UserID: u.id, Name: u.name, Avatar: u.avatar, Status: status,
 		Roles: slices.Clone(u.roles), Ext: maps.Clone(u.ext),
 	}}
-	if withSeen && status == statusOffline && u.seen > 0 {
-		object.Seen = strconv.FormatInt(u.seen, 10)
+	if withSeen && status == statusOffline && u.presence.Seen > 0 {
+		object.Seen = strconv.FormatInt(u.presence.Seen, 10)
 	}
 	if status == "" {
 		object.Cleared = append(object.Cleared, "status")
@@ -419,8 +409,8 @@ func (u *userState) views() userViews {
 // never clears it: a user object carries seen only with a shown offline.
 func (u *userState) shownView() wire.User {
 	shown := u.profile().User
-	if u.seen > 0 {
-		shown.Seen = strconv.FormatInt(u.seen, 10)
+	if u.presence.Seen > 0 {
+		shown.Seen = strconv.FormatInt(u.presence.Seen, 10)
 	}
 	return shown
 }
@@ -514,7 +504,7 @@ func (s *Server) updateProfile(c *client, p wire.MeParams, reply wire.Reply[wire
 	// A status change counts against the user's limit on status changes,
 	// as a `status` request does (§4.5), so `me` flipping it in a loop
 	// cannot make the server announce it to every sharer without end.
-	if hasStatus && status != u.chosen {
+	if hasStatus && status != u.presence.Chosen {
 		if err := admitStatusLocked(u); err != nil {
 			return err
 		}
@@ -545,7 +535,7 @@ func (s *Server) updateProfile(c *client, p wire.MeParams, reply wire.Reply[wire
 	u.ext = ext
 	if hasStatus {
 		// A change of the chosen status is sent at once, with the profile.
-		u.chosen = status
+		u.presence.Chosen = status
 		s.publishLocked(u)
 	}
 	s.notifyProfileLocked(u, c, before)

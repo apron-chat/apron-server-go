@@ -499,7 +499,7 @@ func TestAfterAuthMutesAndStatuses(t *testing.T) {
 	addAccount(t, app, "away", clients...)
 	addAccount(t, app, "busy", clients...)
 	app.mu.Lock()
-	app.users["busy"].chosen = statusDND
+	app.users["busy"].presence.Chosen = statusDND
 	app.unlock()
 
 	owner, _ := dialOrigin(t, httpServer, testPasskeyOrigin)
@@ -816,7 +816,7 @@ func TestStatusRateLimit(t *testing.T) {
 
 	// A limit of two, refilled hourly.
 	app.mu.Lock()
-	app.users[b.userID].statusRequests = rate.NewLimiter(rate.Every(time.Hour), 2)
+	app.users[b.userID].presence.SetRequestLimit(rate.NewLimiter(rate.Every(time.Hour), 2))
 	app.unlock()
 	b.status(t, map[string]any{"idle": 300})
 	expectStatus(t, a, b.userID, "idle")
@@ -977,7 +977,7 @@ func TestMeStatusChangesAreLimited(t *testing.T) {
 	watching(a)
 	a.drain(t)
 	app.mu.Lock()
-	app.users[b.userID].statusRequests = rate.NewLimiter(rate.Every(time.Hour), 1)
+	app.users[b.userID].presence.SetRequestLimit(rate.NewLimiter(rate.Every(time.Hour), 1))
 	app.unlock()
 	if got := setStatus(t, b, "dnd"); got != "dnd" {
 		t.Fatalf("status = %v", got)
@@ -994,8 +994,8 @@ func TestMeStatusChangesAreLimited(t *testing.T) {
 	a.expectQuiet(t)
 	app.mu.RLock()
 	defer app.mu.RUnlock()
-	if u := app.users[b.userID]; u.chosen != statusDND || u.name == "Bea" {
-		t.Fatalf("after a limited me: status %q name %q", u.chosen, u.name)
+	if u := app.users[b.userID]; u.presence.Chosen != statusDND || u.name == "Bea" {
+		t.Fatalf("after a limited me: status %q name %q", u.presence.Chosen, u.name)
 	}
 }
 
@@ -1401,7 +1401,7 @@ func TestHiddenFlapKeepsSeen(t *testing.T) {
 	a.drain(t)
 	// b has one change of its burst left, which refills no more.
 	app.mu.Lock()
-	app.users[userID].statusLimit = rate.NewLimiter(rate.Every(time.Hour), 1)
+	app.users[userID].presence.SetPublishLimit(rate.NewLimiter(rate.Every(time.Hour), 1))
 	app.unlock()
 	_ = b.ws.Close(websocket.StatusNormalClosure, "bye")
 	seen := expectStatus(t, a, userID, "offline")
@@ -1421,7 +1421,7 @@ func TestHiddenFlapKeepsSeen(t *testing.T) {
 	a.expectQuiet(t)
 	expectListedSeen(t, a, userID, "offline", seen)
 	app.mu.RLock()
-	kept := app.users[userID].seen
+	kept := app.users[userID].presence.Seen
 	app.mu.RUnlock()
 	if kept != seenMillis(t, seen) {
 		t.Fatalf("seen after a hidden flap = %d, want %s", kept, seen)
@@ -1453,7 +1453,7 @@ func TestSeenOnlyWithTheLastConnection(t *testing.T) {
 	a.expectQuiet(t)
 	expectListedSeen(t, a, userID, "online", "")
 	app.mu.RLock()
-	kept := app.users[userID].seen
+	kept := app.users[userID].presence.Seen
 	app.mu.RUnlock()
 	if kept != seenMillis(t, seen) {
 		t.Fatalf("seen after closing one of two connections = %d, want %s", kept, seen)

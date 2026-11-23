@@ -282,7 +282,7 @@ func (s *Server) entriesLocked(d dirtySet, records []store.Entry) []store.Entry 
 
 func storedUserOf(u *userState) storedUser {
 	stored := storedUser{
-		Name: u.name, Avatar: u.avatar, Ext: u.ext, LeftAt: u.leftAt, Pings: u.pings, Seen: u.seen, Shown: u.status != statusOffline,
+		Name: u.name, Avatar: u.avatar, Ext: u.ext, LeftAt: u.leftAt, Pings: u.pings, Seen: u.presence.Seen, Shown: u.presence.Status != statusOffline,
 		Bot: u.botOf, Identities: u.identities, Records: u.records, Grants: u.granted,
 		Email: u.identities[email.Name], External: u.identities[external.Name],
 		Passkey: u.records[passkey.Name], Granted: u.granted[external.Name],
@@ -291,7 +291,7 @@ func storedUserOf(u *userState) storedUser {
 	if !u.created.IsZero() {
 		stored.Created = u.created.UnixMilli()
 	}
-	if status := u.chosen; status != statusOnline {
+	if status := u.presence.Chosen; status != statusOnline {
 		stored.Status = &status
 	}
 	now := time.Now()
@@ -410,11 +410,11 @@ func (s *Server) restoreLocked() (map[string]bool, error) {
 		}
 		switch {
 		case stored.Status != nil && settableStatus(*stored.Status):
-			u.chosen = *stored.Status
+			u.presence.Chosen = *stored.Status
 		case stored.Status != nil:
-			u.chosen = statusNone
+			u.presence.Chosen = statusNone
 		}
-		u.seen = stored.Seen
+		u.presence.Seen = stored.Seen
 		if stored.Mute != nil {
 			u.mute = muteState{forever: stored.Mute.Forever, until: stored.Mute.Until}
 		}
@@ -529,10 +529,7 @@ func (s *Server) restoreLocked() (map[string]bool, error) {
 			for id := range u.roomMutes {
 				s.scheduleRoomMuteLocked(u, id)
 			}
-			u.shown = u.shownStatus()
-			u.status = u.shown
-			if storedUsers[id].Shown && u.shown == statusOffline {
-				u.seen = now.UnixMilli()
+			if u.presence.Restore(storedUsers[id].Shown, now) {
 				s.touchUser(id)
 			}
 		}

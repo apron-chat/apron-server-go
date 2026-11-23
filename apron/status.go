@@ -3,51 +3,39 @@ package apron
 import (
 	"encoding/json/jsontext"
 	"fmt"
-	"github.com/apron-chat/apron-server-go/wire"
 	"maps"
 	"slices"
 	"strconv"
 	"time"
 
-	"golang.org/x/time/rate"
+	"github.com/apron-chat/apron-server-go/apron/internal/presence"
+	"github.com/apron-chat/apron-server-go/wire"
 )
 
 // Status (§4.5). The chosen status is set with `me`: online (the default),
 // "" for none, dnd, or invisible; the server stores "" for any other value.
-// The presence is online while a connection is attended, idle while
-// connected with none attended, and offline without a connection. Others
-// see the shown status, which the two give (§4.5.1):
-//
-//	chosen     presence online  presence idle  presence offline
-//	online     online           idle           offline
-//	dnd        dnd              dnd            offline
-//	invisible  offline          offline        offline
-//	""         ""               ""             ""
-//
-// and the user sees, in `you`, the chosen status. Others see the shown
-// status as last announced (publishLocked): a change held back to coalesce
-// a flapping user's changes shows nowhere, in no notification and no
-// listing, until it is sent, so everyone sees the same changes. seen is
-// when the announced shown status last became offline: it is set only
-// then, so an invisible user's connections never move it, nor does a flap
-// that coalescing hides, and it goes with each shown offline, in complete
-// objects, bare members, and the `user` notification of the change, but
-// never in `you` (§4.5.2). Separately, each
-// connection reports whether it is idle, and the user mutes their
-// notifications everywhere or in one room and its threads; mutes and a dnd
-// status silence pushes (§4.9). Both are set with the `status` request.
-// Mutes are private: each change goes to every connection of the user as a
-// `status` notification, and the mutes in effect to a connection after a
-// sign-in. A connection starts attended, and only its own `idle` with the
-// seconds since attention stopped makes it idle, until its `idle: false`
-// (§4.5.3): a connection that never sends idle is never taken as idle.
+// Others see the shown status, which the chosen status and the presence
+// give (§4.5.1), as last published: a presence.State keeps both, and when
+// seen (§4.5.2) moves. The server notes each change of the presence, and
+// publishes the shown status to those who share a room with the user, at
+// once or, for a flapping user, coalesced (announceStatusLocked), so
+// everyone sees the same changes; the user sees, in `you`, the chosen
+// status. Separately, each connection reports whether it is idle, and the
+// user mutes their notifications everywhere or in one room and its
+// threads; mutes and a dnd status silence pushes (§4.9). Both are set with
+// the `status` request. Mutes are private: each change goes to every
+// connection of the user as a `status` notification, and the mutes in
+// effect to a connection after a sign-in. A connection starts attended, and
+// only its own `idle` with the seconds since attention stopped makes it
+// idle, until its `idle: false` (§4.5.3): a connection that never sends
+// idle is never taken as idle.
 const (
-	statusOnline    = "online"
-	statusIdle      = "idle"
-	statusDND       = "dnd"
-	statusInvisible = "invisible"
-	statusOffline   = "offline"
-	statusNone      = ""
+	statusOnline    = presence.Online
+	statusIdle      = presence.Idle
+	statusDND       = presence.DND
+	statusInvisible = presence.Invisible
+	statusOffline   = presence.Offline
+	statusNone      = presence.None
 	// maxMuteSeconds caps a timed mute at a year; `true` mutes until changed.
 	maxMuteSeconds = 365 * 24 * 60 * 60
 	// maxRoomMutes bounds the rooms a user mutes at once; muting another
@@ -56,30 +44,21 @@ const (
 	// Each user may send statusRequestBurst `status` requests at once,
 	// refilled one every statusRequestRefill; beyond them a request is
 	// retry_after (§4.5).
-	statusRequestBurst  = 20
-	statusRequestRefill = time.Second
+	statusRequestBurst  = presence.RequestBurst
+	statusRequestRefill = presence.RequestRefill
 	// A user's shown status changes go to others at once up to
-	// statusBurst times, then at most once per statusCoalesce, the latest
-	// status winning, so a flapping connection costs its rooms little
-	// (§4.5 lets servers delay them). A change that is undone before it is
-	// sent is never sent, and moves no seen.
-	statusBurst    = 10
-	statusCoalesce = 2 * time.Second
+	// statusBurst times, then at most once per statusCoalesce (presence).
+	statusBurst    = presence.Burst
+	statusCoalesce = presence.Coalesce
 )
 
 // optionalStatuses are the optional statuses the server accepts, which the
 // server frame lists as server.status (§3.1, §4.5).
-var optionalStatuses = []string{statusDND, statusInvisible}
+var optionalStatuses = presence.Optional
 
 // settableStatus reports whether the server supports value as a status a
 // user sets (§4.5); it stores "" for any other.
-func settableStatus(value string) bool {
-	switch value {
-	case statusOnline, statusNone:
-		return true
-	}
-	return slices.Contains(optionalStatuses, value)
-}
+func settableStatus(value string) bool { return presence.Settable(value) }
 
 // muteState is a mute (§4.5): until a time, forever, or, when zero, none.
 type muteState struct {
@@ -190,13 +169,7 @@ func (s *Server) status(c *client, p wire.StatusParams, reply wire.Reply[wire.Em
 // a client flipping idle or its mutes in a loop cannot make the server
 // announce, store, and recount for it without end.
 func admitStatusLocked(u *userState) *Error {
-	if u.statusRequests == nil {
-		u.statusRequests = rate.NewLimiter(rate.Every(statusRequestRefill), statusRequestBurst)
-	}
-	now := time.Now()
-	reservation := u.statusRequests.ReserveN(now, 1)
-	if delay := reservation.DelayFrom(now); delay > 0 {
-		reservation.CancelAt(now)
+	if delay := u.presence.Admit(time.Now()); delay > 0 {
 		return retryAfter("Too many status changes; slow down", delay)
 	}
 	return nil
@@ -282,7 +255,7 @@ func (s *Server) sendAfterAuthLocked(c *client) {
 	}
 	var shown []*userState
 	for _, id := range slices.Sorted(maps.Keys(listed)) {
-		if other := listed[id]; other.status != statusOffline && other.status != statusNone {
+		if other := listed[id]; other.presence.Status != statusOffline && other.presence.Status != statusNone {
 			shown = append(shown, other)
 		}
 	}
@@ -365,7 +338,7 @@ func (s *Server) endRoomMuteLocked(u *userState, id string) {
 // silenced reports whether u's notifications are silenced everywhere: by
 // the unscoped mute, or by a dnd status (§4.5).
 func (u *userState) silenced(now time.Time) bool {
-	return u.mute.active(now) || u.chosen == statusDND
+	return u.mute.active(now) || u.presence.Chosen == statusDND
 }
 
 // roomMuted reports whether u's own mute of room r, or of a room r is a
@@ -394,89 +367,48 @@ func (u *userState) attended() bool {
 // shownStatus is the user's shown status, from the chosen status and the
 // presence (§4.5.1).
 func (u *userState) shownStatus() string {
-	switch u.chosen {
-	case statusOnline:
-		switch {
-		case u.attended():
-			return statusOnline
-		case len(u.clients) > 0:
-			return statusIdle
-		}
-		return statusOffline
-	case statusDND:
-		// dnd shows only while connected, so it does not tell others
-		// that the user is reachable when they are not (§4.5).
-		if len(u.clients) > 0 {
-			return statusDND
-		}
-		return statusOffline
-	case statusInvisible:
-		return statusOffline
-	}
-	return u.chosen
+	return u.presence.Shown(u.attended(), len(u.clients) > 0)
 }
 
 // you is the user's own current object (§3.3): its profile, with the
 // chosen status in place of the shown one, and never seen (§4.5.2).
 func (u *userState) you() wire.CurrentUser {
-	return u.current(u.chosen, false)
+	return u.current(u.presence.Chosen, false)
 }
 
 // noteShownLocked notes u's shown status after a change to its chosen
 // status or its connections, and when it has just become offline, the
 // time it did. Others do not see it until it is published.
 func (s *Server) noteShownLocked(u *userState) {
-	shown := u.shownStatus()
-	if shown == u.shown {
-		return
-	}
-	u.shown = shown
-	if shown == statusOffline {
-		u.offlineAt = time.Now().UnixMilli()
-	}
+	u.presence.Note(u.attended(), len(u.clients) > 0, time.Now())
 }
 
 // publishLocked notes u's shown status and makes it the one others see
-// (§4.5.2), reporting whether that changed; the caller sends it to those
-// who share a room with u. When the published status becomes offline, seen
-// is the time the shown status became offline, which is after it was last
-// published otherwise: only that change sets seen, so a user whose chosen
-// invisible keeps them shown offline can connect and leave without moving
-// it, and neither does a flap held back and undone before it is sent,
-// which nobody saw. The store keeps whether the published status is
-// offline, so a change out of offline is stored too: after a crash, which
-// closes no connection, restoreLocked gives the users who were shown
-// otherwise a seen then.
+// (§4.5.2, presence.State.Publish), reporting whether that changed; the
+// caller sends it to those who share a room with u. The store keeps whether
+// the published status is offline, and its seen, so a change to or out of
+// offline is stored: after a crash, which closes no connection,
+// restoreLocked gives the users who were shown otherwise a seen then.
 func (s *Server) publishLocked(u *userState) bool {
 	s.noteShownLocked(u)
-	if u.shown == u.status {
-		return false
-	}
-	wasOffline := u.status == statusOffline
-	u.status = u.shown
-	switch {
-	case u.status == statusOffline:
-		u.seen = u.offlineAt
-		if u.seen == 0 {
-			u.seen = time.Now().UnixMilli()
-		}
-		s.touchUser(u.id)
-	case wasOffline:
+	changed, stored := u.presence.Publish(time.Now())
+	if stored {
 		s.touchUser(u.id)
 	}
-	return true
+	return changed
 }
 
 // shownObject is the bare current object of u that others see: user_id and
 // the published shown status, "" too, with seen when it is offline, if it
 // is known (§4.5.2).
 func (u *userState) shownObject() wire.CurrentUser {
-	object := wire.CurrentUser{User: wire.User{UserID: u.id, Status: u.status}}
+	status, seen := u.presence.Status, u.presence.Seen
+	object := wire.CurrentUser{User: wire.User{UserID: u.id, Status: status}}
 	switch {
-	case u.status == statusNone:
+	case status == statusNone:
 		object.Cleared = []string{"status"}
-	case u.status == statusOffline && u.seen > 0:
-		object.Seen = strconv.FormatInt(u.seen, 10)
+	case status == statusOffline && seen > 0:
+		object.Seen = strconv.FormatInt(seen, 10)
 	}
 	return object
 }
@@ -497,13 +429,10 @@ func (s *Server) announceStatusLocked(u *userState) {
 		s.publishLocked(u)
 		return
 	}
-	if u.shown == u.status || u.statusTimer != nil {
+	if !u.presence.Pending() || u.statusTimer != nil {
 		return
 	}
-	if u.statusLimit == nil {
-		u.statusLimit = rate.NewLimiter(rate.Every(statusCoalesce), statusBurst)
-	}
-	if !u.statusLimit.Allow() {
+	if !u.presence.PublishNow() {
 		u.statusTimer = time.AfterFunc(statusCoalesce, func() {
 			s.mu.Lock()
 			defer s.unlock()
@@ -547,7 +476,7 @@ func statusFrame(u *userState) jsontext.Value {
 // leaves out offline and "", which would tell who is invisible or opted
 // out.
 func (s *Server) announceJoinStatusLocked(u *userState, r *roomState) {
-	if status := u.status; status == statusOffline || status == statusNone {
+	if status := u.presence.Status; status == statusOffline || status == statusNone {
 		return
 	}
 	users := make([]*userState, 0, r.MemberCount())
