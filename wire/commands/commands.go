@@ -121,8 +121,9 @@ const (
 var groups = []string{GroupAll, GroupGuest, GroupMember, GroupRoom, GroupRole, GroupAdmin}
 
 // ListMethod is apron's command listing, ext:command_list, as a request
-// and its capability: it answers {"commands": [...]}, an [Entry] for each
-// form the sender may use in at least one room (Router.ListHandler).
+// and its capability: it answers a [ListResult], {"commands": [...]}, an
+// [Entry] for each form the sender may use in at least one room
+// (Router.ListHandler).
 const ListMethod = "ext:command_list"
 
 // Command is a command people run by sending /Name as a command request.
@@ -260,6 +261,13 @@ type Entry struct {
 	Name        string   `json:"name"`
 	Requires    []string `json:"requires,omitempty"`
 	Uses        []string `json:"uses,omitempty"`
+}
+
+// ListResult is the result of ListMethod: an Entry for each form the
+// sender may use, [] for none (Router.ListHandler). A client decodes a
+// listing into one.
+type ListResult struct {
+	Commands []Entry `json:"commands"`
 }
 
 // Help is the text of /help that lists forms: Markdown, a HelpLine for
@@ -497,7 +505,7 @@ func (r *Router) List(ctx context.Context, c *wire.Conn) []Entry {
 	return Entries(r.Usable(ctx, c, ""))
 }
 
-// ListHandler answers ListMethod, {"commands": [...]}, with List, and
+// ListHandler answers ListMethod, a ListResult, with List, and
 // lists its capability: registered with Server.Handle under ListMethod,
 // it gives clients that know apron's ext:command_list, such as to
 // complete what people type, the commands of any backend. It takes no
@@ -507,7 +515,7 @@ func (r *Router) ListHandler() wire.Handler {
 		Capability: ListMethod,
 		NoDedup:    true,
 		Serve: func(ctx context.Context, c *wire.Conn, req *wire.Request) error {
-			req.Reply(map[string]any{"commands": r.List(ctx, c)})
+			req.Reply(ListResult{Commands: r.List(ctx, c)})
 			return nil
 		},
 	}

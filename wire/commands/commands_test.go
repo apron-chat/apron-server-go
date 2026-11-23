@@ -229,11 +229,12 @@ func TestHelpAndList(t *testing.T) {
 	if string(raw) != want {
 		t.Errorf("list:\n%s\nwant\n%s", raw, want)
 	}
-	var list struct {
-		Commands []commands.Entry `json:"commands"`
-	}
+	var list commands.ListResult
 	if err := json.Unmarshal(raw, &list); err != nil || len(list.Commands) != 5 {
 		t.Fatalf("list: %+v %v", list, err)
+	}
+	if again, err := wire.Marshal(list); err != nil || string(again) != want {
+		t.Errorf("the decoded list encodes as %s %v, want it as it was", again, err)
 	}
 }
 
