@@ -24,8 +24,9 @@ import (
 )
 
 // testdata/stored-accounts.jsonl holds the user, device, service token,
-// invitation, embed, custom emoji, and push entries a server stored before
-// they had shapes of their own in modules, after storedAccountsScenario.
+// invitation, embed, custom emoji, push, VAPID key, and server profile
+// entries a server stored before they had shapes of their own in modules,
+// after storedAccountsScenario.
 // Each is stored again byte for byte. Run TestStoredAccountsScenario with
 // APRON_WRITE_STORED_ACCOUNTS=1 to write the file again.
 
@@ -35,10 +36,11 @@ const storedAccountsFile = "testdata/stored-accounts.jsonl"
 var storedAccountKinds = []string{entryUser, devices.EntryKind, services.EntryKind, invitations.EntryKind, embeds.EntryKind, entryPush, entryMeta}
 
 // storedAccountsScenario makes a bot with two service tokens, an
-// outstanding invitation and an account an invitation made, a passkey
-// account with a device token, mutes, a status, an avatar, a custom emoji, a message
-// upload, a write that has not started, and a push registration, and
-// returns what it stored.
+// outstanding invitation and an admin account an invitation made, which
+// sets the server's title, description, and avatar, a passkey account
+// with a device token, mutes, a status, an avatar, a custom emoji, a
+// message upload, a write that has not started, and a push registration,
+// and returns what it stored, with the VAPID key the server made.
 func storedAccountsScenario(t *testing.T) []store.Entry {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -69,12 +71,19 @@ func storedAccountsScenario(t *testing.T) []store.Entry {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	used, err := app.Invite(ctx, InvitationOptions{Lifetime: long, Data: map[string]any{"x": 1}})
+	used, err := app.Invite(ctx, InvitationOptions{Lifetime: long, Roles: []string{RoleAdmin}, Data: map[string]any{"x": 1}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	invited, _ := dialOrigin(t, httpServer, testPasskeyOrigin)
 	passkeyResult(t, registerInvited(t, invited, newTestAuthenticator(t), used.Token, map[string]any{"name": "Invited"}))
+	invited.drain(t)
+	runServer(t, invited, "title Ops <&> Server")
+	runServer(t, invited, "description A server\nfor *ops*")
+	if status, _, _ := httpDo(t, http.MethodPut, serverAvatarWriteURL(t, invited), bytes.NewReader(testPNG(t)), "image/png"); status != http.StatusCreated {
+		t.Fatalf("server avatar upload: %d", status)
+	}
+	invited.drain(t)
 
 	ada, adaID := passkeyAccount(t, httpServer)
 	inviteDevice(t, ada, adaID, "laptop", false, wsURL(httpServer))
@@ -104,7 +113,7 @@ func storedAccountsScenario(t *testing.T) []store.Entry {
 	}
 	var entries []store.Entry
 	_ = backing.Load(func(e store.Entry) error {
-		if slices.Contains(storedAccountKinds, e.Kind) && !(e.Kind == entryMeta && e.ID == "vapid") {
+		if slices.Contains(storedAccountKinds, e.Kind) {
 			entries = append(entries, e)
 		}
 		return nil
