@@ -45,6 +45,9 @@ func TestUnknownMembers(t *testing.T) {
 		{"message", &wire.Message{}, `{"message_id":"5","log_id":"5","from":{"user_id":"ada"},"pinned":true}`},
 		{"server", &wire.ServerInfo{}, `{"apron":10,"auth":["guest"],"future":{"x":1}}`},
 		{"activity", &wire.Activity{}, `{"room_id":"r","from":{"user_id":"ada"},"typing":0,"ext:seen_at":"now"}`},
+		{"embed write", &wire.EmbedWrite{}, `{"embed_id":"e1","kind":"upload","write_url":"https://chat.example/w/1","expires":"soon"}`},
+		{"message result", &wire.MessageResult{}, `{"message_id":"5","embeds":[{"embed_id":"e1","kind":"append","write_url":"https://chat.example/w/1","x":1}],"note":true}`},
+		{"command result", &wire.CommandResult{}, `{"embeds":[{"embed_id":"e1","kind":"terminal","write_url":"https://chat.example/w/1"}],"note":true}`},
 	} {
 		if err := json.Unmarshal([]byte(c.in), c.v); err != nil {
 			t.Fatalf("%s: %v", c.name, err)
@@ -61,6 +64,24 @@ func TestUnknownMembers(t *testing.T) {
 		if string(w) != string(g) {
 			t.Errorf("%s: %s, want %s", c.name, out, c.in)
 		}
+	}
+}
+
+// An embed write encodes its fields in order, and what it has no field for
+// after them, as it arrived.
+func TestEmbedWrite(t *testing.T) {
+	built := wire.MessageResult{MessageID: 5, Embeds: []wire.EmbedWrite{{EmbedID: "embed_1", Kind: "upload", WriteURL: "https://chat.example/w/1"}}}
+	out, err := json.Marshal(built)
+	if want := `{"message_id":"5","embeds":[{"embed_id":"embed_1","kind":"upload","write_url":"https://chat.example/w/1"}]}`; err != nil || string(out) != want {
+		t.Fatalf("built: %s %v, want %s", out, err, want)
+	}
+	in := `{"embed_id":"embed_1","kind":"append","write_url":"https://chat.example/w/1","expires":"soon","limits":{"bytes":1}}`
+	var write wire.EmbedWrite
+	if err := json.Unmarshal([]byte(in), &write); err != nil || write.Kind != "append" || write.WriteURL != "https://chat.example/w/1" {
+		t.Fatalf("decoded %+v %v", write, err)
+	}
+	if out, err := json.Marshal(write); err != nil || string(out) != in {
+		t.Fatalf("decoded and encoded: %s %v, want %s", out, err, in)
 	}
 }
 
@@ -243,7 +264,7 @@ func (b *typed) Command(_ context.Context, _ *wire.Conn, p wire.CommandParams, r
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.commands = append(b.commands, p)
-	return reply.Send(wire.CommandResult{Embeds: []jsontext.Value{jsontext.Value(`{"embed_id":"e1","kind":"upload"}`)}, Unknown: jsontext.Value(`{"note":1}`)})
+	return reply.Send(wire.CommandResult{Embeds: []wire.EmbedWrite{{EmbedID: "e1", Kind: "upload", WriteURL: "https://chat.example/w/1"}}, Unknown: jsontext.Value(`{"note":1}`)})
 }
 
 func (b *typed) RoomList(_ context.Context, _ *wire.Conn, _ wire.RoomListParams, reply wire.Reply[wire.RoomListResult]) error {
@@ -305,7 +326,7 @@ func TestTypedParams(t *testing.T) {
 		t.Fatalf("a deletion without message_id: %v", err)
 	}
 	result, err := call("command", `{"room_id":"r","body":{"text":"/x"}}`)
-	if err != nil || result != `{"embeds":[{"embed_id":"e1","kind":"upload"}],"note":1}` {
+	if err != nil || result != `{"embeds":[{"embed_id":"e1","kind":"upload","write_url":"https://chat.example/w/1"}],"note":1}` {
 		t.Fatalf("command: %s %v", result, err)
 	}
 	if c := b.commands; len(c) != 1 || c[0].RoomID != "r" || c[0].Body.Text != "/x" {

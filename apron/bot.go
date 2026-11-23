@@ -581,13 +581,10 @@ func (b *Session) stream(ctx context.Context, roomID, command, args string, opti
 	if err != nil {
 		return nil, b.requestErr(err)
 	}
-	var embed struct {
-		WriteURL string `json:"write_url"`
-	}
-	if len(result.Embeds) != 1 || json.Unmarshal(result.Embeds[0], &embed) != nil {
+	if len(result.Embeds) != 1 {
 		return nil, errors.New("apron: the server returned no write URL")
 	}
-	_, token, ok := strings.Cut(embed.WriteURL, writePath)
+	_, token, ok := strings.Cut(result.Embeds[0].WriteURL, writePath)
 	if !ok {
 		return nil, errors.New("apron: the server returned no write URL")
 	}

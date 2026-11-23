@@ -227,7 +227,7 @@ func (s *Server) saveMessage(c *client, p wire.EditParams, reply wire.Reply[wire
 	}
 	// Embeds are resolved last: a new upload, terminal, or append embed
 	// reserves a write.
-	var written []any
+	var written []wire.EmbedWrite
 	// An editor's save keeps the embeds as they are stored: it starts no
 	// upload or live text, and releases none (ext:editors).
 	if body != nil && !editor {
@@ -292,9 +292,7 @@ func (s *Server) saveMessage(c *client, p wire.EditParams, reply wire.Reply[wire
 	if replacing {
 		result.MessageID = p.MessageID
 	}
-	for _, write := range written {
-		result.Embeds = append(result.Embeds, encodeJSON(write))
-	}
+	result.Embeds = written
 	_ = reply.Send(result)
 	return nil
 }

@@ -370,7 +370,7 @@ func (s *Server) runExtensionCommand(c *client, command *extensionCommand, cc *c
 	}
 	var typed wire.CommandResult
 	if err := json.Unmarshal(encoded, &typed); err != nil {
-		s.logger.Error("a command's result is not an object", "error", err)
+		s.logger.Error("a command's result is not an object, or its embeds are not embed writes (§4.8.3)", "command", command.command.Name, "error", err)
 		return internalError()
 	}
 	_ = cc.Reply.Send(typed)

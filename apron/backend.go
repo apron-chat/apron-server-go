@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json/jsontext"
 	"encoding/json/v2"
-	"maps"
 	"net/http"
 
 	"github.com/apron-chat/apron-server-go/wire"
@@ -167,9 +166,9 @@ func (b backend) Auth(ctx context.Context, wc *wire.Conn, _ wire.AuthParams, rep
 }
 
 // refresh brings a duplicate's result up to date (§1.2): `me` answers with
-// the current profile, and a message result lists only the write URLs that
-// are still unused. Other results name what the request made, which does
-// not change.
+// the current profile, and a message or command result lists only the write
+// URLs that are still unused. Other results name what the request made,
+// which does not change.
 func (b backend) refresh(_ context.Context, wc *wire.Conn, method string, result jsontext.Value) any {
 	s := b.s
 	c, ok := wire.DataOf[*client](wc)
@@ -185,28 +184,34 @@ func (b backend) refresh(_ context.Context, wc *wire.Conn, method string, result
 	switch method {
 	case "me":
 		return u.you() // Sent as me's result, {"you": ...}.
-	case "message", "command":
-		var original map[string]any
-		if json.Unmarshal(result, &original) != nil || original["embeds"] == nil {
+	case "message":
+		var current wire.MessageResult
+		if json.Unmarshal(result, &current) != nil || current.Embeds == nil {
 			return result
 		}
-		current := maps.Clone(original)
-		var writes []any
-		for _, value := range asList(original["embeds"]) {
-			written, _ := value.(map[string]any)
-			id, _ := written["embed_id"].(string)
-			if e := s.embeds.Get(id); e != nil && !e.started && !e.removed && s.embeds.Write(e.token) == e {
-				writes = append(writes, written)
-			}
+		current.Embeds = s.unusedWritesLocked(current.Embeds)
+		return current
+	case "command":
+		var current wire.CommandResult
+		if json.Unmarshal(result, &current) != nil || current.Embeds == nil {
+			return result
 		}
-		if len(writes) == 0 {
-			delete(current, "embeds")
-		} else {
-			current["embeds"] = writes
-		}
+		current.Embeds = s.unusedWritesLocked(current.Embeds)
 		return current
 	}
 	return result
+}
+
+// unusedWritesLocked returns the writes of a result that are still unused:
+// those whose write has not started, of an embed not removed (§4.8.3).
+func (s *Server) unusedWritesLocked(writes []wire.EmbedWrite) []wire.EmbedWrite {
+	var unused []wire.EmbedWrite
+	for _, w := range writes {
+		if e := s.embeds.Get(w.EmbedID); e != nil && !e.started && !e.removed && s.embeds.Write(e.token) == e {
+			unused = append(unused, w)
+		}
+	}
+	return unused
 }
 
 // Rooms (§4.2).

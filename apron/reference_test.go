@@ -807,6 +807,47 @@ func TestFailedAndExpiredWritesDropTheEmbed(t *testing.T) {
 	}
 }
 
+// A retried message or command is not run again, and its result lists only
+// the writes still unused (§1.2, §4.8.3).
+func TestRetriedResultsListUnusedWrites(t *testing.T) {
+	_, httpServer := newTestServer(t, DefaultConfig())
+	a := dialTestClient(t, httpServer)
+	params := map[string]any{"room_id": "general", "body": map[string]any{
+		"embeds": []any{map[string]any{"kind": "terminal"}, map[string]any{"kind": "terminal"}},
+	}}
+	result := postEmbeds(t, a, "terminals", params)
+	written := result["embeds"].([]any)
+	if status, _, _ := httpDo(t, http.MethodPut, written[0].(map[string]any)["write_url"].(string), strings.NewReader("done"), "text/plain"); status != http.StatusNoContent {
+		t.Fatalf("first write: %d", status)
+	}
+	a.drain(t)
+	again := a.result(t, "message", "terminals", params)
+	if again["message_id"] != result["message_id"] || len(again) != 2 || !reflect.DeepEqual(again["embeds"], written[1:]) {
+		t.Fatalf("retried after the first write: %#v, want only %#v", again, written[1])
+	}
+	if status, _, _ := httpDo(t, http.MethodPut, written[1].(map[string]any)["write_url"].(string), strings.NewReader("done"), "text/plain"); status != http.StatusNoContent {
+		t.Fatalf("second write: %d", status)
+	}
+	a.drain(t)
+	if again := a.result(t, "message", "terminals", params); again["message_id"] != result["message_id"] || len(again) != 1 {
+		t.Fatalf("retried after both writes: %#v", again)
+	}
+
+	command := map[string]any{"room_id": "general", "body": map[string]any{"text": "/embed-terminal make"}}
+	write, writeURL, _ := liveCommand(t, a, "terminal", command)
+	if again := a.result(t, "command", "terminal", command); !reflect.DeepEqual(again, map[string]any{"embeds": []any{write}}) {
+		t.Fatalf("retried command: %#v, want its write %#v", again, write)
+	}
+	if status, _, _ := httpDo(t, http.MethodPut, writeURL, strings.NewReader("done"), "text/plain"); status != http.StatusNoContent {
+		t.Fatalf("command's write: %d", status)
+	}
+	a.drain(t)
+	if again := a.result(t, "command", "terminal", command); len(again) != 0 {
+		t.Fatalf("retried command after its write: %#v", again)
+	}
+	a.expectQuiet(t)
+}
+
 func TestTerminalGrowsLiveThenKeepsItsOutput(t *testing.T) {
 	config := DefaultConfig()
 	config.TerminalKeepBytes = 16

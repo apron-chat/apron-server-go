@@ -104,7 +104,7 @@ func (e *embedState) fileURL() string {
 // embed gets a write URL, listed in written. Senders' og is dropped: the
 // server only describes media it hosts. A message has at most one append
 // embed (§4.8.5).
-func (s *Server) resolveEmbedsLocked(c *client, messageID string, current *roomlog.Message, body map[string]any) ([]any, []any, *Error) {
+func (s *Server) resolveEmbedsLocked(c *client, messageID string, current *roomlog.Message, body map[string]any) ([]any, []wire.EmbedWrite, *Error) {
 	submitted, _ := body["embeds"].([]any)
 	previous := make(map[string]map[string]any)
 	if current != nil && current.Body != nil {
@@ -142,7 +142,7 @@ func (s *Server) resolveEmbedsLocked(c *client, messageID string, current *rooml
 	}
 
 	embeds := make([]any, 0, len(submitted))
-	var written []any
+	var written []wire.EmbedWrite
 	for _, value := range submitted {
 		embed := cloneObject(value.(map[string]any))
 		if id, has := embed["embed_id"].(string); has {
@@ -184,7 +184,7 @@ func (s *Server) resolveEmbedsLocked(c *client, messageID string, current *rooml
 				// A terminal's og, which says what it is (§4.8.1).
 				maps.Copy(embed, cloneObject(e.Owned))
 			}
-			written = append(written, map[string]any{"embed_id": id, "kind": kind, "write_url": e.writeURL()})
+			written = append(written, e.write())
 		}
 		embeds = append(embeds, embed)
 	}
@@ -195,10 +195,16 @@ func (e *embedState) writeURL() string {
 	return e.BaseURL + writePath + e.token
 }
 
+// write is the embed's write, as the result of the request that reserved
+// it lists it for the sender (§4.8.3).
+func (e *embedState) write() wire.EmbedWrite {
+	return wire.EmbedWrite{EmbedID: e.ID, Kind: e.Kind, WriteURL: e.writeURL()}
+}
+
 // writeResult is the result of a command that made the embed's write: its
-// write URL (§4.8.2).
+// write URL (§4.8.3).
 func (e *embedState) writeResult() wire.CommandResult {
-	return wire.CommandResult{Embeds: []jsontext.Value{encodeJSON(map[string]any{"embed_id": e.ID, "kind": e.Kind, "write_url": e.writeURL()})}}
+	return wire.CommandResult{Embeds: []wire.EmbedWrite{e.write()}}
 }
 
 func asList(value any) []any {

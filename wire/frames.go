@@ -182,9 +182,8 @@ type CommandParams struct {
 // CommandResult is the result of a command (§4.1): empty, or the write
 // URLs of the embeds it made.
 type CommandResult struct {
-	// Embeds are the embed writes the command reserved (§4.8.2), as their
-	// objects.
-	Embeds []jsontext.Value `json:"embeds,omitempty"`
+	// Embeds are the embed writes the command reserved (§4.8.3).
+	Embeds []EmbedWrite `json:"embeds,omitempty"`
 	// Unknown holds more result fields, an extension's, as one JSON
 	// object's members, sent after the others.
 	Unknown jsontext.Value `json:",embed"`
@@ -195,8 +194,24 @@ type CommandResult struct {
 type MessageResult struct {
 	MessageID LogID `json:"message_id,omitzero"`
 	// Embeds are the embed writes the message reserved, for the sender
-	// only (§4.8.3), as their objects.
-	Embeds []jsontext.Value `json:"embeds,omitempty"`
+	// only (§4.8.3).
+	Embeds []EmbedWrite `json:"embeds,omitempty"`
+	// Unknown holds more result fields, an extension's, as one JSON
+	// object's members, sent after the others.
+	Unknown jsontext.Value `json:",embed"`
+}
+
+// EmbedWrite is the write of an upload or live embed that a message or
+// command reserved (§4.8.3), in its result, for the sender only: the
+// sender sends the embed's content as the body of an HTTP PUT to
+// WriteURL, a credential that expires if it is not used.
+type EmbedWrite struct {
+	EmbedID  string `json:"embed_id"`
+	Kind     string `json:"kind"`
+	WriteURL string `json:"write_url"`
+	// Unknown holds the members this package has no field for, as they
+	// arrived, and is sent after the others.
+	Unknown jsontext.Value `json:",embed"`
 }
 
 // MeParams are the params of me (§3.3.2): the profile fields to change. A
