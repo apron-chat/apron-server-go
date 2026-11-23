@@ -438,8 +438,9 @@ const commandListMethod = commands.ListMethod
 // on this connection, in at least one room it can see: what /help lists in
 // each room, as data, one Command object for each form. It takes no params,
 // and ignores any.
-func (s *Server) listCommands(c *client, _ request) (any, bool, *Error) {
-	return map[string]any{"commands": s.commands.router.List(s.requestContext(c), c.conn)}, false, nil
+func (s *Server) listCommands(c *client, r *wire.Request) *Error {
+	r.Reply(map[string]any{"commands": s.commands.router.List(s.requestContext(c), c.conn)})
+	return nil
 }
 
 // avatarCommand takes exactly one upload embed, whose file becomes the

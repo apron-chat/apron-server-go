@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/apron-chat/apron-server-go/internal/authn"
+	"github.com/apron-chat/apron-server-go/wire"
 )
 
 // Account management (capability ext:account): an account lists its
@@ -229,7 +230,8 @@ func (s *Server) signOutOthersLocked(u *userState, keep *client) {
 	}
 }
 
-// accountOps are the account's methods (ext:account).
+// accountOps are the account's methods (ext:account), which read their
+// params and reply raw, as wire methods do.
 func accountOps(ops map[string]operation) {
 	ops[accountExt+".credentials"] = (*Server).listCredentials
 	ops[accountExt+".credential_rename"] = (*Server).renameCredential
@@ -248,41 +250,54 @@ func accountLocked(c *client) *Error {
 	return nil
 }
 
-func (s *Server) listCredentials(c *client, req request) (any, bool, *Error) {
+// credentialsResult is the result of account.credentials: the account's
+// credentials, and until when, in Unix milliseconds, the connection's
+// latest reauthentication counts, if it still does.
+type credentialsResult struct {
+	Credentials          []credentialEntry `json:"credentials"`
+	ReauthenticatedUntil int64             `json:"reauthenticated_until,omitzero"`
+}
+
+// credentialEntry is one credential in a credentialsResult: its times in
+// Unix milliseconds, and current when the connection signed in with it.
+type credentialEntry struct {
+	Created  int64  `json:"created,omitzero"`
+	Current  bool   `json:"current,omitzero"`
+	ID       string `json:"id"`
+	LastUsed int64  `json:"last_used,omitzero"`
+	Name     string `json:"name,omitzero"`
+	Scheme   string `json:"scheme"`
+}
+
+func (s *Server) listCredentials(c *client, r *wire.Request) *Error {
 	s.mu.Lock()
 	defer s.unlock()
 	if err := accountLocked(c); err != nil {
-		return nil, false, err
+		return err
 	}
-	list := []any{}
+	result := credentialsResult{Credentials: []credentialEntry{}}
 	for _, credential := range s.credentialsLocked(c.user) {
-		entry := map[string]any{"scheme": credential.Scheme, "id": credential.ID}
-		if credential.Name != "" {
-			entry["name"] = credential.Name
-		}
+		entry := credentialEntry{Scheme: credential.Scheme, ID: credential.ID, Name: credential.Name}
 		if !credential.Created.IsZero() {
-			entry["created"] = credential.Created.UnixMilli()
+			entry.Created = credential.Created.UnixMilli()
 		}
 		if !credential.LastUsed.IsZero() {
-			entry["last_used"] = credential.LastUsed.UnixMilli()
+			entry.LastUsed = credential.LastUsed.UnixMilli()
 		}
-		if c.credential == credentialKey(credential.Scheme, credential.ID) {
-			entry["current"] = true
-		}
-		list = append(list, entry)
+		entry.Current = c.credential == credentialKey(credential.Scheme, credential.ID)
+		result.Credentials = append(result.Credentials, entry)
 	}
-	result := map[string]any{"credentials": list}
 	if v := c.verified; v.user == c.user.id && time.Since(v.at) < reauthWindow {
-		result["reauthenticated_until"] = v.at.Add(reauthWindow).UnixMilli()
+		result.ReauthenticatedUntil = v.at.Add(reauthWindow).UnixMilli()
 	}
-	c.sendResult(req, result)
-	return result, true, nil
+	r.Reply(result)
+	return nil
 }
 
 // credentialParams parses a credential's scheme, webauthn by default, and
 // id.
-func credentialParams(req request) (string, string, *Error) {
-	d := req.params.Decoder()
+func credentialParams(r *wire.Request) (string, string, *Error) {
+	d := r.Decoder()
 	scheme := d.String("scheme", optional)
 	id := d.String("id", required)
 	if d.Err() == nil && id == "" {
@@ -291,84 +306,87 @@ func credentialParams(req request) (string, string, *Error) {
 	return cmp.Or(scheme, "webauthn"), id, paramError(d.Err())
 }
 
-func (s *Server) renameCredential(c *client, req request) (any, bool, *Error) {
-	scheme, id, err := credentialParams(req)
+// renameCredential names one of the account's credentials, and answers {}
+// once it has.
+func (s *Server) renameCredential(c *client, r *wire.Request) *Error {
+	scheme, id, err := credentialParams(r)
 	if err != nil {
-		return nil, false, err
+		return err
 	}
-	name, err := parseString(req.params, "name", required)
+	name, err := parseString(r.Fields(), "name", required)
 	if err != nil {
-		return nil, false, err
+		return err
 	}
 	name = strings.TrimSpace(name)
 	s.mu.Lock()
 	defer s.unlock()
 	if err := accountLocked(c); err != nil {
-		return nil, false, err
+		return err
 	}
 	u := c.user
 	manager, ok := s.schemeLocked(scheme).(authn.Credentials)
 	if !ok || u.identities[scheme] == "" {
-		return nil, false, invalidParams("This account has no %s credentials", scheme)
+		return invalidParams("This account has no %s credentials", scheme)
 	}
 	record, schemeErr := manager.RenameCredential(u.identities[scheme], id, name)
 	if schemeErr != nil {
-		return nil, false, authError(schemeErr)
+		return authError(schemeErr)
 	}
 	u.records[scheme] = record
 	s.touchUser(u.id)
-	return map[string]any{}, false, nil
+	return nil
 }
 
-func (s *Server) removeCredential(c *client, req request) (any, bool, *Error) {
-	scheme, id, err := credentialParams(req)
+// removeCredential removes one of the account's credentials
+// (removeCredentialLocked), and answers {} once that is stored, before it
+// closes the connection, if it signed in with it.
+func (s *Server) removeCredential(c *client, r *wire.Request) *Error {
+	scheme, id, err := credentialParams(r)
 	if err != nil {
-		return nil, false, err
+		return err
 	}
 	s.mu.Lock()
 	defer s.unlock()
 	if err := accountLocked(c); err != nil {
-		return nil, false, err
+		return err
 	}
 	if err := s.reauthenticatedLocked(c); err != nil {
-		return nil, false, err
+		return err
 	}
 	if err := s.removeCredentialLocked(c.user, scheme, id, c); err != nil {
-		return nil, false, err
+		return err
 	}
 	c.fenceLocked()
-	result := map[string]any{}
-	c.sendResult(req, result)
+	r.Reply(wire.Empty{})
 	if c.credential == credentialKey(scheme, id) {
 		c.closeWithError(&Error{Code: CodeDenied, Message: "The passkey this connection signed in with was removed"})
 	}
-	return result, true, nil
+	return nil
 }
 
 // signOut forgets the session, device, or service token the connection
 // signed in with, and the push registrations it made, and closes it, or, with
 // `others`, ends every other session and device token of the account and
 // closes its other connections, which needs a recent reauthentication.
-func (s *Server) signOut(c *client, req request) (any, bool, *Error) {
-	d := req.params.Decoder()
+func (s *Server) signOut(c *client, r *wire.Request) *Error {
+	d := r.Decoder()
 	others := d.Bool("others", optional)
 	if err := paramError(d.Err()); err != nil {
-		return nil, false, err
+		return err
 	}
 	s.mu.Lock()
 	defer s.unlock()
 	if err := accountLocked(c); err != nil {
-		return nil, false, err
+		return err
 	}
 	if others {
 		if err := s.reauthenticatedLocked(c); err != nil {
-			return nil, false, err
+			return err
 		}
 		s.signOutOthersLocked(c.user, c)
 		c.fenceLocked()
-		result := map[string]any{}
-		c.sendResult(req, result)
-		return result, true, nil
+		r.Reply(wire.Empty{})
+		return nil
 	}
 	// What the connection signed in with signs in no more, nor wakes it.
 	session, device, service := c.sessionKeyLocked(), c.device, c.service
@@ -386,10 +404,9 @@ func (s *Server) signOut(c *client, req request) (any, bool, *Error) {
 		s.revokeServiceLocked(service, "Signed out")
 	}
 	c.fenceLocked()
-	result := map[string]any{}
-	c.sendResult(req, result)
+	r.Reply(wire.Empty{})
 	c.closeWithError(&Error{Code: CodeDenied, Message: "Signed out"})
-	return result, true, nil
+	return nil
 }
 
 // Credentials lists an account's credentials, such as its passkeys.

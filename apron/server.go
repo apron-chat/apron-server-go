@@ -782,15 +782,14 @@ func (c *client) enqueueBatch(values ...any) bool {
 	return c.conn.SendBatch(frames...)
 }
 
-// sendResult replies to req now (request.reply).
-func (c *client) sendResult(req request, result any) { req.reply(result) }
-
-// operation is a request handler. When it succeeds and has already queued its
-// own reply, it reports replied. Handlers whose results describe state queue
-// them while holding s.mu, so that a result reflects every notification sent
-// before it on the connection, and after the notifications the request
-// causes, which precede its result (§1).
-type operation func(s *Server, c *client, req request) (result any, replied bool, err *Error)
+// operation handles one of the server's own methods, a wire method
+// (wire.Handler.Serve): it reads the request's params with wire's
+// accessors or Decoder, and replies with Request.Reply, or returns nil
+// without replying, which answers {}, or an error. Operations whose
+// results describe state reply while holding s.mu, so that a result
+// reflects every notification sent before it on the connection, and after
+// the notifications the request causes, which precede its result (§1).
+type operation func(s *Server, c *client, r *wire.Request) *Error
 
 func (s *Server) operations() map[string]operation {
 	ops := map[string]operation{

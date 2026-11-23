@@ -74,16 +74,7 @@ func (s *Server) registerOp(name string, op operation) {
 		Capability: methodCapabilities[name],
 		NoDedup:    readOnlyOps[name],
 		Serve: func(ctx context.Context, wc *wire.Conn, r *wire.Request) error {
-			return backend{s}.serve(ctx, wc, func(c *client) *Error {
-				req := request{params: r.Fields(), send: func(result any, frames []wire.Frame) bool {
-					return r.Reply(result, frames...)
-				}}
-				result, replied, err := op(s, c, req)
-				if err == nil && !replied {
-					req.reply(result)
-				}
-				return err
-			})
+			return backend{s}.serve(ctx, wc, func(c *client) *Error { return op(s, c, r) })
 		},
 	})
 }

@@ -14,6 +14,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/apron-chat/apron-server-go/apron/internal/webpush"
+	"github.com/apron-chat/apron-server-go/wire"
 )
 
 const (
@@ -175,13 +176,14 @@ func (s *Server) removePushLocked(p *pushRegistration) {
 // a url again replaces the caller's registration of it and renews it; other
 // users' registrations of the same url are their own. A user holds at most
 // maxPushesPerUser: another replaces the one least recently registered.
-func (s *Server) registerPush(c *client, req request) (any, bool, *Error) {
+// It answers {} once the registration is kept.
+func (s *Server) registerPush(c *client, r *wire.Request) *Error {
 	if c.service != [32]byte{} {
 		// A service token's client is a program, which push does not wake;
 		// a registration would outlive the token's revocation.
-		return nil, false, &Error{Code: CodeDenied, Message: "A service token's connection does not register for push"}
+		return &Error{Code: CodeDenied, Message: "A service token's connection does not register for push"}
 	}
-	d := req.params.Decoder()
+	d := r.Decoder()
 	kind := d.String("kind", required)
 	if d.Err() == nil && kind != "relay" && kind != "webpush" {
 		d.Fail(invalidParams("Unknown push kind %q; this server supports relay and webpush", kind))
@@ -189,38 +191,38 @@ func (s *Server) registerPush(c *client, req request) (any, bool, *Error) {
 	endpoint := d.String("url", required)
 	token := d.String("token", optional)
 	if err := paramError(d.Err()); err != nil {
-		return nil, false, err
+		return err
 	}
 	endpoint, problem := webpush.CheckURL(endpoint, s.config.AllowInsecurePush)
 	if problem != "" {
-		return nil, false, invalidParams("%s", problem)
+		return invalidParams("%s", problem)
 	}
 	if len(endpoint) > maxPushURLBytes || len(token) > maxPushTokenLen {
-		return nil, false, &Error{Code: CodeTooLarge, Message: fmt.Sprintf("url is at most %d bytes and token at most %d", maxPushURLBytes, maxPushTokenLen)}
+		return &Error{Code: CodeTooLarge, Message: fmt.Sprintf("url is at most %d bytes and token at most %d", maxPushURLBytes, maxPushTokenLen)}
 	}
 	pushID := d.String("push_id", optional)
 	if err := paramError(d.Err()); err != nil {
-		return nil, false, err
+		return err
 	}
 	if d.Has("push_id") && !pushIDPattern.MatchString(pushID) {
-		return nil, false, invalidParams("push_id is 1 to 64 letters, digits, _ or -")
+		return invalidParams("push_id is 1 to 64 letters, digits, _ or -")
 	}
-	keys, err := parseKeysParam(req.params)
+	keys, err := parseKeysParam(r.Fields())
 	if err != nil {
-		return nil, false, err
+		return err
 	}
 	if kind == "webpush" {
 		if keys == nil {
-			return nil, false, invalidParams("A webpush registration needs keys with p256dh and auth")
+			return invalidParams("A webpush registration needs keys with p256dh and auth")
 		}
 		// A webpush subscription has no bearer token.
 		token = ""
 	}
 	wake := defaultWake
-	if raw, has := req.params["wake"]; has {
+	if raw, has := r.Param("wake"); has {
 		var names []string
 		if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) || json.Unmarshal(raw, &names) != nil || names == nil {
-			return nil, false, invalidParams("wake must be an array of scope names")
+			return invalidParams("wake must be an array of scope names")
 		}
 		// Past the bounds, names are ignored like unknown scopes.
 		names = names[:min(len(names), maxWakeScopes)]
@@ -231,7 +233,7 @@ func (s *Server) registerPush(c *client, req request) (any, bool, *Error) {
 	s.mu.Lock()
 	defer s.unlock()
 	if c.conn.Closing() {
-		return nil, false, connectionClosing()
+		return connectionClosing()
 	}
 	u := c.user
 	now := time.Now()
@@ -246,7 +248,7 @@ func (s *Server) registerPush(c *client, req request) (any, bool, *Error) {
 		userID: u.id, kind: kind, url: endpoint, token: token, pushID: pushID, device: c.device, session: c.sessionKeyLocked(),
 		keys: keys, wake: wake, renewed: now, lastUnread: -1,
 	})
-	return map[string]any{}, false, nil
+	return nil
 }
 
 // parseKeysParam reads a registration's optional keys (§4.9).
@@ -274,11 +276,11 @@ func parseKeysParam(params map[string]jsontext.Value) (*webpush.Keys, *Error) {
 }
 
 // unregisterPush removes the caller's registration of a url; an unknown url
-// is already unregistered (§4.9).
-func (s *Server) unregisterPush(c *client, req request) (any, bool, *Error) {
-	endpoint, err := parseString(req.params, "url", required)
+// is already unregistered (§4.9). It answers {} once it is.
+func (s *Server) unregisterPush(c *client, r *wire.Request) *Error {
+	endpoint, err := parseString(r.Fields(), "url", required)
 	if err != nil {
-		return nil, false, err
+		return err
 	}
 	if normalized, problem := webpush.NormalizeURL(endpoint); problem == "" {
 		endpoint = normalized
@@ -288,7 +290,7 @@ func (s *Server) unregisterPush(c *client, req request) (any, bool, *Error) {
 	if registration := c.user.pushes[endpoint]; registration != nil {
 		s.removePushLocked(registration)
 	}
-	return map[string]any{}, false, nil
+	return nil
 }
 
 // expirePushesLocked forgets the user's registrations that were not

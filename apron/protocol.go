@@ -40,42 +40,6 @@ func Denied(message string) *Error { return wire.Denied(message) }
 // InvalidParams is a CodeInvalidParams error with message.
 func InvalidParams(message string) *Error { return wire.InvalidParams(message) }
 
-// request is a request as the code that answers it gets it: an operation's
-// (registerOp), whose result goes out raw, or an auth request's, answered
-// with its typed Reply.
-type request struct {
-	params wire.Fields
-	// send sends a result, followed by frames with nothing between them.
-	send func(result any, frames []wire.Frame) bool
-	// auth answers an auth request (sendAuth).
-	auth wire.Reply[wire.AuthResult]
-}
-
-// sendAuth sends an auth request's result now: with You, it signs the
-// connection in as You, so it is sent while s.mu is held, with the
-// identity the connection then takes (attachLocked).
-func (req request) sendAuth(result wire.AuthResult) {
-	_ = req.auth.Send(result)
-}
-
-// reply sends the request's result now, followed by frames, with nothing
-// between them: handlers whose results describe state reply while they
-// hold s.mu, so that a result reflects every notification sent before it
-// on the connection, and none after (§1).
-func (req request) reply(result any, then ...any) bool {
-	frames := make([]wire.Frame, 0, len(then))
-	for _, value := range then {
-		payload, rendered := value.(jsontext.Value)
-		if !rendered {
-			payload = encodeJSON(value)
-		}
-		if payload != nil {
-			frames = append(frames, wire.Frame(payload))
-		}
-	}
-	return req.send(result, frames)
-}
-
 // bodyObject decodes a body package wire read, as the server keeps it:
 // every field as it was sent, those wire does not know too (Body.Unknown),
 // as a wire.Body encodes as it was decoded. It is nil for no body.

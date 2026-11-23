@@ -421,13 +421,13 @@ func (r *Registrar) Method(name string, fn MethodFunc) {
 		case h.s.ops[name] != nil:
 			return fmt.Errorf("method %q exists already", name)
 		}
-		h.s.ops[name] = func(s *Server, c *client, req request) (any, bool, *Error) {
+		h.s.ops[name] = func(s *Server, c *client, r *wire.Request) *Error {
 			s.mu.RLock()
 			user := userViewOf(c.user)
 			s.mu.RUnlock()
-			result, err := fn(s.requestContext(c), &MethodCall{User: user, Params: req.params})
+			result, err := fn(s.requestContext(c), &MethodCall{User: user, Params: r.Fields()})
 			if err != nil {
-				return nil, false, h.protocolError(err)
+				return h.protocolError(err)
 			}
 			if result == nil {
 				result = map[string]any{}
@@ -437,9 +437,10 @@ func (r *Registrar) Method(name string, fn MethodFunc) {
 			// deduplication keeps (§1.2) cannot change afterwards.
 			encoded, encodeErr := wire.Marshal(result)
 			if encodeErr != nil {
-				return nil, false, h.protocolError(fmt.Errorf("method %s returned a result that is not JSON: %w", name, encodeErr))
+				return h.protocolError(fmt.Errorf("method %s returned a result that is not JSON: %w", name, encodeErr))
 			}
-			return jsontext.Value(encoded), false, nil
+			r.Reply(jsontext.Value(encoded))
+			return nil
 		}
 		h.s.registerOp(name, h.s.ops[name])
 		return nil
