@@ -702,6 +702,7 @@ func TestPushPayloadFitsInLimit(t *testing.T) {
 		"body":     map[string]any{"text": "short", "format": "markdown", "embeds": []any{map[string]any{"kind": "upload"}}},
 		"ext":      map[string]any{"x": 1},
 	}
+	typed := func(snapshot map[string]any) *roomlog.Message { return roomlog.DecodeMessage(encodeJSON(snapshot)) }
 	decode := func(payload []byte) map[string]any {
 		t.Helper()
 		if len(payload) > maxPushPayloadBytes {
@@ -713,7 +714,7 @@ func TestPushPayloadFitsInLimit(t *testing.T) {
 		}
 		return value
 	}
-	got := decode(pushPayload("p", 3, snapshot))
+	got := decode(pushPayload("p", 3, typed(snapshot)))
 	want := map[string]any{"push_id": "p", "unread": float64(3), "message": map[string]any{
 		"message_id": "1724803200042", "room_id": "general", "from": map[string]any{"user_id": "alice", "name": "Alice"},
 		"reply_to": map[string]any{"message_id": "1724803200001"}, "body": map[string]any{"text": "short"},
@@ -723,7 +724,7 @@ func TestPushPayloadFitsInLimit(t *testing.T) {
 	}
 	// Text is truncated to maxPushTextRunes.
 	snapshot["body"] = map[string]any{"text": strings.Repeat("e", maxPushTextRunes+500)}
-	text := decode(pushPayload("", 0, snapshot))["message"].(map[string]any)["body"].(map[string]any)["text"].(string)
+	text := decode(pushPayload("", 0, typed(snapshot)))["message"].(map[string]any)["body"].(map[string]any)["text"].(string)
 	if runes := []rune(text); len(runes) != maxPushTextRunes || runes[len(runes)-1] != '…' {
 		t.Fatalf("truncated text: %d runes", len(runes))
 	}
@@ -733,12 +734,12 @@ func TestPushPayloadFitsInLimit(t *testing.T) {
 		many[i] = "a_rather_long_user_id_" + formatID(int64(i))
 	}
 	snapshot["body"] = map[string]any{"text": "hi", "mentions": many}
-	if body := decode(pushPayload("", 0, snapshot))["message"].(map[string]any)["body"]; !reflect.DeepEqual(body, map[string]any{"text": "hi"}) {
+	if body := decode(pushPayload("", 0, typed(snapshot)))["message"].(map[string]any)["body"]; !reflect.DeepEqual(body, map[string]any{"text": "hi"}) {
 		t.Fatalf("body without mentions: %#v", body)
 	}
 	// Then text is shortened to fit.
 	snapshot["body"] = map[string]any{"text": strings.Repeat(" ", maxPushTextRunes)}
-	payload := pushPayload("", 0, snapshot)
+	payload := pushPayload("", 0, typed(snapshot))
 	text = decode(payload)["message"].(map[string]any)["body"].(map[string]any)["text"].(string)
 	if !strings.HasSuffix(text, "…") || len(payload) < maxPushPayloadBytes-16 {
 		t.Fatalf("shortened text: %d bytes of payload", len(payload))
@@ -746,7 +747,7 @@ func TestPushPayloadFitsInLimit(t *testing.T) {
 	// Then body goes, from keeps only user_id, and reply_to goes.
 	snapshot["body"] = map[string]any{"text": "hi"}
 	snapshot["from"] = map[string]any{"user_id": "alice", "name": strings.Repeat("\\", 3000)}
-	message := decode(pushPayload("", 0, snapshot))["message"].(map[string]any)
+	message := decode(pushPayload("", 0, typed(snapshot)))["message"].(map[string]any)
 	if _, has := message["body"]; has || !reflect.DeepEqual(message["from"], map[string]any{"user_id": "alice"}) || message["reply_to"] == nil {
 		t.Fatalf("message without body and name: %#v", message)
 	}

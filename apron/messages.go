@@ -52,14 +52,6 @@ func (m *messageState) info() *messageInfo {
 	return m.cached
 }
 
-// snapshot decodes the message's current snapshot as a JSON object, for
-// code that edits a body's embeds as objects (embeds.go), a copy the
-// caller owns.
-func (m *messageState) snapshot() map[string]any {
-	records := m.Records()
-	return decodeObject(records[len(records)-1].Raw)
-}
-
 // storedBody is a body the server edited as a JSON object (bodyObject), as
 // a snapshot holds it.
 func storedBody(body map[string]any) *roomlog.Body {
@@ -148,7 +140,7 @@ func (s *Server) saveMessage(c *client, p wire.EditParams, reply wire.Reply[wire
 				return &Error{Code: CodeDenied, Message: "Only the author may edit, move, or delete this message"}
 			}
 			// Live text is still writing into body.text (§4.8.5).
-			if hasLiveAppend(current.snapshot()) {
+			if hasLiveAppend(current.Current()) {
 				return &Error{Code: CodeDenied, Message: "The message's text is still being written"}
 			}
 			// The filters ran before the grant or the mention reached this
@@ -183,12 +175,10 @@ func (s *Server) saveMessage(c *client, p wire.EditParams, reply wire.Reply[wire
 			return &Error{Code: CodeDenied, Message: "A reply cannot quote a message that fewer people can see"}
 		}
 	}
-	// previous is the snapshot the save replaces, and previousObject the
-	// same as a JSON object, for the embeds (embeds.go) and push.
+	// previous is the snapshot the save replaces.
 	var previous *roomlog.Message
-	var previousObject map[string]any
 	if current != nil {
-		previous, previousObject = current.Current(), current.snapshot()
+		previous = current.Current()
 	}
 	if editor {
 		body = sharedTextBody(previous, body)
@@ -244,7 +234,7 @@ func (s *Server) saveMessage(c *client, p wire.EditParams, reply wire.Reply[wire
 	if body != nil && !editor {
 		var embeds []any
 		var err *Error
-		embeds, written, err = s.resolveEmbedsLocked(c, messageID, previousObject, body)
+		embeds, written, err = s.resolveEmbedsLocked(c, messageID, previous, body)
 		if err != nil {
 			return err
 		}
@@ -255,7 +245,7 @@ func (s *Server) saveMessage(c *client, p wire.EditParams, reply wire.Reply[wire
 			delete(body, "embeds")
 		}
 	}
-	s.releaseEmbedsLocked(previousObject, body)
+	s.releaseEmbedsLocked(previous, body)
 
 	snapshot := &roomlog.Message{MessageID: messageID, LogID: formatID(logID), RoomID: roomID, From: from, Deleted: deleted, Ext: ext}
 	if !deleted {
@@ -287,18 +277,17 @@ func (s *Server) saveMessage(c *client, p wire.EditParams, reply wire.Reply[wire
 		// The author's own message moves their read position (§4.9).
 		s.unreadChangedLocked(u, destination.ID())
 	}
-	// Push reads the snapshot as a JSON object.
-	object := current.snapshot()
+	saved := current.Current()
 	switch {
 	case !replacing:
-		s.wakeNewLocked(current, object)
+		s.wakeNewLocked(current, saved)
 	case current.pushHeld:
 		// A save that ends the live append text sends the held push.
-		if deleted || !hasLiveAppend(object) {
+		if deleted || !hasLiveAppend(saved) {
 			s.releasePushLocked(current)
 		}
 	default:
-		s.wakeLocked(current, object, previousObject)
+		s.wakeLocked(current, saved, previous)
 	}
 	result := wire.MessageResult{MessageID: wire.LogID(logID)}
 	if replacing {
@@ -326,16 +315,14 @@ func (s *Server) commitSnapshotLocked(m *messageState, snapshot *roomlog.Message
 // republishLocked publishes a server-made snapshot of a message, such as a
 // finished upload or live text (§4.8.3): edit rewrites a copy of the
 // current body, and nothing is published when it reports no change.
-func (s *Server) republishLocked(m *messageState, edit func(body map[string]any) bool) {
+func (s *Server) republishLocked(m *messageState, edit func(body *roomlog.Body) bool) {
 	snapshot := m.Current()
 	if snapshot.Body == nil || snapshot.Deleted {
 		return
 	}
-	body := bodyObject(&snapshot.Body.Body)
-	if !edit(body) {
+	if !edit(snapshot.Body) {
 		return
 	}
-	snapshot.Body = storedBody(body)
 	logID := s.log.NextID()
 	snapshot.LogID = formatID(logID)
 	s.commitSnapshotLocked(m, snapshot, logID)

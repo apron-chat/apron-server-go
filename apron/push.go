@@ -12,6 +12,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/apron-chat/apron-server-go/apron/internal/roomlog"
 	"github.com/apron-chat/apron-server-go/apron/internal/webpush"
 	"github.com/apron-chat/apron-server-go/wire"
 )
@@ -341,20 +342,19 @@ func (s *Server) sweepPushes() {
 // Each live registration whose wake scopes select the message gets the
 // payload with its push_id and the user's unread count, with the most
 // urgent Urgency of the scopes that select it.
-func (s *Server) wakeLocked(m *messageState, snapshot, previous map[string]any) {
+func (s *Server) wakeLocked(m *messageState, snapshot, previous *roomlog.Message) {
 	// Transient notices, which have no message_id, are never pushed (§4.9).
-	if s.config.DisablePush || len(s.pushes) == 0 || snapshot["deleted"] == true || snapshot["message_id"] == nil {
+	if s.config.DisablePush || len(s.pushes) == 0 || snapshot.Deleted || snapshot.MessageID == "" {
 		return
 	}
 	r := s.rooms.Get(m.RoomID())
 	reasons := make(map[string]wakeScope)
-	body, _ := snapshot["body"].(map[string]any)
-	for _, id := range mentions(body) {
+	for _, id := range snapshot.Mentions() {
 		reasons[id] |= wakeMentions
 	}
 	if previous == nil {
-		if ref, ok := snapshot["reply_to"].(map[string]any); ok {
-			if target := s.messages[ref["message_id"].(string)]; target != nil {
+		if replyID := snapshot.ReplyID(); replyID != "" {
+			if target := s.messages[replyID]; target != nil {
 				reasons[target.Owner()] |= wakeReplies
 			}
 		}
@@ -374,8 +374,7 @@ func (s *Server) wakeLocked(m *messageState, snapshot, previous map[string]any) 
 			}
 		}
 	} else {
-		previousBody, _ := previous["body"].(map[string]any)
-		for _, id := range mentions(previousBody) {
+		for _, id := range previous.Mentions() {
 			delete(reasons, id)
 		}
 	}
@@ -485,20 +484,18 @@ func (u *userState) pushesTodayLocked(now time.Time) int {
 // maxPushPayloadBytes the message is cut to fit: mentions go first, then
 // text is shortened, and then body is dropped, from keeps only user_id, and
 // reply_to goes, in turn.
-func pushPayload(pushID string, unread int, snapshot map[string]any) []byte {
+func pushPayload(pushID string, unread int, snapshot *roomlog.Message) []byte {
 	message := map[string]any{
-		"message_id": snapshot["message_id"],
-		"room_id":    snapshot["room_id"],
-		"from":       snapshot["from"],
+		"message_id": snapshot.MessageID,
+		"room_id":    snapshot.RoomID,
+		"from":       snapshot.From,
 	}
-	if reply, ok := snapshot["reply_to"].(map[string]any); ok {
-		message["reply_to"] = map[string]any{"message_id": reply["message_id"]}
+	if replyID := snapshot.ReplyID(); replyID != "" {
+		message["reply_to"] = map[string]any{"message_id": replyID}
 	}
-	text := ""
-	var mentioned []string
-	if body, ok := snapshot["body"].(map[string]any); ok {
-		text, _ = body["text"].(string)
-		mentioned = mentions(body)
+	text, mentioned := "", snapshot.Mentions()
+	if snapshot.Body != nil {
+		text = snapshot.Body.Text
 	}
 	if utf8.RuneCountInString(text) > maxPushTextRunes {
 		text = string([]rune(text)[:maxPushTextRunes-1]) + "…"
@@ -553,11 +550,7 @@ func pushPayload(pushID string, unread int, snapshot map[string]any) []byte {
 	}
 	for _, cut := range []func(){
 		func() { setBody("", nil) },
-		func() {
-			if from, ok := message["from"].(map[string]any); ok {
-				message["from"] = map[string]any{"user_id": from["user_id"]}
-			}
-		},
+		func() { message["from"] = map[string]any{"user_id": snapshot.From.UserID} },
 		func() { delete(message, "reply_to") },
 	} {
 		if cut(); fits() {

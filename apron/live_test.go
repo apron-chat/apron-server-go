@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/apron-chat/apron-server-go/apron/internal/livetext"
+	"github.com/apron-chat/apron-server-go/apron/internal/roomlog"
 	"github.com/apron-chat/apron-server-go/store"
 )
 
@@ -933,5 +934,29 @@ func TestTerminalViewerNotForHTTPOrAppends(t *testing.T) {
 		if status != http.StatusOK || header.Get("Content-Type") != "text/plain; charset=utf-8" || header.Get("Location") != "" {
 			t.Fatalf("%+v: %d %#v", c, status, header)
 		}
+	}
+}
+
+// replaceEmbed edits one embed of a snapshot's body, keeps the others as
+// they are, and leaves a body without embeds with no embeds member.
+func TestReplaceEmbed(t *testing.T) {
+	snapshot := roomlog.DecodeMessage([]byte(`{"body":{"embeds":[{"embed_id":"embed_1","kind":"upload","n":12345678901234567890},{"embed_id":"embed_2","kind":"append"}],"text":"hi"},"from":{"user_id":"ada"},"log_id":"2","message_id":"1","room_id":"general"}`))
+	body := snapshot.Body
+	if replaceEmbed(body, "embed_9", nil) {
+		t.Fatal("replaced an embed the body does not have")
+	}
+	if !replaceEmbed(body, "embed_2", func(embed map[string]any) { embed["url"] = "https://chat.example/live/embed_2/s" }) {
+		t.Fatal("embed_2 was not replaced")
+	}
+	if got, want := string(encodeJSON(body)), `{"embeds":[{"embed_id":"embed_1","kind":"upload","n":12345678901234567890},{"embed_id":"embed_2","kind":"append","url":"https://chat.example/live/embed_2/s"}],"text":"hi"}`; got != want {
+		t.Fatalf("updated body\n%s\nwant\n%s", got, want)
+	}
+	replaceEmbed(body, "embed_1", nil)
+	replaceEmbed(body, "embed_2", nil)
+	if got := string(encodeJSON(body)); got != `{"text":"hi"}` {
+		t.Fatalf("body without embeds: %s", got)
+	}
+	if !hasLiveAppend(roomlog.DecodeMessage([]byte(`{"body":{"embeds":[{"embed_id":"e","kind":"append"}]},"from":{"user_id":"a"},"log_id":"1","message_id":"1","room_id":"r"}`))) || hasLiveAppend(snapshot) {
+		t.Fatal("hasLiveAppend")
 	}
 }

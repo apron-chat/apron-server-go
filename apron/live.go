@@ -100,7 +100,7 @@ func (s *Server) startWriterLocked(e *embedState) (int, string) {
 		}
 	} else if m := s.messages[e.MessageID]; m != nil {
 		s.embeds.Touch(e.ID)
-		s.republishLocked(m, func(body map[string]any) bool {
+		s.republishLocked(m, func(body *roomlog.Body) bool {
 			return replaceEmbed(body, e.ID, func(embed map[string]any) { maps.Copy(embed, cloneObject(e.Owned)) })
 		})
 	}
@@ -158,14 +158,14 @@ func (s *Server) postPendingLocked(e *embedState) bool {
 	s.commitSnapshotLocked(m, snapshot, logID)
 	s.messageUnreadLocked(m, nil, nil)
 	s.unreadChangedLocked(u, r.ID())
-	s.wakeNewLocked(m, m.snapshot())
+	s.wakeNewLocked(m, m.Current())
 	return true
 }
 
 // wakeNewLocked pushes a new message (§4.9), except one with live append
 // text: its push waits for the text to end (§4.8.5), so that it carries
 // the whole text.
-func (s *Server) wakeNewLocked(m *messageState, snapshot map[string]any) {
+func (s *Server) wakeNewLocked(m *messageState, snapshot *roomlog.Message) {
 	if hasLiveAppend(snapshot) {
 		m.pushHeld = true
 		return
@@ -180,15 +180,18 @@ func (s *Server) releasePushLocked(m *messageState) {
 		return
 	}
 	m.pushHeld = false
-	if snapshot := m.snapshot(); snapshot["deleted"] != true {
+	if snapshot := m.Current(); !snapshot.Deleted {
 		s.wakeLocked(m, snapshot, nil)
 	}
 }
 
-func hasLiveAppend(snapshot map[string]any) bool {
-	body, _ := snapshot["body"].(map[string]any)
-	for _, value := range asList(body["embeds"]) {
-		if embed, ok := value.(map[string]any); ok && embed["kind"] == kindAppend {
+// hasLiveAppend reports whether a snapshot has an append embed (§4.8.5).
+func hasLiveAppend(snapshot *roomlog.Message) bool {
+	if snapshot.Body == nil {
+		return false
+	}
+	for _, raw := range snapshot.Body.Embeds {
+		if embedOf(raw).Kind == kindAppend {
 			return true
 		}
 	}
@@ -291,7 +294,7 @@ func (s *Server) finishLiveLocked(e *embedState) {
 	if e.Kind == kindTerminal {
 		e.Owned = map[string]any{"output": text, "og": e.terminalOG()}
 		if m != nil {
-			s.republishLocked(m, func(body map[string]any) bool {
+			s.republishLocked(m, func(body *roomlog.Body) bool {
 				return replaceEmbed(body, e.ID, func(embed map[string]any) {
 					delete(embed, "url")
 					maps.Copy(embed, cloneObject(e.Owned))
@@ -301,17 +304,16 @@ func (s *Server) finishLiveLocked(e *embedState) {
 		return
 	}
 	if m != nil {
-		s.republishLocked(m, func(body map[string]any) bool {
+		s.republishLocked(m, func(body *roomlog.Body) bool {
 			if !replaceEmbed(body, e.ID, nil) {
 				return false
 			}
 			// A save may have lengthened body.text since the text started:
 			// the text keeps its first part that fits in a request (ReadLimit).
-			current, _ := body["text"].(string)
-			if room := max(0, int(s.config.ReadLimit)-len(current)); len(text) > room {
+			if room := max(0, int(s.config.ReadLimit)-len(body.Text)); len(text) > room {
 				text = string(livetext.WholeRunes([]byte(text[:room])))
 			}
-			body["text"] = current + text
+			body.Text += text
 			return true
 		})
 	}

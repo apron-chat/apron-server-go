@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"crypto/subtle"
 	"encoding/json/jsontext"
+	"encoding/json/v2"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -11,12 +12,14 @@ import (
 	"mime"
 	"net/http"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/apron-chat/apron-server-go/apron/internal/embeds"
 	"github.com/apron-chat/apron-server-go/apron/internal/livetext"
+	"github.com/apron-chat/apron-server-go/apron/internal/roomlog"
 	"github.com/apron-chat/apron-server-go/apron/internal/uploads"
 	"github.com/apron-chat/apron-server-go/wire"
 )
@@ -104,16 +107,15 @@ func (e *embedState) fileURL() string {
 // embed gets a write URL, listed in written. Senders' og is dropped: the
 // server only describes media it hosts. A message has at most one append
 // embed (§4.8.5).
-func (s *Server) resolveEmbedsLocked(c *client, messageID string, current map[string]any, body map[string]any) ([]any, []any, *Error) {
+func (s *Server) resolveEmbedsLocked(c *client, messageID string, current *roomlog.Message, body map[string]any) ([]any, []any, *Error) {
 	submitted, _ := body["embeds"].([]any)
 	previous := make(map[string]map[string]any)
-	if current != nil {
-		if currentBody, ok := current["body"].(map[string]any); ok {
-			for _, value := range asList(currentBody["embeds"]) {
-				if embed, ok := value.(map[string]any); ok {
-					if id, ok := embed["embed_id"].(string); ok {
-						previous[id] = embed
-					}
+	if current != nil && current.Body != nil {
+		for _, raw := range current.Body.Embeds {
+			var embed map[string]any
+			if json.Unmarshal(raw, &embed) == nil {
+				if id, ok := embed["embed_id"].(string); ok {
+					previous[id] = embed
 				}
 			}
 		}
@@ -252,24 +254,35 @@ func (s *Server) newWriteLocked(c *client, id, kind, messageID string) *embedSta
 // releaseEmbedsLocked deletes the hosted content of embeds a save removed
 // from the current snapshot (§4.8.2); a nil body, as for a tombstone,
 // removes every embed.
-func (s *Server) releaseEmbedsLocked(current map[string]any, body map[string]any) {
-	if current == nil {
+func (s *Server) releaseEmbedsLocked(current *roomlog.Message, body map[string]any) {
+	if current == nil || current.Body == nil {
 		return
 	}
-	currentBody, _ := current["body"].(map[string]any)
 	remaining := make(map[string]bool)
 	for _, value := range asList(body["embeds"]) {
 		if id, ok := value.(map[string]any)["embed_id"].(string); ok {
 			remaining[id] = true
 		}
 	}
-	for _, value := range asList(currentBody["embeds"]) {
-		if embed, ok := value.(map[string]any); ok {
-			if id, ok := embed["embed_id"].(string); ok && !remaining[id] {
-				s.removeEmbedLocked(id)
-			}
+	for _, raw := range current.Body.Embeds {
+		if id := embedOf(raw).EmbedID; id != "" && !remaining[id] {
+			s.removeEmbedLocked(id)
 		}
 	}
+}
+
+// embedRef is what the server reads of an embed object in a snapshot.
+type embedRef struct {
+	EmbedID string `json:"embed_id"`
+	Kind    string `json:"kind"`
+}
+
+// embedOf reads an embed object of a snapshot's body, zero for one that is
+// no object.
+func embedOf(raw jsontext.Value) embedRef {
+	var ref embedRef
+	_ = json.Unmarshal(raw, &ref)
+	return ref
 }
 
 // removeEmbedLocked forgets a hosted embed and its content, invalidating its
@@ -366,7 +379,7 @@ func (s *Server) endRefusedWritesLocked(u *userState) {
 // never posted.
 func (s *Server) failWriteLocked(e *embedState) {
 	if m := s.messages[e.MessageID]; m != nil {
-		s.republishLocked(m, func(body map[string]any) bool {
+		s.republishLocked(m, func(body *roomlog.Body) bool {
 			return replaceEmbed(body, e.ID, nil)
 		})
 		s.removeEmbedLocked(e.ID)
@@ -376,24 +389,29 @@ func (s *Server) failWriteLocked(e *embedState) {
 	s.removeEmbedLocked(e.ID)
 }
 
-// replaceEmbed swaps one embed in a body for update, or removes it when
-// update is nil. It reports whether the embed was present.
-func replaceEmbed(body map[string]any, id string, update func(map[string]any)) bool {
-	embeds := asList(body["embeds"])
-	for i, value := range embeds {
-		embed, ok := value.(map[string]any)
-		if !ok || embed["embed_id"] != id {
+// replaceEmbed swaps one embed in a body for update, which edits it as an
+// object, or removes it when update is nil; the other embeds stay as they
+// are. It reports whether the embed was present. A body left without
+// embeds has no embeds member, as one sent without.
+func replaceEmbed(body *roomlog.Body, id string, update func(map[string]any)) bool {
+	for i, raw := range body.Embeds {
+		if embedOf(raw).EmbedID != id {
 			continue
 		}
+		embeds := slices.Clone(body.Embeds)
 		if update == nil {
-			embeds = append(embeds[:i:i], embeds[i+1:]...)
-			if len(embeds) == 0 {
-				delete(body, "embeds")
-			} else {
-				body["embeds"] = embeds
-			}
+			embeds = slices.Delete(embeds, i, i+1)
 		} else {
+			var embed map[string]any
+			_ = json.Unmarshal(raw, &embed)
 			update(embed)
+			embeds[i] = encodeJSON(embed)
+		}
+		body.Embeds = embeds
+		if len(embeds) == 0 {
+			object := bodyObject(&body.Body)
+			delete(object, "embeds")
+			*body = *storedBody(object)
 		}
 		return true
 	}
@@ -609,7 +627,7 @@ func (s *Server) writeUpload(w http.ResponseWriter, r *http.Request, e *embedSta
 	} else if e.ServerAvatarBy != "" {
 		s.setServerAvatarLocked(e)
 	} else if m := s.messages[e.MessageID]; m != nil {
-		s.republishLocked(m, func(body map[string]any) bool {
+		s.republishLocked(m, func(body *roomlog.Body) bool {
 			return replaceEmbed(body, e.ID, func(embed map[string]any) {
 				maps.Copy(embed, cloneObject(e.Owned))
 			})
@@ -662,7 +680,7 @@ func (s *Server) evictUploadsLocked(keep *embedState) {
 	for _, messageID := range order {
 		if m := s.messages[messageID]; m != nil {
 			ids := evicted[messageID]
-			s.republishLocked(m, func(body map[string]any) bool {
+			s.republishLocked(m, func(body *roomlog.Body) bool {
 				changed := false
 				for _, id := range ids {
 					changed = replaceEmbed(body, id, nil) || changed
