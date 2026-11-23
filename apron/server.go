@@ -23,6 +23,7 @@ import (
 	"github.com/go-webauthn/webauthn/protocol"
 	"golang.org/x/time/rate"
 
+	"github.com/apron-chat/apron-server-go/apron/internal/devices"
 	"github.com/apron-chat/apron-server-go/apron/internal/durable"
 	"github.com/apron-chat/apron-server-go/apron/internal/kv"
 	"github.com/apron-chat/apron-server-go/apron/internal/proposals"
@@ -191,7 +192,8 @@ type Server struct {
 	pushes     map[string]*pushRegistration
 	closed     bool
 	sessions   *sessions.Table[*userState]
-	devices    map[[32]byte]deviceToken
+	// devices are the /invite-device tokens (devices.go).
+	devices *devices.Table[*userState]
 	// invitations are the outstanding invitations by the SHA-256 of their
 	// tokens (invitations.go).
 	invitations map[[32]byte]*invitation
@@ -293,7 +295,7 @@ func Open(config Config) (*Server, error) {
 		emoji:       make(map[string]*customEmoji),
 		pushes:      make(map[string]*pushRegistration),
 		sessions:    sessions.New[*userState](),
-		devices:     make(map[[32]byte]deviceToken),
+		devices:     devices.New[*userState](),
 		invitations: make(map[[32]byte]*invitation),
 		services:    make(map[[32]byte]*serviceToken),
 		accounts:    make(map[authn.Identity]*userState),

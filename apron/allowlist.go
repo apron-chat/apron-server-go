@@ -316,10 +316,9 @@ func (s *Server) signOutLocked(u *userState) {
 			s.sessions.Delete(key)
 		}
 	}
-	for key, device := range s.devices {
-		if device.user == u {
-			delete(s.devices, key)
-			s.touchDevice(key)
+	for key, device := range s.devices.All() {
+		if device.User == u {
+			s.devices.Delete(key)
 		}
 	}
 	for _, registration := range u.pushes {

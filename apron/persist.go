@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/apron-chat/apron-server-go/apron/internal/devices"
 	"github.com/apron-chat/apron-server-go/apron/internal/roomlog"
 	"github.com/apron-chat/apron-server-go/apron/internal/rooms"
 	"github.com/apron-chat/apron-server-go/apron/internal/sessions"
@@ -48,7 +49,7 @@ import (
 //	                      reactions (rooms)
 //	user     user_id      guests too, retired at the next start
 //	session  hex SHA-256 of the bearer token (sessions)
-//	device   hex SHA-256 of the /invite-device token
+//	device   hex SHA-256 of the /invite-device token (devices)
 //	embed    embed_id
 //	push     user_id, a space, and url (url alone before registrations
 //	         belonged to their user)
@@ -59,7 +60,6 @@ const (
 	entryRoom    = rooms.EntryKind
 	entryMessage = rooms.MessageEntryKind
 	entryUser    = "user"
-	entryDevice  = "device"
 	entryEmbed   = "embed"
 	entryPush    = "push"
 )
@@ -70,7 +70,6 @@ const (
 type dirtySet struct {
 	messages map[string]bool
 	users    map[string]bool
-	devices  map[[32]byte]bool
 	embeds   map[string]bool
 	// invitations are named by their tokens' SHA-256.
 	invitations map[[32]byte]bool
@@ -86,7 +85,6 @@ func newDirtySet() dirtySet {
 	return dirtySet{
 		messages:    make(map[string]bool),
 		users:       make(map[string]bool),
-		devices:     make(map[[32]byte]bool),
 		invitations: make(map[[32]byte]bool),
 		services:    make(map[[32]byte]bool),
 		embeds:      make(map[string]bool),
@@ -96,7 +94,6 @@ func newDirtySet() dirtySet {
 
 func (s *Server) touchMessage(m *messageState) { s.dirty.messages[m.ID()] = true }
 func (s *Server) touchUser(id string)          { s.dirty.users[id] = true }
-func (s *Server) touchDevice(key [32]byte)     { s.dirty.devices[key] = true }
 func (s *Server) touchEmbed(id string)         { s.dirty.embeds[id] = true }
 func (s *Server) touchPush(key string)         { s.dirty.pushes[key] = true }
 func (s *Server) touchUsedID(lowercased string) {
@@ -170,12 +167,6 @@ type storedMute struct {
 	Until   time.Time `json:"until,omitzero"`
 }
 
-type storedDevice struct {
-	User    string    `json:"user"`
-	Name    string    `json:"name"`
-	Created time.Time `json:"created"`
-}
-
 type storedEmbed struct {
 	Kind      string `json:"kind"`
 	MessageID string `json:"message_id,omitzero"`
@@ -233,12 +224,14 @@ func (s *Server) flushLocked() {
 		s.rooms.Entries()
 		s.extData.Entries()
 		s.sessions.Entries(userID)
+		s.devices.Entries(userID)
 		s.store.Queue(nil)
 		return
 	}
 	batch := append(s.entriesLocked(s.dirty, s.log.Entries()), s.rooms.Entries()...)
 	batch = append(batch, s.extData.Entries()...)
 	batch = append(batch, s.sessions.Entries(userID)...)
+	batch = append(batch, s.devices.Entries(userID)...)
 	meta := s.metaLocked()
 	if meta != s.storedMeta {
 		s.storedMeta = meta
@@ -277,13 +270,6 @@ func (s *Server) entriesLocked(d dirtySet, records []store.Entry) []store.Entry 
 			put(entryUser, id, storedUserOf(u))
 		} else {
 			del(entryUser, id)
-		}
-	}
-	for key := range d.devices {
-		if device, ok := s.devices[key]; ok {
-			put(entryDevice, sessionID(key), storedDevice{User: device.user.id, Name: device.name, Created: device.created})
-		} else {
-			del(entryDevice, sessionID(key))
 		}
 	}
 	s.invitationEntriesLocked(d, put, del)
@@ -588,20 +574,11 @@ func (s *Server) restoreLocked() (map[string]bool, error) {
 	if err := s.restoreServicesLocked(entries[entryService], now); err != nil {
 		return nil, err
 	}
-	for id, raw := range entries[entryDevice] {
-		var stored storedDevice
-		key, err := hex.DecodeString(id)
-		if err != nil || len(key) != 32 {
-			continue
-		}
-		if err := decode(entryDevice, id, raw, &stored); err != nil {
-			return nil, err
-		}
-		if u := s.users[stored.User]; u != nil && u.account() {
-			s.devices[[32]byte(key)] = deviceToken{user: u, name: stored.Name, created: stored.Created}
-		} else {
-			s.touchDevice([32]byte(key))
-		}
+	if err := s.devices.Restore(entries[devices.EntryKind], func(id string) (*userState, bool) {
+		u := s.users[id]
+		return u, u != nil && u.account()
+	}); err != nil {
+		return nil, err
 	}
 
 	// Nothing is connected yet: guests are retired as if their last

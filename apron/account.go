@@ -210,10 +210,9 @@ func (s *Server) signOutOthersLocked(u *userState, keep *client) {
 			s.sessions.Delete(key)
 		}
 	}
-	for key, d := range s.devices {
-		if d.user == u && (device == [32]byte{} || key != device) {
-			delete(s.devices, key)
-			s.touchDevice(key)
+	for key, d := range s.devices.All() {
+		if d.User == u && (device == [32]byte{} || key != device) {
+			s.devices.Delete(key)
 		}
 	}
 	for _, registration := range u.pushes {
@@ -382,8 +381,7 @@ func (s *Server) signOut(c *client, req request) (any, bool, *Error) {
 	case session != [32]byte{}:
 		s.sessions.Delete(session)
 	case device != [32]byte{}:
-		delete(s.devices, device)
-		s.touchDevice(device)
+		s.devices.Delete(device)
 	case service != [32]byte{}:
 		s.revokeServiceLocked(service, "Signed out")
 	}

@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/apron-chat/apron-server-go/apron/internal/devices"
 	"github.com/apron-chat/apron-server-go/store"
 )
 
@@ -25,7 +26,7 @@ import (
 const storedAccountsFile = "testdata/stored-accounts.jsonl"
 
 // storedAccountKinds are the kinds of entries the file holds.
-var storedAccountKinds = []string{entryUser, entryDevice, entryService, entryInvitation, entryEmbed, entryPush, entryMeta}
+var storedAccountKinds = []string{entryUser, devices.EntryKind, entryService, entryInvitation, entryEmbed, entryPush, entryMeta}
 
 // storedAccountsScenario makes a bot with two service tokens, an
 // outstanding invitation and an account an invitation made, a passkey
@@ -187,6 +188,20 @@ func expectStoredAgain(t *testing.T, kind string, want map[string]jsontext.Value
 	}
 }
 
+// TestStoredAccountsAreStoredAgain restores each module's entries of the
+// file, and checks that the module stores them again as they were.
+func TestStoredAccountsAreStoredAgain(t *testing.T) {
+	stored := loadStoredAccounts(t)
+	known := func(id string) (string, bool) { return id, true }
+	same := func(id string) string { return id }
+
+	deviceTable := devices.New[string]()
+	if err := deviceTable.Restore(stored[devices.EntryKind], known); err != nil {
+		t.Fatal(err)
+	}
+	expectStoredAgain(t, devices.EntryKind, stored[devices.EntryKind], deviceTable.Snapshot(same))
+}
+
 // TestStoredAccountShapesRoundTrip decodes each entry of the file into the
 // shape that stores it, and checks that it encodes again as it was.
 func TestStoredAccountShapesRoundTrip(t *testing.T) {
@@ -204,7 +219,6 @@ func TestStoredAccountShapesRoundTrip(t *testing.T) {
 		expectStoredAgain(t, kind, stored[kind], again)
 	}
 	roundTrip(entryUser, func() any { return new(storedUser) })
-	roundTrip(entryDevice, func() any { return new(storedDevice) })
 	roundTrip(entryService, func() any { return new(storedService) })
 	roundTrip(entryInvitation, func() any { return new(storedInvitation) })
 	roundTrip(entryEmbed, func() any { return new(storedEmbed) })

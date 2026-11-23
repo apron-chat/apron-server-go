@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/apron-chat/apron-server-go/apron/internal/devices"
 	"github.com/apron-chat/apron-server-go/apron/internal/sessions"
 )
 
@@ -80,7 +81,7 @@ func (s *Server) authenticateToken(c *client, req request) (any, *Error) {
 	if err := paramError(d.Err()); err != nil {
 		return nil, err
 	}
-	if strings.HasPrefix(token, deviceTokenPrefix) {
+	if strings.HasPrefix(token, devices.Prefix) {
 		return s.authenticateDeviceLocked(c, req, token)
 	}
 	if strings.HasPrefix(token, serviceTokenPrefix) {

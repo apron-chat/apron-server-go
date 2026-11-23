@@ -1,74 +1,31 @@
 package apron
 
 import (
-	"bytes"
-	"crypto/rand"
 	"crypto/sha256"
-	"encoding/base64"
 	"fmt"
 	"slices"
 	"strings"
 	"time"
 
+	"github.com/apron-chat/apron-server-go/apron/internal/devices"
 	"github.com/apron-chat/apron-server-go/wire"
 )
 
 // `/invite-device <name>` follows apron-server-cloudflare's command of that
 // name: an account mints a bearer token that signs it in on another device
 // through the token scheme (§3.2), from any origin, until the same name
-// mints a new one.
-const (
-	maxDeviceTokens    = 3
-	deviceTokenPrefix  = "apron_device_"
-	maxDeviceNameBytes = 32
-)
+// mints a new one. A devices.Table keeps the tokens; the server keeps who
+// may mint one, what a sign-in with one does, and what replacing one ends.
 
-// deviceToken is a token /invite-device minted, kept by the SHA-256 of the
-// token: the account it signs in as, and the name it was minted under.
-// Unlike a session it is bound to no origin and does not expire.
-type deviceToken struct {
-	user    *userState
-	name    string
-	created time.Time
-}
+// maxDeviceTokens bounds an account's device tokens.
+const maxDeviceTokens = devices.MaxPerUser
 
-// validDeviceName reports whether name is 1 to 32 letters, digits, `_`, `.`
-// or `-`, starting with a letter or digit.
-func validDeviceName(name string) bool {
-	if len(name) == 0 || len(name) > maxDeviceNameBytes || !isASCIIAlphanumeric(name[0]) {
-		return false
-	}
-	for i := range len(name) {
-		if b := name[i]; !isASCIIAlphanumeric(b) && b != '_' && b != '.' && b != '-' {
-			return false
-		}
-	}
-	return true
-}
+// deviceToken is a token /invite-device minted, which a devices.Table
+// keeps by the SHA-256 of the token.
+type deviceToken = devices.Device[*userState]
 
 func isASCIIAlphanumeric(b byte) bool {
 	return 'a' <= b && b <= 'z' || 'A' <= b && b <= 'Z' || '0' <= b && b <= '9'
-}
-
-// devicesOfLocked lists u's device tokens oldest first, with their keys.
-func (s *Server) devicesOfLocked(u *userState) ([][32]byte, []deviceToken) {
-	var keys [][32]byte
-	for key, device := range s.devices {
-		if device.user == u {
-			keys = append(keys, key)
-		}
-	}
-	slices.SortFunc(keys, func(a, b [32]byte) int {
-		if order := s.devices[a].created.Compare(s.devices[b].created); order != 0 {
-			return order
-		}
-		return bytes.Compare(a[:], b[:])
-	})
-	devices := make([]deviceToken, len(keys))
-	for i, key := range keys {
-		devices[i] = s.devices[key]
-	}
-	return keys, devices
 }
 
 // inviteDeviceCommand mints a device token for the sender's account under
@@ -90,26 +47,22 @@ func (s *Server) inviteDeviceCommand(c *client, r *roomState, _ map[string]any, 
 		return wire.CommandResult{}, invalidParams("Usage: /invite-device <name>")
 	}
 	name := words[0]
-	if !validDeviceName(name) {
+	if !devices.ValidName(name) {
 		return wire.CommandResult{}, invalidParams("A device name is 1 to 32 letters, digits, _, . or -, starting with a letter or digit")
 	}
-	keys, devices := s.devicesOfLocked(u)
-	previous := slices.IndexFunc(devices, func(d deviceToken) bool { return d.name == name })
-	if previous < 0 && len(devices) >= maxDeviceTokens {
-		names := make([]string, len(devices))
-		for i, d := range devices {
-			names[i] = "`" + d.name + "`"
+	keys, held := s.devices.Of(u)
+	previous := slices.IndexFunc(held, func(d deviceToken) bool { return d.Name == name })
+	if previous < 0 && len(held) >= maxDeviceTokens {
+		names := make([]string, len(held))
+		for i, d := range held {
+			names[i] = "`" + d.Name + "`"
 		}
 		return wire.CommandResult{}, &Error{Code: CodeDenied, Message: fmt.Sprintf("You have %d device tokens (%s); run /invite-device with one of those names to replace its token", maxDeviceTokens, strings.Join(names, ", "))}
 	}
-	secret := make([]byte, 32)
-	if _, err := rand.Read(secret); err != nil {
+	token, key, err := s.devices.Mint(u, name, time.Now())
+	if err != nil {
 		return wire.CommandResult{}, &Error{Code: CodeInternalError, Message: "Unable to create a device token"}
 	}
-	token := deviceTokenPrefix + base64.RawURLEncoding.EncodeToString(secret)
-	key := sha256.Sum256([]byte(token))
-	s.devices[key] = deviceToken{user: u, name: name, created: time.Now()}
-	s.touchDevice(key)
 	replaced := ""
 	if previous >= 0 {
 		replaced = ", and replaces its earlier token"
@@ -133,8 +86,7 @@ func (s *Server) inviteDeviceCommand(c *client, r *roomState, _ map[string]any, 
 // later replacement closes it. The push registrations made by connections
 // signed in with old go too, the asking connection's among them.
 func (s *Server) revokeDeviceLocked(c *client, old, replacement [32]byte) {
-	delete(s.devices, old)
-	s.touchDevice(old)
+	s.devices.Delete(old)
 	if c.device == old {
 		c.device = replacement
 	}
@@ -155,18 +107,18 @@ func (s *Server) revokeDeviceLocked(c *client, old, replacement [32]byte) {
 // keeps its own.
 func (s *Server) authenticateDeviceLocked(c *client, req request, token string) (any, *Error) {
 	key := sha256.Sum256([]byte(token))
-	device, ok := s.devices[key]
+	device, ok := s.devices.Get(key)
 	if !ok {
 		return nil, &Error{Code: CodeDenied, Message: "This device token is not valid; get a new one with /invite-device on a signed-in device"}
 	}
 	// A refused sign-in changes nothing (§3.2.2).
-	if err := s.admitLocked(device.user); err != nil {
+	if err := s.admitLocked(device.User); err != nil {
 		return nil, err
 	}
 	c.device = key
 	c.service, c.serviceManage = [32]byte{}, false
 	c.token, c.credential = [32]byte{}, ""
-	return s.switchUserLocked(c, req, device.user, "", c.user != device.user, false), nil
+	return s.switchUserLocked(c, req, device.User, "", c.user != device.User, false), nil
 }
 
 // apronLink is a link that any Apron app opens to sign in to server with
