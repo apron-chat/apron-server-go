@@ -84,7 +84,7 @@ func TestManagingPasskeys(t *testing.T) {
 	resumedB, _ := dialOrigin(t, httpServer, testPasskeyOrigin)
 	passkeyResult(t, passkeyCall(t, resumedB, "resume", "token", "", map[string]any{"token": tokenB}))
 	resumedB.drain(t)
-	resumedB.expectError(t, "account.credential_remove", "remove", map[string]any{"id": b64(a.id)}, CodeDenied)
+	resumedB.expectError(t, "account.credential_remove", "remove-resumed", map[string]any{"id": b64(a.id)}, CodeDenied)
 
 	// The lost passkey goes: the connections signed in with it close, and
 	// its sessions end; the account and the other passkey stay.

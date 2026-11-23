@@ -64,21 +64,22 @@ func newTestServer(t *testing.T, config Config) (*Server, *httptest.Server) {
 // rather than wait for this to run out.
 const ioTimeout = 10 * time.Second
 
-// waitLeftDefault waits until none of userIDs is in the default room, as
-// after their connections closed: the server ends a guest's session after
-// the close, and a connection opened meanwhile hears of the guest leaving.
-func waitLeftDefault(t *testing.T, app *Server, userIDs ...string) {
+// waitDisconnected waits until the server has detached every connection of
+// userIDs, after the test closed them. The server does so after the close,
+// and a guest's last detach leaves its rooms then, under the same lock: a
+// connection that must not hear of a guest leaving, or a read that must not
+// meet it, waits for this first.
+func waitDisconnected(t *testing.T, app *Server, userIDs ...string) {
 	t.Helper()
 	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(5 * time.Millisecond) {
 		app.mu.RLock()
-		general := app.rooms.Get(defaultRoomID)
-		left := !slices.ContainsFunc(userIDs, func(id string) bool { return general.Member(id) != nil })
+		open := slices.ContainsFunc(userIDs, func(id string) bool { u := app.users[id]; return u != nil && len(u.clients) > 0 })
 		app.mu.RUnlock()
-		if left {
+		if !open {
 			return
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("one of %v is still in the default room", userIDs)
+			t.Fatalf("one of %v still has a connection", userIDs)
 		}
 	}
 }

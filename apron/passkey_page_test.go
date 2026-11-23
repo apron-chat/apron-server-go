@@ -378,7 +378,7 @@ func TestPasskeyPageAdditionsFlood(t *testing.T) {
 		}
 		_ = flooder.ws.CloseNow()
 	}
-	waitLeftDefault(t, p.app, flooders...)
+	waitDisconnected(t, p.app, flooders...)
 
 	// A guest whose origin the RP accepts runs its own ceremony, with the
 	// page as another way.

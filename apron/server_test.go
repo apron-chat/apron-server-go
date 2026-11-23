@@ -344,7 +344,7 @@ func TestLivenessPing(t *testing.T) {
 			break
 		}
 	}
-	waitLeftDefault(t, app, c.userID)
+	waitDisconnected(t, app, c.userID)
 	// One that never pinged stays open while it answers WebSocket pings.
 	quiet := dialTestClient(t, httpServer)
 	for deadline := time.Now().Add(500 * time.Millisecond); time.Now().Before(deadline); {

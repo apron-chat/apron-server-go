@@ -327,7 +327,7 @@ func TestDNDOnlyWhileConnected(t *testing.T) {
 func TestInvisiblePrivacy(t *testing.T) {
 	config := DefaultConfig()
 	config.WebAuthn = testWebAuthn(t)
-	_, httpServer := newTestServer(t, config)
+	app, httpServer := newTestServer(t, config)
 	a := dialTestClient(t, httpServer)
 	b, _ := dialOrigin(t, httpServer, testPasskeyOrigin)
 	registered := registerTestPasskey(t, b, newTestAuthenticator(t))
@@ -368,6 +368,9 @@ func TestInvisiblePrivacy(t *testing.T) {
 		}
 		// A guest that goes leaves its rooms.
 		_ = c.ws.Close(websocket.StatusNormalClosure, "bye")
+		// b hears of the leave from ops apart from a's from general: wait
+		// for both before b.drain takes b's.
+		waitDisconnected(t, app, c.userID)
 		expectMembership(t, a, "general", c.userID, false)
 		a.expectQuiet(t)
 		b.drain(t)
