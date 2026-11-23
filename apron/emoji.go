@@ -2,70 +2,46 @@ package apron
 
 import (
 	"bytes"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json/jsontext"
-	"encoding/json/v2"
 	"fmt"
-	"github.com/apron-chat/apron-server-go/wire"
 	"maps"
 	"net"
 	"net/http"
 	"net/url"
-	"regexp"
 	"slices"
 	"strings"
 	"time"
+
+	"github.com/apron-chat/apron-server-go/apron/internal/emoji"
+	"github.com/apron-chat/apron-server-go/wire"
 )
 
 // Custom emoji (ext:emoji in apron's EXTENSIONS.md): images users add with
 // /emoji add and write as :name: in reactions and text. The server frame
 // carries the URL of the catalog, a JSON object keyed by :name:, which the
 // server serves at a path named after its content's hash, so the URL
-// changes whenever the catalog does.
+// changes whenever the catalog does. An emoji.Catalog keeps the custom
+// emoji and renders the catalog; the server keeps who may change it, the
+// uploads that hold the images, and the server frames that announce it.
 const (
 	emojiPath = "/emoji/"
 	// maxCustomEmoji bounds the catalog.
-	maxCustomEmoji = 1000
+	maxCustomEmoji = emoji.MaxCustom
 )
 
 // emojiKeyPattern is a custom emoji's key: a name between colons.
-var emojiKeyPattern = regexp.MustCompile(`^:[A-Za-z0-9_+-]+:$`)
+var emojiKeyPattern = emoji.KeyPattern
 
 // customEmoji is one catalog entry: the hosted upload holding its image,
 // the image's size, and the user_id of who added it.
-type customEmoji struct {
-	embed  *embedState
-	by     string
-	width  int
-	height int
-}
+type customEmoji = emoji.Entry[*embedState]
 
-type storedEmoji struct {
-	Embed  string `json:"embed"`
-	By     string `json:"by"`
-	Width  int    `json:"width,omitzero"`
-	Height int    `json:"height,omitzero"`
-}
-
-// renderEmojiLocked renders the catalog and names the path it is served
-// at, after a change to it.
-func (s *Server) renderEmojiLocked() {
-	catalog := make(map[string]any, len(s.emoji))
-	for key, emoji := range s.emoji {
-		entry := map[string]any{"url": emoji.embed.fileURL()}
-		if emoji.width > 0 && emoji.height > 0 {
-			entry["width"], entry["height"] = emoji.width, emoji.height
-		}
-		if emoji.embed.alt != "" {
-			entry["alt"] = emoji.embed.alt
-		}
-		catalog[key] = entry
-	}
-	s.emojiCatalog = encodeJSON(catalog)
-	sum := sha256.Sum256(s.emojiCatalog)
-	s.emojiName = "catalog-" + hex.EncodeToString(sum[:8]) + ".json"
-}
+// The embed as a custom emoji's image (emoji.Image): an upload, which the
+// store names by its embed_id.
+func (e *embedState) ImageID() string  { return e.id }
+func (e *embedState) ImageURL() string { return e.fileURL() }
+func (e *embedState) ImageAlt() string { return e.alt }
+func (e *embedState) ImageSize() int64 { return e.size }
 
 // emojiExt is server.ext.emoji for a connection whose URLs start with
 // baseURL, or nil when clients would ignore its catalog_url: one that is
@@ -76,7 +52,8 @@ func (s *Server) emojiExt(baseURL string) map[string]any {
 	if !clientsLoad(baseURL) {
 		return nil
 	}
-	return map[string]any{"catalog_url": baseURL + emojiPath + s.emojiName}
+	name, _ := s.emoji.Rendered()
+	return map[string]any{"catalog_url": baseURL + emojiPath + name}
 }
 
 // clientsLoad reports whether clients load images and catalogs from URLs
@@ -109,23 +86,13 @@ func loopbackHost(host string) bool {
 	return ip != nil && ip.IsLoopback()
 }
 
-// emojiBytesLocked totals the images of the custom emoji, which
-// MaxEmojiStorageBytes bounds.
-func (s *Server) emojiBytesLocked() int64 {
-	var total int64
-	for _, emoji := range s.emoji {
-		total += emoji.embed.size
-	}
-	return total
-}
-
 // emojiRoomLocked is how many bytes an image for key may take: at most
 // MaxEmojiBytes, and what MaxEmojiStorageBytes leaves once the image it
 // would replace is gone.
 func (s *Server) emojiRoomLocked(key string) int64 {
-	room := s.config.MaxEmojiStorageBytes - s.emojiBytesLocked()
-	if previous := s.emoji[key]; previous != nil {
-		room += previous.embed.size
+	room := s.config.MaxEmojiStorageBytes - s.emoji.Bytes()
+	if previous := s.emoji.Get(key); previous != nil {
+		room += previous.Image.size
 	}
 	return min(s.config.MaxEmojiBytes, room)
 }
@@ -133,7 +100,7 @@ func (s *Server) emojiRoomLocked(key string) int64 {
 // mayReplaceEmojiLocked reports whether the user userID may give an
 // existing key a new image: the user who added it, or an admin.
 func (s *Server) mayReplaceEmojiLocked(existing *customEmoji, userID string) bool {
-	if existing.by == userID {
+	if existing.By == userID {
 		return true
 	}
 	u := s.users[userID]
@@ -147,13 +114,13 @@ func (s *Server) mayReplaceEmojiLocked(existing *customEmoji, userID string) boo
 // URL must be one clients load. It returns the
 // HTTP status and message to refuse the write with, or 0.
 func (s *Server) refuseEmojiLocked(e *embedState, size int64) (int, string) {
-	existing := s.emoji[e.emojiKey]
+	existing := s.emoji.Get(e.emojiKey)
 	switch {
 	case !clientsLoad(e.baseURL):
 		return http.StatusForbidden, emojiNeedHTTPS
-	case existing != nil && existing.embed != e && !s.mayReplaceEmojiLocked(existing, e.emojiBy):
+	case existing != nil && existing.Image != e && !s.mayReplaceEmojiLocked(existing, e.emojiBy):
 		return http.StatusConflict, fmt.Sprintf("%s was added by someone else meanwhile; only who added it or an admin can replace it", e.emojiKey)
-	case existing == nil && len(s.emoji) >= maxCustomEmoji:
+	case existing == nil && s.emoji.Len() >= maxCustomEmoji:
 		return http.StatusConflict, fmt.Sprintf("This server has %d custom emoji, the most it keeps", maxCustomEmoji)
 	case size > s.emojiRoomLocked(e.emojiKey):
 		return http.StatusRequestEntityTooLarge, s.emojiFullMessage()
@@ -171,32 +138,29 @@ func (s *Server) emojiFullMessage() string {
 // deleting the upload it replaces, and sends every connection the new
 // server frame.
 func (s *Server) setEmojiLocked(e *embedState, og map[string]any) {
-	if previous := s.emoji[e.emojiKey]; previous != nil && previous.embed != e {
-		s.removeEmbedLocked(previous.embed.id)
+	if previous := s.emoji.Get(e.emojiKey); previous != nil && previous.Image != e {
+		s.removeEmbedLocked(previous.Image.id)
 	}
-	emoji := &customEmoji{embed: e, by: e.emojiBy}
+	entry := &customEmoji{Image: e, By: e.emojiBy}
 	if image, ok := og["image"].(map[string]any); ok {
-		emoji.width, _ = image["width"].(int)
-		emoji.height, _ = image["height"].(int)
+		entry.Width, _ = image["width"].(int)
+		entry.Height, _ = image["height"].(int)
 	}
-	s.emoji[e.emojiKey] = emoji
+	s.emoji.Set(e.emojiKey, entry)
 	s.emojiChangedLocked()
 }
 
 // removeEmojiLocked removes a key from the catalog and deletes its image.
 func (s *Server) removeEmojiLocked(key string) {
-	if emoji := s.emoji[key]; emoji != nil {
-		delete(s.emoji, key)
-		s.removeEmbedLocked(emoji.embed.id)
+	if entry := s.emoji.Remove(key); entry != nil {
+		s.removeEmbedLocked(entry.Image.id)
 		s.emojiChangedLocked()
 	}
 }
 
-// emojiChangedLocked stores the catalog, renders it under a new name, and
-// sends every connection a new server frame (§3.1) with its URL.
+// emojiChangedLocked sends every connection a new server frame (§3.1)
+// with the URL of the catalog, which changed.
 func (s *Server) emojiChangedLocked() {
-	s.dirty.emoji = true
-	s.renderEmojiLocked()
 	type kind struct {
 		baseURL  string
 		revealed bool
@@ -220,38 +184,24 @@ func (s *Server) emojiChangedLocked() {
 	}
 }
 
-func (s *Server) storedEmojiLocked() map[string]storedEmoji {
-	stored := make(map[string]storedEmoji, len(s.emoji))
-	for key, emoji := range s.emoji {
-		stored[key] = storedEmoji{Embed: emoji.embed.id, By: emoji.by, Width: emoji.width, Height: emoji.height}
-	}
-	return stored
-}
-
 // restoreEmojiLocked rebuilds the catalog from the store, after the embeds.
 // A key whose upload is gone is dropped, and so is a finished emoji upload
 // that no key holds.
 func (s *Server) restoreEmojiLocked(raw jsontext.Value) error {
-	if raw != nil {
-		var stored map[string]storedEmoji
-		if err := json.Unmarshal(raw, &stored); err != nil {
-			return fmt.Errorf("stored emoji: %w", err)
-		}
-		for key, entry := range stored {
-			e := s.embeds[entry.Embed]
-			if e == nil || !e.finished || e.emojiKey != key {
-				s.dirty.emoji = true
-				continue
-			}
-			s.emoji[key] = &customEmoji{embed: e, by: entry.By, width: entry.Width, height: entry.Height}
-		}
+	err := s.emoji.Restore(raw, func(id, key string) (*embedState, bool) {
+		e := s.embeds[id]
+		return e, e != nil && e.finished && e.emojiKey == key
+	})
+	if err != nil {
+		return err
 	}
 	for _, id := range slices.Sorted(maps.Keys(s.embeds)) {
-		if e := s.embeds[id]; e.emojiKey != "" && e.finished && (s.emoji[e.emojiKey] == nil || s.emoji[e.emojiKey].embed != e) {
-			s.removeEmbedLocked(id)
+		if e := s.embeds[id]; e.emojiKey != "" && e.finished {
+			if entry := s.emoji.Get(e.emojiKey); entry == nil || entry.Image != e {
+				s.removeEmbedLocked(id)
+			}
 		}
 	}
-	s.renderEmojiLocked()
 	return nil
 }
 
@@ -265,7 +215,7 @@ func (s *Server) handleEmoji(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.mu.RLock()
-	name, catalog := s.emojiName, s.emojiCatalog
+	name, catalog := s.emoji.Rendered()
 	s.mu.RUnlock()
 	if strings.TrimPrefix(r.URL.Path, emojiPath) != name {
 		http.NotFound(w, r)
@@ -291,7 +241,7 @@ func (s *Server) emojiCommand(c *client, _ *roomState, body map[string]any, args
 	if !emojiKeyPattern.MatchString(key) || len(key) > maxEmojiBytes {
 		return wire.CommandResult{}, invalidParams("Usage: /emoji add :<name>: with one image attached, or /emoji remove :<name>:; a name is letters, digits, _, +, and -, at most %d characters", maxEmojiBytes-2)
 	}
-	existing := s.emoji[key]
+	existing := s.emoji.Get(key)
 	// The form's word matches exactly, as command names do.
 	switch action {
 	case "add":
@@ -307,7 +257,7 @@ func (s *Server) emojiCommand(c *client, _ *roomState, body map[string]any, args
 		if existing != nil && !s.mayReplaceEmojiLocked(existing, u.id) {
 			return wire.CommandResult{}, &Error{Code: CodeDenied, Message: fmt.Sprintf("%s is taken; only who added it or an admin can replace it", key)}
 		}
-		if existing == nil && len(s.emoji) >= maxCustomEmoji {
+		if existing == nil && s.emoji.Len() >= maxCustomEmoji {
 			return wire.CommandResult{}, &Error{Code: CodeDenied, Message: fmt.Sprintf("This server has %d custom emoji, the most it keeps", maxCustomEmoji)}
 		}
 		if s.emojiRoomLocked(key) <= 0 {

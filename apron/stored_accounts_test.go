@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/apron-chat/apron-server-go/apron/internal/devices"
+	"github.com/apron-chat/apron-server-go/apron/internal/emoji"
 	"github.com/apron-chat/apron-server-go/apron/internal/invitations"
 	"github.com/apron-chat/apron-server-go/apron/internal/services"
 	"github.com/apron-chat/apron-server-go/store"
@@ -215,7 +216,21 @@ func TestStoredAccountsAreStoredAgain(t *testing.T) {
 		t.Fatal(err)
 	}
 	expectStoredAgain(t, invitations.EntryKind, stored[invitations.EntryKind], invitationTable.Snapshot())
+
+	catalog := emoji.NewCatalog[storedImage]()
+	if err := catalog.Restore(stored[emoji.StoreKind][emoji.StoreID], func(id, key string) (storedImage, bool) { return storedImage(id), true }); err != nil {
+		t.Fatal(err)
+	}
+	expectStoredAgain(t, emoji.StoreKind, map[string]jsontext.Value{emoji.StoreID: stored[emoji.StoreKind][emoji.StoreID]}, catalog.Snapshot())
 }
+
+// storedImage is a custom emoji's image as the store names it.
+type storedImage string
+
+func (i storedImage) ImageID() string  { return string(i) }
+func (i storedImage) ImageURL() string { return "" }
+func (i storedImage) ImageAlt() string { return "" }
+func (i storedImage) ImageSize() int64 { return 0 }
 
 // TestStoredAccountShapesRoundTrip decodes each entry of the file into the
 // shape that stores it, and checks that it encodes again as it was.
@@ -236,11 +251,4 @@ func TestStoredAccountShapesRoundTrip(t *testing.T) {
 	roundTrip(entryUser, func() any { return new(storedUser) })
 	roundTrip(entryEmbed, func() any { return new(storedEmbed) })
 	roundTrip(entryPush, func() any { return new(storedPush) })
-	if emoji := stored[entryMeta]["emoji"]; emoji != nil {
-		var catalog map[string]storedEmoji
-		if err := json.Unmarshal(emoji, &catalog); err != nil {
-			t.Fatal(err)
-		}
-		expectStoredAgain(t, entryMeta, map[string]jsontext.Value{"emoji": emoji}, []store.Entry{{Kind: entryMeta, ID: "emoji", Value: encodeJSON(catalog)}})
-	}
 }

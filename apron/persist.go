@@ -39,7 +39,7 @@ import (
 //
 //	meta     "counters"   log_id, guest, embed, and upload sequences
 //	meta     "vapid"      the webpush VAPID private key (§4.9)
-//	meta     "emoji"      the custom emoji catalog (ext:emoji)
+//	meta     "emoji"      the custom emoji catalog (ext:emoji, emoji)
 //	meta     "profile"    the server's title, description, and avatar set
 //	                      with /server (§3.1)
 //	used_id  lowercased user_id ever assigned
@@ -78,7 +78,6 @@ type dirtySet struct {
 	pushes   map[string]bool
 	usedIDs  []string
 	vapid    bool
-	emoji    bool
 	profile  bool
 }
 
@@ -226,6 +225,7 @@ func (s *Server) flushLocked() {
 		s.devices.Entries(userID)
 		s.services.Entries(userID)
 		s.invitations.Entries()
+		s.emoji.Entries()
 		s.store.Queue(nil)
 		return
 	}
@@ -235,6 +235,7 @@ func (s *Server) flushLocked() {
 	batch = append(batch, s.devices.Entries(userID)...)
 	batch = append(batch, s.services.Entries(userID)...)
 	batch = append(batch, s.invitations.Entries()...)
+	batch = append(batch, s.emoji.Entries()...)
 	meta := s.metaLocked()
 	if meta != s.storedMeta {
 		s.storedMeta = meta
@@ -304,9 +305,6 @@ func (s *Server) entriesLocked(d dirtySet, records []store.Entry) []store.Entry 
 	}
 	if d.vapid && s.vapidStored {
 		put(entryMeta, "vapid", s.vapid.Encoded())
-	}
-	if d.emoji {
-		put(entryMeta, "emoji", s.storedEmojiLocked())
 	}
 	if d.profile {
 		put(entryMeta, "profile", s.storedProfileLocked())

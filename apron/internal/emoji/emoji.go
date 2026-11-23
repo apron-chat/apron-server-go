@@ -1,6 +1,6 @@
 // Package emoji puts reaction entries in their fully-qualified form
 // (PROTOCOL.md §4.7, UTS #51), so that entries that differ only in U+FE0F
-// are the same entry.
+// are the same entry, and keeps the custom emoji catalog (Catalog).
 package emoji
 
 import (

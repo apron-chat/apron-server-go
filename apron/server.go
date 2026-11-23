@@ -25,6 +25,7 @@ import (
 
 	"github.com/apron-chat/apron-server-go/apron/internal/devices"
 	"github.com/apron-chat/apron-server-go/apron/internal/durable"
+	"github.com/apron-chat/apron-server-go/apron/internal/emoji"
 	"github.com/apron-chat/apron-server-go/apron/internal/invitations"
 	"github.com/apron-chat/apron-server-go/apron/internal/kv"
 	"github.com/apron-chat/apron-server-go/apron/internal/proposals"
@@ -177,11 +178,9 @@ type Server struct {
 	files *uploads.Dir
 	// uploadSeq orders finished uploads across restarts.
 	uploadSeq int64
-	// emoji is the custom emoji catalog by key (ext:emoji); emojiCatalog
-	// is its JSON, served at emojiPath + emojiName.
-	emoji        map[string]*customEmoji
-	emojiCatalog []byte
-	emojiName    string
+	// emoji is the custom emoji catalog (ext:emoji), served at emojiPath
+	// and the name it renders.
+	emoji *emoji.Catalog[*embedState]
 	// profile is the server's title, description, and avatar as admins set
 	// them with /server (§3.1), which override Config's.
 	profile serverProfile
@@ -292,7 +291,7 @@ func Open(config Config) (*Server, error) {
 		embeds:      make(map[string]*embedState),
 		writes:      make(map[string]*embedState),
 		uploads:     list.New(),
-		emoji:       make(map[string]*customEmoji),
+		emoji:       emoji.NewCatalog[*embedState](),
 		pushes:      make(map[string]*pushRegistration),
 		sessions:    sessions.New[*userState](),
 		devices:     devices.New[*userState](),

@@ -379,5 +379,9 @@ func (s *Server) dumpLocked() []store.Entry {
 	records = append(records, s.devices.Snapshot(userID)...)
 	records = append(records, s.services.Snapshot(userID)...)
 	records = append(records, s.invitations.Snapshot()...)
+	if s.emoji.Len() > 0 {
+		// An empty catalog is stored only once one was emptied.
+		records = append(records, s.emoji.Snapshot()...)
+	}
 	return append(s.entriesLocked(all, records), store.Entry{Kind: entryMeta, ID: "counters", Value: encodeJSON(meta)})
 }

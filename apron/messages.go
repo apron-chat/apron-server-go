@@ -491,7 +491,7 @@ func (s *Server) react(c *client, p wire.ReactParams, reply wire.Reply[wire.Empt
 	// already, so that a removed one does not keep the user from changing
 	// the rest of their set.
 	for _, emoji := range emojis {
-		if emojiKeyPattern.MatchString(emoji) && s.emoji[emoji] == nil && !slices.Contains(m.Emojis(u.id), emoji) {
+		if emojiKeyPattern.MatchString(emoji) && s.emoji.Get(emoji) == nil && !slices.Contains(m.Emojis(u.id), emoji) {
 			return invalidParams("Unknown custom emoji %s", emoji)
 		}
 	}
