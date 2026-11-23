@@ -377,5 +377,6 @@ func (s *Server) dumpLocked() []store.Entry {
 	meta := s.metaLocked()
 	records = append(records, s.sessions.Snapshot(userID)...)
 	records = append(records, s.devices.Snapshot(userID)...)
+	records = append(records, s.services.Snapshot(userID)...)
 	return append(s.entriesLocked(all, records), store.Entry{Kind: entryMeta, ID: "counters", Value: encodeJSON(meta)})
 }

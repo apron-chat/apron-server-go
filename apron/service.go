@@ -3,17 +3,13 @@ package apron
 import (
 	"cmp"
 	"context"
-	"crypto/rand"
 	"crypto/sha256"
-	"encoding/base64"
-	"encoding/hex"
-	"encoding/json/jsontext"
-	"encoding/json/v2"
 	"errors"
 	"fmt"
 	"slices"
-	"strings"
 	"time"
+
+	"github.com/apron-chat/apron-server-go/apron/internal/services"
 )
 
 // Service tokens are a bot's credentials for a client outside the server's
@@ -25,39 +21,22 @@ import (
 // ends its access at once. Unless issued with ManageAccount, its
 // connections may not manage the account (account.*, /invite-device) nor
 // sign in again on the same connection. The bot's scope (BotOptions.Scope)
-// applies to them as to its in-process connections.
+// applies to them as to its in-process connections. A services.Table
+// keeps the tokens and their expiry; the server keeps who may hold one,
+// what a sign-in with one does, and what revoking one closes.
 
 const (
-	serviceTokenPrefix = "apron_service_"
-	entryService       = "service"
+	serviceTokenPrefix = services.Prefix
 	// DefaultServiceTokenLifetime is a service token's lifetime unless
 	// ServiceTokenOptions.Lifetime says otherwise.
 	DefaultServiceTokenLifetime = 30 * 24 * time.Hour
 	// maxServiceTokens bounds a bot's service tokens.
-	maxServiceTokens    = 10
-	maxServiceNameBytes = 64
+	maxServiceTokens = services.MaxPerUser
 )
 
-// serviceToken is an issued service token, kept by the SHA-256 of its
-// token. Guarded by s.mu.
-type serviceToken struct {
-	id      string
-	user    *userState
-	name    string
-	created time.Time
-	expires time.Time
-	manage  bool
-	timer   *time.Timer
-}
-
-type storedService struct {
-	ID      string    `json:"id"`
-	User    string    `json:"user"`
-	Name    string    `json:"name,omitzero"`
-	Created time.Time `json:"created"`
-	Expires time.Time `json:"expires"`
-	Manage  bool      `json:"manage,omitzero"`
-}
+// serviceToken is an issued service token, which a services.Table keeps by
+// the SHA-256 of its token. Guarded by s.mu.
+type serviceToken = services.Token[*userState]
 
 // ServiceTokenOptions describe a service token.
 type ServiceTokenOptions struct {
@@ -84,8 +63,8 @@ type ServiceToken struct {
 	ManageAccount    bool
 }
 
-func (t *serviceToken) describe() ServiceToken {
-	return ServiceToken{ID: t.id, UserID: t.user.id, Name: t.name, Created: t.created, Expires: t.expires, ManageAccount: t.manage}
+func describeService(t *serviceToken) ServiceToken {
+	return ServiceToken{ID: t.ID, UserID: t.User.id, Name: t.Name, Created: t.Created, Expires: t.Expires, ManageAccount: t.Manage}
 }
 
 // IssueToken issues a service token that signs in as the bot from any
@@ -111,9 +90,9 @@ func (b *Bot) ServiceTokens() []ServiceToken {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	var list []ServiceToken
-	for _, t := range s.services {
-		if t.user.id == b.userID {
-			list = append(list, t.describe())
+	for _, t := range s.services.All() {
+		if t.User.id == b.userID {
+			list = append(list, describeService(t))
 		}
 	}
 	slices.SortFunc(list, func(a, b ServiceToken) int { return cmp.Or(a.Created.Compare(b.Created), cmp.Compare(a.ID, b.ID)) })
@@ -127,8 +106,8 @@ func (b *Bot) RevokeToken(ctx context.Context, id string) (bool, error) {
 	s := b.s
 	s.mu.Lock()
 	found := false
-	for key, t := range s.services {
-		if t.id == id && t.user.id == b.userID {
+	for key, t := range s.services.All() {
+		if t.ID == id && t.User.id == b.userID {
 			s.revokeServiceLocked(key, "This service token was revoked")
 			found = true
 		}
@@ -143,15 +122,13 @@ func (s *Server) issueServiceToken(ctx context.Context, userID string, options S
 	if lifetime < 0 {
 		return ServiceToken{}, errors.New("apron: a service token's lifetime is positive")
 	}
-	if len(options.Name) > maxServiceNameBytes {
-		return ServiceToken{}, fmt.Errorf("apron: a service token's name is at most %d bytes", maxServiceNameBytes)
+	if len(options.Name) > services.MaxNameBytes {
+		return ServiceToken{}, fmt.Errorf("apron: a service token's name is at most %d bytes", services.MaxNameBytes)
 	}
-	secret := make([]byte, 32)
-	if _, err := rand.Read(secret); err != nil {
+	token, key, err := services.NewToken()
+	if err != nil {
 		return ServiceToken{}, err
 	}
-	token := serviceTokenPrefix + base64.RawURLEncoding.EncodeToString(secret)
-	key := sha256.Sum256([]byte(token))
 	now := time.Now()
 	s.mu.Lock()
 	if s.store.Stopped() {
@@ -166,10 +143,10 @@ func (s *Server) issueServiceToken(ctx context.Context, userID string, options S
 	// The limit counts the token being replaced as gone, and is checked
 	// before anything changes.
 	held, replacing := 0, false
-	for _, t := range s.services {
+	for _, t := range s.services.All() {
 		switch {
-		case t.user != u:
-		case replaces != "" && t.id == replaces:
+		case t.User != u:
+		case replaces != "" && t.ID == replaces:
 			replacing = true
 		default:
 			held++
@@ -184,63 +161,49 @@ func (s *Server) issueServiceToken(ctx context.Context, userID string, options S
 		return ServiceToken{}, fmt.Errorf("apron: a bot holds at most %d service tokens; revoke one", maxServiceTokens)
 	}
 	if replaces != "" {
-		for oldKey, old := range s.services {
-			if old.id != replaces || old.user != u {
+		for oldKey, old := range s.services.All() {
+			if old.ID != replaces || old.User != u {
 				continue
 			}
 			if overlap == 0 {
 				s.revokeServiceLocked(oldKey, "This service token was replaced")
-			} else if until := now.Add(overlap); until.Before(old.expires) {
-				old.expires = until
-				s.scheduleServiceLocked(oldKey, old)
-				s.dirty.services[oldKey] = true
+			} else {
+				s.services.Shorten(oldKey, now.Add(overlap))
 			}
 		}
 	}
 	t := &serviceToken{
-		id: "svc_" + strings.ToLower(rand.Text()[:16]), user: u, name: options.Name,
-		created: now, expires: now.Add(lifetime), manage: options.ManageAccount,
+		ID: services.NewID(), User: u, Name: options.Name,
+		Created: now, Expires: now.Add(lifetime), Manage: options.ManageAccount,
 	}
-	s.services[key] = t
-	s.scheduleServiceLocked(key, t)
-	s.dirty.services[key] = true
+	s.services.Add(key, t)
 	f := s.newFenceLocked()
 	s.unlock()
 	if err := f.Wait(ctx); err != nil {
 		return ServiceToken{}, err
 	}
-	described := t.describe()
+	described := describeService(t)
 	described.Token = token
 	return described, nil
 }
 
-// scheduleServiceLocked revokes a token when it expires.
-func (s *Server) scheduleServiceLocked(key [32]byte, t *serviceToken) {
-	if t.timer != nil {
-		t.timer.Stop()
+// serviceExpired revokes a token when it expires (services.Table).
+func (s *Server) serviceExpired(key services.Key, t *serviceToken) {
+	s.mu.Lock()
+	defer s.unlock()
+	if s.services.Get(key) == t {
+		s.revokeServiceLocked(key, "This service token expired")
 	}
-	t.timer = time.AfterFunc(time.Until(t.expires), func() {
-		s.mu.Lock()
-		defer s.unlock()
-		if s.services[key] == t {
-			s.revokeServiceLocked(key, "This service token expired")
-		}
-	})
 }
 
 // revokeServiceLocked forgets a service token and closes the connections it
 // signed in.
 func (s *Server) revokeServiceLocked(key [32]byte, why string) {
-	t := s.services[key]
+	t := s.services.Remove(key)
 	if t == nil {
 		return
 	}
-	if t.timer != nil {
-		t.timer.Stop()
-	}
-	delete(s.services, key)
-	s.dirty.services[key] = true
-	for c := range t.user.clients {
+	for c := range t.User.clients {
 		if c.service == key {
 			c.closeWithError(&Error{Code: CodeDenied, Message: why})
 		}
@@ -249,8 +212,8 @@ func (s *Server) revokeServiceLocked(key [32]byte, why string) {
 
 // revokeServicesOfLocked revokes every service token of u's.
 func (s *Server) revokeServicesOfLocked(u *userState) {
-	for key, t := range s.services {
-		if t.user == u {
+	for key, t := range s.services.All() {
+		if t.User == u {
 			s.revokeServiceLocked(key, "This account was signed out")
 		}
 	}
@@ -260,17 +223,17 @@ func (s *Server) revokeServicesOfLocked(u *userState) {
 // from any origin.
 func (s *Server) authenticateServiceLocked(c *client, req request, token string) (any, *Error) {
 	key := sha256.Sum256([]byte(token))
-	t := s.services[key]
-	if t == nil || !time.Now().Before(t.expires) {
+	t := s.services.Get(key)
+	if t == nil || !time.Now().Before(t.Expires) {
 		return nil, &Error{Code: CodeDenied, Message: "This service token is not valid"}
 	}
-	if err := s.admitLocked(t.user); err != nil {
+	if err := s.admitLocked(t.User); err != nil {
 		return nil, err
 	}
-	c.service, c.serviceManage = key, t.manage
+	c.service, c.serviceManage = key, t.Manage
 	// It signs in with no session, device token, or credential.
 	c.token, c.device, c.credential = [32]byte{}, [32]byte{}, ""
-	return s.switchUserLocked(c, req, t.user, "", c.user != t.user, false), nil
+	return s.switchUserLocked(c, req, t.User, "", c.user != t.User, false), nil
 }
 
 // restrictedService reports whether the connection signed in with a service
@@ -282,41 +245,4 @@ func (c *client) restrictedService() bool {
 // serviceRefusal refuses what a restricted service connection may not do.
 func serviceRefusal() *Error {
 	return &Error{Code: CodeDenied, Message: "A service token may not manage its account"}
-}
-
-// serviceEntriesLocked renders the service tokens a dirty set names.
-func (s *Server) serviceEntriesLocked(d dirtySet, put func(kind, id string, value any), del func(kind, id string)) {
-	for key := range d.services {
-		if t := s.services[key]; t != nil {
-			put(entryService, hex.EncodeToString(key[:]), storedService{
-				ID: t.id, User: t.user.id, Name: t.name, Created: t.created, Expires: t.expires, Manage: t.manage,
-			})
-		} else {
-			del(entryService, hex.EncodeToString(key[:]))
-		}
-	}
-}
-
-// restoreServicesLocked keeps the stored service tokens that have not
-// expired, of accounts that exist.
-func (s *Server) restoreServicesLocked(entries map[string]jsontext.Value, now time.Time) error {
-	for id, raw := range entries {
-		key, err := hex.DecodeString(id)
-		if err != nil || len(key) != 32 {
-			continue
-		}
-		var stored storedService
-		if err := json.Unmarshal(raw, &stored, decodeOptions); err != nil {
-			return fmt.Errorf("stored service token %s: %w", id, err)
-		}
-		u := s.users[stored.User]
-		if u == nil || !now.Before(stored.Expires) {
-			s.dirty.services[[32]byte(key)] = true
-			continue
-		}
-		t := &serviceToken{id: stored.ID, user: u, name: stored.Name, created: stored.Created, expires: stored.Expires, manage: stored.Manage}
-		s.services[[32]byte(key)] = t
-		s.scheduleServiceLocked([32]byte(key), t)
-	}
-	return nil
 }

@@ -29,6 +29,7 @@ import (
 	"github.com/apron-chat/apron-server-go/apron/internal/proposals"
 	"github.com/apron-chat/apron-server-go/apron/internal/roomlog"
 	"github.com/apron-chat/apron-server-go/apron/internal/rooms"
+	"github.com/apron-chat/apron-server-go/apron/internal/services"
 	"github.com/apron-chat/apron-server-go/apron/internal/sessions"
 	"github.com/apron-chat/apron-server-go/apron/internal/uploads"
 	"github.com/apron-chat/apron-server-go/apron/internal/webpush"
@@ -197,9 +198,8 @@ type Server struct {
 	// invitations are the outstanding invitations by the SHA-256 of their
 	// tokens (invitations.go).
 	invitations map[[32]byte]*invitation
-	// services are the bots' service tokens by the SHA-256 of their tokens
-	// (service.go).
-	services map[[32]byte]*serviceToken
+	// services are the bots' service tokens (service.go).
+	services *services.Table[*userState]
 	// schemes are the sign-in schemes the server offers (auth.go), in the
 	// order the server frame lists them; accounts are the accounts by the
 	// identities that prove them; proposals are the outstanding proposals
@@ -297,7 +297,6 @@ func Open(config Config) (*Server, error) {
 		sessions:    sessions.New[*userState](),
 		devices:     devices.New[*userState](),
 		invitations: make(map[[32]byte]*invitation),
-		services:    make(map[[32]byte]*serviceToken),
 		accounts:    make(map[authn.Identity]*userState),
 		proposals:   proposals.NewTable(),
 		dirty:       newDirtySet(),
@@ -309,6 +308,7 @@ func Open(config Config) (*Server, error) {
 		extData:    kv.New(),
 		logger:     config.Logger,
 	}
+	s.services = services.New(s.serviceExpired)
 	if s.logger == nil {
 		s.logger = slog.Default()
 	}
@@ -511,11 +511,7 @@ func (s *Server) Shutdown(ctx context.Context) error {
 		for _, e := range s.embeds {
 			e.endLive()
 		}
-		for _, t := range s.services {
-			if t.timer != nil {
-				t.timer.Stop()
-			}
-		}
+		s.services.Stop()
 		// Pending badge pushes would only be dropped once they fire, and
 		// the ends of timed mutes and coalesced statuses would find the
 		// server closed: none is kept waiting past it.

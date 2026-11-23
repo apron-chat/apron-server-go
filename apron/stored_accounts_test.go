@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/apron-chat/apron-server-go/apron/internal/devices"
+	"github.com/apron-chat/apron-server-go/apron/internal/services"
 	"github.com/apron-chat/apron-server-go/store"
 )
 
@@ -26,7 +27,7 @@ import (
 const storedAccountsFile = "testdata/stored-accounts.jsonl"
 
 // storedAccountKinds are the kinds of entries the file holds.
-var storedAccountKinds = []string{entryUser, devices.EntryKind, entryService, entryInvitation, entryEmbed, entryPush, entryMeta}
+var storedAccountKinds = []string{entryUser, devices.EntryKind, services.EntryKind, entryInvitation, entryEmbed, entryPush, entryMeta}
 
 // storedAccountsScenario makes a bot with two service tokens, an
 // outstanding invitation and an account an invitation made, a passkey
@@ -200,6 +201,13 @@ func TestStoredAccountsAreStoredAgain(t *testing.T) {
 		t.Fatal(err)
 	}
 	expectStoredAgain(t, devices.EntryKind, stored[devices.EntryKind], deviceTable.Snapshot(same))
+
+	serviceTable := services.New(func(services.Key, *services.Token[string]) {})
+	defer serviceTable.Stop()
+	if err := serviceTable.Restore(stored[services.EntryKind], known, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	expectStoredAgain(t, services.EntryKind, stored[services.EntryKind], serviceTable.Snapshot(same))
 }
 
 // TestStoredAccountShapesRoundTrip decodes each entry of the file into the
@@ -219,7 +227,6 @@ func TestStoredAccountShapesRoundTrip(t *testing.T) {
 		expectStoredAgain(t, kind, stored[kind], again)
 	}
 	roundTrip(entryUser, func() any { return new(storedUser) })
-	roundTrip(entryService, func() any { return new(storedService) })
 	roundTrip(entryInvitation, func() any { return new(storedInvitation) })
 	roundTrip(entryEmbed, func() any { return new(storedEmbed) })
 	roundTrip(entryPush, func() any { return new(storedPush) })

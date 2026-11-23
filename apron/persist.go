@@ -15,6 +15,7 @@ import (
 	"github.com/apron-chat/apron-server-go/apron/internal/devices"
 	"github.com/apron-chat/apron-server-go/apron/internal/roomlog"
 	"github.com/apron-chat/apron-server-go/apron/internal/rooms"
+	"github.com/apron-chat/apron-server-go/apron/internal/services"
 	"github.com/apron-chat/apron-server-go/apron/internal/sessions"
 	"github.com/apron-chat/apron-server-go/apron/internal/webpush"
 	"github.com/apron-chat/apron-server-go/internal/auth/email"
@@ -50,6 +51,7 @@ import (
 //	user     user_id      guests too, retired at the next start
 //	session  hex SHA-256 of the bearer token (sessions)
 //	device   hex SHA-256 of the /invite-device token (devices)
+//	service  hex SHA-256 of a bot's service token (services)
 //	embed    embed_id
 //	push     user_id, a space, and url (url alone before registrations
 //	         belonged to their user)
@@ -73,7 +75,6 @@ type dirtySet struct {
 	embeds   map[string]bool
 	// invitations are named by their tokens' SHA-256.
 	invitations map[[32]byte]bool
-	services    map[[32]byte]bool
 	pushes      map[string]bool
 	usedIDs     []string
 	vapid       bool
@@ -86,7 +87,6 @@ func newDirtySet() dirtySet {
 		messages:    make(map[string]bool),
 		users:       make(map[string]bool),
 		invitations: make(map[[32]byte]bool),
-		services:    make(map[[32]byte]bool),
 		embeds:      make(map[string]bool),
 		pushes:      make(map[string]bool),
 	}
@@ -225,6 +225,7 @@ func (s *Server) flushLocked() {
 		s.extData.Entries()
 		s.sessions.Entries(userID)
 		s.devices.Entries(userID)
+		s.services.Entries(userID)
 		s.store.Queue(nil)
 		return
 	}
@@ -232,6 +233,7 @@ func (s *Server) flushLocked() {
 	batch = append(batch, s.extData.Entries()...)
 	batch = append(batch, s.sessions.Entries(userID)...)
 	batch = append(batch, s.devices.Entries(userID)...)
+	batch = append(batch, s.services.Entries(userID)...)
 	meta := s.metaLocked()
 	if meta != s.storedMeta {
 		s.storedMeta = meta
@@ -273,7 +275,6 @@ func (s *Server) entriesLocked(d dirtySet, records []store.Entry) []store.Entry 
 		}
 	}
 	s.invitationEntriesLocked(d, put, del)
-	s.serviceEntriesLocked(d, put, del)
 	for id := range d.embeds {
 		if e := s.embeds[id]; e != nil {
 			put(entryEmbed, id, storedEmbedOf(e))
@@ -571,7 +572,10 @@ func (s *Server) restoreLocked() (map[string]bool, error) {
 	if err := s.restoreInvitationsLocked(entries[entryInvitation], now); err != nil {
 		return nil, err
 	}
-	if err := s.restoreServicesLocked(entries[entryService], now); err != nil {
+	if err := s.services.Restore(entries[services.EntryKind], func(id string) (*userState, bool) {
+		u := s.users[id]
+		return u, u != nil
+	}, now); err != nil {
 		return nil, err
 	}
 	if err := s.devices.Restore(entries[devices.EntryKind], func(id string) (*userState, bool) {

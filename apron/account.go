@@ -222,8 +222,8 @@ func (s *Server) signOutOthersLocked(u *userState, keep *client) {
 			s.removePushLocked(registration)
 		}
 	}
-	for key, t := range s.services {
-		if t.user == u && (service == [32]byte{} || key != service) {
+	for key, t := range s.services.All() {
+		if t.User == u && (service == [32]byte{} || key != service) {
 			s.revokeServiceLocked(key, "This account signed out its other sessions")
 		}
 	}
