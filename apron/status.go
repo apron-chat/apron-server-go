@@ -64,16 +64,16 @@ func settableStatus(value string) bool { return presence.Settable(value) }
 // muteState is a mute (§4.5): until a time, forever, or, when zero, none.
 type muteState = users.Mute
 
-// muteValue is a mute as a `status` notification carries it: true, the
-// seconds left, rounded up, or false when there is none.
-func muteValue(m muteState, now time.Time) any {
+// muteValue is a mute as a `status` notification carries it (wire.Mute):
+// true, the seconds left, rounded up, or false when there is none.
+func muteValue(m muteState, now time.Time) wire.Mute {
 	switch {
 	case m.Forever:
-		return true
+		return wire.Mute{On: true}
 	case !m.Active(now):
-		return false
+		return wire.Mute{}
 	}
-	return int64((m.Until.Sub(now) + time.Second - 1) / time.Second)
+	return wire.Mute{On: true, Seconds: int64((m.Until.Sub(now) + time.Second - 1) / time.Second)}
 }
 
 // statusUpdate is one parsed `status` request. A nil field was absent.
@@ -204,7 +204,9 @@ func (s *Server) applyStatusLocked(c *client, u *userState, update statusUpdate)
 }
 
 // muteFrame is the `status` notification that tells the user's connections
-// of a mute, everywhere or, with roomID, of that room (§4.5).
+// of a mute, everywhere or, with roomID, of that room (§4.5). Its params
+// are a map, not a wire.StatusUpdate, which would send room_id first: the
+// server has always sent its keys sorted.
 func muteFrame(roomID string, mute muteState, now time.Time) jsontext.Value {
 	params := map[string]any{"mute": muteValue(mute, now)}
 	if roomID != "" {
