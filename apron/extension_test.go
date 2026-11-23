@@ -712,3 +712,30 @@ func TestDisableGuests(t *testing.T) {
 		t.Fatal("a room is public on a server without guests")
 	}
 }
+
+// A bot's request that is not sent fails as the server would refuse it.
+func TestBotPostErrorsAreTheServers(t *testing.T) {
+	var bot *Bot
+	newTestServer(t, extensionConfig(testExtension{"poster", func(r *Registrar) error {
+		var err error
+		bot, err = r.Bot("poster", BotOptions{})
+		return err
+	}}))
+	ctx := context.Background()
+	for _, test := range []struct {
+		roomID, replyTo string
+		params          map[string]any
+	}{
+		{"", "", map[string]any{"room_id": "", "body": map[string]any{"text": "x"}}},
+		{"a room", "", map[string]any{"room_id": "a room", "body": map[string]any{"text": "x"}}},
+		{"general", "x1", map[string]any{"room_id": "general", "body": map[string]any{"text": "x"}, "reply_to": map[string]any{"message_id": "x1"}}},
+		{"general", "0", map[string]any{"room_id": "general", "body": map[string]any{"text": "x"}, "reply_to": map[string]any{"message_id": "0"}}},
+		{"", "x1", map[string]any{"room_id": "", "body": map[string]any{"text": "x"}, "reply_to": map[string]any{"message_id": "x1"}}},
+	} {
+		_, want := bot.Call(ctx, "message", test.params)
+		_, got := bot.Post(ctx, test.roomID, "x", ReplyTo(test.replyTo))
+		if want == nil || got == nil || got.Error() != want.Error() {
+			t.Errorf("Post(%q, ReplyTo(%q)) = %v, want %v", test.roomID, test.replyTo, got, want)
+		}
+	}
+}

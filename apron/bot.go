@@ -6,13 +6,14 @@ import (
 	"encoding/json/v2"
 	"errors"
 	"fmt"
-	"github.com/apron-chat/apron-server-go/apron/internal/livetext"
-	"github.com/apron-chat/apron-server-go/wire"
 	"net"
 	"net/url"
-	"strconv"
 	"strings"
 	"sync"
+
+	"github.com/apron-chat/apron-server-go/apron/internal/livetext"
+	"github.com/apron-chat/apron-server-go/wire"
+	wirebot "github.com/apron-chat/apron-server-go/wire/bot"
 )
 
 // Errors of Sessions, which Session.Err reports and their requests return.
@@ -188,13 +189,14 @@ func (b *Bot) StreamTerminal(ctx context.Context, roomID, title string, options 
 
 // Session is one in-process connection of a Bot. It speaks the protocol
 // (PROTOCOL.md) as a WebSocket client does, and gets the frames a client
-// would: it is a wire.Local connection. It sends one request at a time, in
-// order; its methods are safe to call from any goroutine.
+// would: it is a wire.Local connection, whose requests package wire/bot
+// makes typed. It sends one request at a time, in order; its methods are
+// safe to call from any goroutine.
 type Session struct {
-	s   *Server
-	bot *Bot
-	c   *client
-	l   *wire.Local
+	s    *Server
+	bot  *Bot
+	c    *client
+	conn *wirebot.Conn
 	// done is closed once the server has forgotten the connection, with
 	// err set.
 	done  chan struct{}
@@ -234,14 +236,14 @@ func (b *Bot) Connect(options SessionOptions) (*Session, error) {
 	// wire opens the connection as a network one, calling backend.connected
 	// (connectSession) and Hello, which take s.mu, so it is opened without
 	// it.
-	l, err := s.wire.Local(local)
+	conn, err := wirebot.Dial(s.wire, local)
 	switch {
 	case errors.Is(err, wire.ErrClosed):
 		return nil, ErrServerClosed
 	case err != nil:
 		return nil, err
 	}
-	session.l = l
+	session.conn = conn
 	return session, nil
 }
 
@@ -343,7 +345,7 @@ func (b *Session) Err() error {
 // closing records why the session is closing, unless that was recorded
 // already: it fell behind, or else it was closed.
 func (b *Session) closing() {
-	if errors.Is(b.l.Err(), wire.ErrFellBehind) {
+	if errors.Is(b.conn.Err(), wire.ErrFellBehind) {
 		b.setErr(ErrFellBehind)
 	}
 	b.setErr(ErrSessionClosed)
@@ -353,13 +355,13 @@ func (b *Session) closing() {
 // account stays.
 func (b *Session) Close() error {
 	b.closing()
-	_ = b.l.Close()
+	_ = b.conn.Close()
 	<-b.done
 	return nil
 }
 
 func (b *Session) closedErr() error {
-	if errors.Is(b.l.Err(), wire.ErrFellBehind) {
+	if errors.Is(b.conn.Err(), wire.ErrFellBehind) {
 		return ErrFellBehind
 	}
 	if err := b.Err(); err != nil {
@@ -375,18 +377,41 @@ func (b *Session) Call(ctx context.Context, method string, params any) (jsontext
 	if method == "auth" {
 		return nil, errors.New("apron: a session is signed in as its bot")
 	}
-	result, err := b.l.Call(ctx, method, params)
-	if errors.Is(err, wire.ErrClosed) || errors.Is(err, wire.ErrFellBehind) {
-		return nil, b.closedErr()
-	}
-	return result, err
+	result, err := b.conn.Call(ctx, method, params)
+	return result, b.requestErr(err)
 }
 
-// postRequest is a message a Session posts, as options set it.
+// requestErr is the error of a request: why the session closed, once it
+// has.
+func (b *Session) requestErr(err error) error {
+	if errors.Is(err, wire.ErrClosed) || errors.Is(err, wire.ErrFellBehind) {
+		return b.closedErr()
+	}
+	return err
+}
+
+// postRequest is a message a Session posts, as options set it: the params
+// of a new message, or of a command that streams live text.
 type postRequest struct {
-	params    map[string]any
-	body      map[string]any
+	params    wire.MessageParams
 	extension string
+	// extErr is the error of an ext value that is not JSON, and replyErr
+	// of a reply_to that is no message_id.
+	extErr, replyErr error
+}
+
+// check returns the error of a request that is not sent: one whose ext
+// does not encode, or that the server refuses for its room_id, which it
+// reads first, or its reply_to, with the server's errors. The room_id ""
+// is refused, rather than left out for the default room.
+func (p *postRequest) check() error {
+	switch {
+	case p.extErr != nil:
+		return p.extErr
+	case !wire.ValidID(p.params.RoomID):
+		return InvalidParams("room_id must be an ID: not empty, without whitespace or control characters")
+	}
+	return p.replyErr
 }
 
 // PostOption sets a field of a message a Session posts.
@@ -408,9 +433,16 @@ func (f postFunc) applyPost(p *postRequest) { f(p) }
 type replyTo string
 
 func (r replyTo) applyPost(p *postRequest) {
-	if r != "" {
-		p.params["reply_to"] = map[string]any{"message_id": string(r)}
+	if r == "" {
+		return
 	}
+	// The server's own error for a reply_to that names no message_id.
+	id, err := wire.ParseLogID(string(r))
+	if err != nil || id == 0 {
+		p.replyErr = InvalidParams("reply_to.message_id must be a positive decimal string")
+		return
+	}
+	p.params.ReplyTo = &wire.Ref{MessageID: id}
 }
 
 func (r replyTo) applyStream(p *postRequest) { r.applyPost(p) }
@@ -421,17 +453,13 @@ func ReplyTo(messageID string) ReplyOption { return replyTo(messageID) }
 
 // Markdown renders the message's text as Markdown (§3.5.2).
 func Markdown() PostOption {
-	return postFunc(func(p *postRequest) { p.body["format"] = "markdown" })
+	return postFunc(func(p *postRequest) { p.params.Body.Format = wire.Markdown })
 }
 
 // Mention mentions users (§3.5.5), whom the text names as @user_id.
 func Mention(userIDs ...string) PostOption {
 	return postFunc(func(p *postRequest) {
-		mentioned, _ := p.body["mentions"].([]any)
-		for _, id := range userIDs {
-			mentioned = append(mentioned, id)
-		}
-		p.body["mentions"] = mentioned
+		p.params.Body.Mentions = append(p.params.Body.Mentions, userIDs...)
 	})
 }
 
@@ -439,39 +467,42 @@ func Mention(userIDs ...string) PostOption {
 // (§4.12), such as a bridge's ID for the message it relays.
 func WithExt(value any) PostOption {
 	return postFunc(func(p *postRequest) {
-		ext, _ := p.params["ext"].(map[string]any)
-		if ext == nil {
-			ext = make(map[string]any)
-			p.params["ext"] = ext
+		encoded, err := wire.Marshal(value)
+		if err != nil {
+			p.extErr = err
+			return
 		}
-		ext[p.extension] = value
+		if p.params.Ext == nil {
+			p.params.Ext = make(wire.Ext)
+		}
+		p.params.Ext[p.extension] = encoded
 	})
 }
 
 // Post posts a message with text to the room and returns its message_id.
 func (b *Session) Post(ctx context.Context, roomID, text string, options ...PostOption) (string, error) {
-	p := &postRequest{body: map[string]any{"text": text}, extension: b.bot.host.name}
-	p.params = map[string]any{"room_id": roomID, "body": p.body}
+	p := b.post(roomID, text)
 	for _, option := range options {
 		option.applyPost(p)
 	}
-	raw, err := b.Call(ctx, "message", p.params)
-	if err != nil {
+	if err := p.check(); err != nil {
 		return "", err
 	}
-	var result struct {
-		MessageID string `json:"message_id"`
+	result, err := b.conn.Post(ctx, p.params)
+	if err != nil || result.MessageID == 0 {
+		return "", b.requestErr(err)
 	}
-	if err := json.Unmarshal(raw, &result); err != nil {
-		return "", err
-	}
-	return result.MessageID, nil
+	return result.MessageID.String(), nil
+}
+
+// post starts a message with text to the room.
+func (b *Session) post(roomID, text string) *postRequest {
+	return &postRequest{params: wire.MessageParams{RoomID: roomID, Body: &wire.Body{Text: text}}, extension: b.bot.host.name}
 }
 
 // Join joins the room (§4.2.2).
 func (b *Session) Join(ctx context.Context, roomID string) error {
-	_, err := b.Call(ctx, "room_join", map[string]any{"room_id": roomID})
-	return err
+	return b.requestErr(b.conn.Join(ctx, roomID))
 }
 
 // HistoryOptions bound a History page (§4.3): records after After, before
@@ -485,16 +516,16 @@ type HistoryOptions struct {
 // first, as the bot may read them (§4.3). A message edited within the page
 // has a record for each snapshot.
 func (b *Session) History(ctx context.Context, roomID string, options HistoryOptions) ([]Message, error) {
-	params := map[string]any{"room_id": roomID}
+	params := wire.HistoryParams{RoomID: roomID, Limit: max(options.Limit, 0)}
 	if options.After > 0 {
-		params["after"] = strconv.FormatInt(options.After, 10)
+		after := wire.LogID(options.After)
+		params.After = &after
 	}
 	if options.Before > 0 {
-		params["before"] = strconv.FormatInt(options.Before, 10)
+		before := wire.LogID(options.Before)
+		params.Before = &before
 	}
-	if options.Limit > 0 {
-		params["limit"] = options.Limit
-	}
+	// The records are read as the server sent them (decodeMessageRecord).
 	raw, err := b.Call(ctx, "history", params)
 	if err != nil {
 		return nil, err
@@ -533,8 +564,7 @@ func (b *Session) StreamTerminal(ctx context.Context, roomID, title string, opti
 }
 
 func (b *Session) stream(ctx context.Context, roomID, command, args string, options []StreamOption) (*LiveWriter, error) {
-	p := &postRequest{body: map[string]any{"text": strings.TrimSpace(command + " " + args)}, extension: b.bot.host.name}
-	p.params = map[string]any{"room_id": roomID, "body": p.body}
+	p := b.post(roomID, strings.TrimSpace(command+" "+args))
 	for _, option := range options {
 		option.applyStream(p)
 	}
@@ -548,19 +578,20 @@ func (b *Session) stream(ctx context.Context, roomID, command, args string, opti
 	if err != nil {
 		return nil, err
 	}
-	raw, err := b.Call(ctx, "command", p.params)
-	if err != nil {
+	if err := p.check(); err != nil {
 		return nil, err
 	}
-	var result struct {
-		Embeds []struct {
-			WriteURL string `json:"write_url"`
-		} `json:"embeds"`
+	result, err := b.conn.Command(ctx, wire.CommandParams(p.params))
+	if err != nil {
+		return nil, b.requestErr(err)
 	}
-	if err := json.Unmarshal(raw, &result); err != nil || len(result.Embeds) != 1 {
+	var embed struct {
+		WriteURL string `json:"write_url"`
+	}
+	if len(result.Embeds) != 1 || json.Unmarshal(result.Embeds[0], &embed) != nil {
 		return nil, errors.New("apron: the server returned no write URL")
 	}
-	_, token, ok := strings.Cut(result.Embeds[0].WriteURL, writePath)
+	_, token, ok := strings.Cut(embed.WriteURL, writePath)
 	if !ok {
 		return nil, errors.New("apron: the server returned no write URL")
 	}
