@@ -28,10 +28,13 @@ forgets it on restart); see [SERVER.md](SERVER.md#storage).
   brings up to date (`go get github.com/apron-chat/apron-server-go/wire@<commit>`)
   so that `go install ...@latest`, which ignores `go.work`, builds.
   Commands that take package patterns name both modules (`./... ./wire/...`).
-  `wire/commands` gives any backend the command capability (§4.1).
+  `wire/commands` gives any backend the command capability (§4.1), and
+  `wire/bot` runs a bot on a connection of its own, in process.
   `wire/wiretest` tests a backend of it, a handler at a
   time or a whole server as a client sees it, as `examples/minimal`'s test
-  does. Sign-in schemes live in
+  does, and `wire/wiretest/conformance` runs the protocol's core
+  conformance checks, a port of `conform.py`, as Go tests against any
+  backend in process, as `apron`'s and `examples/minimal`'s tests do. Sign-in schemes live in
   `internal/auth/{email,passkey,external}`, and depend only on
   `internal/authn`, the boundary between them and the server: a scheme
   proves a subject of its own, and the server names the identity, and owns
@@ -288,6 +291,14 @@ make test
 WebSockets against the web client's `ChatClient`. Run the latter alone with
 `make test-wire`; it needs Node.js and Go, but no browser or running dev server.
 
+`make test-conformance` runs the protocol's own conformance suite,
+`testdata/apron/tests/conformance/conform.py`, against `aprond`, in a Python
+environment of its own under `build/`, with its passkey checks signing in
+through Chromium. Its core checks also run in `make test`, as
+`wire/wiretest/conformance` (`apron`'s `TestConformance`). To check another
+server, run `conform.py ws://127.0.0.1:8080/ws`, or, for a Go backend,
+`conformance.Run` in a test of its own.
+
 The devenv environment supplies Chromium on Linux. Outside that environment,
 or on macOS, install Chromium once for browser tests:
 
@@ -323,7 +334,9 @@ APRON_WEB_DIR=../apron-web-pr make test-interop
 See [`tests/interop/README.md`](tests/interop/README.md) for what each suite
 covers and the flags the server is started with.
 
-No root JavaScript workspace or Go workspace is required.
+There is no root JavaScript workspace: each JavaScript project, such as
+`tests/interop`, installs its own. The Go modules share the root `go.work`
+(see [Layout](#layout)).
 
 ## Environment updates
 

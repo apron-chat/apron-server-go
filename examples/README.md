@@ -17,11 +17,13 @@ file sets in a table of that name (`[sso]`). Run one with
 | [`private`](private) | Only invited people may sign in, and nothing is visible to anyone else; admins manage the list with `/allow` and `/disallow`, which signs people out: `RestrictSignIn`, `Allowlist`, `ParsePrincipal`, `Store`. |
 | [`search`](search) | Full-text search as a request and a command, limited to rooms the person may see, and a web archive of public rooms: `Method`, `Advertise`, `OnEventFrom`, `Visible`, `Public`. |
 
-[`minimal`](minimal) is the other kind: a whole server in about a hundred
+[`minimal`](minimal) is the other kind: a whole server in under two hundred
 lines on package [`wire`](../wire), which speaks the protocol for a program
 that keeps its own state, such as a gateway in front of another chat system.
 Its commands are a [`wire/commands`](../wire/commands) Router, which answers
 `/help` and lists them, and its bot, which answers when someone mentions
-`@echo`, a [`wire/bot`](../wire/bot) Bot. It takes only `--addr`, and its test uses package
-[`wiretest`](../wire/wiretest). Run the conformance checks against it with
-`conform.py ws://127.0.0.1:8080/ws`.
+`@echo`, a [`wire/bot`](../wire/bot) Bot. It takes only `--addr`. Its tests
+use package [`wiretest`](../wire/wiretest), and run the protocol's core
+conformance checks in process
+([`wiretest/conformance`](../wire/wiretest/conformance)); run the whole
+suite against it with `conform.py ws://127.0.0.1:8080/ws`.

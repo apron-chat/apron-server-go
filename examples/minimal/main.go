@@ -1,5 +1,5 @@
-// Command minimal is a whole Apron server in about a hundred lines, built on
-// package wire rather than package apron: one room, guests, profiles,
+// Command minimal is a whole Apron server in under two hundred lines, built
+// on package wire rather than package apron: one room, guests, profiles,
 // commands (package wire/commands), and a bot that answers its mentions
 // (package wire/bot), with its state in a map. It is the starting point
 // for a server that keeps its own state, such as a bridge or a gateway in
