@@ -242,7 +242,9 @@ test.describe('reference features against the Go server', () => {
 		await openChat(page);
 		const field = composer(page);
 		const run = page.getByRole('button', { name: 'Run command', exact: true });
-		await field.fill('/help');
+		// `/help` alone opens apron-web's own list of commands on a server with ext:command_list (apron-web#298);
+		// with a word after it, it goes to the server, which lists them all.
+		await field.fill('/help avatar');
 		await expect(page.getByTestId('command-tag')).toHaveText('Command');
 		await run.click();
 		await expect(field).toHaveText('');
