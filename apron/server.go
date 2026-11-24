@@ -133,27 +133,27 @@ type client struct {
 
 // Server is an Apron server, which Open starts. It serves the protocol
 // through Handler, and is safe for concurrent use.
-//
-// Its state is guarded by mu. Cohesive parts of it live in modules under
-// apron/internal, which know nothing of Server: the log and its paging
-// (roomlog), rooms, their members, who may see them, and the messages by
-// message_id (rooms), the store writer and its fences (durable), user_ids
-// (accounts), what the server keeps of each user and the accounts by
-// identity (users, whose timed mutes and coalesced statuses take mu),
-// users' statuses (presence), push registrations (push, whose badge pushes
-// take mu), sessions (sessions), device tokens (devices), service tokens
-// (services, whose expiry takes mu), invitations (invitations), hosted
-// embeds (embeds), the custom emoji (emoji), the profile set with /server
-// (profile), out-of-band sign-in proposals (proposals), and the
-// extensions' values (kv), whose methods are called holding mu; and push
-// delivery (webpush, which also keeps the VAPID key the server made), live
-// text (livetext), and upload files (uploads), which own their own locks
-// or atomics. Each module that keeps state in the store tracks its own
-// changes and renders its own entries (persist.go). Server keeps what ties
-// them together: users' live links, what it keeps of each user and
-// message beyond the modules (userState, messageState), and delivery, and
-// it acts on the modules' timers, which call it back to take mu.
 type Server struct {
+	// The server's state is guarded by mu. Cohesive parts of it live in modules under
+	// apron/internal, which know nothing of Server: the log and its paging
+	// (roomlog), rooms, their members, who may see them, and the messages by
+	// message_id (rooms), the store writer and its fences (durable), user_ids
+	// (accounts), what the server keeps of each user and the accounts by
+	// identity (users, whose timed mutes and coalesced statuses take mu),
+	// users' statuses (presence), push registrations (push, whose badge pushes
+	// take mu), sessions (sessions), device tokens (devices), service tokens
+	// (services, whose expiry takes mu), invitations (invitations), hosted
+	// embeds (embeds), the custom emoji (emoji), the profile set with /server
+	// (profile), out-of-band sign-in proposals (proposals), and the
+	// extensions' values (kv), whose methods are called holding mu; and push
+	// delivery (webpush, which also keeps the VAPID key the server made), live
+	// text (livetext), and upload files (uploads), which own their own locks
+	// or atomics. Each module that keeps state in the store tracks its own
+	// changes and renders its own entries (persist.go). Server keeps what ties
+	// them together: users' live links, what it keeps of each user and
+	// message beyond the modules (userState, messageState), and delivery, and
+	// it acts on the modules' timers, which call it back to take mu.
+
 	config Config
 
 	mu sync.RWMutex
