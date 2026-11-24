@@ -39,10 +39,8 @@ import (
 	"errors"
 	"net/http/httptest"
 	"slices"
-	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -172,9 +170,6 @@ type Client struct {
 	t testing.TB
 }
 
-// requests numbers the requests Command sends on any connection.
-var requests atomic.Uint64
-
 // deadline returns a context that ends after timeout, or with the test.
 func (c *Client) deadline() (context.Context, context.CancelFunc) {
 	return context.WithTimeout(c.t.Context(), timeout)
@@ -237,62 +232,33 @@ func (c *Client) Call(method string, params, result any) error {
 // refusal (apron.Registrar.FilterMessage).
 func (c *Client) Post(roomID, text string) (messageID string, err error) {
 	c.t.Helper()
-	var result struct {
-		MessageID string `json:"message_id"`
+	ctx, cancel := c.deadline()
+	defer cancel()
+	result, err := c.Wire.Post(ctx, wire.MessageParams{RoomID: roomID, Body: &wire.Body{Text: text}})
+	if err != nil {
+		return "", c.refusal("message", err)
 	}
-	err = c.Call("message", map[string]any{"room_id": roomID, "body": map[string]any{"text": text}}, &result)
-	return result.MessageID, err
+	if result.MessageID == 0 {
+		return "", nil
+	}
+	return result.MessageID.String(), nil
 }
 
 // Command runs a command line, such as "/weather Lisbon", in a room
 // (§4.1), and returns the text of the notices it sent the client, which
 // arrive before its reply (apron.CommandCall.Notice), and its error reply,
-// if any. It takes those notices and the reply, and leaves every other
-// frame, such as the message snapshots that arrived meanwhile, for
-// Message.
+// if any. It takes those notices, as wiretest.Client.Command does, and
+// leaves every other frame, such as the message snapshots that arrived
+// meanwhile, for Message.
 func (c *Client) Command(roomID, line string) (notices []string, err error) {
 	c.t.Helper()
 	ctx, cancel := c.deadline()
 	defer cancel()
-	id := "aprontest-" + strconv.FormatUint(requests.Add(1), 10)
-	payload, err := wire.Marshal(map[string]any{
-		"method": "command", "id": id,
-		"params": map[string]any{"room_id": roomID, "body": map[string]any{"text": line}},
-	})
+	notices, err = c.Wire.Command(ctx, roomID, line)
 	if err != nil {
-		c.t.Fatal(err)
+		return notices, c.refusal(line, err)
 	}
-	if err := c.Wire.Send(ctx, payload); err != nil {
-		c.t.Fatalf("aprontest: command %s: %v", line, err)
-	}
-	for {
-		frame, err := c.Wire.Expect(ctx, func(f wiretest.Frame) bool {
-			return f.Method == "" && f.ID == id || privateNotice(f) != nil
-		})
-		if err != nil {
-			c.t.Fatalf("aprontest: command %s: %v", line, err)
-		}
-		if notice := privateNotice(frame); notice != nil {
-			notices = append(notices, notice.Body.Text)
-			continue
-		}
-		if frame.Error != nil {
-			return notices, frame.Error
-		}
-		return notices, nil
-	}
-}
-
-// privateNotice is the transient ~private notice that f carries, or nil.
-func privateNotice(f wiretest.Frame) *wire.Message {
-	if f.Method != "message" {
-		return nil
-	}
-	var m wire.Message
-	if f.Decode(&m) != nil || m.From.UserID != wire.Private.UserID || m.Body == nil {
-		return nil
-	}
-	return &m
+	return notices, nil
 }
 
 // Message waits for a message snapshot (§3.5) that match is true of, the
