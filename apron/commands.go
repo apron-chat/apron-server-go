@@ -29,8 +29,8 @@ const (
 // the room and the reply (beforeCommand). The server's own commands check
 // the rest themselves, with their own errors (commands.CheckAll), and run
 // while they hold s.mu; the extensions' run outside it, and the Router
-// asks whether they are available (extensionCommand.may), also outside
-// it.
+// asks whether they are available (their forms' May, such as May's),
+// also outside it.
 
 // serverCommands are the core commands, then the extensions'. The Router
 // keeps what /help and ext:command_list (apron's
@@ -104,6 +104,7 @@ func coreCommands() *serverCommands {
 	embeds := []string{commands.FieldEmbeds}
 	sc := &serverCommands{}
 	sc.router.Before = beforeCommand
+	sc.router.From = privateNoticeFrom
 	for _, core := range []struct {
 		command commands.Command
 		run     coreRun
@@ -395,12 +396,15 @@ func (s *Server) runCoreCommand(c *client, call *commands.Call, run coreRun) *Er
 // fixed word of a form, are told from what follows them.
 func cutWord(text string) (word, rest string) { return commands.Cut(text) }
 
+// privateNoticeFrom is the sender of ~private notices.
+var privateNoticeFrom = wire.User{UserID: privateNoticeID, Name: "System message to you"}
+
 // privateNotice renders a notice for the one connection it is queued on:
 // unlogged, without message_id or log_id (Appendix A.1).
 func privateNotice(roomID, text string) jsontext.Value {
 	return encodeNotification(wire.Message{
 		RoomID: roomID,
-		From:   wire.User{UserID: privateNoticeID, Name: "System message to you"},
+		From:   privateNoticeFrom,
 		Body:   &wire.Body{Text: text, Format: wire.Markdown},
 	})
 }
@@ -426,8 +430,7 @@ func runHelp(ctx context.Context, call *commands.Call) error {
 	if err != nil {
 		return err
 	}
-	roomID := call.Params.RoomID
-	c.enqueue(privateNotice(roomID, commands.Help(c.server.commands.router.Usable(ctx, c.conn, roomID))))
+	call.Notice(commands.Help(c.server.commands.router.Usable(ctx, c.conn, call.Params.RoomID)))
 	_ = call.Done()
 	return nil
 }

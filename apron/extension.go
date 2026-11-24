@@ -183,8 +183,13 @@ func internalError() *Error {
 	return &Error{Code: CodeInternalError, Message: "Something went wrong; try again later"}
 }
 
-// Command is a command people run by sending /name as a `command` request
-// (PROTOCOL.md §4.1).
+// Command is a command of one form, which people run by sending /name as a
+// `command` request (PROTOCOL.md §4.1): the shorthand for the
+// commands.Command that Registrar.Command makes of it, for a command that
+// is its name and arguments, and answers with notices and a result. A
+// command of more forms, such as /poll open and /poll close, one that is
+// Unlisted, or one whose Run replies itself, is a commands.Command, which
+// Registrar.Commands adds.
 type Command struct {
 	// Name is what follows the slash: lowercase letters, digits, and
 	// dashes. It may not be a command the server has. Names are
@@ -192,38 +197,35 @@ type Command struct {
 	// /Name is an unknown command.
 	Name string
 	// Usage and Help describe the command in /help, such as
-	// "/weather <city>" and "show the forecast". When Usage starts with the
-	// slash and Name, then whitespace or nothing, what follows is the
-	// command's hint in ext:command_list (apron's
-	// extensions/ext_command_list.md), such as "<city>", which follows its
-	// suggested convention: <value>, [optional], a|b, repeats..., and @user
-	// for a mention, its whitespace collapsed. Any other Usage gives the
-	// command no hint, /help shows it as written, and Open logs it. Help
-	// is its description: plain text on one line, its
-	// whitespace collapsed; without it, the command has none.
+	// "/weather <city>" and "show the forecast": its form's Usage and Help
+	// (commands.Form). When Usage starts with the slash and Name, then
+	// whitespace or nothing, what follows is the command's hint in
+	// ext:command_list (apron's extensions/ext_command_list.md), such as
+	// "<city>", which follows its suggested convention: <value>,
+	// [optional], a|b, repeats..., and @user for a mention, its whitespace
+	// collapsed. Any other Usage gives the command no hint, /help shows it
+	// as written, and Open logs it. Help is its description: plain text on
+	// one line, its whitespace collapsed; without it, the command has none.
 	Usage, Help string
 	// Uses are the fields of the `command` request, besides body.text,
 	// that change what the command does, as ext:command_list lists them:
-	// "room_id" when it acts on the room it runs in (CommandCall.Room),
-	// and the arguments it reads, "reply_to", "body.mentions", and
-	// "body.embeds". Requires are those of Uses that the command fails
-	// without. With "room_id", the command acts only on a room the client
-	// names: one sent without room_id is refused as invalid_params rather
-	// than run in the default room.
+	// commands.FieldRoom ("room_id") when it acts on the room it runs in
+	// (CommandCall.Room), and the arguments it reads, FieldReplyTo,
+	// FieldMentions, and FieldEmbeds. Requires are those of Uses that the
+	// command fails without; Run checks them itself, but FieldRoom: a
+	// command that requires it acts only on a room the client names, and
+	// one sent without room_id is refused as invalid_params rather than
+	// run in the default room.
 	Uses, Requires []string
 	// Group says who may use the command, for display in ext:command_list:
-	// "all", "guest", "member", "room", "role", or "admin", from the widest
-	// to the narrowest; "" leaves it out. It changes nothing about who may
-	// use it, which is Available's. Open refuses any other value, on
-	// purpose, so that a typo does not reach clients.
+	// one of package commands' Group constants, "all", "guest", "member",
+	// "room", "role", or "admin", from the widest to the narrowest; ""
+	// leaves it out. It changes nothing about who may use it, which is
+	// Available's. Open refuses any other value, on purpose, so that a
+	// typo does not reach clients.
 	Group string
-	// Available reports whether u may run the command in r. /help lists
-	// the command where it is available, and ext:command_list for a user
-	// it is available to in at least one room the user can see, asking
-	// about each in turn, the default room first, until one is. So it may
-	// be called once for each room the user can see on every listing: keep
-	// it cheap and free of side effects. nil makes it available to
-	// everyone.
+	// Available reports whether u may run the command in r: the form's May
+	// (see May). nil makes it available to everyone who can see a room.
 	Available func(u User, r Room) bool
 	// Run runs the command. Its replies are notices (CommandCall.Notice,
 	// Host.RoomNotice) and the effects of what it does; the result, {} for
@@ -232,12 +234,17 @@ type Command struct {
 	Run func(ctx context.Context, call *CommandCall) (map[string]any, error)
 }
 
-// CommandCall is one run of a Command.
+// CommandCall is one run of an extension's command, as apron sees it: who
+// ran it, where, and with what. A Command's Run is given it; a
+// commands.Command's Run gets it from its commands.Call with CallOf.
 type CommandCall struct {
-	// User ran the command in Room.
+	// User ran the command in Room: the room the request names, or the
+	// default room for one without room_id, which the user can see.
 	User User
 	Room Room
-	// Args is the command line after the command's name, trimmed.
+	// Args is the command line after the command's name, trimmed: its
+	// fixed words too, for a form that has some (commands.Call.Rest is
+	// what follows them).
 	Args string
 	// ReplyTo is the message_id the command replied to, if any.
 	ReplyTo string
@@ -246,73 +253,70 @@ type CommandCall struct {
 	// Body is a copy of the command's message body.
 	Body map[string]any
 
-	client *client
+	call *commands.Call
 }
 
 // Notice sends a ~private notice (Appendix A.1), Markdown, to the connection
-// that ran the command, before the command's result.
+// that ran the command, before the command's result, as
+// commands.Call.Notice does.
 func (c *CommandCall) Notice(text string) {
-	c.client.enqueue(privateNotice(c.Room.ID, text))
+	c.call.Notice(text)
+}
+
+// CallOf is the run of an extension's command that call is, as apron sees
+// it, for the Run of a commands.Command that Registrar.Commands added; nil
+// for a call apron did not make, such as one a test makes.
+func CallOf(call *commands.Call) *CommandCall {
+	cc, _ := call.Data.(*CommandCall)
+	return cc
 }
 
 var commandNamePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,31}$`)
 
-type extensionCommand struct {
-	host    *Host
-	command Command
-}
-
-// may is the command's form's May: whether the connection's user may run
-// it in the room roomID, or, for "", in any room it can see, asking
-// Available about each in turn, the default room first, until one is.
-// Available runs outside s.mu, with views of the user and rooms made
-// under it.
-func (e *extensionCommand) may(_ context.Context, wc *wire.Conn, roomID string) bool {
-	c, ok := wire.DataOf[*client](wc)
-	if !ok {
-		return false
-	}
-	s := c.server
-	s.mu.RLock()
-	user := userViewOf(c.user)
-	var rooms []Room
-	switch {
-	case roomID != "":
-		rooms = []Room{s.roomViewLocked(s.rooms.Get(roomID))}
-	case e.command.Available != nil:
-		rooms = s.visibleRoomsLocked(c.user)
-	case !s.seesARoomLocked(c.user):
-		// A user who sees no room can run no command: each runs in a
-		// room.
+// May makes a check of who may use a command form a commands.Form's May,
+// from fn, which reports whether u may use it in r, as Command.Available
+// does, with copies of the user and the room. The Router asks it about the
+// room a command runs in, to refuse it as denied and to list it in /help;
+// and ext:command_list about each room the user can see, the default room
+// first, until fn reports one. So fn may be called once for each room the
+// user can see on every listing: keep it cheap and free of side effects.
+// A user who can see no room may use no command, whatever fn says, and a
+// nil fn lets everyone else.
+func May(fn func(u User, r Room) bool) func(ctx context.Context, c *wire.Conn, roomID string) bool {
+	return func(_ context.Context, wc *wire.Conn, roomID string) bool {
+		c, ok := wire.DataOf[*client](wc)
+		if !ok {
+			return false
+		}
+		// fn runs outside s.mu, with views of the user and rooms made
+		// under it.
+		s := c.server
+		s.mu.RLock()
+		user := userViewOf(c.user)
+		var rooms []Room
+		switch {
+		case roomID != "":
+			rooms = []Room{s.roomViewLocked(s.rooms.Get(roomID))}
+		case fn != nil:
+			rooms = s.visibleRoomsLocked(c.user)
+		case !s.seesARoomLocked(c.user):
+			// A user who sees no room can run no command: each runs in a
+			// room.
+			s.mu.RUnlock()
+			return false
+		}
 		s.mu.RUnlock()
-		return false
+		if fn == nil {
+			return true
+		}
+		return slices.ContainsFunc(rooms, func(r Room) bool { return fn(user, r) })
 	}
-	s.mu.RUnlock()
-	if e.command.Available == nil {
-		return true
-	}
-	return slices.ContainsFunc(rooms, func(r Room) bool { return e.command.Available(user, r) })
 }
 
-// run is the command's Run, outside s.mu, with copies of what it is told,
-// in the room the Router's Before checked, unless it has gone since. Its
-// result, which it renders as an object, goes out as a CommandResult,
-// whose Unknown keeps any field of the extension's own.
-func (e *extensionCommand) run(_ context.Context, call *commands.Call) error {
-	c, err := clientOf(call.Conn)
-	if err != nil {
-		return err
-	}
-	return replyError(c.server.runExtensionCommand(c, e, call))
-}
-
-// Command adds a command.
+// Command adds a command of one form.
 func (r *Registrar) Command(command Command) {
 	r.register("a command", func() error {
-		switch {
-		case !commandNamePattern.MatchString(command.Name):
-			return fmt.Errorf("command %q: a name is lowercase letters, digits, and dashes", command.Name)
-		case command.Run == nil:
+		if command.Run == nil {
 			return fmt.Errorf("command /%s has no Run", command.Name)
 		}
 		// The command's one form takes the hint from Usage, collapses Help
@@ -321,15 +325,14 @@ func (r *Registrar) Command(command Command) {
 		// backend. Its May asks Available, outside s.mu, and the Router
 		// refuses it where it is not available; Run checks the other
 		// fields it requires itself, but room_id, which the Router does.
-		command.Uses, command.Requires = slices.Clone(command.Uses), slices.Clone(command.Requires)
-		e := &extensionCommand{host: r.Host, command: command}
-		err := r.s.commands.router.Add(commands.Command{
+		uses, requires := slices.Clone(command.Uses), slices.Clone(command.Requires)
+		err := r.addCommand(commands.Command{
 			Name: command.Name,
 			Forms: []commands.Form{{
 				Usage: command.Usage, Help: command.Help, Group: command.Group,
-				Uses: command.Uses, Requires: command.Requires, May: e.may,
+				Uses: uses, Requires: requires, May: May(command.Available),
 			}},
-			Run:       e.run,
+			Run:       func(ctx context.Context, call *commands.Call) error { return r.runCommand(ctx, call, command) },
 			RunChecks: commands.CheckForm | commands.CheckRequires,
 		})
 		if err != nil {
@@ -344,37 +347,106 @@ func (r *Registrar) Command(command Command) {
 	})
 }
 
-func (s *Server) runExtensionCommand(c *client, command *extensionCommand, cc *commands.Call) *Error {
-	body, replyID := bodyObject(cc.Params.Body), replyIDOf(cc.Params)
-	s.mu.RLock()
-	r := s.visibleRoomLocked(c.user, cc.Params.RoomID)
-	if r == nil {
-		s.mu.RUnlock()
-		return invalidParams("Unknown room %q", cc.Params.RoomID)
-	}
-	call := &CommandCall{
-		User: userViewOf(c.user), Room: s.roomViewLocked(r), Args: cc.Args, ReplyTo: replyID,
-		Mentions: mentions(body), Body: cloneObject(body), client: c,
-	}
-	s.mu.RUnlock()
-	result, err := command.command.Run(s.requestContext(c), call)
+// runCommand is a Command's Run: its result, which it renders as an
+// object, goes out as a CommandResult, whose Unknown keeps any field of the
+// extension's own.
+func (h *Host) runCommand(ctx context.Context, call *commands.Call, command Command) error {
+	result, err := command.Run(ctx, CallOf(call))
 	if err != nil {
-		return command.host.protocolError(err)
+		return err
 	}
 	if result == nil {
 		result = map[string]any{}
 	}
-	encoded, encodeErr := wire.Marshal(result)
-	if encodeErr != nil {
-		return command.host.protocolError(fmt.Errorf("/%s returned a result that is not JSON: %w", command.command.Name, encodeErr))
+	encoded, err := wire.Marshal(result)
+	if err != nil {
+		return fmt.Errorf("/%s returned a result that is not JSON: %w", command.Name, err)
 	}
 	var typed wire.CommandResult
 	if err := json.Unmarshal(encoded, &typed); err != nil {
-		s.logger.Error("a command's result is not an object, or its embeds are not embed writes (§4.8.3)", "command", command.command.Name, "error", err)
-		return internalError()
+		return fmt.Errorf("/%s returned a result that is not an object, or embeds that are not embed writes (§4.8.3): %w", command.Name, err)
 	}
-	_ = cc.Reply.Send(typed)
+	_ = call.Reply.Send(typed)
 	return nil
+}
+
+// Commands adds commands in package commands' terms, which any wire
+// backend's commands are in: forms with fixed words, such as /poll open
+// and /poll close, each with what it uses and requires, its group, and who
+// may use it (Form.May, which May makes from a check on a User and a
+// Room); commands that are Unlisted; and commands whose Run checks some of
+// what the Router would itself, with errors of its own (RunChecks).
+//
+// Names follow Command.Name's. A form without May is for everyone who can
+// see a room. Before any command runs, the server checks that its room,
+// the default room for a command without room_id, is one the user can see,
+// and that its reply_to is a message the user can see; then the Router
+// checks the command line as package commands says.
+//
+// Run replies as package commands says, with call.Notice and call.Done or
+// call.Reply, or returns an error: an *Error refuses the command with its
+// code, and any other is logged and refused as an internal error. It runs
+// outside the server's lock, with call.Params.RoomID set to the command's
+// room; CallOf(call) is the run as apron sees it, such as the user and the
+// room as extensions see them.
+func (r *Registrar) Commands(list ...commands.Command) {
+	for _, command := range list {
+		r.register("a command", func() error {
+			if command.Run == nil {
+				return fmt.Errorf("command /%s has no Run", command.Name)
+			}
+			return r.addCommand(command)
+		})
+	}
+}
+
+// addCommand adds an extension's command to the server's Router, which
+// runs it after the core commands' checks (beforeCommand): its Run, with
+// the run as apron sees it in call.Data, and its error as the extension's.
+// It is called holding s.mu, which the Router's Add does not need.
+func (r *Registrar) addCommand(command commands.Command) error {
+	if !commandNamePattern.MatchString(command.Name) {
+		return fmt.Errorf("command %q: a name is lowercase letters, digits, and dashes", command.Name)
+	}
+	command.Forms = slices.Clone(command.Forms)
+	if len(command.Forms) == 0 {
+		command.Forms = []commands.Form{{}}
+	}
+	for i := range command.Forms {
+		if command.Forms[i].May == nil {
+			command.Forms[i].May = May(nil)
+		}
+	}
+	run, h := command.Run, r.Host
+	command.Run = func(ctx context.Context, call *commands.Call) error {
+		c, err := clientOf(call.Conn)
+		if err != nil {
+			return err
+		}
+		cc, callErr := c.server.commandCall(c, call)
+		if callErr != nil {
+			return callErr
+		}
+		call.Data = cc
+		return replyError(h.protocolError(run(ctx, call)))
+	}
+	return r.s.commands.router.Add(command)
+}
+
+// commandCall is the run of an extension's command as apron sees it, in
+// the room the Router's Before checked, unless it has gone since.
+func (s *Server) commandCall(c *client, call *commands.Call) (*CommandCall, *Error) {
+	body := bodyObject(call.Params.Body)
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	r := s.visibleRoomLocked(c.user, call.Params.RoomID)
+	if r == nil {
+		return nil, invalidParams("Unknown room %q", call.Params.RoomID)
+	}
+	return &CommandCall{
+		User: userViewOf(c.user), Room: s.roomViewLocked(r), Args: call.Args, ReplyTo: replyIDOf(call.Params),
+		Mentions: mentions(body), Body: cloneObject(body), call: call,
+	}, nil
 }
 
 // MethodCall is one request to an extension's method.
