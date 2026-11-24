@@ -130,27 +130,16 @@ func TestMentions(t *testing.T) {
 	if _, err := client.Auth(ctx, map[string]any{"scheme": "guest"}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := client.Call(ctx, "message", map[string]any{"body": map[string]any{"text": "hi all"}}); err != nil {
+	if _, err := client.Post(ctx, wire.MessageParams{Body: &wire.Body{Text: "hi all"}}); err != nil {
 		t.Fatal(err)
 	}
-	raw, err := client.Call(ctx, "message", map[string]any{"body": map[string]any{"text": "@echo hello", "mentions": []string{"echo"}}})
+	asked, err := client.Post(ctx, wire.MessageParams{Body: &wire.Body{Text: "@echo hello", Mentions: []string{"echo"}}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	var asked wire.MessageResult
-	if err := json.Unmarshal(raw, &asked); err != nil {
-		t.Fatalf("%s: %v", raw, err)
-	}
-	f, err := client.Expect(ctx, func(f wiretest.Frame) bool {
-		var m wire.Message
-		return f.Method == "message" && f.Decode(&m) == nil && m.From.UserID == "echo"
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	var reply wire.Message
-	if err := f.Decode(&reply); err != nil || reply.Body.Text != "You said: @echo hello" || reply.ReplyTo == nil || reply.ReplyTo.MessageID != asked.MessageID {
-		t.Fatalf("reply %s: %v", f.Raw, err)
+	reply, err := client.ExpectMessage(ctx, func(m wire.Message) bool { return m.From.UserID == "echo" })
+	if err != nil || reply.Body.Text != "You said: @echo hello" || reply.ReplyTo == nil || reply.ReplyTo.MessageID != asked.MessageID {
+		t.Fatalf("reply %+v: %v", reply, err)
 	}
 	// The bot was told of the message that did not mention it, not of
 	// its own reply.
@@ -272,16 +261,8 @@ func say(t *testing.T, c *chat, text string, mentions ...string) (*wiretest.Clie
 	if _, err := client.Auth(ctx, map[string]any{"scheme": "guest"}); err != nil {
 		t.Fatal(err)
 	}
-	body := map[string]any{"text": text}
-	if len(mentions) > 0 {
-		body["mentions"] = mentions
-	}
-	raw, err := client.Call(ctx, "message", map[string]any{"body": body})
+	result, err := client.Post(ctx, wire.MessageParams{Body: &wire.Body{Text: text, Mentions: mentions}})
 	if err != nil {
-		t.Fatal(err)
-	}
-	var result wire.MessageResult
-	if err := json.Unmarshal(raw, &result); err != nil {
 		t.Fatal(err)
 	}
 	return client, result.MessageID

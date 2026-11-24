@@ -20,9 +20,17 @@
 //	if _, err := c.Auth(ctx, map[string]any{"scheme": "guest"}); err != nil {
 //		t.Fatal(err)
 //	}
-//	result, err := c.Call(ctx, "message", map[string]any{"body": map[string]any{"text": "hi"}})
+//	result, err := c.Post(ctx, wire.MessageParams{Body: &wire.Body{Text: "hi"}})
 //	...
-//	echo, err := c.Expect(ctx, wiretest.Method("message"))
+//	echo, err := c.ExpectMessage(ctx, func(m wire.Message) bool { return m.From.UserID == "echo" })
+//
+// Its requests are typed as a bot's are (package wire/bot): Post, Me, and
+// Command, which returns the notices a command sent before its result,
+// and Call[T] for any other, which decodes the result into a T; and so
+// are the notifications a test expects, with Expect[T], such as
+// Expect[wire.UserUpdate], or ExpectMessage. Client.Call and Client.Expect
+// are the same raw: a request's params as any value that encodes as an
+// object, and its result and the frames as JSON.
 //
 // A handler that answers later (wire.Reply.Later) returns before its
 // reply is sent, which a goroutine of the backend's own sends: called

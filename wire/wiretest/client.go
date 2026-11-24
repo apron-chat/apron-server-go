@@ -212,7 +212,7 @@ func (c *Client) Auth(ctx context.Context, params any) (wire.AuthResult, error) 
 // result, or its error reply as an *wire.Error. The frames that arrive
 // before the reply are kept for Next and Expect.
 func (c *Client) Call(ctx context.Context, method string, params any) (jsontext.Value, error) {
-	result, _, err := c.call(ctx, method, params, false)
+	result, _, err := c.call(ctx, method, params, nil)
 	return result, err
 }
 
@@ -225,7 +225,7 @@ func (c *Client) Call(ctx context.Context, method string, params any) (jsontext.
 // takes the backlog first, such as with Sync and Next. When ctx is done
 // or the connection ends before the reply, nothing is taken.
 func (c *Client) CallFrames(ctx context.Context, method string, params any) (result jsontext.Value, before []Frame, err error) {
-	return c.call(ctx, method, params, true)
+	return c.call(ctx, method, params, func(Frame) bool { return true })
 }
 
 // Sync waits until every frame the server queued to the connection before
@@ -249,18 +249,18 @@ func (c *Client) Sync(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	_, _, err = c.reply(ctx, id, false)
+	_, _, err = c.reply(ctx, id, nil)
 	return err
 }
 
-// call sends a request and takes its reply, and, with before, the frames
-// ahead of it.
-func (c *Client) call(ctx context.Context, method string, params any, before bool) (jsontext.Value, []Frame, error) {
+// call sends a request and takes its reply, and the frames ahead of it that
+// take matches (reply).
+func (c *Client) call(ctx context.Context, method string, params any, take func(Frame) bool) (jsontext.Value, []Frame, error) {
 	id, err := c.send(ctx, method, params)
 	if err != nil {
 		return nil, nil, err
 	}
-	reply, frames, err := c.reply(ctx, id, before)
+	reply, frames, err := c.reply(ctx, id, take)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -295,10 +295,10 @@ func (c *Client) send(ctx context.Context, method string, params any) (string, e
 }
 
 // reply takes the reply to the request of id, waiting for it until ctx is
-// done or the connection ends, and, with before, the frames ahead of it
-// but for the replies to the Client's other requests. The request is
-// forgotten either way.
-func (c *Client) reply(ctx context.Context, id string, before bool) (Frame, []Frame, error) {
+// done or the connection ends, and the frames ahead of it that take
+// matches, when take is not nil, but for the replies to the Client's other
+// requests. The request is forgotten either way.
+func (c *Client) reply(ctx context.Context, id string, take func(Frame) bool) (Frame, []Frame, error) {
 	defer func() {
 		c.mu.Lock()
 		delete(c.calls, id)
@@ -309,10 +309,10 @@ func (c *Client) reply(ctx context.Context, id string, before bool) (Frame, []Fr
 		if i := slices.IndexFunc(c.frames, func(f Frame) bool { return f.ID == id && f.Method == "" }); i >= 0 {
 			reply := c.frames[i]
 			var ahead []Frame
-			if before {
+			if take != nil {
 				kept := c.frames[:0:0]
 				for _, f := range c.frames[:i] {
-					if f.Method == "" && c.calls[f.ID] {
+					if f.Method == "" && c.calls[f.ID] || !take(f) {
 						kept = append(kept, f)
 					} else {
 						ahead = append(ahead, f)
