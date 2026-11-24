@@ -230,8 +230,8 @@
 // after the reply was sent is logged, at debug level for an *Error. A
 // handler that panics is logged, and answered error/internal_error unless
 // it handles a notification; its connection goes on, as in net/http. The
-// param accessors, the Decoder, and the parsers return an error that is
-// always an *Error, error/invalid_params.
+// Decoder's error, and ParseBody's and ParseLogID's, is always an *Error,
+// error/invalid_params.
 //
 // # Validation
 //
@@ -239,8 +239,8 @@
 // shapes, the same for every server. The backend checks what depends on its
 // state and policy. A request wire refuses never reaches the backend, and
 // the backend counts on what wire checked; params a request has that wire
-// does not know are left to the backend, which reads them raw
-// ([Request.Param]) or ignores them.
+// does not know are left to the backend, which reads them with the
+// Request's Decoder, or raw ([Request.Fields]), or ignores them.
 //
 //	What                         wire checks                              the backend checks
 //	frames (§1, §1.1)            JSON object, method, request id a        —

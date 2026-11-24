@@ -58,7 +58,7 @@ func TestNotificationMethod(t *testing.T) {
 	s := wired(&backend{}, wire.Config{})
 	got := make(chan string, 4)
 	s.HandleNotification("activity", wire.NotificationHandler{Capability: "activity", Serve: func(_ context.Context, _ *wire.Conn, r *wire.Request) {
-		v, _ := r.Param("typing")
+		v := r.Fields()["typing"]
 		got <- string(v)
 	}})
 	c := wiretest.ConnectT(t, s)

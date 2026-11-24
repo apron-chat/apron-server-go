@@ -244,7 +244,7 @@ func (s *Server) revokeEnrollmentLocked(u *userState) {
 // expired, or presented on a connection signed in already.
 func (s *Server) presentedInvitationLocked(c *client, reply wire.Reply[wire.AuthResult]) (*invitation, *Error) {
 	d := authParams(reply).Decoder()
-	token := wire.Opt(d, "invitation", d.String)
+	token := wire.IfPresent(d, "invitation", d.String)
 	if err := paramError(d.Err()); err != nil || token == nil {
 		return nil, err
 	}

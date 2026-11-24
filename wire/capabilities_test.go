@@ -91,16 +91,16 @@ func TestIDs(t *testing.T) {
 }
 
 func TestParseStatus(t *testing.T) {
-	p, err := ParseStatus(req(`{"idle": false, "mute": 3600, "room_id": "general"}`))
+	p, err := parseStatus(req(`{"idle": false, "mute": 3600, "room_id": "general"}`))
 	if err != nil || p.Idle == nil || !p.Idle.Attended || p.Mute == nil || !p.Mute.On || p.Mute.Seconds != 3600 || p.RoomID != "general" {
 		t.Fatalf("got %+v %v", p, err)
 	}
-	p, err = ParseStatus(req(`{"idle": 300}`))
+	p, err = parseStatus(req(`{"idle": 300}`))
 	if err != nil || p.Idle.Seconds != 300 || p.Mute != nil {
 		t.Fatalf("got %+v %v", p, err)
 	}
 	for _, bad := range []string{`{"room_id": "general", "idle": 5}`, `{"idle": true}`, `{"idle": -1}`, `{"mute": 0}`, `{"mute": "x"}`} {
-		if _, err := ParseStatus(req(bad)); err == nil {
+		if _, err := parseStatus(req(bad)); err == nil {
 			t.Errorf("%s was accepted", bad)
 		}
 	}
@@ -114,12 +114,12 @@ func TestParseStatus(t *testing.T) {
 }
 
 func TestParseHistory(t *testing.T) {
-	p, err := ParseHistory(req(`{"room_id": "general", "after": "10", "before": "20", "limit": 5}`))
+	p, err := parseHistory(req(`{"room_id": "general", "after": "10", "before": "20", "limit": 5}`))
 	if err != nil || p.After == nil || *p.After != 10 || p.Before == nil || *p.Before != 20 || p.Limit != 5 {
 		t.Fatalf("got %+v %v", p, err)
 	}
 	for _, bad := range []string{`{"after": "x"}`, `{"after": 10}`, `{"after": null}`, `{"before": "-1"}`, `{"before": "+1"}`, `{"after": "010"}`, `{"limit": 0}`, `{"room_id": "a b"}`} {
-		if _, err := ParseHistory(req(bad)); err == nil {
+		if _, err := parseHistory(req(bad)); err == nil {
 			t.Errorf("%s was accepted", bad)
 		}
 	}

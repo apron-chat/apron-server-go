@@ -151,9 +151,6 @@ func TestNewRequest(t *testing.T) {
 	if err := h.Serve(context.Background(), nil, r, reply); wire.CodeOf(err) != wire.CodeInvalidParams {
 		t.Fatalf("without text: %v", err)
 	}
-	if _, err := wire.ParseHistory(wiretest.NewRequest("history", map[string]any{"limit": 0})); wire.CodeOf(err) != wire.CodeInvalidParams {
-		t.Fatalf("ParseHistory: %v", err)
-	}
 }
 
 // testClient runs the same conversation on a Client of either kind.

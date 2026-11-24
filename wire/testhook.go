@@ -32,5 +32,5 @@ func detachedRequest(method string, params jsontext.Value, rec testhook.Recorder
 	if err := json.Unmarshal(params, &fields); err != nil || fields == nil {
 		return nil, errors.New("wire: params must be a JSON object")
 	}
-	return &Request{Method: method, Params: params, fields: fields, hasID: true, rec: rec}, nil
+	return &Request{Method: method, params: params, fields: fields, hasID: true, rec: rec}, nil
 }

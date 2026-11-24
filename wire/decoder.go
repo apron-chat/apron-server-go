@@ -1,32 +1,35 @@
 package wire
 
-// Presence says whether a param a Decoder reads is required.
-type Presence bool
+// Requirement says whether a param a Decoder reads is required.
+type Requirement bool
 
 const (
 	// Optional is a param that may be left out: the Decoder reads its zero
 	// value.
-	Optional Presence = false
+	Optional Requirement = false
 	// Required is a param that may not be left out: the Decoder's error is
 	// then Missing.
-	Required Presence = true
+	Required Requirement = true
 )
 
-// Decoder reads params one at a time, with the rules of Fields' accessors,
-// and keeps the first error, so that a handler reads every param it needs
-// and checks once:
+// Decoder reads params one at a time, each with the protocol's rules for
+// its kind (§1.1), and keeps the first error, so that a handler reads
+// every param it needs and checks once:
 //
 //	d := r.Decoder()
 //	kind := d.String("kind", wire.Required)
-//	token := wire.Opt(d, "token", d.String) // nil when left out
+//	token := wire.IfPresent(d, "token", d.String) // nil when left out
 //	if err := d.Err(); err != nil {
 //		return err
 //	}
 //
-// The params are checked in the order they are read, and once the Decoder
-// has an error every read returns a zero value. A check of the handler's
-// own takes its place in that order with Fail. The Server's typed params
-// are read with a Decoder (ParseMessage, ParseRoomList, ...).
+// It is how params are read: the Server reads its handlers' typed params
+// with one, and a Handler reads its own. A param of the wrong type, or a
+// null where a value is needed, is invalid_params. The params are checked
+// in the order they are read, and once the Decoder has an error every read
+// returns a zero value. A check of the handler's own takes its place in
+// that order with Fail. A param no method reads, such as an array of the
+// backend's own, is in the raw Fields.
 type Decoder struct {
 	fields Fields
 	err    error
@@ -59,8 +62,8 @@ func (d *Decoder) Has(name string) bool {
 	return ok
 }
 
-// read reads a param with one of Fields' accessors.
-func read[T any](d *Decoder, name string, p Presence, get func(string) (T, bool, error)) T {
+// read reads a param with one of Fields' readers.
+func read[T any](d *Decoder, name string, p Requirement, get func(string) (T, bool, error)) T {
 	var zero T
 	if d.err != nil {
 		return zero
@@ -77,57 +80,60 @@ func read[T any](d *Decoder, name string, p Presence, get func(string) (T, bool,
 	return value
 }
 
-// String reads a string param, as Fields.String does.
-func (d *Decoder) String(name string, p Presence) string {
-	return read(d, name, p, d.fields.String)
+// String reads a string param.
+func (d *Decoder) String(name string, p Requirement) string {
+	return read(d, name, p, d.fields.stringParam)
 }
 
-// ID reads a room_id or user_id param, as Fields.IDParam does.
-func (d *Decoder) ID(name string, p Presence) string {
-	return read(d, name, p, d.fields.IDParam)
+// ID reads a room_id or user_id param, which is not empty and has no
+// whitespace or control characters (§2.4).
+func (d *Decoder) ID(name string, p Requirement) string {
+	return read(d, name, p, d.fields.idParam)
 }
 
-// Bool reads a boolean param, as Fields.Bool does.
-func (d *Decoder) Bool(name string, p Presence) bool {
-	return read(d, name, p, d.fields.Bool)
+// Bool reads a boolean param.
+func (d *Decoder) Bool(name string, p Requirement) bool {
+	return read(d, name, p, d.fields.boolParam)
 }
 
-// Object reads an object param, as Fields.Object does.
-func (d *Decoder) Object(name string, p Presence) Fields {
-	return read(d, name, p, d.fields.Object)
+// Object reads an object param, with its values raw.
+func (d *Decoder) Object(name string, p Requirement) Fields {
+	return read(d, name, p, d.fields.objectParam)
 }
 
-// Ext reads an ext param, as Fields.Ext does: nil when left out.
-func (d *Decoder) Ext(name string, p Presence) Ext {
-	return read(d, name, p, d.fields.Ext)
+// Ext reads an ext param (§4.13): an object whose values are any JSON,
+// kept as they arrived, compacted; nil when left out.
+func (d *Decoder) Ext(name string, p Requirement) Ext {
+	return read(d, name, p, d.fields.extParam)
 }
 
-// LogID reads a log_id param, as Fields.LogID does.
-func (d *Decoder) LogID(name string, p Presence) LogID {
-	return read(d, name, p, d.fields.LogID)
+// LogID reads a log_id param, such as a history bound (§2.1): a decimal
+// string of a non-negative number below 2^53, as ParseLogID reads it.
+func (d *Decoder) LogID(name string, p Requirement) LogID {
+	return read(d, name, p, d.fields.logIDParam)
 }
 
-// MessageID reads a message_id param, as Fields.MessageID does.
-func (d *Decoder) MessageID(name string, p Presence) LogID {
-	return read(d, name, p, d.fields.MessageID)
+// MessageID reads a message_id param (§2.2): a log_id that is not 0.
+func (d *Decoder) MessageID(name string, p Requirement) LogID {
+	return read(d, name, p, d.fields.messageIDParam)
 }
 
-// Ref reads a reference to a message, as Fields.MessageRef does.
-func (d *Decoder) Ref(name string, p Presence) Ref {
-	id := read(d, name, p, d.fields.MessageRef)
+// Ref reads a reference to a message (§3.5.4), {"message_id": ...}.
+func (d *Decoder) Ref(name string, p Requirement) Ref {
+	id := read(d, name, p, d.fields.messageRefParam)
 	return Ref{MessageID: id}
 }
 
-// Count reads a positive integer param, as Fields.Count does.
-func (d *Decoder) Count(name string, p Presence) int {
-	return read(d, name, p, d.fields.Count)
+// Count reads a positive integer param, such as a limit.
+func (d *Decoder) Count(name string, p Requirement) int {
+	return read(d, name, p, d.fields.countParam)
 }
 
-// Opt reads an optional param with one of d's methods, such as d.String or
-// d.Bool, and returns it, or nil when it is left out, or d has an error:
-// for a param whose absence means something of its own, such as a profile
-// field left as it is.
-func Opt[T any](d *Decoder, name string, read func(name string, p Presence) T) *T {
+// IfPresent reads an optional param with one of d's methods, such as
+// d.String or d.Bool, and returns it, or nil when it is left out, or d has
+// an error: for a param whose absence means something of its own, such as
+// a profile field left as it is.
+func IfPresent[T any](d *Decoder, name string, read func(name string, r Requirement) T) *T {
 	value := read(name, Optional)
 	if d.err != nil || !d.Has(name) {
 		return nil

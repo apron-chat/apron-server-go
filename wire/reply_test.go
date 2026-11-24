@@ -230,7 +230,7 @@ func TestHandleAnyTime(t *testing.T) {
 	b := &backend{}
 	s := wire.NewServer(b, wire.Config{Messages: b, Commands: &commands{}})
 	s.Handle("echo", wire.Handler{Capability: "ext:echo", Serve: func(_ context.Context, _ *wire.Conn, r *wire.Request, reply wire.Reply[any]) error {
-		return reply.Send(r.Params)
+		return reply.Send(r.Fields())
 	}})
 	l := local(t, s)
 	if _, err := call(t, l, "message", `{"body":{"text":"hi"}}`); err != nil || b.messages.Load() != 1 {

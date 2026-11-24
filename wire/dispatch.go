@@ -3,7 +3,6 @@ package wire
 import (
 	"context"
 	"encoding/json/jsontext"
-	"encoding/json/v2"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -64,18 +63,17 @@ type method struct {
 }
 
 // Request is a request, or a notification, as a handler gets it: its
-// method, id, and params, raw, which a Handler reads with its accessors,
-// such as Request.String, or its Decoder, and answers with its Reply. A
-// typed handler's Reply has it too (Reply.Request). Its params are
-// decoded once, as the frame is read, and may be read from any goroutine.
+// method, id, and params, which a Handler reads with its Decoder. A typed
+// handler's Reply has it too (Reply.Request). Its params are decoded once,
+// as the frame is read, and may be read from any goroutine.
 type Request struct {
 	// Method is the request's method, and ID its id, or "" for a
 	// notification.
 	Method string
 	ID     string
-	// Params are the request's params, always an object.
-	Params jsontext.Value
 
+	// params are the request's params, always an object.
+	params       jsontext.Value
 	c            *Conn
 	notification bool
 	hasID        bool
@@ -100,37 +98,11 @@ type Request struct {
 // Conn is the connection the request came on.
 func (r *Request) Conn() *Conn { return r.c }
 
-// Notification reports whether the request is a notification, which gets
-// no reply.
-func (r *Request) Notification() bool { return r.notification }
-
-// Param returns the raw value of a param, and whether the request has it:
-// a param sent as "" or null is there.
-func (r *Request) Param(name string) (jsontext.Value, bool) {
-	value, ok := r.Fields()[name]
-	return value, ok
-}
-
-// Decode decodes the params into v. A failure is error/invalid_params.
-func (r *Request) Decode(v any) error {
-	if err := json.Unmarshal(r.Params, v); err != nil {
-		return InvalidParams("Invalid params for " + r.Method + ": " + err.Error())
-	}
-	return nil
-}
-
 // reply sends the request's result, raw, any value that encodes as a JSON
 // object, {} for nil, and reports whether it was queued: a duplicate's
 // outcome, or the {} of a handler that returned without sending.
 func (r *Request) reply(result any) bool {
 	return r.send(result, func() (any, error) { return result, nil }, nil, nil) == nil
-}
-
-// Replied reports whether the request has its reply.
-func (r *Request) Replied() bool {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return r.replied
 }
 
 // failed reports whether the request's reply is an error.
@@ -244,7 +216,7 @@ func (s *Server) processFrame(ctx context.Context, c *Conn, payload []byte) {
 	if fields == nil {
 		fields = Fields{}
 	}
-	r := &Request{Method: parsed.Method, ID: parsed.ID, Params: parsed.Params, fields: fields, c: c, notification: !parsed.HasID, hasID: parsed.HasID}
+	r := &Request{Method: parsed.Method, ID: parsed.ID, params: parsed.Params, fields: fields, c: c, notification: !parsed.HasID, hasID: parsed.HasID}
 	defer s.recoverFrame(r)
 	if failed != nil {
 		// An error about a frame that has no id omits it (§1.1).
@@ -312,7 +284,7 @@ func (s *Server) processFrame(ctx context.Context, c *Conn, payload []byte) {
 	// Deduplicate by user_id and id (§1.2): a duplicate waits for the
 	// original, even on another connection, and gets its outcome, brought up
 	// to date.
-	fingerprint := wirecore.Fingerprint(r.Method, r.Params)
+	fingerprint := wirecore.Fingerprint(r.Method, r.params)
 	entry, prior := s.dedup.claim(userID, r.ID, fingerprint)
 	if prior != nil {
 		if prior.Fingerprint != fingerprint {
@@ -464,31 +436,31 @@ func (s *Server) builtins() map[string]method {
 		methods["message"] = method{strict: true, serve: s.message(messages, nil)}
 	}
 	if p := s.config.Profiles; p != nil {
-		methods["me"] = typed(ParseMe, p.Me)
+		methods["me"] = typed(parseMe, p.Me)
 	}
 	if cmd := s.config.Commands; cmd != nil {
-		methods["command"] = typed(ParseCommand, cmd.Command).with("command", false)
+		methods["command"] = typed(parseCommand, cmd.Command).with("command", false)
 	}
 	if rooms := s.config.Rooms; rooms != nil {
-		methods["room_list"] = typed(ParseRoomList, rooms.RoomList).with("rooms", true)
-		methods["room_join"] = typed(ParseRoomJoin, rooms.RoomJoin).with("rooms", false)
-		methods["room_leave"] = typed(ParseRoomLeave, rooms.RoomLeave).with("rooms", false)
-		methods["room_set"] = typed(ParseRoomSet, rooms.RoomSet).with("rooms", false)
+		methods["room_list"] = typed(parseRoomList, rooms.RoomList).with("rooms", true)
+		methods["room_join"] = typed(parseRoomJoin, rooms.RoomJoin).with("rooms", false)
+		methods["room_leave"] = typed(parseRoomLeave, rooms.RoomLeave).with("rooms", false)
+		methods["room_set"] = typed(parseRoomSet, rooms.RoomSet).with("rooms", false)
 	}
 	if h := s.config.History; h != nil {
-		methods["history"] = typed(ParseHistory, h.History).with("history", true)
+		methods["history"] = typed(parseHistory, h.History).with("history", true)
 	}
 	if st := s.config.Status; st != nil {
-		methods["status"] = typed(ParseStatus, st.Status).with("status", false)
+		methods["status"] = typed(parseStatus, st.Status).with("status", false)
 	}
 	if reactions := s.config.Reactions; reactions != nil {
-		methods["reactions"] = typed(ParseReact, reactions.React).with("reactions", false)
+		methods["reactions"] = typed(parseReact, reactions.React).with("reactions", false)
 	}
 	if a := s.config.Activity; a != nil {
 		methods["activity"] = method{capability: "activity", notify: func(ctx context.Context, c *Conn, r *Request) {
 			// Params that are not valid are ignored, as a notification is
 			// never answered (§1.1).
-			if p, err := ParseActivity(r); err == nil {
+			if p, err := parseActivity(r); err == nil {
 				a.Activity(ctx, c, p)
 			}
 		}}
@@ -549,7 +521,7 @@ func (s *Server) authenticate(ctx context.Context, c *Conn, r *Request) {
 	if c.Closing() {
 		return
 	}
-	p, err := ParseAuth(r)
+	p, err := parseAuth(r)
 	if err != nil {
 		r.fail(s.protocolError(ctx, "auth", err))
 		return

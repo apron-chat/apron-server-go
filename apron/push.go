@@ -120,7 +120,7 @@ func (s *Server) registerPush(c *client, r *wire.Request, reply wire.Reply[any])
 		token = ""
 	}
 	wake := defaultWake
-	if raw, has := r.Param("wake"); has {
+	if raw, has := r.Fields()["wake"]; has {
 		var names []string
 		if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) || json.Unmarshal(raw, &names) != nil || names == nil {
 			return invalidParams("wake must be an array of scope names")
@@ -151,12 +151,13 @@ func (s *Server) registerPush(c *client, r *wire.Request, reply wire.Reply[any])
 
 // parseKeysParam reads a registration's optional keys (§4.9).
 func parseKeysParam(r *wire.Request) (*webpush.Keys, *Error) {
-	raw, present, objectErr := r.Object("keys")
-	if !present {
-		return nil, nil
-	}
-	if objectErr != nil {
+	d := r.Decoder()
+	raw := d.Object("keys", optional)
+	if d.Err() != nil {
 		return nil, invalidParams("keys must be an object with p256dh and auth")
+	}
+	if raw == nil {
+		return nil, nil
 	}
 	p256dh, err := parseString(raw, "p256dh", required)
 	if err != nil {

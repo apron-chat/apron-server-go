@@ -82,8 +82,7 @@ func invalidParams(format string, args ...any) *Error {
 	return &Error{Code: CodeInvalidParams, Message: fmt.Sprintf(format, args...)}
 }
 
-// paramError is the error of wire's param accessors, or of a
-// wire.Decoder, which is an *Error whenever it is not nil, as an *Error:
+// paramError is the error of a wire.Decoder, which is an *Error whenever it is not nil, as an *Error:
 // nil stays a nil *Error.
 func paramError(err error) *Error {
 	if err == nil {
@@ -103,7 +102,7 @@ const (
 
 // parseString reads one string param, for a request that reads only it;
 // one that reads more reads them with a wire.Decoder.
-func parseString(params wire.Fields, name string, p wire.Presence) (string, *Error) {
+func parseString(params wire.Fields, name string, p wire.Requirement) (string, *Error) {
 	d := params.Decoder()
 	value := d.String(name, p)
 	return value, paramError(d.Err())

@@ -83,7 +83,7 @@ func TestLogIDBound(t *testing.T) {
 	const atMax, past = `"9007199254740991"`, `"9007199254740992"`
 	f := Fields{"max": jsontext.Value(atMax), "past": jsontext.Value(past), "huge": jsontext.Value(`"18446744073709551616"`),
 		"ref": jsontext.Value(`{"message_id":` + past + `}`)}
-	for _, read := range []func(string) (LogID, bool, error){f.LogID, f.MessageID} {
+	for _, read := range []func(string) (LogID, bool, error){f.logIDParam, f.messageIDParam} {
 		if id, _, err := read("max"); id != MaxLogID || err != nil {
 			t.Errorf("max: %v, %v", id, err)
 		}
@@ -93,11 +93,11 @@ func TestLogIDBound(t *testing.T) {
 			}
 		}
 	}
-	if _, _, err := f.MessageRef("ref"); CodeOf(err) != CodeInvalidParams || !strings.Contains(err.Error(), "ref.message_id must be below 2^53") {
+	if _, _, err := f.messageRefParam("ref"); CodeOf(err) != CodeInvalidParams || !strings.Contains(err.Error(), "ref.message_id must be below 2^53") {
 		t.Errorf("ref: %v", err)
 	}
 	for _, ref := range []string{`null`, `{}`, `{"message_id":"0"}`, `{"message_id":"x"}`, `{"message_id":5}`} {
-		if _, _, err := (Fields{"ref": jsontext.Value(ref)}).MessageRef("ref"); err == nil || err.(*Error).Message != "ref.message_id must be a positive decimal string" {
+		if _, _, err := (Fields{"ref": jsontext.Value(ref)}).messageRefParam("ref"); err == nil || err.(*Error).Message != "ref.message_id must be a positive decimal string" {
 			t.Errorf("ref %s: %v", ref, err)
 		}
 	}
@@ -109,10 +109,10 @@ func TestLogIDBound(t *testing.T) {
 			t.Errorf("message %s: %v", params, err)
 		}
 	}
-	if _, err := ParseRoomList(req(`{"latest_log_id":` + past + `}`)); CodeOf(err) != CodeInvalidParams {
+	if _, err := parseRoomList(req(`{"latest_log_id":` + past + `}`)); CodeOf(err) != CodeInvalidParams {
 		t.Errorf("room_list: %v", err)
 	}
-	if _, err := ParseActivity(req(`{"read_message_id":` + past + `}`)); CodeOf(err) != CodeInvalidParams {
+	if _, err := parseActivity(req(`{"read_message_id":` + past + `}`)); CodeOf(err) != CodeInvalidParams {
 		t.Errorf("activity: %v", err)
 	}
 	var m Message
@@ -173,19 +173,19 @@ func TestLogIDParams(t *testing.T) {
 	if err := json.Unmarshal([]byte(`{"zero":"0","id":"42","ref":{"message_id":"42"}}`), &f); err != nil {
 		t.Fatal(err)
 	}
-	if id, present, err := f.LogID("zero"); id != 0 || !present || err != nil {
+	if id, present, err := f.logIDParam("zero"); id != 0 || !present || err != nil {
 		t.Errorf("LogID zero: %v %v %v", id, present, err)
 	}
-	if id, present, err := f.MessageID("id"); id != 42 || !present || err != nil {
+	if id, present, err := f.messageIDParam("id"); id != 42 || !present || err != nil {
 		t.Errorf("MessageID: %v %v %v", id, present, err)
 	}
-	if id, present, err := f.MessageRef("ref"); id != 42 || !present || err != nil {
+	if id, present, err := f.messageRefParam("ref"); id != 42 || !present || err != nil {
 		t.Errorf("MessageRef: %v %v %v", id, present, err)
 	}
-	if _, present, err := f.MessageID("absent"); present || err != nil {
+	if _, present, err := f.messageIDParam("absent"); present || err != nil {
 		t.Errorf("absent: %v %v", present, err)
 	}
-	if _, _, err := f.MessageID("zero"); err == nil {
+	if _, _, err := f.messageIDParam("zero"); err == nil {
 		t.Error("a message_id of 0 was accepted")
 	}
 
@@ -198,19 +198,19 @@ func TestLogIDParams(t *testing.T) {
 			t.Errorf("message %s: %v", bad, err)
 		}
 	}
-	if p, err := ParseReact(req(`{"message_id":"9","emojis":[]}`)); err != nil || p.MessageID != 9 {
+	if p, err := parseReact(req(`{"message_id":"9","emojis":[]}`)); err != nil || p.MessageID != 9 {
 		t.Errorf("reactions: %+v %v", p, err)
 	}
-	if _, err := ParseReact(req(`{"message_id":"x","emojis":[]}`)); CodeOf(err) != CodeInvalidParams {
+	if _, err := parseReact(req(`{"message_id":"x","emojis":[]}`)); CodeOf(err) != CodeInvalidParams {
 		t.Errorf("reactions with a bad message_id: %v", err)
 	}
-	if p, err := ParseActivity(req(`{"read_message_id":"11"}`)); err != nil || p.ReadMessageID == nil || *p.ReadMessageID != 11 {
+	if p, err := parseActivity(req(`{"read_message_id":"11"}`)); err != nil || p.ReadMessageID == nil || *p.ReadMessageID != 11 {
 		t.Errorf("activity: %+v %v", p, err)
 	}
-	if _, err := ParseActivity(req(`{"read_message_id":""}`)); err == nil {
+	if _, err := parseActivity(req(`{"read_message_id":""}`)); err == nil {
 		t.Error("activity with an empty read_message_id was accepted")
 	}
-	if p, err := ParseRoomList(req(`{"latest_log_id":"12"}`)); err != nil || p.LatestLogID == nil || *p.LatestLogID != 12 {
+	if p, err := parseRoomList(req(`{"latest_log_id":"12"}`)); err != nil || p.LatestLogID == nil || *p.LatestLogID != 12 {
 		t.Errorf("room_list: %+v %v", p, err)
 	}
 }

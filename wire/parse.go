@@ -8,11 +8,9 @@ import (
 	"slices"
 )
 
-// The parsers read the params of the methods of the Server's handler
-// fields, with what wire checks of each (see the package documentation's
-// table): the Server calls them before a handler, and a Handler that takes
-// a Config handler's place calls them to read the same params the same way,
-// then passes them on. Each returns an error that is an
+// The parsers read the params of the methods of the Server's Config
+// handlers, with what wire checks of each (see the package documentation's
+// table), before a handler gets them. Each returns an error that is an
 // *Error, error/invalid_params, and zero params with it.
 
 // messageFields are the params of a message request or a command (§3.5),
@@ -37,7 +35,7 @@ func parseMessageFields(r *Request) (messageFields, error) {
 	m := messageFields{
 		roomID:    d.ID("room_id", Optional),
 		messageID: d.MessageID("message_id", Optional),
-		replyTo:   Opt(d, "reply_to", d.Ref),
+		replyTo:   IfPresent(d, "reply_to", d.Ref),
 		deleted:   d.Bool("deleted", Optional),
 		ext:       d.Ext("ext", Optional),
 	}
@@ -46,7 +44,7 @@ func parseMessageFields(r *Request) (messageFields, error) {
 		return parsed(m, d)
 	}
 	if fields := d.Object("body", Optional); fields != nil {
-		raw, _ := r.Param("body")
+		raw := r.fields["body"]
 		body, err := parseBody(raw, fields)
 		d.Fail(err)
 		m.body = body
@@ -95,62 +93,29 @@ func parseBody(raw jsontext.Value, fields Fields) (*Body, error) {
 }
 
 // ParseBody reads a message body (§3.5) as the message requests' parsers
-// read one, such as ParseMessage: text a string, format plain or
+// read one, such as parseMessage: text a string, format plain or
 // markdown, mentions user_ids, and embeds objects with a kind, with the
 // members this package does not know kept in Unknown. A backend checks
 // with it a body that came from elsewhere, such as one its filter
 // rewrote, as wire checks a client's. Its error is always an *Error,
 // error/invalid_params.
 func ParseBody(raw jsontext.Value) (*Body, error) {
-	fields, _, err := Fields{"body": raw}.Object("body")
+	fields, _, err := Fields{"body": raw}.objectParam("body")
 	if err != nil {
 		return nil, err
 	}
 	return parseBody(raw, fields)
 }
 
-// ParseMessage reads the params of a new message (§3.5.1): a message
-// request without message_id or deleted, with a body, whose fields are
-// well formed (§3.5).
-func ParseMessage(r *Request) (MessageParams, error) {
-	m, err := parseMessageFields(r)
-	switch {
-	case err != nil:
-		return MessageParams{}, err
-	case m.edit():
-		return MessageParams{}, InvalidParams("A new message has no message_id or deleted")
-	case m.body == nil:
-		return MessageParams{}, Missing("body")
-	}
-	return MessageParams{RoomID: m.roomID, Body: m.body, ReplyTo: m.replyTo, Ext: m.ext}, nil
-}
-
-// ParseEdit reads the params of a save of an existing message (§4.4): a
-// message request with message_id, which deleted, if set, makes a
-// deletion.
-func ParseEdit(r *Request) (EditParams, error) {
-	m, err := parseMessageFields(r)
-	switch {
-	case err != nil:
-		return EditParams{}, err
-	case m.messageID == 0 && m.deleted:
-		// Only a save of an existing message deletes it (§4.4).
-		return EditParams{}, InvalidParams("Cannot create a deleted message")
-	case m.messageID == 0:
-		return EditParams{}, Missing("message_id")
-	}
-	return m.editParams(), nil
-}
-
 func (m messageFields) editParams() EditParams {
 	return EditParams{MessageID: m.messageID, RoomID: m.roomID, Deleted: m.deleted, Body: m.body, ReplyTo: m.replyTo, Ext: m.ext}
 }
 
-// ParseCommand reads a command's params (§4.1): a message's, but for
+// parseCommand reads a command's params (§4.1): a message's, but for
 // message_id and deleted, and with a body.
-func ParseCommand(r *Request) (CommandParams, error) {
+func parseCommand(r *Request) (CommandParams, error) {
 	for _, name := range []string{"message_id", "deleted"} {
-		if r.Has(name) {
+		if _, ok := r.fields[name]; ok {
 			return CommandParams{}, InvalidParams("A command has no " + name + "; send it as a message instead")
 		}
 	}
@@ -164,13 +129,13 @@ func ParseCommand(r *Request) (CommandParams, error) {
 	return CommandParams{RoomID: m.roomID, Body: m.body, ReplyTo: m.replyTo, Ext: m.ext}, nil
 }
 
-// ParseAuth reads auth's params (§3.2): scheme, a non-empty string, and the
+// parseAuth reads auth's params (§3.2): scheme, a non-empty string, and the
 // fields AuthParams has, each of its type. Whether the server offers the
 // scheme is Config.CheckScheme's to decide, and the rest, such as whether
 // user_id could be one (§2.4), the backend's, after it: a scheme the
 // server does not offer is unsupported whatever else the request holds
 // (§3.2).
-func ParseAuth(r *Request) (AuthParams, error) {
+func parseAuth(r *Request) (AuthParams, error) {
 	d := r.Decoder()
 	p := AuthParams{
 		Scheme: d.String("scheme", Required),
@@ -179,7 +144,7 @@ func ParseAuth(r *Request) (AuthParams, error) {
 		Agent:  d.String("agent", Optional),
 		Token:  d.String("token", Optional),
 		Ext:    d.Ext("ext", Optional),
-		Raw:    r.Params,
+		Raw:    r.params,
 	}
 	if d.Err() == nil && p.Scheme == "" {
 		d.Fail(Missing("scheme"))
@@ -187,26 +152,26 @@ func ParseAuth(r *Request) (AuthParams, error) {
 	return parsed(p, d)
 }
 
-// ParseMe reads me's params (§3.3.2): name, avatar, and status are
+// parseMe reads me's params (§3.3.2): name, avatar, and status are
 // strings, and ext an object. What a server accepts of each, such as a
 // name's length or a status value, is the backend's.
-func ParseMe(r *Request) (MeParams, error) {
+func parseMe(r *Request) (MeParams, error) {
 	d := r.Decoder()
 	p := MeParams{
-		Name:   Opt(d, "name", d.String),
-		Avatar: Opt(d, "avatar", d.String),
-		Status: Opt(d, "status", d.String),
+		Name:   IfPresent(d, "name", d.String),
+		Avatar: IfPresent(d, "avatar", d.String),
+		Status: IfPresent(d, "status", d.String),
 		Ext:    d.Ext("ext", Optional),
 	}
 	return parsed(p, d)
 }
 
-// ParseRoomList reads room_list's params (§4.2.1): filter is joined,
+// parseRoomList reads room_list's params (§4.2.1): filter is joined,
 // not_joined, or all, the default.
-func ParseRoomList(r *Request) (RoomListParams, error) {
+func parseRoomList(r *Request) (RoomListParams, error) {
 	d := r.Decoder()
 	p := RoomListParams{Filter: FilterAll}
-	if filter := Opt(d, "filter", d.String); filter != nil {
+	if filter := IfPresent(d, "filter", d.String); filter != nil {
 		p.Filter = *filter
 		if p.Filter != FilterAll && p.Filter != FilterJoined && p.Filter != FilterNotJoined {
 			d.Fail(InvalidParams("filter must be joined, not_joined, or all"))
@@ -216,62 +181,62 @@ func ParseRoomList(r *Request) (RoomListParams, error) {
 	p.ParentRoomID = d.ID("parent_room_id", Optional)
 	p.UserID = d.ID("user_id", Optional)
 	p.Members = d.Bool("members", Optional)
-	p.LatestLogID = Opt(d, "latest_log_id", d.LogID)
+	p.LatestLogID = IfPresent(d, "latest_log_id", d.LogID)
 	return parsed(p, d)
 }
 
-// ParseRoomJoin reads room_join's params (§4.2.2): room_id, and user_id,
+// parseRoomJoin reads room_join's params (§4.2.2): room_id, and user_id,
 // for a join of another user.
-func ParseRoomJoin(r *Request) (RoomJoinParams, error) {
+func parseRoomJoin(r *Request) (RoomJoinParams, error) {
 	d := r.Decoder()
 	p := RoomJoinParams{RoomID: d.ID("room_id", Required), UserID: d.ID("user_id", Optional)}
 	return parsed(p, d)
 }
 
-// ParseRoomLeave reads room_leave's params (§4.2.2), as ParseRoomJoin does
+// parseRoomLeave reads room_leave's params (§4.2.2), as parseRoomJoin does
 // room_join's.
-func ParseRoomLeave(r *Request) (RoomLeaveParams, error) {
+func parseRoomLeave(r *Request) (RoomLeaveParams, error) {
 	d := r.Decoder()
 	p := RoomLeaveParams{RoomID: d.ID("room_id", Required), UserID: d.ID("user_id", Optional)}
 	return parsed(p, d)
 }
 
-// ParseRoomSet reads room_set's params (§4.2.4).
-func ParseRoomSet(r *Request) (RoomSetParams, error) {
+// parseRoomSet reads room_set's params (§4.2.4).
+func parseRoomSet(r *Request) (RoomSetParams, error) {
 	d := r.Decoder()
 	p := RoomSetParams{
 		RoomID:       d.ID("room_id", Optional),
 		ParentRoomID: d.ID("parent_room_id", Optional),
-		Title:        Opt(d, "title", d.String),
-		Description:  Opt(d, "description", d.String),
-		Private:      Opt(d, "private", d.Bool),
+		Title:        IfPresent(d, "title", d.String),
+		Description:  IfPresent(d, "description", d.String),
+		Private:      IfPresent(d, "private", d.Bool),
 		Ext:          d.Ext("ext", Optional),
 	}
 	return parsed(p, d)
 }
 
-// ParseHistory reads history's params (§4.3): after and before are
+// parseHistory reads history's params (§4.3): after and before are
 // log_ids, and limit is positive. A limit above the backend's own is the
 // backend's to lower.
-func ParseHistory(r *Request) (HistoryParams, error) {
+func parseHistory(r *Request) (HistoryParams, error) {
 	d := r.Decoder()
 	p := HistoryParams{
 		RoomID: d.ID("room_id", Optional),
-		After:  Opt(d, "after", d.LogID),
-		Before: Opt(d, "before", d.LogID),
+		After:  IfPresent(d, "after", d.LogID),
+		Before: IfPresent(d, "before", d.LogID),
 		Limit:  d.Count("limit", Optional),
 	}
 	return parsed(p, d)
 }
 
-// ParseStatus reads a status request's params (§4.5.3): idle is false or
+// parseStatus reads a status request's params (§4.5.3): idle is false or
 // a non-negative number of seconds, mute true, false, or a positive number
 // of seconds, and room_id scopes only the mute, so it is sent with one.
-func ParseStatus(r *Request) (StatusParams, error) {
+func parseStatus(r *Request) (StatusParams, error) {
 	d := r.Decoder()
 	p := StatusParams{RoomID: d.ID("room_id", Optional)}
 	scoped := d.Has("room_id")
-	if raw, ok := r.Param("idle"); ok && d.Err() == nil {
+	if raw, ok := r.fields["idle"]; ok && d.Err() == nil {
 		var seconds int64
 		switch raw := bytes.TrimSpace(raw); {
 		case bytes.Equal(raw, []byte("false")):
@@ -282,7 +247,7 @@ func ParseStatus(r *Request) (StatusParams, error) {
 			d.Fail(InvalidParams("idle must be false or a non-negative whole number of seconds"))
 		}
 	}
-	if raw, ok := r.Param("mute"); ok && d.Err() == nil {
+	if raw, ok := r.fields["mute"]; ok && d.Err() == nil {
 		var mute Mute
 		if mute.UnmarshalJSON(raw) != nil {
 			d.Fail(InvalidParams("mute must be true, false, or a positive whole number of seconds"))
@@ -295,13 +260,13 @@ func ParseStatus(r *Request) (StatusParams, error) {
 	return parsed(p, d)
 }
 
-// ParseReact reads the params of reactions (§4.7): message_id, and emojis,
+// parseReact reads the params of reactions (§4.7): message_id, and emojis,
 // an array of non-empty strings, empty to clear the set. Whether each is
 // an emoji the server takes is the backend's.
-func ParseReact(r *Request) (ReactParams, error) {
+func parseReact(r *Request) (ReactParams, error) {
 	d := r.Decoder()
 	p := ReactParams{MessageID: d.MessageID("message_id", Required)}
-	raw, ok := r.Param("emojis")
+	raw, ok := r.fields["emojis"]
 	switch {
 	case d.Err() != nil:
 	case !ok:
@@ -316,19 +281,19 @@ func ParseReact(r *Request) (ReactParams, error) {
 	return parsed(p, d)
 }
 
-// ParseActivity reads an activity notification's params (§4.6): typing is
+// parseActivity reads an activity notification's params (§4.6): typing is
 // a non-negative number of seconds, and read_message_id a message_id.
-func ParseActivity(r *Request) (ActivityParams, error) {
+func parseActivity(r *Request) (ActivityParams, error) {
 	d := r.Decoder()
 	p := ActivityParams{RoomID: d.ID("room_id", Optional)}
-	if raw, ok := r.Param("typing"); ok && d.Err() == nil {
+	if raw, ok := r.fields["typing"]; ok && d.Err() == nil {
 		var typing int
 		if isNull(raw) || json.Unmarshal(raw, &typing) != nil || typing < 0 {
 			d.Fail(InvalidParams("typing must be a non-negative integer"))
 		}
 		p.Typing = &typing
 	}
-	p.ReadMessageID = Opt(d, "read_message_id", d.MessageID)
+	p.ReadMessageID = IfPresent(d, "read_message_id", d.MessageID)
 	return parsed(p, d)
 }
 
@@ -353,7 +318,7 @@ func replyFor[T any](r *Request, params any) Reply[T] {
 		if r.Method == "room_list" {
 			list, ok := params.(RoomListParams)
 			if !ok {
-				list, _ = ParseRoomList(r)
+				list, _ = parseRoomList(r)
 			}
 			p.check = func(result *RoomListResult) (any, error) { return normalizeRoomList(list, *result), nil }
 		}

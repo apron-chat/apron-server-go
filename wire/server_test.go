@@ -331,7 +331,7 @@ func TestUnsupportedMethod(t *testing.T) {
 func TestHandle(t *testing.T) {
 	s := wired(&backend{}, wire.Config{})
 	s.Handle("echo", wire.Handler{Capability: "ext:echo", Serve: func(_ context.Context, _ *wire.Conn, r *wire.Request, reply wire.Reply[any]) error {
-		return reply.Send(r.Params)
+		return reply.Send(r.Fields())
 	}})
 	s.Handle("fail", wire.Handler{NoDedup: true, Serve: func(context.Context, *wire.Conn, *wire.Request, wire.Reply[any]) error {
 		return errors.New("secret detail")
@@ -341,7 +341,7 @@ func TestHandle(t *testing.T) {
 		t.Fatalf("capabilities = %v", capabilities)
 	}
 	signIn(t, c)
-	if result, err := c.Call(wait(t), "echo", params(`{"b":1,"a":2}`)); err != nil || string(result) != `{"b":1,"a":2}` {
+	if result, err := c.Call(wait(t), "echo", params(`{"b":1,"a":2}`)); err != nil || string(result) != `{"a":2,"b":1}` {
 		t.Fatalf("echo: %s %v", result, err)
 	}
 	if _, err := c.Call(wait(t), "fail", nil); wire.CodeOf(err) != wire.CodeInternalError || strings.Contains(err.Error(), "secret") {

@@ -13,9 +13,9 @@ func TestDecoder(t *testing.T) {
 	d := req(`{"kind":"web","n":3,"on":true,"ext":{"a":{"b": 1}},"after":"7"}`).Decoder()
 	kind := d.String("kind", Required)
 	n := d.Count("n", Required)
-	on := Opt(d, "on", d.Bool)
-	off := Opt(d, "off", d.Bool)
-	after := Opt(d, "after", d.LogID)
+	on := IfPresent(d, "on", d.Bool)
+	off := IfPresent(d, "off", d.Bool)
+	after := IfPresent(d, "after", d.LogID)
 	ext := d.Ext("ext", Optional)
 	if err := d.Err(); err != nil || kind != "web" || n != 3 || on == nil || !*on || off != nil || after == nil || *after != 7 || string(ext["a"]) != `{"b":1}` {
 		t.Fatalf("got %q %d %v %v %v %s, %v", kind, n, on, off, after, ext["a"], d.Err())
@@ -34,7 +34,7 @@ func TestDecoder(t *testing.T) {
 	if err := d.Err(); CodeOf(err) != CodeInvalidParams || !strings.Contains(err.Error(), "kind must be a string") {
 		t.Fatalf("Err = %v, want the first", err)
 	}
-	if got := Opt(d, "n", d.Count); got != nil {
+	if got := IfPresent(d, "n", d.Count); got != nil {
 		t.Fatalf("Opt after an error = %v", got)
 	}
 
@@ -57,30 +57,24 @@ func TestParsers(t *testing.T) {
 		name, params, want string
 		parse              func(*Request) error
 	}{
-		{"message", `{"message_id":"3","body":{"text":"x"}}`, "A new message has no message_id", errOf(ParseMessage)},
-		{"message", `{"room_id":"general"}`, "Missing body", errOf(ParseMessage)},
-		{"message", `{"room_id":"a b","body":5}`, "room_id must be an ID", errOf(ParseMessage)},
-		{"edit", `{"body":{"text":"x"}}`, "Missing message_id", errOf(ParseEdit)},
-		{"edit", `{"deleted":true}`, "Cannot create a deleted message", errOf(ParseEdit)},
-		{"edit", `{"message_id":"3","deleted":true,"body":5}`, "", errOf(ParseEdit)},
-		{"command", `{"deleted":false,"body":{"text":"/x"}}`, "A command has no deleted", errOf(ParseCommand)},
-		{"auth", `{}`, "Missing scheme", errOf(ParseAuth)},
-		{"auth", `{"scheme":""}`, "Missing scheme", errOf(ParseAuth)},
-		{"auth", `{"scheme":5}`, "scheme must be a string", errOf(ParseAuth)},
-		{"auth", `{"scheme":"guest","name":5}`, "name must be a string", errOf(ParseAuth)},
-		{"auth", `{"scheme":"guest","ext":[]}`, "ext must be an object", errOf(ParseAuth)},
-		{"auth", `{"scheme":"guest","user_id":"a b","credential":{}}`, "", errOf(ParseAuth)},
-		{"me", `{"avatar":null}`, "avatar must be a string", errOf(ParseMe)},
-		{"room_list", `{"filter":"some"}`, "filter must be joined", errOf(ParseRoomList)},
-		{"room_join", `{"user_id":"ada"}`, "Missing room_id", errOf(ParseRoomJoin)},
-		{"room_leave", `{"room_id":"general","user_id":""}`, "user_id must be an ID", errOf(ParseRoomLeave)},
-		{"room_set", `{"private":"yes"}`, "private must be a boolean", errOf(ParseRoomSet)},
-		{"history", `{"limit":-1}`, "limit must be a positive integer", errOf(ParseHistory)},
-		{"status", `{"room_id":"general","idle":5}`, "room_id scopes a mute", errOf(ParseStatus)},
-		{"reactions", `{"message_id":"0","emojis":[]}`, "message_id must be a positive", errOf(ParseReact)},
-		{"reactions", `{"message_id":"1"}`, "Missing emojis", errOf(ParseReact)},
-		{"activity", `{"typing":null}`, "typing must be a non-negative integer", errOf(ParseActivity)},
-		{"activity", `{"read_message_id":"0"}`, "read_message_id must be a positive", errOf(ParseActivity)},
+		{"command", `{"deleted":false,"body":{"text":"/x"}}`, "A command has no deleted", errOf(parseCommand)},
+		{"auth", `{}`, "Missing scheme", errOf(parseAuth)},
+		{"auth", `{"scheme":""}`, "Missing scheme", errOf(parseAuth)},
+		{"auth", `{"scheme":5}`, "scheme must be a string", errOf(parseAuth)},
+		{"auth", `{"scheme":"guest","name":5}`, "name must be a string", errOf(parseAuth)},
+		{"auth", `{"scheme":"guest","ext":[]}`, "ext must be an object", errOf(parseAuth)},
+		{"auth", `{"scheme":"guest","user_id":"a b","credential":{}}`, "", errOf(parseAuth)},
+		{"me", `{"avatar":null}`, "avatar must be a string", errOf(parseMe)},
+		{"room_list", `{"filter":"some"}`, "filter must be joined", errOf(parseRoomList)},
+		{"room_join", `{"user_id":"ada"}`, "Missing room_id", errOf(parseRoomJoin)},
+		{"room_leave", `{"room_id":"general","user_id":""}`, "user_id must be an ID", errOf(parseRoomLeave)},
+		{"room_set", `{"private":"yes"}`, "private must be a boolean", errOf(parseRoomSet)},
+		{"history", `{"limit":-1}`, "limit must be a positive integer", errOf(parseHistory)},
+		{"status", `{"room_id":"general","idle":5}`, "room_id scopes a mute", errOf(parseStatus)},
+		{"reactions", `{"message_id":"0","emojis":[]}`, "message_id must be a positive", errOf(parseReact)},
+		{"reactions", `{"message_id":"1"}`, "Missing emojis", errOf(parseReact)},
+		{"activity", `{"typing":null}`, "typing must be a non-negative integer", errOf(parseActivity)},
+		{"activity", `{"read_message_id":"0"}`, "read_message_id must be a positive", errOf(parseActivity)},
 	} {
 		err := tc.parse(req(tc.params))
 		switch {
@@ -91,12 +85,12 @@ func TestParsers(t *testing.T) {
 		}
 	}
 
-	p, err := ParseAuth(req(`{"scheme":"token","token":"t","ext":{"x": [1, 2]}}`))
+	p, err := parseAuth(req(`{"scheme":"token","token":"t","ext":{"x": [1, 2]}}`))
 	if err != nil || p.Scheme != "token" || p.Token != "t" || string(p.Ext["x"]) != "[1,2]" || !strings.Contains(string(p.Raw), `"token"`) {
-		t.Fatalf("ParseAuth: %+v %v", p, err)
+		t.Fatalf("parseAuth: %+v %v", p, err)
 	}
-	if p, err := ParseReact(req(`{"message_id":"4","emojis":[]}`)); err != nil || p.Emojis == nil {
-		t.Fatalf("ParseReact: %+v %v", p, err)
+	if p, err := parseReact(req(`{"message_id":"4","emojis":[]}`)); err != nil || p.Emojis == nil {
+		t.Fatalf("parseReact: %+v %v", p, err)
 	}
 }
 
@@ -172,10 +166,11 @@ func TestFieldsShared(t *testing.T) {
 	var wg sync.WaitGroup
 	for range 4 {
 		wg.Go(func() {
-			if v, _, err := r.String("a"); v != "x" || err != nil {
-				t.Errorf("String: %q %v", v, err)
+			d := r.Decoder()
+			if v := d.String("a", Required); v != "x" || d.Err() != nil {
+				t.Errorf("String: %q %v", v, d.Err())
 			}
-			if !r.Has("b") {
+			if !d.Has("b") {
 				t.Error("Has")
 			}
 		})

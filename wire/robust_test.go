@@ -16,12 +16,13 @@ import (
 	"github.com/apron-chat/apron-server-go/wire/wiretest"
 )
 
-// The accessors' errors are plain errors, nil when there is none, and
+// The Decoder's errors are plain errors, nil when there is none, and
 // *Errors underneath when there is.
 func TestParamErrors(t *testing.T) {
 	read := func(f wire.Fields, name string) error {
-		_, _, err := f.String(name)
-		return err
+		d := f.Decoder()
+		d.String(name, wire.Optional)
+		return d.Err()
 	}
 	if err := read(wire.Fields{}, "x"); err != nil {
 		t.Fatalf("an absent field: %v", err)
@@ -186,7 +187,7 @@ func TestLocalNotify(t *testing.T) {
 	s := wired(&backend{}, wire.Config{})
 	got := make(chan string, 1)
 	s.HandleNotification("activity", wire.NotificationHandler{Capability: "activity", Serve: func(_ context.Context, _ *wire.Conn, r *wire.Request) {
-		v, _ := r.Param("typing")
+		v := r.Fields()["typing"]
 		got <- string(v)
 	}})
 	l, err := s.Local(wire.LocalOptions{User: wire.User{UserID: "bot"}})
