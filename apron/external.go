@@ -168,3 +168,11 @@ func (x *ExternalSignIn) Deny(w http.ResponseWriter, r *http.Request, id, reason
 	}
 	return nil
 }
+
+// BaseURL is the server's base URL as people reach it, such as
+// https://chat.example: Config.PublicURL, else the scheme and host that r,
+// a request to the server, arrived on, as the server's own pages and links
+// have it. An extension makes the addresses of its routes with it, such as
+// the callback URL of the OAuth app it signs people in with, which it
+// sends from its external sign-in's start function and from that callback.
+func (h *Host) BaseURL(r *http.Request) string { return h.s.baseURL(r) }

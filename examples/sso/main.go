@@ -14,7 +14,6 @@
 //
 //	go run ./examples/sso --public-url https://chat.example \
 //	  --origin https://chat.example --disable-guests \
-//	  --sso.base-url https://chat.example \
 //	  --sso.client-id ... --sso.client-secret ... \
 //	  --sso.org my-team --sso.admin octocat
 package main
@@ -42,7 +41,6 @@ type SSO struct {
 	Settings struct {
 		ClientID     string   `long:"client-id" description:"The GitHub OAuth app's client ID"`
 		ClientSecret string   `long:"client-secret" description:"The GitHub OAuth app's client secret"`
-		BaseURL      string   `long:"base-url" description:"This server's public URL, which the OAuth app's callback URL starts with, such as https://chat.example"`
 		Org          string   `long:"org" description:"Only members of this GitHub organization may sign in; empty lets in everyone"`
 		Admins       []string `long:"admin" description:"A GitHub login that gets the admin role; repeat for more"`
 	}
@@ -54,13 +52,16 @@ type SSO struct {
 	github struct{ web, api string }
 }
 
-func (*SSO) Name() string       { return "sso" }
-func (s *SSO) Flags() any       { return &s.Settings }
-func (s *SSO) callback() string { return strings.TrimRight(s.Settings.BaseURL, "/") + "/sso/callback" }
+func (*SSO) Name() string { return "sso" }
+func (s *SSO) Flags() any { return &s.Settings }
+
+// callback is the OAuth app's callback URL, on this server as r reached
+// it: its --public-url, if set.
+func (s *SSO) callback(r *http.Request) string { return s.host.BaseURL(r) + "/sso/callback" }
 
 func (s *SSO) Init(r *apron.Registrar) error {
-	if s.Settings.ClientID == "" || s.Settings.ClientSecret == "" || s.Settings.BaseURL == "" {
-		return errors.New("set --sso.client-id, --sso.client-secret, and --sso.base-url")
+	if s.Settings.ClientID == "" || s.Settings.ClientSecret == "" {
+		return errors.New("set --sso.client-id and --sso.client-secret")
 	}
 	s.host = r.Host
 	s.client = &http.Client{Timeout: 15 * time.Second}
@@ -77,7 +78,7 @@ func (s *SSO) Init(r *apron.Registrar) error {
 func (s *SSO) start(w http.ResponseWriter, r *http.Request, req apron.ExternalRequest) {
 	query := url.Values{
 		"client_id":    {s.Settings.ClientID},
-		"redirect_uri": {s.callback()},
+		"redirect_uri": {s.callback(r)},
 		"state":        {req.ID},
 		"allow_signup": {"false"},
 	}
@@ -97,7 +98,7 @@ func (s *SSO) finish(w http.ResponseWriter, r *http.Request) {
 		_ = s.signIn.Cancel(w, r, signIn)
 		return
 	}
-	identity, err := s.identify(r.Context(), r.URL.Query().Get("code"))
+	identity, err := s.identify(r.Context(), r.URL.Query().Get("code"), s.callback(r))
 	if err != nil {
 		// The server's page says why, and lets the person sign in as
 		// someone else, or go back to the app, which hears why too.
@@ -110,7 +111,7 @@ func (s *SSO) finish(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (s *SSO) identify(ctx context.Context, code string) (apron.Identity, error) {
+func (s *SSO) identify(ctx context.Context, code, callback string) (apron.Identity, error) {
 	if code == "" {
 		return apron.Identity{}, errors.New("GitHub sent no code")
 	}
@@ -118,7 +119,7 @@ func (s *SSO) identify(ctx context.Context, code string) (apron.Identity, error)
 		AccessToken string `json:"access_token"`
 		Error       string `json:"error_description"`
 	}
-	form := url.Values{"client_id": {s.Settings.ClientID}, "client_secret": {s.Settings.ClientSecret}, "code": {code}, "redirect_uri": {s.callback()}}
+	form := url.Values{"client_id": {s.Settings.ClientID}, "client_secret": {s.Settings.ClientSecret}, "code": {code}, "redirect_uri": {callback}}
 	request, _ := http.NewRequestWithContext(ctx, http.MethodPost, s.github.web+"/login/oauth/access_token", strings.NewReader(form.Encode()))
 	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	if err := s.fetch(request, &token); err != nil {

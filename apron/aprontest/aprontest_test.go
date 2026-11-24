@@ -2,6 +2,7 @@ package aprontest_test
 
 import (
 	"context"
+	"net/http"
 	"testing"
 
 	"github.com/apron-chat/apron-server-go/apron"
@@ -100,6 +101,37 @@ func TestClients(t *testing.T) {
 	}
 	if code := mail.Code("nobody@example.com", 0); code != "" {
 		t.Fatalf("mailed nobody %q", code)
+	}
+}
+
+// external is an extension whose external sign-in signs everyone in as
+// octocat at once.
+type external struct{ signIn *apron.ExternalSignIn }
+
+func (*external) Name() string { return "external" }
+
+func (x *external) Init(r *apron.Registrar) error {
+	x.signIn = r.ExternalSignIn(func(w http.ResponseWriter, r *http.Request, req apron.ExternalRequest) {
+		_ = x.signIn.Complete(w, r, req.ID, apron.Identity{Subject: "test:1", Name: "The Octocat", UserID: "octocat"})
+	})
+	return nil
+}
+
+func TestApp(t *testing.T) {
+	server := aprontest.Serve(t, apron.DefaultConfig(), &external{})
+	app := server.App()
+	page := app.Open()
+	if page.Status != http.StatusOK || page.Return != nil {
+		t.Fatalf("sign-in page = %d %s", page.Status, page.Body)
+	}
+	result, err := app.Redeem(app.Press(page, "allow"))
+	if err != nil || result.You == nil || result.You.UserID != "octocat" || app.Conn.UserID != "octocat" {
+		t.Fatalf("redeemed: %+v, %v", result, err)
+	}
+	declined := server.App()
+	back := declined.Press(declined.Open(), "cancel")
+	if back.Return == nil || back.Return.Query().Get("error") != "access_denied" || back.Return.Query().Get("state") != declined.State {
+		t.Fatalf("cancel = %d %v", back.Status, back.Return)
 	}
 }
 
