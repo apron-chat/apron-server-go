@@ -323,7 +323,7 @@
 // ext:command_list. A backend checks what every command needs first
 // (Router.Before), passing what it works out on to the command
 // (Call.Data), and a command may check the rest itself
-// (Command.RunChecks), or every command (Router.RunChecks); a command
+// (Command.SkipChecks), or every command (Router.SkipChecks); a command
 // may run without being listed (Command.Unlisted). Package apron runs its
 // commands on one too.
 //

@@ -381,7 +381,7 @@ func (r *Registrar) Command(command Command) {
 			Run: func(ctx context.Context, call *commands.Call) error {
 				return h.runCommand(ctx, call, runs[call.Form.Name])
 			},
-			RunChecks: commands.CheckRequires,
+			SkipChecks: commands.CheckRequires,
 		})
 		if err != nil {
 			return err

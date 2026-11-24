@@ -248,10 +248,10 @@ func TestBuiltInHelp(t *testing.T) {
 	}
 }
 
-// Router.From names the sender of Call.Notice's notices, and /help's.
+// Router.NoticeFrom names the sender of Call.Notice's notices, and /help's.
 func TestNoticeFrom(t *testing.T) {
 	var router commands.Router
-	router.From = wire.User{UserID: "~private", Name: "System message to you"}
+	router.NoticeFrom = wire.User{UserID: "~private", Name: "System message to you"}
 	router.MustAdd(commands.Command{Name: "x", Run: func(_ context.Context, call *commands.Call) error {
 		call.Notice("from x")
 		return call.Done()
@@ -363,9 +363,9 @@ func TestParseUsage(t *testing.T) {
 }
 
 // Before checks every command line, once a form that requires room_id has
-// it, before the name, and may settle the room; a command's RunChecks are
+// it, before the name, and may settle the room; a command's SkipChecks are
 // left to its Run.
-func TestBeforeAndRunChecks(t *testing.T) {
+func TestBeforeAndSkipChecks(t *testing.T) {
 	var router commands.Router
 	var formOf []string
 	router.Before = func(_ context.Context, call *commands.Call) error {
@@ -398,14 +398,14 @@ func TestBeforeAndRunChecks(t *testing.T) {
 				Uses: []string{commands.FieldRoom, commands.FieldMentions}, Requires: []string{commands.FieldRoom, commands.FieldMentions},
 				May: admin,
 			}},
-			Run:       ran,
-			RunChecks: commands.CheckAll,
+			Run:        ran,
+			SkipChecks: commands.CheckAll,
 		},
 		commands.Command{
-			Name:      "emoji",
-			Forms:     []commands.Form{{Name: "emoji add"}, {Name: "emoji remove"}},
-			Run:       ran,
-			RunChecks: commands.CheckForm,
+			Name:       "emoji",
+			Forms:      []commands.Form{{Name: "emoji add"}, {Name: "emoji remove"}},
+			Run:        ran,
+			SkipChecks: commands.CheckForm,
 		},
 		commands.Command{
 			Name:  "ban",
@@ -476,9 +476,9 @@ func TestBeforeAndRunChecks(t *testing.T) {
 }
 
 // What Before sets in call.Data reaches Run and Fallback as it is; the
-// Router's RunChecks add to each command's own; an Unlisted command runs,
+// Router's SkipChecks add to each command's own; an Unlisted command runs,
 // as any other, but /help and a listing leave it out.
-func TestDataRunChecksAndUnlisted(t *testing.T) {
+func TestDataSkipChecksAndUnlisted(t *testing.T) {
 	type line struct{ text string }
 	router := commands.Router{
 		Before: func(_ context.Context, call *commands.Call) error {
@@ -488,7 +488,7 @@ func TestDataRunChecksAndUnlisted(t *testing.T) {
 			call.Data = &line{strings.ToUpper(call.Params.Body.Text)}
 			return nil
 		},
-		RunChecks: commands.CheckMay,
+		SkipChecks: commands.CheckMay,
 	}
 	run := func(_ context.Context, call *commands.Call) error {
 		l, ok := call.Data.(*line)
@@ -515,7 +515,7 @@ func TestDataRunChecksAndUnlisted(t *testing.T) {
 		code  int
 		about string
 	}{
-		// May is the command's to check, by the Router's RunChecks.
+		// May is the command's to check, by the Router's SkipChecks.
 		{guest, "/ban @x", "/BAN @X", 0, "a form May refuses"},
 		// Requires is still the Router's.
 		{guest, "/ban", "", wire.CodeInvalidParams, "a missing mention"},

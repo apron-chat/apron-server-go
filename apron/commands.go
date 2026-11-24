@@ -104,7 +104,7 @@ func coreCommands() *serverCommands {
 	embeds := []string{commands.FieldEmbeds}
 	sc := &serverCommands{}
 	sc.router.Before = beforeCommand
-	sc.router.From = privateNoticeFrom
+	sc.router.NoticeFrom = privateNoticeFrom
 	for _, core := range []struct {
 		command commands.Command
 		run     coreRun
@@ -209,7 +209,7 @@ func coreCommands() *serverCommands {
 		// they need, and who may use them themselves, with errors that say
 		// more than the Router's: their forms' Requires and May are for
 		// /help and ext:command_list.
-		command.RunChecks = commands.CheckAll
+		command.SkipChecks = commands.CheckAll
 		for i := range command.Forms {
 			if command.Forms[i].May == nil {
 				command.Forms[i].May = mayLocked(nil)

@@ -63,10 +63,10 @@
 //
 // A command whose Run makes some of the Router's checks itself, with
 // errors that say more, such as who may use it, names them in its
-// RunChecks: the Router skips them, and its forms' Requires and May then
+// SkipChecks: the Router skips them, and its forms' Requires and May then
 // only say what /help and a listing show. A backend whose commands all
 // check something themselves, such as a gateway whose host checks every
-// command, names it once, in Router.RunChecks. Package apron's own
+// command, names it once, in Router.SkipChecks. Package apron's own
 // commands check everything themselves; its extensions' leave who may use
 // them to the Router.
 //
@@ -149,12 +149,12 @@ type Command struct {
 	// the Router answers it; or one that a backend with its own dispatch
 	// runs itself.
 	Run func(ctx context.Context, call *Call) error
-	// RunChecks are the checks of a command line that Run makes itself,
-	// with errors of its own, and Router.Command skips (see Checks in the
-	// package documentation), with those of Router.RunChecks. With
+	// SkipChecks are the checks of a command line that Router.Command
+	// skips, with those of Router.SkipChecks, as Run makes them itself,
+	// with errors of its own (see Checks in the package documentation). With
 	// CheckForm, a line that selects none of the forms runs with a nil
 	// call.Form.
-	RunChecks Checks
+	SkipChecks Checks
 	// Unlisted keeps the command out of /help and listings (Router.Usable,
 	// Router.List), while the Router finds and runs it as any other: an
 	// alias, or a command people are not meant to find. Its forms still
@@ -163,7 +163,7 @@ type Command struct {
 }
 
 // Checks are checks Router.Command makes of a command line before it runs
-// the command (Command.RunChecks).
+// the command, unless the command makes them itself (Command.SkipChecks).
 type Checks uint8
 
 const (
@@ -378,16 +378,17 @@ type Router struct {
 	// nil, such as a gateway's that hands it to the system behind it. nil
 	// answers invalid_params, Unknown command.
 	Fallback func(ctx context.Context, call *Call) error
-	// RunChecks are checks every command's Run makes itself, as if each
-	// named them in its own Command.RunChecks, which add to them: such as
+	// SkipChecks are checks the Router skips for every command, as each
+	// command's Run makes them itself, as if each named them in its own
+	// Command.SkipChecks, which add to them: such as
 	// CheckAll for a gateway whose host checks every command line, and
 	// says what is wrong with it. A command cannot take one back.
-	RunChecks Checks
-	// From is who the Router's ~private notices are from: those of
+	SkipChecks Checks
+	// NoticeFrom is who the Router's ~private notices are from: those of
 	// Call.Notice, and /help's. The zero User is wire.Private; a backend
 	// that names its own system identities otherwise sets it, with the
 	// user_id "~private" (Appendix A.1).
-	From wire.User
+	NoticeFrom wire.User
 
 	commands []Command
 	// hasHelp is whether commands has one named help.
@@ -560,7 +561,7 @@ func (r *Router) Command(ctx context.Context, c *wire.Conn, p wire.CommandParams
 		return wire.InvalidParams("A command starts with /; try /help")
 	}
 	command, form := r.Find(name, args)
-	call := &Call{Conn: c, Params: p, Reply: reply, Name: name, Args: args, from: r.From}
+	call := &Call{Conn: c, Params: p, Reply: reply, Name: name, Args: args, from: r.NoticeFrom}
 	if form != nil {
 		// A form that requires room_id acts only on a room the client
 		// names, not on one Before settles for it.
@@ -577,7 +578,7 @@ func (r *Router) Command(ctx context.Context, c *wire.Conn, p wire.CommandParams
 	}
 	var checks Checks = CheckAll
 	if command != nil {
-		checks &^= r.RunChecks | command.RunChecks
+		checks &^= r.SkipChecks | command.SkipChecks
 	}
 	switch {
 	case command == nil && name == "help":
@@ -676,7 +677,7 @@ type Call struct {
 	// fold it into Params, and Run need not work it out again.
 	Data any
 
-	// from is Router.From, the sender of Notice's notices.
+	// from is Router.NoticeFrom, the sender of Notice's notices.
 	from wire.User
 }
 
@@ -693,7 +694,7 @@ func (c *Call) Rest() string {
 }
 
 // Notice sends the sender a ~private notice in the command's room, as
-// Markdown (Appendix A.1), from Router.From, before the result. It reports
+// Markdown (Appendix A.1), from Router.NoticeFrom, before the result. It reports
 // whether the notice was queued.
 func (c *Call) Notice(text string) bool {
 	notice := wire.Notice(c.Params.RoomID, text)
