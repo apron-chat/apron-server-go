@@ -271,6 +271,8 @@ type weatherExtension struct {
 	settings struct {
 		Key   string   `long:"key" description:"The weather service's key"`
 		Hosts []string `long:"host" default:"a.example" description:"Hosts to ask"`
+		Days  int      `long:"days" default:"3" description:"Days to forecast; 0 is today only"`
+		Hours *int     `long:"hours" default:"12" description:"Hours to forecast; 0 is none"`
 	}
 }
 
@@ -345,11 +347,66 @@ func TestExtensionDefaultsWithoutMain(t *testing.T) {
 		t.Fatalf("hosts emptied in the config file = %#v", emptied.settings.Hosts)
 	}
 
+	// A setting with a default is its default when zero in Go, but for a
+	// pointer to zero.
+	zero := 0
+	inGo := &weatherExtension{}
+	inGo.settings.Hours = &zero
+	open(inGo)
+	if inGo.settings.Days != 3 || *inGo.settings.Hours != 0 {
+		t.Fatalf("days %d, hours %d in Go", inGo.settings.Days, *inGo.settings.Hours)
+	}
+
 	bad := &badDefault{}
 	config := apron.DefaultConfig()
 	config.Extensions = []apron.Extension{bad}
 	if _, err := apron.Open(config); err == nil || !strings.Contains(err.Error(), "extension bad") {
 		t.Fatalf("Open with a default that is not a duration = %v", err)
+	}
+}
+
+// Main keeps a setting given as zero, on the command line or in the config
+// file, and sets those it is not given to their defaults.
+func TestExtensionZeroSettings(t *testing.T) {
+	for _, test := range []struct {
+		args        []string
+		config      string
+		days, hours int
+	}{
+		{days: 3, hours: 12},
+		{args: []string{"--weather.days", "0", "--weather.hours", "0"}, days: 0, hours: 0},
+		{config: "[weather]\ndays = 0\nhours = 0\n", days: 0, hours: 0},
+		{args: []string{"--weather.days", "5"}, config: "[weather]\nhours = 1\n", days: 5, hours: 1},
+	} {
+		weather := &weatherExtension{}
+		options := Options{}
+		parser := flags.NewParser(&options, flags.Default&^flags.PrintErrors)
+		targets, err := addExtensionFlags(parser, []apron.Extension{weather})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := parser.ParseArgs(test.args); err != nil {
+			t.Fatal(err)
+		}
+		if test.config != "" {
+			if err := loadConfig(parser, &options, writeConfig(t, test.config), targets...); err != nil {
+				t.Fatal(err)
+			}
+		}
+		markParsed(targets)
+		config := apron.DefaultConfig()
+		config.Extensions = []apron.Extension{weather}
+		server, err := apron.Open(config)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := server.Shutdown(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+		if weather.settings.Days != test.days || *weather.settings.Hours != test.hours {
+			t.Errorf("%q and %q: days %d, hours %d, want %d and %d", test.args, test.config,
+				weather.settings.Days, *weather.settings.Hours, test.days, test.hours)
+		}
 	}
 }
 

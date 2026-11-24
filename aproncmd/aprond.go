@@ -26,6 +26,7 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	"github.com/apron-chat/apron-server-go/apron"
+	"github.com/apron-chat/apron-server-go/internal/settings"
 	"github.com/apron-chat/apron-server-go/store"
 )
 
@@ -133,12 +134,22 @@ type Options struct {
 // and from the config file's table of its name, [weather] api-key = "...",
 // before it starts the server, and so before the extension's Init.
 //
+// Main sets every setting before Init: as given on the command line or in
+// the config file, zero too, as --weather.timeout 0, or else to its
+// default. A list emptied in the config file stays empty.
+//
 // The defaults apply without Main too: apron.Open sets each setting that
 // is zero and has a default tag to its default, so that an extension
 // opened by a program or a test of its own, with the settings it sets in
-// Go, finds the others' defaults in Init, as with Main. A setting with a
-// default is so never zero: given as zero, as --weather.timeout 0, it is
-// its default. A list emptied in the config file stays empty.
+// Go, finds the others' defaults in Init, as with Main. There a zero
+// setting with a default means its default, as Go cannot tell zero from
+// unset. A setting whose zero is a choice of its own also in Go, such as a
+// limit where 0 means none, is a pointer, nil when unset:
+//
+//	Limit *int `long:"limit" default:"100" description:"Most posts an hour; 0 is no limit"`
+//
+// which Main sets as any other, and which Open sets to the default only
+// while nil, so that a program's &zero stays zero.
 type Configurable interface {
 	apron.Extension
 	Flags() any
@@ -172,6 +183,7 @@ func Main(extensions ...apron.Extension) {
 			os.Exit(1)
 		}
 	}
+	markParsed(targets)
 	if options.PrintConfig {
 		if err := printConfig(os.Stdout, parser); err != nil {
 			fmt.Fprintln(os.Stderr, err)
@@ -205,6 +217,15 @@ func addExtensionFlags(parser *flags.Parser, extensions []apron.Extension) ([]co
 		targets = append(targets, configTarget{namespace: extension.Name(), options: data})
 	}
 	return targets, nil
+}
+
+// markParsed tells apron.Open that the extensions' settings are parsed:
+// every one is set, to its default when the command line and the config
+// file left it out, so that Open keeps one given as zero.
+func markParsed(targets []configTarget) {
+	for _, target := range targets {
+		settings.Parsed(target.options)
+	}
 }
 
 // ServerConfig converts parsed runner options into a server configuration, using

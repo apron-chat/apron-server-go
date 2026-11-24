@@ -51,3 +51,39 @@ func TestApplyDefaults(t *testing.T) {
 		t.Fatal("applied defaults to a struct that is not a pointer")
 	}
 }
+
+// A pointer option is zero while nil: a pointer to zero is a value of its
+// own, which is kept.
+func TestApplyDefaultsToPointers(t *testing.T) {
+	type pointers struct {
+		Limit *int           `long:"limit" default:"100"`
+		Every *time.Duration `long:"every" default:"1m"`
+	}
+	zero := 0
+	settings := pointers{Limit: &zero}
+	if err := ApplyDefaults(&settings); err != nil {
+		t.Fatal(err)
+	}
+	if settings.Limit != &zero || *settings.Limit != 0 || settings.Every == nil || *settings.Every != time.Minute {
+		t.Fatalf("limit %v, every %v", settings.Limit, settings.Every)
+	}
+}
+
+// Settings that were parsed keep their zeros.
+func TestParsed(t *testing.T) {
+	settings := example{Key: "k"}
+	Parsed(&settings)
+	if err := ApplyDefaults(&settings); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(settings, example{Key: "k"}) {
+		t.Fatalf("parsed settings = %+v", settings)
+	}
+	other := example{Key: "k"}
+	if err := ApplyDefaults(&other); err != nil {
+		t.Fatal(err)
+	}
+	if other.Context != 20 {
+		t.Fatalf("settings not parsed: context %d", other.Context)
+	}
+}

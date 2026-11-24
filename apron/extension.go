@@ -36,6 +36,15 @@ import (
 // request, such as a command, method, or filter, delays that request's
 // connection until it returns, and gets a context that is canceled when the
 // connection closes; long work belongs in Host.Go.
+//
+// An extension with settings has a method Flags() any that returns a
+// pointer to them: a struct of options tagged as aproncmd reads them
+// (aproncmd.Configurable), such as `long:"days" default:"3"`. aproncmd sets
+// each from the command line or the config file, zero too, or else to its
+// default; when a program or a test sets them in Go, Open gives each that
+// is zero its default. So a setting whose zero is a choice of its own,
+// such as a limit where 0 means none, is a pointer, *int, which only nil
+// leaves to the default.
 type Extension interface {
 	// Name is the extension's name: lowercase letters, digits, and dashes,
 	// starting with a letter, such as "weather". It names the extension's

@@ -270,10 +270,11 @@ type Server struct {
 // An extension with settings, whose Flags method returns a pointer to them
 // (aproncmd.Configurable), has each setting that is zero and has a default
 // tag, such as `long:"timeout" default:"30m"`, set to that default first,
-// however it is opened: by aproncmd, which parses the settings as flags,
-// or by a program or a test that sets them in Go. So its Init finds every
-// setting with a default set, and a zero setting with a default means the
-// default.
+// when a program or a test sets them in Go: so its Init finds every
+// setting with a default set, as when aproncmd parsed them as flags, which
+// sets every setting, to its default when it is not given. A zero setting
+// set in Go so means its default, but for a pointer, which is unset only
+// while nil (see Extension).
 func Open(config Config) (*Server, error) {
 	config = config.withDefaults()
 	fail := func(err error) (*Server, error) {
