@@ -82,8 +82,9 @@ func (r *Registrar) OnEvent(fn func(ctx context.Context, e Event)) {
 // order, then each one logged later, on one goroutine of its own: 0 sends
 // the whole log first, as an index kept in memory needs at each start. When
 // fn returns an error, it is logged, and fn is called with the same event
-// again, after a delay that grows to a minute, until it succeeds, returns
-// an error from SkipEvent, or the server shuts down.
+// again until it succeeds, returns an error from SkipEvent, or the server
+// shuts down: the first retry comes a second later, and each delay after
+// it doubles, up to a minute. The events after it wait meanwhile.
 func (r *Registrar) OnEventFrom(after int64, fn func(ctx context.Context, e Event) error) {
 	r.follow("OnEventFrom", after, fn, nil)
 }

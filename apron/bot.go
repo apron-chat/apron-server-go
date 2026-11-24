@@ -611,9 +611,10 @@ func (m Message) Wire() wire.Message {
 // StreamAppend posts a message to the room that starts with opening
 // (Markdown) and grows as text is written to the returned LiveWriter
 // (§4.8.5), as /embed-append does. The message is posted at the first
-// Write; Close ends the text, which then becomes part of the message. Live
-// text needs Config.PublicURL, the address people open it at, except on a
-// loopback host in development.
+// Write; Close ends the text, which then becomes part of the message. Once
+// the text ended otherwise, such as at Config.LiveTextMaxBytes, Write
+// returns ErrLiveTextEnded. Live text needs Config.PublicURL, the address
+// people open it at, except on a loopback host in development.
 func (b *Session) StreamAppend(ctx context.Context, roomID, opening string, options ...StreamOption) (*LiveWriter, error) {
 	return b.stream(ctx, roomID, "/embed-append", opening, options)
 }
@@ -714,7 +715,9 @@ func (w *LiveWriter) MessageID() string {
 	return e.MessageID
 }
 
-// Write adds p to the text.
+// Write adds p to the text. Once the text ended, by Close or otherwise,
+// such as at a limit, it returns ErrLiveTextEnded, and writing again does
+// not change that: stop writing, and Close the writer still.
 func (w *LiveWriter) Write(p []byte) (int, error) {
 	w.mu.Lock()
 	err := w.startLocked()
