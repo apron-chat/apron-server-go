@@ -180,7 +180,9 @@ type EditParams struct {
 // message, whose body.text is the command line, and whose other fields
 // are its arguments. They encode as a client sends them.
 type CommandParams struct {
-	// RoomID is the room the command runs in, or "" for the default room.
+	// RoomID is the room the command runs in, or "" for the default room,
+	// which the backend names (§3.6.3): with package wire/commands, in its
+	// Router.Before.
 	RoomID string `json:"room_id,omitempty"`
 	// Body is never nil.
 	Body    *Body `json:"body,omitzero"`

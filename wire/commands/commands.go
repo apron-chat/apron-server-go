@@ -55,9 +55,11 @@
 // fields are there; and the sender may use it (Form.May). Before may also
 // settle what the command line leaves to the server, such as the default
 // room of a command sent without room_id, which the checks after it,
-// /help, and Run then see; and what it works out that Run needs too, such
-// as the sender's record, or the command line as the backend rewrote it,
-// it passes on in [Call].Data.
+// /help, and Run then see: the Router knows no rooms, so a backend with a
+// default room sets it there (see Router.Before), or May and Run get "".
+// What Before works out that Run needs too, such as the sender's record,
+// or the command line as the backend rewrote it, it passes on in
+// [Call].Data.
 //
 // A command whose Run makes some of the Router's checks itself, with
 // errors that say more, such as who may use it, names them in its
@@ -186,15 +188,22 @@ type Form struct {
 	// name, then any fixed word, such as "emoji add", each separated from
 	// the next by one space. "" is the command's name alone.
 	Name string
-	// Usage is the form as people type it, such as
-	// "/kick @user [<reason>]". When it starts with the slash and Name,
-	// then whitespace or nothing, what follows is the form's Hint, unless
-	// one is set; any other Usage is shown in /help as written, and gives
-	// no hint. "" is the slash, Name, and Hint.
+	// Usage and Hint are two ways to say how the form is typed: set
+	// one. Usage is the whole line, such as "/kick @user [<reason>]",
+	// and Hint the text after Name, "@user [<reason>]"; Add turns a Usage
+	// that starts with the slash and Name, then whitespace or nothing,
+	// into the Hint, so the two are the same form. Hint is the shorter
+	// for a form with fixed words, such as "emoji add" with ":<name>:".
+	//
+	// A Usage that does not start with the form, such as one with words
+	// of its own, is shown in /help as written, and gives a listing no
+	// hint; so is one set beside a Hint, which the listing gives. With
+	// neither, the form is the slash and Name alone.
 	Usage string
-	// Hint describes the text after Name, such as "@user [<reason>]",
-	// following the suggested convention: <value>, [optional], a|b,
-	// repeats..., and @user for a mention. Its whitespace is collapsed.
+	// Hint describes the text after Name, following the suggested
+	// convention: <value>, [optional], a|b, repeats..., and @user for a
+	// mention. /help shows it after the slash and Name, and a listing as
+	// the form's hint. Its whitespace is collapsed.
 	Hint string
 	// Help says what the form does, plain text on one line: its
 	// whitespace is collapsed. "" is none, and /help shows the usage
@@ -349,6 +358,20 @@ type Router struct {
 	// runs in, or the arguments as a filter rewrites them, and the checks
 	// after it, /help, and Run see the change. call.Form is the form the
 	// line selects, or nil.
+	//
+	// The Router knows no rooms: a backend with a default room, which a
+	// command without room_id runs in (§3.6.3), sets it here, so that May
+	// and Run are asked about that room, not "":
+	//
+	//	router.Before = func(ctx context.Context, call *commands.Call) error {
+	//		if call.Params.RoomID == "" {
+	//			call.Params.RoomID = chat.defaultRoom
+	//		}
+	//		if !chat.exists(call.Params.RoomID) {
+	//			return wire.InvalidParams("No such room")
+	//		}
+	//		return nil
+	//	}
 	Before func(ctx context.Context, call *Call) error
 	// Fallback runs a command line whose name the Router has no command
 	// for, but /help, which it answers itself, with a Call whose Form is
@@ -634,7 +657,9 @@ type Call struct {
 	// Conn sent the command.
 	Conn *wire.Conn
 	// Params are the command's: its room, "" for the default room, its
-	// body, whose text is the command line, and its other arguments.
+	// body, whose text is the command line, and its other arguments. The
+	// Router knows no rooms, so "" stays "" for May, /help, and Run,
+	// unless Router.Before sets the backend's default room (§3.6.3).
 	Params wire.CommandParams
 	// Reply answers the command, once its notices are sent.
 	Reply wire.Reply[wire.CommandResult]
