@@ -2,7 +2,7 @@ package main
 
 import (
 	"context"
-	"encoding/json/v2"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -23,11 +23,15 @@ func signIn(t *testing.T, ctx context.Context, chat *Chat, name string) (*wirete
 	if err != nil || result.You == nil || result.You.Name != name {
 		t.Fatalf("auth: %+v %v", result, err)
 	}
-	welcome, err := c.Next(ctx)
-	if err != nil || !strings.Contains(string(welcome.Params), "Welcome, "+name) {
-		t.Fatalf("welcome: %s %v", welcome.Raw, err)
+	if welcome, err := c.ExpectMessage(ctx, nil); err != nil || welcome.From.UserID != wire.Private.UserID || !strings.HasPrefix(welcome.Body.Text, "Welcome, "+name) {
+		t.Fatalf("welcome: %+v %v", welcome, err)
 	}
 	return c, result.You.User
+}
+
+// text is a message request's params with text.
+func text(s string) wire.MessageParams {
+	return wire.MessageParams{Body: &wire.Body{Text: s}}
 }
 
 func TestChat(t *testing.T) {
@@ -38,62 +42,63 @@ func TestChat(t *testing.T) {
 	bob, bobUser := signIn(t, ctx, chat, "Bob")
 
 	// A message goes to everyone, the sender's copy before the result.
-	result, err := ada.Call(ctx, "message", map[string]any{"body": map[string]any{"text": "hi"}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	var sent wire.MessageResult
-	if err := json.Unmarshal(result, &sent); err != nil || sent.MessageID == 0 {
-		t.Fatalf("message result %s: %v", result, err)
+	sent, err := ada.Post(ctx, text("hi"))
+	if err != nil || sent.MessageID == 0 {
+		t.Fatalf("message: %+v %v", sent, err)
 	}
 	for _, c := range []*wiretest.Client{ada, bob} {
-		f, err := c.Next(ctx)
-		var m wire.Message
-		if err != nil || f.Decode(&m) != nil || m.MessageID != sent.MessageID || m.Body.Text != "hi" || m.From.Name != "Ada" {
-			t.Fatalf("message frame %s: %v", f.Raw, err)
+		if m, err := c.ExpectMessage(ctx, nil); err != nil || m.MessageID != sent.MessageID || m.Body.Text != "hi" || m.From.Name != "Ada" {
+			t.Fatalf("message: %+v %v", m, err)
 		}
 	}
-	if _, err := ada.Call(ctx, "message", map[string]any{"room_id": "elsewhere", "body": map[string]any{"text": "x"}}); wire.CodeOf(err) != wire.CodeInvalidParams {
+	elsewhere := text("x")
+	elsewhere.RoomID = "elsewhere"
+	if _, err := ada.Post(ctx, elsewhere); wire.CodeOf(err) != wire.CodeInvalidParams {
 		t.Fatalf("another room: %v", err)
 	}
-	if _, err := ada.Call(ctx, "message", map[string]any{"body": map[string]any{"text": "x"}, "reply_to": map[string]any{"message_id": "999"}}); wire.CodeOf(err) != wire.CodeInvalidParams {
+	toNothing := text("x")
+	toNothing.ReplyTo = &wire.Ref{MessageID: 999}
+	if _, err := ada.Post(ctx, toNothing); wire.CodeOf(err) != wire.CodeInvalidParams {
 		t.Fatalf("a reply to nothing: %v", err)
 	}
 
-	// A profile change goes to the user's own connections as you, to the
-	// others as new, and clears what it empties.
-	raw, err := bob.Call(ctx, "me", map[string]any{"name": ""})
-	if err != nil || !strings.Contains(string(raw), `"name":""`) {
-		t.Fatalf("me: %s %v", raw, err)
+	// A profile change is the result, complete, with what it clears as its
+	// empty value (§3.3.2), and goes to the others as new (§3.3.3).
+	empty := ""
+	you, err := bob.Me(ctx, wire.MeParams{Name: &empty})
+	if err != nil || you.UserID != bobUser.UserID || !slices.Equal(you.Cleared, []string{"name"}) {
+		t.Fatalf("me: %+v %v", you, err)
 	}
-	if f, err := bob.Expect(ctx, wiretest.Method("user")); err != nil || !strings.Contains(string(f.Params), `"you"`) {
-		t.Fatalf("bob's user frame: %s %v", f.Raw, err)
+	update, err := wiretest.Expect(ctx, ada, func(u wire.UserUpdate) bool { return u.New != nil })
+	if err != nil || update.New.UserID != bobUser.UserID || !slices.Equal(update.New.Cleared, []string{"name"}) {
+		t.Fatalf("ada's user frame: %+v %v", update, err)
 	}
-	f, err := ada.Expect(ctx, wiretest.Method("user"))
-	var update wire.UserUpdate
-	if err != nil || f.Decode(&update) != nil || update.New == nil || update.New.UserID != bobUser.UserID {
-		t.Fatalf("ada's user frame: %s %v", f.Raw, err)
-	}
-
-	if _, err := ada.Call(ctx, "command", map[string]any{"body": map[string]any{"text": "/help"}}); err != nil {
+	// The result told Bob's connection: it gets no user frame besides.
+	if err := bob.Sync(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if f, err := ada.Next(ctx); err != nil || !strings.Contains(string(f.Params), "/help") || !strings.Contains(string(f.Params), "/nick <name>") {
-		t.Fatalf("help: %s %v", f.Raw, err)
+	if i := slices.IndexFunc(bob.Pending(), wiretest.Method("user")); i >= 0 {
+		t.Fatalf("bob's user frame %s besides the result", bob.Pending()[i].Raw)
 	}
-	if _, err := ada.Call(ctx, "command", map[string]any{"body": map[string]any{"text": "/nope"}}); wire.CodeOf(err) != wire.CodeInvalidParams {
+
+	if notices, err := ada.Command(ctx, "", "/help"); err != nil || len(notices) != 1 || !strings.Contains(notices[0], "/help") || !strings.Contains(notices[0], "/nick <name>") {
+		t.Fatalf("/help: %q %v", notices, err)
+	}
+	if _, err := ada.Command(ctx, "", "/nope"); wire.CodeOf(err) != wire.CodeInvalidParams {
 		t.Fatalf("an unknown command: %v", err)
 	}
-	if _, err := ada.Call(ctx, "command", map[string]any{"body": map[string]any{"text": "/nick"}}); wire.CodeOf(err) != wire.CodeInvalidParams {
+	if _, err := ada.Command(ctx, "", "/nick"); wire.CodeOf(err) != wire.CodeInvalidParams {
 		t.Fatalf("/nick without a name: %v", err)
 	}
 
 	// /nick renames, as me does: the user update comes before the result.
-	if _, before, err := ada.CallFrames(ctx, "command", map[string]any{"body": map[string]any{"text": "/nick Ada L."}}); err != nil || len(before) != 1 || !strings.Contains(string(before[0].Params), `"name":"Ada L."`) {
+	_, before, err := ada.CallFrames(ctx, "command", wire.CommandParams{Body: &wire.Body{Text: "/nick Ada L."}})
+	var renamed wire.UserUpdate
+	if err != nil || len(before) != 1 || before[0].Decode(&renamed) != nil || renamed.You == nil || renamed.You.Name != "Ada L." {
 		t.Fatalf("/nick: %v %v", before, err)
 	}
-	if f, err := bob.Expect(ctx, wiretest.Method("user")); err != nil || !strings.Contains(string(f.Params), `"new"`) {
-		t.Fatalf("bob's user frame: %s %v", f.Raw, err)
+	if update, err := wiretest.Expect[wire.UserUpdate](ctx, bob, nil); err != nil || update.New == nil || update.New.Name != "Ada L." {
+		t.Fatalf("bob's user frame: %+v %v", update, err)
 	}
 	if raw, err := ada.Call(ctx, "ext:command_list", nil); err != nil || string(raw) != `{"commands":[{"description":"list the commands you can use here","group":"all","name":"help"},{"description":"change your name","hint":"<name>","name":"nick"}]}` {
 		t.Fatalf("command list: %s %v", raw, err)
@@ -108,26 +113,18 @@ func TestEcho(t *testing.T) {
 	chat := NewChat()
 	ada, _ := signIn(t, ctx, chat, "Ada")
 	bob, _ := signIn(t, ctx, chat, "Bob")
-	for _, body := range []map[string]any{
-		{"text": "@echo hi", "mentions": []string{"echo"}},
-		{"text": "echo: hi"},
+	for _, body := range []wire.Body{
+		{Text: "@echo hi", Mentions: []string{"echo"}},
+		{Text: "echo: hi"},
 	} {
-		result, err := ada.Call(ctx, "message", map[string]any{"body": body})
+		asked, err := ada.Post(ctx, wire.MessageParams{Body: &body})
 		if err != nil {
 			t.Fatal(err)
 		}
-		var asked wire.MessageResult
-		if err := json.Unmarshal(result, &asked); err != nil {
-			t.Fatal(err)
-		}
 		for _, c := range []*wiretest.Client{ada, bob} {
-			f, err := c.Expect(ctx, func(f wiretest.Frame) bool {
-				var m wire.Message
-				return f.Method == "message" && f.Decode(&m) == nil && m.From.UserID == "echo"
-			})
-			var m wire.Message
-			if err != nil || f.Decode(&m) != nil || m.Body.Text != "Ada said: "+body["text"].(string) || m.ReplyTo == nil || m.ReplyTo.MessageID != asked.MessageID {
-				t.Fatalf("the bot's reply %s: %v", f.Raw, err)
+			m, err := c.ExpectMessage(ctx, func(m wire.Message) bool { return m.From.UserID == "echo" })
+			if err != nil || m.Body.Text != "Ada said: "+body.Text || m.ReplyTo == nil || m.ReplyTo.MessageID != asked.MessageID {
+				t.Fatalf("the bot's reply %+v: %v", m, err)
 			}
 		}
 	}

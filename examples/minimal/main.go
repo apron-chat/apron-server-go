@@ -55,15 +55,23 @@ func NewChat() *Chat {
 		Run:   c.nick,
 	})
 	c.Server = &wire.Server{
-		Backend:     c,
-		Messages:    c,
-		Profiles:    c,
-		Commands:    &c.commands,
+		Backend:  c,
+		Messages: c,
+		Profiles: c,
+		Commands: &c.commands,
+		// Browsers open a WebSocket from the page's origin, and by
+		// default only the server's own may: a web client served from
+		// elsewhere, such as a dev server on another port, needs its
+		// origin let in, as wire.OriginPatterns("localhost:*") does. This
+		// server signs in guests, with no cookies for another site's page
+		// to use, so it lets in any.
 		CheckOrigin: wire.AnyOrigin,
 	}
 	c.Server.Handle(commands.ListMethod, c.commands.ListHandler())
 	// The bot is a user on a connection of its own, in process: what it
-	// posts goes through Message, as anyone's does.
+	// posts goes through Message, as anyone's does. Its connection is the
+	// Server's first, which takes the Server's configuration, so it
+	// starts once the fields are set.
 	if _, err := bot.Start(c.Server, bot.Options{User: wire.User{UserID: "echo", Name: "Echo"}, OnMessage: echo}); err != nil {
 		panic(err) // A Server that is not shut down opens it.
 	}
@@ -131,24 +139,17 @@ func (c *Chat) Message(_ context.Context, conn *wire.Conn, p wire.MessageParams,
 	return reply.Send(wire.MessageResult{MessageID: id})
 }
 
+// Me changes the user's profile (§3.3.2). SendMe answers with the
+// complete object, the fields the change cleared as their empty values,
+// and tells what changed to the user's other connections as you, and to
+// everyone else as new (§3.3.3): everyone shares the one room.
 func (c *Chat) Me(_ context.Context, conn *wire.Conn, p wire.MeParams, reply wire.Reply[wire.CurrentUser]) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	old := *conn.User()
-	you := old
-	if p.Name != nil {
-		you.Name = strings.TrimSpace(*p.Name)
-	}
-	if p.Avatar != nil {
-		you.Avatar = *p.Avatar
-	}
-	// What changed goes to every connection, "you" to the user's own
-	// (§3.3.3); everyone shares the one room.
-	c.Server.PublishUser(old, you, nil)
-	// The result is the complete object, with the fields cleared as their
-	// empty values (§3.3.2).
-	patch, _ := you.Patch(old)
-	return reply.Send(wire.CurrentUser{User: you, Cleared: patch.Cleared})
+	you := wire.ApplyMe(old, p)
+	you.Name = strings.TrimSpace(you.Name)
+	return c.Server.SendMe(reply, old, you, nil)
 }
 
 // nick is /nick <name>: a rename, as me does it. Its effect, the user
