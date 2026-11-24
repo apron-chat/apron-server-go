@@ -464,7 +464,7 @@ func (r replyTo) applyPost(p *postRequest) {
 		p.replyErr = InvalidParams("reply_to.message_id must be a positive decimal string")
 		return
 	}
-	p.params.ReplyTo = &wire.Ref{MessageID: id}
+	p.params.ReplyTo = &wire.MessageRef{MessageID: id}
 }
 
 func (r replyTo) applyStream(p *postRequest) { r.applyPost(p) }
@@ -602,7 +602,7 @@ func (m Message) Wire() wire.Message {
 	}
 	message.MessageID, _ = wire.ParseLogID(m.ID)
 	if id, err := wire.ParseLogID(m.ReplyTo); err == nil && id != 0 {
-		message.ReplyTo = &wire.Ref{MessageID: id}
+		message.ReplyTo = &wire.MessageRef{MessageID: id}
 	}
 	switch {
 	case m.Body != nil:

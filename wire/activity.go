@@ -38,7 +38,7 @@ type Reaction struct {
 // ReactionHandler handles reactions, and adds capability reactions (§4.7).
 // It broadcasts the reaction set, including to c, before it replies.
 type ReactionHandler interface {
-	React(ctx context.Context, c *Conn, p ReactParams, reply Reply[Empty]) error
+	React(ctx context.Context, c *Conn, p ReactParams, reply Reply[OK]) error
 }
 
 // ActivityParams are an activity notification's (§4.6): typing, and how far

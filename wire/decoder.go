@@ -118,10 +118,10 @@ func (d *Decoder) MessageID(name string, p Requirement) LogID {
 	return read(d, name, p, d.fields.messageIDParam)
 }
 
-// Ref reads a reference to a message (§3.5.4), {"message_id": ...}.
-func (d *Decoder) Ref(name string, p Requirement) Ref {
+// MessageRef reads a reference to a message (§3.5.4), {"message_id": ...}.
+func (d *Decoder) MessageRef(name string, p Requirement) MessageRef {
 	id := read(d, name, p, d.fields.messageRefParam)
-	return Ref{MessageID: id}
+	return MessageRef{MessageID: id}
 }
 
 // Count reads a positive integer param, such as a limit.

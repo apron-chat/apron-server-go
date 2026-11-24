@@ -349,7 +349,7 @@ func (s *Server) removeCredential(c *client, r *wire.Request, reply wire.Reply[a
 		return err
 	}
 	c.fenceLocked()
-	_ = reply.Send(wire.Empty{})
+	_ = reply.Send(wire.OK{})
 	if c.credential == credentialKey(scheme, id) {
 		c.closeWithError(&Error{Code: CodeDenied, Message: "The passkey this connection signed in with was removed"})
 	}
@@ -377,7 +377,7 @@ func (s *Server) signOut(c *client, r *wire.Request, reply wire.Reply[any]) *Err
 		}
 		s.signOutOthersLocked(c.user, c)
 		c.fenceLocked()
-		_ = reply.Send(wire.Empty{})
+		_ = reply.Send(wire.OK{})
 		return nil
 	}
 	// What the connection signed in with signs in no more, nor wakes it.
@@ -396,7 +396,7 @@ func (s *Server) signOut(c *client, r *wire.Request, reply wire.Reply[any]) *Err
 		s.revokeServiceLocked(service, "Signed out")
 	}
 	c.fenceLocked()
-	_ = reply.Send(wire.Empty{})
+	_ = reply.Send(wire.OK{})
 	c.closeWithError(&Error{Code: CodeDenied, Message: "Signed out"})
 	return nil
 }

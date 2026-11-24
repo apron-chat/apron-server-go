@@ -416,7 +416,7 @@ func (b *Bot) Post(ctx context.Context, p wire.MessageParams) (wire.MessageResul
 func (b *Bot) Reply(ctx context.Context, to wire.Message, text string) (wire.MessageResult, error) {
 	p := wire.MessageParams{RoomID: to.RoomID, Body: &wire.Body{Text: text}}
 	if to.MessageID != 0 {
-		p.ReplyTo = &wire.Ref{MessageID: to.MessageID}
+		p.ReplyTo = &wire.MessageRef{MessageID: to.MessageID}
 	}
 	return b.Post(ctx, p)
 }

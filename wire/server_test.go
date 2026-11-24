@@ -703,7 +703,7 @@ func TestWebSocket(t *testing.T) {
 	}
 }
 
-// fence is a test Fence.
+// fence is a test Pending.
 type fence struct {
 	done chan struct{}
 	err  error
@@ -718,8 +718,8 @@ func TestSendFramesAndFence(t *testing.T) {
 	signIn(t, c)
 	conn := onlyConn(t, s)
 	f := &fence{done: make(chan struct{})}
-	if !conn.Fence(f) {
-		t.Fatal("Fence failed")
+	if !conn.HoldUntil(f) {
+		t.Fatal("HoldUntil failed")
 	}
 	// Three frames in one place in the queue, behind the fence.
 	a, _ := wire.EncodeRaw("a", map[string]any{})
@@ -736,7 +736,7 @@ func TestSendFramesAndFence(t *testing.T) {
 	}
 
 	failed := &fence{done: make(chan struct{}), err: errors.New("not stored")}
-	conn.Fence(failed)
+	conn.HoldUntil(failed)
 	conn.Send(a)
 	close(failed.done)
 	if got := next(t, c); code(got) != wire.CodeInternalError || got.ID != "" {
@@ -772,7 +772,7 @@ func (b *fencingBackend) Auth(_ context.Context, c *wire.Conn, p wire.AuthParams
 	if err != nil {
 		return err
 	}
-	c.Fence(b.fence)
+	c.HoldUntil(b.fence)
 	return reply.Send(wire.AuthResult{You: you})
 }
 

@@ -76,24 +76,24 @@ var (
 	ServerNotice = User{UserID: "~server", Name: "Server"}
 )
 
-// Ref refers to a message by its message_id (§3.5.4).
-type Ref struct {
+// MessageRef refers to a message by its message_id (§3.5.4).
+type MessageRef struct {
 	MessageID LogID `json:"message_id"`
 }
 
 // Message is a message snapshot, or a transient notice when MessageID is
 // 0 (§3.5).
 type Message struct {
-	MessageID  LogID  `json:"message_id,omitzero"`
-	LogID      LogID  `json:"log_id,omitzero"`
-	RoomID     string `json:"room_id,omitempty"`
-	From       User   `json:"from"`
-	Body       *Body  `json:"body,omitzero"`
-	ReplyTo    *Ref   `json:"reply_to,omitempty"`
-	PrevLogID  LogID  `json:"prev_log_id,omitzero"`
-	PrevRoomID string `json:"prev_room_id,omitempty"`
-	Deleted    bool   `json:"deleted,omitzero"`
-	Ext        Ext    `json:"ext,omitempty"`
+	MessageID  LogID       `json:"message_id,omitzero"`
+	LogID      LogID       `json:"log_id,omitzero"`
+	RoomID     string      `json:"room_id,omitempty"`
+	From       User        `json:"from"`
+	Body       *Body       `json:"body,omitzero"`
+	ReplyTo    *MessageRef `json:"reply_to,omitempty"`
+	PrevLogID  LogID       `json:"prev_log_id,omitzero"`
+	PrevRoomID string      `json:"prev_room_id,omitempty"`
+	Deleted    bool        `json:"deleted,omitzero"`
+	Ext        Ext         `json:"ext,omitempty"`
 	// Unknown holds the members this package has no field for, as they
 	// arrived, and is sent after the others.
 	Unknown jsontext.Value `json:",embed"`
@@ -152,8 +152,8 @@ type MessageParams struct {
 	RoomID string `json:"room_id,omitempty"`
 	// Body is never nil. Its Unknown holds the fields this package does
 	// not know, for a backend that keeps them.
-	Body    *Body `json:"body,omitzero"`
-	ReplyTo *Ref  `json:"reply_to,omitempty"`
+	Body    *Body       `json:"body,omitzero"`
+	ReplyTo *MessageRef `json:"reply_to,omitempty"`
 	// Ext is the message's ext (§4.13); nil when left out.
 	Ext Ext `json:"ext,omitempty"`
 }
@@ -171,7 +171,7 @@ type EditParams struct {
 	// Body is nil when the request leaves it out. Its Unknown holds the
 	// fields this package does not know.
 	Body    *Body
-	ReplyTo *Ref
+	ReplyTo *MessageRef
 	// Ext merges into the message's ext (§4.13); nil when left out.
 	Ext Ext
 }
@@ -185,9 +185,9 @@ type CommandParams struct {
 	// Router.Before.
 	RoomID string `json:"room_id,omitempty"`
 	// Body is never nil.
-	Body    *Body `json:"body,omitzero"`
-	ReplyTo *Ref  `json:"reply_to,omitempty"`
-	Ext     Ext   `json:"ext,omitempty"`
+	Body    *Body       `json:"body,omitzero"`
+	ReplyTo *MessageRef `json:"reply_to,omitempty"`
+	Ext     Ext         `json:"ext,omitempty"`
 }
 
 // CommandResult is the result of a command (§4.1): empty, or the write

@@ -538,7 +538,7 @@ func profiles(users map[string]*userState) []wire.CurrentUser {
 // With the user_id of another user, a member of the room adds that user,
 // which is how people are brought into a private room; adding a member
 // changes nothing.
-func (s *Server) joinRoom(c *client, p wire.RoomJoinParams, reply wire.Reply[wire.Empty]) *Error {
+func (s *Server) joinRoom(c *client, p wire.RoomJoinParams, reply wire.Reply[wire.OK]) *Error {
 	roomID, targetID := p.RoomID, p.UserID
 	hasTarget := targetID != ""
 	s.mu.Lock()
@@ -576,7 +576,7 @@ func (s *Server) joinRoom(c *client, p wire.RoomJoinParams, reply wire.Reply[wir
 	if !s.joinLocked(target, r) && target == u {
 		c.enqueue(s.joinedUpdateLocked(r))
 	}
-	_ = reply.Send(wire.Empty{})
+	_ = reply.Send(wire.OK{})
 	return nil
 }
 
@@ -587,7 +587,7 @@ func (s *Server) joinRoom(c *client, p wire.RoomJoinParams, reply wire.Reply[wir
 //
 // With the user_id of another user, it removes that user, which the room's
 // creator and users with the admin or moderator role may do.
-func (s *Server) leaveRoom(c *client, p wire.RoomLeaveParams, reply wire.Reply[wire.Empty]) *Error {
+func (s *Server) leaveRoom(c *client, p wire.RoomLeaveParams, reply wire.Reply[wire.OK]) *Error {
 	roomID, targetID := p.RoomID, p.UserID
 	hasTarget := targetID != ""
 	s.mu.Lock()
@@ -612,7 +612,7 @@ func (s *Server) leaveRoom(c *client, p wire.RoomLeaveParams, reply wire.Reply[w
 		}
 	}
 	s.leaveLocked(target, r)
-	_ = reply.Send(wire.Empty{})
+	_ = reply.Send(wire.OK{})
 	return nil
 }
 

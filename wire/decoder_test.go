@@ -150,10 +150,10 @@ func TestNewReply(t *testing.T) {
 		t.Fatal("an invalid auth result was not recorded as an error")
 	}
 	send("x", `{}`, func(r *Request) {
-		if err := replyFor[Empty](r, nil).Send(Empty{}); err != nil {
+		if err := replyFor[OK](r, nil).Send(OK{}); err != nil {
 			t.Fatal(err)
 		}
-		if err := replyFor[Empty](r, nil).Send(Empty{}); err != ErrReplied {
+		if err := replyFor[OK](r, nil).Send(OK{}); err != ErrReplied {
 			t.Fatalf("a second reply: %v", err)
 		}
 	})

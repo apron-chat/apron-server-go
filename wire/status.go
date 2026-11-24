@@ -24,13 +24,16 @@ type StatusParams struct {
 	RoomID string
 	// Idle reports the sending connection unattended for its seconds, or
 	// attended again when its Attended is set.
-	Idle *Idle
+	Idle *IdleReport
 	// Mute silences the user's notifications.
 	Mute *Mute
 }
 
-// Idle is a status request's idle: false (Attended), or seconds.
-type Idle struct {
+// IdleReport is a status request's idle (§4.5.3), which reports whether
+// somebody attends the sending connection: false, which is Attended, or
+// the Seconds it has been unattended. It is not a status: the presence
+// idle (StatusIdle) is what a server derives from it.
+type IdleReport struct {
 	Attended bool
 	Seconds  int64
 }
@@ -86,5 +89,5 @@ func (StatusUpdate) Method() string { return "status" }
 // notifications, and statuses as user notifications. The statuses it
 // accepts with me, other than online and "", are ServerInfo.Status.
 type StatusHandler interface {
-	Status(ctx context.Context, c *Conn, p StatusParams, reply Reply[Empty]) error
+	Status(ctx context.Context, c *Conn, p StatusParams, reply Reply[OK]) error
 }

@@ -145,34 +145,34 @@ type RoomLeaveParams struct {
 // join's or leave's UserID is empty unless the client names another user
 // to add or remove; a backend that does not support that returns an
 // Unsupported error. A backend that lists rooms but takes no other room
-// request embeds UnimplementedRooms.
+// request embeds ReadOnlyRooms.
 type RoomHandler interface {
 	// RoomList answers with the rooms, which Send makes what the filter
 	// asks for (RoomListResult).
 	RoomList(ctx context.Context, c *Conn, p RoomListParams, reply Reply[RoomListResult]) error
-	RoomJoin(ctx context.Context, c *Conn, p RoomJoinParams, reply Reply[Empty]) error
-	RoomLeave(ctx context.Context, c *Conn, p RoomLeaveParams, reply Reply[Empty]) error
+	RoomJoin(ctx context.Context, c *Conn, p RoomJoinParams, reply Reply[OK]) error
+	RoomLeave(ctx context.Context, c *Conn, p RoomLeaveParams, reply Reply[OK]) error
 	RoomSet(ctx context.Context, c *Conn, p RoomSetParams, reply Reply[RoomSetResult]) error
 }
 
-// UnimplementedRooms refuses room_join, room_leave, and room_set as
+// ReadOnlyRooms refuses room_join, room_leave, and room_set as
 // error/unsupported, for a RoomHandler that embeds it and implements only
 // RoomList, such as a gateway to a chat system whose rooms its users
 // cannot change.
-type UnimplementedRooms struct{}
+type ReadOnlyRooms struct{}
 
 // RoomJoin refuses a join.
-func (UnimplementedRooms) RoomJoin(context.Context, *Conn, RoomJoinParams, Reply[Empty]) error {
+func (ReadOnlyRooms) RoomJoin(context.Context, *Conn, RoomJoinParams, Reply[OK]) error {
 	return Unsupported("This server does not join rooms on request")
 }
 
 // RoomLeave refuses a leave.
-func (UnimplementedRooms) RoomLeave(context.Context, *Conn, RoomLeaveParams, Reply[Empty]) error {
+func (ReadOnlyRooms) RoomLeave(context.Context, *Conn, RoomLeaveParams, Reply[OK]) error {
 	return Unsupported("This server does not leave rooms on request")
 }
 
 // RoomSet refuses to make or edit a room.
-func (UnimplementedRooms) RoomSet(context.Context, *Conn, RoomSetParams, Reply[RoomSetResult]) error {
+func (ReadOnlyRooms) RoomSet(context.Context, *Conn, RoomSetParams, Reply[RoomSetResult]) error {
 	return Unsupported("This server does not make or edit rooms on request")
 }
 

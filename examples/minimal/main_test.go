@@ -52,7 +52,7 @@ func TestChat(t *testing.T) {
 		t.Fatalf("another room: %v", err)
 	}
 	toNothing := text("x")
-	toNothing.ReplyTo = &wire.Ref{MessageID: 999}
+	toNothing.ReplyTo = &wire.MessageRef{MessageID: 999}
 	if _, err := ada.Post(ctx, toNothing); wire.CodeOf(err) != wire.CodeInvalidParams {
 		t.Fatalf("a reply to nothing: %v", err)
 	}

@@ -58,7 +58,7 @@ func (s *Server) newWire() {
 		MaxConnections: config.MaxConnections,
 		DedupSize:      maxDedupEntries,
 		Logger:         s.logger,
-		FenceFailed:    internalError(),
+		HoldFailed:     internalError(),
 		ShutdownError:  &Error{Code: CodeRetryAfter, Message: "Server is shutting down; reconnect shortly", Data: map[string]any{"retry_after": 5}},
 	})
 	for name, op := range s.ops {
@@ -215,11 +215,11 @@ func (s *Server) unusedWritesLocked(writes []wire.EmbedWrite) []wire.EmbedWrite 
 
 // Rooms (§4.2).
 
-func (b backend) RoomJoin(ctx context.Context, wc *wire.Conn, p wire.RoomJoinParams, reply wire.Reply[wire.Empty]) error {
+func (b backend) RoomJoin(ctx context.Context, wc *wire.Conn, p wire.RoomJoinParams, reply wire.Reply[wire.OK]) error {
 	return b.serve(ctx, wc, func(c *client) *Error { return b.s.joinRoom(c, p, reply) })
 }
 
-func (b backend) RoomLeave(ctx context.Context, wc *wire.Conn, p wire.RoomLeaveParams, reply wire.Reply[wire.Empty]) error {
+func (b backend) RoomLeave(ctx context.Context, wc *wire.Conn, p wire.RoomLeaveParams, reply wire.Reply[wire.OK]) error {
 	return b.serve(ctx, wc, func(c *client) *Error { return b.s.leaveRoom(c, p, reply) })
 }
 
@@ -247,7 +247,7 @@ func (b backend) Me(ctx context.Context, wc *wire.Conn, p wire.MeParams, reply w
 
 // Status (§4.5).
 
-func (b backend) Status(ctx context.Context, wc *wire.Conn, p wire.StatusParams, reply wire.Reply[wire.Empty]) error {
+func (b backend) Status(ctx context.Context, wc *wire.Conn, p wire.StatusParams, reply wire.Reply[wire.OK]) error {
 	return b.serve(ctx, wc, func(c *client) *Error { return b.s.status(c, p, reply) })
 }
 
@@ -259,7 +259,7 @@ func (b backend) Activity(ctx context.Context, wc *wire.Conn, p wire.ActivityPar
 
 // Reactions (§4.7).
 
-func (b backend) React(ctx context.Context, wc *wire.Conn, p wire.ReactParams, reply wire.Reply[wire.Empty]) error {
+func (b backend) React(ctx context.Context, wc *wire.Conn, p wire.ReactParams, reply wire.Reply[wire.OK]) error {
 	return b.serve(ctx, wc, func(c *client) *Error { return b.s.react(c, p, reply) })
 }
 

@@ -77,7 +77,7 @@ func TestMessageOfAndWire(t *testing.T) {
 		MessageID: 7, LogID: 9, RoomID: "general", PrevLogID: 8, PrevRoomID: "random",
 		From:    wire.User{UserID: "ada", Name: "Ada"},
 		Body:    &wire.Body{Text: "yes", Mentions: []string{"bob"}, Unknown: jsontext.Value(`{"x":1}`)},
-		ReplyTo: &wire.Ref{MessageID: 3},
+		ReplyTo: &wire.MessageRef{MessageID: 3},
 		Ext:     wire.Ext{"irc": jsontext.Value(`{"nick":"ada_"}`)},
 	}
 	m := MessageOf(reply)

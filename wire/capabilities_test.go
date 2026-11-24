@@ -61,7 +61,7 @@ func TestPage(t *testing.T) {
 
 func TestIDs(t *testing.T) {
 	clock := &Clock{}
-	ids := &IDs[string]{Clock: clock, Size: 2}
+	ids := &MessageIDs[string]{Clock: clock, Size: 2}
 	past := time.UnixMilli(1000)
 	a := ids.ID("a", past)
 	if a != 1000 {

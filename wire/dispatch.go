@@ -503,7 +503,7 @@ var definedSchemes = []string{"guest", "token", "webauthn", "email", "external"}
 // checkScheme is the default of Config.CheckScheme: the schemes of the
 // server frame.
 func checkScheme(_ context.Context, c *Conn, p AuthParams) error {
-	info := c.Info()
+	info := c.ServerInfo()
 	if slices.Contains(info.Auth, p.Scheme) || slices.Contains(info.Signup, p.Scheme) {
 		return nil
 	}

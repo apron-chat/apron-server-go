@@ -11,7 +11,7 @@
 //     frames, with a bounded write queue per connection that drops a client
 //     too slow to keep up, write timeouts, and transport-level pings;
 //     frames that go out together ([Conn.Send]), and frames held until
-//     the backend's changes are durable ([Conn.Fence]);
+//     the backend's changes are durable ([Conn.HoldUntil]);
 //   - in-process connections ([Server.Local]) for bots, bridges, and tests;
 //   - the server frame on connect (§3.1), and the liveness ping and pong (§1);
 //   - the envelope: parse errors, invalid requests, request ids, and the
@@ -62,7 +62,7 @@
 // each of which adds its requests, with their params checked, and its
 // capability in the server frame. One value may be every handler, or each
 // may be its own, such as a wrapper that adds metrics to one of them; a
-// server that refuses some room requests embeds [UnimplementedRooms]. Hook
+// server that refuses some room requests embeds [ReadOnlyRooms]. Hook
 // fields follow a connection's life (OnConnect, OnDisconnect), bring a
 // duplicate's result up to date (RefreshDuplicate), decide the auth schemes
 // (CheckScheme), and the origins that may open a WebSocket (CheckOrigin).
@@ -115,7 +115,7 @@
 // now, followed by frames with nothing between them, and does what wire
 // does with the method's result as it queues it, such as signing the
 // connection in with an auth result. A handler sends exactly once, or
-// returns an error; one whose result is [Empty] may return nil without
+// returns an error; one whose result is [OK] may return nil without
 // sending, and has {} sent for it. A backend that keeps its state under a
 // lock sends while it holds the lock, so that the result reflects every
 // notification sent before it on the connection, and none after (§1), and
@@ -223,9 +223,9 @@
 //	return nil
 //
 // wire has no barrier of its own: only the host knows its queues, and when
-// a change's effects are all in them. Nor is [Conn.Fence] one: it holds
+// a change's effects are all in them. Nor is [Conn.HoldUntil] one: it holds
 // the frames queued after it until a condition holds, which suits a change
-// made durable in the background, but a result held behind a fence still
+// made durable in the background, but a result held behind it still
 // goes before the notifications queued after it, which are the effects a
 // barrier waits for.
 //
@@ -308,9 +308,9 @@
 //
 // # Hosts that keep less
 //
-// A host that keeps less than the protocol asks for gets helpers: [IDs]
-// gives message_ids to messages that have none, derived from their own
-// times, and [Page] answers history from a [Log]: any ordered slice of
+// A host that keeps less than the protocol asks for gets helpers:
+// [MessageIDs] gives message_ids to messages that have none, derived from
+// their own times, and [Page] answers history from a [Log]: any ordered slice of
 // records, such as a host's recent-message buffer, and its bounds.
 //
 // # Commands

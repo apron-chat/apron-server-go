@@ -8,13 +8,13 @@ import (
 // ErrReplied is a second reply to a request, which has its reply already.
 var ErrReplied = errors.New("wire: the request has its reply")
 
-// Empty is the result of a request that answers nothing but success, {}:
+// OK is the result of a request that answers nothing but success, {}:
 // room_join, room_leave, status, and reactions.
-type Empty struct{}
+type OK struct{}
 
 // Reply answers the request a typed handler handles, such as a
 // RoomHandler's room_list. A handler calls Send exactly once, or returns an
-// error, which is the error reply. A handler of a Reply[Empty] that returns
+// error, which is the error reply. A handler of a Reply[OK] that returns
 // nil without sending has {} sent for it; any other that does is a bug, which
 // is logged and answered error/internal_error.
 //
@@ -191,10 +191,10 @@ func (r *Request) forgetUnkeptLocked() {
 	}
 }
 
-// isEmpty reports whether T is Empty, whose handlers may return without
+// isEmpty reports whether T is OK, whose handlers may return without
 // sending.
 func isEmpty[T any]() bool {
-	_, ok := any(*new(T)).(Empty)
+	_, ok := any(*new(T)).(OK)
 	return ok
 }
 

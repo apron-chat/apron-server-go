@@ -35,7 +35,7 @@ func (s *Server) newFenceLocked() *durable.Fence {
 // after the fence, such as a new account's result, means its change is
 // stored. Called holding s.mu.
 func (c *client) fenceLocked() {
-	c.conn.Fence(c.server.newFenceLocked())
+	c.conn.HoldUntil(c.server.newFenceLocked())
 }
 
 // StoreErr is the store's failure, wrapping ErrStoreFailed, or nil while it

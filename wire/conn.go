@@ -29,10 +29,10 @@ type Conn struct {
 	data    any
 }
 
-// Fence is a condition the frames queued after it wait for, such as a
-// change being stored: Done is closed once it is decided, and Err is then
-// nil when it holds.
-type Fence interface {
+// Pending is an outcome not decided yet, such as a change being stored,
+// which HoldUntil holds a connection's frames for: Done is closed once it
+// is decided, and Err is then nil when it succeeded.
+type Pending interface {
 	Done() <-chan struct{}
 	Err() error
 }
@@ -94,8 +94,8 @@ func (c *Conn) SetData(v any) {
 	c.mu.Unlock()
 }
 
-// Info returns the server frame the connection was last sent.
-func (c *Conn) Info() ServerInfo {
+// ServerInfo returns the server frame the connection was last sent.
+func (c *Conn) ServerInfo() ServerInfo {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.info
@@ -188,13 +188,13 @@ func (c *Conn) enqueue(frames []Frame) bool {
 	return c.rt.Send(framesOf(frames)...)
 }
 
-// Fence holds every frame queued after it until f is done, so that a reply
-// queued after a change is made durable in the background, such as a new
-// account's, is sent only once it is. If f then has an error, the frames
-// after it are never sent: the connection is sent error/internal_error and
-// closed. A fence placed while auth runs holds its result too. Fence
+// HoldUntil holds every frame queued after it until p is done, so that a
+// reply queued after a change is made durable in the background, such as a
+// new account's, is sent only once it is. If p then has an error, the
+// frames after it are never sent: the connection is sent Config.HoldFailed
+// and closed. A hold placed while auth runs holds its result too. HoldUntil
 // reports false when the connection is closed or fell behind.
-func (c *Conn) Fence(f Fence) bool { return c.rt.Fence(f) }
+func (c *Conn) HoldUntil(p Pending) bool { return c.rt.Fence(p) }
 
 // hold queues notifications aside until release.
 func (c *Conn) hold() {

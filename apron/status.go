@@ -128,7 +128,7 @@ func (update statusUpdate) mute(now time.Time) muteState {
 // package wire ignores. On an error nothing changes: invalid params, a mute
 // of a room the user cannot see, a mute of another room beyond
 // maxRoomMutes, or more requests than the user's limit (admitStatusLocked).
-func (s *Server) status(c *client, p wire.StatusParams, reply wire.Reply[wire.Empty]) *Error {
+func (s *Server) status(c *client, p wire.StatusParams, reply wire.Reply[wire.OK]) *Error {
 	update := statusUpdateOf(p)
 	s.mu.Lock()
 	defer s.unlock()
@@ -150,7 +150,7 @@ func (s *Server) status(c *client, p wire.StatusParams, reply wire.Reply[wire.Em
 		return err
 	}
 	s.applyStatusLocked(c, u, update)
-	_ = reply.Send(wire.Empty{})
+	_ = reply.Send(wire.OK{})
 	return nil
 }
 

@@ -139,10 +139,10 @@ type Config struct {
 	// after the frames already queued, such as error/retry_after to have
 	// clients come back shortly; without it, connections close at once.
 	ShutdownError *Error
-	// FenceFailed is sent in place of the frames behind a fence that failed
-	// (Conn.Fence), before the connection closes; error/internal_error by
-	// default.
-	FenceFailed *Error
+	// HoldFailed is sent in place of the frames held for a Pending that
+	// failed (Conn.HoldUntil), before the connection closes;
+	// error/internal_error by default.
+	HoldFailed *Error
 }
 
 // NewServer returns a Server for backend, which serves with config. It
@@ -262,8 +262,8 @@ func (s *Server) pingInterval() time.Duration {
 }
 func (s *Server) pingTimeout() time.Duration { return orDefault(s.config.PingTimeout, 10*time.Second) }
 
-func (s *Server) fenceFailed() []byte {
-	e := s.config.FenceFailed
+func (s *Server) holdFailed() []byte {
+	e := s.config.HoldFailed
 	if e == nil {
 		e = internalError()
 	}
@@ -418,7 +418,7 @@ func (s *Server) newConn(ctx context.Context, cancel context.CancelFunc, w wirec
 		WriteTimeout: s.writeTimeout(),
 		PingInterval: s.pingInterval(),
 		PingTimeout:  s.pingTimeout(),
-		FenceFailed:  s.fenceFailed(),
+		FenceFailed:  s.holdFailed(),
 		OnStop:       cancel,
 		OnFellBehind: func() {
 			if fellBehind != nil {

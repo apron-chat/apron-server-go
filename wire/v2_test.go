@@ -173,8 +173,8 @@ func TestAnnounce(t *testing.T) {
 		!slices.Contains(info.Capabilities, "ext:thing") {
 		t.Fatalf("got %s", f.Raw)
 	}
-	if conn.Info().Title != "Revealed" {
-		t.Fatalf("Info: %+v", conn.Info())
+	if conn.ServerInfo().Title != "Revealed" {
+		t.Fatalf("Info: %+v", conn.ServerInfo())
 	}
 	conn.SignOut()
 	if _, err := c.Call(wait(t), "message", params(`{"body":{"text":"x"}}`)); wire.CodeOf(err) != wire.CodeDenied {
@@ -297,7 +297,7 @@ func TestLocalOpens(t *testing.T) {
 	if f := <-frames; f != `{"method":"welcome","params":{"to":"bot"}}` {
 		t.Fatalf("second frame %s, want the welcome", f)
 	}
-	if info := l.Conn().Info(); info.Agent != "wire-test/1" {
+	if info := l.Conn().ServerInfo(); info.Agent != "wire-test/1" {
 		t.Fatalf("Info: %+v", info)
 	}
 	if _, err := s.Local(wire.LocalOptions{User: wire.User{UserID: "nobody"}, Data: 1}); err != refuse {

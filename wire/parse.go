@@ -20,7 +20,7 @@ type messageFields struct {
 	roomID    string
 	deleted   bool
 	body      *Body
-	replyTo   *Ref
+	replyTo   *MessageRef
 	ext       Ext
 }
 
@@ -35,7 +35,7 @@ func parseMessageFields(r *Request) (messageFields, error) {
 	m := messageFields{
 		roomID:    d.ID("room_id", Optional),
 		messageID: d.MessageID("message_id", Optional),
-		replyTo:   IfPresent(d, "reply_to", d.Ref),
+		replyTo:   IfPresent(d, "reply_to", d.MessageRef),
 		deleted:   d.Bool("deleted", Optional),
 		ext:       d.Ext("ext", Optional),
 	}
@@ -240,9 +240,9 @@ func parseStatus(r *Request) (StatusParams, error) {
 		var seconds int64
 		switch raw := bytes.TrimSpace(raw); {
 		case bytes.Equal(raw, []byte("false")):
-			p.Idle = &Idle{Attended: true}
+			p.Idle = &IdleReport{Attended: true}
 		case !isNull(raw) && json.Unmarshal(raw, &seconds) == nil && seconds >= 0:
-			p.Idle = &Idle{Seconds: seconds}
+			p.Idle = &IdleReport{Seconds: seconds}
 		default:
 			d.Fail(InvalidParams("idle must be false or a non-negative whole number of seconds"))
 		}

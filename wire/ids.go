@@ -158,19 +158,19 @@ func (c *Clock) Restore(last LogID) {
 	c.last = max(c.last, last)
 }
 
-// IDs gives message_ids to the messages of a host that has none of its own
-// (§2.2), such as a chat system the server is a gateway to. The host
-// chooses a key that tells its messages apart, such as the message itself
-// when it is comparable, or its author, time, and text; IDs remembers the
-// latest Size of them.
+// MessageIDs gives message_ids to the messages of a host that has none of
+// its own (§2.2), such as a chat system the server is a gateway to. The
+// host chooses a key that tells its messages apart, such as the message
+// itself when it is comparable, or its author, time, and text; MessageIDs
+// remembers the latest Size of them.
 //
 // A message_id is the log_id of the message's creation, so it cannot be a
 // pure function of the message: log_ids are unique and strictly increase
 // across everything the server logs. ID derives it from the message's own
 // time with Clock.At, the first time it sees the key, and returns the same
-// one after. Give IDs the messages in the order the host committed them,
-// and their log_ids follow that order.
-type IDs[K comparable] struct {
+// one after. Give MessageIDs the messages in the order the host committed
+// them, and their log_ids follow that order.
+type MessageIDs[K comparable] struct {
 	// Clock issues the log_ids; share it with the server's other records.
 	Clock *Clock
 	// Size bounds how many keys are kept; 4096 when zero.
@@ -183,7 +183,7 @@ type IDs[K comparable] struct {
 }
 
 // ID returns the message_id of key, made from at the first time.
-func (ids *IDs[K]) ID(key K, at time.Time) LogID {
+func (ids *MessageIDs[K]) ID(key K, at time.Time) LogID {
 	ids.mu.Lock()
 	defer ids.mu.Unlock()
 	if id, ok := ids.byKey[key]; ok {
@@ -208,7 +208,7 @@ func (ids *IDs[K]) ID(key K, at time.Time) LogID {
 }
 
 // Lookup returns the message_id of key, if it has one.
-func (ids *IDs[K]) Lookup(key K) (LogID, bool) {
+func (ids *MessageIDs[K]) Lookup(key K) (LogID, bool) {
 	ids.mu.Lock()
 	defer ids.mu.Unlock()
 	id, ok := ids.byKey[key]
@@ -217,7 +217,7 @@ func (ids *IDs[K]) Lookup(key K) (LogID, bool) {
 
 // Key returns the key that has message_id id, such as to check a reply_to
 // (§3.5.4).
-func (ids *IDs[K]) Key(id LogID) (K, bool) {
+func (ids *MessageIDs[K]) Key(id LogID) (K, bool) {
 	ids.mu.Lock()
 	defer ids.mu.Unlock()
 	key, ok := ids.byID[id]

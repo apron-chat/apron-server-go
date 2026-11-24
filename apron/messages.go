@@ -379,7 +379,7 @@ func mentions(body map[string]any) []string {
 // react replaces the caller's complete reaction set on one message
 // (§4.7). Entries are kept fully qualified, and duplicates collapse; an
 // unchanged set logs nothing. The broadcast precedes the result (§1).
-func (s *Server) react(c *client, p wire.ReactParams, reply wire.Reply[wire.Empty]) *Error {
+func (s *Server) react(c *client, p wire.ReactParams, reply wire.Reply[wire.OK]) *Error {
 	messageID := p.MessageID.String()
 	emojis, err := messages.Emojis(p.Emojis)
 	if err != nil {
@@ -407,6 +407,6 @@ func (s *Server) react(c *client, p wire.ReactParams, reply wire.Reply[wire.Empt
 		record, r := s.rooms.React(m.Message, u.from(), emojis)
 		s.deliverLocked(rawNotification("reactions", record.Raw), r)
 	}
-	_ = reply.Send(wire.Empty{})
+	_ = reply.Send(wire.OK{})
 	return nil
 }

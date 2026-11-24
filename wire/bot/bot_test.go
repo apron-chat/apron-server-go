@@ -20,7 +20,7 @@ import (
 // chat is a test backend: guests, one room whose messages everyone gets,
 // history, a /ping command, and no room requests.
 type chat struct {
-	wire.UnimplementedRooms
+	wire.ReadOnlyRooms
 	server   *wire.Server
 	clock    wire.Clock
 	commands commands.Router

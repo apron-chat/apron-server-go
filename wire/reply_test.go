@@ -81,16 +81,16 @@ func (h *commands) Command(_ context.Context, _ *wire.Conn, p wire.CommandParams
 	return wire.InvalidParams("unknown")
 }
 
-// statuses answers status with nothing, as a Reply[Empty] handler may.
+// statuses answers status with nothing, as a Reply[OK] handler may.
 type statuses struct{}
 
-func (statuses) Status(context.Context, *wire.Conn, wire.StatusParams, wire.Reply[wire.Empty]) error {
+func (statuses) Status(context.Context, *wire.Conn, wire.StatusParams, wire.Reply[wire.OK]) error {
 	return nil
 }
 
 // A handler sends once: a second Send is ErrReplied, and only the first is
 // sent. One that returns nil without sending is answered internal_error and
-// logged, but for a Reply[Empty]'s, which is sent {}.
+// logged, but for a Reply[OK]'s, which is sent {}.
 func TestSendOnce(t *testing.T) {
 	var log logged
 	h := &commands{}
@@ -123,9 +123,9 @@ func TestSendOnce(t *testing.T) {
 	}
 }
 
-// rooms lists what it is given, and embeds UnimplementedRooms for the rest.
+// rooms lists what it is given, and embeds ReadOnlyRooms for the rest.
 type rooms struct {
-	wire.UnimplementedRooms
+	wire.ReadOnlyRooms
 	result wire.RoomListResult
 }
 
@@ -154,9 +154,9 @@ func TestRoomListSend(t *testing.T) {
 	}
 }
 
-// UnimplementedRooms refuses what a RoomList-only handler does not take,
+// ReadOnlyRooms refuses what a RoomList-only handler does not take,
 // and the server has capability rooms.
-func TestUnimplementedRooms(t *testing.T) {
+func TestReadOnlyRooms(t *testing.T) {
 	s := wire.NewServer(&backend{}, wire.Config{Rooms: &rooms{}})
 	l := local(t, s)
 	for method, params := range map[string]string{
@@ -169,8 +169,8 @@ func TestUnimplementedRooms(t *testing.T) {
 		}
 	}
 	l.Conn().Announce(wire.ServerInfo{})
-	if !slices.Contains(l.Conn().Info().Capabilities, "rooms") {
-		t.Fatalf("capabilities: %v", l.Conn().Info().Capabilities)
+	if !slices.Contains(l.Conn().ServerInfo().Capabilities, "rooms") {
+		t.Fatalf("capabilities: %v", l.Conn().ServerInfo().Capabilities)
 	}
 }
 
@@ -246,7 +246,7 @@ func TestHandleAnyTime(t *testing.T) {
 		t.Fatalf("late: %s %v", result, err)
 	}
 	l.Conn().Announce(wire.ServerInfo{})
-	if got := l.Conn().Info().Capabilities; !slices.Equal(got, []string{"command", "ext:echo", "ext:late"}) {
+	if got := l.Conn().ServerInfo().Capabilities; !slices.Equal(got, []string{"command", "ext:echo", "ext:late"}) {
 		t.Fatalf("capabilities: %v", got)
 	}
 }
@@ -317,7 +317,7 @@ func TestOverride(t *testing.T) {
 			t.Fatalf("got %s %v, %d edits", result, err, b.edits.Load())
 		}
 		l.Conn().Announce(wire.ServerInfo{})
-		if got, want := l.Conn().Info().Capabilities, []string{capability}; !slices.Equal(got, want) && !(capability == "" && len(got) == 0) {
+		if got, want := l.Conn().ServerInfo().Capabilities, []string{capability}; !slices.Equal(got, want) && !(capability == "" && len(got) == 0) {
 			t.Errorf("override with capability %q: capabilities %v", capability, got)
 		}
 		if _, err := call(t, l, "tick", `{}`); !errors.Is(err, wire.ErrNotRequest) {

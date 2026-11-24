@@ -272,18 +272,18 @@ func (b *typed) RoomList(_ context.Context, _ *wire.Conn, _ wire.RoomListParams,
 	return reply.Send(wire.RoomListResult{})
 }
 
-func (b *typed) RoomJoin(_ context.Context, _ *wire.Conn, p wire.RoomJoinParams, _ wire.Reply[wire.Empty]) error {
+func (b *typed) RoomJoin(_ context.Context, _ *wire.Conn, p wire.RoomJoinParams, _ wire.Reply[wire.OK]) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.joins = append(b.joins, p)
 	return nil
 }
 
-func (b *typed) RoomLeave(_ context.Context, _ *wire.Conn, p wire.RoomLeaveParams, reply wire.Reply[wire.Empty]) error {
+func (b *typed) RoomLeave(_ context.Context, _ *wire.Conn, p wire.RoomLeaveParams, reply wire.Reply[wire.OK]) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.leaves = append(b.leaves, p)
-	return reply.Send(wire.Empty{})
+	return reply.Send(wire.OK{})
 }
 
 func (b *typed) RoomSet(_ context.Context, _ *wire.Conn, p wire.RoomSetParams, reply wire.Reply[wire.RoomSetResult]) error {
