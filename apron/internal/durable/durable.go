@@ -15,17 +15,12 @@ package durable
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 	"sync/atomic"
 
 	"github.com/apron-chat/apron-server-go/store"
 )
-
-// ErrFailed is wrapped by Err, and by the errors fences report, once the
-// store failed to apply a batch.
-var ErrFailed = errors.New("apron: the store failed")
 
 // queueLength bounds the batches waiting for the writer; beyond it, Queue
 // waits for the store.
@@ -73,6 +68,9 @@ func (f *Fence) Wait(ctx context.Context) error {
 type Writer struct {
 	store   store.Store
 	onError func(error)
+	// failedErr is wrapped by Err, and by the errors fences report, once
+	// the store failed to apply a batch.
+	failedErr error
 	// closedErr releases the fences that wait once the Writer is stopped.
 	closedErr error
 
@@ -88,11 +86,11 @@ type Writer struct {
 }
 
 // Start starts a writer to st. onError, if set, is called once, on a
-// goroutine of its own, with the store's first failure; closedErr is what
-// fences report once the writer is stopped.
-func Start(st store.Store, onError func(error), closedErr error) *Writer {
+// goroutine of its own, with the store's first failure, wrapping
+// failedErr; closedErr is what fences report once the writer is stopped.
+func Start(st store.Store, onError func(error), failedErr, closedErr error) *Writer {
 	w := &Writer{
-		store: st, onError: onError, closedErr: closedErr,
+		store: st, onError: onError, failedErr: failedErr, closedErr: closedErr,
 		batches: make(chan batch, queueLength),
 		done:    make(chan struct{}),
 	}
@@ -141,7 +139,7 @@ func (w *Writer) Stop() {
 	<-w.done
 }
 
-// Err is the store's failure, wrapping ErrFailed, or nil while it has not
+// Err is the store's failure, wrapping the Writer's failedErr, or nil while it has not
 // failed. It may be called without the server's lock.
 func (w *Writer) Err() error {
 	if err := w.err.Load(); err != nil {
@@ -159,7 +157,7 @@ func (w *Writer) run() {
 		err := w.Err()
 		if err == nil && len(b.entries) > 0 {
 			if applyErr := w.store.Apply(b.entries); applyErr != nil {
-				err = fmt.Errorf("%w: %w", ErrFailed, applyErr)
+				err = fmt.Errorf("%w: %w", w.failedErr, applyErr)
 				w.err.Store(&err)
 				slog.Error("cannot write to the store; the server writes nothing more", "error", applyErr)
 				if w.onError != nil {

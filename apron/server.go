@@ -383,7 +383,7 @@ func Open(config Config) (*Server, error) {
 		s.externalBy = "Config.ExternalIssuer"
 	}
 	s.files = uploads.Open(config.UploadDir, config.MaxUploadStorageBytes)
-	s.store = durable.Start(config.Store, config.OnStoreError, ErrServerClosed)
+	s.store = durable.Start(config.Store, config.OnStoreError, ErrStoreFailed, ErrServerClosed)
 	s.mu.Lock()
 	files, err := s.restoreLocked()
 	if err != nil {

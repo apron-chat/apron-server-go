@@ -2,6 +2,7 @@ package apron
 
 import (
 	"context"
+	"errors"
 
 	"github.com/apron-chat/apron-server-go/apron/internal/durable"
 )
@@ -19,7 +20,7 @@ import (
 // ErrStoreFailed is wrapped by the error Sync returns, and that
 // Config.OnStoreError is given, once the store failed to apply a batch.
 // The server writes nothing more after it.
-var ErrStoreFailed = durable.ErrFailed
+var ErrStoreFailed = errors.New("apron: the store failed")
 
 // newFenceLocked returns a fence that waits for the changes made so far,
 // those the current lock made included, to be stored. Called holding s.mu,

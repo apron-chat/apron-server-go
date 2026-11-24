@@ -28,7 +28,10 @@ func (f *failing) Apply(batch []store.Entry) error {
 	return nil
 }
 
-var errClosed = errors.New("closed")
+var (
+	errClosed = errors.New("closed")
+	errFailed = errors.New("failed")
+)
 
 func entry(id string) []store.Entry {
 	return []store.Entry{{Kind: "k", ID: id, Value: []byte(`true`)}}
@@ -36,7 +39,7 @@ func entry(id string) []store.Entry {
 
 func TestFencesWaitForEarlierBatches(t *testing.T) {
 	st := store.NewMemory()
-	w := Start(st, nil, errClosed)
+	w := Start(st, nil, errFailed, errClosed)
 	w.Queue(entry("a"))
 	f := w.Fence()
 	w.Queue(entry("b"))
@@ -65,15 +68,15 @@ func TestFencesWaitForEarlierBatches(t *testing.T) {
 func TestFailureIsFinal(t *testing.T) {
 	st := &failing{failAt: 2}
 	reported := make(chan error, 1)
-	w := Start(st, func(err error) { reported <- err }, errClosed)
+	w := Start(st, func(err error) { reported <- err }, errFailed, errClosed)
 	w.Queue(entry("a"))
 	w.Queue(entry("b"))
 	f := w.Fence()
 	w.Queue(entry("c"))
-	if err := f.Wait(context.Background()); !errors.Is(err, ErrFailed) {
+	if err := f.Wait(context.Background()); !errors.Is(err, errFailed) {
 		t.Fatalf("fence after the failure: %v", err)
 	}
-	if err := <-reported; !errors.Is(err, ErrFailed) || !errors.Is(w.Err(), ErrFailed) {
+	if err := <-reported; !errors.Is(err, errFailed) || !errors.Is(w.Err(), errFailed) {
 		t.Fatalf("reported %v, Err %v", err, w.Err())
 	}
 	w.Stop()
