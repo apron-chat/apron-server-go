@@ -38,11 +38,10 @@ var (
 
 // Bot is an account an extension owns and speaks through: it holds the
 // "bot" role (§3.3.4), and is never a person's or another extension's. Its
-// requests (Post, Join, History, Call, StreamAppend, StreamTerminal, and
-// Conn's, in package wire/bot's terms) go through a connection of its own,
-// made again if the server closed it, so they get the same checks,
-// limits, delivery, and push as a client's. A Bot is safe for concurrent
-// use.
+// requests (Post, Join, History, Call, StreamAppend, and StreamTerminal)
+// go through a connection of its own, made again if the server closed it,
+// so they get the same checks, limits, delivery, and push as a client's.
+// A Bot is safe for concurrent use.
 type Bot struct {
 	s      *Server
 	host   *Host
@@ -132,9 +131,11 @@ func (b *Bot) conn() (*Session, error) {
 }
 
 // Conn is the bot's own connection in package wire/bot's terms
-// (Session.Conn), made again if the server closed it: typed requests with
-// wire's params and results, such as Post with a wire.MessageParams, or
-// History, whose page has every kind of record.
+// (Session.Conn), made again if the server closed it. An extension needs
+// it only for what the Bot's own methods do not cover, in wire's typed
+// params and results: such as Post with a wire.MessageParams, or History,
+// whose page has every kind of record, not only messages (MessageOf reads
+// those).
 func (b *Bot) Conn() (*bot.Conn, error) {
 	session, err := b.conn()
 	if err != nil {
@@ -201,11 +202,10 @@ func (b *Bot) StreamTerminal(ctx context.Context, roomID, title string, options 
 
 // Session is one in-process connection of a Bot. It speaks the protocol
 // (PROTOCOL.md) as a WebSocket client does, and gets the frames a client
-// would: it is a wire.Local connection, and Conn is the same connection in
-// package wire/bot's terms, whose requests are typed with wire's params and
-// results. Its own methods, Post, Join, History, and the streams, are in
-// apron's: message_ids as strings, and Messages. It sends one request at a
-// time, in order; its methods are safe to call from any goroutine.
+// would. Its methods, Post, Join, History, Call, and the streams, are in
+// apron's terms: message_ids as strings, and Messages. It sends one
+// request at a time, in order; its methods are safe to call from any
+// goroutine.
 type Session struct {
 	s    *Server
 	bot  *Bot
@@ -336,12 +336,12 @@ func (s *Server) streamBaseURLLocked() (string, error) {
 // UserID is the bot's user_id.
 func (b *Session) UserID() string { return b.bot.userID }
 
-// Conn is the session's connection in package wire/bot's terms, for
-// requests typed with wire's params and results (bot.Conn.Post, Command,
-// Join, History, and the raw Call). Its errors are wire's: a refusal as a
-// *wire.Error, which is an *Error, and wire.ErrClosed once the session is
-// closed, where the session's own methods return Err's. auth is refused:
-// a session stays signed in as its bot.
+// Conn is the session's connection in package wire/bot's terms, as
+// Bot.Conn is the bot's: for what the session's own methods do not cover,
+// typed with wire's params and results. Its errors are wire's: a refusal
+// as a *wire.Error, which is an *Error, and wire.ErrClosed once the
+// session is closed, where the session's own methods return Err's. auth is
+// refused: a session stays signed in as its bot.
 func (b *Session) Conn() *bot.Conn { return b.conn }
 
 // Done is closed once the session is closed, by Close or by the server.
@@ -559,12 +559,13 @@ func (b *Session) History(ctx context.Context, roomID string, options HistoryOpt
 	return messages, nil
 }
 
-// MessageOf is a message as package wire has it, such as a record of a
-// history page that Conn reads, or a message a wire/bot handler gets, as
-// extensions see messages (Message): the same snapshot, with its IDs as
+// MessageOf is a message as package wire has it, as extensions see
+// messages (Message), for code that reads messages in wire's terms, such as
+// a history page that Conn reads: the same snapshot, with its IDs as
 // Message has them, its body's text, format, and mentions in their own
 // fields, and the whole body, those of its members wire has no field for
-// too, decoded into Body.
+// too, decoded into Body. Host, Bot, Session, and DecodeMessage give
+// Messages already.
 func MessageOf(m wire.Message) Message {
 	message := Message{
 		LogID: int64(m.LogID), RoomID: m.RoomID, PrevLogID: int64(m.PrevLogID), PrevRoomID: m.PrevRoomID,
@@ -584,9 +585,10 @@ func MessageOf(m wire.Message) Message {
 	return message
 }
 
-// Wire is the message as package wire has it, as MessageOf reads it: its
-// body is Body, or, for a Message made without one, Text, Format, and
-// Mentions, unless it is deleted. An ID that is not a log_id is left out.
+// Wire is the message as package wire has it, as MessageOf reads it, for
+// code in wire's terms, such as a post with Conn: its body is Body, or, for
+// a Message made without one, Text, Format, and Mentions, unless it is
+// deleted. An ID that is not a log_id is left out.
 func (m Message) Wire() wire.Message {
 	message := wire.Message{
 		LogID: wire.LogID(m.LogID), RoomID: m.RoomID, PrevLogID: wire.LogID(m.PrevLogID), PrevRoomID: m.PrevRoomID,

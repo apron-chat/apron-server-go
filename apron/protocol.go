@@ -31,8 +31,9 @@ const (
 )
 
 // Error is a protocol error reply (PROTOCOL.md §1.1): package wire's, so
-// that code written for either package refuses requests the same way, and
-// an extension refuses with the constructors below, which are wire's.
+// that code written for either package refuses requests the same way. An
+// extension needs nothing of package wire to use it: it refuses with the
+// constructors below, or an Error with one of the Code constants.
 //
 //	type Error struct {
 //		Code    int    // one of the Code constants
