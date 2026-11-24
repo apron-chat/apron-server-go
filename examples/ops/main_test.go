@@ -5,6 +5,7 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"net/http"
 	"strings"
 	"testing"
@@ -52,41 +53,27 @@ func TestOps(t *testing.T) {
 	}
 }
 
-// lead is a test extension whose bot holds the deployer role.
-type lead struct{ session *apron.Bot }
-
-func (*lead) Name() string { return "lead" }
-func (l *lead) Init(r *apron.Registrar) (err error) {
-	l.session, err = r.Bot("lead", apron.BotOptions{})
-	return err
-}
-
 func TestDeploy(t *testing.T) {
 	o := &Ops{}
 	o.Settings.Services = []string{"api=echo deployed the api"}
-	config := apron.DefaultConfig()
-	config.Roles = map[string][]string{RoleDeployer: {"lead"}}
-	l := &lead{}
-	server := aprontest.Serve(t, config, o, l)
-	ada := server.Guest("Ada")
+	server := aprontest.Serve(t, apron.DefaultConfig(), o)
+	ada, lead := server.Guest("Ada"), server.Member("lead", RoleDeployer)
 
-	_, err := l.session.Call(t.Context(), "command", map[string]any{"room_id": "general", "body": map[string]any{"text": "/deploy api"}})
-	if err != nil {
+	if _, err := lead.Command("general", "/deploy api"); err != nil {
 		t.Fatal(err)
 	}
 	ada.Message(func(m apron.Message) bool {
-		embeds, _ := m.Body["embeds"].([]any)
-		if len(embeds) != 1 {
-			return false
-		}
-		output, _ := embeds[0].(map[string]any)["output"].(string)
-		return strings.Contains(output, "deployed the api")
+		// The terminal embed shows the program's output.
+		var terminal struct{ Output string }
+		body := m.Wire().Body
+		return body != nil && len(body.Embeds) == 1 && json.Unmarshal(body.Embeds[0], &terminal) == nil &&
+			strings.Contains(terminal.Output, "deployed the api")
 	})
 	done := ada.Message(func(m apron.Message) bool { return strings.HasPrefix(m.Text, "✅") })
 	if done.Text != "✅ deployed api" {
 		t.Fatalf("outcome = %q", done.Text)
 	}
-	if _, err := l.session.Call(t.Context(), "command", map[string]any{"room_id": "general", "body": map[string]any{"text": "/deploy web"}}); err == nil {
+	if _, err := lead.Command("general", "/deploy web"); err == nil {
 		t.Fatal("deployed an unknown service")
 	}
 }

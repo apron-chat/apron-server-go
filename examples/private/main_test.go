@@ -31,10 +31,10 @@ func TestPrivate(t *testing.T) {
 	if hello := stranger.Hello(); slices.Contains(hello.Auth, "guest") || hello.Ext != nil {
 		t.Fatalf("server frame before sign-in = %#v", hello)
 	}
-	if _, err := stranger.Auth(map[string]any{"scheme": "guest"}); err == nil {
+	if err := stranger.SignInAsGuest("Mallory"); err == nil {
 		t.Fatal("a guest signed in")
 	}
-	if _, err := stranger.Auth(map[string]any{"scheme": "email", "email": "mallory@example.com"}); err != nil {
+	if err := stranger.AskForCode("mallory@example.com"); err != nil {
 		t.Fatal(err)
 	}
 	if code := mail.Code("mallory@example.com", 200*time.Millisecond); code != "" {
@@ -81,7 +81,7 @@ func TestPrivate(t *testing.T) {
 	if !bob.Closed() {
 		t.Fatal("Bob's connection stayed open")
 	}
-	if _, err := server.Dial().Auth(map[string]any{"scheme": "token", "token": bob.Token}); bob.Token == "" || err == nil {
+	if err := server.Dial().SignInWithToken(bob.Token); bob.Token == "" || err == nil {
 		t.Fatal("Bob's session token still signs in")
 	}
 }

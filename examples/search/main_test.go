@@ -5,7 +5,6 @@ import (
 	"net/http"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/apron-chat/apron-server-go/apron"
 	"github.com/apron-chat/apron-server-go/apron/aprontest"
@@ -17,13 +16,11 @@ func TestSearch(t *testing.T) {
 	if _, err := ada.Post("general", "The deploy failed again <script>"); err != nil {
 		t.Fatal(err)
 	}
-	var room struct {
-		ID string `json:"room_id"`
-	}
-	if err := ada.Call("room_set", map[string]any{"title": "Secret", "private": true}, &room); err != nil {
+	room, err := ada.CreateRoom("Secret", true)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ada.Post(room.ID, "the secret deploy plan"); err != nil {
+	if _, err := ada.Post(room, "the secret deploy plan"); err != nil {
 		t.Fatal(err)
 	}
 	edited, err := ada.Post("general", "edit me")
@@ -34,27 +31,22 @@ func TestSearch(t *testing.T) {
 	// The index follows the log on its own goroutine: wait for it.
 	expect := func(c *aprontest.Client, q string, want int) {
 		t.Helper()
+		server.Settle()
 		var result struct{ Results []any }
-		for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); time.Sleep(5 * time.Millisecond) {
-			if err := c.Call("search.query", map[string]any{"q": q}, &result); err != nil {
-				t.Fatal(err)
-			}
-			if len(result.Results) == want {
-				return
-			}
+		if err := c.Call("search.query", map[string]any{"q": q}, &result); err != nil || len(result.Results) != want {
+			t.Fatalf("%s finds %d for %q, want %d: %v", c.UserID, len(result.Results), q, want, err)
 		}
-		t.Fatalf("%s finds %d for %q, want %d", c.UserID, len(result.Results), q, want)
 	}
 	expect(ada, "deploy", 2)
 	// Bob is not in the private room.
 	expect(bob, "deploy", 1)
 	// An edit replaces what is indexed, and a deletion removes it.
-	if err := ada.Call("message", map[string]any{"room_id": "general", "message_id": edited, "body": map[string]any{"text": "edited deploy"}}, nil); err != nil {
+	if err := ada.Edit("general", edited, "edited deploy"); err != nil {
 		t.Fatal(err)
 	}
 	expect(bob, "deploy", 2)
 	expect(bob, "edit me", 0)
-	if err := ada.Call("message", map[string]any{"room_id": "general", "message_id": edited, "deleted": true}, nil); err != nil {
+	if err := ada.Delete("general", edited); err != nil {
 		t.Fatal(err)
 	}
 	expect(bob, "deploy", 1)
@@ -72,7 +64,7 @@ func TestSearch(t *testing.T) {
 	if !strings.Contains(string(page), "The deploy failed again &lt;script&gt;") || strings.Contains(string(page), "secret") {
 		t.Fatalf("archive page:\n%s", page)
 	}
-	response, err = http.Get(server.URL + "/search/archive/" + room.ID)
+	response, err = http.Get(server.URL + "/search/archive/" + room)
 	if err != nil {
 		t.Fatal(err)
 	}

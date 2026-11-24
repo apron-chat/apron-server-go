@@ -9,26 +9,14 @@ import (
 	"github.com/apron-chat/apron-server-go/apron/aprontest"
 )
 
-// mod is a test extension whose bot is a moderator.
-type mod struct{ bot *apron.Bot }
-
-func (*mod) Name() string { return "mod" }
-func (m *mod) Init(r *apron.Registrar) (err error) {
-	m.bot, err = r.Bot("mod", apron.BotOptions{})
-	return err
-}
-
 func TestModeration(t *testing.T) {
 	m := &Moderation{}
 	m.Settings.Words = []string{"darn", "ärger"}
-	config := apron.DefaultConfig()
-	config.Roles = map[string][]string{apron.RoleModerator: {"mod"}}
-	moderator := &mod{}
-	server := aprontest.Serve(t, config, m, moderator)
+	server := aprontest.Serve(t, apron.DefaultConfig(), m)
 	if m.Settings.LinkAge != 24*time.Hour {
 		t.Fatalf("LinkAge = %v, want its default", m.Settings.LinkAge)
 	}
-	ada, bob := server.Guest("Ada"), server.Guest("Bob")
+	ada, bob, mo := server.Guest("Ada"), server.Guest("Bob"), server.Member("mo", apron.RoleModerator)
 
 	if _, err := ada.Post("general", "see https://example.com"); err == nil || !strings.Contains(err.Error(), "links") {
 		t.Fatalf("a guest posted a link: %v", err)
@@ -48,19 +36,18 @@ func TestModeration(t *testing.T) {
 	}
 
 	// A moderator turns slow mode on; then each member posts once in 30s.
-	if _, err := moderator.bot.Call(t.Context(), "command", map[string]any{"room_id": "general", "body": map[string]any{"text": "/slowmode 30"}}); err != nil {
+	if _, err := mo.Command("general", "/slowmode 30"); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := bob.Post("general", "first"); err != nil {
 		t.Fatal(err)
 	}
 	// Slow mode counts posts from the log, which the extension follows.
-	for deadline := time.Now().Add(5 * time.Second); m.slowed("general", bob.UserID) == 0; time.Sleep(time.Millisecond) {
-		if time.Now().After(deadline) {
-			t.Fatal("the post was not noted")
-		}
-	}
+	server.Settle()
 	if _, err := bob.Post("general", "second"); err == nil || !strings.Contains(err.Error(), "Slow mode") {
 		t.Fatalf("second post in slow mode: %v", err)
+	}
+	if _, err := mo.Post("general", "moderators are not slowed"); err != nil {
+		t.Fatal(err)
 	}
 }
