@@ -16,10 +16,17 @@
 // not offer (§3.1) skips, as does one whose request the server's policy
 // refused with error/retry_after, or error/denied where §1.1 allows it.
 // Where the Python suite warns, of a SHOULD the server does not follow, the
-// check skips with a message that starts with "WARN". Checks run in order,
-// and later ones use what earlier ones learned, such as the default room
-// (§3.6.3) and a message to reply to; when -run leaves out a check that
-// learns something, it still runs, unreported.
+// check skips with a message that starts with "WARN". So does a check that
+// a server's limits keep from running whole, where conform.py fails it: a
+// message of the slow reader's burst refused as too_large, where frames up
+// to 256 KiB SHOULD be accepted (§1), or a record a check reads back
+// discarded from the log, where history SHOULD be kept (§4.3.3); a check
+// that can still compare what is left, as the slow reader does, fails on
+// what it finds before it warns. Config says what the checks need.
+//
+// Checks run in order, and later ones use what earlier ones learned, such
+// as the default room (§3.6.3) and a message to reply to; when -run leaves
+// out a check that learns something, it still runs, unreported.
 //
 // Every frame from the server is also checked as it arrives, as the Python
 // suite does, and the last checks report what was seen: that it matches
@@ -80,6 +87,20 @@ import (
 )
 
 // Config is the server to check, and how to sign in to it.
+//
+// The checks post to the default room (§3.6.3), as many users as they
+// sign in. What they need of the server, besides what the protocol
+// requires, is what a server for tests allows: posts of up to 250 kB
+// (§1), and a burst of 512 posts of 16 KiB each, 8 MiB in all, sent
+// without waiting for their results (core.delivery.slow-reader); and the
+// room's log kept for the whole run, some 600 messages, for the checks
+// that read back what earlier ones posted (history.shape.page,
+// history.bounds.inclusive, and the slow reader). A server with smaller
+// limits is not failed for them: a post refused with retry_after or
+// denied skips the check, and one refused as too_large, or a record
+// discarded from the log, skips it with a warning (see the package
+// documentation). A server for tests that lets the checks run raises
+// them.
 type Config struct {
 	// Server is the server to check: each connection is to it, in
 	// process, over a LineTransport (Server.ServeTransport) with no HTTP

@@ -536,8 +536,26 @@ func historyPage(c *checker) {
 	}
 	if c.r.message != nil {
 		found := slices.ContainsFunc(list(page["messages"]), func(m any) bool { return get(m, "message_id") == c.r.message["message_id"] })
+		if !found && discarded(page, c.r.message["log_id"]) {
+			c.warn("the server discarded a recent message from the room's log, where servers SHOULD keep history (§4.3.3)")
+		}
 		c.must(found, "the newest page lacks a recent message")
 	}
+}
+
+// discarded reports whether a history result says that its log no longer
+// holds the record at logID: that its effective lower bound (§4.3.3) is
+// past it. A result without the bounds says nothing.
+func discarded(page obj, logID any) bool {
+	id, ok := parseID(logID)
+	if !ok {
+		return false
+	}
+	if bound, ok := parseID(page["history_log_id"]); ok {
+		return bound > id
+	}
+	latest, ok := parseID(page["latest_log_id"])
+	return ok && has(page, "history_log_id") && page["history_log_id"] == nil && latest+1 > id
 }
 
 func historyAllRooms(c *checker) {
@@ -572,7 +590,8 @@ func historyAllRooms(c *checker) {
 // burst posts the texts at once, each request sent before the previous
 // result, and returns their message_ids in order. A refusal by the
 // server's policy (retry_after or denied, such as a posting limit) skips
-// the check.
+// the check, and a message refused as too_large warns: frames up to 256
+// KiB SHOULD be accepted (§1), and a burst's are far smaller.
 func (c *checker) burst(conn *conn, texts []string) []string {
 	c.t.Helper()
 	var sent []string
@@ -591,8 +610,12 @@ func (c *checker) burst(conn *conn, texts []string) []string {
 			}
 			c.fail("%s", why)
 		}
-		if code(reply) == wire.CodeRetryAfter || code(reply) == wire.CodeDenied {
+		switch code(reply) {
+		case wire.CodeRetryAfter, wire.CodeDenied:
 			c.skip("the server's policy refused the burst: %s", describe(reply))
+		case wire.CodeTooLarge:
+			c.warn("the server refused a message of the burst, of %d bytes, as too large, where frames up to 256 KiB SHOULD be accepted (§1): %s",
+				len(texts[len(messageIDs)]), describe(reply))
 		}
 		messageID, ok := get(reply, "result", "message_id").(string)
 		c.must(ok, "posting: %s", describe(reply))
@@ -742,6 +765,17 @@ func slowReader(c *checker) {
 	}
 	slices.Sort(loggedIDs)
 	firstID := c.id(messageIDs[0])
+	// A server that discards the start of the log may have discarded the
+	// start of the burst too: what arrived live is then compared with what
+	// is left, and the check warns once it passes.
+	page := c.call(a, "history", obj{"room_id": c.r.room, "after": messageIDs[0], "before": messageIDs[0]})
+	trimmed := discarded(page, messageIDs[0])
+	if trimmed {
+		if len(loggedIDs) == 0 {
+			c.warn("the server discarded the whole burst from the room's log, where servers SHOULD keep history (§4.3.3)")
+		}
+		firstID = loggedIDs[0]
+	}
 	var live []int64
 	for _, r := range delivered(b, start, c.r.room) {
 		if r.kind == "message" && r.logID >= firstID {
@@ -753,20 +787,24 @@ func slowReader(c *checker) {
 		// everything up to its last record, with no gap.
 		c.must(len(live) <= len(loggedIDs) && slices.Equal(live, loggedIDs[:len(live)]),
 			"a reader that fell behind lost records before later ones, then its connection")
-		return
-	}
-	liveSet := map[int64]bool{}
-	for _, id := range live {
-		liveSet[id] = true
-	}
-	var missing []int64
-	for _, id := range loggedIDs {
-		if !liveSet[id] {
-			missing = append(missing, id)
+	} else {
+		liveSet := map[int64]bool{}
+		for _, id := range live {
+			liveSet[id] = true
 		}
+		var missing []int64
+		for _, id := range loggedIDs {
+			if !liveSet[id] {
+				missing = append(missing, id)
+			}
+		}
+		c.must(len(missing) == 0, "a reader that fell behind kept its connection and lost %d records, such as %v (§3.5.3)", len(missing), first(missing))
+		c.must(slices.Equal(live, loggedIDs), "a reader that fell behind got records out of log order or twice (§3.5.3)")
 	}
-	c.must(len(missing) == 0, "a reader that fell behind kept its connection and lost %d records, such as %v (§3.5.3)", len(missing), first(missing))
-	c.must(slices.Equal(live, loggedIDs), "a reader that fell behind got records out of log order or twice (§3.5.3)")
+	if trimmed {
+		c.warn("the server discarded the start of the burst from the room's log, where servers SHOULD keep history (§4.3.3): "+
+			"only its last %d of %d messages were checked", len(loggedIDs), len(messageIDs))
+	}
 }
 
 func boundsInclusive(c *checker) {
@@ -776,6 +814,9 @@ func boundsInclusive(c *checker) {
 	conn := c.open(true, "Conformance", false)
 	logID := c.r.message["log_id"]
 	page := c.call(conn, "history", obj{"room_id": c.r.room, "after": logID, "before": logID})
+	if discarded(page, logID) {
+		c.warn("the server discarded the message from the room's log, where servers SHOULD keep history (§4.3.3)")
+	}
 	var logIDs []any
 	for _, m := range list(page["messages"]) {
 		logIDs = append(logIDs, get(m, "log_id"))
