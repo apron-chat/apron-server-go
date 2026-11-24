@@ -121,6 +121,11 @@ func (s *Server) authenticate(c *client, reply wire.Reply[wire.AuthResult]) *Err
 		s.unlock()
 		return serviceRefusal()
 	}
+	if c.session != nil {
+		// A bot's session stays signed in as its bot (Session.Conn).
+		s.unlock()
+		return Denied("A bot's session stays signed in as its bot")
+	}
 	name, err := parseString(authParams(reply), "scheme", required)
 	if err != nil {
 		s.unlock()

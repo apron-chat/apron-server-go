@@ -184,7 +184,10 @@ func (r *Registrar) follow(what string, after int64, deliver func(ctx context.Co
 	})
 }
 
-// Message is a message record, decoded (PROTOCOL.md §3.5).
+// Message is a message record, decoded (PROTOCOL.md §3.5), as extensions
+// see messages: wire.Message's snapshot, with its message_id a string, as
+// Draft, CommandCall, and ReplyTo take one, and its body's text, format,
+// and mentions in fields of their own. MessageOf and Wire convert.
 type Message struct {
 	ID     string
 	LogID  int64
