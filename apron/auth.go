@@ -201,9 +201,9 @@ func (s *Server) authenticate(c *client, req request) (any, *Error) {
 	case disabledSchemes[name] != "":
 		err = &Error{Code: CodeUnsupported, Message: disabledSchemes[name]}
 	default:
-		// A request that depends on a name the server does not know is
-		// invalid_params (§1).
-		err = invalidParams("Unknown authentication scheme %q", name)
+		// A scheme the server does not offer is unsupported, even one the
+		// protocol does not define (§3.2).
+		err = &Error{Code: CodeUnsupported, Message: fmt.Sprintf("Unknown authentication scheme %q", name)}
 	}
 	// A user_id is never empty, nor contains whitespace or control
 	// characters (§2.4): requesting one that could be no user_id is

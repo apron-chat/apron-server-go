@@ -134,8 +134,8 @@ func TestConcurrentSavesOfDifferentExtKeysBothSurvive(t *testing.T) {
 	}
 }
 
-// room_set replaces the client fields of a room, but merges ext (§4.2.4,
-// §4.12); the limit applies to the merged ext.
+// room_set merges the client fields of a room, ext one level into its keys
+// (§4.2.4, §4.12); the limit applies to the merged ext.
 func TestRoomSetMergesExt(t *testing.T) {
 	_, httpServer := newTestServer(t, DefaultConfig())
 	a := dialTestClient(t, httpServer)
@@ -151,8 +151,12 @@ func TestRoomSetMergesExt(t *testing.T) {
 	if want := map[string]any{"irc": map[string]any{"channel": "#ops"}, "matrix": nil}; !reflect.DeepEqual(merged["ext"], any(want)) {
 		t.Fatalf("merged ext: %#v", merged["ext"])
 	}
-	_, cleared := saveRoom(t, a, "clear", map[string]any{"room_id": roomID, "ext": map[string]any{"irc": "", "matrix": map[string]any{}}})
-	if _, has := cleared["ext"]; has || cleared["title"] != nil {
+	_, untitled := saveRoom(t, a, "describe", map[string]any{"room_id": roomID, "description": "About"})
+	if untitled["title"] != "Ops 2" || untitled["description"] != "About" {
+		t.Fatalf("an edit without title: %#v", untitled)
+	}
+	_, cleared := saveRoom(t, a, "clear", map[string]any{"room_id": roomID, "title": "", "description": "", "ext": map[string]any{"irc": "", "matrix": map[string]any{}}})
+	if _, has := cleared["ext"]; has || cleared["title"] != nil || cleared["description"] != nil {
 		t.Fatalf("cleared: %#v", cleared)
 	}
 	half := strings.Repeat("x", maxRoomExtBytes/2)

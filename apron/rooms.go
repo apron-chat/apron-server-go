@@ -494,10 +494,12 @@ func (s *Server) setRoom(c *client, req request) (any, bool, *Error) {
 	if err != nil {
 		return nil, false, err
 	}
+	_, hasTitle := req.params["title"]
 	description, err := parseString(req.params, "description", false)
 	if err != nil {
 		return nil, false, err
 	}
+	_, hasDescription := req.params["description"]
 	if len(title) > maxTitleBytes {
 		return nil, false, &Error{Code: CodeTooLarge, Message: fmt.Sprintf("title is at most %d bytes", maxTitleBytes)}
 	}
@@ -525,6 +527,14 @@ func (s *Server) setRoom(c *client, req request) (any, bool, *Error) {
 		}
 		parent = existing.parent
 		keptExt = extOf(existing.record["ext"])
+		// An edit merges into the room's client fields (§4.2.4): a field it
+		// leaves out keeps its value, and "" clears it.
+		if !hasTitle {
+			title, _ = existing.record["title"].(string)
+		}
+		if !hasDescription {
+			description, _ = existing.record["description"].(string)
+		}
 	} else if parentID != "" {
 		if parent = s.visibleRoomLocked(u, parentID); parent == nil {
 			return nil, false, invalidParams("Unknown parent room %q", parentID)
@@ -538,7 +548,7 @@ func (s *Server) setRoom(c *client, req request) (any, bool, *Error) {
 		}
 	}
 	// ext merges into the room's (§4.12), and the limit applies to the
-	// result; other client fields are replaced (§4.2.4).
+	// result; so do the other client fields, one level deep (§4.2.4).
 	ext := mergeExt(keptExt, extWrite)
 	if encodedSize(ext) > maxRoomExtBytes {
 		return nil, false, &Error{Code: CodeTooLarge, Message: fmt.Sprintf("The room's ext would be over %d bytes", maxRoomExtBytes)}
