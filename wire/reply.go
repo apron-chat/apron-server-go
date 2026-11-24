@@ -107,8 +107,9 @@ func (p Reply[T]) Fail(err error) error {
 	return p.r.failWith(err)
 }
 
-// Request is the request the reply answers: its params as they arrived,
-// such as those of an auth scheme that AuthParams has no field for.
+// Request is the request the reply answers: the escape hatch to its params
+// as they arrived, for those the typed params leave out, such as an auth
+// scheme's own that AuthParams has no field for.
 func (p Reply[T]) Request() *Request { return p.r }
 
 // initReply is a Reply of any T that a test (package wiretest) makes for a

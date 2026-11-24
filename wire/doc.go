@@ -62,8 +62,8 @@
 // each of which adds its requests, with their params checked, and its
 // capability in the server frame. One value may be every handler, or each
 // may be its own, such as a wrapper that adds metrics to one of them; a
-// server that refuses some room requests embeds [ReadOnlyRooms]. Hook
-// fields follow a connection's life (OnConnect, OnDisconnect), bring a
+// server that refuses some room requests embeds [ReadOnlyRooms]. The
+// Config's hooks follow a connection's life (OnConnect, OnDisconnect), bring a
 // duplicate's result up to date (RefreshDuplicate), decide the auth schemes
 // (CheckScheme), and the origins that may open a WebSocket (CheckOrigin).
 //
@@ -76,13 +76,21 @@
 // cookies or other ambient credentials, or whose clients are not browsers.
 //
 // A [Handler] registered with [Server.Handle] handles a request by name,
-// raw, and a [NotificationHandler] registered with
+// and a [NotificationHandler] registered with
 // [Server.HandleNotification] a client's notification: an extension's own
 // method, such as the reference server's push_register and account
-// methods, or one that takes the place of a Config handler's. A Handler
+// methods, or one that takes the place of a Config handler's, the escape
+// hatch for a backend that serves a typed method otherwise. A Handler
 // reads its params with the Request's [Decoder], which reads several and
 // keeps the first error, and answers with its Reply, as a typed handler
 // does, with any result that encodes as a JSON object.
+//
+// The escape hatches are few, and each says so: [Request.Fields], the
+// params raw, for one no Decoder method reads; [Reply.Request], a typed
+// handler's request, for params its typed ones leave out, such as an
+// auth scheme's own; [Conn.Send], frames encoded once, for many
+// connections or a batch; and [Marshal], wire's encoding, for a backend
+// that keeps the bytes it sends.
 //
 // # Putting a server together
 //
