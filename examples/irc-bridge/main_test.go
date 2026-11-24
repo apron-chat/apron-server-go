@@ -2,13 +2,14 @@ package main
 
 import (
 	"bufio"
+	"encoding/json"
 	"net"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/apron-chat/apron-server-go/apron"
-	"github.com/apron-chat/apron-server-go/internal/wstest"
+	"github.com/apron-chat/apron-server-go/apron/aprontest"
 )
 
 func TestBridge(t *testing.T) {
@@ -51,9 +52,9 @@ func TestBridge(t *testing.T) {
 
 	b := &Bridge{}
 	b.Settings.Server, b.Settings.Plaintext, b.Settings.Nick = listener.Addr().String(), true, "bridge"
-	b.Settings.Channel, b.Settings.Room = "#apron", "general"
-	_, server := wstest.Serve(t, apron.DefaultConfig(), b)
-	ada := wstest.Guest(t, server, "Ada")
+	b.Settings.Channel = "#apron"
+	server := aprontest.Serve(t, apron.DefaultConfig(), b)
+	ada := server.Guest("Ada")
 
 	// What is posted while the bridge is not in the channel is relayed
 	// once it is.
@@ -65,12 +66,13 @@ func TestBridge(t *testing.T) {
 	expectSent(t, sent, "PRIVMSG #apron :<Ada> while you were out")
 	say <- ":alice!a@test PRIVMSG #apron :hello from irc"
 
-	relayed := ada.Message(func(p map[string]any) bool { return wstest.From(p) == "irc" })
-	if text := wstest.Text(relayed); text != "**alice:** hello from irc" {
-		t.Fatalf("relayed = %q", text)
+	relayed := ada.Message(func(m apron.Message) bool { return m.From.UserID == "irc" })
+	if relayed.Text != "**alice:** hello from irc" {
+		t.Fatalf("relayed = %q", relayed.Text)
 	}
-	if ext := relayed["ext"].(map[string]any)["irc-bridge"].(map[string]any); ext["nick"] != "alice" {
-		t.Fatalf("ext = %#v", ext)
+	var ext struct{ Nick string }
+	if err := json.Unmarshal(relayed.Ext["irc-bridge"], &ext); err != nil || ext.Nick != "alice" {
+		t.Fatalf("ext = %s", relayed.Ext["irc-bridge"])
 	}
 	if _, err := ada.Post("general", "hi alice\nhow are you"); err != nil {
 		t.Fatal(err)

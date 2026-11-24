@@ -1,19 +1,16 @@
 package main
 
 import (
-	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
-	"time"
-
-	"github.com/coder/websocket"
 
 	"github.com/apron-chat/apron-server-go/apron"
+	"github.com/apron-chat/apron-server-go/apron/aprontest"
 	"github.com/apron-chat/apron-server-go/internal/oauthtest"
-	"github.com/apron-chat/apron-server-go/internal/wstest"
 )
 
 // gitHub is a fake GitHub, which signs in octocat, a member of acme
@@ -66,39 +63,16 @@ func TestSignInWithGitHub(t *testing.T) {
 	// The OAuth callback is on this server, whose URL is known once it
 	// listens, before anyone signs in.
 	s.Settings.BaseURL = "http://placeholder"
-	_, server := wstest.Serve(t, config, s)
+	server := aprontest.Serve(t, config, s)
 	base := server.URL
 	s.Settings.BaseURL = base
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	ws, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(base, "http")+"/ws", nil)
+	c := server.Dial()
+	begun, err := c.Auth(map[string]any{"scheme": "external"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer ws.CloseNow()
-	call := func(params map[string]any) map[string]any {
-		payload, _ := json.Marshal(map[string]any{"method": "auth", "id": "a", "params": params})
-		if err := ws.Write(ctx, websocket.MessageText, payload); err != nil {
-			t.Fatal(err)
-		}
-		for {
-			_, payload, err := ws.Read(ctx)
-			if err != nil {
-				t.Fatal(err)
-			}
-			var frame map[string]any
-			json.Unmarshal(payload, &frame)
-			if frame["id"] == "a" {
-				result, ok := frame["result"].(map[string]any)
-				if !ok {
-					t.Fatalf("auth failed: %v", frame)
-				}
-				return result
-			}
-		}
-	}
-	external := call(map[string]any{"scheme": "external"})["external"].(map[string]any)
+	external := begun.Extra["external"].(map[string]any)
 	if external["url"] != base+"/oauth/authorize" {
 		t.Fatalf("external = %#v", external)
 	}
@@ -113,9 +87,11 @@ func TestSignInWithGitHub(t *testing.T) {
 	code := app.Code(app.Press(page, "allow"), base)
 	params := app.Redemption(code)
 	params["scheme"] = "external"
-	result := call(params)
-	you := result["you"].(map[string]any)
-	if you["user_id"] != "octocat" || you["name"] != "The Octocat" || result["token"] == nil || !strings.Contains(strings.Join(toStrings(you["roles"]), ","), "admin") {
+	result, err := c.Auth(params)
+	if err != nil || result.You == nil {
+		t.Fatalf("redeeming the code: %v", err)
+	}
+	if you := result.You; you.UserID != "octocat" || you.Name != "The Octocat" || result.Token == "" || !slices.Contains(you.Roles, apron.RoleAdmin) {
 		t.Fatalf("you = %#v", you)
 	}
 
@@ -146,12 +122,4 @@ func TestSignInWithGitHub(t *testing.T) {
 	if back.Return == nil || back.Return.Query().Get("error") != "access_denied" || back.Return.Query().Get("error_description") != "octocat is not a member of acme" {
 		t.Fatalf("outsider's cancel = %d %v", back.Status, back.Return)
 	}
-}
-
-func toStrings(value any) []string {
-	var out []string
-	for _, item := range value.([]any) {
-		out = append(out, item.(string))
-	}
-	return out
 }

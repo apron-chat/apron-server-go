@@ -10,8 +10,9 @@ forgets it on restart); see [SERVER.md](SERVER.md#storage).
   every capability in [PROTOCOL.md](https://github.com/shazow/apron/blob/main/PROTOCOL.md);
   `apron` is the server as a Go package, with its extension API; `store`
   its storage backends; `aproncmd` the command as a library, which
-  `cmd/aprond` runs; and `examples` servers built with extensions, each
-  with a test that uses `internal/wstest`. `wire` is the protocol itself,
+  `cmd/aprond` runs; `apron/aprontest` tests extensions as clients use
+  them, from any module; and `examples` servers built with extensions, each
+  with a test that uses `aprontest`. `wire` is the protocol itself,
   with no rooms, log, or accounts of its own: connections, frames, the auth
   barrier, deduplication, and in-process connections, with a Backend that
   answers. `apron` is a Backend of it, and so is any server built on it,

@@ -8,18 +8,17 @@ import (
 	"net/http"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/apron-chat/apron-server-go/apron"
-	"github.com/apron-chat/apron-server-go/internal/wstest"
+	"github.com/apron-chat/apron-server-go/apron/aprontest"
 )
 
 func TestOps(t *testing.T) {
 	o := &Ops{}
-	o.Settings.Room, o.Settings.WebhookSecret, o.Settings.Timeout = "general", "s3cret", time.Minute
+	o.Settings.WebhookSecret = "s3cret"
 	o.Settings.Services = []string{"api=echo deployed the api"}
-	_, server := wstest.Serve(t, apron.DefaultConfig(), o)
-	ada := wstest.Guest(t, server, "Ada")
+	server := aprontest.Serve(t, apron.DefaultConfig(), o)
+	ada := server.Guest("Ada")
 
 	body := []byte(`{"action":"opened","repository":{"full_name":"acme/app"},"sender":{"login":"octocat"},
 		"pull_request":{"number":7,"title":"Fix it","html_url":"https://github.com/acme/app/pull/7"}}`)
@@ -42,9 +41,9 @@ func TestOps(t *testing.T) {
 	if status := post("sha256=" + hex.EncodeToString(mac.Sum(nil))); status != http.StatusNoContent {
 		t.Fatalf("signed webhook = %d", status)
 	}
-	got := ada.Message(func(p map[string]any) bool { return wstest.From(p) == "ops" })
-	if text := wstest.Text(got); !strings.Contains(text, "**octocat** opened [acme/app#7 Fix it]") {
-		t.Fatalf("webhook message = %q", text)
+	got := ada.Message(func(m apron.Message) bool { return m.From.UserID == "ops" })
+	if !strings.Contains(got.Text, "**octocat** opened [acme/app#7 Fix it]") {
+		t.Fatalf("webhook message = %q", got.Text)
 	}
 
 	// Guests may not deploy.
@@ -64,30 +63,28 @@ func (l *lead) Init(r *apron.Registrar) (err error) {
 
 func TestDeploy(t *testing.T) {
 	o := &Ops{}
-	o.Settings.Room, o.Settings.Timeout = "general", time.Minute
 	o.Settings.Services = []string{"api=echo deployed the api"}
 	config := apron.DefaultConfig()
 	config.Roles = map[string][]string{RoleDeployer: {"lead"}}
 	l := &lead{}
-	_, server := wstest.Serve(t, config, o, l)
-	ada := wstest.Guest(t, server, "Ada")
+	server := aprontest.Serve(t, config, o, l)
+	ada := server.Guest("Ada")
 
 	_, err := l.session.Call(t.Context(), "command", map[string]any{"room_id": "general", "body": map[string]any{"text": "/deploy api"}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	ada.Message(func(p map[string]any) bool {
-		body, _ := p["body"].(map[string]any)
-		embeds, _ := body["embeds"].([]any)
+	ada.Message(func(m apron.Message) bool {
+		embeds, _ := m.Body["embeds"].([]any)
 		if len(embeds) != 1 {
 			return false
 		}
 		output, _ := embeds[0].(map[string]any)["output"].(string)
 		return strings.Contains(output, "deployed the api")
 	})
-	done := ada.Message(func(p map[string]any) bool { return strings.HasPrefix(wstest.Text(p), "✅") })
-	if wstest.Text(done) != "✅ deployed api" {
-		t.Fatalf("outcome = %q", wstest.Text(done))
+	done := ada.Message(func(m apron.Message) bool { return strings.HasPrefix(m.Text, "✅") })
+	if done.Text != "✅ deployed api" {
+		t.Fatalf("outcome = %q", done.Text)
 	}
 	if _, err := l.session.Call(t.Context(), "command", map[string]any{"room_id": "general", "body": map[string]any{"text": "/deploy web"}}); err == nil {
 		t.Fatal("deployed an unknown service")

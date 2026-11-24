@@ -6,7 +6,7 @@ import (
 	"time"
 
 	"github.com/apron-chat/apron-server-go/apron"
-	"github.com/apron-chat/apron-server-go/internal/wstest"
+	"github.com/apron-chat/apron-server-go/apron/aprontest"
 )
 
 // mod is a test extension whose bot is a moderator.
@@ -24,11 +24,11 @@ func TestModeration(t *testing.T) {
 	config := apron.DefaultConfig()
 	config.Roles = map[string][]string{apron.RoleModerator: {"mod"}}
 	moderator := &mod{}
-	_, server := wstest.Serve(t, config, m, moderator)
+	server := aprontest.Serve(t, config, m, moderator)
 	if m.Settings.LinkAge != 24*time.Hour {
 		t.Fatalf("LinkAge = %v, want its default", m.Settings.LinkAge)
 	}
-	ada, bob := wstest.Guest(t, server, "Ada"), wstest.Guest(t, server, "Bob")
+	ada, bob := server.Guest("Ada"), server.Guest("Bob")
 
 	if _, err := ada.Post("general", "see https://example.com"); err == nil || !strings.Contains(err.Error(), "links") {
 		t.Fatalf("a guest posted a link: %v", err)
@@ -40,8 +40,8 @@ func TestModeration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := bob.Message(func(p map[string]any) bool { return p["message_id"] == id }); wstest.Text(got) != "well d***, so much Ä****" {
-		t.Fatalf("masked = %q", wstest.Text(got))
+	if got := bob.Message(func(m apron.Message) bool { return m.ID == id }); got.Text != "well d***, so much Ä****" {
+		t.Fatalf("masked = %q", got.Text)
 	}
 	if _, err := ada.Command("general", "/slowmode 30"); err == nil {
 		t.Fatal("a guest turned slow mode on")

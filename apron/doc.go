@@ -11,6 +11,9 @@
 //     flags, opens no listener, and handles no signals.
 //   - [github.com/apron-chat/apron-server-go/store] keeps a server's state
 //     across restarts, in SQLite or in memory ([Config].Store).
+//   - [github.com/apron-chat/apron-server-go/apron/aprontest] tests
+//     extensions: it serves a server with them in a test, and signs in to
+//     it as people do, with guests, accounts, posts, and commands.
 //   - [github.com/apron-chat/apron-server-go/aproncmd] is the aprond command as
 //     a library: flags, a config file, TLS, email delivery, and signals around
 //     this package. Its Main runs a server with extensions added.
@@ -83,6 +86,7 @@
 // [Config].OnStoreError is told, nothing more is written, and Sync returns
 // an error wrapping [ErrStoreFailed].
 //
-// The examples directory of the module holds complete servers built with
-// extensions, each with a test.
+// An extension's tests serve it with aprontest.Serve, and use it as
+// clients do: the examples directory of the module holds complete servers
+// built with extensions, each with such a test.
 package apron
