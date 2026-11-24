@@ -19,7 +19,6 @@ import (
 
 	"github.com/apron-chat/apron-server-go/apron"
 	"github.com/apron-chat/apron-server-go/aproncmd"
-	"github.com/apron-chat/apron-server-go/wire/commands"
 )
 
 func main() { aproncmd.Main(&Moderation{}) }
@@ -60,16 +59,15 @@ func (m *Moderation) Init(r *apron.Registrar) error {
 	r.FilterMessage(m.filter)
 	r.OnEvent(m.notePost)
 	// /slowmode has two forms, which /help lists apart: /slowmode <seconds>
-	// and /slowmode off. Moderators may use them in the room they run in.
-	room := []string{commands.FieldRoom}
-	moderator := apron.May(func(u apron.User, _ apron.Room) bool { return moderates(u) })
-	r.Commands(commands.Command{
+	// and /slowmode off. Moderators may use both in the room they run in.
+	r.Command(apron.Command{
 		Name: "slowmode",
-		Forms: []commands.Form{
-			{Hint: "<seconds>", Help: "limit how often each member may post here", Uses: room, Requires: room, Group: commands.GroupRole, May: moderator},
-			{Name: "slowmode off", Help: "let members post as often as they like here", Uses: room, Requires: room, Group: commands.GroupRole, May: moderator},
+		Uses: []string{apron.FieldRoom}, Requires: []string{apron.FieldRoom}, Group: apron.GroupRole,
+		Available: func(u apron.User, _ apron.Room) bool { return moderates(u) },
+		Forms: []apron.Form{
+			{Usage: "/slowmode <seconds>", Help: "limit how often each member may post here", Run: m.slowmode},
+			{Name: "slowmode off", Help: "let members post as often as they like here", Run: m.slowmodeOff},
 		},
-		Run: m.slowmode,
 	})
 	return nil
 }
@@ -136,27 +134,25 @@ func (m *Moderation) slowed(roomID, userID string) time.Duration {
 	return max(0, time.Until(m.posted[roomID+"\x00"+userID].Add(time.Duration(seconds)*time.Second)))
 }
 
-func (m *Moderation) slowmode(_ context.Context, call *commands.Call) error {
-	cc := apron.CallOf(call) // who ran it, and in which room
-	key := "slowmode/" + cc.Room.ID
-	seconds, err := strconv.Atoi(call.Rest())
-	var notice string
+// slowmode limits how often each member may post in the room; 0 seconds
+// turns slow mode off.
+func (m *Moderation) slowmode(ctx context.Context, call *apron.CommandCall) (map[string]any, error) {
+	seconds, err := strconv.Atoi(call.Args)
 	switch {
-	case call.Form.Name == "slowmode off" || err == nil && seconds == 0:
-		if err := m.host.Store().Delete(key); err != nil {
-			return err
-		}
-		notice = fmt.Sprintf("@%s turned slow mode off", cc.User.ID)
+	case err == nil && seconds == 0:
+		return m.slowmodeOff(ctx, call)
 	case err != nil || seconds < 0 || seconds > 3600:
-		return call.UsageError("at most 3600 seconds")
-	default:
-		if err := m.host.Store().Put(key, seconds); err != nil {
-			return err
-		}
-		notice = fmt.Sprintf("@%s turned slow mode on: one message every %d seconds", cc.User.ID, seconds)
+		return nil, call.UsageError("at most 3600 seconds")
 	}
-	if err := m.host.RoomNotice(cc.Room.ID, notice); err != nil {
-		return err
+	if err := m.host.Store().Put("slowmode/"+call.Room.ID, seconds); err != nil {
+		return nil, err
 	}
-	return call.Done()
+	return nil, m.host.RoomNotice(call.Room.ID, fmt.Sprintf("@%s turned slow mode on: one message every %d seconds", call.User.ID, seconds))
+}
+
+func (m *Moderation) slowmodeOff(_ context.Context, call *apron.CommandCall) (map[string]any, error) {
+	if err := m.host.Store().Delete("slowmode/" + call.Room.ID); err != nil {
+		return nil, err
+	}
+	return nil, m.host.RoomNotice(call.Room.ID, fmt.Sprintf("@%s turned slow mode off", call.User.ID))
 }

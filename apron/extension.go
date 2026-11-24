@@ -1,6 +1,7 @@
 package apron
 
 import (
+	"cmp"
 	"context"
 	"encoding/json/jsontext"
 	"encoding/json/v2"
@@ -183,69 +184,127 @@ func internalError() *Error {
 	return &Error{Code: CodeInternalError, Message: "Something went wrong; try again later"}
 }
 
-// Command is a command of one form, which people run by sending /name as a
-// `command` request (PROTOCOL.md §4.1): the shorthand for the
-// commands.Command that Registrar.Command makes of it, for a command that
-// is its name and arguments, and answers with notices and a result. A
-// command of more forms, such as /poll open and /poll close, one that is
-// Unlisted, or one whose Run replies itself, is a commands.Command, which
-// Registrar.Commands adds.
+// Command is a command, which people run by sending /Name as a `command`
+// request (PROTOCOL.md §4.1), such as /weather <city>: the forms that /help
+// and ext:command_list (apron's extensions/ext_command_list.md) show of it,
+// each with who may use it, and how each runs. Most commands have one form,
+// which the Command's own fields describe. A command of more, such as
+// /slowmode <seconds> and /slowmode off, lists them in Forms, each with a
+// Run of its own, so that adding a form changes nothing about the others.
 type Command struct {
 	// Name is what follows the slash: lowercase letters, digits, and
 	// dashes. It may not be a command the server has. Names are
 	// case-sensitive (ext:command_list): only /name exactly runs it, and
 	// /Name is an unknown command.
 	Name string
-	// Usage and Help describe the command in /help, such as
-	// "/weather <city>" and "show the forecast": its form's Usage and Help
-	// (commands.Form). When Usage starts with the slash and Name, then
-	// whitespace or nothing, what follows is the command's hint in
-	// ext:command_list (apron's extensions/ext_command_list.md), such as
-	// "<city>", which follows its suggested convention: <value>,
-	// [optional], a|b, repeats..., and @user for a mention, its whitespace
-	// collapsed. Any other Usage gives the command no hint, /help shows it
-	// as written, and Open logs it. Help is its description: plain text on
-	// one line, its whitespace collapsed; without it, the command has none.
+	// Usage, Help, Uses, Requires, Group, Available, and Run describe
+	// the command's one form, as Form's do. A command with Forms leaves
+	// Usage, Help, and Run to its forms, and its Uses and Requires, Group,
+	// and Available are those of each form that sets none of its own:
+	// what all its forms share, such as that moderators may use them in
+	// the room they run in.
+	Usage, Help    string
+	Uses, Requires []string
+	Group          string
+	Available      func(u User, r Room) bool
+	Run            func(ctx context.Context, call *CommandCall) (map[string]any, error)
+	// Forms are the command's forms, in the order /help shows them, for a
+	// command of more than one: one for each fixed word that may follow
+	// the name, such as "slowmode off", and one for the name alone, if
+	// it runs alone or with arguments, such as /slowmode <seconds>. A
+	// command line runs the form with the most fixed words that start its
+	// arguments; one that selects no form, such as /poll alone of
+	// /poll open and /poll close, is refused as invalid_params, with the
+	// forms' usage.
+	Forms []Form
+	// Unlisted keeps the command out of /help and ext:command_list, while
+	// it runs as any other: an alias, or a command people are not meant to
+	// find.
+	Unlisted bool
+}
+
+// Form is one form of a command (Command.Forms): the command's name and
+// any fixed words after it, what /help and ext:command_list show of it, who
+// may use it, and how it runs.
+type Form struct {
+	// Name is the words people type after the slash: the command's name,
+	// then any fixed word, such as "slowmode off", each one space from the
+	// next. "" is the command's name alone.
+	Name string
+	// Usage and Help describe the form in /help, such as
+	// "/weather <city>" and "show the forecast". When Usage starts with
+	// the slash and the form's name, then whitespace or nothing, what
+	// follows is the form's hint in ext:command_list, such as "<city>",
+	// which follows its suggested convention: <value>, [optional], a|b,
+	// repeats..., and @user for a mention, its whitespace collapsed. ""
+	// is the slash and the name alone. Any other Usage gives the form no
+	// hint, /help shows it as written, and Open logs it. Help is its
+	// description: plain text on one line, its whitespace collapsed;
+	// without it, the form has none.
 	Usage, Help string
 	// Uses are the fields of the `command` request, besides body.text,
-	// that change what the command does, as ext:command_list lists them:
-	// commands.FieldRoom ("room_id") when it acts on the room it runs in
-	// (CommandCall.Room), and the arguments it reads, FieldReplyTo,
-	// FieldMentions, and FieldEmbeds. Requires are those of Uses that the
-	// command fails without; Run checks them itself, but FieldRoom: a
-	// command that requires it acts only on a room the client names, and
-	// one sent without room_id is refused as invalid_params rather than
-	// run in the default room.
+	// that change what the form does, as ext:command_list lists them:
+	// FieldRoom when it acts on the room it runs in (CommandCall.Room),
+	// and the arguments it reads, FieldReplyTo, FieldMentions, and
+	// FieldEmbeds. Requires are those of Uses that the form fails
+	// without; Run checks them itself, but FieldRoom: a form that requires
+	// it acts only on a room the client names, and one sent without
+	// room_id is refused as invalid_params rather than run in the default
+	// room.
 	Uses, Requires []string
-	// Group says who may use the command, for display in ext:command_list:
-	// one of package commands' Group constants, "all", "guest", "member",
-	// "room", "role", or "admin", from the widest to the narrowest; ""
-	// leaves it out. It changes nothing about who may use it, which is
-	// Available's. Open refuses any other value, on purpose, so that a
-	// typo does not reach clients.
+	// Group says who may use the form, for display in ext:command_list:
+	// one of the Group constants, or "" to leave it out. It changes
+	// nothing about who may use it, which is Available's. Open refuses any
+	// other value, on purpose, so that a typo does not reach clients.
 	Group string
-	// Available reports whether u may run the command in r: the form's May
-	// (see May). nil makes it available to everyone who can see a room.
+	// Available reports whether u may use the form in r. The server asks
+	// it about the room a command runs in, to refuse the command as denied
+	// where it is not, and to list the form in /help; and
+	// ext:command_list about each room the user can see, the default room
+	// first, until it reports one. So it may be called once for each room
+	// the user can see on every listing: keep it cheap and free of side
+	// effects. A user who can see no room may use no command; nil makes
+	// the form available to everyone else.
 	Available func(u User, r Room) bool
-	// Run runs the command. Its replies are notices (CommandCall.Notice,
+	// Run runs the form. Its replies are notices (CommandCall.Notice,
 	// Host.RoomNotice) and the effects of what it does; the result, {} for
 	// nil, with nil slices and maps in it as [] and {}, follows them. An
-	// *Error refuses the command with its code; any other error is logged
-	// and refused as an internal error.
+	// *Error, such as CommandCall.UsageError's, refuses the command with
+	// its code; any other error is logged and refused as an internal
+	// error.
 	Run func(ctx context.Context, call *CommandCall) (map[string]any, error)
 }
 
-// CommandCall is one run of an extension's command, as apron sees it: who
-// ran it, where, and with what. A Command's Run is given it; a
-// commands.Command's Run gets it from its commands.Call with CallOf.
+// The fields of a `command` request, besides body.text, that a command
+// form may use or require (Form.Uses): room_id, when it acts on the room it
+// runs in, and the arguments of §4.1.
+const (
+	FieldRoom     = "room_id"
+	FieldReplyTo  = "reply_to"
+	FieldMentions = "body.mentions"
+	FieldEmbeds   = "body.embeds"
+)
+
+// The groups a command form may name (Form.Group), from the widest to the
+// narrowest: who may use it, for display in ext:command_list only.
+const (
+	GroupAll    = "all"
+	GroupGuest  = "guest"
+	GroupMember = "member"
+	GroupRoom   = "room"
+	GroupRole   = "role"
+	GroupAdmin  = "admin"
+)
+
+// CommandCall is one run of an extension's command: who ran it, where, and
+// with what.
 type CommandCall struct {
 	// User ran the command in Room: the room the request names, or the
 	// default room for one without room_id, which the user can see.
 	User User
 	Room Room
-	// Args is the command line after the command's name, trimmed: its
-	// fixed words too, for a form that has some (commands.Call.Rest is
-	// what follows them).
+	// Args is the command line after the form's name, trimmed, such as
+	// "30" of "/slowmode 30", and "" of "/slowmode off".
 	Args string
 	// ReplyTo is the message_id the command replied to, if any.
 	ReplyTo string
@@ -258,39 +317,115 @@ type CommandCall struct {
 }
 
 // Notice sends a ~private notice (Appendix A.1), Markdown, to the connection
-// that ran the command, before the command's result, as
-// commands.Call.Notice does.
+// that ran the command, before the command's result.
 func (c *CommandCall) Notice(text string) {
 	c.call.Notice(text)
 }
 
-// CallOf is the run of an extension's command that call is, as apron sees
-// it, for the Run of a commands.Command that Registrar.Commands added; nil
-// for a call apron did not make, such as one a test makes.
-func CallOf(call *commands.Call) *CommandCall {
-	cc, _ := call.Data.(*CommandCall)
-	return cc
+// UsageError is the error of a command line the form cannot run, for Run
+// to return: invalid_params, "Usage: " and the form as /help shows it, then
+// detail, if any, such as "Usage: /slowmode <seconds>, at most 3600
+// seconds".
+func (c *CommandCall) UsageError(detail string) *Error {
+	return c.call.UsageError(detail)
 }
 
 var commandNamePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,31}$`)
 
-// May makes a check of who may use a command form a commands.Form's May,
-// from fn, which reports whether u may use it in r, as Command.Available
-// does, with copies of the user and the room. The Router asks it about the
-// room a command runs in, to refuse it as denied and to list it in /help;
-// and ext:command_list about each room the user can see, the default room
-// first, until fn reports one. So fn may be called once for each room the
-// user can see on every listing: keep it cheap and free of side effects.
-// A user who can see no room may use no command, whatever fn says, and a
-// nil fn lets everyone else.
-func May(fn func(u User, r Room) bool) func(ctx context.Context, c *wire.Conn, roomID string) bool {
+// Command adds a command.
+func (r *Registrar) Command(command Command) {
+	r.register("a command", func() error {
+		if !commandNamePattern.MatchString(command.Name) {
+			return fmt.Errorf("command %q: a name is lowercase letters, digits, and dashes", command.Name)
+		}
+		forms, err := command.forms()
+		if err != nil {
+			return err
+		}
+		// Each form takes its hint from Usage, and its Help is collapsed
+		// into one line of plain text in /help's Markdown list; the Router
+		// checks the fields and the group, as package commands does for
+		// any backend. A form's May asks Available, outside s.mu, and the
+		// Router refuses the command where it is not available, and a
+		// command line that selects no form; Run checks the other fields
+		// it requires itself, but room_id, which the Router does. The
+		// Router's command runs the Run of the form the line selects.
+		runs := make(map[string]func(context.Context, *CommandCall) (map[string]any, error), len(forms))
+		listed := make([]commands.Form, len(forms))
+		for i, f := range forms {
+			name := cmp.Or(f.Name, command.Name)
+			if f.Run == nil {
+				if len(command.Forms) == 0 {
+					return fmt.Errorf("command /%s has no Run", command.Name)
+				}
+				return fmt.Errorf("command /%s: form %q has no Run", command.Name, name)
+			}
+			runs[name] = f.Run
+			listed[i] = commands.Form{
+				Name: f.Name, Usage: f.Usage, Help: f.Help, Group: f.Group,
+				Uses: slices.Clone(f.Uses), Requires: slices.Clone(f.Requires), May: available(f.Available),
+			}
+		}
+		h := r.Host
+		err = r.s.commands.router.Add(commands.Command{
+			Name: command.Name, Forms: listed, Unlisted: command.Unlisted,
+			Run: func(ctx context.Context, call *commands.Call) error {
+				return h.runCommand(ctx, call, runs[call.Form.Name])
+			},
+			RunChecks: commands.CheckRequires,
+		})
+		if err != nil {
+			return err
+		}
+		// /help shows any Usage that does not start with "/name" and
+		// whitespace as written.
+		for _, f := range forms {
+			name := cmp.Or(f.Name, command.Name)
+			if _, ok := commands.ParseUsage(name, f.Usage); !ok && f.Usage != "" {
+				r.logger.Warn("a command's Usage does not start with its name, so ext:command_list gives it no hint", "command", name, "usage", f.Usage)
+			}
+		}
+		return nil
+	})
+}
+
+// forms are the command's forms: its Forms, each with the command's Uses
+// and Requires, Group, and Available where it sets none of its own, or the
+// one form that the command's own fields describe.
+func (c Command) forms() ([]Form, error) {
+	if len(c.Forms) == 0 {
+		return []Form{{
+			Usage: c.Usage, Help: c.Help, Uses: c.Uses, Requires: c.Requires,
+			Group: c.Group, Available: c.Available, Run: c.Run,
+		}}, nil
+	}
+	if c.Usage != "" || c.Help != "" || c.Run != nil {
+		return nil, fmt.Errorf("command /%s has Forms, which have its Usage, Help, and Run", c.Name)
+	}
+	forms := slices.Clone(c.Forms)
+	for i := range forms {
+		f := &forms[i]
+		if f.Uses == nil && f.Requires == nil {
+			f.Uses, f.Requires = c.Uses, c.Requires
+		}
+		f.Group = cmp.Or(f.Group, c.Group)
+		if f.Available == nil {
+			f.Available = c.Available
+		}
+	}
+	return forms, nil
+}
+
+// available makes a form's Available a commands.Form's May, which reports
+// whether the connection's user may use the form in the room roomID, or,
+// for "", in some room it can see: fn runs outside s.mu, with copies of the
+// user and the rooms made under it.
+func available(fn func(u User, r Room) bool) func(ctx context.Context, c *wire.Conn, roomID string) bool {
 	return func(_ context.Context, wc *wire.Conn, roomID string) bool {
 		c, ok := wire.DataOf[*client](wc)
 		if !ok {
 			return false
 		}
-		// fn runs outside s.mu, with views of the user and rooms made
-		// under it.
 		s := c.server
 		s.mu.RLock()
 		user := userViewOf(c.user)
@@ -314,124 +449,47 @@ func May(fn func(u User, r Room) bool) func(ctx context.Context, c *wire.Conn, r
 	}
 }
 
-// Command adds a command of one form.
-func (r *Registrar) Command(command Command) {
-	r.register("a command", func() error {
-		if command.Run == nil {
-			return fmt.Errorf("command /%s has no Run", command.Name)
-		}
-		// The command's one form takes the hint from Usage, collapses Help
-		// into one line of plain text in /help's Markdown list, and checks
-		// the fields and the group, as package commands does for any
-		// backend. Its May asks Available, outside s.mu, and the Router
-		// refuses it where it is not available; Run checks the other
-		// fields it requires itself, but room_id, which the Router does.
-		uses, requires := slices.Clone(command.Uses), slices.Clone(command.Requires)
-		err := r.addCommand(commands.Command{
-			Name: command.Name,
-			Forms: []commands.Form{{
-				Usage: command.Usage, Help: command.Help, Group: command.Group,
-				Uses: uses, Requires: requires, May: May(command.Available),
-			}},
-			Run:       func(ctx context.Context, call *commands.Call) error { return r.runCommand(ctx, call, command) },
-			RunChecks: commands.CheckForm | commands.CheckRequires,
-		})
-		if err != nil {
-			return err
-		}
-		// /help shows any Usage that does not start with "/name" and
-		// whitespace as written.
-		if _, ok := commands.ParseUsage(command.Name, command.Usage); !ok && command.Usage != "" {
-			r.logger.Warn("a command's Usage does not start with its name, so ext:command_list gives it no hint", "command", command.Name, "usage", command.Usage)
-		}
-		return nil
-	})
-}
-
-// runCommand is a Command's Run: its result, which it renders as an
-// object, goes out as a CommandResult, whose Unknown keeps any field of the
-// extension's own.
-func (h *Host) runCommand(ctx context.Context, call *commands.Call, command Command) error {
-	result, err := command.Run(ctx, CallOf(call))
+// runCommand runs a form of an extension's command, after the core
+// commands' checks (beforeCommand), in the room they checked, unless it has
+// gone since: its result, which it renders as an object, goes out as a
+// CommandResult, whose Unknown keeps any field of the extension's own, and
+// its error as the extension's.
+func (h *Host) runCommand(ctx context.Context, call *commands.Call, run func(context.Context, *CommandCall) (map[string]any, error)) error {
+	c, err := clientOf(call.Conn)
 	if err != nil {
 		return err
 	}
-	if result == nil {
-		result = map[string]any{}
-	}
-	encoded, err := encodeResult(result)
-	if err != nil {
-		return fmt.Errorf("/%s returned a result that is not JSON: %w", command.Name, err)
+	cc, callErr := c.server.commandCall(c, call)
+	if callErr != nil {
+		return callErr
 	}
 	var typed wire.CommandResult
-	if err := json.Unmarshal(encoded, &typed); err != nil {
-		return fmt.Errorf("/%s returned a result that is not an object, or embeds that are not embed writes (§4.8.3): %w", command.Name, err)
+	result, runErr := run(ctx, cc)
+	if runErr == nil {
+		typed, runErr = commandResult(call.Form.Name, result)
+	}
+	if runErr != nil {
+		return replyError(h.protocolError(runErr))
 	}
 	_ = call.Reply.Send(typed)
 	return nil
 }
 
-// Commands adds commands in package commands' terms, which any wire
-// backend's commands are in: forms with fixed words, such as /poll open
-// and /poll close, each with what it uses and requires, its group, and who
-// may use it (Form.May, which May makes from a check on a User and a
-// Room); commands that are Unlisted; and commands whose Run checks some of
-// what the Router would itself, with errors of its own (RunChecks).
-//
-// Names follow Command.Name's. A form without May is for everyone who can
-// see a room. Before any command runs, the server checks that its room,
-// the default room for a command without room_id, is one the user can see,
-// and that its reply_to is a message the user can see; then the Router
-// checks the command line as package commands says.
-//
-// Run replies as package commands says, with call.Notice and call.Done or
-// call.Reply, or returns an error: an *Error refuses the command with its
-// code, and any other is logged and refused as an internal error. It runs
-// outside the server's lock, with call.Params.RoomID set to the command's
-// room; CallOf(call) is the run as apron sees it, such as the user and the
-// room as extensions see them.
-func (r *Registrar) Commands(list ...commands.Command) {
-	for _, command := range list {
-		r.register("a command", func() error {
-			if command.Run == nil {
-				return fmt.Errorf("command /%s has no Run", command.Name)
-			}
-			return r.addCommand(command)
-		})
+// commandResult is the result of the form name's Run as a CommandResult,
+// or the error of one that is none.
+func commandResult(name string, result map[string]any) (wire.CommandResult, error) {
+	var typed wire.CommandResult
+	if result == nil {
+		result = map[string]any{}
 	}
-}
-
-// addCommand adds an extension's command to the server's Router, which
-// runs it after the core commands' checks (beforeCommand): its Run, with
-// the run as apron sees it in call.Data, and its error as the extension's.
-// It is called holding s.mu, which the Router's Add does not need.
-func (r *Registrar) addCommand(command commands.Command) error {
-	if !commandNamePattern.MatchString(command.Name) {
-		return fmt.Errorf("command %q: a name is lowercase letters, digits, and dashes", command.Name)
+	encoded, err := encodeResult(result)
+	if err != nil {
+		return typed, fmt.Errorf("/%s returned a result that is not JSON: %w", name, err)
 	}
-	command.Forms = slices.Clone(command.Forms)
-	if len(command.Forms) == 0 {
-		command.Forms = []commands.Form{{}}
+	if err := json.Unmarshal(encoded, &typed); err != nil {
+		return typed, fmt.Errorf("/%s returned a result that is not an object, or embeds that are not embed writes (§4.8.3): %w", name, err)
 	}
-	for i := range command.Forms {
-		if command.Forms[i].May == nil {
-			command.Forms[i].May = May(nil)
-		}
-	}
-	run, h := command.Run, r.Host
-	command.Run = func(ctx context.Context, call *commands.Call) error {
-		c, err := clientOf(call.Conn)
-		if err != nil {
-			return err
-		}
-		cc, callErr := c.server.commandCall(c, call)
-		if callErr != nil {
-			return callErr
-		}
-		call.Data = cc
-		return replyError(h.protocolError(run(ctx, call)))
-	}
-	return r.s.commands.router.Add(command)
+	return typed, nil
 }
 
 // commandCall is the run of an extension's command as apron sees it, in
@@ -445,7 +503,7 @@ func (s *Server) commandCall(c *client, call *commands.Call) (*CommandCall, *Err
 		return nil, invalidParams("Unknown room %q", call.Params.RoomID)
 	}
 	return &CommandCall{
-		User: userViewOf(c.user), Room: s.roomViewLocked(r), Args: call.Args, ReplyTo: replyIDOf(call.Params),
+		User: userViewOf(c.user), Room: s.roomViewLocked(r), Args: call.Rest(), ReplyTo: replyIDOf(call.Params),
 		Mentions: mentions(body), Body: cloneObject(body), call: call,
 	}, nil
 }

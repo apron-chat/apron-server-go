@@ -29,7 +29,7 @@ const (
 // the room and the reply (beforeCommand). The server's own commands check
 // the rest themselves, with their own errors (commands.CheckAll), and run
 // while they hold s.mu; the extensions' run outside it, and the Router
-// asks whether they are available (their forms' May, such as May's),
+// asks whether they are available (their forms' May, which asks Available),
 // also outside it.
 
 // serverCommands are the core commands, then the extensions'. The Router

@@ -30,7 +30,6 @@ import (
 
 	"github.com/apron-chat/apron-server-go/apron"
 	"github.com/apron-chat/apron-server-go/aproncmd"
-	"github.com/apron-chat/apron-server-go/wire/commands"
 )
 
 func main() { aproncmd.Main(&Private{}) }
@@ -81,56 +80,62 @@ func (p *Private) Init(r *apron.Registrar) error {
 		r.Logger().Warn("nobody may sign in; add someone with --private.allow")
 	}
 
-	// Admins may use every command of the extension, in any room.
-	admin := apron.May(func(u apron.User, _ apron.Room) bool { return u.HasRole(apron.RoleAdmin) })
-	forAdmins := func(hint, help string) []commands.Form {
-		return []commands.Form{{Hint: hint, Help: help, Group: commands.GroupAdmin, May: admin}}
-	}
-	r.Commands(
-		commands.Command{Name: "allow", Forms: forAdmins("<address|user:id|external:subject>", "let someone sign in"), Run: p.allow},
-		commands.Command{Name: "disallow", Forms: forAdmins("<address|user:id|external:subject>", "sign someone out, and keep them out"), Run: p.disallow},
-		commands.Command{Name: "allowed", Forms: forAdmins("", "list who may sign in"), Run: p.list},
-		commands.Command{Name: "invite", Forms: forAdmins("[<user_id>]", "invite one person to make an account with a passkey"), Run: p.invite},
-	)
+	admin := func(u apron.User, _ apron.Room) bool { return u.HasRole(apron.RoleAdmin) }
+	r.Command(apron.Command{
+		Name: "allow", Usage: "/allow <address|user:id|external:subject>", Help: "let someone sign in",
+		Group: apron.GroupAdmin, Available: admin, Run: p.allow,
+	})
+	r.Command(apron.Command{
+		Name: "disallow", Usage: "/disallow <address|user:id|external:subject>", Help: "sign someone out, and keep them out",
+		Group: apron.GroupAdmin, Available: admin, Run: p.disallow,
+	})
+	r.Command(apron.Command{
+		Name: "allowed", Help: "list who may sign in",
+		Group: apron.GroupAdmin, Available: admin, Run: p.list,
+	})
+	r.Command(apron.Command{
+		Name: "invite", Usage: "/invite [<user_id>]", Help: "invite one person to make an account with a passkey",
+		Group: apron.GroupAdmin, Available: admin, Run: p.invite,
+	})
 	return nil
 }
 
-func (p *Private) allow(_ context.Context, call *commands.Call) error {
+func (p *Private) allow(_ context.Context, call *apron.CommandCall) (map[string]any, error) {
 	principal, err := apron.ParsePrincipal(call.Args)
 	if err != nil {
-		return call.UsageError("")
+		return nil, call.UsageError("")
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if err := p.host.Store().Put(allowedKeys+principal.String(), true); err != nil {
-		return err
+		return nil, err
 	}
 	if err := p.allowlist.Allow(principal); err != nil {
-		return err
+		return nil, err
 	}
 	call.Notice(fmt.Sprintf("`%s` may sign in.", principal))
-	return call.Done()
+	return nil, nil
 }
 
-func (p *Private) disallow(_ context.Context, call *commands.Call) error {
+func (p *Private) disallow(_ context.Context, call *apron.CommandCall) (map[string]any, error) {
 	principal, err := apron.ParsePrincipal(call.Args)
 	if err != nil {
-		return call.UsageError("")
+		return nil, call.UsageError("")
 	}
 	if p.flagged[principal] {
-		return apron.Denied(fmt.Sprintf("`%s` is allowed by --private.allow; remove it there, and restart", principal))
+		return nil, apron.Denied(fmt.Sprintf("`%s` is allowed by --private.allow; remove it there, and restart", principal))
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if err := p.host.Store().Delete(allowedKeys + principal.String()); err != nil {
-		return err
+		return nil, err
 	}
 	p.allowlist.Disallow(principal)
 	call.Notice(fmt.Sprintf("`%s` may no longer sign in, and is signed out.", principal))
-	return call.Done()
+	return nil, nil
 }
 
-func (p *Private) list(_ context.Context, call *commands.Call) error {
+func (p *Private) list(_ context.Context, call *apron.CommandCall) (map[string]any, error) {
 	var b strings.Builder
 	b.WriteString("May sign in:\n")
 	for _, principal := range p.allowlist.Principals() {
@@ -141,19 +146,19 @@ func (p *Private) list(_ context.Context, call *commands.Call) error {
 		fmt.Fprintf(&b, "- `%s`%s\n", principal, note)
 	}
 	call.Notice(b.String())
-	return call.Done()
+	return nil, nil
 }
 
-func (p *Private) invite(ctx context.Context, call *commands.Call) error {
+func (p *Private) invite(ctx context.Context, call *apron.CommandCall) (map[string]any, error) {
 	userID := call.Args
 	invitation, err := p.host.Invite(ctx, apron.InvitationOptions{UserID: userID})
 	if err != nil && userID != "" {
-		return call.UsageError("")
+		return nil, call.UsageError("")
 	}
 	if err != nil {
-		return err
+		return nil, err
 	}
 	call.Notice(fmt.Sprintf("This invitation makes one account with a passkey until %s:\n\n`%s`",
 		invitation.Expires.UTC().Format("2006-01-02 15:04 MST"), invitation.Token))
-	return call.Done()
+	return nil, nil
 }

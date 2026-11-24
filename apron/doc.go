@@ -36,9 +36,9 @@
 // and its Init registers what it adds with its [Registrar], which works only
 // during Init:
 //
-//   - commands ([Registrar.Command], or [Registrar.Commands] in the terms
-//     of package wire/commands, for forms such as /poll open and
-//     /poll close) and request methods ([Registrar.Method]);
+//   - commands ([Registrar.Command]), of one form or more, such as
+//     /slowmode <seconds> and /slowmode off, and request methods
+//     ([Registrar.Method]);
 //   - HTTP routes ([Registrar.Handle]);
 //   - filters that change or refuse messages before they are saved
 //     ([Registrar.FilterMessage]);
