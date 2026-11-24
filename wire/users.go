@@ -167,6 +167,38 @@ func (u User) Patch(old User) (CurrentUser, bool) {
 	return patch, changed
 }
 
+// Complete returns u as a complete current object (§3.3.1) for a client
+// that keeps old, as a me result carries it (§3.3.2): all of u, with
+// Cleared naming each field old had and u has not, which it carries as its
+// empty value, as u.Patch(old) does.
+func (u User) Complete(old User) CurrentUser {
+	patch, _ := u.Patch(old)
+	return CurrentUser{User: u, Cleared: patch.Cleared}
+}
+
+// ApplyMe returns old with what a me request changes (§3.3.2), merged as
+// the protocol merges it: a name or avatar the request carries replaces
+// old's, and "" clears it; its ext merges into old's (MergeExt). Status is
+// left as it was: the chosen status is capability status's (§4.5.1),
+// which others see as the shown status, so a backend with it applies it
+// itself, and publishes the two views with PublishUserChange. The backend
+// checks the result against its own policy, such as a name's length, or
+// normalizes it, before it makes it the user's. The result shares nothing
+// with old.
+func ApplyMe(old User, p MeParams) User {
+	u := old.clone()
+	if p.Name != nil {
+		u.Name = *p.Name
+	}
+	if p.Avatar != nil {
+		u.Avatar = *p.Avatar
+	}
+	if p.Ext != nil {
+		u.Ext = MergeExt(old.Ext, p.Ext).clone()
+	}
+	return u
+}
+
 // fieldIndex is the place of a field among userFields.
 func fieldIndex(name string) int {
 	return slices.IndexFunc(userFields, func(f struct{ name, empty string }) bool { return f.name == name })
@@ -225,6 +257,38 @@ func (UserUpdate) Method() string { return "user" }
 // caller's goroutine, so it may read what that lock guards.
 func (s *Server) PublishUser(old, cur User, shares func(*Conn) bool) bool {
 	return s.PublishUserChange(UserChange{Old: old, New: cur}, shares)
+}
+
+// SendMe answers a me request that changed the user from old to cur, as
+// ProfileHandler says: it tells the change to the user's other
+// connections, and to the other signed-in connections for which shares
+// returns true, or every one when shares is nil (PublishUserChange, with
+// the request's connection its Except), then sends the result, all of cur
+// with the fields the change cleared (cur.Complete(old)), which makes cur
+// the connection's user, and returns what Send returns. A me that changed
+// nothing is answered with cur, and tells no one.
+//
+// It is for a backend whose user is one object to everyone; one whose own
+// connections see another than others do, such as the chosen status and
+// the shown one (§4.5.2), publishes with PublishUserChange and sends
+// cur.Complete(old) itself. Like PublishUser, it never blocks, and is
+// meant to be called while the backend holds the lock of the change;
+// shares is called in the caller's goroutine.
+//
+//	func (b *Backend) Me(ctx context.Context, c *wire.Conn, p wire.MeParams, reply wire.Reply[wire.CurrentUser]) error {
+//		b.mu.Lock()
+//		defer b.mu.Unlock()
+//		old := *c.User()
+//		cur := wire.ApplyMe(old, p)
+//		if len(cur.Name) > 64 {
+//			return wire.InvalidParams("A name is at most 64 bytes")
+//		}
+//		// Everyone shares the one room: shares is nil.
+//		return b.server.SendMe(reply, old, cur, nil)
+//	}
+func (s *Server) SendMe(reply Reply[CurrentUser], old, cur User, shares func(*Conn) bool) error {
+	s.PublishUserChange(UserChange{Old: old, New: cur, Except: reply.Request().Conn()}, shares)
+	return reply.Send(cur.Complete(old))
 }
 
 // UserChange is a change of a user (§3.3.3) as its two audiences see it:

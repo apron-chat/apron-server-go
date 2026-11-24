@@ -29,11 +29,14 @@ type Server struct {
 
 	// The handlers of the protocol's requests: each that is set adds its
 	// requests, with their params checked, and its capability in the server
-	// frame (§3.1). Messages and Edits share the message request.
-	Messages  MessageHandler  // message (§3.5.1)
+	// frame (§3.1). Messages and Profiles are the core's, which every
+	// server needs, and the Server warns as it starts serving without
+	// either; the others are capabilities. Messages and Edits share the
+	// message request.
+	Messages  MessageHandler  // message (§3.5.1), core
+	Profiles  ProfileHandler  // me (§3.3.2), core
 	Edits     EditHandler     // message with message_id, capability edit (§4.4)
 	Commands  CommandHandler  // command, capability command (§4.1)
-	Profiles  ProfileHandler  // me (§3.3.2)
 	Rooms     RoomHandler     // room_*, capability rooms (§4.2)
 	History   HistoryHandler  // history, capability history (§4.3)
 	Status    StatusHandler   // status, capability status (§4.5)
@@ -319,6 +322,8 @@ func (s *Server) ServeTransport(ctx context.Context, t Transport, remote net.Add
 		s.logger().Info("wire: serving", "capabilities", s.capabilities())
 		if _, ok := s.method("message"); !ok {
 			s.logger().Warn("wire: the server takes no messages, which every server should (§3.6): set Server.Messages, or Handle message")
+		} else if _, ok := s.method("me"); !ok {
+			s.logger().Warn("wire: the server answers no me, which clients count on to change a user's profile (§3.3.2): set Server.Profiles, or Handle me")
 		}
 	})
 	ctx, cancel := context.WithCancel(ctx)

@@ -2,6 +2,8 @@ package wire_test
 
 import (
 	"context"
+	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -179,4 +181,75 @@ func TestPublishUserChange(t *testing.T) {
 		t.Fatalf("the excepted connection's identity is %+v", u)
 	}
 	marker("8")
+}
+
+// ApplyMe merges a me request as the protocol does, and leaves the status
+// and what old holds alone; Complete is the whole user, with what the
+// change cleared.
+func TestApplyMeAndComplete(t *testing.T) {
+	old := wire.User{UserID: "ada", Name: "Ada", Avatar: "https://a/1", Roles: []string{"admin"}, Status: "online", Ext: wire.Ext{"tz": []byte(`"UTC"`), "irc": []byte(`{"nick":"ada_"}`)}}
+	name, empty, status := "Ada L", "", "dnd"
+	cur := wire.ApplyMe(old, wire.MeParams{Name: &name, Avatar: &empty, Status: &status, Ext: wire.Ext{"tz": []byte(`""`), "lang": []byte(`"en"`)}})
+	if cur.Name != "Ada L" || cur.Avatar != "" || cur.Status != "online" || !slices.Equal(cur.Roles, old.Roles) ||
+		len(cur.Ext) != 2 || string(cur.Ext["irc"]) != `{"nick":"ada_"}` || string(cur.Ext["lang"]) != `"en"` {
+		t.Fatalf("ApplyMe: %+v", cur)
+	}
+	if old.Name != "Ada" || old.Avatar == "" || len(old.Ext) != 2 || string(old.Ext["tz"]) != `"UTC"` {
+		t.Fatalf("ApplyMe changed old: %+v", old)
+	}
+	cur.Roles[0] = "changed"
+	if old.Roles[0] != "admin" {
+		t.Fatal("ApplyMe's result shares old's roles")
+	}
+	if same := wire.ApplyMe(old, wire.MeParams{}); !reflect.DeepEqual(same, old) {
+		t.Fatalf("an empty me: %+v", same)
+	}
+
+	cur.Roles = nil
+	complete := cur.Complete(old)
+	if !reflect.DeepEqual(complete.User, cur) || !slices.Equal(complete.Cleared, []string{"avatar", "roles"}) {
+		t.Fatalf("Complete: %+v", complete)
+	}
+	raw, err := wire.Marshal(complete)
+	if err != nil || string(raw) != `{"user_id":"ada","name":"Ada L","status":"online","ext":{"irc":{"nick":"ada_"},"lang":"en"},"avatar":"","roles":[]}` {
+		t.Fatalf("Complete encodes as %s %v", raw, err)
+	}
+	if other := cur.Complete(wire.User{UserID: "bob", Avatar: "x"}); len(other.Cleared) != 0 {
+		t.Fatalf("Complete for another user clears %v", other.Cleared)
+	}
+}
+
+// A Server that takes messages but answers no me says so as it starts
+// serving.
+func TestNoMeWarning(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		profiles bool
+		want     string
+	}{
+		{"without me", false, "answers no me"},
+		{"with me", true, ""},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var log logged
+			s := &wire.Server{Backend: &backend{}, Messages: &backend{}, Logger: log.logger()}
+			if test.profiles {
+				s.Profiles = profiles{}
+			}
+			c := connect(t, s)
+			if err := c.Sync(wait(t)); err != nil {
+				t.Fatal(err)
+			}
+			out := log.String()
+			if got := strings.Contains(out, "answers no me"); got != (test.want != "") || strings.Contains(out, "takes no messages") {
+				t.Errorf("logged %s", out)
+			}
+		})
+	}
+}
+
+type profiles struct{}
+
+func (profiles) Me(_ context.Context, c *wire.Conn, p wire.MeParams, reply wire.Reply[wire.CurrentUser]) error {
+	return reply.Send(wire.CurrentUser{User: *c.User()})
 }

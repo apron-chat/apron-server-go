@@ -60,12 +60,18 @@ type EditHandler interface {
 	Edit(ctx context.Context, c *Conn, p EditParams, reply Reply[MessageResult]) error
 }
 
-// ProfileHandler handles me (§3.3.2): it changes the user's profile and
-// answers with the complete current user object, with the fields the
-// change cleared (CurrentUser.Cleared), whose User becomes the
-// connection's (Conn.SetUser) as Send queues it. The backend tells the
-// user's other connections, and those who share a room with the user,
-// itself (§3.3.3), such as with Server.PublishUserChange, c its Except.
+// ProfileHandler handles me (§3.3.2), the core request that changes the
+// user's own profile, such as a rename: every server needs it, as it needs
+// a MessageHandler, since clients count on it, and the Server warns as it
+// starts serving without one. It answers with the complete current user
+// object, with the fields the change cleared (CurrentUser.Cleared), whose
+// User becomes the connection's (Conn.SetUser) as Send queues it. The
+// backend tells the user's other connections, and those who share a room
+// with the user, itself (§3.3.3), such as with Server.PublishUserChange, c
+// its Except.
+//
+// ApplyMe makes the request's changes, and Server.SendMe does the rest:
+// it tells the others, and sends the result.
 type ProfileHandler interface {
 	Me(ctx context.Context, c *Conn, p MeParams, reply Reply[CurrentUser]) error
 }

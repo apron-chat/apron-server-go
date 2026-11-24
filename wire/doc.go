@@ -44,11 +44,19 @@
 // # Backends and handlers
 //
 // A [Backend] says who the server is (Hello) and who each connection is
-// (Auth). Everything else is added one capability at a time, by setting a
-// handler field of the [Server] — Messages ([MessageHandler], message),
-// Edits ([EditHandler], edit), Profiles ([ProfileHandler], me), Commands
-// ([CommandHandler], command), Rooms ([RoomHandler], rooms), History
-// ([HistoryHandler], history), Status ([StatusHandler], status), Reactions
+// (Auth). Two handler fields of the [Server] are the core, which every
+// server sets: Messages ([MessageHandler], message), with which clients
+// post, and Profiles ([ProfileHandler], me), with which they change the
+// user's own profile, such as a rename (§3.3.2). The Server warns as it
+// starts serving without either. A me handler makes the request's changes
+// with [ApplyMe], checks them, and answers with [Server.SendMe], which
+// tells the user's other connections and those who share a room, and
+// sends the complete object as the result.
+//
+// Everything else is added one capability at a time, by setting another
+// handler field — Edits ([EditHandler], edit), Commands ([CommandHandler],
+// command), Rooms ([RoomHandler], rooms), History ([HistoryHandler],
+// history), Status ([StatusHandler], status), Reactions
 // ([ReactionHandler], reactions), Activity ([ActivityHandler], activity) —
 // each of which adds its requests, with their params checked, and its
 // capability in the server frame. One value may be every handler, or each
