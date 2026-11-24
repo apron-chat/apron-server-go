@@ -109,16 +109,16 @@ func Notice(roomID, text string) Message {
 	return Message{RoomID: roomID, From: Private, Body: &Body{Text: text}}
 }
 
-// AuthParams are the params of auth (§3.2). Raw holds every param, for the
-// schemes whose fields are not here, such as webauthn's.
+// AuthParams are the params of auth (§3.2). A scheme whose fields are not
+// here, such as webauthn's, reads them from the request's Decoder
+// (Reply.Request).
 type AuthParams struct {
-	Scheme string         `json:"scheme"`
-	Name   string         `json:"name,omitempty"`
-	UserID string         `json:"user_id,omitempty"`
-	Agent  string         `json:"agent,omitempty"`
-	Token  string         `json:"token,omitempty"`
-	Ext    Ext            `json:"ext,omitempty"`
-	Raw    jsontext.Value `json:"-"`
+	Scheme string `json:"scheme"`
+	Name   string `json:"name,omitempty"`
+	UserID string `json:"user_id,omitempty"`
+	Agent  string `json:"agent,omitempty"`
+	Token  string `json:"token,omitempty"`
+	Ext    Ext    `json:"ext,omitempty"`
 }
 
 // AuthResult is the result of auth (§3.2). A result with You nil

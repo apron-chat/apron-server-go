@@ -86,7 +86,7 @@ func TestParsers(t *testing.T) {
 	}
 
 	p, err := parseAuth(req(`{"scheme":"token","token":"t","ext":{"x": [1, 2]}}`))
-	if err != nil || p.Scheme != "token" || p.Token != "t" || string(p.Ext["x"]) != "[1,2]" || !strings.Contains(string(p.Raw), `"token"`) {
+	if err != nil || p.Scheme != "token" || p.Token != "t" || string(p.Ext["x"]) != "[1,2]" {
 		t.Fatalf("parseAuth: %+v %v", p, err)
 	}
 	if p, err := parseReact(req(`{"message_id":"4","emojis":[]}`)); err != nil || p.Emojis == nil {

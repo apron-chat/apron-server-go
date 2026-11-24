@@ -81,52 +81,52 @@ func read[T any](d *Decoder, name string, p Requirement, get func(string) (T, bo
 }
 
 // String reads a string param.
-func (d *Decoder) String(name string, p Requirement) string {
-	return read(d, name, p, d.fields.stringParam)
+func (d *Decoder) String(name string, r Requirement) string {
+	return read(d, name, r, d.fields.stringParam)
 }
 
 // ID reads a room_id or user_id param, which is not empty and has no
 // whitespace or control characters (§2.4).
-func (d *Decoder) ID(name string, p Requirement) string {
-	return read(d, name, p, d.fields.idParam)
+func (d *Decoder) ID(name string, r Requirement) string {
+	return read(d, name, r, d.fields.idParam)
 }
 
 // Bool reads a boolean param.
-func (d *Decoder) Bool(name string, p Requirement) bool {
-	return read(d, name, p, d.fields.boolParam)
+func (d *Decoder) Bool(name string, r Requirement) bool {
+	return read(d, name, r, d.fields.boolParam)
 }
 
 // Object reads an object param, with its values raw.
-func (d *Decoder) Object(name string, p Requirement) Fields {
-	return read(d, name, p, d.fields.objectParam)
+func (d *Decoder) Object(name string, r Requirement) Fields {
+	return read(d, name, r, d.fields.objectParam)
 }
 
 // Ext reads an ext param (§4.13): an object whose values are any JSON,
 // kept as they arrived, compacted; nil when left out.
-func (d *Decoder) Ext(name string, p Requirement) Ext {
-	return read(d, name, p, d.fields.extParam)
+func (d *Decoder) Ext(name string, r Requirement) Ext {
+	return read(d, name, r, d.fields.extParam)
 }
 
 // LogID reads a log_id param, such as a history bound (§2.1): a decimal
 // string of a non-negative number below 2^53, as ParseLogID reads it.
-func (d *Decoder) LogID(name string, p Requirement) LogID {
-	return read(d, name, p, d.fields.logIDParam)
+func (d *Decoder) LogID(name string, r Requirement) LogID {
+	return read(d, name, r, d.fields.logIDParam)
 }
 
 // MessageID reads a message_id param (§2.2): a log_id that is not 0.
-func (d *Decoder) MessageID(name string, p Requirement) LogID {
-	return read(d, name, p, d.fields.messageIDParam)
+func (d *Decoder) MessageID(name string, r Requirement) LogID {
+	return read(d, name, r, d.fields.messageIDParam)
 }
 
 // MessageRef reads a reference to a message (§3.5.4), {"message_id": ...}.
-func (d *Decoder) MessageRef(name string, p Requirement) MessageRef {
-	id := read(d, name, p, d.fields.messageRefParam)
+func (d *Decoder) MessageRef(name string, r Requirement) MessageRef {
+	id := read(d, name, r, d.fields.messageRefParam)
 	return MessageRef{MessageID: id}
 }
 
 // Count reads a positive integer param, such as a limit.
-func (d *Decoder) Count(name string, p Requirement) int {
-	return read(d, name, p, d.fields.countParam)
+func (d *Decoder) Count(name string, r Requirement) int {
+	return read(d, name, r, d.fields.countParam)
 }
 
 // IfPresent reads an optional param with one of d's methods, such as

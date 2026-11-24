@@ -144,7 +144,6 @@ func parseAuth(r *Request) (AuthParams, error) {
 		Agent:  d.String("agent", Optional),
 		Token:  d.String("token", Optional),
 		Ext:    d.Ext("ext", Optional),
-		Raw:    r.params,
 	}
 	if d.Err() == nil && p.Scheme == "" {
 		d.Fail(Missing("scheme"))
