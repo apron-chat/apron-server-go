@@ -59,7 +59,7 @@ func (b *panicky) Auth(ctx context.Context, c *wire.Conn, p wire.AuthParams, rep
 // A panicking handler is answered error/internal_error, its outcome is not
 // kept, and the connection goes on.
 func TestHandlerPanics(t *testing.T) {
-	s := wired(&wire.Server{Backend: &panicky{}, Logger: slog.New(slog.DiscardHandler)})
+	s := wired(&panicky{}, wire.Config{Logger: slog.New(slog.DiscardHandler)})
 	var calls atomic.Int64
 	s.Handle("boom", wire.Handler{Serve: func(_ context.Context, _ *wire.Conn, r *wire.Request) error {
 		if calls.Add(1) == 1 {
@@ -99,7 +99,7 @@ func TestHandlerPanics(t *testing.T) {
 func TestErrorAfterReply(t *testing.T) {
 	var logged bytes.Buffer
 	var mu sync.Mutex
-	s := wired(&wire.Server{Backend: &backend{}, Logger: slog.New(slog.NewTextHandler(lockedWriter{&mu, &logged}, &slog.HandlerOptions{Level: slog.LevelDebug}))})
+	s := wired(&backend{}, wire.Config{Logger: slog.New(slog.NewTextHandler(lockedWriter{&mu, &logged}, &slog.HandlerOptions{Level: slog.LevelDebug}))})
 	s.Handle("late", wire.Handler{Serve: func(_ context.Context, _ *wire.Conn, r *wire.Request) error {
 		r.Reply(nil)
 		return wire.Denied("too late")
@@ -151,7 +151,7 @@ func (*oneUser) Auth(_ context.Context, c *wire.Conn, _ wire.AuthParams, reply w
 // when its own connection ends.
 func TestDuplicateWaitEndsWithConnection(t *testing.T) {
 	b := &oneUser{}
-	s := wired(&wire.Server{Backend: b})
+	s := wired(b, wire.Config{})
 	started, release := make(chan struct{}), make(chan struct{})
 	defer close(release)
 	s.Handle("slow", wire.Handler{Serve: func(context.Context, *wire.Conn, *wire.Request) error {
@@ -184,7 +184,7 @@ func TestDuplicateWaitEndsWithConnection(t *testing.T) {
 // Local notifications are handled, and a Call of a notification-only method
 // returns at once.
 func TestLocalNotify(t *testing.T) {
-	s := wired(&wire.Server{Backend: &backend{}})
+	s := wired(&backend{}, wire.Config{})
 	got := make(chan string, 1)
 	s.HandleNotification("activity", wire.NotificationHandler{Capability: "activity", Serve: func(_ context.Context, _ *wire.Conn, r *wire.Request) {
 		v, _ := r.Param("typing")
@@ -225,7 +225,7 @@ func (b *connecting) Connected(context.Context, *wire.Conn) error {
 // it, though it is sent the server frame.
 func TestMaxConnectionsFirst(t *testing.T) {
 	b := &connecting{}
-	s := wired(&wire.Server{Backend: b, MaxConnections: 1, OnConnect: b.Connected})
+	s := wired(b, wire.Config{MaxConnections: 1, OnConnect: b.Connected})
 	c1, c2 := wiretest.ConnectT(t, s), wiretest.ConnectT(t, s)
 	if f := next(t, c2); code(f) != wire.CodeRetryAfter {
 		t.Fatalf("got %s, want retry_after", f.Raw)
@@ -244,7 +244,7 @@ func TestMaxConnectionsFirst(t *testing.T) {
 
 // Conn.User and SetUser copy the user, roles and ext included.
 func TestUserCopies(t *testing.T) {
-	s := wired(&wire.Server{Backend: &backend{}})
+	s := wired(&backend{}, wire.Config{})
 	roles := []string{"op"}
 	l, err := s.Local(wire.LocalOptions{User: wire.User{UserID: "bot", Roles: roles, Ext: wire.MustExt("x", map[string]any{"y": 1})}})
 	if err != nil {
@@ -263,7 +263,7 @@ func TestUserCopies(t *testing.T) {
 
 // DataOf returns the connection's value as its type.
 func TestDataOf(t *testing.T) {
-	s := wired(&wire.Server{Backend: &backend{}})
+	s := wired(&backend{}, wire.Config{})
 	type session struct{ name string }
 	l, err := s.Local(wire.LocalOptions{User: wire.User{UserID: "bot"}, Data: &session{"x"}})
 	if err != nil {
@@ -284,38 +284,5 @@ func TestMarshal(t *testing.T) {
 	got, err := wire.Marshal(map[string]any{"b": []string(nil), "a": "<&>"})
 	if err != nil || string(got) != `{"a":"<&>","b":null}` {
 		t.Fatalf("Marshal = %s, %v", got, err)
-	}
-}
-
-// A field the Server takes as it starts serving, changed after, is not
-// used, and the change is logged once, at Error, naming the fields; a
-// field it reads as it serves, such as ReadLimit, is no such change.
-func TestChangeAfterServingIsLogged(t *testing.T) {
-	var logged bytes.Buffer
-	var mu sync.Mutex
-	s := wired(&wire.Server{Backend: &backend{}, Logger: slog.New(slog.NewTextHandler(lockedWriter{&mu, &logged}, nil))})
-	wiretest.ConnectT(t, s)
-	wiretest.ConnectT(t, s)
-	s.ReadLimit = 1 << 20
-	wiretest.ConnectT(t, s)
-	logs := func() string {
-		mu.Lock()
-		defer mu.Unlock()
-		return logged.String()
-	}
-	if out := logs(); strings.Contains(out, "level=ERROR") {
-		t.Fatalf("logged with nothing taken changed: %s", out)
-	}
-	connected := false
-	s.OnConnect = func(context.Context, *wire.Conn) error { connected = true; return nil }
-	s.Messages = nil
-	c := wiretest.ConnectT(t, s)
-	wiretest.ConnectT(t, s)
-	signIn(t, c)
-	if _, err := c.Post(wait(t), wire.MessageParams{Body: &wire.Body{Text: "still taken"}}); err != nil || connected {
-		t.Fatalf("the Server used the changed fields: post %v, OnConnect called %v", err, connected)
-	}
-	if out := logs(); strings.Count(out, "level=ERROR") != 1 || !strings.Contains(out, `fields="[Messages OnConnect]"`) {
-		t.Fatalf("log: %s", out)
 	}
 }

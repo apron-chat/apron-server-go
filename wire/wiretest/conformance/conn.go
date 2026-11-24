@@ -115,10 +115,7 @@ func (r *run) dial(ctx context.Context, slow bool) (transport, error) {
 // connect connects to s in process, over a LineTransport on a net.Pipe.
 func connect(s *wire.Server) transport {
 	server, client := net.Pipe()
-	limit := s.ReadLimit
-	if limit <= 0 {
-		limit = 256 << 10 // wire's default
-	}
+	limit := s.ReadLimit()
 	served := make(chan struct{})
 	go func() {
 		defer close(served)

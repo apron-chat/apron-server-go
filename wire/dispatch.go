@@ -22,7 +22,7 @@ import (
 const MaxRequestIDBytes = wirecore.MaxRequestIDBytes
 
 // Handler handles one request method by name, raw: an extension's own
-// method, or one that takes the place of a handler field's (Server.Handle).
+// method, or one that takes the place of a Config handler's (Server.Handle).
 type Handler struct {
 	// Capability, if set, is listed in the server frame.
 	Capability string
@@ -383,7 +383,7 @@ func (s *Server) duplicate(ctx context.Context, c *Conn, r *Request, outcome ded
 		return
 	}
 	var result any = outcome.result
-	if refresh := s.config.refreshDuplicate; refresh != nil {
+	if refresh := s.config.RefreshDuplicate; refresh != nil {
 		result = s.refreshed(r.Method, outcome.result, refresh(ctx, c, r.Method, outcome.result))
 	}
 	r.Reply(result)
@@ -437,7 +437,7 @@ func (s *Server) finish(ctx context.Context, r *Request, strict bool, err error)
 }
 
 // method returns the handler of a method: one registered with Handle or
-// HandleNotification, or one of the Server's handler fields.
+// HandleNotification, or one of the Server's Config handlers.
 func (s *Server) method(name string) (method, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -463,37 +463,37 @@ func (m method) with(capability string, noDedup bool) method {
 	return m
 }
 
-// builtins are the methods of the Server's handler fields.
+// builtins are the methods of the Server's Config handlers.
 func (s *Server) builtins() map[string]method {
 	methods := map[string]method{}
-	switch messages, edits := s.Messages, s.Edits; {
+	switch messages, edits := s.config.Messages, s.config.Edits; {
 	case edits != nil:
 		methods["message"] = method{capability: "edit", strict: true, serve: s.message(messages, edits)}
 	case messages != nil:
 		methods["message"] = method{strict: true, serve: s.message(messages, nil)}
 	}
-	if p := s.Profiles; p != nil {
+	if p := s.config.Profiles; p != nil {
 		methods["me"] = typed(ParseMe, p.Me)
 	}
-	if cmd := s.Commands; cmd != nil {
+	if cmd := s.config.Commands; cmd != nil {
 		methods["command"] = typed(ParseCommand, cmd.Command).with("command", false)
 	}
-	if rooms := s.Rooms; rooms != nil {
+	if rooms := s.config.Rooms; rooms != nil {
 		methods["room_list"] = typed(ParseRoomList, rooms.RoomList).with("rooms", true)
 		methods["room_join"] = typed(ParseRoomJoin, rooms.RoomJoin).with("rooms", false)
 		methods["room_leave"] = typed(ParseRoomLeave, rooms.RoomLeave).with("rooms", false)
 		methods["room_set"] = typed(ParseRoomSet, rooms.RoomSet).with("rooms", false)
 	}
-	if h := s.History; h != nil {
+	if h := s.config.History; h != nil {
 		methods["history"] = typed(ParseHistory, h.History).with("history", true)
 	}
-	if st := s.Status; st != nil {
+	if st := s.config.Status; st != nil {
 		methods["status"] = typed(ParseStatus, st.Status).with("status", false)
 	}
-	if reactions := s.Reactions; reactions != nil {
+	if reactions := s.config.Reactions; reactions != nil {
 		methods["reactions"] = typed(ParseReact, reactions.React).with("reactions", false)
 	}
-	if a := s.Activity; a != nil {
+	if a := s.config.Activity; a != nil {
 		methods["activity"] = method{capability: "activity", notify: func(ctx context.Context, c *Conn, r *Request) {
 			// Params that are not valid are ignored, as a notification is
 			// never answered (§1.1).
@@ -537,7 +537,7 @@ func (s *Server) message(messages MessageHandler, edits EditHandler) func(contex
 // definedSchemes are the auth schemes PROTOCOL.md defines.
 var definedSchemes = []string{"guest", "token", "webauthn", "email", "external"}
 
-// checkScheme is the default of Server.CheckScheme: the schemes of the
+// checkScheme is the default of Config.CheckScheme: the schemes of the
 // server frame.
 func checkScheme(_ context.Context, c *Conn, p AuthParams) error {
 	info := c.Info()
@@ -564,8 +564,8 @@ func (s *Server) authenticate(ctx context.Context, c *Conn, r *Request) {
 		return
 	}
 	check := checkScheme
-	if s.config.checkScheme != nil {
-		check = s.config.checkScheme
+	if s.config.CheckScheme != nil {
+		check = s.config.CheckScheme
 	}
 	if err := check(ctx, c, p); err != nil {
 		r.fail(s.protocolError(ctx, "auth", err))
@@ -579,6 +579,6 @@ func (s *Server) authenticate(ctx context.Context, c *Conn, r *Request) {
 	// A panic is answered before the frames held meanwhile are let go, as
 	// an error is.
 	defer s.recoverFrame(r)
-	err = s.Backend.Auth(ctx, c, p, replyFor[AuthResult](r, p))
+	err = s.backend.Auth(ctx, c, p, replyFor[AuthResult](r, p))
 	s.finish(ctx, r, true, err)
 }

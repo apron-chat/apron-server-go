@@ -67,7 +67,7 @@ func result(text string) wire.CommandResult {
 // goroutine, with the handler's ctx still live.
 func TestLater(t *testing.T) {
 	b := newUpstream()
-	s := wired(&wire.Server{Backend: b})
+	s := wired(b, wire.Config{})
 	c := wiretest.ConnectT(t, s)
 	signIn(t, c)
 	send(t, c, `{"method":"command","id":"slow","params":{"body":{"text":"/slow"}}}`)
@@ -97,7 +97,7 @@ func TestLater(t *testing.T) {
 // outcome; the backend runs the request once.
 func TestLaterDuplicate(t *testing.T) {
 	b := newUpstream()
-	s := wired(&wire.Server{Backend: b})
+	s := wired(b, wire.Config{})
 	c1, c2 := wiretest.ConnectT(t, s), wiretest.ConnectT(t, s)
 	signIn(t, c1)
 	signIn(t, c2)
@@ -136,7 +136,7 @@ func TestLaterDuplicate(t *testing.T) {
 // A request answered later that fails is not kept: a retry runs again.
 func TestLaterFail(t *testing.T) {
 	b := newUpstream()
-	s := wired(&wire.Server{Backend: b, Logger: slog.New(slog.DiscardHandler)})
+	s := wired(b, wire.Config{Logger: slog.New(slog.DiscardHandler)})
 	c := wiretest.ConnectT(t, s)
 	signIn(t, c)
 	const slow = `{"method":"command","id":"f","params":{"body":{"text":"/slow"}}}`
@@ -173,7 +173,7 @@ func TestLaterFail(t *testing.T) {
 // Send returns ErrClosed.
 func TestLaterConnectionEnds(t *testing.T) {
 	b := newUpstream()
-	s := wired(&wire.Server{Backend: b})
+	s := wired(b, wire.Config{})
 	c1, c2 := wiretest.ConnectT(t, s), wiretest.ConnectT(t, s)
 	signIn(t, c1)
 	signIn(t, c2)
@@ -213,7 +213,7 @@ func (*laterAuth) Auth(_ context.Context, _ *wire.Conn, _ wire.AuthParams, reply
 
 // Auth is a barrier, and is never answered later.
 func TestLaterAuth(t *testing.T) {
-	c := wiretest.ConnectT(t, wired(&wire.Server{Backend: &laterAuth{}, Logger: slog.New(slog.DiscardHandler)}))
+	c := wiretest.ConnectT(t, wired(&laterAuth{}, wire.Config{Logger: slog.New(slog.DiscardHandler)}))
 	if _, err := c.Auth(wait(t), map[string]any{"scheme": "guest"}); wire.CodeOf(err) != wire.CodeInternalError {
 		t.Fatalf("got %v, want internal_error", err)
 	}
@@ -223,7 +223,7 @@ func TestLaterAuth(t *testing.T) {
 // connection does not; a Handler answers later with its request's Reply.
 func TestLaterLocal(t *testing.T) {
 	b := newUpstream()
-	s := wired(&wire.Server{Backend: b})
+	s := wired(b, wire.Config{})
 	release := make(chan struct{})
 	s.Handle("ext:slow", wire.Handler{Serve: func(ctx context.Context, c *wire.Conn, r *wire.Request) error {
 		reply := wire.NewReply[map[string]any](r)

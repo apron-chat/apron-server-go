@@ -55,7 +55,7 @@ func TestLocalStallWarning(t *testing.T) {
 
 	var log syncBuffer
 	release := make(chan struct{})
-	s := &Server{Backend: stallBackend{release}, Logger: slog.New(slog.NewTextHandler(&log, nil))}
+	s := NewServer(stallBackend{release}, Config{Logger: slog.New(slog.NewTextHandler(&log, nil))})
 	opened := make(chan error, 1)
 	go func() {
 		l, err := s.Local(LocalOptions{User: User{UserID: "ada"}})
@@ -91,7 +91,7 @@ func TestLocalNoStallWarning(t *testing.T) {
 	localOpenStall = 200 * time.Millisecond
 
 	var log syncBuffer
-	s := &Server{Backend: stallBackend{}, Logger: slog.New(slog.NewTextHandler(&log, nil))}
+	s := NewServer(stallBackend{}, Config{Logger: slog.New(slog.NewTextHandler(&log, nil))})
 	start := time.Now()
 	l, err := s.Local(LocalOptions{User: User{UserID: "ada"}})
 	if err != nil {

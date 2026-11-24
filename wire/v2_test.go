@@ -19,7 +19,7 @@ import (
 // A handler that replies itself, as a backend holding its own lock does,
 // gets its result and its frames out together, and nothing else.
 func TestReplyInHandler(t *testing.T) {
-	s := wired(&wire.Server{Backend: &backend{}})
+	s := wired(&backend{}, wire.Config{})
 	var mu sync.Mutex
 	s.Handle("snapshot", wire.Handler{Serve: func(ctx context.Context, c *wire.Conn, r *wire.Request) error {
 		mu.Lock()
@@ -55,7 +55,7 @@ func TestReplyInHandler(t *testing.T) {
 // Notification methods run with or without an id, only once signed in, and
 // are never answered.
 func TestNotificationMethod(t *testing.T) {
-	s := wired(&wire.Server{Backend: &backend{}})
+	s := wired(&backend{}, wire.Config{})
 	got := make(chan string, 4)
 	s.HandleNotification("activity", wire.NotificationHandler{Capability: "activity", Serve: func(_ context.Context, _ *wire.Conn, r *wire.Request) {
 		v, _ := r.Param("typing")
@@ -108,7 +108,7 @@ func (b *refreshing) Me(_ context.Context, c *wire.Conn, _ wire.MeParams, reply 
 func TestRefreshDuplicate(t *testing.T) {
 	var log logged
 	b := &refreshing{}
-	s := wired(&wire.Server{Backend: b, RefreshDuplicate: b.Refresh, Logger: log.logger()})
+	s := wired(b, wire.Config{RefreshDuplicate: b.Refresh, Logger: log.logger()})
 	s.Handle("ext:count", wire.Handler{Serve: func(_ context.Context, _ *wire.Conn, r *wire.Request) error {
 		r.Reply(map[string]any{"version": 0})
 		return nil
@@ -152,7 +152,7 @@ func (*anyScheme) CheckScheme(_ context.Context, _ *wire.Conn, p wire.AuthParams
 
 func TestCheckScheme(t *testing.T) {
 	b := &anyScheme{}
-	c := wiretest.ConnectT(t, wired(&wire.Server{Backend: b, CheckScheme: b.CheckScheme}))
+	c := wiretest.ConnectT(t, wired(b, wire.Config{CheckScheme: b.CheckScheme}))
 	if _, err := c.Auth(wait(t), map[string]any{"scheme": "guest"}); wire.CodeOf(err) != wire.CodeDenied {
 		t.Fatalf("got %v", err)
 	}
@@ -162,7 +162,7 @@ func TestCheckScheme(t *testing.T) {
 }
 
 func TestAnnounce(t *testing.T) {
-	s := wired(&wire.Server{Backend: &backend{}})
+	s := wired(&backend{}, wire.Config{})
 	s.Handle("ext:thing", wire.Handler{Capability: "ext:thing", Serve: func(context.Context, *wire.Conn, *wire.Request) error { return nil }})
 	c := wiretest.ConnectT(t, s)
 	signIn(t, c)
@@ -185,7 +185,7 @@ func TestAnnounce(t *testing.T) {
 
 func TestLocal(t *testing.T) {
 	b := &backend{}
-	s := wired(&wire.Server{Backend: b})
+	s := wired(b, wire.Config{})
 	var once sync.Once
 	s.Handle("whoami", wire.Handler{Serve: func(ctx context.Context, c *wire.Conn, r *wire.Request) error {
 		c.NotifyRaw("hello", map[string]any{})
@@ -248,7 +248,7 @@ func TestLocal(t *testing.T) {
 }
 
 func TestLocalFellBehind(t *testing.T) {
-	s := wired(&wire.Server{Backend: &backend{}})
+	s := wired(&backend{}, wire.Config{})
 	block := make(chan struct{})
 	defer close(block)
 	l, err := s.Local(wire.LocalOptions{User: wire.User{UserID: "bot"}, Queue: 2, OnFrame: func(wire.Frame) { <-block }})
@@ -275,8 +275,8 @@ func TestLocalFellBehind(t *testing.T) {
 func TestLocalOpens(t *testing.T) {
 	refuse := errors.New("refused")
 	var disconnects atomic.Int64
-	s := wired(&wire.Server{Backend: &backend{}})
-	s.OnConnect = func(_ context.Context, c *wire.Conn) error {
+	var config wire.Config
+	config.OnConnect = func(_ context.Context, c *wire.Conn) error {
 		if c.HTTPRequest() != nil || c.Data() == nil || !c.Local() {
 			t.Errorf("OnConnect: request %v, data %v, local %v", c.HTTPRequest(), c.Data(), c.Local())
 		}
@@ -286,7 +286,8 @@ func TestLocalOpens(t *testing.T) {
 		c.NotifyRaw("welcome", map[string]any{"to": c.UserID()})
 		return nil
 	}
-	s.OnDisconnect = func(*wire.Conn) { disconnects.Add(1) }
+	config.OnDisconnect = func(*wire.Conn) { disconnects.Add(1) }
+	s := wired(&backend{}, config)
 	frames := make(chan string, 8)
 	l, err := s.Local(wire.LocalOptions{User: wire.User{UserID: "bot"}, Data: 1, OnFrame: func(f wire.Frame) { frames <- string(f) }})
 	if err != nil {
@@ -329,14 +330,15 @@ func TestLocalOpens(t *testing.T) {
 // though neither has an HTTP request.
 func TestConnLocal(t *testing.T) {
 	local := make(chan bool, 2)
-	s := wired(&wire.Server{Backend: &backend{}})
-	s.OnConnect = func(_ context.Context, c *wire.Conn) error {
+	var config wire.Config
+	config.OnConnect = func(_ context.Context, c *wire.Conn) error {
 		if c.HTTPRequest() != nil {
 			t.Errorf("OnConnect: request %v", c.HTTPRequest())
 		}
 		local <- c.Local()
 		return nil
 	}
+	s := wired(&backend{}, config)
 	client := wiretest.ConnectT(t, s)
 	if err := client.Sync(wait(t)); err != nil {
 		t.Fatal(err)
@@ -360,11 +362,12 @@ func TestConnLocal(t *testing.T) {
 func TestDisconnectAfterRefusal(t *testing.T) {
 	for _, refusal := range []error{wire.Denied("No"), errors.New("no")} {
 		b := &backend{}
-		s := wired(&wire.Server{Backend: b})
-		s.OnConnect = func(_ context.Context, c *wire.Conn) error {
+		var config wire.Config
+		config.OnConnect = func(_ context.Context, c *wire.Conn) error {
 			c.SetData("half done")
 			return refusal
 		}
+		s := wired(b, config)
 		client := wiretest.ConnectT(t, s)
 		for {
 			// The server frame and the error, for an *Error.
@@ -390,14 +393,14 @@ func TestDisconnectAfterRefusal(t *testing.T) {
 // after its server frame, before what OnConnect sent it; it may not leave
 // it signed out.
 func TestLocalUserFromOnConnect(t *testing.T) {
-	s := wired(&wire.Server{Backend: &backend{}})
+	var config wire.Config
 	var signedOut atomic.Int64
-	s.OnDisconnect = func(c *wire.Conn) {
+	config.OnDisconnect = func(c *wire.Conn) {
 		if c.User() == nil {
 			signedOut.Add(1)
 		}
 	}
-	s.OnConnect = func(_ context.Context, c *wire.Conn) error {
+	config.OnConnect = func(_ context.Context, c *wire.Conn) error {
 		u := c.User()
 		switch u.UserID {
 		case "echo":
@@ -413,6 +416,7 @@ func TestLocalUserFromOnConnect(t *testing.T) {
 		c.Notify(wire.Notice("", "welcome"))
 		return nil
 	}
+	s := wired(&backend{}, config)
 	for _, tc := range []struct {
 		asked wire.User
 		you   string // the user notification, or "" for none

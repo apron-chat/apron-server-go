@@ -11,7 +11,7 @@ import (
 // The parsers read the params of the methods of the Server's handler
 // fields, with what wire checks of each (see the package documentation's
 // table): the Server calls them before a handler, and a Handler that takes
-// a handler field's place calls them to read the same params the same way,
+// a Config handler's place calls them to read the same params the same way,
 // then passes them on, with NewReply. Each returns an error that is an
 // *Error, error/invalid_params, and zero params with it.
 
@@ -166,7 +166,7 @@ func ParseCommand(r *Request) (CommandParams, error) {
 
 // ParseAuth reads auth's params (§3.2): scheme, a non-empty string, and the
 // fields AuthParams has, each of its type. Whether the server offers the
-// scheme is Server.CheckScheme's to decide, and the rest, such as whether
+// scheme is Config.CheckScheme's to decide, and the rest, such as whether
 // user_id could be one (§2.4), the backend's, after it: a scheme the
 // server does not offer is unsupported whatever else the request holds
 // (§3.2).
@@ -336,7 +336,7 @@ func ParseActivity(r *Request) (ActivityParams, error) {
 // request with one of the parsers, such as ParseMessage, and passes it on
 // to a typed handler, or for a test (package wiretest). Its Send does what
 // the Server does with the result of r's method when T is that method's
-// result type, as for its own handler fields: the user of a me result
+// result type, as for its Config handlers: the user of a me result
 // becomes the connection's, a room_list result is normalized for its
 // params, and an auth result signs the connection in. For any other method
 // or type, Send sends the result as Request.Reply does.

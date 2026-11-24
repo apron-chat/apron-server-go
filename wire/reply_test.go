@@ -97,7 +97,7 @@ func (statuses) Status(context.Context, *wire.Conn, wire.StatusParams, wire.Repl
 func TestSendOnce(t *testing.T) {
 	var log logged
 	h := &commands{}
-	s := &wire.Server{Backend: &backend{}, Commands: h, Status: statuses{}, Logger: log.logger()}
+	s := wire.NewServer(&backend{}, wire.Config{Commands: h, Status: statuses{}, Logger: log.logger()})
 	l := local(t, s)
 	if result, err := call(t, l, "command", `{"body":{"text":"/twice"}}`); err != nil || result != `{"n":1}` {
 		t.Fatalf("got %s %v, want the first result", result, err)
@@ -151,7 +151,7 @@ func TestRoomListSend(t *testing.T) {
 	member := wire.User{UserID: "bob"}
 	general := wire.RoomView{Room: wire.Room{RoomID: "general"}, Members: []wire.CurrentUser{{User: member}}, MemberCount: 9}
 	h := &rooms{result: wire.RoomListResult{NotJoined: []wire.RoomView{general}, Users: []wire.CurrentUser{{User: member}}}}
-	s := &wire.Server{Backend: &backend{}, Rooms: h}
+	s := wire.NewServer(&backend{}, wire.Config{Rooms: h})
 	l := local(t, s)
 	for _, tc := range []struct{ params, want string }{
 		{`{}`, `{"joined":[],"not_joined":[{"room_id":"general"}]}`},
@@ -174,7 +174,7 @@ func TestRoomListSend(t *testing.T) {
 // UnimplementedRooms refuses what a RoomList-only handler does not take,
 // and the server has capability rooms.
 func TestUnimplementedRooms(t *testing.T) {
-	s := &wire.Server{Backend: &backend{}, Rooms: &rooms{}}
+	s := wire.NewServer(&backend{}, wire.Config{Rooms: &rooms{}})
 	l := local(t, s)
 	for method, params := range map[string]string{
 		"room_join":  `{"room_id":"general"}`,
@@ -221,7 +221,7 @@ func (b *broadcasting) Auth(_ context.Context, c *wire.Conn, p wire.AuthParams, 
 
 func TestAuthSendSignsIn(t *testing.T) {
 	b := &broadcasting{}
-	b.s = &wire.Server{Backend: b, Logger: slog.New(slog.DiscardHandler)}
+	b.s = wire.NewServer(b, wire.Config{Logger: slog.New(slog.DiscardHandler)})
 	c := wiretest.ConnectT(t, b.s)
 	if _, err := c.Auth(wait(t), map[string]any{"scheme": "guest", "user_id": "bad id"}); wire.CodeOf(err) != wire.CodeInternalError {
 		t.Fatalf("got %v, want internal_error for an invalid user_id", err)
@@ -242,18 +242,14 @@ func TestAuthSendSignsIn(t *testing.T) {
 	}
 }
 
-// A Server's fields may be set in any order before it serves, and a
-// method registered before the Backend is.
-func TestConfigAnyOrder(t *testing.T) {
-	s := &wire.Server{}
+// A method may be registered before the Server serves, and after.
+func TestHandleAnyTime(t *testing.T) {
+	b := &backend{}
+	s := wire.NewServer(b, wire.Config{Messages: b, Commands: &commands{}})
 	s.Handle("echo", wire.Handler{Capability: "ext:echo", Serve: func(_ context.Context, _ *wire.Conn, r *wire.Request) error {
 		r.Reply(r.Params)
 		return nil
 	}})
-	b := &backend{}
-	s.Backend = b
-	s.Messages = b
-	s.Commands = &commands{}
 	l := local(t, s)
 	if _, err := call(t, l, "message", `{"body":{"text":"hi"}}`); err != nil || b.messages.Load() != 1 {
 		t.Fatalf("message: %v", err)
@@ -270,6 +266,27 @@ func TestConfigAnyOrder(t *testing.T) {
 	l.Conn().Announce(wire.ServerInfo{})
 	if got := l.Conn().Info().Capabilities; !slices.Equal(got, []string{"command", "ext:echo", "ext:late"}) {
 		t.Fatalf("capabilities: %v", got)
+	}
+}
+
+// A Server is made with NewServer, with a Backend: a zero one, or one
+// without a Backend, panics at once rather than when it first serves.
+func TestNewServerPanics(t *testing.T) {
+	for name, use := range map[string]func(){
+		"no backend": func() { wire.NewServer(nil, wire.Config{}) },
+		"zero Handle": func() {
+			new(wire.Server).Handle("x", wire.Handler{Serve: func(context.Context, *wire.Conn, *wire.Request) error { return nil }})
+		},
+		"zero Local": func() { _, _ = new(wire.Server).Local(wire.LocalOptions{User: wire.User{UserID: "ada"}}) },
+	} {
+		func() {
+			defer func() {
+				if recover() == nil {
+					t.Errorf("%s: no panic", name)
+				}
+			}()
+			use()
+		}()
 	}
 }
 
@@ -296,7 +313,7 @@ func TestHandlePanics(t *testing.T) {
 					t.Errorf("%s: no panic", name)
 				}
 			}()
-			register(&wire.Server{Backend: &backend{}})
+			register(wire.NewServer(&backend{}, wire.Config{}))
 		}()
 	}
 }
@@ -308,7 +325,7 @@ func TestHandlePanics(t *testing.T) {
 func TestOverride(t *testing.T) {
 	for _, capability := range []string{"edit", ""} {
 		b := &editor{}
-		s := &wire.Server{Backend: b, Messages: b, Edits: b}
+		s := wire.NewServer(b, wire.Config{Messages: b, Edits: b})
 		s.Handle("message", wire.Handler{Capability: capability, Serve: func(_ context.Context, _ *wire.Conn, r *wire.Request) error {
 			r.Reply(map[string]any{"overridden": true})
 			return nil
@@ -372,10 +389,10 @@ func TestCheckOrigin(t *testing.T) {
 		}
 		return err
 	}
-	if err := dial(wired(&wire.Server{Backend: &backend{}}), "https://elsewhere.test"); err == nil {
+	if err := dial(wired(&backend{}, wire.Config{}), "https://elsewhere.test"); err == nil {
 		t.Error("another origin opened a WebSocket by default")
 	}
-	allowed := wired(&wire.Server{Backend: &backend{}, CheckOrigin: wire.OriginPatterns("elsewhere.test")})
+	allowed := wired(&backend{}, wire.Config{CheckOrigin: wire.OriginPatterns("elsewhere.test")})
 	if err := dial(allowed, "https://elsewhere.test"); err != nil {
 		t.Errorf("an allowed origin: %v", err)
 	}
@@ -399,7 +416,7 @@ func (h badLogIDs) Command(_ context.Context, c *wire.Conn, _ wire.CommandParams
 func TestLogIDOutOfRangeNotSent(t *testing.T) {
 	var log logged
 	h := badLogIDs{make(chan bool, 1)}
-	l := local(t, &wire.Server{Backend: &backend{}, Commands: h, Logger: log.logger()})
+	l := local(t, wire.NewServer(&backend{}, wire.Config{Commands: h, Logger: log.logger()}))
 	if result, err := call(t, l, "command", `{"body":{"text":"/x"}}`); wire.CodeOf(err) != wire.CodeInternalError {
 		t.Fatalf("got %s %v, want internal_error", result, err)
 	}

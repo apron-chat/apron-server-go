@@ -54,8 +54,7 @@ func NewChat() *Chat {
 		Forms: []commands.Form{{Usage: "/nick <name>", Help: "change your name"}},
 		Run:   c.nick,
 	})
-	c.Server = &wire.Server{
-		Backend:  c,
+	c.Server = wire.NewServer(c, wire.Config{
 		Messages: c,
 		Profiles: c,
 		Commands: &c.commands,
@@ -66,12 +65,12 @@ func NewChat() *Chat {
 		// server signs in guests, with no cookies for another site's page
 		// to use, so it lets in any.
 		CheckOrigin: wire.AnyOrigin,
-	}
+	})
 	c.Server.Handle(commands.ListMethod, c.commands.ListHandler())
 	// The bot is a user on a connection of its own, in process: what it
-	// posts goes through Message, as anyone's does. Its connection is the
-	// Server's first, which takes the Server's configuration, so it
-	// starts once the fields are set.
+	// posts goes through Message, as anyone's does. Its connection opens
+	// at once, so it starts once c.Server is set, for the handlers its
+	// connection calls.
 	if _, err := bot.Start(c.Server, bot.Options{User: wire.User{UserID: "echo", Name: "Echo"}, OnMessage: echo}); err != nil {
 		panic(err) // A Server that is not shut down opens it.
 	}

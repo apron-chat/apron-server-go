@@ -79,19 +79,13 @@ type clientConn interface {
 	close() error
 }
 
-// defaultReadLimit is wire's own default of Server.ReadLimit.
-const defaultReadLimit = 256 << 10
-
 // Connect connects to s in process, over a LineTransport on a net.Pipe,
 // which s serves (Server.ServeTransport) as it does a WebSocket: OnConnect,
 // the server frame, auth, and all, but for an HTTP request, which the
 // connection has none of.
 func Connect(s *wire.Server) *Client {
 	server, client := net.Pipe()
-	limit := s.ReadLimit
-	if limit <= 0 {
-		limit = defaultReadLimit
-	}
+	limit := s.ReadLimit()
 	served := make(chan struct{})
 	go func() {
 		defer close(served)

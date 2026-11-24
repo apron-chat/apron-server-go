@@ -27,8 +27,7 @@ func (s *Server) newWire() {
 	config := s.config
 	b := backend{s}
 	patterns := wire.OriginPatterns(config.OriginPatterns...)
-	s.wire = &wire.Server{
-		Backend:   b,
+	s.wire = wire.NewServer(b, wire.Config{
 		Messages:  b,
 		Edits:     b,
 		Commands:  b,
@@ -61,7 +60,7 @@ func (s *Server) newWire() {
 		Logger:         s.logger,
 		FenceFailed:    internalError(),
 		ShutdownError:  &Error{Code: CodeRetryAfter, Message: "Server is shutting down; reconnect shortly", Data: map[string]any{"retry_after": 5}},
-	}
+	})
 	for name, op := range s.ops {
 		s.registerOp(name, op)
 	}

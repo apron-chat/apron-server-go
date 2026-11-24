@@ -15,8 +15,8 @@ import (
 type typedChat struct{ *chat }
 
 func newTypedChat() *typedChat {
-	c := &typedChat{newChat()}
-	c.server.Profiles, c.server.Commands = c, c
+	c := &typedChat{&chat{}}
+	c.server = wire.NewServer(c.chat, c.config(wire.Config{Profiles: c, Commands: c}))
 	return c
 }
 

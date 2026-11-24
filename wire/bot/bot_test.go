@@ -40,8 +40,8 @@ func newChat() *chat {
 		call.Notice("pong " + call.Conn.UserID())
 		return call.Done()
 	}})
-	c.server = &wire.Server{
-		Backend: c, Messages: c, History: c, Commands: &c.commands, Rooms: c,
+	c.server = wire.NewServer(c, wire.Config{
+		Messages: c, History: c, Commands: &c.commands, Rooms: c,
 		OnConnect: func(_ context.Context, conn *wire.Conn) error {
 			c.mu.Lock()
 			defer c.mu.Unlock()
@@ -53,7 +53,7 @@ func newChat() *chat {
 			}
 			return nil
 		},
-	}
+	})
 	return c
 }
 

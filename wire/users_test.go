@@ -58,7 +58,7 @@ func (v viewer) expect(t *testing.T, want string) {
 // PublishUserChange sends the user's own connections the patch of their
 // view, and others the patch of the shown one, each only when it changed.
 func TestPublishUserChange(t *testing.T) {
-	s := &wire.Server{Backend: helloBackend{}}
+	s := wire.NewServer(helloBackend{}, wire.Config{})
 	chosen := wire.User{UserID: "ada", Name: "Ada", Status: "online"}
 	ada := openViewer(t, s, chosen)
 	ada2 := openViewer(t, s, chosen)
@@ -233,10 +233,11 @@ func TestNoMeWarning(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			var log logged
-			s := &wire.Server{Backend: &backend{}, Messages: &backend{}, Logger: log.logger()}
+			config := wire.Config{Messages: &backend{}, Logger: log.logger()}
 			if test.profiles {
-				s.Profiles = profiles{}
+				config.Profiles = profiles{}
 			}
+			s := wire.NewServer(&backend{}, config)
 			c := wiretest.ConnectT(t, s)
 			if err := c.Sync(wait(t)); err != nil {
 				t.Fatal(err)

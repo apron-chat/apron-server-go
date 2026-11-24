@@ -44,7 +44,7 @@
 // # Backends and handlers
 //
 // A [Backend] says who the server is (Hello) and who each connection is
-// (Auth). Two handler fields of the [Server] are the core, which every
+// (Auth). Two handlers of the Server's [Config] are the core, which every
 // server sets: Messages ([MessageHandler], message), with which clients
 // post, and Profiles ([ProfileHandler], me), with which they change the
 // user's own profile, such as a rename (§3.3.2). The Server warns as it
@@ -54,7 +54,7 @@
 // sends the complete object as the result.
 //
 // Everything else is added one capability at a time, by setting another
-// handler field — Edits ([EditHandler], edit), Commands ([CommandHandler],
+// handler — Edits ([EditHandler], edit), Commands ([CommandHandler],
 // command), Rooms ([RoomHandler], rooms), History ([HistoryHandler],
 // history), Status ([StatusHandler], status), Reactions
 // ([ReactionHandler], reactions), Activity ([ActivityHandler], activity) —
@@ -78,33 +78,37 @@
 // raw, and a [NotificationHandler] registered with
 // [Server.HandleNotification] a client's notification: an extension's own
 // method, such as the reference server's push_register and account
-// methods, or one that takes the place of a handler field's. A Handler
+// methods, or one that takes the place of a Config handler's. A Handler
 // reads its params with the Request's accessors, such as
 // [Request.String], or a [Decoder], which reads several and keeps the
-// first error; one that takes a handler field's place reads them as the
+// first error; one that takes a Config handler's place reads them as the
 // Server would with the field's parser, such as [ParseMessage], and passes
 // them on to a typed handler with [NewReply].
 //
 // # Putting a server together
 //
-// The Server takes its configuration as it serves its first connection,
-// or opens its first Local one, in whatever order its fields were set, and
-// its fields must not change after. A backend and its Server refer to
-// each other: the Server calls the backend's handlers, and the backend
-// sends with the Server's methods, such as Broadcast and PublishUser. So a
-// program makes them in this order:
+// [NewServer] makes a Server for a Backend, with its [Config]: the
+// handlers, hooks, and limits it serves with, which are fixed from then
+// on. A backend and its Server refer to each other: the Server calls the
+// backend's handlers, and the backend sends with the Server's methods,
+// such as Broadcast and PublishUser. NewServer calls nothing of the
+// backend's, so a program makes them in this order:
 //
 //  1. the backend, without the Server;
-//  2. the Server, its Backend and handler fields set to the backend, and
-//     its own methods registered (Server.Handle);
+//  2. the Server, with NewServer(backend, Config{...}), its handlers
+//     the backend's, and its own methods registered (Server.Handle);
 //  3. the Server kept in the backend, for its handlers to send with;
 //  4. then what opens connections: bots (package bot) and other Local
 //     connections, each of which opens one at once, and the HTTP server
 //     that serves the Server's WebSocket.
 //
-// A field set after step 4 is not taken, as the Server took its
-// configuration as the first bot connected; a method registered then is
-// served from then on. examples/minimal does it so.
+// A method registered after step 4 is served from then on, such as an
+// extension's added while the server runs. examples/minimal does it so:
+//
+//	chat := &Chat{}
+//	chat.server = wire.NewServer(chat, wire.Config{Messages: chat, Profiles: chat})
+//	bot.Start(chat.server, bot.Options{User: wire.User{UserID: "echo"}})
+//	http.Handle("/ws", chat.server)
 //
 // # Requests, replies, and ordering
 //
@@ -344,7 +348,7 @@
 //		return f.MessageHandler.Message(ctx, c, p, reply)
 //	}
 //
-//	server.Messages = noShouting{chat}
+//	server := wire.NewServer(chat, wire.Config{Messages: noShouting{chat}, Profiles: chat})
 //
 // Edits and commands are wrapped the same way, and a filter that rewrites
 // a body checks what it made as wire checks a client's ([ParseBody]).

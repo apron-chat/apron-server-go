@@ -18,7 +18,7 @@
 //			return call.Done()
 //		},
 //	})
-//	server.Commands = &router
+//	server := wire.NewServer(chat, wire.Config{Messages: chat, Profiles: chat, Commands: &router})
 //	server.Handle(commands.ListMethod, router.ListHandler()) // optional
 //
 // # Command lines
@@ -344,7 +344,7 @@ func collapse(text string) string { return strings.Join(strings.Fields(text), " 
 var helpForm = Form{Name: "help", Group: GroupAll, Help: "list the commands you can use here"}
 
 // Router is a set of commands, in the order they were added, and the
-// Server's CommandHandler (Server.Commands) that runs them. Its zero
+// Server's CommandHandler (Config.Commands) that runs them. Its zero
 // value is ready, with /help and no other command. Add every command
 // before the Router serves: Add is not safe for use with its other
 // methods at the same time, which are safe for concurrent use.

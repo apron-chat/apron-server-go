@@ -169,7 +169,7 @@ func TestPatch(t *testing.T) {
 // PublishUser makes the change the user's own connections' identity, and
 // sends them you and the others who share a room new.
 func TestPublishUser(t *testing.T) {
-	s := wired(&wire.Server{Backend: &backend{}})
+	s := wired(&backend{}, wire.Config{})
 	type local struct {
 		l      *wire.Local
 		frames chan string
@@ -292,7 +292,7 @@ func (b *typed) RoomSet(_ context.Context, _ *wire.Conn, p wire.RoomSetParams, r
 
 func TestTypedParams(t *testing.T) {
 	b := &typed{}
-	s := wired(&wire.Server{Backend: b})
+	s := wired(b, wire.Config{})
 	l, err := s.Local(wire.LocalOptions{User: wire.User{UserID: "ada"}})
 	if err != nil {
 		t.Fatal(err)
@@ -351,7 +351,7 @@ func TestTypedParams(t *testing.T) {
 // either.
 func TestAuthExtra(t *testing.T) {
 	b := &typed{extra: map[string]any{"options": map[string]any{"challenge": "c"}}}
-	c := wiretest.ConnectT(t, wired(&wire.Server{Backend: b}))
+	c := wiretest.ConnectT(t, wired(b, wire.Config{}))
 	raw, err := c.Call(wait(t), "auth", map[string]any{"scheme": "guest"})
 	var result map[string]any
 	if err != nil || json.Unmarshal(raw, &result) != nil || result["options"] == nil || result["you"] == nil {
@@ -362,7 +362,7 @@ func TestAuthExtra(t *testing.T) {
 	}
 
 	b2 := &typed{extra: map[string]any{"you": 1}}
-	c2 := wiretest.ConnectT(t, wired(&wire.Server{Backend: b2, Logger: slog.New(slog.DiscardHandler)}))
+	c2 := wiretest.ConnectT(t, wired(b2, wire.Config{Logger: slog.New(slog.DiscardHandler)}))
 	if _, err := c2.Auth(wait(t), map[string]any{"scheme": "guest"}); wire.CodeOf(err) != wire.CodeInternalError {
 		t.Fatalf("got %v", err)
 	}

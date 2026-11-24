@@ -117,7 +117,7 @@ type inFlight struct{ l *Local }
 // is queued. An error of OnConnect is returned as it is, and ErrClosed when
 // the Server is shut down.
 func (s *Server) Local(options LocalOptions) (*Local, error) {
-	s.freeze()
+	s.made()
 	if !ValidID(options.User.UserID) {
 		return nil, errors.New("wire: a Local connection needs a user")
 	}
@@ -195,7 +195,7 @@ func (s *Server) openLocal(ctx context.Context, c *Conn, asked User) error {
 		s.disconnected(c)
 		return err
 	}
-	if connect := s.config.onConnect; connect != nil {
+	if connect := s.config.OnConnect; connect != nil {
 		if err := connect(ctx, c); err != nil {
 			return fail(err)
 		}
@@ -204,11 +204,7 @@ func (s *Server) openLocal(ctx context.Context, c *Conn, asked User) error {
 	if user == nil || !ValidID(user.UserID) {
 		return fail(errors.New("wire: OnConnect left a Local connection without a user"))
 	}
-	var info ServerInfo
-	if s.Backend != nil {
-		info = s.Backend.Hello(ctx, c)
-	}
-	info = s.complete(info)
+	info := s.complete(s.backend.Hello(ctx, c))
 	frames := make([]Frame, 1, 2)
 	frame, err := Encode(info)
 	if err != nil {

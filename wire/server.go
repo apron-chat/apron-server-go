@@ -8,11 +8,9 @@ import (
 	"maps"
 	"net"
 	"net/http"
-	"reflect"
 	"slices"
 	"strconv"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/coder/websocket"
@@ -20,18 +18,36 @@ import (
 	"github.com/apron-chat/apron-server-go/wire/internal/wirecore"
 )
 
-// Server serves the protocol for a Backend, and the handlers of its fields.
-// It is configured by setting its fields, in any order, and registering
-// methods (Handle, HandleNotification), before it serves its first
-// connection or opens its first Local one: then it takes its
-// configuration, and its fields must not change after. A handler, hook,
-// or dedup size set after then is not used: the Server logs the first
-// such change it finds, at Error, as it serves a connection, naming the
-// field.
+// Server serves the protocol for a Backend, and the handlers of its
+// Config. NewServer makes one, with its configuration, which is fixed from
+// then on: a Server has no settings to change after, so none is ever set
+// too late. Methods (Handle, HandleNotification) may be registered at any
+// time, such as an extension's own as it is added: one registered while
+// the Server serves is served from then on.
 type Server struct {
-	// Backend says who the server is, and who each connection is.
-	Backend Backend
+	backend Backend
+	config  Config
 
+	checkOnce sync.Once
+	mu        sync.Mutex
+	// registered are the methods registered with Handle and
+	// HandleNotification, and methods every method the Server serves: its
+	// handlers', with those registered in their place.
+	registered map[string]method
+	methods    map[string]method
+	conns      map[*Conn]struct{}
+	network    int
+	closed     bool
+	dedup      *dedup
+	serving    sync.WaitGroup
+	shutdown   chan struct{}
+}
+
+// Config is what a Server serves with besides its Backend: the handlers
+// of the protocol's requests, the hooks of a connection's life, and the
+// limits of its transport. NewServer takes a copy; the zero Config serves
+// auth alone, with every limit its default.
+type Config struct {
 	// The handlers of the protocol's requests: each that is set adds its
 	// requests, with their params checked, and its capability in the server
 	// frame (§3.1). Messages and Profiles are the core's, which every
@@ -127,91 +143,40 @@ type Server struct {
 	// (Conn.Fence), before the connection closes; error/internal_error by
 	// default.
 	FenceFailed *Error
-
-	once       sync.Once
-	freezeOnce sync.Once
-	checkOnce  sync.Once
-	// changeLogged is whether a change to a field the Server took was
-	// logged.
-	changeLogged atomic.Bool
-	mu           sync.Mutex
-	// registered are the methods registered with Handle and
-	// HandleNotification, and methods, once the Server took its
-	// configuration, every method it serves.
-	registered map[string]method
-	methods    map[string]method
-	config     config
-	conns      map[*Conn]struct{}
-	network    int
-	closed     bool
-	dedup      *dedup
-	serving    sync.WaitGroup
-	shutdown   chan struct{}
 }
 
-// config is what the Server took of its hooks as it started serving.
-type config struct {
-	onConnect        func(ctx context.Context, c *Conn) error
-	onDisconnect     func(c *Conn)
-	refreshDuplicate func(ctx context.Context, c *Conn, method string, result jsontext.Value) any
-	checkScheme      func(ctx context.Context, c *Conn, p AuthParams) error
-	checkOrigin      func(r *http.Request) bool
-	// taken are the fields the Server took, as it took them, to tell a
-	// change after (logChange).
-	taken []any
+// NewServer returns a Server for backend, which serves with config. It
+// calls nothing of the backend's, so a backend and its Server, which refer
+// to each other, are made in this order: the backend, then its Server,
+// kept in the backend for its handlers to send with, then what opens
+// connections (see the package documentation). It panics without a
+// backend.
+func NewServer(backend Backend, config Config) *Server {
+	if backend == nil {
+		panic("wire: NewServer without a Backend")
+	}
+	perUser := config.DedupSize
+	if perUser == 0 {
+		perUser = 1024
+	}
+	s := &Server{
+		backend:    backend,
+		config:     config,
+		registered: make(map[string]method),
+		conns:      make(map[*Conn]struct{}),
+		dedup:      newDedup(perUser, orDefault(config.DedupUsers, 4096)),
+		shutdown:   make(chan struct{}),
+	}
+	s.methods = s.builtins()
+	return s
 }
 
-// takenFields names the fields the Server takes as it starts serving, in
-// the order of taken's values.
-var takenFields = []string{
-	"Messages", "Profiles", "Edits", "Commands", "Rooms", "History", "Status", "Reactions", "Activity",
-	"OnConnect", "OnDisconnect", "RefreshDuplicate", "CheckScheme", "CheckOrigin", "DedupSize", "DedupUsers",
-}
-
-// taken returns the values of the fields the Server takes as it starts
-// serving, in takenFields' order.
-func (s *Server) taken() []any {
-	return []any{
-		s.Messages, s.Profiles, s.Edits, s.Commands, s.Rooms, s.History, s.Status, s.Reactions, s.Activity,
-		s.OnConnect, s.OnDisconnect, s.RefreshDuplicate, s.CheckScheme, s.CheckOrigin, s.DedupSize, s.DedupUsers,
+// made panics for a Server that NewServer did not make, such as a zero
+// one, which has no Backend to serve.
+func (s *Server) made() {
+	if s.backend == nil {
+		panic("wire: a Server is made with NewServer")
 	}
-}
-
-// logChange logs, once, that a field the Server took changed after, which
-// the Server goes on without.
-func (s *Server) logChange() {
-	if s.changeLogged.Load() {
-		return
-	}
-	var changed []string
-	for i, value := range s.taken() {
-		if !same(value, s.config.taken[i]) {
-			changed = append(changed, takenFields[i])
-		}
-	}
-	if len(changed) > 0 && s.changeLogged.CompareAndSwap(false, true) {
-		s.logger().Error("wire: Server fields changed after the Server took its configuration, as it started serving, and are not used: set them before",
-			"fields", changed)
-	}
-}
-
-// same reports whether two values of a field are the same: funcs, and
-// pointers in handlers, by what they point to, and comparable values by
-// ==. Two closures of one func literal, or two method values, are the
-// same, as are two values it cannot compare.
-func same(a, b any) bool {
-	va, vb := reflect.ValueOf(a), reflect.ValueOf(b)
-	switch {
-	case !va.IsValid() || !vb.IsValid():
-		return va.IsValid() == vb.IsValid()
-	case va.Type() != vb.Type():
-		return false
-	}
-	switch va.Kind() {
-	case reflect.Func, reflect.Pointer, reflect.Map, reflect.Chan, reflect.Slice, reflect.UnsafePointer:
-		return va.Pointer() == vb.Pointer()
-	}
-	return !va.Comparable() || va.Equal(vb)
 }
 
 // reservedMethods are handled by the Server itself.
@@ -221,7 +186,7 @@ var reservedMethods = map[string]string{
 }
 
 // Handle registers a request method, such as an extension's own, which
-// takes the place of a handler field's for the same name: Handle("message",
+// takes the place of a Config handler's for the same name: Handle("message",
 // h) handles every message request, edits included, so the server frame
 // lists capability edit only when h.Capability says so. It panics for a
 // name the Server handles itself (auth, ping), a notification (activity;
@@ -239,7 +204,7 @@ func (s *Server) Handle(name string, h Handler) {
 }
 
 // HandleNotification registers a notification method a client sends, which
-// takes the place of a handler field's for the same name, as Handle does a
+// takes the place of a Config handler's for the same name, as Handle does a
 // request method. It panics for a name the Server handles itself (auth,
 // ping), a name registered already, or a NotificationHandler without Serve.
 // Local.Call refuses a notification method with ErrNotRequest.
@@ -251,71 +216,25 @@ func (s *Server) HandleNotification(name string, h NotificationHandler) {
 }
 
 func (s *Server) register(name string, m method) {
+	s.made()
 	if why, reserved := reservedMethods[name]; reserved {
 		panic("wire: cannot register " + name + ": " + why)
 	}
 	if name == "" {
 		panic("wire: cannot register a method without a name")
 	}
-	s.init()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if _, twice := s.registered[name]; twice {
 		panic("wire: method " + strconv.Quote(name) + " registered twice")
 	}
 	s.registered[name] = m
-	if s.methods != nil {
-		s.methods[name] = m
-	}
-}
-
-// init makes what the Server needs to hold connections and registrations,
-// which takes nothing of its configuration.
-func (s *Server) init() {
-	s.once.Do(func() {
-		s.registered = make(map[string]method)
-		s.conns = make(map[*Conn]struct{})
-		s.shutdown = make(chan struct{})
-	})
-}
-
-// freeze takes the Server's configuration, once, as it starts serving: the
-// methods of its handler fields, with those registered in their place, and
-// its hooks. Called again, it logs a change to them since (logChange).
-func (s *Server) freeze() {
-	s.init()
-	took := false
-	s.freezeOnce.Do(func() {
-		took = true
-		builtins := s.builtins()
-		perUser := s.DedupSize
-		if perUser == 0 {
-			perUser = 1024
-		}
-		s.mu.Lock()
-		defer s.mu.Unlock()
-		for name, m := range s.registered {
-			builtins[name] = m
-		}
-		s.methods = builtins
-		s.config = config{
-			onConnect:        s.OnConnect,
-			onDisconnect:     s.OnDisconnect,
-			refreshDuplicate: s.RefreshDuplicate,
-			checkScheme:      s.CheckScheme,
-			checkOrigin:      s.CheckOrigin,
-			taken:            s.taken(),
-		}
-		s.dedup = newDedup(perUser, orDefault(s.DedupUsers, 4096))
-	})
-	if !took {
-		s.logChange()
-	}
+	s.methods[name] = m
 }
 
 func (s *Server) logger() *slog.Logger {
-	if s.Logger != nil {
-		return s.Logger
+	if s.config.Logger != nil {
+		return s.config.Logger
 	}
 	return slog.Default()
 }
@@ -327,14 +246,22 @@ func orDefault[T int | int64 | time.Duration](v, d T) T {
 	return v
 }
 
-func (s *Server) readLimit() int64            { return orDefault(s.ReadLimit, 256<<10) }
-func (s *Server) outgoingQueue() int          { return orDefault(s.OutgoingQueue, 128) }
-func (s *Server) writeTimeout() time.Duration { return orDefault(s.WriteTimeout, 10*time.Second) }
-func (s *Server) pingInterval() time.Duration { return orDefault(s.PingInterval, 30*time.Second) }
-func (s *Server) pingTimeout() time.Duration  { return orDefault(s.PingTimeout, 10*time.Second) }
+// ReadLimit is the most bytes a frame from a client may have
+// (Config.ReadLimit), such as for a Transport that bounds its frames
+// (LineTransport).
+func (s *Server) ReadLimit() int64 { return orDefault(s.config.ReadLimit, 256<<10) }
+
+func (s *Server) outgoingQueue() int { return orDefault(s.config.OutgoingQueue, 128) }
+func (s *Server) writeTimeout() time.Duration {
+	return orDefault(s.config.WriteTimeout, 10*time.Second)
+}
+func (s *Server) pingInterval() time.Duration {
+	return orDefault(s.config.PingInterval, 30*time.Second)
+}
+func (s *Server) pingTimeout() time.Duration { return orDefault(s.config.PingTimeout, 10*time.Second) }
 
 func (s *Server) fenceFailed() []byte {
-	e := s.FenceFailed
+	e := s.config.FenceFailed
 	if e == nil {
 		e = internalError()
 	}
@@ -344,7 +271,7 @@ func (s *Server) fenceFailed() []byte {
 
 // ServeHTTP accepts a WebSocket and serves it until it closes.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	s.freeze()
+	s.made()
 	s.mu.Lock()
 	closed := s.closed
 	s.mu.Unlock()
@@ -353,7 +280,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	options := &websocket.AcceptOptions{}
-	if check := s.config.checkOrigin; check != nil {
+	if check := s.config.CheckOrigin; check != nil {
 		if !check(r) {
 			http.Error(w, fmt.Sprintf("request Origin %q is not authorized for Host %q", r.Header.Get("Origin"), r.Host), http.StatusForbidden)
 			return
@@ -364,10 +291,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		return
 	}
-	ws.SetReadLimit(s.readLimit())
+	ws.SetReadLimit(s.ReadLimit())
 	var remote net.Addr
-	if s.ClientAddr != nil {
-		remote = s.ClientAddr(r)
+	if s.config.ClientAddr != nil {
+		remote = s.config.ClientAddr(r)
 	} else if addr, err := net.ResolveTCPAddr("tcp", r.RemoteAddr); err == nil {
 		remote = addr
 	}
@@ -377,7 +304,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // ServeTransport serves a connection on any transport until it closes.
 // remote and r describe the client, and may be nil.
 func (s *Server) ServeTransport(ctx context.Context, t Transport, remote net.Addr, r *http.Request) {
-	s.freeze()
+	s.made()
 	s.mu.Lock()
 	if s.closed {
 		s.mu.Unlock()
@@ -391,9 +318,9 @@ func (s *Server) ServeTransport(ctx context.Context, t Transport, remote net.Add
 	s.checkOnce.Do(func() {
 		s.logger().Debug("wire: serving", "capabilities", s.capabilities())
 		if _, ok := s.method("message"); !ok {
-			s.logger().Warn("wire: the server takes no messages, which every server should (§3.6): set Server.Messages, or Handle message")
+			s.logger().Warn("wire: the server takes no messages, which every server should (§3.6): set Config.Messages, or Handle message")
 		} else if _, ok := s.method("me"); !ok {
-			s.logger().Warn("wire: the server answers no me, which clients count on to change a user's profile (§3.3.2): set Server.Profiles, or Handle me")
+			s.logger().Warn("wire: the server answers no me, which clients count on to change a user's profile (§3.3.2): set Config.Profiles, or Handle me")
 		}
 	})
 	ctx, cancel := context.WithCancel(ctx)
@@ -410,9 +337,9 @@ func (s *Server) ServeTransport(ctx context.Context, t Transport, remote net.Add
 		s.mu.Unlock()
 		c.Close()
 		return
-	case s.MaxConnections > 0 && s.network >= s.MaxConnections:
+	case s.config.MaxConnections > 0 && s.network >= s.config.MaxConnections:
 		s.mu.Unlock()
-		c.info = s.complete(s.Backend.Hello(ctx, c))
+		c.info = s.complete(s.backend.Hello(ctx, c))
 		if frame, err := Encode(c.info); err == nil {
 			c.rt.Send(frame)
 		}
@@ -429,10 +356,10 @@ func (s *Server) ServeTransport(ctx context.Context, t Transport, remote net.Add
 		s.mu.Unlock()
 	}()
 
-	if connect := s.config.onConnect; connect != nil {
+	if connect := s.config.OnConnect; connect != nil {
 		if err := connect(ctx, c); err != nil {
 			if e, ok := asError(err); ok {
-				c.info = s.complete(s.Backend.Hello(ctx, c))
+				c.info = s.complete(s.backend.Hello(ctx, c))
 				if frame, err := Encode(c.info); err == nil {
 					c.rt.Send(frame)
 				}
@@ -445,7 +372,7 @@ func (s *Server) ServeTransport(ctx context.Context, t Transport, remote net.Add
 			return
 		}
 	}
-	c.info = s.complete(s.Backend.Hello(ctx, c))
+	c.info = s.complete(s.backend.Hello(ctx, c))
 	frame, err := Encode(c.info)
 	if err != nil {
 		s.logger().Error("wire: encoding the server frame", "error", err)
@@ -512,7 +439,7 @@ func (s *Server) waitClosed(c *Conn) {
 }
 
 func (s *Server) disconnected(c *Conn) {
-	if disconnect := s.config.onDisconnect; disconnect != nil {
+	if disconnect := s.config.OnDisconnect; disconnect != nil {
 		disconnect(c)
 	}
 }
@@ -552,7 +479,6 @@ func (s *Server) capabilities() []string {
 // Conns returns the open connections, Local ones included, such as to
 // broadcast to them.
 func (s *Server) Conns() []*Conn {
-	s.init()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	conns := make([]*Conn, 0, len(s.conns))
@@ -579,7 +505,7 @@ func (s *Server) Broadcast(frame Frame, to func(*Conn) bool) {
 // Shutdown stops accepting connections, closes the open ones, and waits for
 // them to finish, or for ctx.
 func (s *Server) Shutdown(ctx context.Context) error {
-	s.init()
+	s.made()
 	s.mu.Lock()
 	if !s.closed {
 		s.closed = true
@@ -591,8 +517,8 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	}
 	s.mu.Unlock()
 	for _, c := range conns {
-		if s.ShutdownError != nil {
-			c.CloseWithError(s.ShutdownError)
+		if s.config.ShutdownError != nil {
+			c.CloseWithError(s.config.ShutdownError)
 		} else {
 			c.Close()
 		}

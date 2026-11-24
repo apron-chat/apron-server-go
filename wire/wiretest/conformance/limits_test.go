@@ -29,7 +29,7 @@ func TestLimits(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			chat := &limited{maxText: test.maxText, keep: test.keep}
-			chat.server = &wire.Server{Backend: chat, Messages: chat, History: chat, Logger: slog.New(slog.DiscardHandler)}
+			chat.server = wire.NewServer(chat, wire.Config{Messages: chat, History: chat, Logger: slog.New(slog.DiscardHandler)})
 			r := &run{config: Config{Server: chat.server}, order: map[orderKey]int64{}, violations: map[string]map[string]bool{}}
 			for _, item := range checks {
 				if !slices.Contains(reported, item.id) {

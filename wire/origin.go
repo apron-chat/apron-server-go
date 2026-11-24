@@ -7,7 +7,7 @@ import (
 	"strings"
 )
 
-// OriginPatterns returns a Server.CheckOrigin that accepts the server's own
+// OriginPatterns returns a Config.CheckOrigin that accepts the server's own
 // origin, a request without an Origin header, and the origins that match
 // one of patterns, as in github.com/coder/websocket's AcceptOptions: a
 // pattern is matched with path.Match, case-insensitively, against the
@@ -41,7 +41,7 @@ func OriginPatterns(patterns ...string) func(r *http.Request) bool {
 	}
 }
 
-// AnyOrigin is a Server.CheckOrigin that accepts every origin, such as for a
+// AnyOrigin is a Config.CheckOrigin that accepts every origin, such as for a
 // server whose clients are not browsers, or a trusted deployment: it lets
 // any web page open a WebSocket with its visitors' cookies.
 func AnyOrigin(*http.Request) bool { return true }

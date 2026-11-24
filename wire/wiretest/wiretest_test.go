@@ -32,8 +32,15 @@ type chat struct {
 
 func newChat() *chat {
 	c := &chat{}
-	c.server = &wire.Server{Backend: c, Messages: c, History: c, Activity: c, OnDisconnect: func(*wire.Conn) { c.disconnected.Add(1) }}
+	c.server = wire.NewServer(c, c.config(wire.Config{}))
 	return c
+}
+
+// config is more with the chat's handlers and hooks.
+func (c *chat) config(more wire.Config) wire.Config {
+	more.Messages, more.History, more.Activity = c, c, c
+	more.OnDisconnect = func(*wire.Conn) { c.disconnected.Add(1) }
+	return more
 }
 
 func (*chat) Hello(context.Context, *wire.Conn) wire.ServerInfo {
@@ -417,7 +424,7 @@ func TestLater(t *testing.T) {
 		t.Fatalf("Wait: %v, sent %v %s", err, sent.Sent(), sent.Raw())
 	}
 
-	client, _ := wiretest.SignIn(t, &wire.Server{Backend: newChat(), Commands: s}, map[string]any{"scheme": "guest"})
+	client, _ := wiretest.SignIn(t, wire.NewServer(newChat(), wire.Config{Commands: s}), map[string]any{"scheme": "guest"})
 	done := make(chan string, 1)
 	go func() {
 		result, err := client.Call(ctx, "command", map[string]any{"body": map[string]any{"text": "/slow"}})

@@ -95,7 +95,7 @@ func testRouter(t *testing.T) *commands.Router {
 }
 
 func connect(t *testing.T, router *commands.Router) (*wiretest.Client, *wiretest.Client) {
-	server := &wire.Server{Backend: &backend{}, Commands: router, Logger: slog.New(slog.DiscardHandler)}
+	server := wire.NewServer(&backend{}, wire.Config{Commands: router, Logger: slog.New(slog.DiscardHandler)})
 	server.Handle(commands.ListMethod, router.ListHandler())
 	var clients []*wiretest.Client
 	for range 2 {

@@ -186,7 +186,7 @@ func (c *Conn) Send(frame Frame) bool { return c.SendBatch(frame) }
 
 // SendBatch queues frames to be written one after another, with no other
 // frame between them, such as a result and the notifications that complete
-// it. They take one place in the queue (Server.OutgoingQueue). Like Send,
+// it. They take one place in the queue (Config.OutgoingQueue). Like Send,
 // it never blocks, and is meant to be called under the backend's lock.
 func (c *Conn) SendBatch(frames ...Frame) bool {
 	if len(frames) == 0 {

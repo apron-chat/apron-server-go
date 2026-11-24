@@ -3,9 +3,10 @@ package wire
 import "context"
 
 // Backend answers for a Server: who it is (the server frame), and who each
-// connection is (auth). Everything else it does, it adds with the Server's
-// handler fields, such as Messages and Rooms, each of which adds its
-// requests and its capability, or with methods of its own (Server.Handle).
+// connection is (auth). Everything else it does, it adds with the
+// handlers of the Server's Config, such as Messages and Rooms, each of
+// which adds its requests and its capability, or with methods of its own
+// (Server.Handle).
 //
 // The Server calls a Backend, and every handler, from one goroutine per
 // connection, for one frame at a time, so calls for different connections
@@ -14,7 +15,7 @@ type Backend interface {
 	// Hello returns the server frame for a new connection (§3.1), network
 	// or Local, with ctx the connection's context. Server sets Apron and
 	// Ping, and adds the capabilities of what it handles. A connection
-	// refused at capacity (Server.MaxConnections) is sent one too, before
+	// refused at capacity (Config.MaxConnections) is sent one too, before
 	// its error, so Hello is called for it without OnConnect, and must not
 	// count on what OnConnect keeps with a connection.
 	Hello(ctx context.Context, c *Conn) ServerInfo
