@@ -65,11 +65,21 @@ type EditHandler interface {
 // object, with the fields the change cleared (CurrentUser.Cleared), whose
 // User becomes the connection's (Conn.SetUser) as Send queues it. The
 // backend tells the user's other connections, and those who share a room
-// with the user, itself (§3.3.3), such as with Server.PublishUserChange, c
-// its Except.
+// with the user, itself (§3.3.3), with Server.PublishUser, c its Except.
+// ApplyMe makes the request's changes, and User.Complete the result:
 //
-// ApplyMe makes the request's changes, and Server.SendMe does the rest:
-// it tells the others, and sends the result.
+//	func (b *Backend) Me(ctx context.Context, c *wire.Conn, p wire.MeParams, reply wire.Reply[wire.CurrentUser]) error {
+//		b.mu.Lock()
+//		defer b.mu.Unlock()
+//		old := *c.User()
+//		cur := wire.ApplyMe(old, p)
+//		if len(cur.Name) > 64 {
+//			return wire.InvalidParams("A name is at most 64 bytes")
+//		}
+//		// Everyone shares the one room: shares is nil.
+//		b.server.PublishUser(wire.UserChange{Old: old, New: cur, Except: c}, nil)
+//		return reply.Send(cur.Complete(old))
+//	}
 type ProfileHandler interface {
 	Me(ctx context.Context, c *Conn, p MeParams, reply Reply[CurrentUser]) error
 }

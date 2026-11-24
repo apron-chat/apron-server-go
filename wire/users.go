@@ -187,7 +187,7 @@ func (u User) Complete(old User) CurrentUser {
 // old's, and "" clears it; its ext merges into old's (MergeExt). Status is
 // left as it was: the chosen status is capability status's (§4.5.1),
 // which others see as the shown status, so a backend with it applies it
-// itself, and publishes the two views with PublishUserChange. The backend
+// itself, and publishes the two views with PublishUser. The backend
 // checks the result against its own policy, such as a name's length, or
 // normalizes it, before it makes it the user's. The result shares nothing
 // with old.
@@ -234,74 +234,12 @@ type UserUpdate struct {
 // Method makes a UserUpdate a Notification.
 func (UserUpdate) Method() string { return "user" }
 
-// PublishUser announces a change of a user from old to cur (§3.3.3), and
-// reports whether there was one: whether cur.Patch(old) changed anything.
-// When it did, PublishUser makes cur the identity of the user's own
-// connections (Conn.SetUser), and sends them {"you": patch}, and the other
-// signed-in connections for which shares returns true, or every one when
-// shares is nil, {"new": patch}, where patch is cur.Patch(old). The user's
-// own connections are those signed in as cur's user_id, or old's: when the
-// two differ, as when a guest becomes an account, others are sent old too.
-//
-// When nothing changed, PublishUser does nothing at all: it neither walks
-// the connections nor calls SetUser, so a backend may call it on every
-// change it might have made, and learn from the result whether it did.
-// Patch covers every field of User, so nothing changed means cur is old;
-// old is what the backend last made the user's connections' identity and
-// told their clients, and a connection whose identity is something else,
-// such as one the backend set itself with Conn.SetUser, is the backend's
-// to bring up to date.
-//
-// A backend tells others only of users who share a room with them
-// (§3.3.3): shares says who does. A backend whose user's own connections
-// see another object than others do, such as the chosen status rather than
-// the shown one (§4.5.2), publishes with PublishUserChange.
-//
-// Like Broadcast, it never blocks, and is meant to be called while the
-// backend holds the lock of the change, so that every connection gets a
-// user's changes in the order they were made; shares is called in the
-// caller's goroutine, so it may read what that lock guards.
-func (s *Server) PublishUser(old, cur User, shares func(*Conn) bool) bool {
-	return s.PublishUserChange(UserChange{Old: old, New: cur}, shares)
-}
-
-// SendMe answers a me request that changed the user from old to cur, as
-// ProfileHandler says: it tells the change to the user's other
-// connections, and to the other signed-in connections for which shares
-// returns true, or every one when shares is nil (PublishUserChange, with
-// the request's connection its Except), then sends the result, all of cur
-// with the fields the change cleared (cur.Complete(old)), which makes cur
-// the connection's user, and returns what Send returns. A me that changed
-// nothing is answered with cur, and tells no one.
-//
-// It is for a backend whose user is one object to everyone; one whose own
-// connections see another than others do, such as the chosen status and
-// the shown one (§4.5.2), publishes with PublishUserChange and sends
-// cur.Complete(old) itself. Like PublishUser, it never blocks, and is
-// meant to be called while the backend holds the lock of the change;
-// shares is called in the caller's goroutine.
-//
-//	func (b *Backend) Me(ctx context.Context, c *wire.Conn, p wire.MeParams, reply wire.Reply[wire.CurrentUser]) error {
-//		b.mu.Lock()
-//		defer b.mu.Unlock()
-//		old := *c.User()
-//		cur := wire.ApplyMe(old, p)
-//		if len(cur.Name) > 64 {
-//			return wire.InvalidParams("A name is at most 64 bytes")
-//		}
-//		// Everyone shares the one room: shares is nil.
-//		return b.server.SendMe(reply, old, cur, nil)
-//	}
-func (s *Server) SendMe(reply Reply[CurrentUser], old, cur User, shares func(*Conn) bool) error {
-	s.PublishUserChange(UserChange{Old: old, New: cur, Except: reply.Request().Conn()}, shares)
-	return reply.Send(cur.Complete(old))
-}
-
-// UserChange is a change of a user (§3.3.3) as its two audiences see it:
-// the user's own connections, which are sent you, and everyone else, who
-// are sent new. The two see different objects when the user's own see
-// what the user chose, and others what the server shows of it, such as
-// the chosen status and the shown one (§4.5.2).
+// UserChange is a change of a user (§3.3.3), which PublishUser announces,
+// as its two audiences see it: the user's own connections, which are sent
+// you, and everyone else, who are sent new. The two see different objects
+// when the user's own see what the user chose, and others what the server
+// shows of it, such as the chosen status and the shown one (§4.5.2); most
+// changes set Old and New alone.
 type UserChange struct {
 	// Old and New are the user before and after the change as its own
 	// connections see it: what the backend last made their identity and
@@ -316,30 +254,45 @@ type UserChange struct {
 	// Except, if set, is one of the user's own connections that is told
 	// of the change otherwise, and is sent nothing, nor given an identity:
 	// the one whose me or auth result carries the user, complete (§3.3.2),
-	// and makes it the connection's as it is sent.
+	// and makes it the connection's as it is sent (see ProfileHandler).
 	Except *Conn
 }
 
-// PublishUserChange announces a change of a user (§3.3.3) whose own
-// connections may see another object than everyone else does, and reports
-// whether there was one: whether either view of it changed anything, as
-// User.Patch tells. Each audience is sent the patch of its own view, and
-// only when that view changed:
+// PublishUser announces a change of a user (§3.3.3), and reports whether
+// there was one: whether either view of it changed anything, as User.Patch
+// tells. Each audience is sent the patch of its own view, and only when
+// that view changed:
 //
 //   - the user's own connections, those signed in as New's user_id or
 //     Old's, but Except, get New as their identity (Conn.SetUser), and are
 //     sent {"you": New.Patch(Old)};
 //   - the other signed-in connections for which shares returns true, or
 //     every one when shares is nil, are sent
-//     {"new": NewShown.Patch(OldShown)}, with OldShown as old when the
-//     user_id changed, as when a guest becomes an account.
+//     {"new": NewShown.Patch(OldShown)}, or New's patch when NewShown is
+//     unset, with the old user as old when the user_id changed, as when a
+//     guest becomes an account.
 //
-// When nothing changed, PublishUserChange does nothing at all, as
-// PublishUser does; when only others' view did, the user's own
-// connections are neither sent anything nor given an identity. It never
-// blocks, and is meant to be called while the backend holds the lock of
-// the change, as PublishUser is.
-func (s *Server) PublishUserChange(change UserChange, shares func(*Conn) bool) bool {
+// A backend tells others only of users who share a room with them
+// (§3.3.3): shares says who does. A change of the user's own profile, as
+// a rename, is the simplest:
+//
+//	server.PublishUser(wire.UserChange{Old: old, New: renamed}, nil)
+//
+// When nothing changed, PublishUser does nothing at all: it neither walks
+// the connections nor calls SetUser, so a backend may call it on every
+// change it might have made, and learn from the result whether it did.
+// Patch covers every field of User, so nothing changed means New is Old;
+// Old is what the backend last made the user's connections' identity and
+// told their clients, and a connection whose identity is something else,
+// such as one the backend set itself with Conn.SetUser, is the backend's
+// to bring up to date. When only others' view changed, the user's own
+// connections are neither sent anything nor given an identity.
+//
+// Like Broadcast, it never blocks, and is meant to be called while the
+// backend holds the lock of the change, so that every connection gets a
+// user's changes in the order they were made; shares is called in the
+// caller's goroutine, so it may read what that lock guards.
+func (s *Server) PublishUser(change UserChange, shares func(*Conn) bool) bool {
 	old, cur := change.Old, change.New
 	oldShown, curShown := old, cur
 	if change.NewShown.UserID != "" {

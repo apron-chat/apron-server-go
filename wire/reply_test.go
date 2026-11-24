@@ -198,7 +198,7 @@ func (b *broadcasting) Auth(_ context.Context, c *wire.Conn, p wire.AuthParams, 
 	}
 	frame, _ := wire.EncodeRaw("joined", map[string]any{"user_id": "ada"})
 	b.s.Broadcast(frame, nil)
-	b.s.PublishUser(you, wire.User{UserID: "ada", Name: "Ada L"}, nil)
+	b.s.PublishUser(wire.UserChange{Old: you, New: wire.User{UserID: "ada", Name: "Ada L"}}, nil)
 	return nil
 }
 

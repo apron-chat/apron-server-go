@@ -37,9 +37,9 @@
 //     as [LogID], below 2^53, and a [Clock] that issues them (§2.1);
 //   - user changes as patches ([User.Patch], [CurrentUser]), which carry
 //     what changed and clear what was taken away (§3.3.1), published to the
-//     user's connections and those who share a room ([Server.PublishUser]),
-//     or each its own view of the user, such as the chosen status and the
-//     shown one ([Server.PublishUserChange], §4.5.2).
+//     user's connections and those who share a room, each its own view of
+//     the user, such as the chosen status and the shown one
+//     ([Server.PublishUser], [UserChange], §4.5.2).
 //
 // # Backends and handlers
 //
@@ -49,9 +49,10 @@
 // post, and Profiles ([ProfileHandler], me), with which they change the
 // user's own profile, such as a rename (§3.3.2). The Server warns as it
 // starts serving without either. A me handler makes the request's changes
-// with [ApplyMe], checks them, and answers with [Server.SendMe], which
-// tells the user's other connections and those who share a room, and
-// sends the complete object as the result.
+// with [ApplyMe], checks them, tells the user's other connections and
+// those who share a room ([Server.PublishUser], with the request's
+// connection its Except), and answers with the complete object
+// ([User.Complete]), as [ProfileHandler] shows.
 //
 // Everything else is added one capability at a time, by setting another
 // handler — Edits ([EditHandler], edit), Commands ([CommandHandler],

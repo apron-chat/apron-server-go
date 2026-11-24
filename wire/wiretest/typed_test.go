@@ -10,7 +10,7 @@ import (
 	"github.com/apron-chat/apron-server-go/wire/wiretest"
 )
 
-// typedChat is chat with profiles, by ApplyMe and SendMe, and commands
+// typedChat is chat with profiles, by ApplyMe and PublishUser, and commands
 // whose notices come with a message to everyone between them.
 type typedChat struct{ *chat }
 
@@ -24,7 +24,9 @@ func (c *typedChat) Me(_ context.Context, conn *wire.Conn, p wire.MeParams, repl
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	old := *conn.User()
-	return c.server.SendMe(reply, old, wire.ApplyMe(old, p), nil)
+	cur := wire.ApplyMe(old, p)
+	c.server.PublishUser(wire.UserChange{Old: old, New: cur, Except: conn}, nil)
+	return reply.Send(cur.Complete(old))
 }
 
 // Command sends a notice, broadcasts the line, sends another notice, and

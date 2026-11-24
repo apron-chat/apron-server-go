@@ -345,7 +345,7 @@ func (u *userState) shownView() wire.User {
 }
 
 // notifyProfileLocked tells of a change to u since before, as package wire
-// does (wire.Server.PublishUserChange): `you` to the user's connections but
+// does (wire.Server.PublishUser): `you` to the user's connections but
 // except, whose result carries the user, and `new` to everyone who shares
 // a room with them (§3.3.3), each with the fields of their view that
 // changed, a cleared one as its empty value (§3.3.1), and only when their
@@ -368,7 +368,7 @@ func (s *Server) publishUserLocked(u *userState, except *client, before userView
 	if except != nil {
 		change.Except = except.conn
 	}
-	s.wire.PublishUserChange(change, func(wc *wire.Conn) bool {
+	s.wire.PublishUser(change, func(wc *wire.Conn) bool {
 		c, ok := wc.Data().(*client)
 		return ok && c.user != nil && sharers[c.user]
 	})

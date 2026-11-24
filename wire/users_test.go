@@ -55,9 +55,9 @@ func (v viewer) expect(t *testing.T, want string) {
 	}
 }
 
-// PublishUserChange sends the user's own connections the patch of their
+// PublishUser sends the user's own connections the patch of their
 // view, and others the patch of the shown one, each only when it changed.
-func TestPublishUserChange(t *testing.T) {
+func TestPublishUserViews(t *testing.T) {
 	s := wire.NewServer(helloBackend{}, wire.Config{})
 	chosen := wire.User{UserID: "ada", Name: "Ada", Status: "online"}
 	ada := openViewer(t, s, chosen)
@@ -69,7 +69,7 @@ func TestPublishUserChange(t *testing.T) {
 	// sent before it.
 	marker := func(name string) {
 		t.Helper()
-		if !s.PublishUser(wire.User{UserID: "carol"}, wire.User{UserID: "carol", Name: name}, nil) {
+		if !s.PublishUser(wire.UserChange{Old: wire.User{UserID: "carol"}, New: wire.User{UserID: "carol", Name: name}}, nil) {
 			t.Fatal("marker: no change")
 		}
 		for _, v := range []viewer{ada, ada2, bob, eve} {
@@ -81,7 +81,7 @@ func TestPublishUserChange(t *testing.T) {
 	// is shown while she is online (§4.5.1).
 	dnd := chosen
 	dnd.Status = "dnd"
-	if !s.PublishUserChange(wire.UserChange{Old: chosen, New: dnd, OldShown: chosen, NewShown: dnd}, notEve) {
+	if !s.PublishUser(wire.UserChange{Old: chosen, New: dnd, OldShown: chosen, NewShown: dnd}, notEve) {
 		t.Fatal("dnd: no change")
 	}
 	ada.expect(t, `{"method":"user","params":{"you":{"user_id":"ada","status":"dnd"}}}`)
@@ -93,7 +93,7 @@ func TestPublishUserChange(t *testing.T) {
 	invisible := chosen
 	invisible.Status = "invisible"
 	shownOffline := wire.User{UserID: "ada", Name: "Ada", Status: "offline", Seen: "1724803600000"}
-	if !s.PublishUserChange(wire.UserChange{Old: dnd, New: invisible, OldShown: dnd, NewShown: shownOffline}, notEve) {
+	if !s.PublishUser(wire.UserChange{Old: dnd, New: invisible, OldShown: dnd, NewShown: shownOffline}, notEve) {
 		t.Fatal("invisible: no change")
 	}
 	ada.expect(t, `{"method":"user","params":{"you":{"user_id":"ada","status":"invisible"}}}`)
@@ -110,7 +110,7 @@ func TestPublishUserChange(t *testing.T) {
 	ada.l.Conn().SetUser(wire.User{UserID: "ada", Name: "Stale"})
 	idle, online := chosen, chosen
 	idle.Status = "idle"
-	if !s.PublishUserChange(wire.UserChange{Old: chosen, New: chosen, OldShown: online, NewShown: idle}, notEve) {
+	if !s.PublishUser(wire.UserChange{Old: chosen, New: chosen, OldShown: online, NewShown: idle}, notEve) {
 		t.Fatal("idle: no change")
 	}
 	bob.expect(t, `{"method":"user","params":{"new":{"user_id":"ada","status":"idle"}}}`)
@@ -124,7 +124,7 @@ func TestPublishUserChange(t *testing.T) {
 	renamed := invisible
 	renamed.Name = "Ada L"
 	shownRenamed := shownOffline
-	if !s.PublishUserChange(wire.UserChange{Old: invisible, New: renamed, OldShown: shownOffline, NewShown: shownRenamed},
+	if !s.PublishUser(wire.UserChange{Old: invisible, New: renamed, OldShown: shownOffline, NewShown: shownRenamed},
 		func(*wire.Conn) bool { t.Error("shares called without a change of others' view"); return true }) {
 		t.Fatal("own view: no change")
 	}
@@ -136,7 +136,7 @@ func TestPublishUserChange(t *testing.T) {
 	marker("4")
 
 	// Neither: nothing at all.
-	if s.PublishUserChange(wire.UserChange{Old: renamed, New: renamed, OldShown: shownOffline, NewShown: shownOffline},
+	if s.PublishUser(wire.UserChange{Old: renamed, New: renamed, OldShown: shownOffline, NewShown: shownOffline},
 		func(*wire.Conn) bool { t.Error("shares called without a change"); return true }) {
 		t.Fatal("reported a change where there was none")
 	}
@@ -145,7 +145,7 @@ func TestPublishUserChange(t *testing.T) {
 	// A user_id change: others are sent the shown objects, old too, with
 	// Old's and New's user_ids whatever the shown objects hold.
 	account := wire.User{UserID: "ada_l", Name: "Ada L", Status: "invisible"}
-	if !s.PublishUserChange(wire.UserChange{Old: renamed, New: account, OldShown: shownOffline, NewShown: wire.User{UserID: "ignored", Name: "Ada L", Status: "offline"}}, notEve) {
+	if !s.PublishUser(wire.UserChange{Old: renamed, New: account, OldShown: shownOffline, NewShown: wire.User{UserID: "ignored", Name: "Ada L", Status: "offline"}}, notEve) {
 		t.Fatal("user_id: no change")
 	}
 	ada.expect(t, `{"method":"user","params":{"you":{"user_id":"ada_l","name":"Ada L","status":"invisible"}}}`)
@@ -159,7 +159,7 @@ func TestPublishUserChange(t *testing.T) {
 	// Without NewShown, everyone sees Old and New, as with PublishUser.
 	back := account
 	back.Status = "online"
-	if !s.PublishUserChange(wire.UserChange{Old: account, New: back, OldShown: wire.User{UserID: "x", Name: "unused"}}, nil) {
+	if !s.PublishUser(wire.UserChange{Old: account, New: back, OldShown: wire.User{UserID: "x", Name: "unused"}}, nil) {
 		t.Fatal("one view: no change")
 	}
 	ada.expect(t, `{"method":"user","params":{"you":{"user_id":"ada_l","status":"online"}}}`)
@@ -172,7 +172,7 @@ func TestPublishUserChange(t *testing.T) {
 	// nothing, and keeps its identity.
 	named := back
 	named.Name = "Ada"
-	if !s.PublishUserChange(wire.UserChange{Old: back, New: named, Except: ada.l.Conn()}, nil) {
+	if !s.PublishUser(wire.UserChange{Old: back, New: named, Except: ada.l.Conn()}, nil) {
 		t.Fatal("except: no change")
 	}
 	ada2.expect(t, `{"method":"user","params":{"you":{"user_id":"ada_l","name":"Ada"}}}`)

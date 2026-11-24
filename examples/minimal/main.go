@@ -139,17 +139,18 @@ func (c *Chat) Message(_ context.Context, conn *wire.Conn, p wire.MessageParams,
 	return reply.Send(wire.MessageResult{MessageID: id})
 }
 
-// Me changes the user's profile (§3.3.2). SendMe answers with the
-// complete object, the fields the change cleared as their empty values,
-// and tells what changed to the user's other connections as you, and to
-// everyone else as new (§3.3.3): everyone shares the one room.
+// Me changes the user's profile (§3.3.2): it tells what changed to the
+// user's other connections as you, and to everyone else as new (§3.3.3),
+// as everyone shares the one room, and answers with the complete object,
+// the fields the change cleared as their empty values.
 func (c *Chat) Me(_ context.Context, conn *wire.Conn, p wire.MeParams, reply wire.Reply[wire.CurrentUser]) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	old := *conn.User()
 	you := wire.ApplyMe(old, p)
 	you.Name = strings.TrimSpace(you.Name)
-	return c.Server.SendMe(reply, old, you, nil)
+	c.Server.PublishUser(wire.UserChange{Old: old, New: you, Except: conn}, nil)
+	return reply.Send(you.Complete(old))
 }
 
 // nick is /nick <name>: a rename, as me does it. Its effect, the user
@@ -163,6 +164,6 @@ func (c *Chat) nick(_ context.Context, call *commands.Call) error {
 	old := *call.Conn.User()
 	you := old
 	you.Name = call.Args
-	c.Server.PublishUser(old, you, nil)
+	c.Server.PublishUser(wire.UserChange{Old: old, New: you}, nil)
 	return call.Done()
 }
