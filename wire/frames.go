@@ -123,9 +123,18 @@ type AuthParams struct {
 
 // AuthResult is the result of auth (§3.2). A result with You nil
 // authenticated nothing, such as the begin step of a ceremony; with You, the
-// connection is signed in as You. You is complete (§3.3.1), so a field it
-// carries empty, such as a status of "", which a complete object carries
-// (§4.5.2), is in its Cleared.
+// connection is signed in as You.
+//
+// You is complete (§3.3.1): it carries every profile field the server
+// publishes, those the user has empty too, named in its Cleared, such as a
+// status of "" with capability status (§4.5.2). So a sign-in's You is the
+// user, u, with Cleared naming the fields the server publishes that u has
+// empty: &CurrentUser{User: u}, for a server that publishes no field u
+// can have empty, such as one of user_id and name alone, or
+// &CurrentUser{User: u, Cleared: []string{"status"}} for a user without a
+// status. User.Complete is for a client that keeps the user already, as a
+// me result's does: a signing-in client keeps nothing, and
+// u.Complete(User{}) is CurrentUser{User: u}, which clears nothing.
 type AuthResult struct {
 	You   *CurrentUser `json:"you,omitzero"`
 	Token string       `json:"token,omitempty"`

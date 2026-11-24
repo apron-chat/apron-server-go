@@ -109,7 +109,8 @@ func (c *Chat) Auth(_ context.Context, _ *wire.Conn, p wire.AuthParams, reply wi
 	if err != nil {
 		return err
 	}
-	// The welcome goes right after the result (§3.2.2).
+	// The welcome goes right after the result (§3.2.2). you is complete
+	// (§3.3.1): this server publishes user_id and name, and both are set.
 	return reply.Send(wire.AuthResult{You: &wire.CurrentUser{User: wire.User{UserID: id, Name: name}}}, welcome)
 }
 

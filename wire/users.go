@@ -13,7 +13,9 @@ import (
 // Cleared names is sent as its empty value ("" for a string, [] for roles,
 // {} for ext), in place of User's, so that a client that merges the object
 // into the one it keeps clears it; a decoded CurrentUser lists in Cleared
-// the fields of User it carried empty.
+// the fields of User it carried empty. A complete object, an auth or me
+// result's you, also names in Cleared the fields the server publishes that
+// User has empty (see AuthResult).
 //
 // A cleared ext key is not a cleared field: it is a key of Ext with an
 // empty value (§4.13), as Patch makes it. An empty ext clears nothing.
@@ -170,7 +172,11 @@ func (u User) Patch(old User) (CurrentUser, bool) {
 // Complete returns u as a complete current object (§3.3.1) for a client
 // that keeps old, as a me result carries it (§3.3.2): all of u, with
 // Cleared naming each field old had and u has not, which it carries as its
-// empty value, as u.Patch(old) does.
+// empty value, as u.Patch(old) does. A field the server publishes that
+// neither has, such as a status of "" with capability status (§4.5.2), a
+// complete object carries too: the caller adds it to Cleared. For a
+// client that keeps nothing of the user, as one signing in, old is the
+// zero User (see AuthResult).
 func (u User) Complete(old User) CurrentUser {
 	patch, _ := u.Patch(old)
 	return CurrentUser{User: u, Cleared: patch.Cleared}
