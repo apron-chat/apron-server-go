@@ -1,7 +1,7 @@
 github.com/BurntSushi/toml v1.6.0 h1:dRaEfpa2VI55EwlIW72hMRHdWouJeRF7TPYhI+AUQjk=
 github.com/BurntSushi/toml v1.6.0/go.mod h1:ukJfTF/6rtPPRCnwkur4qwRxa8vTRFBF0uk2lLoLwho=
-github.com/apron-chat/apron-server-go/wire v0.0.0-20261124170756-90c66207f1ef h1:YvIZy22jpUrh9YE+qGxcy35MA+azvWgnerhKSJtNXuc=
-github.com/apron-chat/apron-server-go/wire v0.0.0-20261124170756-90c66207f1ef/go.mod h1:gNW4u6aSRhOmcZFrawwo3gHz5GDHhP0qzk/XZHQDPu8=
+github.com/apron-chat/apron-server-go/wire v0.0.0-20261124184429-971a459e582f h1:dyyHIuvTKhPag8GsUElYzGBFGEK1P1mgIOo4hxJrHM0=
+github.com/apron-chat/apron-server-go/wire v0.0.0-20261124184429-971a459e582f/go.mod h1:gNW4u6aSRhOmcZFrawwo3gHz5GDHhP0qzk/XZHQDPu8=
 github.com/coder/websocket v1.8.14 h1:9L0p0iKiNOibykf283eHkKUHHrpG7f65OE3BhhO7v9g=
 github.com/coder/websocket v1.8.14/go.mod h1:NX3SzP+inril6yawo5CQXx8+fk145lPDC6pumgx0mVg=
 github.com/dustin/go-humanize v1.0.1 h1:GzkhY7T5VNhEkwH0PVJgjz+fX1rhBrR7pRT3mDkpeCY=
