@@ -285,3 +285,36 @@ func TestMarshal(t *testing.T) {
 		t.Fatalf("Marshal = %s, %v", got, err)
 	}
 }
+
+// A field the Server takes as it starts serving, changed after, is not
+// used, and the change is logged once, at Error, naming the fields; a
+// field it reads as it serves, such as ReadLimit, is no such change.
+func TestChangeAfterServingIsLogged(t *testing.T) {
+	var logged bytes.Buffer
+	var mu sync.Mutex
+	s := wired(&wire.Server{Backend: &backend{}, Logger: slog.New(slog.NewTextHandler(lockedWriter{&mu, &logged}, nil))})
+	connect(t, s)
+	connect(t, s)
+	s.ReadLimit = 1 << 20
+	connect(t, s)
+	logs := func() string {
+		mu.Lock()
+		defer mu.Unlock()
+		return logged.String()
+	}
+	if out := logs(); strings.Contains(out, "level=ERROR") {
+		t.Fatalf("logged with nothing taken changed: %s", out)
+	}
+	connected := false
+	s.OnConnect = func(context.Context, *wire.Conn) error { connected = true; return nil }
+	s.Messages = nil
+	c := connect(t, s)
+	connect(t, s)
+	signIn(t, c)
+	if _, err := c.Post(wait(t), wire.MessageParams{Body: &wire.Body{Text: "still taken"}}); err != nil || connected {
+		t.Fatalf("the Server used the changed fields: post %v, OnConnect called %v", err, connected)
+	}
+	if out := logs(); strings.Count(out, "level=ERROR") != 1 || !strings.Contains(out, `fields="[Messages OnConnect]"`) {
+		t.Fatalf("log: %s", out)
+	}
+}

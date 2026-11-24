@@ -8,9 +8,11 @@ import (
 	"maps"
 	"net"
 	"net/http"
+	"reflect"
 	"slices"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/coder/websocket"
@@ -22,7 +24,10 @@ import (
 // It is configured by setting its fields, in any order, and registering
 // methods (Handle, HandleNotification), before it serves its first
 // connection or opens its first Local one: then it takes its
-// configuration, and its fields must not change after.
+// configuration, and its fields must not change after. A handler, hook,
+// or dedup size set after then is not used: the Server logs the first
+// such change it finds, at Error, as it serves a connection, naming the
+// field.
 type Server struct {
 	// Backend says who the server is, and who each connection is.
 	Backend Backend
@@ -126,7 +131,10 @@ type Server struct {
 	once       sync.Once
 	freezeOnce sync.Once
 	checkOnce  sync.Once
-	mu         sync.Mutex
+	// changeLogged is whether a change to a field the Server took was
+	// logged.
+	changeLogged atomic.Bool
+	mu           sync.Mutex
 	// registered are the methods registered with Handle and
 	// HandleNotification, and methods, once the Server took its
 	// configuration, every method it serves.
@@ -148,6 +156,62 @@ type config struct {
 	refreshDuplicate func(ctx context.Context, c *Conn, method string, result jsontext.Value) any
 	checkScheme      func(ctx context.Context, c *Conn, p AuthParams) error
 	checkOrigin      func(r *http.Request) bool
+	// taken are the fields the Server took, as it took them, to tell a
+	// change after (logChange).
+	taken []any
+}
+
+// takenFields names the fields the Server takes as it starts serving, in
+// the order of taken's values.
+var takenFields = []string{
+	"Messages", "Profiles", "Edits", "Commands", "Rooms", "History", "Status", "Reactions", "Activity",
+	"OnConnect", "OnDisconnect", "RefreshDuplicate", "CheckScheme", "CheckOrigin", "DedupSize", "DedupUsers",
+}
+
+// taken returns the values of the fields the Server takes as it starts
+// serving, in takenFields' order.
+func (s *Server) taken() []any {
+	return []any{
+		s.Messages, s.Profiles, s.Edits, s.Commands, s.Rooms, s.History, s.Status, s.Reactions, s.Activity,
+		s.OnConnect, s.OnDisconnect, s.RefreshDuplicate, s.CheckScheme, s.CheckOrigin, s.DedupSize, s.DedupUsers,
+	}
+}
+
+// logChange logs, once, that a field the Server took changed after, which
+// the Server goes on without.
+func (s *Server) logChange() {
+	if s.changeLogged.Load() {
+		return
+	}
+	var changed []string
+	for i, value := range s.taken() {
+		if !same(value, s.config.taken[i]) {
+			changed = append(changed, takenFields[i])
+		}
+	}
+	if len(changed) > 0 && s.changeLogged.CompareAndSwap(false, true) {
+		s.logger().Error("wire: Server fields changed after the Server took its configuration, as it started serving, and are not used: set them before",
+			"fields", changed)
+	}
+}
+
+// same reports whether two values of a field are the same: funcs, and
+// pointers in handlers, by what they point to, and comparable values by
+// ==. Two closures of one func literal, or two method values, are the
+// same, as are two values it cannot compare.
+func same(a, b any) bool {
+	va, vb := reflect.ValueOf(a), reflect.ValueOf(b)
+	switch {
+	case !va.IsValid() || !vb.IsValid():
+		return va.IsValid() == vb.IsValid()
+	case va.Type() != vb.Type():
+		return false
+	}
+	switch va.Kind() {
+	case reflect.Func, reflect.Pointer, reflect.Map, reflect.Chan, reflect.Slice, reflect.UnsafePointer:
+		return va.Pointer() == vb.Pointer()
+	}
+	return !va.Comparable() || va.Equal(vb)
 }
 
 // reservedMethods are handled by the Server itself.
@@ -217,10 +281,12 @@ func (s *Server) init() {
 
 // freeze takes the Server's configuration, once, as it starts serving: the
 // methods of its handler fields, with those registered in their place, and
-// its hooks.
+// its hooks. Called again, it logs a change to them since (logChange).
 func (s *Server) freeze() {
 	s.init()
+	took := false
 	s.freezeOnce.Do(func() {
+		took = true
 		builtins := s.builtins()
 		perUser := s.DedupSize
 		if perUser == 0 {
@@ -238,9 +304,13 @@ func (s *Server) freeze() {
 			refreshDuplicate: s.RefreshDuplicate,
 			checkScheme:      s.CheckScheme,
 			checkOrigin:      s.CheckOrigin,
+			taken:            s.taken(),
 		}
 		s.dedup = newDedup(perUser, orDefault(s.DedupUsers, 4096))
 	})
+	if !took {
+		s.logChange()
+	}
 }
 
 func (s *Server) logger() *slog.Logger {
