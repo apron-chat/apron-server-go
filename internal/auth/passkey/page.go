@@ -399,7 +399,7 @@ func (s *Scheme) pagePost(w http.ResponseWriter, r *http.Request) {
 		s.pageVerify(w, r, f)
 	case "cancel":
 		s.finishFlowLocked(f)
-		f.req.Deny(w, r)
+		f.req.Deny(w, r, "")
 	default:
 		http.Error(w, "Unknown action", http.StatusBadRequest)
 	}

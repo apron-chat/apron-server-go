@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/apron-chat/apron-server-go/internal/authn"
@@ -234,6 +235,67 @@ func TestExternalSignIn(t *testing.T) {
 	// An external token is not this server's.
 	signIn.drain(t)
 	signIn.expectError(t, "auth", "t", map[string]any{"scheme": "external", "token": "anything"}, CodeDenied)
+}
+
+// Deny refuses a person with a reason: the page says why, and offers to
+// sign in as someone else, or to cancel, which tells the app why.
+func TestExternalDeny(t *testing.T) {
+	var refuse atomic.Bool
+	refuse.Store(true)
+	var signIn *ExternalSignIn
+	_, httpServer := newTestServer(t, extensionConfig(testExtension{"sso", func(r *Registrar) error {
+		signIn = r.ExternalSignIn(func(w http.ResponseWriter, req *http.Request, p ExternalRequest) {
+			if refuse.Load() {
+				_ = signIn.Deny(w, req, p.ID, "Ada is not a member of “acme”")
+				return
+			}
+			_ = signIn.Complete(w, req, p.ID, Identity{Subject: "idp:1", Name: "Ada"})
+		})
+		return nil
+	}}))
+	issuer := httpServer.URL
+	page := issuer + "/oauth/authorize"
+
+	app := oauthtest.New(t, issuer)
+	screen := app.Get(app.URL(page, nil))
+	for _, want := range []string{
+		"You can&#39;t sign in to <strong>127.0.0.1:",
+		"</strong> with this account.",
+		"Ada is not a member of “acme”",
+		`value="restart" class="primary">Sign in as someone else</button>`,
+		`value="cancel"`,
+	} {
+		if screen.Status != http.StatusForbidden || !strings.Contains(screen.Body, want) {
+			t.Fatalf("denied screen lacks %q: %d %s", want, screen.Status, screen.Body)
+		}
+	}
+	if allowed := app.Press(screen, "allow"); allowed.Return != nil {
+		t.Fatalf("allow after a denial returned %v", allowed.Return)
+	}
+	declined := app.Press(screen, "cancel")
+	if query := declined.Return.Query(); declined.Return == nil || query.Get("error") != "access_denied" || query.Get("error_description") != "Ada is not a member of 'acme'" || query.Get("state") != app.State {
+		t.Fatalf("cancel after a denial = %d %v", declined.Status, declined.Return)
+	}
+
+	// Signing in as someone else after a denial may succeed, and a cancel
+	// then gives no reason.
+	again := oauthtest.New(t, issuer)
+	screen = again.Get(again.URL(page, nil))
+	refuse.Store(false)
+	if code := again.Code(again.Press(again.Press(screen, "restart"), "allow"), issuer); code == "" {
+		t.Fatal("no code after signing in as someone else")
+	}
+	other := oauthtest.New(t, issuer)
+	screen = other.Get(other.URL(page, nil))
+	if declined := other.Press(screen, "cancel"); declined.Return == nil || declined.Return.Query().Has("error_description") {
+		t.Fatalf("plain cancel = %v", declined.Return)
+	}
+
+	// A sign-in that is no longer open says so.
+	recorder := httptest.NewRecorder()
+	if err := signIn.Deny(recorder, httptest.NewRequest(http.MethodGet, "/", nil), "unknown", "no"); err != ErrUnknownSignIn || recorder.Code != http.StatusNotFound {
+		t.Fatalf("Deny of an unknown sign-in = %v, %d", err, recorder.Code)
+	}
 }
 
 // On a signed-in connection, guests included, a code adds the identity to

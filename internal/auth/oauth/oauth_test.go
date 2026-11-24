@@ -145,3 +145,16 @@ func TestClientNames(t *testing.T) {
 		}
 	}
 }
+
+func TestErrorDescription(t *testing.T) {
+	for text, want := range map[string]string{
+		"octocat is not a member of acme": "octocat is not a member of acme",
+		"  two\n lines\t ":                "two lines",
+		`a "quoted" \ path`:               `a 'quoted' / path`,
+		"Ada’s account für dich":          "Ada's account f?r dich",
+	} {
+		if got := errorDescription(text); got != want {
+			t.Errorf("errorDescription(%q) = %q, want %q", text, got, want)
+		}
+	}
+}

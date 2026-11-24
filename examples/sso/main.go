@@ -89,7 +89,8 @@ func (s *SSO) start(w http.ResponseWriter, r *http.Request, req apron.ExternalRe
 
 // finish exchanges GitHub's code for the person's identity and completes
 // the sign-in with it; the server's page then asks them to allow the app.
-// A person who declined at GitHub goes back to the app, which hears so.
+// A person who declined at GitHub goes back to the app, which hears so; one
+// who is not a member of the organization is refused.
 func (s *SSO) finish(w http.ResponseWriter, r *http.Request) {
 	signIn := r.URL.Query().Get("state")
 	if r.URL.Query().Get("error") == "access_denied" {
@@ -98,8 +99,10 @@ func (s *SSO) finish(w http.ResponseWriter, r *http.Request) {
 	}
 	identity, err := s.identify(r.Context(), r.URL.Query().Get("code"))
 	if err != nil {
+		// The server's page says why, and lets the person sign in as
+		// someone else, or go back to the app, which hears why too.
 		s.host.Logger().Warn("GitHub sign-in refused", "error", err)
-		http.Error(w, "Sign-in failed: "+err.Error(), http.StatusForbidden)
+		_ = s.signIn.Deny(w, r, signIn, err.Error())
 		return
 	}
 	if err := s.signIn.Complete(w, r, signIn, identity); err != nil {

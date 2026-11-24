@@ -16,11 +16,11 @@ import (
 	"github.com/apron-chat/apron-server-go/internal/wstest"
 )
 
-// gitHub is a fake GitHub, which signs in octocat, a member of acme,
-// whatever is asked, unless the person declines.
+// gitHub is a fake GitHub, which signs in octocat, a member of acme
+// unless left, whatever is asked, unless the person declines.
 type gitHub struct {
 	*httptest.Server
-	decline bool
+	decline, left bool
 }
 
 func fakeGitHub(t *testing.T) *gitHub {
@@ -44,6 +44,10 @@ func fakeGitHub(t *testing.T) *gitHub {
 		json.NewEncoder(w).Encode(map[string]any{"id": 583231, "login": "octocat", "name": "The Octocat"})
 	})
 	mux.HandleFunc("GET /user/memberships/orgs/acme", func(w http.ResponseWriter, r *http.Request) {
+		if g.left {
+			http.NotFound(w, r)
+			return
+		}
 		json.NewEncoder(w).Encode(map[string]any{"state": "active"})
 	})
 	g.Server = httptest.NewServer(mux)
@@ -128,6 +132,19 @@ func TestSignInWithGitHub(t *testing.T) {
 	page = declined.Get(declined.URL(external["url"].(string), nil))
 	if page.Return == nil || page.Return.Query().Get("error") != "access_denied" || page.Return.Query().Get("state") != declined.State {
 		t.Fatalf("declined = %d %v %s", page.Status, page.Return, page.Body)
+	}
+
+	// Once octocat left acme, the page refuses them and says why; back in
+	// the app, which hears why too.
+	github.decline, github.left = false, true
+	outsider := oauthtest.New(t, base)
+	page = outsider.Get(outsider.URL(external["url"].(string), nil))
+	if page.Status != http.StatusForbidden || !strings.Contains(page.Body, "octocat is not a member of acme") {
+		t.Fatalf("outsider = %d %s", page.Status, page.Body)
+	}
+	back := outsider.Press(page, "cancel")
+	if back.Return == nil || back.Return.Query().Get("error") != "access_denied" || back.Return.Query().Get("error_description") != "octocat is not a member of acme" {
+		t.Fatalf("outsider's cancel = %d %v", back.Status, back.Return)
 	}
 }
 

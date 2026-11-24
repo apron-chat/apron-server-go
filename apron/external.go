@@ -91,11 +91,12 @@ type Identity struct {
 
 // ExternalSignIn offers external sign-in (§4.12), which start begins: it
 // is called as an app opens the server's page, and again when the person
-// chooses to sign in as someone else, and typically redirects to an identity provider, whose answer comes back to
-// a route of the extension's (Handle) that calls the returned
-// ExternalSignIn's Complete, or Cancel. One extension may offer it. Account
-// creation is the extension's policy: an identity it completes signs in,
-// making an account if it has none.
+// chooses to sign in as someone else, and typically redirects to an
+// identity provider, whose answer comes back to a route of the extension's
+// (Handle) that calls the returned ExternalSignIn's Complete, Deny, or
+// Cancel. One extension may offer it. Account creation is the extension's
+// policy: an identity it completes signs in, making an account if it has
+// none, and one it refuses it denies.
 func (r *Registrar) ExternalSignIn(start func(w http.ResponseWriter, r *http.Request, req ExternalRequest)) *ExternalSignIn {
 	scheme := external.New(func(w http.ResponseWriter, req *http.Request, p external.Request) {
 		start(w, req, ExternalRequest{ID: p.ID, Client: p.Client})
@@ -116,8 +117,8 @@ func (r *Registrar) ExternalSignIn(start func(w http.ResponseWriter, r *http.Req
 	return &ExternalSignIn{scheme: scheme}
 }
 
-// ErrUnknownSignIn is returned by Complete and Cancel for a sign-in that is
-// unknown, expired, or completed.
+// ErrUnknownSignIn is returned by Complete, Deny, and Cancel for a sign-in
+// that is unknown, expired, or completed.
 var ErrUnknownSignIn = errors.New("apron: the sign-in is unknown, expired, or completed")
 
 // Complete completes the sign-in named id with the identity the extension
@@ -146,6 +147,23 @@ func (x *ExternalSignIn) Complete(w http.ResponseWriter, r *http.Request, id str
 // open, it answers with a page that says so, and returns ErrUnknownSignIn.
 func (x *ExternalSignIn) Cancel(w http.ResponseWriter, r *http.Request, id string) error {
 	if errors.Is(x.scheme.Cancel(w, r, id), external.ErrUnknownSignIn) {
+		return ErrUnknownSignIn
+	}
+	return nil
+}
+
+// Deny refuses the sign-in named id, as the extension's policy, such as
+// for a person who is not a member of the organization it admits, and
+// answers the person's browser with the server's page, which says they
+// can't sign in with this account, then reason, such as "octocat is not a
+// member of acme", and offers to sign in as someone else (the extension's
+// start function again, with a new ExternalRequest) or to cancel. Cancel
+// returns to the app with error=access_denied (RFC 6749 §4.1.2.1) and
+// reason as its error_description, in printable ASCII. For a sign-in that
+// is no longer open, it answers with a page that says so, and returns
+// ErrUnknownSignIn.
+func (x *ExternalSignIn) Deny(w http.ResponseWriter, r *http.Request, id, reason string) error {
+	if errors.Is(x.scheme.Deny(w, r, id, reason), external.ErrUnknownSignIn) {
 		return ErrUnknownSignIn
 	}
 	return nil

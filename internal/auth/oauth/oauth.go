@@ -284,9 +284,31 @@ func (r *Request) Return(w http.ResponseWriter, req *http.Request, params url.Va
 }
 
 // Deny returns to the client with error=access_denied: the person
-// declined or cancelled.
-func (r *Request) Deny(w http.ResponseWriter, req *http.Request) {
-	r.Return(w, req, url.Values{"error": {"access_denied"}})
+// declined or cancelled, or the server refused them, as description says,
+// if set, which goes as error_description.
+func (r *Request) Deny(w http.ResponseWriter, req *http.Request, description string) {
+	params := url.Values{"error": {"access_denied"}}
+	if description = errorDescription(description); description != "" {
+		params.Set("error_description", description)
+	}
+	r.Return(w, req, params)
+}
+
+// errorDescription is text as an error_description may carry it (RFC 6749
+// §4.1.2.1): printable ASCII, with each run of whitespace a space, " and
+// curly quotes as ', \ as /, and any other character as a question mark.
+func errorDescription(text string) string {
+	return strings.Map(func(r rune) rune {
+		switch {
+		case r == '"', r == '\u2018', r == '\u2019', r == '\u201c', r == '\u201d':
+			return '\''
+		case r == '\\':
+			return '/'
+		case r < 0x20 || r > 0x7e:
+			return '?'
+		}
+		return r
+	}, strings.Join(strings.Fields(text), " "))
 }
 
 // Grant binds a code to its request (§4.12.3).
