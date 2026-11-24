@@ -791,13 +791,3 @@ func normalizeRoles(roles []string) []string {
 	slices.Sort(normalized)
 	return slices.Compact(normalized)
 }
-
-// RetryAfter is a CodeRetryAfter error suggesting wait, in whole seconds.
-func RetryAfter(message string, wait time.Duration) *Error {
-	return retryAfter(message, wait)
-}
-
-// retryAfter is a retry_after error suggesting wait, in whole seconds.
-func retryAfter(message string, wait time.Duration) *Error {
-	return &Error{Code: CodeRetryAfter, Message: message, Data: map[string]any{"retry_after": authn.Seconds(wait)}}
-}

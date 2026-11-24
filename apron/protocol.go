@@ -5,6 +5,7 @@ import (
 	"encoding/json/v2"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/apron-chat/apron-server-go/wire"
 )
@@ -30,15 +31,39 @@ const (
 )
 
 // Error is a protocol error reply (PROTOCOL.md §1.1): package wire's, so
-// that code written for either package refuses requests the same way.
-// Message is shown to people, so it says what to do in a sentence.
+// that code written for either package refuses requests the same way, and
+// an extension refuses with the constructors below, which are wire's.
+//
+//	type Error struct {
+//		Code    int    // one of the Code constants
+//		Message string // shown to people as is
+//		Data    any    // details for clients, such as retry_after, or nil
+//	}
+//
+// Message says what happened, or what to do, in a sentence. An extension
+// returns an *Error from a command, method, or filter to refuse it with
+// its code; any other error is logged, and the client told only of an
+// internal error.
 type Error = wire.Error
 
-// Denied is a CodeDenied error with message.
+// Denied is a CodeDenied error with message: the sender may not do this.
 func Denied(message string) *Error { return wire.Denied(message) }
 
-// InvalidParams is a CodeInvalidParams error with message.
+// InvalidParams is a CodeInvalidParams error with message: the request
+// names something that does not exist, or its params are malformed.
 func InvalidParams(message string) *Error { return wire.InvalidParams(message) }
+
+// Unsupported is a CodeUnsupported error with message: the server does not
+// offer this.
+func Unsupported(message string) *Error { return wire.Unsupported(message) }
+
+// RetryAfter is a CodeRetryAfter error with message that asks the client to
+// wait, in Data's retry_after: whole seconds, rounded up, and at least one.
+func RetryAfter(message string, wait time.Duration) *Error { return wire.RetryAfter(message, wait) }
+
+// TooLarge is a CodeTooLarge error with message: the request is over a
+// size limit.
+func TooLarge(message string) *Error { return wire.TooLarge(message) }
 
 // bodyObject decodes a body package wire read, as the server keeps it:
 // every field as it was sent, those wire does not know too (Body.Unknown),

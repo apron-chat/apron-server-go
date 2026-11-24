@@ -163,7 +163,7 @@ func (s *Server) status(c *client, p wire.StatusParams, reply wire.Reply[wire.Em
 // announce, store, and recount for it without end.
 func admitStatusLocked(u *userState) *Error {
 	if delay := u.Presence.Admit(time.Now()); delay > 0 {
-		return retryAfter("Too many status changes; slow down", delay)
+		return RetryAfter("Too many status changes; slow down", delay)
 	}
 	return nil
 }
