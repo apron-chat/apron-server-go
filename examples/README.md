@@ -10,7 +10,7 @@ file sets in a table of that name (`[sso]`). Run one with
 | Example | What it shows |
 |---------|---------------|
 | [`sso`](sso) | External sign-in with GitHub for the members of one organization, with admins by login, behind the server's own OAuth sign-in page: `ExternalSignIn`, `Complete`, `Cancel`, `Handle`. |
-| [`moderation`](moderation) | No links from new accounts or guests, masked words, and a moderators' `/slowmode`: `FilterMessage`, `OnEvent`, `Command`, `Store`, `RoomNotice`. |
+| [`moderation`](moderation) | No links from new accounts or guests, masked words, and a moderators' `/slowmode` of two forms: `FilterMessage`, `OnEvent`, `Command` and `Form`, `Store`, `RoomNotice`. |
 | [`assistant`](assistant) | A bot that answers its mentions, streaming the reply from a command such as a local model: `Bot`, `OnEvent`, `Visible`, `History`, `StreamAppend`, `Go`. |
 | [`ops`](ops) | Signed GitHub webhooks posted to a room, and `/deploy` streaming a terminal for people with the `deployer` role: `Handle`, `Bot.Post`, `StreamTerminal`. |
 | [`irc-bridge`](irc-bridge) | A room bridged to an IRC channel both ways, relaying what it missed while down: `Follow`, `WithExt`. |
