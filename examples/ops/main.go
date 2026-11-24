@@ -28,6 +28,7 @@ import (
 
 	"github.com/apron-chat/apron-server-go/apron"
 	"github.com/apron-chat/apron-server-go/aproncmd"
+	"github.com/apron-chat/apron-server-go/wire/commands"
 )
 
 func main() { aproncmd.Main(&Ops{}) }
@@ -84,9 +85,9 @@ func (o *Ops) Init(r *apron.Registrar) error {
 	r.Command(apron.Command{
 		Name: "deploy", Usage: "/deploy <service>", Help: "deploy a service and stream its output here",
 		// It streams into the room it runs in, replying to what it replies to.
-		Uses:      []string{"room_id", "reply_to"},
-		Requires:  []string{"room_id"},
-		Group:     "role",
+		Uses:      []string{commands.FieldRoom, commands.FieldReplyTo},
+		Requires:  []string{commands.FieldRoom},
+		Group:     commands.GroupRole,
 		Available: func(u apron.User, _ apron.Room) bool { return u.HasRole(RoleDeployer) || u.HasRole(apron.RoleAdmin) },
 		Run:       o.deploy,
 	})
