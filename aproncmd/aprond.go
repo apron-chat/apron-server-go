@@ -132,6 +132,13 @@ type Options struct {
 // Main parses them as flags named after the extension, --weather.api-key,
 // and from the config file's table of its name, [weather] api-key = "...",
 // before it starts the server, and so before the extension's Init.
+//
+// The defaults apply without Main too: apron.Open sets each setting that
+// is zero and has a default tag to its default, so that an extension
+// opened by a program or a test of its own, with the settings it sets in
+// Go, finds the others' defaults in Init, as with Main. A setting with a
+// default is so never zero: given as zero, as --weather.timeout 0, it is
+// its default. A list emptied in the config file stays empty.
 type Configurable interface {
 	apron.Extension
 	Flags() any

@@ -53,9 +53,6 @@ var (
 func (m *Moderation) Init(r *apron.Registrar) error {
 	m.host = r.Host
 	m.posted = make(map[string]time.Time)
-	if m.Settings.LinkAge == 0 {
-		m.Settings.LinkAge = 24 * time.Hour
-	}
 	m.words = make(map[string]bool)
 	for _, word := range m.Settings.Words {
 		m.words[strings.ToLower(word)] = true

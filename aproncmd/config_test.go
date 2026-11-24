@@ -304,3 +304,62 @@ func TestExtensionFlags(t *testing.T) {
 		t.Fatalf("printed config:\n%s", printed.String())
 	}
 }
+
+// apron.Open gives an extension's settings their defaults however it is
+// opened, and keeps what is set: a list the config file empties included.
+func TestExtensionDefaultsWithoutMain(t *testing.T) {
+	open := func(weather *weatherExtension) {
+		t.Helper()
+		config := apron.DefaultConfig()
+		config.Extensions = []apron.Extension{weather}
+		server, err := apron.Open(config)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := server.Shutdown(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	weather := &weatherExtension{}
+	weather.settings.Key = "k1"
+	open(weather)
+	if weather.settings.Key != "k1" || !reflect.DeepEqual(weather.settings.Hosts, []string{"a.example"}) {
+		t.Fatalf("settings in Go = %+v", weather.settings)
+	}
+
+	emptied := &weatherExtension{}
+	var options Options
+	parser := flags.NewParser(&options, flags.Default&^flags.PrintErrors)
+	targets, err := addExtensionFlags(parser, []apron.Extension{emptied})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := parser.ParseArgs(nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := loadConfig(parser, &options, writeConfig(t, "[weather]\nhost = []\n"), targets...); err != nil {
+		t.Fatal(err)
+	}
+	open(emptied)
+	if emptied.settings.Hosts == nil || len(emptied.settings.Hosts) != 0 {
+		t.Fatalf("hosts emptied in the config file = %#v", emptied.settings.Hosts)
+	}
+
+	bad := &badDefault{}
+	config := apron.DefaultConfig()
+	config.Extensions = []apron.Extension{bad}
+	if _, err := apron.Open(config); err == nil || !strings.Contains(err.Error(), "extension bad") {
+		t.Fatalf("Open with a default that is not a duration = %v", err)
+	}
+}
+
+// badDefault is an extension whose setting's default is not its type's.
+type badDefault struct {
+	settings struct {
+		Every time.Duration `long:"every" default:"often" description:"How often"`
+	}
+}
+
+func (*badDefault) Name() string                { return "bad" }
+func (*badDefault) Init(*apron.Registrar) error { return nil }
+func (b *badDefault) Flags() any                { return &b.settings }

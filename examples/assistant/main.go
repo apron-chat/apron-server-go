@@ -42,20 +42,6 @@ func (a *Assistant) Flags() any { return &a.Settings }
 
 func (a *Assistant) Init(r *apron.Registrar) error {
 	a.host = r.Host
-	// Settings left at zero, as when the extension is used without
-	// aproncmd's flags, take the flags' defaults.
-	if a.Settings.UserID == "" {
-		a.Settings.UserID = "assistant"
-	}
-	if a.Settings.Name == "" {
-		a.Settings.Name = "Assistant"
-	}
-	if a.Settings.Context <= 0 {
-		a.Settings.Context = 20
-	}
-	if a.Settings.Timeout <= 0 {
-		a.Settings.Timeout = 2 * time.Minute
-	}
 	var err error
 	if a.bot, err = r.Bot(a.Settings.UserID, apron.BotOptions{Name: a.Settings.Name}); err != nil {
 		return err

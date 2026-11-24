@@ -57,14 +57,6 @@ const RoleDeployer = "deployer"
 
 func (o *Ops) Init(r *apron.Registrar) error {
 	o.host = r.Host
-	// Settings left at zero, as when the extension is used without
-	// aproncmd's flags, take the flags' defaults.
-	if o.Settings.Room == "" {
-		o.Settings.Room = "general"
-	}
-	if o.Settings.Timeout <= 0 {
-		o.Settings.Timeout = 30 * time.Minute
-	}
 	o.services = make(map[string][]string)
 	o.deploying = make(map[string]bool)
 	for _, service := range o.Settings.Services {

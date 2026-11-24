@@ -42,6 +42,7 @@ import (
 	"github.com/apron-chat/apron-server-go/internal/auth/external"
 	"github.com/apron-chat/apron-server-go/internal/auth/passkey"
 	"github.com/apron-chat/apron-server-go/internal/authn"
+	"github.com/apron-chat/apron-server-go/internal/settings"
 	"github.com/apron-chat/apron-server-go/store"
 	"github.com/apron-chat/apron-server-go/wire"
 )
@@ -265,6 +266,14 @@ type Server struct {
 // when the configuration is invalid, the stored state cannot be read, or an
 // extension fails to start. The server owns config.Store: it closes it on
 // Shutdown, or when Open fails.
+//
+// An extension with settings, whose Flags method returns a pointer to them
+// (aproncmd.Configurable), has each setting that is zero and has a default
+// tag, such as `long:"timeout" default:"30m"`, set to that default first,
+// however it is opened: by aproncmd, which parses the settings as flags,
+// or by a program or a test that sets them in Go. So its Init finds every
+// setting with a default set, and a zero setting with a default means the
+// default.
 func Open(config Config) (*Server, error) {
 	config = config.withDefaults()
 	fail := func(err error) (*Server, error) {
@@ -277,6 +286,13 @@ func Open(config Config) (*Server, error) {
 	}
 	if config.Avatar != "" && !validAvatar(config.Avatar) {
 		return fail(fmt.Errorf("the server avatar must be an https: URL or a data:image URL of at most %d bytes", maxAvatarDataURLBytes))
+	}
+	for _, extension := range config.Extensions {
+		if configurable, ok := extension.(interface{ Flags() any }); ok {
+			if err := settings.ApplyDefaults(configurable.Flags()); err != nil {
+				return fail(fmt.Errorf("extension %s: its settings: %w", extension.Name(), err))
+			}
+		}
 	}
 	if config.Store == nil {
 		config.Store = store.NewMemory()

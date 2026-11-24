@@ -48,14 +48,6 @@ func (b *Bridge) Init(r *apron.Registrar) error {
 	if b.Settings.Server == "" || !strings.HasPrefix(b.Settings.Channel, "#") {
 		return errors.New("set --irc-bridge.server and --irc-bridge.channel")
 	}
-	// Settings left at zero, as when the extension is used without
-	// aproncmd's flags, take the flags' defaults.
-	if b.Settings.Nick == "" {
-		b.Settings.Nick = "apron-bridge"
-	}
-	if b.Settings.Room == "" {
-		b.Settings.Room = "general"
-	}
 	b.host = r.Host
 	var err error
 	if b.relay, err = r.Bot("irc", apron.BotOptions{Name: "IRC"}); err != nil {
