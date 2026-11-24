@@ -68,7 +68,7 @@ func TestExtensionCommands(t *testing.T) {
 					return nil, ctx.Err()
 				}
 				call.Notice(call.User.ID + " said " + call.Args + " in " + call.Room.ID)
-				return map[string]any{"echoed": call.Args}, nil
+				return map[string]any{"echoed": call.Args, "none": []string(nil)}, nil
 			},
 		})
 		r.Command(Command{
@@ -114,7 +114,8 @@ func TestExtensionCommands(t *testing.T) {
 	if len(before) != 1 || noticeText(t, before[0]) != c.userID+" said hello there in general" {
 		t.Fatalf("/echo frames = %#v", before)
 	}
-	if result := reply["result"].(map[string]any); result["echoed"] != "hello there" {
+	// A nil slice in the result is sent as [], not null.
+	if result := reply["result"].(map[string]any); result["echoed"] != "hello there" || result["none"] == nil {
 		t.Fatalf("/echo result = %#v", reply)
 	}
 	for line, code := range map[string]int{
@@ -239,7 +240,7 @@ func TestExtensionMethodAdvertiseAndRoute(t *testing.T) {
 			if err := call.Decode(&params); err != nil {
 				return nil, err
 			}
-			return map[string]any{"sum": params.A + params.B, "by": call.User.ID}, nil
+			return map[string]any{"sum": params.A + params.B, "by": call.User.ID, "terms": []int(nil), "names": map[string]string(nil)}, nil
 		})
 		r.Method("calc.broken", func(context.Context, *MethodCall) (any, error) {
 			return map[string]any{"ch": make(chan int)}, nil
@@ -260,7 +261,8 @@ func TestExtensionMethodAdvertiseAndRoute(t *testing.T) {
 	c.expectError(t, "calc.add", "early", map[string]any{"a": 1}, CodeDenied)
 	guestAuth(t, c)
 	result := c.result(t, "calc.add", "add", map[string]any{"a": 2, "b": 3})
-	if result["sum"] != float64(5) || result["by"] != c.userID {
+	// Nil slices and maps in the result are sent as [] and {}, not null.
+	if result["sum"] != float64(5) || result["by"] != c.userID || result["terms"] == nil || result["names"] == nil {
 		t.Fatalf("calc.add = %#v", result)
 	}
 	c.expectError(t, "calc.add", "bad", map[string]any{"a": "two"}, CodeInvalidParams)

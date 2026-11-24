@@ -229,8 +229,9 @@ type Command struct {
 	Available func(u User, r Room) bool
 	// Run runs the command. Its replies are notices (CommandCall.Notice,
 	// Host.RoomNotice) and the effects of what it does; the result, {} for
-	// nil, follows them. An *Error refuses the command with its code;
-	// any other error is logged and refused as an internal error.
+	// nil, with nil slices and maps in it as [] and {}, follows them. An
+	// *Error refuses the command with its code; any other error is logged
+	// and refused as an internal error.
 	Run func(ctx context.Context, call *CommandCall) (map[string]any, error)
 }
 
@@ -358,7 +359,7 @@ func (h *Host) runCommand(ctx context.Context, call *commands.Call, command Comm
 	if result == nil {
 		result = map[string]any{}
 	}
-	encoded, err := wire.Marshal(result)
+	encoded, err := encodeResult(result)
 	if err != nil {
 		return fmt.Errorf("/%s returned a result that is not JSON: %w", command.Name, err)
 	}
@@ -471,9 +472,10 @@ func (m *MethodCall) Decode(into any) error {
 }
 
 // MethodFunc answers a request to an extension's method. Its result is
-// encoded as the reply's result, {} for nil; an *Error refuses the request
-// with its code, and any other error, or a result that does not encode as
-// JSON, is logged and refused as an internal error.
+// encoded as the reply's result, {} for nil, with nil slices and maps in it
+// as [] and {}, not null; an *Error refuses the request with its code, and
+// any other error, or a result that does not encode as JSON, is logged and
+// refused as an internal error.
 type MethodFunc func(ctx context.Context, call *MethodCall) (any, error)
 
 // Method adds a request method for signed-in users. Its name starts with
@@ -506,7 +508,7 @@ func (r *Registrar) Method(name string, fn MethodFunc) {
 			// The result is encoded now: one that is not JSON is the
 			// extension's error, not the connection's, and the reply that
 			// deduplication keeps (§1.2) cannot change afterwards.
-			encoded, encodeErr := wire.Marshal(result)
+			encoded, encodeErr := encodeResult(result)
 			if encodeErr != nil {
 				return h.protocolError(fmt.Errorf("method %s returned a result that is not JSON: %w", name, encodeErr))
 			}

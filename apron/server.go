@@ -3,6 +3,7 @@ package apron
 import (
 	"context"
 	"encoding/json/jsontext"
+	"encoding/json/v2"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -56,6 +57,14 @@ func encodeJSON(value any) []byte {
 		return nil
 	}
 	return payload
+}
+
+// encodeResult encodes the result of an extension's method or command as
+// encodeJSON does, but for nil slices and maps, which it sends as [] and
+// {}: a field that holds a list is one in Go whether or not it was ever
+// appended to, and a client that reads it expects an array, never null.
+func encodeResult(value any) ([]byte, error) {
+	return json.Marshal(value, json.Deterministic(true))
 }
 
 // notification renders a frame once, for sending to many connections.
