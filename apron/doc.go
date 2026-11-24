@@ -13,7 +13,9 @@
 //     across restarts, in SQLite or in memory ([Config].Store).
 //   - [github.com/apron-chat/apron-server-go/apron/aprontest] tests
 //     extensions: it serves a server with them in a test, and signs in to
-//     it as people do, with guests, accounts, posts, and commands.
+//     it as people do, with guests, accounts, members with roles, and apps
+//     that sign in externally, which post and run commands; and it waits
+//     for the extensions' followers of the log.
 //   - [github.com/apron-chat/apron-server-go/aproncmd] is the aprond command as
 //     a library: flags, a config file, TLS, email delivery, and signals around
 //     this package. Its Main runs a server with extensions added.

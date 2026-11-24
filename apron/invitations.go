@@ -283,14 +283,7 @@ func (s *Server) enrollLocked(c *client, reply wire.Reply[wire.AuthResult], sche
 		return err
 	}
 	now := time.Now()
-	user := newUserState(s.assignAccountIDLocked(cmp.Or(proof.UserID, inv.UserID)), normalizeName(cmp.Or(proof.Name, inv.Name)))
-	user.Enrolled = inv.Enroll(now)
-	s.users.Add(user)
-	s.users.SetIdentity(user, id, record)
-	s.setGrantLocked(user, id.Scheme, proof.Roles)
-	s.setGrantLocked(user, invitationGrant, inv.Roles)
-	s.grantRolesLocked(user)
-	s.invitations.Use(mustString(authParams(reply), "invitation"))
+	user := s.enrollAccountLocked(inv, mustString(authParams(reply), "invitation"), id, record, proof, now)
 	// Nothing the connection is sent from here on goes before the account
 	// and the used invitation are stored.
 	c.fenceLocked()
@@ -298,6 +291,28 @@ func (s *Server) enrollLocked(c *client, reply wire.Reply[wire.AuthResult], sche
 		return err
 	}
 	s.provedLocked(c, scheme, proof, now, true)
+	s.joinInvitedLocked(user, inv)
+	return nil
+}
+
+// enrollAccountLocked makes the account that the invitation of token makes
+// for an identity, with the record its scheme keeps and the name, user_id,
+// and roles its proof asked for, and uses the invitation up.
+func (s *Server) enrollAccountLocked(inv *invitation, token string, id authn.Identity, record jsontext.Value, proof authn.Proof, now time.Time) *userState {
+	user := newUserState(s.assignAccountIDLocked(cmp.Or(proof.UserID, inv.UserID)), normalizeName(cmp.Or(proof.Name, inv.Name)))
+	user.Enrolled = inv.Enroll(now)
+	s.users.Add(user)
+	s.users.SetIdentity(user, id, record)
+	s.setGrantLocked(user, id.Scheme, proof.Roles)
+	s.setGrantLocked(user, invitationGrant, inv.Roles)
+	s.grantRolesLocked(user)
+	s.invitations.Use(token)
+	return user
+}
+
+// joinInvitedLocked joins an account to the rooms its invitation names, in
+// order, skipping a room that is gone, or a thread it cannot see.
+func (s *Server) joinInvitedLocked(user *userState, inv *invitation) {
 	for _, roomID := range inv.Rooms {
 		r := s.rooms.Get(roomID)
 		if r == nil || (r.Parent() != nil && !r.Parent().VisibleTo(user)) {
@@ -305,7 +320,6 @@ func (s *Server) enrollLocked(c *client, reply wire.Reply[wire.AuthResult], sche
 		}
 		s.joinLocked(user, r)
 	}
-	return nil
 }
 
 // mustString is a string param that parsing found already.

@@ -3,6 +3,7 @@ package apron
 import (
 	"cmp"
 	"context"
+	"crypto/sha256"
 	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"errors"
@@ -137,7 +138,7 @@ func (s *Server) authenticate(c *client, reply wire.Reply[wire.AuthResult]) *Err
 	switch {
 	case name == "guest" && !s.guestsAllowedLocked():
 		err = &Error{Code: CodeUnsupported, Message: "This server has no guests; sign in with an account"}
-	case name == "token" && len(s.schemes) == 0 && !presentsServiceToken(reply):
+	case name == "token" && len(s.schemes) == 0 && !presentsServiceToken(reply) && !s.presentsSessionLocked(reply):
 		err = &Error{Code: CodeUnsupported, Message: "This server has no sign-in sessions; use guest"}
 	case name == "guest", name == "token", scheme != nil:
 	case disabledSchemes[name] != "":
@@ -244,6 +245,19 @@ func resultFields(result any) map[string]any {
 func presentsServiceToken(reply wire.Reply[wire.AuthResult]) bool {
 	token, _ := parseString(authParams(reply), "token", optional)
 	return strings.HasPrefix(token, serviceTokenPrefix)
+}
+
+// presentsSessionLocked reports whether a token auth presents the token of
+// a session the server holds, which signs in on a server without sign-in
+// schemes too, as one made in process does (testhook.Member), or one
+// from before the server's schemes were taken away. Called holding s.mu.
+func (s *Server) presentsSessionLocked(reply wire.Reply[wire.AuthResult]) bool {
+	token, _ := parseString(authParams(reply), "token", optional)
+	if token == "" {
+		return false
+	}
+	_, ok := s.sessions.Get(sha256.Sum256([]byte(token)))
+	return ok
 }
 
 // authenticateGuestLocked signs the connection in as a new guest, or

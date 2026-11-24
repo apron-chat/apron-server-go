@@ -519,7 +519,13 @@ func (b *Session) Post(ctx context.Context, roomID, text string, options ...Post
 
 // post starts a message with text to the room.
 func (b *Session) post(roomID, text string) *postRequest {
-	return &postRequest{params: wire.MessageParams{RoomID: roomID, Body: &wire.Body{Text: text}}, extension: b.bot.host.name}
+	return newPost(roomID, text, b.bot.host.name)
+}
+
+// newPost starts a message with text to the room, whose WithExt writes
+// under extension's name.
+func newPost(roomID, text, extension string) *postRequest {
+	return &postRequest{params: wire.MessageParams{RoomID: roomID, Body: &wire.Body{Text: text}}, extension: extension}
 }
 
 // Join joins the room (§4.2.2).

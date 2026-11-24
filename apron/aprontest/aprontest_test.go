@@ -3,7 +3,10 @@ package aprontest_test
 import (
 	"context"
 	"net/http"
+	"strconv"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/apron-chat/apron-server-go/apron"
 	"github.com/apron-chat/apron-server-go/apron/aprontest"
@@ -101,6 +104,111 @@ func TestClients(t *testing.T) {
 	}
 	if code := mail.Code("nobody@example.com", 0); code != "" {
 		t.Fatalf("mailed nobody %q", code)
+	}
+}
+
+// counter is an extension that counts each user's new messages as it
+// follows the log, slowly, and tells them with a command, which only
+// counters may run.
+type counter struct {
+	mu     sync.Mutex
+	counts map[string]int
+}
+
+func (*counter) Name() string { return "counter" }
+
+func (c *counter) Init(r *apron.Registrar) error {
+	c.counts = make(map[string]int)
+	r.OnEvent(func(ctx context.Context, e apron.Event) {
+		time.Sleep(5 * time.Millisecond)
+		if m, ok := apron.DecodeMessage(e); ok && m.New() {
+			c.mu.Lock()
+			c.counts[m.From.UserID]++
+			c.mu.Unlock()
+		}
+	})
+	r.Command(apron.Command{
+		Name: "count", Usage: "/count <user_id>", Help: "how many messages someone posted",
+		Available: func(u apron.User, _ apron.Room) bool { return u.HasRole("counter") },
+		Run: func(_ context.Context, call *apron.CommandCall) (map[string]any, error) {
+			c.mu.Lock()
+			defer c.mu.Unlock()
+			call.Notice(strconv.Itoa(c.counts[call.Args]))
+			return nil, nil
+		},
+	})
+	return nil
+}
+
+func TestMessages(t *testing.T) {
+	server := aprontest.Serve(t, apron.DefaultConfig(), &counter{})
+	ada, bob := server.Guest("Ada"), server.Guest("Bob")
+	room, err := ada.CreateRoom("Plans", true)
+	if err != nil || room == "" {
+		t.Fatalf("room = %q, %v", room, err)
+	}
+	asked, err := ada.Post("general", "@"+bob.UserID+" *hi*", apron.Mention(bob.UserID), apron.Markdown(), apron.WithExt(map[string]int{"n": 1}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := bob.Message(func(m apron.Message) bool { return m.ID == asked })
+	if !got.MentionsUser(bob.UserID) || got.Format != "markdown" || string(got.Ext["counter"]) != `{"n":1}` {
+		t.Fatalf("message = %+v", got)
+	}
+	reply, err := bob.Post("general", "hello", apron.ReplyTo(asked))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := ada.Message(func(m apron.Message) bool { return m.ID == reply }); got.ReplyTo != asked {
+		t.Fatalf("reply = %+v", got)
+	}
+	if _, err := ada.Post("general", "x", apron.ReplyTo("nope")); wire.CodeOf(err) != apron.CodeInvalidParams {
+		t.Fatalf("a reply to no message_id = %v", err)
+	}
+
+	if err := ada.Edit("general", asked, "edited"); err != nil {
+		t.Fatal(err)
+	}
+	if got := bob.Message(func(m apron.Message) bool { return m.ID == asked }); got.Text != "edited" || got.New() {
+		t.Fatalf("edit = %+v", got)
+	}
+	if err := bob.Edit("general", asked, "mine now"); wire.CodeOf(err) == 0 {
+		t.Fatal("Bob edited Ada's message")
+	}
+	if err := ada.Delete("general", asked); err != nil {
+		t.Fatal(err)
+	}
+	if got := bob.Message(func(m apron.Message) bool { return m.ID == asked }); !got.Deleted {
+		t.Fatalf("deletion = %+v", got)
+	}
+}
+
+// A member holds its roles; the follower's count is settled before the
+// command reads it.
+func TestMembersAndSettle(t *testing.T) {
+	server := aprontest.Serve(t, apron.DefaultConfig(), &counter{})
+	ada, mo := server.Guest("Ada"), server.Member("mo", "counter", apron.RoleModerator)
+	if mo.UserID != "mo" || mo.Token == "" {
+		t.Fatalf("member = %q, token %q", mo.UserID, mo.Token)
+	}
+	if user, ok := server.Enrollment("mo"); !ok || !user.Admitted {
+		t.Fatalf("enrollment = %+v, %v", user, ok)
+	}
+	if _, err := ada.Command("general", "/count mo"); err == nil {
+		t.Fatal("a guest counted")
+	}
+	for i := range 20 {
+		if _, err := ada.Post("general", strconv.Itoa(i)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	server.Settle()
+	if notices, err := mo.Command("general", "/count "+ada.UserID); err != nil || len(notices) != 1 || notices[0] != "20" {
+		t.Fatalf("/count = %q, %v", notices, err)
+	}
+	// A member signs in again with its token, and its user_id is its own.
+	if again := server.SignIn(wire.AuthParams{Scheme: "token", Token: mo.Token}); again.UserID != "mo" {
+		t.Fatalf("token signed in as %q", again.UserID)
 	}
 }
 

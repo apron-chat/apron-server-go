@@ -246,6 +246,8 @@ type Server struct {
 	extContext    context.Context
 	extCancel     context.CancelFunc
 	extensionWork sync.WaitGroup
+	// followers are the event followers' places in the log (events.go).
+	followers followers
 	// allowlist is who may sign in, once an extension restricts sign-in
 	// (allowlist.go); nil lets in anyone.
 	allowlist *allowlist

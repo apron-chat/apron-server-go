@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"slices"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/apron-chat/apron-server-go/apron/internal/roomlog"
@@ -71,6 +72,9 @@ func (h *Host) LastLogID() int64 {
 //
 // Events carry every room's records, private rooms' included: an extension
 // that shows them to people checks Host.Visible or Host.Public first.
+//
+// A test waits for the followers of every kind with aprontest's
+// Server.Settle, which returns once they have handled every event logged.
 func (r *Registrar) OnEvent(fn func(ctx context.Context, e Event)) {
 	r.follow("OnEvent", r.LastLogID(), func(ctx context.Context, e Event) error {
 		fn(ctx, e)
@@ -139,6 +143,7 @@ func (r *Registrar) follow(what string, after int64, deliver func(ctx context.Co
 		panic(fmt.Sprintf("apron: extension %s called %s after Init", r.name, what))
 	}
 	h, s := r.Host, r.s
+	position := s.followers.add(fmt.Sprintf("extension %s's %s", r.name, what), after)
 	h.Go(func(ctx context.Context) {
 		cursor := after
 		for {
@@ -180,9 +185,94 @@ func (r *Registrar) follow(what string, after int64, deliver func(ctx context.Co
 						return // the store is closed
 					}
 				}
+				s.followers.advance(position, cursor)
 			}
 		}
 	})
+}
+
+// followers tracks how far each follower of the log (follow) has handled
+// it, for settle. It has its own lock, which no other is taken under.
+type followers struct {
+	mu   sync.Mutex
+	list []*follower
+	// changed is closed, and replaced, when a follower moves on.
+	changed chan struct{}
+}
+
+// follower is a follower's place: the log_id of the last event it handled
+// or skipped, or that it started after. Guarded by followers.mu.
+type follower struct {
+	name string
+	at   int64
+}
+
+func (f *followers) add(name string, after int64) *follower {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	position := &follower{name: name, at: after}
+	f.list = append(f.list, position)
+	return position
+}
+
+func (f *followers) advance(position *follower, logID int64) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	position.at = logID
+	if f.changed != nil {
+		close(f.changed)
+		f.changed = nil
+	}
+}
+
+// behind returns a follower that has not handled logID yet, if any, and a
+// channel that is closed when a follower moves on.
+func (f *followers) behind(logID int64) (*follower, <-chan struct{}) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, position := range f.list {
+		if position.at < logID {
+			if f.changed == nil {
+				f.changed = make(chan struct{})
+			}
+			return position, f.changed
+		}
+	}
+	return nil, nil
+}
+
+// settle waits until every follower of the log has handled every event
+// logged before it returns: those logged when it is called, and those
+// logged meanwhile, such as by a follower's bot as it handled one, until
+// the log is quiet. A follower that is retrying an event holds it up; what
+// a follower does on goroutines of its own, it does not wait for.
+func (s *Server) settle(ctx context.Context) error {
+	last := func() int64 {
+		s.mu.RLock()
+		defer s.mu.RUnlock()
+		return s.log.Last()
+	}
+	for target := last(); ; {
+		for {
+			position, changed := s.followers.behind(target)
+			if position == nil {
+				break
+			}
+			select {
+			case <-changed:
+			case <-ctx.Done():
+				s.followers.mu.Lock()
+				at := position.at
+				s.followers.mu.Unlock()
+				return fmt.Errorf("apron: %s has handled the log up to log_id %d of %d: %w", position.name, at, target, context.Cause(ctx))
+			}
+		}
+		now := last()
+		if now == target {
+			return nil
+		}
+		target = now
+	}
 }
 
 // Message is a message record, decoded (PROTOCOL.md §3.5), as extensions

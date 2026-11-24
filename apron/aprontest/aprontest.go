@@ -1,7 +1,7 @@
 // Package aprontest tests an extension of package apron as people use it:
 // it serves a server with the extension in a test, and connects to it as
-// clients do, as a guest, with an account, or not signed in yet, so that a
-// test reads as what people do:
+// clients do, as a guest, with an account, with roles, or not signed in
+// yet, so that a test reads as what people do:
 //
 //	func TestWeather(t *testing.T) {
 //		server := aprontest.Serve(t, apron.DefaultConfig(), &weather.Extension{})
@@ -10,7 +10,7 @@
 //		if err != nil || len(notices) != 1 || !strings.Contains(notices[0], "Lisbon") {
 //			t.Fatalf("/weather = %q, %v", notices, err)
 //		}
-//		if _, err := ada.Post("general", "rain again?"); err != nil {
+//		if _, err := ada.Post("general", "@weather rain again?", apron.Mention("weather")); err != nil {
 //			t.Fatal(err)
 //		}
 //		reply := ada.Message(func(m apron.Message) bool { return m.From.UserID == "weather" })
@@ -26,26 +26,55 @@
 // error/denied for a request an extension refused. Call them from the
 // test's goroutine, as t.Fatal is.
 //
-// What a test does not do as a client, it does in process: a bot of a
-// test extension of its own (apron.Registrar.Bot), whose user_id
-// Config.Roles may grant a role, or the Server's methods, such as
-// Invitations and Shutdown.
+// The methods take and return apron's types where package apron has one
+// for what they carry, as an extension sees it: the post options of
+// apron.Session.Post (apron.Mention, apron.ReplyTo, apron.Markdown,
+// apron.WithExt), apron.Message, and apron.Error. Frames that apron has no
+// type of its own for, because extensions never handle them, are package
+// wire's, as a client receives them: the server frame (wire.ServerInfo) and
+// the result of auth (wire.AuthResult).
+//
+// # Members with roles
+//
+// Server.Member signs in an account that holds server roles, such as
+// apron.RoleModerator or an extension's own, as an invitation with those
+// roles makes one (apron.InvitationOptions), so that a test of what only
+// some people may do needs no Config.Roles and no extension of its own.
+//
+// # Followers
+//
+// An extension's followers of the log (apron.Registrar.OnEvent,
+// OnEventFrom, and Follow) handle each event on a goroutine of their own,
+// after the request that logged it was answered: a test that posts, then
+// asks the extension about the post, such as a search index, first calls
+// Server.Settle, which waits until every follower has handled every event
+// logged so far, and those logged meanwhile, rather than polling or
+// sleeping.
+//
+// # External sign-in
+//
+// An App is an app on the person's device signing in with the server's
+// external sign-in (§4.12), which an extension offers
+// (apron.Registrar.ExternalSignIn): it opens the server's sign-in page, its
+// browser follows the redirects to the extension's identity provider, such
+// as a fake one the test serves, and back, presses the page's buttons, and
+// redeems the code it returns with on a connection of its own.
+//
+// What a test does not do as a client, it does in process with the Server's
+// methods, such as Invitations and Shutdown.
 package aprontest
 
 import (
 	"context"
-	"encoding/json/jsontext"
-	"encoding/json/v2"
 	"errors"
 	"net/http/httptest"
 	"slices"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
 	"github.com/apron-chat/apron-server-go/apron"
-	"github.com/apron-chat/apron-server-go/wire"
+	"github.com/apron-chat/apron-server-go/apron/internal/testhook"
 	"github.com/apron-chat/apron-server-go/wire/wiretest"
 )
 
@@ -62,6 +91,8 @@ type Server struct {
 
 	t    testing.TB
 	mail *Mailbox
+	// extension is the name WithExt writes under for its clients.
+	extension string
 }
 
 // Serve opens a server with config and extensions, after any config names,
@@ -85,8 +116,14 @@ func Serve(t testing.TB, config apron.Config, extensions ...apron.Extension) *Se
 		}
 		httpServer.Close()
 	})
-	mail, _ := config.EmailSender.(*Mailbox)
-	return &Server{Server: app, URL: httpServer.URL, t: t, mail: mail}
+	s := &Server{Server: app, URL: httpServer.URL, t: t}
+	s.mail, _ = config.EmailSender.(*Mailbox)
+	if len(extensions) > 0 {
+		s.extension = extensions[0].Name()
+	} else if len(config.Extensions) > 0 {
+		s.extension = config.Extensions[0].Name()
+	}
+	return s
 }
 
 // WebSocketURL is the address of the server's WebSocket endpoint, such as
@@ -107,7 +144,7 @@ func (s *Server) Dial() *Client {
 		s.t.Fatalf("aprontest: connecting: %v", err)
 	}
 	s.t.Cleanup(func() { _ = conn.Close() })
-	return &Client{Wire: conn, t: s.t}
+	return &Client{Wire: conn, Extension: s.extension, t: s.t}
 }
 
 // SignIn connects a client and signs it in with the params of an auth
@@ -116,11 +153,7 @@ func (s *Server) Dial() *Client {
 func (s *Server) SignIn(params any) *Client {
 	s.t.Helper()
 	c := s.Dial()
-	result, err := c.Auth(params)
-	if err == nil && result.You == nil {
-		err = errors.New("the auth result signed nobody in")
-	}
-	if err != nil {
+	if err := c.signIn(params); err != nil {
 		s.t.Fatalf("aprontest: signing in with %v: %v", params, err)
 	}
 	return c
@@ -130,7 +163,11 @@ func (s *Server) SignIn(params any) *Client {
 // or fails the test, as on a server with Config.DisableGuests.
 func (s *Server) Guest(name string) *Client {
 	s.t.Helper()
-	return s.SignIn(map[string]any{"scheme": "guest", "name": name})
+	c := s.Dial()
+	if err := c.SignInAsGuest(name); err != nil {
+		s.t.Fatalf("aprontest: signing in as the guest %s: %v", name, err)
+	}
+	return c
 }
 
 // Account connects a client and signs it in with email (§4.11), as the
@@ -143,208 +180,61 @@ func (s *Server) Account(address string) *Client {
 		s.t.Fatal("aprontest: Account needs a *aprontest.Mailbox as Config.EmailSender")
 	}
 	c := s.Dial()
-	if _, err := c.Auth(map[string]any{"scheme": "email", "email": address}); err != nil {
+	if err := c.AskForCode(address); err != nil {
 		s.t.Fatalf("aprontest: asking for a code for %s: %v", address, err)
 	}
 	code := s.mail.Code(address, timeout)
 	if code == "" {
 		s.t.Fatalf("aprontest: no code was mailed to %s", address)
 	}
-	if result, err := c.Auth(map[string]any{"scheme": "email", "token": code}); err != nil || result.You == nil {
+	if err := c.SignInWithCode(code); err != nil {
 		s.t.Fatalf("aprontest: signing in as %s: %v", address, err)
 	}
 	return c
 }
 
-// Client is a connection to a Server.
-type Client struct {
-	// Wire is the connection, for what the methods below do not do, such
-	// as reading frames in the order they arrived (wiretest.Client.Next,
-	// CallFrames, and Sync).
-	Wire *wiretest.Client
-	// UserID is the user_id the client last signed in as, and Token the
-	// session token that sign-in gave, if any, which signs in again
-	// (scheme token); both are "" before.
-	UserID, Token string
-
-	t testing.TB
-}
-
-// deadline returns a context that ends after timeout, or with the test.
-func (c *Client) deadline() (context.Context, context.CancelFunc) {
-	return context.WithTimeout(c.t.Context(), timeout)
-}
-
-// refusal returns err if it is the server's error reply, and fails the
-// test with it otherwise, as when the connection ended.
-func (c *Client) refusal(what string, err error) error {
-	c.t.Helper()
-	if _, ok := errors.AsType[*apron.Error](err); ok {
-		return err
-	}
-	c.t.Fatalf("aprontest: %s: %v", what, err)
-	return err
-}
-
-// Hello is the server frame (§3.1) the client got as it connected.
-func (c *Client) Hello() wire.ServerInfo { return c.Wire.Hello() }
-
-// Auth sends an auth request (§3.2) with params, such as {"scheme":
-// "guest"}, and returns its result, or the server's error reply. A result
-// with You signed the client in, as UserID and Token then say; one
-// without, such as the begin step of external sign-in, signed nobody in.
-func (c *Client) Auth(params any) (wire.AuthResult, error) {
-	c.t.Helper()
-	ctx, cancel := c.deadline()
+// Member makes an account with the user_id userID, also its name, that
+// holds roles, and connects a client signed in to it, or fails the test,
+// as when userID is taken. The account is made in process, as an
+// invitation with these roles makes one (apron.InvitationOptions): it is a
+// member of the default room, holds roles until RevokeEnrollment, and the
+// invitation admits it to a server whose sign-in an extension restricts.
+// Its identity is the email address userID@aprontest.invalid, with which
+// Account signs it in again, on a server with a Mailbox. Its Token signs
+// it in from any origin.
+func (s *Server) Member(userID string, roles ...string) *Client {
+	s.t.Helper()
+	ctx, cancel := context.WithTimeout(s.t.Context(), timeout)
 	defer cancel()
-	result, err := c.Wire.Auth(ctx, params)
+	options := apron.InvitationOptions{Name: userID, UserID: userID, Roles: roles}
+	made, token, err := testhook.Member(s.Server, ctx, options, userID+"@aprontest.invalid")
+	if err == nil && made != userID {
+		err = errors.New("the user_id is taken; the account is " + made)
+	}
 	if err != nil {
-		return result, c.refusal("auth", err)
+		s.t.Fatalf("aprontest: making the member %s: %v", userID, err)
 	}
-	if result.You != nil {
-		c.UserID, c.Token = result.You.UserID, result.Token
+	c := s.Dial()
+	if err := c.SignInWithToken(token); err != nil {
+		s.t.Fatalf("aprontest: signing in as the member %s: %v", userID, err)
 	}
-	return result, nil
+	return c
 }
 
-// Call sends a request of method with params, such as an extension's
-// method, and decodes its result into result, unless nil, as
-// encoding/json does, matching names ignoring case; or returns the
-// server's error reply.
-func (c *Client) Call(method string, params, result any) error {
-	c.t.Helper()
-	ctx, cancel := c.deadline()
+// Settle waits until each of the extensions' followers of the log
+// (apron.Registrar.OnEvent, OnEventFrom, and Follow) has handled every
+// event logged before Settle returns: those logged as it is called, and
+// those logged meanwhile, such as a bot's reply that a follower posted as
+// it handled an event, until the log is quiet. It fails the test when they
+// do not within ten seconds, as when a follower retries an event that
+// fails. What a follower does on a goroutine of its own (apron.Host.Go),
+// such as a reply that it streams, Settle does not wait for: wait for its
+// message with Client.Message.
+func (s *Server) Settle() {
+	s.t.Helper()
+	ctx, cancel := context.WithTimeout(s.t.Context(), timeout)
 	defer cancel()
-	raw, err := c.Wire.Call(ctx, method, params)
-	if err != nil {
-		return c.refusal(method, err)
-	}
-	if result != nil {
-		if err := json.Unmarshal(raw, result, json.MatchCaseInsensitiveNames(true)); err != nil {
-			c.t.Fatalf("aprontest: decoding the result of %s, %s: %v", method, raw, err)
-		}
-	}
-	return nil
-}
-
-// Post posts a message of text to a room (§3.5.1), and returns its
-// message_id, or the server's error reply, such as an extension's filter's
-// refusal (apron.Registrar.FilterMessage).
-func (c *Client) Post(roomID, text string) (messageID string, err error) {
-	c.t.Helper()
-	ctx, cancel := c.deadline()
-	defer cancel()
-	result, err := c.Wire.Post(ctx, wire.MessageParams{RoomID: roomID, Body: &wire.Body{Text: text}})
-	if err != nil {
-		return "", c.refusal("message", err)
-	}
-	if result.MessageID == 0 {
-		return "", nil
-	}
-	return result.MessageID.String(), nil
-}
-
-// Command runs a command line, such as "/weather Lisbon", in a room
-// (§4.1), and returns the text of the notices it sent the client, which
-// arrive before its reply (apron.CommandCall.Notice), and its error reply,
-// if any. It takes those notices, as wiretest.Client.Command does, and
-// leaves every other frame, such as the message snapshots that arrived
-// meanwhile, for Message.
-func (c *Client) Command(roomID, line string) (notices []string, err error) {
-	c.t.Helper()
-	ctx, cancel := c.deadline()
-	defer cancel()
-	notices, err = c.Wire.Command(ctx, roomID, line)
-	if err != nil {
-		return notices, c.refusal(line, err)
-	}
-	return notices, nil
-}
-
-// Message waits for a message snapshot (§3.5) that match is true of, the
-// first one the client got that a call of Message has not taken yet, takes
-// it, and returns it. It fails the test when none comes. Snapshots are
-// sent to the members of a room: a guest is a member of the default room,
-// "general".
-func (c *Client) Message(match func(apron.Message) bool) apron.Message {
-	c.t.Helper()
-	ctx, cancel := c.deadline()
-	defer cancel()
-	var found apron.Message
-	_, err := c.Wire.Expect(ctx, func(f wiretest.Frame) bool {
-		if f.Method != "message" {
-			return false
-		}
-		m, ok := apron.DecodeMessage(apron.Event{Kind: apron.EventMessage, Record: jsontext.Value(f.Params)})
-		if ok && match(m) {
-			found = m
-			return true
-		}
-		return false
-	})
-	if err != nil {
-		c.t.Fatalf("aprontest: no message matched: %v", err)
-	}
-	return found
-}
-
-// Closed reports whether the server closes the connection within ten
-// seconds, as it does when it signs the client's account out, taking
-// every frame until then.
-func (c *Client) Closed() bool {
-	ctx, cancel := c.deadline()
-	defer cancel()
-	for {
-		if _, err := c.Wire.Next(ctx); err != nil {
-			return ctx.Err() == nil
-		}
-	}
-}
-
-// Mailbox is an apron.EmailSender, for Config.EmailSender, that keeps the
-// sign-in codes the server sends, with which Server.Account signs in, and
-// Code reads. Its zero value is ready to use.
-type Mailbox struct {
-	mu      sync.Mutex
-	sent    []apron.SignInEmail
-	changed chan struct{}
-}
-
-// SendSignInCode keeps the message.
-func (m *Mailbox) SendSignInCode(_ context.Context, message apron.SignInEmail) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.sent = append(m.sent, message)
-	if m.changed != nil {
-		close(m.changed)
-		m.changed = nil
-	}
-	return nil
-}
-
-// Code takes the code of the first message to address it has not taken,
-// waiting for one at most wait, and returns it, or "" if none came, as
-// for an address that may not sign in.
-func (m *Mailbox) Code(address string, wait time.Duration) string {
-	deadline := time.NewTimer(wait)
-	defer deadline.Stop()
-	for {
-		m.mu.Lock()
-		if i := slices.IndexFunc(m.sent, func(s apron.SignInEmail) bool { return strings.EqualFold(s.To, address) }); i >= 0 {
-			code := m.sent[i].Code
-			m.sent = slices.Delete(m.sent, i, i+1)
-			m.mu.Unlock()
-			return code
-		}
-		if m.changed == nil {
-			m.changed = make(chan struct{})
-		}
-		changed := m.changed
-		m.mu.Unlock()
-		select {
-		case <-changed:
-		case <-deadline.C:
-			return ""
-		}
+	if err := testhook.Settle(s.Server, ctx); err != nil {
+		s.t.Fatalf("aprontest: the followers did not settle: %v", err)
 	}
 }
