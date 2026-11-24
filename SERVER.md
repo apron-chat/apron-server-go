@@ -371,10 +371,9 @@ they are not in.
 ## Identity and profiles
 
 An `auth` request's `agent`, the client's implementation string, is
-accepted with any scheme and not used. A scheme this server does not know is
-`invalid_params` (§1); `webauthn`, `email`, and `token` while their sign-in
-is not configured are schemes the server does not offer, so `unsupported`
-(§3.2).
+accepted with any scheme and not used. A scheme the server does not offer is
+`unsupported` (§3.2): one it does not know, and `webauthn`, `email`, and
+`token` while their sign-in is not configured.
 
 `auth` with scheme `guest` assigns `guest_<n>` from a server-wide counter
 (`guest_1`, `guest_2`, …) and honors an optional requested `name`. A
@@ -608,9 +607,10 @@ account's join to `general`, and a guest's leaves when it is retired.
   `members` and `users`, and `latest_log_id` already the membership's) and
   the membership, then the result. A new thread that is not private goes to the parent's other members
   as `room_update` `updated`, without joining them. With `room_id` it
-  replaces every client field except `parent_room_id` and `private`, which
-  are fixed at creation and kept, and `ext`, which merges as `me`'s does
-  (§4.12); other omitted fields are cleared. The merged `ext` is at most
+  merges its fields into the room's client fields (§4.2.4): a field it
+  leaves out keeps its value, and `""` clears it. `parent_room_id` and
+  `private` are fixed at creation and kept, and `ext` merges as `me`'s does
+  (§4.12). The merged `ext` is at most
   16 KiB of JSON, or the request is `too_large`. The edit goes as
   `room_update` `updated` to the room's members, to the parent's members for
   a thread that is not private, and to the editor. Both return
@@ -642,8 +642,7 @@ Saves apply in server order, each merging into the snapshot current then,
 so concurrent saves of different `ext` keys both survive. The merged `ext`
 is at most 64 KiB of JSON, or the save is `too_large` and changes nothing. Without `room_id` the message goes to
 `general`; an unknown `room_id` is `invalid_params`. A new message with no
-`text` and no `embeds` is neither logged nor broadcast, and its result is
-`{}`. The broadcast reaches the sender's connection before the result when
+`text` and no `embeds` is `invalid_params` (§3.5.1). The broadcast reaches the sender's connection before the result when
 the sender has joined the room. `body.mentions` must be an array of
 non-empty strings (`invalid_params` otherwise) and lists at most 256 users
 (`denied` past that).

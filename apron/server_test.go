@@ -178,8 +178,9 @@ func TestGuestAuth(t *testing.T) {
 	_, httpServer := newTestServer(t, DefaultConfig())
 	c, _ := dialRaw(t, httpServer)
 	c.expectError(t, "message", "early", map[string]any{"room_id": "general", "body": map[string]any{}}, CodeDenied)
-	// An unknown scheme is a name the server does not know (§1).
-	c.expectError(t, "auth", "bad-scheme", map[string]any{"scheme": "password"}, CodeInvalidParams)
+	// A scheme the server does not offer is unsupported, even one the
+	// protocol does not define (§3.2).
+	c.expectError(t, "auth", "bad-scheme", map[string]any{"scheme": "password"}, CodeUnsupported)
 	// A request method without an id is ignored, guest auth included.
 	c.write(t, map[string]any{"method": "auth", "params": map[string]any{"scheme": "guest"}})
 	c.expectQuiet(t)
@@ -579,7 +580,7 @@ func TestRoomSetCreatesAndEditsRoomsAndThreads(t *testing.T) {
 	}
 	observer.expectQuiet(t)
 
-	// Edits replace every client field except parent_room_id, and reach the
+	// Edits merge into the client fields, parent_room_id fixed, and reach the
 	// room's members and, for a thread, the parent's.
 	ext := map[string]any{"app": map[string]any{"pinned": true}}
 	sameID, updated := saveRoom(t, c, "update", map[string]any{"room_id": thread, "parent_room_id": "ignored", "title": "Renamed", "ext": ext})
@@ -589,7 +590,7 @@ func TestRoomSetCreatesAndEditsRoomsAndThreads(t *testing.T) {
 	if sameID != thread || updated["parent_room_id"] != "general" || updated["title"] != "Renamed" || !reflect.DeepEqual(updated["ext"], ext) {
 		t.Fatalf("thread update: %#v", updated)
 	}
-	if _, kept := updated["description"]; kept || updated["history_log_id"] != thread || updated["latest_log_id"] != updated["log_id"] {
+	if updated["description"] != description || updated["history_log_id"] != thread || updated["latest_log_id"] != updated["log_id"] {
 		t.Fatalf("thread update fields: %#v", updated)
 	}
 	// A new top-level room joins only its creator.
@@ -598,9 +599,14 @@ func TestRoomSetCreatesAndEditsRoomsAndThreads(t *testing.T) {
 	if _, isThread := topRecord["parent_room_id"]; isThread || topRecord["title"] != "Ops" {
 		t.Fatalf("top-level room: %#v", topRecord)
 	}
-	_, cleared := saveRoom(t, observer, "clear", map[string]any{"room_id": top})
+	// An omitted field keeps its value, and "" clears it (§4.2.4).
+	_, kept := saveRoom(t, observer, "keep", map[string]any{"room_id": top})
+	if kept["title"] != "Ops" {
+		t.Fatalf("omitted title was not kept on a top-level room: %#v", kept)
+	}
+	_, cleared := saveRoom(t, observer, "clear", map[string]any{"room_id": top, "title": ""})
 	if _, present := cleared["title"]; present {
-		t.Fatalf("omitted title was retained on a top-level room: %#v", cleared)
+		t.Fatalf("an empty title was retained on a top-level room: %#v", cleared)
 	}
 	// An editor who has not joined the room still receives the update.
 	_, renamed := saveRoom(t, c, "rename-top", map[string]any{"room_id": top, "title": "Ops 2"})
@@ -1015,7 +1021,7 @@ func TestInvalidSavesLeaveStateUnchanged(t *testing.T) {
 }
 
 // A message without room_id goes to the default room; a new message with no
-// text and no embeds is neither logged nor broadcast.
+// text and no embeds is invalid_params, and neither logged nor broadcast.
 func TestDefaultRoomAndEmptyMessages(t *testing.T) {
 	_, httpServer := newTestServer(t, DefaultConfig())
 	c := dialTestClient(t, httpServer)
@@ -1024,9 +1030,7 @@ func TestDefaultRoomAndEmptyMessages(t *testing.T) {
 		t.Fatalf("default room snapshot: %#v", snapshot)
 	}
 	for i, body := range []map[string]any{{}, {"text": ""}, {"text": "", "embeds": []any{}, "mentions": []any{"guest_1"}}} {
-		if result := c.result(t, "message", fmt.Sprint("empty-", i), map[string]any{"body": body}); len(result) != 0 {
-			t.Fatalf("empty message result: %#v", result)
-		}
+		c.expectError(t, "message", fmt.Sprint("empty-", i), map[string]any{"body": body}, CodeInvalidParams)
 	}
 	c.expectQuiet(t)
 	if page := historyPage(t, c, "general", map[string]any{}); len(records(t, page, "messages")) != 1 {

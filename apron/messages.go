@@ -73,8 +73,7 @@ func (m *messageState) snapshot() map[string]any {
 // so a sender who has joined receives a new upload's pending snapshot before
 // the result carrying its write URL. Posting does not join the room
 // (§4.2.2): a poster who has not joined gets only the result. A new message
-// with no text and no embeds is neither logged nor broadcast, and its
-// result is {}.
+// with no text and no embeds is invalid_params (§3.5.1).
 func (s *Server) saveMessage(c *client, req request) (any, bool, *Error) {
 	roomID, err := parseString(req.params, "room_id", false)
 	if err != nil {
@@ -234,9 +233,7 @@ func (s *Server) saveMessage(c *client, req request) (any, bool, *Error) {
 	}
 	if !replacing {
 		if text, _ := body["text"].(string); text == "" && len(asList(body["embeds"])) == 0 {
-			result := map[string]any{}
-			c.sendResult(req, result)
-			return result, true, nil
+			return nil, false, invalidParams("A new message needs text or embeds")
 		}
 		if err := s.admitPostLocked(u); err != nil {
 			return nil, false, err
