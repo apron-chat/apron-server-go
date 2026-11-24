@@ -360,6 +360,11 @@ type Router struct {
 	// CheckAll for a gateway whose host checks every command line, and
 	// says what is wrong with it. A command cannot take one back.
 	RunChecks Checks
+	// From is who the Router's ~private notices are from: those of
+	// Call.Notice, and /help's. The zero User is wire.Private; a backend
+	// that names its own system identities otherwise sets it, with the
+	// user_id "~private" (Appendix A.1).
+	From wire.User
 
 	commands []Command
 	// hasHelp is whether commands has one named help.
@@ -533,7 +538,7 @@ func (r *Router) Command(ctx context.Context, c *wire.Conn, p wire.CommandParams
 		return wire.InvalidParams("A command starts with /; try /help")
 	}
 	command, form := r.Find(name, args)
-	call := &Call{Conn: c, Params: p, Reply: reply, Name: name, Args: args}
+	call := &Call{Conn: c, Params: p, Reply: reply, Name: name, Args: args, from: r.From}
 	if form != nil {
 		// A form that requires room_id acts only on a room the client
 		// names, not on one Before settles for it.
@@ -646,6 +651,9 @@ type Call struct {
 	// the command line as the backend rewrote it, so that Before need not
 	// fold it into Params, and Run need not work it out again.
 	Data any
+
+	// from is Router.From, the sender of Notice's notices.
+	from wire.User
 }
 
 // Rest is the command line after the form's fixed words, trimmed, such as
@@ -661,11 +669,14 @@ func (c *Call) Rest() string {
 }
 
 // Notice sends the sender a ~private notice in the command's room, as
-// Markdown (Appendix A.1), before the result. It reports whether the
-// notice was queued.
+// Markdown (Appendix A.1), from Router.From, before the result. It reports
+// whether the notice was queued.
 func (c *Call) Notice(text string) bool {
 	notice := wire.Notice(c.Params.RoomID, text)
 	notice.Body.Format = wire.Markdown
+	if c.from.UserID != "" {
+		notice.From = c.from
+	}
 	return c.Conn.Notify(notice)
 }
 

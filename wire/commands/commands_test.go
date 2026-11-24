@@ -253,6 +253,24 @@ func TestBuiltInHelp(t *testing.T) {
 	}
 }
 
+// Router.From names the sender of Call.Notice's notices, and /help's.
+func TestNoticeFrom(t *testing.T) {
+	var router commands.Router
+	router.From = wire.User{UserID: "~private", Name: "System message to you"}
+	router.MustAdd(commands.Command{Name: "x", Run: func(_ context.Context, call *commands.Call) error {
+		call.Notice("from x")
+		return call.Done()
+	}})
+	c, _ := connect(t, &router)
+	for _, line := range []string{"/x", "/help"} {
+		_, before, err := c.CallFrames(timeout(t), "command", map[string]any{"body": map[string]any{"text": line}})
+		var m wire.Message
+		if err != nil || len(before) != 1 || before[0].Decode(&m) != nil || m.From.UserID != "~private" || m.From.Name != "System message to you" || m.Body.Format != wire.Markdown {
+			t.Fatalf("%s: %v %v", line, before, err)
+		}
+	}
+}
+
 // Fallback runs the lines of names the Router has no command for.
 func TestFallback(t *testing.T) {
 	var router commands.Router
