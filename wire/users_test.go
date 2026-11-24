@@ -241,6 +241,9 @@ func TestNoMeWarning(t *testing.T) {
 				t.Fatal(err)
 			}
 			out := log.String()
+			if !strings.Contains(out, "level=DEBUG msg=\"wire: serving\"") {
+				t.Errorf("no debug line: %s", out)
+			}
 			if got := strings.Contains(out, "answers no me"); got != (test.want != "") || strings.Contains(out, "takes no messages") {
 				t.Errorf("logged %s", out)
 			}

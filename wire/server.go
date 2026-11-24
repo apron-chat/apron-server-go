@@ -319,7 +319,7 @@ func (s *Server) ServeTransport(ctx context.Context, t Transport, remote net.Add
 	defer s.serving.Done()
 
 	s.checkOnce.Do(func() {
-		s.logger().Info("wire: serving", "capabilities", s.capabilities())
+		s.logger().Debug("wire: serving", "capabilities", s.capabilities())
 		if _, ok := s.method("message"); !ok {
 			s.logger().Warn("wire: the server takes no messages, which every server should (§3.6): set Server.Messages, or Handle message")
 		} else if _, ok := s.method("me"); !ok {

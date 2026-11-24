@@ -64,10 +64,15 @@
 // server that refuses some room requests embeds [UnimplementedRooms]. Hook
 // fields follow a connection's life (OnConnect, OnDisconnect), bring a
 // duplicate's result up to date (RefreshDuplicate), decide the auth schemes
-// (CheckScheme), and the origins that may open a WebSocket (CheckOrigin,
-// [OriginPatterns], [AnyOrigin]). The Server takes its configuration as it
-// serves its first connection, or opens its first Local one, in whatever
-// order its fields were set.
+// (CheckScheme), and the origins that may open a WebSocket (CheckOrigin).
+//
+// A browser sends the origin of the page that opens a WebSocket, and by
+// default only the server's own origin may: a web client served from
+// another, such as one on its own host or a development server on another
+// port, is refused with 403 until CheckOrigin lets its origin in, such as
+// with [OriginPatterns]("chat.example.com", "localhost:*"). [AnyOrigin]
+// lets in every page on the web, which suits a server that keeps no
+// cookies or other ambient credentials, or whose clients are not browsers.
 //
 // A [Handler] registered with [Server.Handle] handles a request by name,
 // raw, and a [NotificationHandler] registered with
@@ -79,6 +84,27 @@
 // first error; one that takes a handler field's place reads them as the
 // Server would with the field's parser, such as [ParseMessage], and passes
 // them on to a typed handler with [NewReply].
+//
+// # Putting a server together
+//
+// The Server takes its configuration as it serves its first connection,
+// or opens its first Local one, in whatever order its fields were set, and
+// its fields must not change after. A backend and its Server refer to
+// each other: the Server calls the backend's handlers, and the backend
+// sends with the Server's methods, such as Broadcast and PublishUser. So a
+// program makes them in this order:
+//
+//  1. the backend, without the Server;
+//  2. the Server, its Backend and handler fields set to the backend, and
+//     its own methods registered (Server.Handle);
+//  3. the Server kept in the backend, for its handlers to send with;
+//  4. then what opens connections: bots (package bot) and other Local
+//     connections, each of which opens one at once, and the HTTP server
+//     that serves the Server's WebSocket.
+//
+// A field set after step 4 is not taken, as the Server took its
+// configuration as the first bot connected; a method registered then is
+// served from then on. examples/minimal does it so.
 //
 // # Requests, replies, and ordering
 //
@@ -336,7 +362,8 @@
 // with a request on no connection (wiretest.NewRequest); and it tests a
 // whole Server as a client sees it (wiretest.Connect, in process, and
 // wiretest.Dial, over a WebSocket), with a Client that signs in, calls,
-// and expects the notifications that came before a result
-// (Client.CallFrames), or waits for every frame queued so far
-// (Client.Sync).
+// typed as a bot does (Client.Post, Client.Me, Client.Command,
+// wiretest.Call), and expects the notifications that came before a
+// result (wiretest.Expect, Client.CallFrames), or waits for every frame
+// queued so far (Client.Sync).
 package wire
