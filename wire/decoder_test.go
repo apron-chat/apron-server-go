@@ -131,7 +131,7 @@ func TestNewReply(t *testing.T) {
 		return rec
 	}
 	rec := send("me", `{}`, func(r *Request) {
-		_ = NewReply[CurrentUser](r).Send(CurrentUser{User: User{UserID: "ada"}, Cleared: []string{"avatar"}})
+		_ = replyFor[CurrentUser](r, nil).Send(CurrentUser{User: User{UserID: "ada"}, Cleared: []string{"avatar"}})
 	})
 	if string(rec.raw) != `{"you":{"user_id":"ada","avatar":""}}` {
 		t.Fatalf("me: %s", rec.raw)
@@ -139,16 +139,16 @@ func TestNewReply(t *testing.T) {
 	if you, ok := rec.sent.(CurrentUser); !ok || you.UserID != "ada" {
 		t.Fatalf("me sent %#v", rec.sent)
 	}
-	rec = send("room_list", `{"filter":"joined"}`, func(r *Request) { _ = NewReply[RoomListResult](r).Send(RoomListResult{}) })
+	rec = send("room_list", `{"filter":"joined"}`, func(r *Request) { _ = replyFor[RoomListResult](r, nil).Send(RoomListResult{}) })
 	if string(rec.raw) != `{"joined":[]}` {
 		t.Fatalf("room_list: %s", rec.raw)
 	}
-	rec = send("x", `{}`, func(r *Request) { _ = NewReply[CurrentUser](r).Send(CurrentUser{User: User{UserID: "ada"}}) })
+	rec = send("x", `{}`, func(r *Request) { _ = replyFor[CurrentUser](r, nil).Send(CurrentUser{User: User{UserID: "ada"}}) })
 	if string(rec.raw) != `{"user_id":"ada"}` {
 		t.Fatalf("another method: %s", rec.raw)
 	}
 	rec = send("auth", `{"scheme":"guest"}`, func(r *Request) {
-		if err := NewReply[AuthResult](r).Send(AuthResult{You: &CurrentUser{User: User{UserID: "a b"}}}); CodeOf(err) != CodeInternalError {
+		if err := replyFor[AuthResult](r, nil).Send(AuthResult{You: &CurrentUser{User: User{UserID: "a b"}}}); CodeOf(err) != CodeInternalError {
 			t.Errorf("an invalid user_id: %v", err)
 		}
 	})
@@ -156,10 +156,10 @@ func TestNewReply(t *testing.T) {
 		t.Fatal("an invalid auth result was not recorded as an error")
 	}
 	send("x", `{}`, func(r *Request) {
-		if err := NewReply[Empty](r).Send(Empty{}); err != nil {
+		if err := replyFor[Empty](r, nil).Send(Empty{}); err != nil {
 			t.Fatal(err)
 		}
-		if err := NewReply[Empty](r).Send(Empty{}); err != ErrReplied {
+		if err := replyFor[Empty](r, nil).Send(Empty{}); err != ErrReplied {
 			t.Fatalf("a second reply: %v", err)
 		}
 	})

@@ -10,7 +10,7 @@ import "encoding/json/jsontext"
 // Recorder gets what is sent to a request made by NewRequest.
 type Recorder interface {
 	// Record is called once, with the request's reply: sent is the value
-	// the handler gave Reply.Send or Request.Reply, raw the result object
+	// the handler gave Reply.Send, raw the result object
 	// as it would be written, or err the error reply, and then the frames
 	// sent after it.
 	Record(sent any, raw jsontext.Value, err error, then [][]byte)
@@ -23,4 +23,8 @@ var (
 	// RecorderOf returns the Recorder of a *wire.Request made by
 	// NewRequest, or nil.
 	RecorderOf func(r any) Recorder
+	// InitReply makes *reply, a *wire.Reply[T] of any T, the Reply of the
+	// *wire.Request r, with what Send does for r's method and T, as the
+	// Server makes a handler's.
+	InitReply func(reply, r any)
 )

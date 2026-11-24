@@ -224,7 +224,7 @@ func (s *Server) signOutOthersLocked(u *userState, keep *client) {
 }
 
 // accountOps are the account's methods (ext:account), which read their
-// params and reply raw, as wire methods do.
+// params and reply as wire methods do.
 func accountOps(ops map[string]operation) {
 	ops[accountExt+".credentials"] = (*Server).listCredentials
 	ops[accountExt+".credential_rename"] = (*Server).renameCredential
@@ -262,7 +262,7 @@ type credentialEntry struct {
 	Scheme   string `json:"scheme"`
 }
 
-func (s *Server) listCredentials(c *client, r *wire.Request) *Error {
+func (s *Server) listCredentials(c *client, r *wire.Request, reply wire.Reply[any]) *Error {
 	s.mu.Lock()
 	defer s.unlock()
 	if err := accountLocked(c); err != nil {
@@ -283,7 +283,7 @@ func (s *Server) listCredentials(c *client, r *wire.Request) *Error {
 	if v := c.verified; v.user == c.user.id && time.Since(v.at) < reauthWindow {
 		result.ReauthenticatedUntil = v.at.Add(reauthWindow).UnixMilli()
 	}
-	r.Reply(result)
+	_ = reply.Send(result)
 	return nil
 }
 
@@ -301,7 +301,7 @@ func credentialParams(r *wire.Request) (string, string, *Error) {
 
 // renameCredential names one of the account's credentials, and answers {}
 // once it has.
-func (s *Server) renameCredential(c *client, r *wire.Request) *Error {
+func (s *Server) renameCredential(c *client, r *wire.Request, reply wire.Reply[any]) *Error {
 	scheme, id, err := credentialParams(r)
 	if err != nil {
 		return err
@@ -332,7 +332,7 @@ func (s *Server) renameCredential(c *client, r *wire.Request) *Error {
 // removeCredential removes one of the account's credentials
 // (removeCredentialLocked), and answers {} once that is stored, before it
 // closes the connection, if it signed in with it.
-func (s *Server) removeCredential(c *client, r *wire.Request) *Error {
+func (s *Server) removeCredential(c *client, r *wire.Request, reply wire.Reply[any]) *Error {
 	scheme, id, err := credentialParams(r)
 	if err != nil {
 		return err
@@ -349,7 +349,7 @@ func (s *Server) removeCredential(c *client, r *wire.Request) *Error {
 		return err
 	}
 	c.fenceLocked()
-	r.Reply(wire.Empty{})
+	_ = reply.Send(wire.Empty{})
 	if c.credential == credentialKey(scheme, id) {
 		c.closeWithError(&Error{Code: CodeDenied, Message: "The passkey this connection signed in with was removed"})
 	}
@@ -360,7 +360,7 @@ func (s *Server) removeCredential(c *client, r *wire.Request) *Error {
 // signed in with, and the push registrations it made, and closes it, or, with
 // `others`, ends every other session and device token of the account and
 // closes its other connections, which needs a recent reauthentication.
-func (s *Server) signOut(c *client, r *wire.Request) *Error {
+func (s *Server) signOut(c *client, r *wire.Request, reply wire.Reply[any]) *Error {
 	d := r.Decoder()
 	others := d.Bool("others", optional)
 	if err := paramError(d.Err()); err != nil {
@@ -377,7 +377,7 @@ func (s *Server) signOut(c *client, r *wire.Request) *Error {
 		}
 		s.signOutOthersLocked(c.user, c)
 		c.fenceLocked()
-		r.Reply(wire.Empty{})
+		_ = reply.Send(wire.Empty{})
 		return nil
 	}
 	// What the connection signed in with signs in no more, nor wakes it.
@@ -396,7 +396,7 @@ func (s *Server) signOut(c *client, r *wire.Request) *Error {
 		s.revokeServiceLocked(service, "Signed out")
 	}
 	c.fenceLocked()
-	r.Reply(wire.Empty{})
+	_ = reply.Send(wire.Empty{})
 	c.closeWithError(&Error{Code: CodeDenied, Message: "Signed out"})
 	return nil
 }

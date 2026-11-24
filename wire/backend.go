@@ -36,9 +36,6 @@ type Backend interface {
 	// Auth, such as a goroutine that relays a host's events to it, stops
 	// them before it returns an error, or the frames they send after
 	// reach a connection that is not signed in.
-	//
-	// A backend that replies raw (Reply.Request) sets the connection's
-	// user itself.
 	Auth(ctx context.Context, c *Conn, p AuthParams, reply Reply[AuthResult]) error
 }
 

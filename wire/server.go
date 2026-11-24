@@ -200,7 +200,9 @@ func (s *Server) Handle(name string, h Handler) {
 	if wirecore.NotificationOnly[name] {
 		panic("wire: Handle " + strconv.Quote(name) + ": it is a notification; use HandleNotification")
 	}
-	s.register(name, method{capability: h.Capability, noDedup: h.NoDedup, serve: h.Serve})
+	s.register(name, method{capability: h.Capability, noDedup: h.NoDedup, serve: func(ctx context.Context, c *Conn, r *Request) error {
+		return h.Serve(ctx, c, r, replyFor[any](r, nil))
+	}})
 }
 
 // HandleNotification registers a notification method a client sends, which

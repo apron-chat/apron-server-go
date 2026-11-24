@@ -671,12 +671,12 @@ func (c *client) enqueueBatch(values ...any) bool {
 
 // operation handles one of the server's own methods, a wire method
 // (wire.Handler.Serve): it reads the request's params with wire's
-// accessors or Decoder, and replies with Request.Reply, or returns nil
-// without replying, which answers {}, or an error. Operations whose
+// Decoder, and replies with reply.Send, or returns nil without replying,
+// which answers {}, or an error. Operations whose
 // results describe state reply while holding s.mu, so that a result
 // reflects every notification sent before it on the connection, and after
 // the notifications the request causes, which precede its result (§1).
-type operation func(s *Server, c *client, r *wire.Request) *Error
+type operation func(s *Server, c *client, r *wire.Request, reply wire.Reply[any]) *Error
 
 func (s *Server) operations() map[string]operation {
 	ops := map[string]operation{

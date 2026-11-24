@@ -129,25 +129,26 @@ func TestNewReply(t *testing.T) {
 // A Handler gets a request with params, and its reply and the frames after
 // it are recorded.
 func TestNewRequest(t *testing.T) {
-	h := wire.Handler{Serve: func(_ context.Context, _ *wire.Conn, r *wire.Request) error {
+	h := wire.Handler{Serve: func(_ context.Context, _ *wire.Conn, r *wire.Request, reply wire.Reply[any]) error {
 		d := r.Decoder()
 		text := d.String("text", wire.Required)
 		if err := d.Err(); err != nil {
 			return err
 		}
 		notice, _ := wire.Encode(wire.Notice("", "echoed"))
-		r.Reply(map[string]any{"echo": text}, notice)
-		return nil
+		return reply.Send(map[string]any{"echo": text}, notice)
 	}}
 	r := wiretest.NewRequest("x_echo", map[string]any{"text": "hi"})
-	if err := h.Serve(context.Background(), nil, r); err != nil {
+	reply, sent := wiretest.NewReply[any](r)
+	if err := h.Serve(context.Background(), nil, r, reply); err != nil {
 		t.Fatal(err)
 	}
-	_, sent := wiretest.NewReply[jsontext.Value](r)
-	if string(sent.Raw()) != `{"echo":"hi"}` || string(sent.Result()) != `{"echo":"hi"}` || len(sent.Then()) != 1 {
-		t.Fatalf("sent %s %s %q", sent.Raw(), sent.Result(), sent.Then())
+	if string(sent.Raw()) != `{"echo":"hi"}` || len(sent.Then()) != 1 {
+		t.Fatalf("sent %s %q", sent.Raw(), sent.Then())
 	}
-	if err := h.Serve(context.Background(), nil, wiretest.NewRequest("x_echo", nil)); wire.CodeOf(err) != wire.CodeInvalidParams {
+	r = wiretest.NewRequest("x_echo", nil)
+	reply, _ = wiretest.NewReply[any](r)
+	if err := h.Serve(context.Background(), nil, r, reply); wire.CodeOf(err) != wire.CodeInvalidParams {
 		t.Fatalf("without text: %v", err)
 	}
 	if _, err := wire.ParseHistory(wiretest.NewRequest("history", map[string]any{"limit": 0})); wire.CodeOf(err) != wire.CodeInvalidParams {
@@ -284,9 +285,9 @@ func TestCallFramesAndSync(t *testing.T) {
 	ctx := timeout(t)
 	c := newChat()
 	// test.order sends a notice before its reply and one after it.
-	c.server.Handle("test.order", wire.Handler{Serve: func(_ context.Context, conn *wire.Conn, r *wire.Request) error {
+	c.server.Handle("test.order", wire.Handler{Serve: func(_ context.Context, conn *wire.Conn, r *wire.Request, reply wire.Reply[any]) error {
 		conn.Notify(wire.Notice("", "before"))
-		r.Reply(nil)
+		_ = reply.Send(nil)
 		conn.Notify(wire.Notice("", "after"))
 		return nil
 	}})

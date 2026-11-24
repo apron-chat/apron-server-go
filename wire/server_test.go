@@ -330,11 +330,10 @@ func TestUnsupportedMethod(t *testing.T) {
 
 func TestHandle(t *testing.T) {
 	s := wired(&backend{}, wire.Config{})
-	s.Handle("echo", wire.Handler{Capability: "ext:echo", Serve: func(_ context.Context, _ *wire.Conn, r *wire.Request) error {
-		r.Reply(r.Params)
-		return nil
+	s.Handle("echo", wire.Handler{Capability: "ext:echo", Serve: func(_ context.Context, _ *wire.Conn, r *wire.Request, reply wire.Reply[any]) error {
+		return reply.Send(r.Params)
 	}})
-	s.Handle("fail", wire.Handler{NoDedup: true, Serve: func(context.Context, *wire.Conn, *wire.Request) error {
+	s.Handle("fail", wire.Handler{NoDedup: true, Serve: func(context.Context, *wire.Conn, *wire.Request, wire.Reply[any]) error {
 		return errors.New("secret detail")
 	}})
 	c := wiretest.ConnectT(t, s)
@@ -411,9 +410,9 @@ func (b *returning) stall(n int64) {
 func TestDedupForgetsBeforeTheReply(t *testing.T) {
 	b := &returning{returning: make(chan struct{})}
 	s := wired(b, wire.Config{})
-	s.Handle("read", wire.Handler{NoDedup: true, Serve: func(_ context.Context, _ *wire.Conn, r *wire.Request) error {
+	s.Handle("read", wire.Handler{NoDedup: true, Serve: func(_ context.Context, _ *wire.Conn, r *wire.Request, reply wire.Reply[any]) error {
 		n := b.calls.Add(1)
-		r.Reply(map[string]any{"call": n})
+		_ = reply.Send(map[string]any{"call": n})
 		b.stall(n)
 		return nil
 	}})

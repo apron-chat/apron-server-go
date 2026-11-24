@@ -79,11 +79,9 @@
 // [Server.HandleNotification] a client's notification: an extension's own
 // method, such as the reference server's push_register and account
 // methods, or one that takes the place of a Config handler's. A Handler
-// reads its params with the Request's accessors, such as
-// [Request.String], or a [Decoder], which reads several and keeps the
-// first error; one that takes a Config handler's place reads them as the
-// Server would with the field's parser, such as [ParseMessage], and passes
-// them on to a typed handler with [NewReply].
+// reads its params with the Request's [Decoder], which reads several and
+// keeps the first error, and answers with its Reply, as a typed handler
+// does, with any result that encodes as a JSON object.
 //
 // # Putting a server together
 //
@@ -132,10 +130,9 @@
 // senders for the connection, such as a goroutine it started during
 // Auth, before it returns the error.
 //
-// [Reply.Request] is the request, raw: its params, with presence
-// ([Request.Param]), and [Request.Reply], which sends any result without
-// what Send does with the method's, as a [Handler] replies. Code deep in
-// a handler's calls that needs the request gets it, or the Reply, passed
+// [Reply.Request] is the request: its params as they arrived, such as an
+// auth scheme's that [AuthParams] has no field for. Code deep in a
+// handler's calls that needs the request gets it, or the Reply, passed
 // down: a handler's context carries no Request.
 //
 // A connection's frames are handled one at a time, in order, each to its
@@ -152,9 +149,9 @@
 // ends first, the request fails, so that its duplicates are not left
 // waiting, and is not kept, so that a retry runs again; Send and Fail then
 // return ErrClosed. Auth is a barrier, finished before the frames after it
-// (§3.2.2), and is never answered later. A [Handler] answers later with the
-// Reply of its request ([NewReply]), and [Local.Call] waits for a reply
-// answered later, while the next Call on the connection does not.
+// (§3.2.2), and is never answered later. A [Handler] answers later as a
+// typed handler does, and [Local.Call] waits for a reply answered later,
+// while the next Call on the connection does not.
 //
 // A reply answered later comes when the backend sends it, maybe after the
 // replies to requests sent after it: a server may reply in any order, and
@@ -171,8 +168,9 @@
 // Sending never blocks, and calls nothing of the backend's but
 // Broadcast's and PublishUser's filters: [Conn.Send], [Conn.Notify],
 // [Conn.SendBatch], [Server.Broadcast], [Server.PublishUser],
-// [Server.PublishUserChange], [Reply.Send], and [Request.Reply] queue
-// frames, and disconnect a client too slow to take them. So a backend sends while it holds the lock of the change a
+// [Server.PublishUserChange], and [Reply.Send] queue frames, and
+// disconnect a client too slow to take them. So a backend sends while it
+// holds the lock of the change a
 // frame describes, which keeps every connection's frames in the order of
 // the changes, such as messages in log_id order; one that sends after
 // letting go of the lock lets two changes' frames cross.

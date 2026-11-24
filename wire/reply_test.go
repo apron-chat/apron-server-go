@@ -72,9 +72,6 @@ func (h *commands) Command(_ context.Context, _ *wire.Conn, p wire.CommandParams
 		return first
 	case "/forget":
 		return nil
-	case "/raw":
-		reply.Request().Reply(map[string]any{"raw": true})
-		return nil
 	case "/late":
 		if err := reply.Send(wire.CommandResult{}); err != nil {
 			return err
@@ -117,10 +114,6 @@ func TestSendOnce(t *testing.T) {
 	if result, err := call(t, l, "status", `{"idle":false}`); err != nil || result != `{}` {
 		t.Fatalf("status: %s %v, want {}", result, err)
 	}
-	// The raw request takes any result.
-	if result, err := call(t, l, "command", `{"body":{"text":"/raw"}}`); err != nil || result != `{"raw":true}` {
-		t.Fatalf("raw: %s %v", result, err)
-	}
 	// An error after Send is logged, and the client has the result.
 	if result, err := call(t, l, "command", `{"body":{"text":"/late"}}`); err != nil || result != `{}` {
 		t.Fatalf("late: %s %v", result, err)
@@ -134,19 +127,13 @@ func TestSendOnce(t *testing.T) {
 type rooms struct {
 	wire.UnimplementedRooms
 	result wire.RoomListResult
-	raw    bool
 }
 
 func (h *rooms) RoomList(_ context.Context, _ *wire.Conn, _ wire.RoomListParams, reply wire.Reply[wire.RoomListResult]) error {
-	if h.raw {
-		reply.Request().Reply(h.result)
-		return nil
-	}
 	return reply.Send(h.result)
 }
 
-// Send makes a room_list result what its filter and members ask for; the
-// raw reply sends it as it is.
+// Send makes a room_list result what its filter and members ask for.
 func TestRoomListSend(t *testing.T) {
 	member := wire.User{UserID: "bob"}
 	general := wire.RoomView{Room: wire.Room{RoomID: "general"}, Members: []wire.CurrentUser{{User: member}}, MemberCount: 9}
@@ -164,10 +151,6 @@ func TestRoomListSend(t *testing.T) {
 	}
 	if len(h.result.NotJoined[0].Members) != 1 {
 		t.Fatal("Send changed the backend's own rooms")
-	}
-	h.raw = true
-	if result, err := call(t, l, "room_list", `{"filter":"joined"}`); err != nil || !strings.Contains(result, `"members"`) || strings.Contains(result, `"joined"`) {
-		t.Fatalf("raw: %s %v, want the result as it was", result, err)
 	}
 }
 
@@ -246,9 +229,8 @@ func TestAuthSendSignsIn(t *testing.T) {
 func TestHandleAnyTime(t *testing.T) {
 	b := &backend{}
 	s := wire.NewServer(b, wire.Config{Messages: b, Commands: &commands{}})
-	s.Handle("echo", wire.Handler{Capability: "ext:echo", Serve: func(_ context.Context, _ *wire.Conn, r *wire.Request) error {
-		r.Reply(r.Params)
-		return nil
+	s.Handle("echo", wire.Handler{Capability: "ext:echo", Serve: func(_ context.Context, _ *wire.Conn, r *wire.Request, reply wire.Reply[any]) error {
+		return reply.Send(r.Params)
 	}})
 	l := local(t, s)
 	if _, err := call(t, l, "message", `{"body":{"text":"hi"}}`); err != nil || b.messages.Load() != 1 {
@@ -259,7 +241,7 @@ func TestHandleAnyTime(t *testing.T) {
 	}
 	// A method registered once the Server serves is served, and listed in
 	// the server frames after.
-	s.Handle("late", wire.Handler{Capability: "ext:late", Serve: func(context.Context, *wire.Conn, *wire.Request) error { return nil }})
+	s.Handle("late", wire.Handler{Capability: "ext:late", Serve: func(context.Context, *wire.Conn, *wire.Request, wire.Reply[any]) error { return nil }})
 	if result, err := call(t, l, "late", `{}`); err != nil || result != `{}` {
 		t.Fatalf("late: %s %v", result, err)
 	}
@@ -275,7 +257,7 @@ func TestNewServerPanics(t *testing.T) {
 	for name, use := range map[string]func(){
 		"no backend": func() { wire.NewServer(nil, wire.Config{}) },
 		"zero Handle": func() {
-			new(wire.Server).Handle("x", wire.Handler{Serve: func(context.Context, *wire.Conn, *wire.Request) error { return nil }})
+			new(wire.Server).Handle("x", wire.Handler{Serve: func(context.Context, *wire.Conn, *wire.Request, wire.Reply[any]) error { return nil }})
 		},
 		"zero Local": func() { _, _ = new(wire.Server).Local(wire.LocalOptions{User: wire.User{UserID: "ada"}}) },
 	} {
@@ -292,7 +274,7 @@ func TestNewServerPanics(t *testing.T) {
 
 // Handle and HandleNotification refuse what they cannot serve.
 func TestHandlePanics(t *testing.T) {
-	serve := func(context.Context, *wire.Conn, *wire.Request) error { return nil }
+	serve := func(context.Context, *wire.Conn, *wire.Request, wire.Reply[any]) error { return nil }
 	notify := func(context.Context, *wire.Conn, *wire.Request) {}
 	for name, register := range map[string]func(s *wire.Server){
 		"auth":                  func(s *wire.Server) { s.Handle("auth", wire.Handler{Serve: serve}) },
@@ -326,9 +308,8 @@ func TestOverride(t *testing.T) {
 	for _, capability := range []string{"edit", ""} {
 		b := &editor{}
 		s := wire.NewServer(b, wire.Config{Messages: b, Edits: b})
-		s.Handle("message", wire.Handler{Capability: capability, Serve: func(_ context.Context, _ *wire.Conn, r *wire.Request) error {
-			r.Reply(map[string]any{"overridden": true})
-			return nil
+		s.Handle("message", wire.Handler{Capability: capability, Serve: func(_ context.Context, _ *wire.Conn, r *wire.Request, reply wire.Reply[any]) error {
+			return reply.Send(map[string]any{"overridden": true})
 		}})
 		s.HandleNotification("tick", wire.NotificationHandler{Serve: func(context.Context, *wire.Conn, *wire.Request) {}})
 		l := local(t, s)
@@ -405,10 +386,9 @@ func TestCheckOrigin(t *testing.T) {
 // notification past MaxLogID, and then a result with a negative one.
 type badLogIDs struct{ notified chan bool }
 
-func (h badLogIDs) Command(_ context.Context, c *wire.Conn, _ wire.CommandParams, reply wire.Reply[wire.CommandResult]) error {
+func (h badLogIDs) serve(_ context.Context, c *wire.Conn, _ *wire.Request, reply wire.Reply[any]) error {
 	h.notified <- c.Notify(wire.Message{LogID: wire.MaxLogID + 1, RoomID: "r", From: wire.User{UserID: "ada"}, Body: &wire.Body{Text: "x"}})
-	reply.Request().Reply(map[string]any{"log_id": wire.LogID(-1)})
-	return nil
+	return reply.Send(map[string]any{"log_id": wire.LogID(-1)})
 }
 
 // A LogID that is no log_id is not sent: a result with one is answered
@@ -416,8 +396,10 @@ func (h badLogIDs) Command(_ context.Context, c *wire.Conn, _ wire.CommandParams
 func TestLogIDOutOfRangeNotSent(t *testing.T) {
 	var log logged
 	h := badLogIDs{make(chan bool, 1)}
-	l := local(t, wire.NewServer(&backend{}, wire.Config{Commands: h, Logger: log.logger()}))
-	if result, err := call(t, l, "command", `{"body":{"text":"/x"}}`); wire.CodeOf(err) != wire.CodeInternalError {
+	s := wire.NewServer(&backend{}, wire.Config{Logger: log.logger()})
+	s.Handle("x_bad", wire.Handler{Serve: h.serve})
+	l := local(t, s)
+	if result, err := call(t, l, "x_bad", `{}`); wire.CodeOf(err) != wire.CodeInternalError {
 		t.Fatalf("got %s %v, want internal_error", result, err)
 	}
 	if <-h.notified {

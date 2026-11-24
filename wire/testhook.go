@@ -12,6 +12,7 @@ func init() {
 	testhook.NewRequest = func(method string, params jsontext.Value, rec testhook.Recorder) (any, error) {
 		return detachedRequest(method, params, rec)
 	}
+	testhook.InitReply = func(reply, r any) { reply.(initReply).init(r.(*Request)) }
 	testhook.RecorderOf = func(r any) testhook.Recorder {
 		if r, ok := r.(*Request); ok {
 			return r.rec

@@ -220,13 +220,12 @@ func TestLaterAuth(t *testing.T) {
 }
 
 // A Local call waits for a reply answered later, and the next call on the
-// connection does not; a Handler answers later with its request's Reply.
+// connection does not; a Handler answers later as a typed handler does.
 func TestLaterLocal(t *testing.T) {
 	b := newUpstream()
 	s := wired(b, wire.Config{})
 	release := make(chan struct{})
-	s.Handle("ext:slow", wire.Handler{Serve: func(ctx context.Context, c *wire.Conn, r *wire.Request) error {
-		reply := wire.NewReply[map[string]any](r)
+	s.Handle("ext:slow", wire.Handler{Serve: func(ctx context.Context, c *wire.Conn, r *wire.Request, reply wire.Reply[any]) error {
 		go func() {
 			<-release
 			// The work answered later may call the connection again.

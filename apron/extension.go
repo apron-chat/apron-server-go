@@ -561,7 +561,7 @@ func (r *Registrar) Method(name string, fn MethodFunc) {
 		case h.s.ops[name] != nil:
 			return fmt.Errorf("method %q exists already", name)
 		}
-		h.s.ops[name] = func(s *Server, c *client, r *wire.Request) *Error {
+		h.s.ops[name] = func(s *Server, c *client, r *wire.Request, reply wire.Reply[any]) *Error {
 			s.mu.RLock()
 			user := userViewOf(c.user)
 			s.mu.RUnlock()
@@ -579,7 +579,7 @@ func (r *Registrar) Method(name string, fn MethodFunc) {
 			if encodeErr != nil {
 				return h.protocolError(fmt.Errorf("method %s returned a result that is not JSON: %w", name, encodeErr))
 			}
-			r.Reply(jsontext.Value(encoded))
+			_ = reply.Send(jsontext.Value(encoded))
 			return nil
 		}
 		h.s.registerOp(name, h.s.ops[name])

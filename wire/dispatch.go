@@ -30,13 +30,13 @@ type Handler struct {
 	// the request again, as is right for one that changes nothing, such as
 	// a read.
 	NoDedup bool
-	// Serve handles a request from a signed-in connection, and replies with
-	// r.Reply, or returns an error: one that is an *Error is the error
-	// reply, and any other is error/internal_error. A Serve that returns
-	// nil without replying has {} sent for it, unless it is answered
-	// later, as a typed handler's is, with the Reply of its request
-	// (NewReply): its Later, then its Send or Fail.
-	Serve func(ctx context.Context, c *Conn, r *Request) error
+	// Serve handles a request from a signed-in connection, r, whose params
+	// it reads with r.Decoder, and answers with reply, as a typed handler
+	// does: reply.Send sends any result that encodes as a JSON object, or
+	// Serve returns an error, one that is an *Error the error reply, and
+	// any other error/internal_error. A Serve that returns nil without
+	// sending has {} sent for it, unless it answers later (Reply.Later).
+	Serve func(ctx context.Context, c *Conn, r *Request, reply Reply[any]) error
 }
 
 // NotificationHandler handles a notification method a client sends, such
@@ -65,8 +65,8 @@ type method struct {
 
 // Request is a request, or a notification, as a handler gets it: its
 // method, id, and params, raw, which a Handler reads with its accessors,
-// such as Request.String, or its Decoder, and answers with Request.Reply.
-// A typed handler's Reply has it too (Reply.Request). Its params are
+// such as Request.String, or its Decoder, and answers with its Reply. A
+// typed handler's Reply has it too (Reply.Request). Its params are
 // decoded once, as the frame is read, and may be read from any goroutine.
 type Request struct {
 	// Method is the request's method, and ID its id, or "" for a
@@ -119,20 +119,11 @@ func (r *Request) Decode(v any) error {
 	return nil
 }
 
-// Reply sends the request's result, any value that encodes as a JSON
-// object, {} for nil, now, followed by frames with nothing between them,
-// as Reply.Send does, but raw: without what Send does with a typed
-// method's result, such as the sign-in of an auth result, or the
-// normalization of a room_list result, which a handler that replies raw
-// does itself. Like Conn.Send, it never blocks. It reports false for a
-// second reply, a result that is not an object (answered
-// error/internal_error), or a closed connection.
-// A notification gets no reply, but its frames are sent.
-func (r *Request) Reply(result any, then ...Frame) bool {
-	if r.notification {
-		return r.c.SendBatch(then...)
-	}
-	return r.send(result, func() (any, error) { return result, nil }, nil, then) == nil
+// reply sends the request's result, raw, any value that encodes as a JSON
+// object, {} for nil, and reports whether it was queued: a duplicate's
+// outcome, or the {} of a handler that returned without sending.
+func (r *Request) reply(result any) bool {
+	return r.send(result, func() (any, error) { return result, nil }, nil, nil) == nil
 }
 
 // Replied reports whether the request has its reply.
@@ -386,7 +377,7 @@ func (s *Server) duplicate(ctx context.Context, c *Conn, r *Request, outcome ded
 	if refresh := s.config.RefreshDuplicate; refresh != nil {
 		result = s.refreshed(r.Method, outcome.result, refresh(ctx, c, r.Method, outcome.result))
 	}
-	r.Reply(result)
+	r.reply(result)
 }
 
 // refreshed returns the result RefreshDuplicate brought up to date, as it
@@ -432,7 +423,7 @@ func (s *Server) finish(ctx context.Context, r *Request, strict bool, err error)
 		s.logger().Error(errNoReply(r.Method).Error(), "method", r.Method)
 		r.fail(internalError())
 	default:
-		r.Reply(nil)
+		r.reply(nil)
 	}
 }
 
@@ -513,7 +504,7 @@ func (s *Server) message(messages MessageHandler, edits EditHandler) func(contex
 		if err != nil {
 			return err
 		}
-		reply := NewReply[MessageResult](r)
+		reply := replyFor[MessageResult](r, nil)
 		if m.edit() {
 			switch {
 			case edits == nil:

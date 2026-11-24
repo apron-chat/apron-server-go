@@ -12,7 +12,7 @@ import (
 // fields, with what wire checks of each (see the package documentation's
 // table): the Server calls them before a handler, and a Handler that takes
 // a Config handler's place calls them to read the same params the same way,
-// then passes them on, with NewReply. Each returns an error that is an
+// then passes them on. Each returns an error that is an
 // *Error, error/invalid_params, and zero params with it.
 
 // messageFields are the params of a message request or a command (§3.5),
@@ -332,18 +332,12 @@ func ParseActivity(r *Request) (ActivityParams, error) {
 	return parsed(p, d)
 }
 
-// NewReply returns a Reply that answers r, for a Handler that reads a
-// request with one of the parsers, such as ParseMessage, and passes it on
-// to a typed handler, or for a test (package wiretest). Its Send does what
-// the Server does with the result of r's method when T is that method's
-// result type, as for its Config handlers: the user of a me result
+// replyFor returns the Reply of r, for a result of T, with what Send does
+// for r's method when T is its result type: the user of a me result
 // becomes the connection's, a room_list result is normalized for its
 // params, and an auth result signs the connection in. For any other method
-// or type, Send sends the result as Request.Reply does.
-func NewReply[T any](r *Request) Reply[T] { return replyFor[T](r, nil) }
-
-// replyFor returns the Reply of r, for a result of T, with what Send does
-// for r's method; params are r's, when the caller parsed them already.
+// or type, Send sends the result as it is. params are r's, when the caller
+// parsed them already.
 func replyFor[T any](r *Request, params any) Reply[T] {
 	reply := Reply[T]{r: r}
 	if r == nil {

@@ -443,8 +443,8 @@ const commandListMethod = commands.ListMethod
 // on this connection, in at least one room it can see: what /help lists in
 // each room, as data, one Command object for each form. It takes no params,
 // and ignores any.
-func (s *Server) listCommands(c *client, r *wire.Request) *Error {
-	r.Reply(commands.ListResult{Commands: s.commands.router.List(s.requestContext(c), c.conn)})
+func (s *Server) listCommands(c *client, r *wire.Request, reply wire.Reply[any]) *Error {
+	_ = reply.Send(commands.ListResult{Commands: s.commands.router.List(s.requestContext(c), c.conn)})
 	return nil
 }
 

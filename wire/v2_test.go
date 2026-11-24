@@ -21,14 +21,14 @@ import (
 func TestReplyInHandler(t *testing.T) {
 	s := wired(&backend{}, wire.Config{})
 	var mu sync.Mutex
-	s.Handle("snapshot", wire.Handler{Serve: func(ctx context.Context, c *wire.Conn, r *wire.Request) error {
+	s.Handle("snapshot", wire.Handler{Serve: func(ctx context.Context, c *wire.Conn, r *wire.Request, reply wire.Reply[any]) error {
 		mu.Lock()
 		defer mu.Unlock()
 		after, _ := wire.EncodeRaw("cursor", map[string]any{"n": 1})
-		if !r.Reply(map[string]any{"state": 1}, after) {
+		if reply.Send(map[string]any{"state": 1}, after) != nil {
 			t.Error("Reply failed")
 		}
-		if r.Reply(map[string]any{"state": 2}) {
+		if reply.Send(map[string]any{"state": 2}) == nil {
 			t.Error("a second Reply was sent")
 		}
 		return nil
@@ -109,9 +109,8 @@ func TestRefreshDuplicate(t *testing.T) {
 	var log logged
 	b := &refreshing{}
 	s := wired(b, wire.Config{RefreshDuplicate: b.Refresh, Logger: log.logger()})
-	s.Handle("ext:count", wire.Handler{Serve: func(_ context.Context, _ *wire.Conn, r *wire.Request) error {
-		r.Reply(map[string]any{"version": 0})
-		return nil
+	s.Handle("ext:count", wire.Handler{Serve: func(_ context.Context, _ *wire.Conn, r *wire.Request, reply wire.Reply[any]) error {
+		return reply.Send(map[string]any{"version": 0})
 	}})
 	c := wiretest.ConnectT(t, s)
 	userID := signIn(t, c)
@@ -163,7 +162,7 @@ func TestCheckScheme(t *testing.T) {
 
 func TestAnnounce(t *testing.T) {
 	s := wired(&backend{}, wire.Config{})
-	s.Handle("ext:thing", wire.Handler{Capability: "ext:thing", Serve: func(context.Context, *wire.Conn, *wire.Request) error { return nil }})
+	s.Handle("ext:thing", wire.Handler{Capability: "ext:thing", Serve: func(context.Context, *wire.Conn, *wire.Request, wire.Reply[any]) error { return nil }})
 	c := wiretest.ConnectT(t, s)
 	signIn(t, c)
 	conn := onlyConn(t, s)
@@ -187,7 +186,7 @@ func TestLocal(t *testing.T) {
 	b := &backend{}
 	s := wired(b, wire.Config{})
 	var once sync.Once
-	s.Handle("whoami", wire.Handler{Serve: func(ctx context.Context, c *wire.Conn, r *wire.Request) error {
+	s.Handle("whoami", wire.Handler{Serve: func(ctx context.Context, c *wire.Conn, r *wire.Request, reply wire.Reply[any]) error {
 		c.NotifyRaw("hello", map[string]any{})
 		var err error
 		once.Do(func() {
@@ -197,8 +196,7 @@ func TestLocal(t *testing.T) {
 		if !errors.Is(err, wire.ErrReentrant) && err != nil {
 			t.Errorf("reentrant call: %v", err)
 		}
-		r.Reply(map[string]any{"user_id": c.UserID()})
-		return nil
+		return reply.Send(map[string]any{"user_id": c.UserID()})
 	}})
 	frames := make(chan string, 8)
 	l, err := s.Local(wire.LocalOptions{User: wire.User{UserID: "bot"}, OnFrame: func(f wire.Frame) { frames <- string(f) }})

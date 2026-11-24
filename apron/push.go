@@ -78,7 +78,7 @@ func (s *Server) removePushLocked(p *pushRegistration) {
 // users' registrations of the same url are their own. A user holds at most
 // maxPushesPerUser: another replaces the one least recently registered.
 // It answers {} once the registration is kept.
-func (s *Server) registerPush(c *client, r *wire.Request) *Error {
+func (s *Server) registerPush(c *client, r *wire.Request, reply wire.Reply[any]) *Error {
 	if c.service != [32]byte{} {
 		// A service token's client is a program, which push does not wake;
 		// a registration would outlive the token's revocation.
@@ -175,7 +175,7 @@ func parseKeysParam(r *wire.Request) (*webpush.Keys, *Error) {
 
 // unregisterPush removes the caller's registration of a url; an unknown url
 // is already unregistered (§4.9). It answers {} once it is.
-func (s *Server) unregisterPush(c *client, r *wire.Request) *Error {
+func (s *Server) unregisterPush(c *client, r *wire.Request, reply wire.Reply[any]) *Error {
 	endpoint, err := parseString(r.Fields(), "url", required)
 	if err != nil {
 		return err

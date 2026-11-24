@@ -542,9 +542,8 @@ func (r *Router) ListHandler() wire.Handler {
 	return wire.Handler{
 		Capability: ListMethod,
 		NoDedup:    true,
-		Serve: func(ctx context.Context, c *wire.Conn, req *wire.Request) error {
-			req.Reply(ListResult{Commands: r.List(ctx, c)})
-			return nil
+		Serve: func(ctx context.Context, c *wire.Conn, req *wire.Request, reply wire.Reply[any]) error {
+			return reply.Send(ListResult{Commands: r.List(ctx, c)})
 		},
 	}
 }

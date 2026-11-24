@@ -107,12 +107,15 @@ func (p Reply[T]) Fail(err error) error {
 	return p.r.failWith(err)
 }
 
-// Request is the request the reply answers, raw: its params as they
-// arrived, and Request.Reply, which sends any result, without what Send
-// does with the method's, such as the normalization of a room_list result,
-// or the sign-in of an auth result. A handler that replies raw does that
-// itself.
+// Request is the request the reply answers: its params as they arrived,
+// such as those of an auth scheme that AuthParams has no field for.
 func (p Reply[T]) Request() *Request { return p.r }
+
+// initReply is a Reply of any T that a test (package wiretest) makes for a
+// request: replyFor, for T it cannot name.
+type initReply interface{ init(r *Request) }
+
+func (p *Reply[T]) init(r *Request) { *p = replyFor[T](r, nil) }
 
 // send queues the reply to r: the value it renders, followed by then. apply
 // runs as it is queued. sent is the result as the handler gave it, which a

@@ -61,12 +61,11 @@ func (b *panicky) Auth(ctx context.Context, c *wire.Conn, p wire.AuthParams, rep
 func TestHandlerPanics(t *testing.T) {
 	s := wired(&panicky{}, wire.Config{Logger: slog.New(slog.DiscardHandler)})
 	var calls atomic.Int64
-	s.Handle("boom", wire.Handler{Serve: func(_ context.Context, _ *wire.Conn, r *wire.Request) error {
+	s.Handle("boom", wire.Handler{Serve: func(_ context.Context, _ *wire.Conn, r *wire.Request, reply wire.Reply[any]) error {
 		if calls.Add(1) == 1 {
 			panic("first time")
 		}
-		r.Reply(map[string]any{"ok": true})
-		return nil
+		return reply.Send(map[string]any{"ok": true})
 	}})
 	s.HandleNotification("tick", wire.NotificationHandler{Serve: func(context.Context, *wire.Conn, *wire.Request) {
 		panic("in a notification")
@@ -100,8 +99,8 @@ func TestErrorAfterReply(t *testing.T) {
 	var logged bytes.Buffer
 	var mu sync.Mutex
 	s := wired(&backend{}, wire.Config{Logger: slog.New(slog.NewTextHandler(lockedWriter{&mu, &logged}, &slog.HandlerOptions{Level: slog.LevelDebug}))})
-	s.Handle("late", wire.Handler{Serve: func(_ context.Context, _ *wire.Conn, r *wire.Request) error {
-		r.Reply(nil)
+	s.Handle("late", wire.Handler{Serve: func(_ context.Context, _ *wire.Conn, r *wire.Request, reply wire.Reply[any]) error {
+		_ = reply.Send(nil)
 		return wire.Denied("too late")
 	}})
 	c := wiretest.ConnectT(t, s)
@@ -154,7 +153,7 @@ func TestDuplicateWaitEndsWithConnection(t *testing.T) {
 	s := wired(b, wire.Config{})
 	started, release := make(chan struct{}), make(chan struct{})
 	defer close(release)
-	s.Handle("slow", wire.Handler{Serve: func(context.Context, *wire.Conn, *wire.Request) error {
+	s.Handle("slow", wire.Handler{Serve: func(context.Context, *wire.Conn, *wire.Request, wire.Reply[any]) error {
 		close(started)
 		<-release
 		return nil

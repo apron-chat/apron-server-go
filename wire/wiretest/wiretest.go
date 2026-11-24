@@ -84,9 +84,8 @@ import (
 
 // NewRequest returns a request of method on no connection, with params,
 // any value that encodes as a JSON object, {} for nil, as a handler gets
-// it: for a Handler (Server.Handle), for a parser (wire.ParseMessage,
-// ...), and for NewReply. What a handler sends to it is recorded, and read
-// with NewReply's Recorded. Its Conn is nil. It panics on params that are
+// it: for a Handler (Server.Handle), and for NewReply. What a handler
+// sends to it is recorded, and read with NewReply's Recorded. Its Conn is nil. It panics on params that are
 // not an object.
 func NewRequest(method string, params any) *wire.Request {
 	raw := jsontext.Value("{}")
@@ -107,11 +106,11 @@ func NewRequest(method string, params any) *wire.Request {
 // NewReply returns the Reply of r, a request made by NewRequest, or of a
 // request of no method when r is nil, for a typed handler of T, and what is
 // sent to r. Send does what the Server does with the result of r's method
-// (wire.NewReply), such as the {"you": ...} around a me result; Recorded
-// has both. NewReply panics on a request NewRequest did not make.
+// when T is its result type, such as the {"you": ...} around a me result;
+// Recorded has both. NewReply panics on a request NewRequest did not make.
 //
-// A Handler's test reads what it sent with any T, such as
-// jsontext.Value.
+// A Handler's test makes its Reply with T any, and reads what it sent
+// with Recorded.Raw.
 func NewReply[T any](r *wire.Request) (wire.Reply[T], *Recorded[T]) {
 	if r == nil {
 		r = NewRequest("", nil)
@@ -120,7 +119,9 @@ func NewReply[T any](r *wire.Request) (wire.Reply[T], *Recorded[T]) {
 	if !ok {
 		panic("wiretest: NewReply needs a request made by NewRequest")
 	}
-	return wire.NewReply[T](r), &Recorded[T]{rec}
+	var reply wire.Reply[T]
+	testhook.InitReply(&reply, r)
+	return reply, &Recorded[T]{rec}
 }
 
 // Recorded is what a handler sent to a request made by NewRequest: its
@@ -174,8 +175,8 @@ func (r *Recorded[T]) Wait(ctx context.Context) error {
 	}
 }
 
-// Result returns the result the handler sent: the value it gave Send, or
-// Request.Reply, when it is a T, and else the result as encoded (Raw),
+// Result returns the result the handler sent: the value it gave Send,
+// when it is a T, and else the result as encoded (Raw),
 // decoded into a T. It is the zero T until the request has its reply, or
 // when the reply is an error.
 func (r *Recorded[T]) Result() T {

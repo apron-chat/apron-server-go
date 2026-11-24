@@ -16,7 +16,7 @@ import (
 // it, and sends it with its Reply while it holds s.mu where the result
 // describes state, so that wire's types make the bytes of every result.
 // The Server's own methods beyond the protocol's, such as ext:account's,
-// are wire methods (registerOp), which reply raw.
+// are wire methods (registerOp), which reply with any result.
 
 // backend is the Server as wire's Backend and handlers, kept unexported so
 // that wire's interfaces are not part of the Server's API.
@@ -66,13 +66,13 @@ func (s *Server) newWire() {
 	}
 }
 
-// registerOp makes an operation a wire method, which replies raw.
+// registerOp makes an operation a wire method.
 func (s *Server) registerOp(name string, op operation) {
 	s.wire.Handle(name, wire.Handler{
 		Capability: methodCapabilities[name],
 		NoDedup:    readOnlyOps[name],
-		Serve: func(ctx context.Context, wc *wire.Conn, r *wire.Request) error {
-			return backend{s}.serve(ctx, wc, func(c *client) *Error { return op(s, c, r) })
+		Serve: func(ctx context.Context, wc *wire.Conn, r *wire.Request, reply wire.Reply[any]) error {
+			return backend{s}.serve(ctx, wc, func(c *client) *Error { return op(s, c, r, reply) })
 		},
 	})
 }
