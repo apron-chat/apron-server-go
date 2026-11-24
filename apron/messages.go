@@ -335,8 +335,7 @@ func (s *Server) admitPostLocked(u *userState) *Error {
 	reservation := u.posts.ReserveN(now, 1)
 	if delay := reservation.DelayFrom(now); delay > 0 {
 		reservation.CancelAt(now)
-		wait := int64((delay + time.Second - 1) / time.Second)
-		return wire.RetryAfter("Too many messages; slow down", int(wait))
+		return RetryAfter("Too many messages; slow down", delay)
 	}
 	return nil
 }
@@ -361,7 +360,7 @@ func admitActionLocked(u *userState) *Error {
 	reservation := u.actions.ReserveN(now, 1)
 	if delay := reservation.DelayFrom(now); delay > 0 {
 		reservation.CancelAt(now)
-		return retryAfter("Too many changes; slow down", delay)
+		return RetryAfter("Too many changes; slow down", delay)
 	}
 	return nil
 }

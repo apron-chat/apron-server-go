@@ -347,7 +347,7 @@ func (s *Server) ServeTransport(ctx context.Context, t Transport, remote net.Add
 			c.rt.Send(frame)
 		}
 		// An error about the connection as a whole omits id (§1.1).
-		c.CloseWithError(RetryAfter("Server at capacity; try again shortly", 30))
+		c.CloseWithError(RetryAfter("Server at capacity; try again shortly", 30*time.Second))
 		s.waitClosed(c)
 		return
 	}

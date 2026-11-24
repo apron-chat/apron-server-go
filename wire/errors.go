@@ -3,6 +3,7 @@ package wire
 import (
 	"errors"
 	"fmt"
+	"time"
 )
 
 // Error codes (PROTOCOL.md §1.1).
@@ -45,8 +46,10 @@ func InvalidParams(message string) *Error { return &Error{Code: CodeInvalidParam
 // Unsupported is a CodeUnsupported error.
 func Unsupported(message string) *Error { return &Error{Code: CodeUnsupported, Message: message} }
 
-// RetryAfter is a CodeRetryAfter error that asks the client to wait seconds.
-func RetryAfter(message string, seconds int) *Error {
+// RetryAfter is a CodeRetryAfter error that asks the client to wait, in
+// Data's retry_after: whole seconds, rounded up, and at least one (§1.1).
+func RetryAfter(message string, wait time.Duration) *Error {
+	seconds := max(1, int64((wait+time.Second-1)/time.Second))
 	return &Error{Code: CodeRetryAfter, Message: message, Data: map[string]any{"retry_after": seconds}}
 }
 

@@ -140,7 +140,7 @@ func TestLaterFail(t *testing.T) {
 	signIn(t, c)
 	const slow = `{"method":"command","id":"f","params":{"body":{"text":"/slow"}}}`
 	send(t, c, slow)
-	if err := b.take(t).reply.Fail(wire.RetryAfter("Upstream busy", 1)); err != nil {
+	if err := b.take(t).reply.Fail(wire.RetryAfter("Upstream busy", time.Second)); err != nil {
 		t.Fatal(err)
 	}
 	if f := next(t, c); f.ID != "f" || code(f) != wire.CodeRetryAfter {

@@ -583,7 +583,7 @@ func TestCloseWithError(t *testing.T) {
 	signIn(t, c)
 	conn := onlyConn(t, s)
 	conn.NotifyRaw("status", map[string]any{"n": 1})
-	conn.CloseWithError(wire.RetryAfter("Going away", 7))
+	conn.CloseWithError(wire.RetryAfter("Going away", 7*time.Second))
 	if conn.NotifyRaw("status", map[string]any{"n": 2}) {
 		t.Fatal("a frame was queued after CloseWithError")
 	}
