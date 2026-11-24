@@ -80,7 +80,7 @@ func (s *Server) registerOp(name string, op operation) {
 // serve runs a handler for the connection's client, with the request's
 // context as the one extension code it runs gets (Host).
 func (b backend) serve(ctx context.Context, wc *wire.Conn, handle func(c *client) *Error) error {
-	c, ok := wire.DataOf[*client](wc)
+	c, ok := wc.Data().(*client)
 	if !ok {
 		return internalError()
 	}
@@ -97,7 +97,7 @@ func (b backend) serve(ctx context.Context, wc *wire.Conn, handle func(c *client
 // client its Bot made (Bot.Connect).
 func (b backend) connected(_ context.Context, wc *wire.Conn) error {
 	s := b.s
-	if c, ok := wire.DataOf[*client](wc); ok && c.session != nil {
+	if c, ok := wc.Data().(*client); ok && c.session != nil {
 		return s.connectSession(c, wc)
 	}
 	r := wc.HTTPRequest()
@@ -121,7 +121,7 @@ func (b backend) connected(_ context.Context, wc *wire.Conn) error {
 
 // disconnected forgets a closed connection, network or session.
 func (b backend) disconnected(wc *wire.Conn) {
-	c, ok := wire.DataOf[*client](wc)
+	c, ok := wc.Data().(*client)
 	if !ok {
 		return
 	}
@@ -146,7 +146,7 @@ func (b backend) disconnected(wc *wire.Conn) {
 // Hello is the server frame of a new connection.
 func (b backend) Hello(_ context.Context, wc *wire.Conn) wire.ServerInfo {
 	s := b.s
-	c, ok := wire.DataOf[*client](wc)
+	c, ok := wc.Data().(*client)
 	s.mu.Lock()
 	defer s.unlock()
 	if !ok {
@@ -170,7 +170,7 @@ func (b backend) Auth(ctx context.Context, wc *wire.Conn, _ wire.AuthParams, rep
 // which does not change.
 func (b backend) refresh(_ context.Context, wc *wire.Conn, method string, result jsontext.Value) any {
 	s := b.s
-	c, ok := wire.DataOf[*client](wc)
+	c, ok := wc.Data().(*client)
 	if !ok {
 		return result
 	}

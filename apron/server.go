@@ -666,7 +666,7 @@ func (c *client) enqueueBatch(values ...any) bool {
 		}
 		frames = append(frames, wire.Frame(payload))
 	}
-	return c.conn.SendBatch(frames...)
+	return c.conn.Send(frames...)
 }
 
 // operation handles one of the server's own methods, a wire method

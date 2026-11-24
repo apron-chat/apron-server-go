@@ -369,7 +369,7 @@ func (s *Server) publishUserLocked(u *userState, except *client, before userView
 		change.Except = except.conn
 	}
 	s.wire.PublishUserChange(change, func(wc *wire.Conn) bool {
-		c, ok := wire.DataOf[*client](wc)
+		c, ok := wc.Data().(*client)
 		return ok && c.user != nil && sharers[c.user]
 	})
 }

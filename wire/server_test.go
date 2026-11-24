@@ -712,7 +712,7 @@ type fence struct {
 func (f *fence) Done() <-chan struct{} { return f.done }
 func (f *fence) Err() error            { return f.err }
 
-func TestSendBatchAndFence(t *testing.T) {
+func TestSendFramesAndFence(t *testing.T) {
 	s := wired(&backend{}, wire.Config{OutgoingQueue: 2})
 	c := wiretest.ConnectT(t, s)
 	signIn(t, c)
@@ -724,8 +724,8 @@ func TestSendBatchAndFence(t *testing.T) {
 	// Three frames in one place in the queue, behind the fence.
 	a, _ := wire.EncodeRaw("a", map[string]any{})
 	b, _ := wire.EncodeRaw("b", map[string]any{})
-	if !conn.SendBatch(a, b, a) || !conn.SendBatch() {
-		t.Fatal("SendBatch failed")
+	if !conn.Send(a, b, a) || !conn.Send() {
+		t.Fatal("Send failed")
 	}
 	quiet(t, c)
 	close(f.done)

@@ -10,7 +10,7 @@
 //   - WebSocket transport (§1), or any [Transport] that carries whole
 //     frames, with a bounded write queue per connection that drops a client
 //     too slow to keep up, write timeouts, and transport-level pings;
-//     frames that go out together ([Conn.SendBatch]), and frames held until
+//     frames that go out together ([Conn.Send]), and frames held until
 //     the backend's changes are durable ([Conn.Fence]);
 //   - in-process connections ([Server.Local]) for bots, bridges, and tests;
 //   - the server frame on connect (§3.1), and the liveness ping and pong (§1);
@@ -166,14 +166,19 @@
 // # Sending never blocks
 //
 // Sending never blocks, and calls nothing of the backend's but
-// Broadcast's and PublishUser's filters: [Conn.Send], [Conn.Notify],
-// [Conn.SendBatch], [Server.Broadcast], [Server.PublishUser],
-// [Server.PublishUserChange], and [Reply.Send] queue frames, and
-// disconnect a client too slow to take them. So a backend sends while it
-// holds the lock of the change a
-// frame describes, which keeps every connection's frames in the order of
-// the changes, such as messages in log_id order; one that sends after
-// letting go of the lock lets two changes' frames cross.
+// Broadcast's and PublishUser's filters: [Conn.Notify], [Conn.Send],
+// [Server.Broadcast], [Server.PublishUser], and [Reply.Send] queue frames,
+// and disconnect a client too slow to take them. So a backend sends while
+// it holds the lock of the change a frame describes, which keeps every
+// connection's frames in the order of the changes, such as messages in
+// log_id order; one that sends after letting go of the lock lets two
+// changes' frames cross.
+//
+// There is one way for each: Notify sends one notification to one
+// connection; a notification for many is encoded once ([Encode]) and its
+// Frame sent to each with Broadcast, or with Send, which also sends
+// frames that go together, such as a reply's then frames do. An
+// extension's own notification is a type with a Method ([Notification]).
 //
 // # Ordering for asynchronous hosts
 //

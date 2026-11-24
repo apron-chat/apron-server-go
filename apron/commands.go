@@ -49,7 +49,7 @@ type coreRun func(s *Server, c *client, r *roomState, body map[string]any, args,
 
 // clientOf is the client of a command's connection.
 func clientOf(wc *wire.Conn) (*client, *Error) {
-	c, ok := wire.DataOf[*client](wc)
+	c, ok := wc.Data().(*client)
 	if !ok {
 		return nil, internalError()
 	}
@@ -78,7 +78,7 @@ func replyError(err *Error) error {
 // use no command in "some room": each runs in a room.
 func mayLocked(may func(s *Server, c *client, r *roomState) bool) func(context.Context, *wire.Conn, string) bool {
 	return func(_ context.Context, wc *wire.Conn, roomID string) bool {
-		c, ok := wire.DataOf[*client](wc)
+		c, ok := wc.Data().(*client)
 		if !ok {
 			return false
 		}

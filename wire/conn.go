@@ -78,7 +78,8 @@ func (c *Conn) SignOut() {
 	c.mu.Unlock()
 }
 
-// Data returns the value the backend keeps with the connection.
+// Data returns the value the backend keeps with the connection, which it
+// reads with a type assertion, such as c.Data().(*session).
 func (c *Conn) Data() any {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -91,13 +92,6 @@ func (c *Conn) SetData(v any) {
 	c.mu.Lock()
 	c.data = v
 	c.mu.Unlock()
-}
-
-// DataOf returns the backend's value for the connection (Conn.SetData) as
-// a T, and whether it is one.
-func DataOf[T any](c *Conn) (T, bool) {
-	value, ok := c.Data().(T)
-	return value, ok
 }
 
 // Info returns the server frame the connection was last sent.
@@ -124,9 +118,6 @@ func (c *Conn) Announce(info ServerInfo) bool {
 	return c.Send(frame)
 }
 
-// Queued returns how many batches wait to be written to the client.
-func (c *Conn) Queued() int { return c.rt.Queued() }
-
 // Closing reports whether the connection is closing or closed: its last
 // frame is queued, and the frames it sent after are dropped.
 func (c *Conn) Closing() bool { return c.rt.Closing() }
@@ -152,9 +143,11 @@ func (c *Conn) Context() context.Context { return c.ctx }
 // Done is closed when the connection ends.
 func (c *Conn) Done() <-chan struct{} { return c.rt.Done() }
 
-// Notify queues a notification, such as a Message, a UserUpdate, or a
-// StatusUpdate. It reports false when the connection is closed, or the
-// notification cannot be encoded. Like Send, it never blocks.
+// Notify queues a notification to this connection, such as a Message, a
+// UserUpdate, or a StatusUpdate: Encode, then Send. It reports false when
+// the connection is closed, or the notification cannot be encoded, which
+// is logged. Like Send, it never blocks. To send one notification to many
+// connections, Encode it once, and Broadcast or Send the Frame.
 func (c *Conn) Notify(n Notification) bool {
 	frame, err := Encode(n)
 	if err != nil {
@@ -164,31 +157,20 @@ func (c *Conn) Notify(n Notification) bool {
 	return c.Send(frame)
 }
 
-// NotifyRaw queues a notification of any method and params, such as an
-// extension's own, as Notify does.
-func (c *Conn) NotifyRaw(method string, params any) bool {
-	frame, err := EncodeRaw(method, params)
-	if err != nil {
-		c.server.logger().Error("wire: encoding a notification", "method", method, "error", err)
-		return false
-	}
-	return c.Send(frame)
-}
-
-// Send queues an encoded frame. It never blocks, and calls nothing of the
-// backend's: a client whose queue is full is too slow to keep up, and is
-// disconnected. So a backend that keeps its state under a lock sends while
-// it holds it, which is what keeps every connection's frames in the order
-// of the changes they describe (§1); one that sends after it lets go of the
-// lock lets two senders' frames cross, such as two messages whose log_ids
-// arrive out of order.
-func (c *Conn) Send(frame Frame) bool { return c.SendBatch(frame) }
-
-// SendBatch queues frames to be written one after another, with no other
-// frame between them, such as a result and the notifications that complete
-// it. They take one place in the queue (Config.OutgoingQueue). Like Send,
-// it never blocks, and is meant to be called under the backend's lock.
-func (c *Conn) SendBatch(frames ...Frame) bool {
+// Send queues encoded frames, such as one Encode made once for many
+// connections, to be written one after another, with no other frame
+// between them, such as a room's state and the cursors that complete it;
+// they take one place in the queue (Config.OutgoingQueue). It reports
+// false when the connection is closed.
+//
+// Send never blocks, and calls nothing of the backend's: a client whose
+// queue is full is too slow to keep up, and is disconnected. So a backend
+// that keeps its state under a lock sends while it holds it, which is what
+// keeps every connection's frames in the order of the changes they
+// describe (§1); one that sends after it lets go of the lock lets two
+// senders' frames cross, such as two messages whose log_ids arrive out of
+// order.
+func (c *Conn) Send(frames ...Frame) bool {
 	if len(frames) == 0 {
 		return true
 	}

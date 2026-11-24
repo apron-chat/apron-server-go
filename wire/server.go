@@ -478,9 +478,8 @@ func (s *Server) capabilities() []string {
 	return capabilities
 }
 
-// Conns returns the open connections, Local ones included, such as to
-// broadcast to them.
-func (s *Server) Conns() []*Conn {
+// openConns returns the open connections, Local ones included.
+func (s *Server) openConns() []*Conn {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	conns := make([]*Conn, 0, len(s.conns))
@@ -497,7 +496,7 @@ func (s *Server) Conns() []*Conn {
 // frames in the order of the changes. to is called in the caller's
 // goroutine, so it may read what that lock guards.
 func (s *Server) Broadcast(frame Frame, to func(*Conn) bool) {
-	for _, c := range s.Conns() {
+	for _, c := range s.openConns() {
 		if c.UserID() != "" && (to == nil || to(c)) {
 			c.Send(frame)
 		}

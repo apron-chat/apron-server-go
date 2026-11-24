@@ -243,7 +243,9 @@ type Frame []byte
 
 // Notification is the params of a notification the server sends, which
 // names its method, such as a Message ("message"), a UserUpdate ("user"),
-// or a RoomUpdate ("room_update").
+// or a RoomUpdate ("room_update"). An extension's own notification is a
+// type of the backend's with a Method, such as one that returns
+// "ext:typing".
 type Notification interface {
 	Method() string
 }
@@ -254,12 +256,11 @@ func Encode(n Notification) (Frame, error) {
 	if n == nil {
 		return nil, errors.New("wire: encoding a nil notification")
 	}
-	return EncodeRaw(n.Method(), n)
+	return encodeRaw(n.Method(), n)
 }
 
-// EncodeRaw renders a notification frame of any method and params, such
-// as an extension's own notification.
-func EncodeRaw(method string, params any) (Frame, error) {
+// encodeRaw renders a notification frame of any method and params.
+func encodeRaw(method string, params any) (Frame, error) {
 	return marshal(map[string]any{"method": method, "params": params})
 }
 

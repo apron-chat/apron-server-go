@@ -367,7 +367,7 @@ func (s *Server) PublishUserChange(change UserChange, shares func(*Conn) bool) b
 		s.logger().Error("wire: encoding a user notification", "user_id", cur.UserID, "error", err)
 		you, others = nil, nil
 	}
-	for _, c := range s.Conns() {
+	for _, c := range s.openConns() {
 		switch id := c.UserID(); {
 		case id == "", c == change.Except:
 		case id == cur.UserID || id == old.UserID:

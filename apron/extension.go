@@ -431,7 +431,7 @@ func (c Command) forms() ([]Form, error) {
 // user and the rooms made under it.
 func available(fn func(u User, r Room) bool) func(ctx context.Context, c *wire.Conn, roomID string) bool {
 	return func(_ context.Context, wc *wire.Conn, roomID string) bool {
-		c, ok := wire.DataOf[*client](wc)
+		c, ok := wc.Data().(*client)
 		if !ok {
 			return false
 		}

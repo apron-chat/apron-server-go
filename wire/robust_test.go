@@ -246,7 +246,7 @@ func TestMaxConnectionsFirst(t *testing.T) {
 func TestUserCopies(t *testing.T) {
 	s := wired(&backend{}, wire.Config{})
 	roles := []string{"op"}
-	l, err := s.Local(wire.LocalOptions{User: wire.User{UserID: "bot", Roles: roles, Ext: wire.MustExt("x", map[string]any{"y": 1})}})
+	l, err := s.Local(wire.LocalOptions{User: wire.User{UserID: "bot", Roles: roles, Ext: wire.Ext{}.With("x", map[string]any{"y": 1})}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -258,23 +258,6 @@ func TestUserCopies(t *testing.T) {
 	again := l.Conn().User()
 	if again.Roles[0] != "op" || string(again.Ext["x"]) != `{"y":1}` {
 		t.Fatalf("the connection's user changed: %+v", again)
-	}
-}
-
-// DataOf returns the connection's value as its type.
-func TestDataOf(t *testing.T) {
-	s := wired(&backend{}, wire.Config{})
-	type session struct{ name string }
-	l, err := s.Local(wire.LocalOptions{User: wire.User{UserID: "bot"}, Data: &session{"x"}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer l.Close()
-	if got, ok := wire.DataOf[*session](l.Conn()); !ok || got.name != "x" {
-		t.Fatalf("DataOf = %v, %v", got, ok)
-	}
-	if got, ok := wire.DataOf[string](l.Conn()); ok || got != "" {
-		t.Fatalf("DataOf of another type = %q, %v", got, ok)
 	}
 }
 

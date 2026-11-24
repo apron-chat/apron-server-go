@@ -11,14 +11,11 @@ import (
 // byte. Every ext in this package is one: the params' and the frames'.
 type Ext map[string]jsontext.Value
 
-// MustExt returns an ext with one key, whose value is v encoded as JSON, as
-// in Ext{"irc": ...} built in one expression. A jsontext.Value is kept as
-// it is, compacted. It panics if v cannot be encoded, as a value the
-// program builds itself, such as a map of strings, always can.
-func MustExt(key string, v any) Ext { return Ext(nil).With(key, v) }
-
-// With returns a copy of e with key set to v encoded as JSON, as MustExt
-// encodes it; e is not modified. It panics if v cannot be encoded.
+// With returns a copy of e with key set to v encoded as JSON; e is not
+// modified, and may be nil, as in Ext{}.With("irc", ...) built in one
+// expression. A jsontext.Value is kept as it is, compacted. It panics if v
+// cannot be encoded, as a value the program builds itself, such as a map
+// of strings, always can.
 func (e Ext) With(key string, v any) Ext {
 	raw, err := marshal(v)
 	if err != nil {

@@ -33,7 +33,7 @@ func TestBotConn(t *testing.T) {
 	posted, err := conn.Post(ctx, wire.MessageParams{
 		RoomID: "general",
 		Body:   &wire.Body{Text: "**hi** @" + c.userID, Format: wire.Markdown, Mentions: []string{c.userID}},
-		Ext:    wire.MustExt("helper", map[string]any{"n": 1}),
+		Ext:    wire.Ext{}.With("helper", map[string]any{"n": 1}),
 	})
 	if err != nil || posted.MessageID == 0 {
 		t.Fatalf("Post = %+v, %v", posted, err)

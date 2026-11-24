@@ -60,10 +60,10 @@ func TestCheckRaw(t *testing.T) {
 }
 
 func TestCheckExt(t *testing.T) {
-	if err := CheckExt(wire.MustExt("x", strings.Repeat("a", MaxExtBytes/2))); err != nil {
+	if err := CheckExt(wire.Ext{}.With("x", strings.Repeat("a", MaxExtBytes/2))); err != nil {
 		t.Fatalf("half the limit: %v", err)
 	}
-	if code(CheckExt(wire.MustExt("x", strings.Repeat("a", MaxExtBytes)))) != wire.CodeTooLarge {
+	if code(CheckExt(wire.Ext{}.With("x", strings.Repeat("a", MaxExtBytes)))) != wire.CodeTooLarge {
 		t.Fatal("an ext over the limit was taken")
 	}
 }

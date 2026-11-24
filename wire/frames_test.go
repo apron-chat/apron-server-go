@@ -16,9 +16,9 @@ import (
 )
 
 func TestExt(t *testing.T) {
-	ext := wire.MustExt("irc", map[string]any{"nick": "ada_"})
+	ext := wire.Ext{}.With("irc", map[string]any{"nick": "ada_"})
 	if string(ext["irc"]) != `{"nick":"ada_"}` {
-		t.Fatalf("MustExt: %s", ext["irc"])
+		t.Fatalf("With: %s", ext["irc"])
 	}
 	more := ext.With("tz", "Europe/Oslo").With("raw", jsontext.Value(` [1, 2] `))
 	if len(ext) != 1 || len(more) != 3 || string(more["tz"]) != `"Europe/Oslo"` || string(more["raw"]) != `[1,2]` {
@@ -26,10 +26,10 @@ func TestExt(t *testing.T) {
 	}
 	defer func() {
 		if recover() == nil {
-			t.Fatal("MustExt of a value that cannot be encoded did not panic")
+			t.Fatal("With of a value that cannot be encoded did not panic")
 		}
 	}()
-	wire.MustExt("bad", func() {})
+	wire.Ext{}.With("bad", func() {})
 }
 
 // The frames keep the members they have no field for, and send them again.
@@ -124,7 +124,7 @@ func TestEncode(t *testing.T) {
 }
 
 func TestCurrentUser(t *testing.T) {
-	u := wire.CurrentUser{User: wire.User{UserID: "ada", Name: "Ada", Avatar: "https://a", Ext: wire.MustExt("tz", "UTC")}, Cleared: []string{"avatar", "roles", "ext"}}
+	u := wire.CurrentUser{User: wire.User{UserID: "ada", Name: "Ada", Avatar: "https://a", Ext: wire.Ext{}.With("tz", "UTC")}, Cleared: []string{"avatar", "roles", "ext"}}
 	out, err := json.Marshal(u)
 	if err != nil || string(out) != `{"user_id":"ada","name":"Ada","avatar":"","roles":[],"ext":{}}` {
 		t.Fatalf("marshal: %s %v", out, err)
