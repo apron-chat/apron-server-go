@@ -360,10 +360,11 @@
 // Package wiretest tests a backend: it calls a typed handler directly with
 // a Reply that records what it sends (wiretest.NewReply), and a Handler
 // with a request on no connection (wiretest.NewRequest); and it tests a
-// whole Server as a client sees it (wiretest.Connect, in process, and
-// wiretest.Dial, over a WebSocket), with a Client that signs in, calls,
-// typed as a bot does (Client.Post, Client.Me, Client.Command,
-// wiretest.Call), and expects the notifications that came before a
-// result (wiretest.Expect, Client.CallFrames), or waits for every frame
-// queued so far (Client.Sync).
+// whole Server as a client sees it (wiretest.Connect, in process, or
+// wiretest.SignIn, which also signs in and closes the connection as the
+// test ends; and wiretest.Dial, over a WebSocket), with a Client that
+// signs in, calls, typed as a bot does (Client.Post, Client.Me,
+// Client.Command, wiretest.Call), and expects the notifications that came
+// before a result (wiretest.Expect, Client.CallFrames), or waits for
+// every frame queued so far (Client.Sync).
 package wire

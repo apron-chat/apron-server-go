@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/apron-chat/apron-server-go/wire"
+	"github.com/apron-chat/apron-server-go/wire/wiretest"
 )
 
 // upstream answers commands later, as a gateway to a slow upstream does:
@@ -67,7 +68,7 @@ func result(text string) wire.CommandResult {
 func TestLater(t *testing.T) {
 	b := newUpstream()
 	s := wired(&wire.Server{Backend: b})
-	c := connect(t, s)
+	c := wiretest.ConnectT(t, s)
 	signIn(t, c)
 	send(t, c, `{"method":"command","id":"slow","params":{"body":{"text":"/slow"}}}`)
 	pending := b.take(t)
@@ -97,7 +98,7 @@ func TestLater(t *testing.T) {
 func TestLaterDuplicate(t *testing.T) {
 	b := newUpstream()
 	s := wired(&wire.Server{Backend: b})
-	c1, c2 := connect(t, s), connect(t, s)
+	c1, c2 := wiretest.ConnectT(t, s), wiretest.ConnectT(t, s)
 	signIn(t, c1)
 	signIn(t, c2)
 	const slow = `{"method":"command","id":"x","params":{"body":{"text":"/slow"}}}`
@@ -136,7 +137,7 @@ func TestLaterDuplicate(t *testing.T) {
 func TestLaterFail(t *testing.T) {
 	b := newUpstream()
 	s := wired(&wire.Server{Backend: b, Logger: slog.New(slog.DiscardHandler)})
-	c := connect(t, s)
+	c := wiretest.ConnectT(t, s)
 	signIn(t, c)
 	const slow = `{"method":"command","id":"f","params":{"body":{"text":"/slow"}}}`
 	send(t, c, slow)
@@ -173,7 +174,7 @@ func TestLaterFail(t *testing.T) {
 func TestLaterConnectionEnds(t *testing.T) {
 	b := newUpstream()
 	s := wired(&wire.Server{Backend: b})
-	c1, c2 := connect(t, s), connect(t, s)
+	c1, c2 := wiretest.ConnectT(t, s), wiretest.ConnectT(t, s)
 	signIn(t, c1)
 	signIn(t, c2)
 	const slow = `{"method":"command","id":"x","params":{"body":{"text":"/slow"}}}`
@@ -212,7 +213,7 @@ func (*laterAuth) Auth(_ context.Context, _ *wire.Conn, _ wire.AuthParams, reply
 
 // Auth is a barrier, and is never answered later.
 func TestLaterAuth(t *testing.T) {
-	c := connect(t, wired(&wire.Server{Backend: &laterAuth{}, Logger: slog.New(slog.DiscardHandler)}))
+	c := wiretest.ConnectT(t, wired(&wire.Server{Backend: &laterAuth{}, Logger: slog.New(slog.DiscardHandler)}))
 	if _, err := c.Auth(wait(t), map[string]any{"scheme": "guest"}); wire.CodeOf(err) != wire.CodeInternalError {
 		t.Fatalf("got %v, want internal_error", err)
 	}

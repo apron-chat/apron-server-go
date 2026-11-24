@@ -17,6 +17,7 @@ import (
 	"github.com/coder/websocket"
 
 	"github.com/apron-chat/apron-server-go/wire"
+	"github.com/apron-chat/apron-server-go/wire/wiretest"
 )
 
 // local opens a Local connection to s as ada, closed when the test ends.
@@ -221,7 +222,7 @@ func (b *broadcasting) Auth(_ context.Context, c *wire.Conn, p wire.AuthParams, 
 func TestAuthSendSignsIn(t *testing.T) {
 	b := &broadcasting{}
 	b.s = &wire.Server{Backend: b, Logger: slog.New(slog.DiscardHandler)}
-	c := connect(t, b.s)
+	c := wiretest.ConnectT(t, b.s)
 	if _, err := c.Auth(wait(t), map[string]any{"scheme": "guest", "user_id": "bad id"}); wire.CodeOf(err) != wire.CodeInternalError {
 		t.Fatalf("got %v, want internal_error for an invalid user_id", err)
 	}

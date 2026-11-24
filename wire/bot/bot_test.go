@@ -125,11 +125,7 @@ func TestMentions(t *testing.T) {
 	}
 	t.Cleanup(func() { echo.Close() })
 	ctx := timeout(t)
-	client := wiretest.Connect(c.server)
-	t.Cleanup(func() { client.Close() })
-	if _, err := client.Auth(ctx, map[string]any{"scheme": "guest"}); err != nil {
-		t.Fatal(err)
-	}
+	client, _ := wiretest.SignIn(t, c.server, map[string]any{"scheme": "guest"})
 	if _, err := client.Post(ctx, wire.MessageParams{Body: &wire.Body{Text: "hi all"}}); err != nil {
 		t.Fatal(err)
 	}
@@ -256,11 +252,7 @@ func TestReopen(t *testing.T) {
 func say(t *testing.T, c *chat, text string, mentions ...string) (*wiretest.Client, wire.LogID) {
 	t.Helper()
 	ctx := timeout(t)
-	client := wiretest.Connect(c.server)
-	t.Cleanup(func() { client.Close() })
-	if _, err := client.Auth(ctx, map[string]any{"scheme": "guest"}); err != nil {
-		t.Fatal(err)
-	}
+	client, _ := wiretest.SignIn(t, c.server, map[string]any{"scheme": "guest"})
 	result, err := client.Post(ctx, wire.MessageParams{Body: &wire.Body{Text: text, Mentions: mentions}})
 	if err != nil {
 		t.Fatal(err)

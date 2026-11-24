@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/apron-chat/apron-server-go/wire"
+	"github.com/apron-chat/apron-server-go/wire/wiretest"
 )
 
 // helloBackend is a Backend of Local connections only.
@@ -236,7 +237,7 @@ func TestNoMeWarning(t *testing.T) {
 			if test.profiles {
 				s.Profiles = profiles{}
 			}
-			c := connect(t, s)
+			c := wiretest.ConnectT(t, s)
 			if err := c.Sync(wait(t)); err != nil {
 				t.Fatal(err)
 			}

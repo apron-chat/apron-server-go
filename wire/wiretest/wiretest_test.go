@@ -216,6 +216,29 @@ func TestConnect(t *testing.T) {
 	}
 }
 
+// SignIn signs a connection in, which closes as the test ends.
+func TestSignIn(t *testing.T) {
+	c := newChat()
+	var client *wiretest.Client
+	t.Run("signed in", func(t *testing.T) {
+		var you wire.CurrentUser
+		client, you = wiretest.SignIn(t, c.server, map[string]any{"scheme": "guest", "name": "Ada"})
+		if you.UserID == "" || client.Hello().Title == "" {
+			t.Fatalf("you %+v, server frame %+v", you, client.Hello())
+		}
+	})
+	ctx := timeout(t)
+	for {
+		f, err := client.Next(ctx) // The frames sent after the result, then the close.
+		if errors.Is(err, wire.ErrClosed) {
+			break
+		}
+		if err != nil || f.Method == "" {
+			t.Fatalf("Next once the test ended: %+v %v", f, err)
+		}
+	}
+}
+
 func TestDial(t *testing.T) {
 	c := newChat()
 	server := httptest.NewServer(c.server)
@@ -320,11 +343,7 @@ func TestCallFramesAndSync(t *testing.T) {
 func TestCallFramesConcurrent(t *testing.T) {
 	ctx := timeout(t)
 	c := newChat()
-	client := wiretest.Connect(c.server)
-	defer client.Close()
-	if _, err := client.Auth(ctx, map[string]any{"scheme": "guest"}); err != nil {
-		t.Fatal(err)
-	}
+	client, _ := wiretest.SignIn(t, c.server, map[string]any{"scheme": "guest"})
 	var wg sync.WaitGroup
 	for i := range 16 {
 		wg.Go(func() {
@@ -398,11 +417,7 @@ func TestLater(t *testing.T) {
 		t.Fatalf("Wait: %v, sent %v %s", err, sent.Sent(), sent.Raw())
 	}
 
-	client := wiretest.Connect(&wire.Server{Backend: newChat(), Commands: s})
-	defer client.Close()
-	if _, err := client.Auth(ctx, map[string]any{"scheme": "guest"}); err != nil {
-		t.Fatal(err)
-	}
+	client, _ := wiretest.SignIn(t, &wire.Server{Backend: newChat(), Commands: s}, map[string]any{"scheme": "guest"})
 	done := make(chan string, 1)
 	go func() {
 		result, err := client.Call(ctx, "command", map[string]any{"body": map[string]any{"text": "/slow"}})

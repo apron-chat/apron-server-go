@@ -14,19 +14,14 @@ import (
 // signIn connects a guest, and takes the welcome notice after the result.
 func signIn(t *testing.T, ctx context.Context, chat *Chat, name string) (*wiretest.Client, wire.User) {
 	t.Helper()
-	c := wiretest.Connect(chat.Server)
-	t.Cleanup(func() { _ = c.Close() })
-	if hello := c.Hello(); hello.Title != "Minimal" {
-		t.Fatalf("server frame: %+v", hello)
-	}
-	result, err := c.Auth(ctx, map[string]any{"scheme": "guest", "name": name})
-	if err != nil || result.You == nil || result.You.Name != name {
-		t.Fatalf("auth: %+v %v", result, err)
+	c, you := wiretest.SignIn(t, chat.Server, map[string]any{"scheme": "guest", "name": name})
+	if hello := c.Hello(); hello.Title != "Minimal" || you.Name != name {
+		t.Fatalf("server frame %+v, you %+v", hello, you)
 	}
 	if welcome, err := c.ExpectMessage(ctx, nil); err != nil || welcome.From.UserID != wire.Private.UserID || !strings.HasPrefix(welcome.Body.Text, "Welcome, "+name) {
 		t.Fatalf("welcome: %+v %v", welcome, err)
 	}
-	return c, result.You.User
+	return c, you.User
 }
 
 // text is a message request's params with text.

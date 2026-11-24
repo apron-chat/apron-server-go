@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"sync"
 	"sync/atomic"
+	"testing"
 	"time"
 
 	"github.com/coder/websocket"
@@ -97,6 +98,35 @@ func Connect(s *wire.Server) *Client {
 		s.ServeTransport(context.Background(), wire.LineTransport(server, int(limit)), nil, nil)
 	}()
 	return start(&lineConn{conn: client, lines: bufio.NewReader(client)}, served)
+}
+
+// ConnectT is Connect for a test: the connection closes as the test ends
+// (t.Cleanup).
+func ConnectT(t testing.TB, s *wire.Server) *Client {
+	t.Helper()
+	c := Connect(s)
+	t.Cleanup(func() { _ = c.Close() })
+	return c
+}
+
+// signInWait bounds SignIn's wait for the auth result.
+const signInWait = 10 * time.Second
+
+// SignIn connects to s for a test, as ConnectT does, and signs in (§3.2)
+// with params, such as {"scheme": "guest", "name": "Ada"}: it returns the
+// Client and the result's you, and fails the test unless the result signs
+// the connection in within ten seconds. The frames sent after the result,
+// such as a welcome notice, stay for Next and Expect.
+func SignIn(t testing.TB, s *wire.Server, params any) (*Client, wire.CurrentUser) {
+	t.Helper()
+	c := ConnectT(t, s)
+	ctx, cancel := context.WithTimeout(t.Context(), signInWait)
+	defer cancel()
+	result, err := c.Auth(ctx, params)
+	if err != nil || result.You == nil {
+		t.Fatalf("wiretest: signing in with %v: result %+v, error %v", params, result, err)
+	}
+	return c, *result.You
 }
 
 // Dial connects to a Server over a WebSocket at url, such as that of an

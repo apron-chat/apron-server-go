@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/apron-chat/apron-server-go/wire"
+	"github.com/apron-chat/apron-server-go/wire/wiretest"
 )
 
 func TestExt(t *testing.T) {
@@ -350,7 +351,7 @@ func TestTypedParams(t *testing.T) {
 // either.
 func TestAuthExtra(t *testing.T) {
 	b := &typed{extra: map[string]any{"options": map[string]any{"challenge": "c"}}}
-	c := connect(t, wired(&wire.Server{Backend: b}))
+	c := wiretest.ConnectT(t, wired(&wire.Server{Backend: b}))
 	raw, err := c.Call(wait(t), "auth", map[string]any{"scheme": "guest"})
 	var result map[string]any
 	if err != nil || json.Unmarshal(raw, &result) != nil || result["options"] == nil || result["you"] == nil {
@@ -361,7 +362,7 @@ func TestAuthExtra(t *testing.T) {
 	}
 
 	b2 := &typed{extra: map[string]any{"you": 1}}
-	c2 := connect(t, wired(&wire.Server{Backend: b2, Logger: slog.New(slog.DiscardHandler)}))
+	c2 := wiretest.ConnectT(t, wired(&wire.Server{Backend: b2, Logger: slog.New(slog.DiscardHandler)}))
 	if _, err := c2.Auth(wait(t), map[string]any{"scheme": "guest"}); wire.CodeOf(err) != wire.CodeInternalError {
 		t.Fatalf("got %v", err)
 	}

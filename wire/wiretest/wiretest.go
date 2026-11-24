@@ -10,16 +10,13 @@
 //	}
 //
 // A whole Server is tested as a client sees it, with a Client: in process
-// (Connect), or over a WebSocket (Dial), with the server frame, auth, and
-// every frame after, in order. A Client keeps the frames a test has not
-// taken yet, so that one can expect a notification that arrived before the
-// result of the request it waited for:
+// (Connect, or ConnectT and SignIn, which close it as the test ends), or
+// over a WebSocket (Dial), with the server frame, auth, and every frame
+// after, in order. A Client keeps the frames a test has not taken yet, so
+// that one can expect a notification that arrived before the result of
+// the request it waited for:
 //
-//	c := wiretest.Connect(server)
-//	defer c.Close()
-//	if _, err := c.Auth(ctx, map[string]any{"scheme": "guest"}); err != nil {
-//		t.Fatal(err)
-//	}
+//	c, _ := wiretest.SignIn(t, server, map[string]any{"scheme": "guest", "name": "Ada"})
 //	result, err := c.Post(ctx, wire.MessageParams{Body: &wire.Body{Text: "hi"}})
 //	...
 //	echo, err := c.ExpectMessage(ctx, func(m wire.Message) bool { return m.From.UserID == "echo" })

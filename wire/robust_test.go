@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/apron-chat/apron-server-go/wire"
+	"github.com/apron-chat/apron-server-go/wire/wiretest"
 )
 
 // The accessors' errors are plain errors, nil when there is none, and
@@ -70,7 +71,7 @@ func TestHandlerPanics(t *testing.T) {
 	s.HandleNotification("tick", wire.NotificationHandler{Serve: func(context.Context, *wire.Conn, *wire.Request) {
 		panic("in a notification")
 	}})
-	c := connect(t, s)
+	c := wiretest.ConnectT(t, s)
 	if _, err := c.Auth(wait(t), map[string]any{"scheme": "guest", "name": "panic"}); wire.CodeOf(err) != wire.CodeInternalError {
 		t.Fatalf("got %v, want the auth's internal_error", err)
 	}
@@ -103,7 +104,7 @@ func TestErrorAfterReply(t *testing.T) {
 		r.Reply(nil)
 		return wire.Denied("too late")
 	}})
-	c := connect(t, s)
+	c := wiretest.ConnectT(t, s)
 	signIn(t, c)
 	if _, err := c.Call(wait(t), "late", nil); err != nil {
 		t.Fatal(err)
@@ -158,7 +159,7 @@ func TestDuplicateWaitEndsWithConnection(t *testing.T) {
 		<-release
 		return nil
 	}})
-	c1, c2 := connect(t, s), connect(t, s)
+	c1, c2 := wiretest.ConnectT(t, s), wiretest.ConnectT(t, s)
 	signIn(t, c1)
 	signIn(t, c2)
 	send(t, c1, `{"method":"slow","id":"x"}`)
@@ -225,7 +226,7 @@ func (b *connecting) Connected(context.Context, *wire.Conn) error {
 func TestMaxConnectionsFirst(t *testing.T) {
 	b := &connecting{}
 	s := wired(&wire.Server{Backend: b, MaxConnections: 1, OnConnect: b.Connected})
-	c1, c2 := connect(t, s), connect(t, s)
+	c1, c2 := wiretest.ConnectT(t, s), wiretest.ConnectT(t, s)
 	if f := next(t, c2); code(f) != wire.CodeRetryAfter {
 		t.Fatalf("got %s, want retry_after", f.Raw)
 	}
@@ -293,10 +294,10 @@ func TestChangeAfterServingIsLogged(t *testing.T) {
 	var logged bytes.Buffer
 	var mu sync.Mutex
 	s := wired(&wire.Server{Backend: &backend{}, Logger: slog.New(slog.NewTextHandler(lockedWriter{&mu, &logged}, nil))})
-	connect(t, s)
-	connect(t, s)
+	wiretest.ConnectT(t, s)
+	wiretest.ConnectT(t, s)
 	s.ReadLimit = 1 << 20
-	connect(t, s)
+	wiretest.ConnectT(t, s)
 	logs := func() string {
 		mu.Lock()
 		defer mu.Unlock()
@@ -308,8 +309,8 @@ func TestChangeAfterServingIsLogged(t *testing.T) {
 	connected := false
 	s.OnConnect = func(context.Context, *wire.Conn) error { connected = true; return nil }
 	s.Messages = nil
-	c := connect(t, s)
-	connect(t, s)
+	c := wiretest.ConnectT(t, s)
+	wiretest.ConnectT(t, s)
 	signIn(t, c)
 	if _, err := c.Post(wait(t), wire.MessageParams{Body: &wire.Body{Text: "still taken"}}); err != nil || connected {
 		t.Fatalf("the Server used the changed fields: post %v, OnConnect called %v", err, connected)

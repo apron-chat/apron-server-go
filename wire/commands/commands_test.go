@@ -97,14 +97,9 @@ func testRouter(t *testing.T) *commands.Router {
 func connect(t *testing.T, router *commands.Router) (*wiretest.Client, *wiretest.Client) {
 	server := &wire.Server{Backend: &backend{}, Commands: router, Logger: slog.New(slog.DiscardHandler)}
 	server.Handle(commands.ListMethod, router.ListHandler())
-	ctx := timeout(t)
 	var clients []*wiretest.Client
 	for range 2 {
-		c := wiretest.Connect(server)
-		t.Cleanup(func() { c.Close() })
-		if _, err := c.Auth(ctx, map[string]any{"scheme": "guest"}); err != nil {
-			t.Fatal(err)
-		}
+		c, _ := wiretest.SignIn(t, server, map[string]any{"scheme": "guest"})
 		clients = append(clients, c)
 	}
 	if !slices.Contains(clients[0].Hello().Capabilities, commands.ListMethod) {
