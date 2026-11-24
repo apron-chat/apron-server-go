@@ -51,14 +51,14 @@ func (c *typedChat) Command(_ context.Context, conn *wire.Conn, p wire.CommandPa
 func TestTyped(t *testing.T) {
 	ctx := timeout(t)
 	c := newTypedChat()
-	ada, bob := wiretest.Connect(c.server), wiretest.Connect(c.server)
+	ada, bob := wiretest.Connect(t, c.server), wiretest.Connect(t, c.server)
 	defer ada.Close()
 	defer bob.Close()
 	for _, client := range []*wiretest.Client{ada, bob} {
 		if _, err := client.Auth(ctx, map[string]any{"scheme": "guest"}); err != nil {
 			t.Fatal(err)
 		}
-		if welcome, err := client.ExpectMessage(ctx, nil); err != nil || welcome.Body.Text != "welcome" {
+		if welcome, err := wiretest.Expect[wire.Message](ctx, client, nil); err != nil || welcome.Body.Text != "welcome" {
 			t.Fatalf("welcome: %+v %v", welcome, err)
 		}
 	}
@@ -68,8 +68,8 @@ func TestTyped(t *testing.T) {
 		t.Fatalf("Post: %+v %v", sent, err)
 	}
 	for _, client := range []*wiretest.Client{ada, bob} {
-		if m, err := client.ExpectMessage(ctx, func(m wire.Message) bool { return m.MessageID == sent.MessageID }); err != nil || m.Body.Text != "hi" {
-			t.Fatalf("ExpectMessage: %+v %v", m, err)
+		if m, err := wiretest.Expect(ctx, client, func(m wire.Message) bool { return m.MessageID == sent.MessageID }); err != nil || m.Body.Text != "hi" {
+			t.Fatalf("Expect: %+v %v", m, err)
 		}
 	}
 	if _, err := ada.Post(ctx, wire.MessageParams{}); wire.CodeOf(err) != wire.CodeInvalidParams {
@@ -113,7 +113,7 @@ func TestTyped(t *testing.T) {
 	if err != nil || !slices.Equal(notices, []string{"one", "two"}) {
 		t.Fatalf("Command: %q %v", notices, err)
 	}
-	if m, err := ada.ExpectMessage(ctx, nil); err != nil || m.Body.Text != "/go" {
+	if m, err := wiretest.Expect[wire.Message](ctx, ada, nil); err != nil || m.Body.Text != "/go" {
 		t.Fatalf("the command's effect: %+v %v", m, err)
 	}
 	notices, err = ada.Command(ctx, "", "/fail")

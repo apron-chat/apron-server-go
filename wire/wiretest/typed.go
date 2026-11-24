@@ -50,13 +50,6 @@ func Expect[T wire.Notification](ctx context.Context, c *Client, match func(T) b
 	return got, nil
 }
 
-// ExpectMessage takes the first message notification the test has not
-// taken for which match returns true, or the first when match is nil,
-// waiting for one: it is Expect for a wire.Message.
-func (c *Client) ExpectMessage(ctx context.Context, match func(wire.Message) bool) (wire.Message, error) {
-	return Expect(ctx, c, match)
-}
-
 // Post posts a message (§3.5.1), as bot.Conn.Post does, and returns its
 // result: the new message's message_id, unless the body was empty. The
 // message's notification, which comes before the result, stays for Next

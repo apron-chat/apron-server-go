@@ -238,7 +238,7 @@ func TestNoMeWarning(t *testing.T) {
 				config.Profiles = profiles{}
 			}
 			s := wire.NewServer(&backend{}, config)
-			c := wiretest.ConnectT(t, s)
+			c := wiretest.Connect(t, s)
 			if err := c.Sync(wait(t)); err != nil {
 				t.Fatal(err)
 			}

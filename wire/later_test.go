@@ -68,7 +68,7 @@ func result(text string) wire.CommandResult {
 func TestLater(t *testing.T) {
 	b := newUpstream()
 	s := wired(b, wire.Config{})
-	c := wiretest.ConnectT(t, s)
+	c := wiretest.Connect(t, s)
 	signIn(t, c)
 	send(t, c, `{"method":"command","id":"slow","params":{"body":{"text":"/slow"}}}`)
 	pending := b.take(t)
@@ -98,7 +98,7 @@ func TestLater(t *testing.T) {
 func TestLaterDuplicate(t *testing.T) {
 	b := newUpstream()
 	s := wired(b, wire.Config{})
-	c1, c2 := wiretest.ConnectT(t, s), wiretest.ConnectT(t, s)
+	c1, c2 := wiretest.Connect(t, s), wiretest.Connect(t, s)
 	signIn(t, c1)
 	signIn(t, c2)
 	const slow = `{"method":"command","id":"x","params":{"body":{"text":"/slow"}}}`
@@ -137,7 +137,7 @@ func TestLaterDuplicate(t *testing.T) {
 func TestLaterFail(t *testing.T) {
 	b := newUpstream()
 	s := wired(b, wire.Config{Logger: slog.New(slog.DiscardHandler)})
-	c := wiretest.ConnectT(t, s)
+	c := wiretest.Connect(t, s)
 	signIn(t, c)
 	const slow = `{"method":"command","id":"f","params":{"body":{"text":"/slow"}}}`
 	send(t, c, slow)
@@ -174,7 +174,7 @@ func TestLaterFail(t *testing.T) {
 func TestLaterConnectionEnds(t *testing.T) {
 	b := newUpstream()
 	s := wired(b, wire.Config{})
-	c1, c2 := wiretest.ConnectT(t, s), wiretest.ConnectT(t, s)
+	c1, c2 := wiretest.Connect(t, s), wiretest.Connect(t, s)
 	signIn(t, c1)
 	signIn(t, c2)
 	const slow = `{"method":"command","id":"x","params":{"body":{"text":"/slow"}}}`
@@ -213,7 +213,7 @@ func (*laterAuth) Auth(_ context.Context, _ *wire.Conn, _ wire.AuthParams, reply
 
 // Auth is a barrier, and is never answered later.
 func TestLaterAuth(t *testing.T) {
-	c := wiretest.ConnectT(t, wired(&laterAuth{}, wire.Config{Logger: slog.New(slog.DiscardHandler)}))
+	c := wiretest.Connect(t, wired(&laterAuth{}, wire.Config{Logger: slog.New(slog.DiscardHandler)}))
 	if _, err := c.Auth(wait(t), map[string]any{"scheme": "guest"}); wire.CodeOf(err) != wire.CodeInternalError {
 		t.Fatalf("got %v, want internal_error", err)
 	}

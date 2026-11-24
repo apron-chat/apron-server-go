@@ -71,7 +71,7 @@ func TestHandlerPanics(t *testing.T) {
 	s.HandleNotification("tick", wire.NotificationHandler{Serve: func(context.Context, *wire.Conn, *wire.Request) {
 		panic("in a notification")
 	}})
-	c := wiretest.ConnectT(t, s)
+	c := wiretest.Connect(t, s)
 	if _, err := c.Auth(wait(t), map[string]any{"scheme": "guest", "name": "panic"}); wire.CodeOf(err) != wire.CodeInternalError {
 		t.Fatalf("got %v, want the auth's internal_error", err)
 	}
@@ -104,7 +104,7 @@ func TestErrorAfterReply(t *testing.T) {
 		_ = reply.Send(nil)
 		return wire.Denied("too late")
 	}})
-	c := wiretest.ConnectT(t, s)
+	c := wiretest.Connect(t, s)
 	signIn(t, c)
 	if _, err := c.Call(wait(t), "late", nil); err != nil {
 		t.Fatal(err)
@@ -159,7 +159,7 @@ func TestDuplicateWaitEndsWithConnection(t *testing.T) {
 		<-release
 		return nil
 	}})
-	c1, c2 := wiretest.ConnectT(t, s), wiretest.ConnectT(t, s)
+	c1, c2 := wiretest.Connect(t, s), wiretest.Connect(t, s)
 	signIn(t, c1)
 	signIn(t, c2)
 	send(t, c1, `{"method":"slow","id":"x"}`)
@@ -226,7 +226,7 @@ func (b *connecting) Connected(context.Context, *wire.Conn) error {
 func TestMaxConnectionsFirst(t *testing.T) {
 	b := &connecting{}
 	s := wired(b, wire.Config{MaxConnections: 1, OnConnect: b.Connected})
-	c1, c2 := wiretest.ConnectT(t, s), wiretest.ConnectT(t, s)
+	c1, c2 := wiretest.Connect(t, s), wiretest.Connect(t, s)
 	if f := next(t, c2); code(f) != wire.CodeRetryAfter {
 		t.Fatalf("got %s, want retry_after", f.Raw)
 	}

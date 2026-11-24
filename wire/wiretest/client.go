@@ -79,11 +79,13 @@ type clientConn interface {
 	close() error
 }
 
-// Connect connects to s in process, over a LineTransport on a net.Pipe,
-// which s serves (Server.ServeTransport) as it does a WebSocket: OnConnect,
-// the server frame, auth, and all, but for an HTTP request, which the
-// connection has none of.
-func Connect(s *wire.Server) *Client {
+// Connect connects a test to s in process, over a LineTransport on a
+// net.Pipe, which s serves (Server.ServeTransport) as it does a WebSocket:
+// OnConnect, the server frame, auth, and all, but for an HTTP request,
+// which the connection has none of. The connection closes as the test ends
+// (t.Cleanup).
+func Connect(t testing.TB, s *wire.Server) *Client {
+	t.Helper()
 	server, client := net.Pipe()
 	limit := s.ReadLimit()
 	served := make(chan struct{})
@@ -91,14 +93,7 @@ func Connect(s *wire.Server) *Client {
 		defer close(served)
 		s.ServeTransport(context.Background(), wire.LineTransport(server, int(limit)), nil, nil)
 	}()
-	return start(&lineConn{conn: client, lines: bufio.NewReader(client)}, served)
-}
-
-// ConnectT is Connect for a test: the connection closes as the test ends
-// (t.Cleanup).
-func ConnectT(t testing.TB, s *wire.Server) *Client {
-	t.Helper()
-	c := Connect(s)
+	c := start(&lineConn{conn: client, lines: bufio.NewReader(client)}, served)
 	t.Cleanup(func() { _ = c.Close() })
 	return c
 }
@@ -106,14 +101,14 @@ func ConnectT(t testing.TB, s *wire.Server) *Client {
 // signInWait bounds SignIn's wait for the auth result.
 const signInWait = 10 * time.Second
 
-// SignIn connects to s for a test, as ConnectT does, and signs in (§3.2)
+// SignIn connects to s for a test, as Connect does, and signs in (§3.2)
 // with params, such as {"scheme": "guest", "name": "Ada"}: it returns the
 // Client and the result's you, and fails the test unless the result signs
 // the connection in within ten seconds. The frames sent after the result,
 // such as a welcome notice, stay for Next and Expect.
 func SignIn(t testing.TB, s *wire.Server, params any) (*Client, wire.CurrentUser) {
 	t.Helper()
-	c := ConnectT(t, s)
+	c := Connect(t, s)
 	ctx, cancel := context.WithTimeout(t.Context(), signInWait)
 	defer cancel()
 	result, err := c.Auth(ctx, params)

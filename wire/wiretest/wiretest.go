@@ -10,23 +10,23 @@
 //	}
 //
 // A whole Server is tested as a client sees it, with a Client: in process
-// (Connect, or ConnectT and SignIn, which close it as the test ends), or
-// over a WebSocket (Dial), with the server frame, auth, and every frame
-// after, in order. A Client keeps the frames a test has not taken yet, so
+// (Connect, or SignIn, which also signs in; either closes it as the test
+// ends), or over a WebSocket (Dial), with the server frame, auth, and
+// every frame after, in order. A Client keeps the frames a test has not taken yet, so
 // that one can expect a notification that arrived before the result of
 // the request it waited for:
 //
 //	c, _ := wiretest.SignIn(t, server, map[string]any{"scheme": "guest", "name": "Ada"})
 //	result, err := c.Post(ctx, wire.MessageParams{Body: &wire.Body{Text: "hi"}})
 //	...
-//	echo, err := c.ExpectMessage(ctx, func(m wire.Message) bool { return m.From.UserID == "echo" })
+//	echo, err := wiretest.Expect(ctx, c, func(m wire.Message) bool { return m.From.UserID == "echo" })
 //
 // Its requests are typed as a bot's are (package wire/bot): Post, Me, and
 // Command, which returns the notices a command sent before its result,
 // and Call[T] for any other, which decodes the result into a T; and so
 // are the notifications a test expects, with Expect[T], such as
-// Expect[wire.UserUpdate], or ExpectMessage. Client.Call and Client.Expect
-// are the same raw: a request's params as any value that encodes as an
+// Expect[wire.UserUpdate] or Expect[wire.Message]. Client.Call and
+// Client.Expect are the same raw: a request's params as any value that encodes as an
 // object, and its result and the frames as JSON.
 //
 // A handler that answers later (wire.Reply.Later) returns before its

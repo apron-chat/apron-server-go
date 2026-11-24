@@ -133,7 +133,7 @@ func TestMentions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	reply, err := client.ExpectMessage(ctx, func(m wire.Message) bool { return m.From.UserID == "echo" })
+	reply, err := wiretest.Expect(ctx, client, func(m wire.Message) bool { return m.From.UserID == "echo" })
 	if err != nil || reply.Body.Text != "You said: @echo hello" || reply.ReplyTo == nil || reply.ReplyTo.MessageID != asked.MessageID {
 		t.Fatalf("reply %+v: %v", reply, err)
 	}

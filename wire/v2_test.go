@@ -33,7 +33,7 @@ func TestReplyInHandler(t *testing.T) {
 		}
 		return nil
 	}})
-	c := wiretest.ConnectT(t, s)
+	c := wiretest.Connect(t, s)
 	signIn(t, c)
 	send(t, c, `{"method":"snapshot","id":"s"}`)
 	if f := next(t, c); f.ID != "s" || fields(f)["state"] != float64(1) {
@@ -61,7 +61,7 @@ func TestNotificationMethod(t *testing.T) {
 		v := r.Fields()["typing"]
 		got <- string(v)
 	}})
-	c := wiretest.ConnectT(t, s)
+	c := wiretest.Connect(t, s)
 	if capabilities := c.Hello().Capabilities; !slices.Contains(capabilities, "activity") {
 		t.Fatalf("capabilities: %v", capabilities)
 	}
@@ -112,7 +112,7 @@ func TestRefreshDuplicate(t *testing.T) {
 	s.Handle("ext:count", wire.Handler{Serve: func(_ context.Context, _ *wire.Conn, r *wire.Request, reply wire.Reply[any]) error {
 		return reply.Send(map[string]any{"version": 0})
 	}})
-	c := wiretest.ConnectT(t, s)
+	c := wiretest.Connect(t, s)
 	userID := signIn(t, c)
 	send(t, c, `{"method":"me","id":"m","params":{"name":"x"}}`)
 	original := next(t, c)
@@ -151,7 +151,7 @@ func (*anyScheme) CheckScheme(_ context.Context, _ *wire.Conn, p wire.AuthParams
 
 func TestCheckScheme(t *testing.T) {
 	b := &anyScheme{}
-	c := wiretest.ConnectT(t, wired(b, wire.Config{CheckScheme: b.CheckScheme}))
+	c := wiretest.Connect(t, wired(b, wire.Config{CheckScheme: b.CheckScheme}))
 	if _, err := c.Auth(wait(t), map[string]any{"scheme": "guest"}); wire.CodeOf(err) != wire.CodeDenied {
 		t.Fatalf("got %v", err)
 	}
@@ -163,7 +163,7 @@ func TestCheckScheme(t *testing.T) {
 func TestAnnounce(t *testing.T) {
 	s := wired(&backend{}, wire.Config{})
 	s.Handle("ext:thing", wire.Handler{Capability: "ext:thing", Serve: func(context.Context, *wire.Conn, *wire.Request, wire.Reply[any]) error { return nil }})
-	c := wiretest.ConnectT(t, s)
+	c := wiretest.Connect(t, s)
 	signIn(t, c)
 	conn := onlyConn(t, s)
 	conn.Announce(wire.ServerInfo{Auth: []string{"guest"}, Title: "Revealed"})
@@ -337,7 +337,7 @@ func TestConnLocal(t *testing.T) {
 		return nil
 	}
 	s := wired(&backend{}, config)
-	client := wiretest.ConnectT(t, s)
+	client := wiretest.Connect(t, s)
 	if err := client.Sync(wait(t)); err != nil {
 		t.Fatal(err)
 	}
@@ -366,7 +366,7 @@ func TestDisconnectAfterRefusal(t *testing.T) {
 			return refusal
 		}
 		s := wired(b, config)
-		client := wiretest.ConnectT(t, s)
+		client := wiretest.Connect(t, s)
 		for {
 			// The server frame and the error, for an *Error.
 			if _, err := client.Next(wait(t)); err != nil {

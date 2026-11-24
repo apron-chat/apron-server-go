@@ -196,13 +196,13 @@ func onlyConn(t *testing.T, s *wire.Server) *wire.Conn {
 
 func TestServerFrame(t *testing.T) {
 	s := wired(&backend{}, wire.Config{PingInterval: 20 * time.Second})
-	if hello := wiretest.ConnectT(t, s).Hello(); hello.Apron != wire.Version || hello.Ping != 20 || hello.Agent != "wire-test/1" {
+	if hello := wiretest.Connect(t, s).Hello(); hello.Apron != wire.Version || hello.Ping != 20 || hello.Agent != "wire-test/1" {
 		t.Fatalf("server frame = %+v", hello)
 	}
 }
 
 func TestFramingErrors(t *testing.T) {
-	c := wiretest.ConnectT(t, wired(&backend{}, wire.Config{}))
+	c := wiretest.Connect(t, wired(&backend{}, wire.Config{}))
 	for _, tc := range []struct {
 		send string
 		code int
@@ -242,7 +242,7 @@ func TestFramingErrors(t *testing.T) {
 
 func TestDeniedBeforeAuth(t *testing.T) {
 	b := &backend{}
-	c := wiretest.ConnectT(t, wired(b, wire.Config{}))
+	c := wiretest.Connect(t, wired(b, wire.Config{}))
 	message := params(`{"body":{"text":"hi"}}`)
 	if _, err := c.Call(wait(t), "message", message); wire.CodeOf(err) != wire.CodeDenied {
 		t.Fatalf("got %v, want denied", err)
@@ -263,7 +263,7 @@ func TestDeniedBeforeAuth(t *testing.T) {
 }
 
 func TestAuthSchemes(t *testing.T) {
-	c := wiretest.ConnectT(t, wired(&backend{}, wire.Config{}))
+	c := wiretest.Connect(t, wired(&backend{}, wire.Config{}))
 	for _, tc := range []struct {
 		params string
 		code   int
@@ -283,7 +283,7 @@ func TestAuthSchemes(t *testing.T) {
 func TestAuthBarrier(t *testing.T) {
 	b := &backend{authDelay: 50 * time.Millisecond}
 	s := wired(b, wire.Config{})
-	c := wiretest.ConnectT(t, s)
+	c := wiretest.Connect(t, s)
 	send(t, c, `{"method":"auth","id":"a","params":{"scheme":"guest","name":"Ada"}}`)
 	send(t, c, `{"method":"message","id":"m","params":{"body":{"text":"hi"}}}`)
 	// A frame broadcast while Auth runs is held too.
@@ -313,7 +313,7 @@ func TestAuthBarrier(t *testing.T) {
 }
 
 func TestUnsupportedMethod(t *testing.T) {
-	c := wiretest.ConnectT(t, wired(&backend{}, wire.Config{}))
+	c := wiretest.Connect(t, wired(&backend{}, wire.Config{}))
 	signIn(t, c)
 	// me and command without Profiles or Commands are unsupported too.
 	for method, p := range map[string]string{"nope": `{}`, "me": `{"name":"B"}`, "command": `{"body":{"text":"/help"}}`} {
@@ -336,7 +336,7 @@ func TestHandle(t *testing.T) {
 	s.Handle("fail", wire.Handler{NoDedup: true, Serve: func(context.Context, *wire.Conn, *wire.Request, wire.Reply[any]) error {
 		return errors.New("secret detail")
 	}})
-	c := wiretest.ConnectT(t, s)
+	c := wiretest.Connect(t, s)
 	if capabilities := c.Hello().Capabilities; !slices.Equal(capabilities, []string{"ext:echo"}) {
 		t.Fatalf("capabilities = %v", capabilities)
 	}
@@ -351,7 +351,7 @@ func TestHandle(t *testing.T) {
 
 func TestDedup(t *testing.T) {
 	b := &backend{}
-	c := wiretest.ConnectT(t, wired(b, wire.Config{}))
+	c := wiretest.Connect(t, wired(b, wire.Config{}))
 	signIn(t, c)
 	send(t, c, `{"method":"message","id":"d","params":{"room_id":"r","body":{"text":"hi"}}}`)
 	first := next(t, c)
@@ -418,7 +418,7 @@ func TestDedupForgetsBeforeTheReply(t *testing.T) {
 	}})
 	// Each original holds up its connection, so each pair of requests
 	// has its own connections, which end after the originals return.
-	conns := []*wiretest.Client{wiretest.ConnectT(t, s), wiretest.ConnectT(t, s), wiretest.ConnectT(t, s), wiretest.ConnectT(t, s)}
+	conns := []*wiretest.Client{wiretest.Connect(t, s), wiretest.Connect(t, s), wiretest.Connect(t, s), wiretest.Connect(t, s)}
 	t.Cleanup(func() { close(b.returning) })
 	for _, c := range conns {
 		signIn(t, c)
@@ -443,7 +443,7 @@ func TestDedupForgetsBeforeTheReply(t *testing.T) {
 func TestDedupPerUser(t *testing.T) {
 	b := &backend{}
 	s := wired(b, wire.Config{})
-	c1, c2 := wiretest.ConnectT(t, s), wiretest.ConnectT(t, s)
+	c1, c2 := wiretest.Connect(t, s), wiretest.Connect(t, s)
 	signIn(t, c1)
 	signIn(t, c2)
 	// Different users: the same id is a different request.
@@ -459,7 +459,7 @@ func TestDedupPerUser(t *testing.T) {
 
 func TestDedupOff(t *testing.T) {
 	b := &backend{}
-	c := wiretest.ConnectT(t, wired(b, wire.Config{DedupSize: -1}))
+	c := wiretest.Connect(t, wired(b, wire.Config{DedupSize: -1}))
 	signIn(t, c)
 	for range 2 {
 		send(t, c, `{"method":"message","id":"d","params":{"body":{"text":"hi"}}}`)
@@ -472,7 +472,7 @@ func TestDedupOff(t *testing.T) {
 
 func TestMessageChecks(t *testing.T) {
 	b := &backend{}
-	c := wiretest.ConnectT(t, wired(b, wire.Config{}))
+	c := wiretest.Connect(t, wired(b, wire.Config{}))
 	signIn(t, c)
 	if result, err := c.Call(wait(t), "message", params(`{"body":{"text":""}}`)); wire.CodeOf(err) != wire.CodeInvalidParams {
 		t.Fatalf("an empty message got %s %v, want invalid_params", result, err)
@@ -513,7 +513,7 @@ func (e *editor) Edit(_ context.Context, _ *wire.Conn, _ wire.EditParams, reply 
 
 func TestEditor(t *testing.T) {
 	b := &editor{}
-	c := wiretest.ConnectT(t, wired(b, wire.Config{}))
+	c := wiretest.Connect(t, wired(b, wire.Config{}))
 	if capabilities := c.Hello().Capabilities; !slices.Equal(capabilities, []string{"edit"}) {
 		t.Fatalf("capabilities = %v, want edit", capabilities)
 	}
@@ -569,7 +569,7 @@ func TestSlowClientDisconnected(t *testing.T) {
 func TestCloseWithError(t *testing.T) {
 	b := &backend{}
 	s := wired(b, wire.Config{})
-	c := wiretest.ConnectT(t, s)
+	c := wiretest.Connect(t, s)
 	signIn(t, c)
 	conn := onlyConn(t, s)
 	conn.NotifyRaw("status", map[string]any{"n": 1})
@@ -623,7 +623,7 @@ func TestLineTransport(t *testing.T) {
 // TestFrameTooLarge closes a connection whose client sends more than the
 // transport's limit.
 func TestFrameTooLarge(t *testing.T) {
-	c := wiretest.ConnectT(t, wired(&backend{}, wire.Config{ReadLimit: 1 << 16}))
+	c := wiretest.Connect(t, wired(&backend{}, wire.Config{ReadLimit: 1 << 16}))
 	// The write fails once the server stops reading and closes.
 	go func() {
 		_ = c.Send(context.Background(), []byte(`{"method":"message","id":"x","params":{"body":{"text":"`+strings.Repeat("x", 1<<17)+`"}}}`))
@@ -633,7 +633,7 @@ func TestFrameTooLarge(t *testing.T) {
 
 func TestShutdown(t *testing.T) {
 	s := wired(&backend{}, wire.Config{})
-	c := wiretest.ConnectT(t, s)
+	c := wiretest.Connect(t, s)
 	signIn(t, c)
 	if err := s.Shutdown(wait(t)); err != nil {
 		t.Fatal(err)
@@ -653,7 +653,7 @@ func TestShutdown(t *testing.T) {
 
 func TestBroadcast(t *testing.T) {
 	s := wired(&backend{}, wire.Config{})
-	c1, c2 := wiretest.ConnectT(t, s), wiretest.ConnectT(t, s) // c2 is not signed in: not broadcast to.
+	c1, c2 := wiretest.Connect(t, s), wiretest.Connect(t, s) // c2 is not signed in: not broadcast to.
 	signIn(t, c1)
 	frame, _ := wire.EncodeRaw("status", map[string]any{"x": 1})
 	s.Broadcast(frame, nil)
@@ -714,7 +714,7 @@ func (f *fence) Err() error            { return f.err }
 
 func TestSendFramesAndFence(t *testing.T) {
 	s := wired(&backend{}, wire.Config{OutgoingQueue: 2})
-	c := wiretest.ConnectT(t, s)
+	c := wiretest.Connect(t, s)
 	signIn(t, c)
 	conn := onlyConn(t, s)
 	f := &fence{done: make(chan struct{})}
@@ -750,7 +750,7 @@ func TestSendFramesAndFence(t *testing.T) {
 func TestFenceDuringAuth(t *testing.T) {
 	f := &fence{done: make(chan struct{})}
 	b := &fencingBackend{fence: f}
-	c := wiretest.ConnectT(t, wired(b, wire.Config{}))
+	c := wiretest.Connect(t, wired(b, wire.Config{}))
 	send(t, c, `{"method":"auth","id":"a","params":{"scheme":"guest","name":"Ada"}}`)
 	quiet(t, c)
 	close(f.done)
@@ -778,7 +778,7 @@ func (b *fencingBackend) Auth(_ context.Context, c *wire.Conn, p wire.AuthParams
 
 func TestMaxConnections(t *testing.T) {
 	s := wired(&backend{}, wire.Config{MaxConnections: 1})
-	c1, c2 := wiretest.ConnectT(t, s), wiretest.ConnectT(t, s)
+	c1, c2 := wiretest.Connect(t, s), wiretest.Connect(t, s)
 	if f := next(t, c2); code(f) != wire.CodeRetryAfter || f.ID != "" {
 		t.Fatalf("got %s, want retry_after", f.Raw)
 	}

@@ -208,7 +208,7 @@ func testClient(t *testing.T, c *chat, client *wiretest.Client) {
 
 func TestConnect(t *testing.T) {
 	c := newChat()
-	client := wiretest.Connect(c.server)
+	client := wiretest.Connect(t, c.server)
 	testClient(t, c, client)
 	if err := client.Close(); err != nil {
 		t.Fatal(err)
@@ -288,7 +288,7 @@ func TestCallFramesAndSync(t *testing.T) {
 		conn.Notify(wire.Notice("", "after"))
 		return nil
 	}})
-	ada, bob := wiretest.Connect(c.server), wiretest.Connect(c.server)
+	ada, bob := wiretest.Connect(t, c.server), wiretest.Connect(t, c.server)
 	defer ada.Close()
 	defer bob.Close()
 

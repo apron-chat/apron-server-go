@@ -18,7 +18,7 @@ func signIn(t *testing.T, ctx context.Context, chat *Chat, name string) (*wirete
 	if hello := c.Hello(); hello.Title != "Minimal" || you.Name != name {
 		t.Fatalf("server frame %+v, you %+v", hello, you)
 	}
-	if welcome, err := c.ExpectMessage(ctx, nil); err != nil || welcome.From.UserID != wire.Private.UserID || !strings.HasPrefix(welcome.Body.Text, "Welcome, "+name) {
+	if welcome, err := wiretest.Expect[wire.Message](ctx, c, nil); err != nil || welcome.From.UserID != wire.Private.UserID || !strings.HasPrefix(welcome.Body.Text, "Welcome, "+name) {
 		t.Fatalf("welcome: %+v %v", welcome, err)
 	}
 	return c, you.User
@@ -42,7 +42,7 @@ func TestChat(t *testing.T) {
 		t.Fatalf("message: %+v %v", sent, err)
 	}
 	for _, c := range []*wiretest.Client{ada, bob} {
-		if m, err := c.ExpectMessage(ctx, nil); err != nil || m.MessageID != sent.MessageID || m.Body.Text != "hi" || m.From.Name != "Ada" {
+		if m, err := wiretest.Expect[wire.Message](ctx, c, nil); err != nil || m.MessageID != sent.MessageID || m.Body.Text != "hi" || m.From.Name != "Ada" {
 			t.Fatalf("message: %+v %v", m, err)
 		}
 	}
@@ -117,7 +117,7 @@ func TestEcho(t *testing.T) {
 			t.Fatal(err)
 		}
 		for _, c := range []*wiretest.Client{ada, bob} {
-			m, err := c.ExpectMessage(ctx, func(m wire.Message) bool { return m.From.UserID == "echo" })
+			m, err := wiretest.Expect(ctx, c, func(m wire.Message) bool { return m.From.UserID == "echo" })
 			if err != nil || m.Body.Text != "Ada said: "+body.Text || m.ReplyTo == nil || m.ReplyTo.MessageID != asked.MessageID {
 				t.Fatalf("the bot's reply %+v: %v", m, err)
 			}

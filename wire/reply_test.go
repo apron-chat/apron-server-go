@@ -205,7 +205,7 @@ func (b *broadcasting) Auth(_ context.Context, c *wire.Conn, p wire.AuthParams, 
 func TestAuthSendSignsIn(t *testing.T) {
 	b := &broadcasting{}
 	b.s = wire.NewServer(b, wire.Config{Logger: slog.New(slog.DiscardHandler)})
-	c := wiretest.ConnectT(t, b.s)
+	c := wiretest.Connect(t, b.s)
 	if _, err := c.Auth(wait(t), map[string]any{"scheme": "guest", "user_id": "bad id"}); wire.CodeOf(err) != wire.CodeInternalError {
 		t.Fatalf("got %v, want internal_error for an invalid user_id", err)
 	}
