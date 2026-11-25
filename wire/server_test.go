@@ -312,6 +312,62 @@ func TestAuthBarrier(t *testing.T) {
 	}
 }
 
+// refusing refuses a sign-in as "slow", once the test lets it.
+type refusing struct {
+	backend
+	started, proceed chan struct{}
+}
+
+func (b *refusing) Auth(ctx context.Context, c *wire.Conn, p wire.AuthParams, reply wire.Reply[wire.AuthResult]) error {
+	if p.Name != "slow" {
+		return b.backend.Auth(ctx, c, p, reply)
+	}
+	b.started <- struct{}{}
+	<-b.proceed
+	return wire.Denied("No")
+}
+
+// The frames sent to a connection while an auth runs wait for its result
+// (§3.2.2). When it fails, a connection that was signed in, and stays so,
+// gets them all the same, as they are its user's, such as a broadcast;
+// one that was not gets none, as they were about a sign-in that did not
+// happen.
+func TestFailedAuthHeldFrames(t *testing.T) {
+	for _, signedIn := range []bool{true, false} {
+		t.Run(fmt.Sprintf("signed in %v", signedIn), func(t *testing.T) {
+			b := &refusing{started: make(chan struct{}), proceed: make(chan struct{})}
+			s := wired(b, wire.Config{})
+			c := wiretest.Connect(t, s)
+			var userID string
+			if signedIn {
+				userID = signIn(t, c)
+			}
+			send(t, c, `{"method":"auth","id":"a","params":{"scheme":"guest","name":"slow"}}`)
+			<-b.started
+			frame, err := wire.EncodeRaw("status", map[string]any{"x": 1})
+			if err != nil {
+				t.Fatal(err)
+			}
+			onlyConn(t, s).Send(frame)
+			quiet(t, c)
+			close(b.proceed)
+			if f := next(t, c); f.ID != "a" || code(f) != wire.CodeDenied {
+				t.Fatalf("got %s, want the auth's error", f.Raw)
+			}
+			if !signedIn {
+				quiet(t, c)
+				return
+			}
+			if f := next(t, c); f.Method != "status" {
+				t.Fatalf("got %s, want the frame held while the auth ran", f.Raw)
+			}
+			if got := onlyConn(t, s).UserID(); got != userID {
+				t.Fatalf("signed in as %q, want %q still", got, userID)
+			}
+		})
+	}
+}
+
 func TestUnsupportedMethod(t *testing.T) {
 	c := wiretest.Connect(t, wired(&backend{}, wire.Config{}))
 	signIn(t, c)

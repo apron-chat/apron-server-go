@@ -537,10 +537,14 @@ func (s *Server) authenticate(ctx context.Context, c *Conn, r *Request) {
 		return
 	}
 	// Whatever the backend sends while the sign-in runs comes after its
-	// result (§3.2.2), and, when it fails, is not sent: it was about a
-	// sign-in that did not happen.
+	// result (§3.2.2). When it fails on a connection not signed in, it is
+	// not sent: it was about a sign-in that did not happen. On one signed
+	// in, which a failure leaves as it was (§3.2.2), it is sent all the
+	// same, as it is what the connection's user would have been sent
+	// without the auth, such as the messages broadcast meanwhile.
+	before := c.UserID()
 	c.hold()
-	defer func() { c.release(r.failed()) }()
+	defer func() { c.release(r.failed() && (before == "" || c.UserID() != before)) }()
 	// A panic is answered before the frames held meanwhile are let go, as
 	// an error is.
 	defer s.recoverFrame(r)
