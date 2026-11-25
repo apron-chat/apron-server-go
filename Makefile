@@ -1,4 +1,4 @@
-.PHONY: install dev-web dev-server check test test-go test-wire test-conformance test-interop test-perf build build-web serve run
+.PHONY: install dev-web dev-server check vuln test test-go test-wire test-conformance test-interop test-perf build build-web serve run
 
 # The web client lives in apron-chat/apron-web, pinned as a submodule. The
 # browser tests, dev-web, and run use it; check out another commit in it to
@@ -26,8 +26,15 @@ dev-web:
 dev-server:
 	go run ./cmd/aprond
 
+# staticcheck is a tool of the root module (go.mod), at the version it pins; staticcheck.conf configures it.
 check:
 	go vet ./... ./apron/...
+	go tool staticcheck ./... ./apron/...
+
+# Known vulnerabilities that the code reaches, in its modules or the Go release that builds it. govulncheck runs on
+# that Go release (go.work's toolchain), as an older one cannot read its standard library.
+vuln:
+	GOTOOLCHAIN=$$(go env GOVERSION) go run golang.org/x/vuln/cmd/govulncheck@v1.10.0 ./... ./apron/...
 
 test: test-go test-wire
 

@@ -295,6 +295,10 @@ make check
 make test
 ```
 
+`make check` runs `go vet` and staticcheck (a `tool` of `go.mod`,
+configured by `staticcheck.conf`); `make vuln` runs govulncheck, which
+reports the known vulnerabilities that the code reaches.
+
 `make test` runs the Go tests and the session fixtures over real loopback
 WebSockets against the web client's `ChatClient`. Run the latter alone with
 `make test-wire`; it needs Node.js and Go, but no browser or running dev server.
