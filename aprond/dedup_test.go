@@ -18,7 +18,6 @@ import (
 func TestDepartedGuestsKeepNoDedup(t *testing.T) {
 	app, httpServer := newTestServer(t, DefaultConfig())
 	pad := strings.Repeat("x", 15<<10)
-	var userIDs []string
 	for g := range 3 {
 		c := dialTestClient(t, httpServer)
 		c.result(t, "me", "pad", map[string]any{"ext": map[string]any{"pad": pad}})
@@ -31,7 +30,6 @@ func TestDepartedGuestsKeepNoDedup(t *testing.T) {
 		}
 		_ = c.ws.CloseNow()
 		waitDisconnected(t, app, c.userID)
-		userIDs = append(userIDs, c.userID)
 		if users, requests, bytes := aprontest.DedupUsage(app.srv); users != 0 || requests != 0 || bytes != 0 {
 			t.Fatalf("after guest %d left: %d users, %d requests, %d bytes kept; want none", g, users, requests, bytes)
 		}

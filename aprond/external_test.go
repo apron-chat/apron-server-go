@@ -302,7 +302,7 @@ func TestExternalDeny(t *testing.T) {
 // On a signed-in connection, guests included, a code adds the identity to
 // the account (§4.12.4), and never signs in to another.
 func TestExternalAddsToSignedInAccount(t *testing.T) {
-	identity := &Identity{Subject: "idp:2", Name: "Ev‮il\u0007" + strings.Repeat("x", 200)}
+	identity := &Identity{Subject: "idp:2", Name: "Ev\u202eil\u0007" + strings.Repeat("x", 200)}
 	app, httpServer := externalTestServer(t, identity)
 	issuer := httpServer.URL
 	page := issuer + "/oauth/authorize"
@@ -643,7 +643,7 @@ func TestExternalRemembersConsent(t *testing.T) {
 	identity := &Identity{Subject: "idp:7", Name: "Rem", UserID: "rem"}
 	memory, dir := store.NewMemory(), t.TempDir()
 	configure := func(c *Config) { c.Extensions = []Extension{ssoExtension(identity)} }
-	app, httpServer, stop := startWith(t, memory, dir, configure)
+	_, httpServer, stop := startWith(t, memory, dir, configure)
 	defer func() { stop() }()
 	client := func(redirect string) *oauthtest.Client {
 		c := oauthtest.New(t, httpServer.URL)
@@ -702,7 +702,7 @@ func TestExternalRemembersConsent(t *testing.T) {
 
 	// It is kept with the account.
 	stop()
-	app, httpServer, stop = startWith(t, memory, dir, configure)
+	app, httpServer, stop := startWith(t, memory, dir, configure)
 	if asks("https://chat.alice.dev/cb") {
 		t.Fatal("asked again after a restart")
 	}

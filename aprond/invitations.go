@@ -39,12 +39,6 @@ const (
 // keeps by the SHA-256 of its token. Guarded by s.mu.
 type invitation = invitations.Invitation
 
-// enrollment is what an invitation left with the account it made: kept
-// with the account, so that it is stored in the same change as the
-// account. Admitted reports that the invitation still admits the account
-// to a server whose sign-in an extension restricts.
-type enrollment = invitations.Enrollment
-
 // InvitationOptions describe an invitation to make one account.
 type InvitationOptions struct {
 	// Lifetime is how long the invitation lasts; zero is

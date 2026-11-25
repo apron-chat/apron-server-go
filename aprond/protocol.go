@@ -1,7 +1,6 @@
 package aprond
 
 import (
-	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"errors"
 	"fmt"
@@ -117,16 +116,6 @@ func validID(id string) bool { return apron.ValidID(id) }
 // kept as the JSON it arrived as, so a merge or a store keeps it byte for
 // byte, numbers beyond 2^53 included.
 type extObject = apron.Ext
-
-// emptyJSON reports whether a compact JSON value is an empty value ("", [],
-// or {}), which clears what it is merged into (§3.3).
-func emptyJSON(value jsontext.Value) bool {
-	switch string(value) {
-	case `""`, `[]`, `{}`:
-		return true
-	}
-	return false
-}
 
 // mergeExt merges a write's ext into the kept one, one level deep (§4.12):
 // each key the write carries replaces the kept value, a key whose value is

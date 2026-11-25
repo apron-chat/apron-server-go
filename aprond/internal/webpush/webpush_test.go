@@ -8,7 +8,6 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/hkdf"
-	"crypto/rand"
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/json/v2"
@@ -77,19 +76,6 @@ func decryptPush(t *testing.T, body []byte, private *ecdh.PrivateKey, auth []byt
 		t.Fatalf("record does not end with the last-record delimiter: %x", record)
 	}
 	return record[:len(record)-1]
-}
-
-// testSubscription is a browser's push subscription: its private key and
-// the keys it registers.
-func testSubscription(t *testing.T) (*ecdh.PrivateKey, map[string]any) {
-	t.Helper()
-	private, err := ecdh.P256().GenerateKey(rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-	auth := make([]byte, authSecretBytes)
-	_, _ = rand.Read(auth)
-	return private, map[string]any{"p256dh": EncodeBase64URL(private.PublicKey().Bytes()), "auth": EncodeBase64URL(auth)}
 }
 
 func TestWebPushEncryptionMatchesRFC8291(t *testing.T) {

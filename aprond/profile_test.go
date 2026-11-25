@@ -140,7 +140,7 @@ func TestServerCommand(t *testing.T) {
 		code int
 	}{
 		{"title two\nlines", CodeInvalidParams},
-		{"title ​​", CodeInvalidParams},
+		{"title \u200b\u200b", CodeInvalidParams},
 		{"title " + strings.Repeat("x", maxNameRunes+1), CodeTooLarge},
 		{"description tab\there", CodeInvalidParams},
 		{"description " + strings.Repeat("x", maxServerDescriptionBytes+1), CodeTooLarge},
