@@ -43,8 +43,10 @@ func TestDedupForgetUser(t *testing.T) {
 	calls := padded(s, 10<<10)
 	c := aprontest.Connect(t, s)
 	userID := signIn(t, c)
-	if retry(t, c, "k") != 1 || retry(t, c, "k") != 1 {
-		t.Fatal("a retry ran again")
+	for range 2 {
+		if retry(t, c, "k") != 1 {
+			t.Fatal("a retry ran again")
+		}
 	}
 	for range 20 {
 		if _, err := c.Call(wait(t), "big", nil); err != nil {

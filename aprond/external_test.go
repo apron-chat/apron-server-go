@@ -686,8 +686,11 @@ func TestExternalRemembersConsent(t *testing.T) {
 	}
 	// An app's scheme or a loopback redirect asks every time.
 	for _, redirect := range []string{"com.example.app:/signed-in", "http://127.0.0.1:5173/cb", "https://localhost:8443/cb", "https://127.0.0.1/cb"} {
-		if !asks(redirect) || !asks(redirect) {
-			t.Errorf("%s: remembered", redirect)
+		for range 2 {
+			if !asks(redirect) {
+				t.Errorf("%s: remembered", redirect)
+				break
+			}
 		}
 	}
 	// Another account at the same host asks.

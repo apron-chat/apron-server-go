@@ -84,6 +84,7 @@ func (relay *testRelay) pushes(t *testing.T, app *Server, c *testClient) []relay
 	// drain, which a Server answers after c's requests, takes what it sent
 	// c.
 	app.mu.Lock()
+	//lint:ignore SA2001 the critical section orders what the server did before it.
 	app.mu.Unlock()
 	c.drain(t)
 	app.pushes.Wait()
@@ -93,6 +94,7 @@ func (relay *testRelay) pushes(t *testing.T, app *Server, c *testClient) []relay
 	// server adds only holding app.mu, so taking it here orders those Adds
 	// after the Waits.
 	app.mu.Lock()
+	//lint:ignore SA2001 the critical section orders the Adds after the Waits.
 	app.mu.Unlock()
 	var requests []relayRequest
 	for len(relay.received) > 0 {
