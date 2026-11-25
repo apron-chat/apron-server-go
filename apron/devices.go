@@ -116,7 +116,7 @@ func (s *Server) authenticateDeviceLocked(c *client, reply wire.Reply[wire.AuthR
 		return err
 	}
 	c.device = key
-	c.service, c.serviceManage = [32]byte{}, false
+	c.setService([32]byte{}, false)
 	c.token, c.credential = [32]byte{}, ""
 	s.switchUserLocked(c, reply, device.User, "", c.user != device.User, false)
 	return nil

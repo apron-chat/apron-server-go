@@ -231,11 +231,26 @@ func (s *Server) authenticateServiceLocked(c *client, reply wire.Reply[wire.Auth
 	if err := s.admitLocked(t.User); err != nil {
 		return err
 	}
-	c.service, c.serviceManage = key, t.Manage
+	c.setService(key, t.Manage)
 	// It signs in with no session, device token, or credential.
 	c.token, c.device, c.credential = [32]byte{}, [32]byte{}, ""
 	s.switchUserLocked(c, reply, t.User, "", c.user != t.User, false)
 	return nil
+}
+
+// setService notes the service token the connection signed in with, zero
+// for none, and whether it may manage its account. A restricted one has a
+// deduplication scope of its own (wire.Conn.SetDedupScope): a retry of
+// another connection's request (§1.2) runs again on it, so that it never
+// gets the outcome of what the handler refuses it, such as an account
+// method's.
+func (c *client) setService(key [32]byte, manage bool) {
+	c.service, c.serviceManage = key, manage
+	scope := ""
+	if c.restrictedService() {
+		scope = "restricted-service"
+	}
+	c.conn.SetDedupScope(scope)
 }
 
 // restrictedService reports whether the connection signed in with a service

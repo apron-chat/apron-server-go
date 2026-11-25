@@ -35,7 +35,7 @@ func (s *Server) signInLocked(c *client, reply wire.Reply[wire.AuthResult], user
 		return err
 	}
 	c.token = key
-	c.service, c.serviceManage = [32]byte{}, false
+	c.setService([32]byte{}, false)
 	// A sign-in that proved a credential notes it after (provedLocked). A
 	// device token the connection signed in with stays its own, so that
 	// replacing that token still closes it.
@@ -121,7 +121,7 @@ func (s *Server) authenticateToken(c *client, reply wire.Reply[wire.AuthResult])
 	s.sessions.Put(key, session)
 	c.token = key
 	c.credential = session.Credential
-	c.service, c.serviceManage = [32]byte{}, false
+	c.setService([32]byte{}, false)
 	// Resuming the user the connection is signed in as is no sign-in
 	// (§4.5), and sends nothing after its result.
 	s.switchUserLocked(c, reply, session.User, token, c.user != session.User, false)
