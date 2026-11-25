@@ -266,7 +266,7 @@ func (s *Server) processFrame(ctx context.Context, c *Conn, payload []byte) {
 	if c.Closing() {
 		return
 	}
-	userID := c.UserID()
+	userID, scope := c.dedupScope()
 	switch {
 	case userID == "":
 		r.fail(Denied("Sign in before sending requests"))
@@ -283,9 +283,11 @@ func (s *Server) processFrame(ctx context.Context, c *Conn, payload []byte) {
 
 	// Deduplicate by user_id and id (§1.2): a duplicate waits for the
 	// original, even on another connection, and gets its outcome, brought up
-	// to date.
+	// to date. Only a connection of the same deduplication scope has it
+	// (Conn.SetDedupScope), as no handler runs for it.
 	fingerprint := wirecore.Fingerprint(r.Method, r.params)
-	entry, prior := s.dedup.claim(userID, r.ID, fingerprint)
+	key := dedupKey{scope: scope, id: r.ID}
+	entry, prior := s.dedup.claim(userID, key, fingerprint)
 	if prior != nil {
 		if prior.Fingerprint != fingerprint {
 			r.fail(InvalidParams(fmt.Sprintf("Request id %q was already used for another operation", r.ID)))
@@ -322,14 +324,14 @@ func (s *Server) processFrame(ctx context.Context, c *Conn, payload []byte) {
 	if entry != nil {
 		r.unkept = func(outcome dedupOutcome) {
 			if !kept(outcome) {
-				s.dedup.forget(userID, r.ID, entry)
+				s.dedup.forget(userID, key, entry)
 			}
 		}
 	}
 	s.serve(ctx, c, r, m)
 	if entry != nil {
 		finish := func(outcome dedupOutcome) {
-			s.dedup.finish(userID, r.ID, entry, outcome, !kept(outcome))
+			s.dedup.finish(userID, key, entry, outcome, !kept(outcome))
 		}
 		// A request answered later finishes as its reply is queued.
 		if outcome, done := r.finishOrDefer(finish); done {

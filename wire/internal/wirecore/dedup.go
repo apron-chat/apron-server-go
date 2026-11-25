@@ -1,6 +1,14 @@
 package wirecore
 
-import "sync/atomic"
+import (
+	"container/list"
+	"sync/atomic"
+)
+
+// DedupEntryBytes is what a kept request costs besides its key and its
+// outcome, for a Dedup's byte bound: its entry, its place in the order, and
+// its map slot, roughly.
+const DedupEntryBytes = 160
 
 // Dedup keeps the outcomes of the latest requests (§1.2) by a key, such as
 // a user_id and a request id, oldest forgotten first. Its methods are
@@ -8,9 +16,21 @@ import "sync/atomic"
 type Dedup[K comparable, V any] struct {
 	// Size bounds the requests kept; negative keeps none, and Claim then
 	// claims nothing.
-	Size    int
-	entries map[K]*DedupEntry[V]
-	order   []K
+	Size int
+	// MaxBytes, if positive, bounds the bytes the requests kept cost, as
+	// Claim and Finish count them: a request's key and outcome, and
+	// DedupEntryBytes.
+	MaxBytes int
+	entries  map[K]*list.Element // of *dedupNode[K, V]
+	order    list.List           // oldest first
+	bytes    int
+}
+
+// dedupNode is a kept request, in its place in the order.
+type dedupNode[K comparable, V any] struct {
+	key   K
+	entry *DedupEntry[V]
+	bytes int
 }
 
 // DedupEntry is one request's outcome: Value, once Done is closed.
@@ -29,67 +49,93 @@ func (e *DedupEntry[V]) Done() <-chan struct{} { return e.done }
 
 // Claim returns a new entry for key, which the caller runs and finishes,
 // or the prior entry of a request with the same key, which the caller
-// waits for (without the lock) unless its fingerprint differs. With Size
-// negative, both are nil.
-func (d *Dedup[K, V]) Claim(key K, fingerprint [32]byte) (entry, prior *DedupEntry[V]) {
+// waits for (without the lock) unless its fingerprint differs. keyBytes is
+// what key costs, for MaxBytes. With Size negative, both are nil.
+func (d *Dedup[K, V]) Claim(key K, fingerprint [32]byte, keyBytes int) (entry, prior *DedupEntry[V]) {
 	if d.Size < 0 {
 		return nil, nil
 	}
-	if prior := d.entries[key]; prior != nil {
-		return nil, prior
+	if element := d.entries[key]; element != nil {
+		return nil, element.Value.(*dedupNode[K, V]).entry
 	}
 	if d.entries == nil {
-		d.entries = make(map[K]*DedupEntry[V])
+		d.entries = make(map[K]*list.Element)
 	}
 	entry = &DedupEntry[V]{Fingerprint: fingerprint, done: make(chan struct{})}
-	d.entries[key] = entry
-	d.order = append(d.order, key)
-	for len(d.order) > d.Size && d.evict() {
-	}
+	node := &dedupNode[K, V]{key: key, entry: entry, bytes: keyBytes + DedupEntryBytes}
+	d.entries[key] = d.order.PushBack(node)
+	d.bytes += node.bytes
+	d.trim()
 	return entry, nil
 }
 
-// evict forgets the oldest request that finished, and reports whether
-// there was one. A request still running stays, in its place, so that its
-// duplicates find it, and it is forgotten once it is the oldest finished.
-func (d *Dedup[K, V]) evict() bool {
-	for i, key := range d.order {
-		if e := d.entries[key]; e != nil && !isClosed(e.done) {
+// over reports whether the requests kept are over Size or MaxBytes.
+func (d *Dedup[K, V]) over() bool {
+	return d.order.Len() > d.Size || d.MaxBytes > 0 && d.bytes > d.MaxBytes
+}
+
+// trim forgets the oldest requests that finished while the requests kept
+// are over Size or MaxBytes.
+func (d *Dedup[K, V]) trim() {
+	for d.over() && d.EvictOldest() {
+	}
+}
+
+// EvictOldest forgets the oldest request that finished, and reports
+// whether there was one. A request still running stays, in its place, so
+// that its duplicates find it, and it is forgotten once it is the oldest
+// finished.
+func (d *Dedup[K, V]) EvictOldest() bool {
+	for element := d.order.Front(); element != nil; element = element.Next() {
+		node := element.Value.(*dedupNode[K, V])
+		if !isClosed(node.entry.done) {
 			continue
 		}
-		delete(d.entries, key)
-		if i == 0 {
-			d.order = d.order[1:]
-		} else {
-			d.order = append(d.order[:i], d.order[i+1:]...)
-		}
+		d.remove(element)
 		return true
 	}
 	return false
 }
 
+// remove forgets a kept request.
+func (d *Dedup[K, V]) remove(element *list.Element) {
+	node := d.order.Remove(element).(*dedupNode[K, V])
+	delete(d.entries, node.key)
+	d.bytes -= node.bytes
+}
+
 // Finish records the outcome of a claimed request; forget drops it once
-// the requests waiting on it have it, so that a retry runs again.
-func (d *Dedup[K, V]) Finish(key K, entry *DedupEntry[V], value V, forget bool) {
+// the requests waiting on it have it, so that a retry runs again. Else
+// valueBytes is what the outcome costs, for MaxBytes: one that does not
+// fit is not kept.
+func (d *Dedup[K, V]) Finish(key K, entry *DedupEntry[V], value V, valueBytes int, forget bool) {
 	entry.Value = value
 	if forget {
 		d.Forget(key, entry)
+	} else if element := d.entries[key]; element != nil && element.Value.(*dedupNode[K, V]).entry == entry {
+		element.Value.(*dedupNode[K, V]).bytes += valueBytes
+		d.bytes += valueBytes
 	}
 	close(entry.done)
+	d.trim()
 }
 
 // Forget drops a claimed request, running or finished, so that a request
 // with its key claimed after it runs again; the requests already waiting
 // on it still get its outcome, once it finishes.
 func (d *Dedup[K, V]) Forget(key K, entry *DedupEntry[V]) {
-	if d.entries[key] == entry {
-		delete(d.entries, key)
+	if element := d.entries[key]; element != nil && element.Value.(*dedupNode[K, V]).entry == entry {
+		d.remove(element)
 	}
 }
 
 // Kept reports whether a request with key is kept: running, or finished
 // and not yet forgotten.
 func (d *Dedup[K, V]) Kept(key K) bool { return d.entries[key] != nil }
+
+// Len is how many requests are kept, and Bytes what they cost.
+func (d *Dedup[K, V]) Len() int   { return d.order.Len() }
+func (d *Dedup[K, V]) Bytes() int { return d.bytes }
 
 func isClosed(done chan struct{}) bool {
 	select {

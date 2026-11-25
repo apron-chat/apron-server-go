@@ -92,6 +92,22 @@
 // connections or a batch; and [Marshal], wire's encoding, for a backend
 // that keeps the bytes it sends.
 //
+// # Deduplication
+//
+// A request repeated with its id by the same user (§1.2), as a client
+// retries, also across reconnects, gets the original's outcome, brought up
+// to date (RefreshDuplicate), without its handler running again; reads
+// (Handler.NoDedup) and failures are not kept, so their retries run again.
+// As no handler runs for a duplicate, a backend whose connections of one
+// user may do different things, such as one signed in with a restricted
+// token, gives each kind of connection its own scope as it signs it in
+// ([Conn.SetDedupScope]): a duplicate from another scope runs again, its
+// handler's checks and all. What is kept is bounded for each user and in
+// all, by count and by bytes (Config.DedupSize, DedupUsers, DedupBytes,
+// DedupTotalBytes), and outlives the user's connections; a backend that
+// retires a user_id for good, such as a guest's that left, frees what is
+// kept for it with [Server.ForgetUser].
+//
 // # Putting a server together
 //
 // [NewServer] makes a Server for a Backend, with its [Config]: the

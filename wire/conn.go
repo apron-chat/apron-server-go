@@ -22,6 +22,8 @@ type Conn struct {
 
 	mu   sync.Mutex
 	user *User
+	// scope is the connection's deduplication scope (SetDedupScope).
+	scope string
 	// holding is set while auth runs: notifications queued meanwhile wait
 	// in held until its result is queued (§3.2.2).
 	holding bool
@@ -71,11 +73,39 @@ func (c *Conn) SetUser(u User) {
 }
 
 // SignOut leaves the connection without an identity: its requests are
-// denied until it signs in again.
+// denied until it signs in again. It clears its deduplication scope too
+// (SetDedupScope).
 func (c *Conn) SignOut() {
 	c.mu.Lock()
-	c.user = nil
+	c.user, c.scope = nil, ""
 	c.mu.Unlock()
+}
+
+// SetDedupScope sets the connection's deduplication scope, "" until it is
+// set, and again after SignOut; SetUser leaves it as it is. A duplicate of
+// a request (§1.2) gets the original's outcome without its handler
+// running, so the requests of one user's connections are each other's
+// duplicates only within one scope: a backend whose connections of one
+// user may do different things, such as one signed in with a restricted
+// token, which its handlers refuse what another connection of the user
+// may do, gives each kind of connection its own scope as it signs it in.
+// A retry from another scope then runs again, its handler's checks and
+// all, rather than get what a connection allowed more did.
+func (c *Conn) SetDedupScope(scope string) {
+	c.mu.Lock()
+	c.scope = scope
+	c.mu.Unlock()
+}
+
+// dedupScope returns the connection's user_id, "" before it signs in, and
+// its deduplication scope.
+func (c *Conn) dedupScope() (userID, scope string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.user == nil {
+		return "", c.scope
+	}
+	return c.user.UserID, c.scope
 }
 
 // Data returns the value the backend keeps with the connection, which it

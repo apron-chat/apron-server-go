@@ -127,6 +127,15 @@ type Config struct {
 	// default. A negative DedupSize keeps none.
 	DedupSize  int
 	DedupUsers int
+	// DedupBytes bounds what the requests kept for each user cost, and
+	// DedupTotalBytes what those of every user cost together: their ids
+	// and encoded results, and an estimate of the memory each takes
+	// besides; 1 MiB and 64 MiB by default. Over DedupBytes, the user's
+	// oldest requests are forgotten first, and over DedupTotalBytes, those
+	// of the users least recently active. A result too large to fit is not
+	// kept: a retry of it runs again.
+	DedupBytes      int
+	DedupTotalBytes int
 	// Logger logs what goes wrong; slog.Default() when nil.
 	Logger *slog.Logger
 	// ClientAddr returns the address of the client that opened a WebSocket,
@@ -159,12 +168,14 @@ func NewServer(backend Backend, config Config) *Server {
 	if perUser == 0 {
 		perUser = 1024
 	}
+	dedup := newDedup(perUser, orDefault(config.DedupUsers, 4096),
+		orDefault(config.DedupBytes, 1<<20), orDefault(config.DedupTotalBytes, 64<<20))
 	s := &Server{
 		backend:    backend,
 		config:     config,
 		registered: make(map[string]method),
 		conns:      make(map[*Conn]struct{}),
-		dedup:      newDedup(perUser, orDefault(config.DedupUsers, 4096)),
+		dedup:      dedup,
 		shutdown:   make(chan struct{}),
 	}
 	s.methods = s.builtins()
@@ -501,6 +512,20 @@ func (s *Server) Broadcast(frame Frame, to func(*Conn) bool) {
 			c.Send(frame)
 		}
 	}
+}
+
+// ForgetUser forgets the requests kept for a user's deduplication (§1.2),
+// so that what they cost is freed, as for a user_id that is retired for
+// good, such as a guest's whose last connection ended. A Server keeps a
+// user's requests across reconnects, as a client retries across them, and
+// until requests of more recent users push them out (Config.DedupUsers,
+// Config.DedupTotalBytes), as it cannot tell which users are gone for
+// good. A request still running when its user is forgotten is answered,
+// and its duplicates still get its outcome; a request with its id after
+// it runs again. It may be called while the backend holds its own locks.
+func (s *Server) ForgetUser(userID string) {
+	s.made()
+	s.dedup.forgetUser(userID)
 }
 
 // Shutdown stops accepting connections, closes the open ones, and waits for

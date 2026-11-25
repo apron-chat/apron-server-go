@@ -13,6 +13,9 @@ func init() {
 		return detachedRequest(method, params, rec)
 	}
 	testhook.InitReply = func(reply, r any) { reply.(initReply).init(r.(*Request)) }
+	testhook.DedupUsage = func(s any) (users, requests, bytes int) {
+		return s.(*Server).dedup.usage()
+	}
 	testhook.RecorderOf = func(r any) testhook.Recorder {
 		if r, ok := r.(*Request); ok {
 			return r.rec

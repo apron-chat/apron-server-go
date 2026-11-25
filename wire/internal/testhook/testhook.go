@@ -1,6 +1,7 @@
 // Package testhook lets package wiretest make requests that are on no
-// connection, and see what their handlers send, without package wire
-// exporting a constructor that only tests need. Package wire sets its
+// connection, and see what their handlers send, and read what a Server
+// keeps for deduplication, without package wire exporting what only tests
+// need. Package wire sets its
 // functions as it is initialized; it cannot import wiretest, nor wiretest
 // its internals, so the requests are passed as any.
 package testhook
@@ -27,4 +28,8 @@ var (
 	// *wire.Request r, with what Send does for r's method and T, as the
 	// Server makes a handler's.
 	InitReply func(reply, r any)
+	// DedupUsage reports what the *wire.Server server keeps for
+	// deduplication: of how many users, how many requests, and what they
+	// cost.
+	DedupUsage func(server any) (users, requests, bytes int)
 )

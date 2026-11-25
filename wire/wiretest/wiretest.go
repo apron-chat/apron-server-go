@@ -103,6 +103,14 @@ func NewRequest(method string, params any) *wire.Request {
 	return r.(*wire.Request)
 }
 
+// DedupUsage reports what s keeps for deduplication (§1.2): of how many
+// users, how many requests, and what they cost, as Config.DedupBytes counts
+// it; for a test that its backend forgets the users that are gone for good
+// (Server.ForgetUser).
+func DedupUsage(s *wire.Server) (users, requests, bytes int) {
+	return testhook.DedupUsage(s)
+}
+
 // NewReply returns the Reply of r, a request made by NewRequest, or of a
 // request of no method when r is nil, for a typed handler of T, and what is
 // sent to r. Send does what the Server does with the result of r's method
