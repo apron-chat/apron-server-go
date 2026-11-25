@@ -86,6 +86,13 @@ type Conn interface {
 //	func(_ context.Context, onFrame func(apron.Frame)) (bot.Conn, error) {
 //		return srv.Local(server.LocalOptions{User: echo, OnFrame: onFrame})
 //	}
+//
+// On any Apron server over the network, it dials one with package
+// [github.com/apron-chat/apron-server-go/apron/client]:
+//
+//	func(ctx context.Context, onFrame func(apron.Frame)) (bot.Conn, error) {
+//		return client.Dial(ctx, url, auth, client.OnFrame(onFrame))
+//	}
 type Dialer func(ctx context.Context, onFrame func(apron.Frame)) (Conn, error)
 
 // call sends a request on conn, and decodes its result.

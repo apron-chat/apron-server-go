@@ -9,7 +9,7 @@ import (
 // The packages both sides use, which a client imports, import nothing of
 // the server's: only the standard library, package apron, this module's
 // internal packages, and the WebSocket package.
-var clientPackages = []string{".", "./bot"}
+var clientPackages = []string{".", "./bot", "./client"}
 
 func TestBoundary(t *testing.T) {
 	gobin, err := exec.LookPath("go")

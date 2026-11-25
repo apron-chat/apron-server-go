@@ -12,14 +12,16 @@
 //     command capability (§4.1) for any backend of apron/server;
 //   - [github.com/apron-chat/apron-server-go/apron/bot]: bots, on any
 //     connection they are given, such as an in-process one of apron/server;
+//   - [github.com/apron-chat/apron-server-go/apron/client]: a network
+//     client of any Apron server, on which a bot runs over the network too;
 //   - [github.com/apron-chat/apron-server-go/apron/aprontest]: tests of a
 //     backend of apron/server, a handler at a time or a whole server as a
 //     client sees it;
 //   - [github.com/apron-chat/apron-server-go/apron/conformance]: the
 //     protocol's core conformance checks, as Go tests against any server.
 //
-// Package apron and package bot import nothing of apron/server, so that a
-// client imports them without the engine.
+// Packages apron, bot, and client import nothing of apron/server, so that
+// a client imports them without the engine.
 //
 // # The vocabulary
 //
