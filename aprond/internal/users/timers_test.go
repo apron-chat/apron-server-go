@@ -3,8 +3,10 @@ package users
 import (
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
+	"github.com/apron-chat/apron-server-go/aprond/internal/presence"
 	"golang.org/x/time/rate"
 )
 
@@ -64,34 +66,40 @@ func TestMuteTimers(t *testing.T) {
 // A shown status changes at once within the burst, and beyond it is held
 // until the callback, which publishes it if still held.
 func TestStatusHold(t *testing.T) {
-	var mu sync.Mutex
-	due := make(chan bool, 1)
-	var table *Table[*testUser]
-	table = NewTable(Timers[*testUser]{StatusDue: func(u *testUser) {
+	synctest.Test(t, func(t *testing.T) {
+		var mu sync.Mutex
+		due := make(chan bool, 1)
+		var table *Table[*testUser]
+		table = NewTable(Timers[*testUser]{StatusDue: func(u *testUser) {
+			mu.Lock()
+			defer mu.Unlock()
+			due <- table.ReleaseStatus(u)
+		}})
+		ada := &testUser{id: "ada", User: New("Ada", time.Now())}
 		mu.Lock()
-		defer mu.Unlock()
-		due <- table.ReleaseStatus(u)
-	}})
-	ada := &testUser{id: "ada", User: New("Ada", time.Now())}
-	mu.Lock()
-	table.Add(ada)
-	if table.PublishStatus(ada) {
-		t.Error("published a status that did not change")
-	}
-	ada.Presence.Note(true, true, time.Now())
-	if !table.PublishStatus(ada) {
-		t.Fatal("a change within the burst is held")
-	}
-	ada.Presence.SetPublishLimit(rate.NewLimiter(rate.Every(time.Hour), 0))
-	if table.PublishStatus(ada) || table.Pending("ada") != 1 || table.PublishStatus(ada) {
-		t.Fatal("a change beyond the burst is not held, once")
-	}
-	if table.ReleaseStatus(&testUser{id: "ada"}) {
-		t.Error("released another user's status")
-	}
-	mu.Unlock()
-	// The hold lasts presence.Coalesce.
-	if !<-due {
-		t.Error("the held status was not released")
-	}
+		table.Add(ada)
+		if table.PublishStatus(ada) {
+			t.Error("published a status that did not change")
+		}
+		ada.Presence.Note(true, true, time.Now())
+		if !table.PublishStatus(ada) {
+			t.Fatal("a change within the burst is held")
+		}
+		ada.Presence.SetPublishLimit(rate.NewLimiter(rate.Every(time.Hour), 0))
+		held := time.Now()
+		if table.PublishStatus(ada) || table.Pending("ada") != 1 || table.PublishStatus(ada) {
+			t.Fatal("a change beyond the burst is not held, once")
+		}
+		if table.ReleaseStatus(&testUser{id: "ada"}) {
+			t.Error("released another user's status")
+		}
+		mu.Unlock()
+		// The hold lasts presence.Coalesce, by the bubble's fake clock.
+		if !<-due {
+			t.Error("the held status was not released")
+		}
+		if waited := time.Since(held); waited != presence.Coalesce {
+			t.Errorf("held for %v, want %v", waited, presence.Coalesce)
+		}
+	})
 }
