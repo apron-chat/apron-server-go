@@ -4,7 +4,7 @@ go 1.27.0
 
 require (
 	github.com/BurntSushi/toml v1.6.0
-	github.com/apron-chat/apron-server-go/apron v0.0.0-20261125181340-391040ea4537
+	github.com/apron-chat/apron-server-go/apron v0.0.0-20261125183732-e12899ed7039
 	github.com/coder/websocket v1.8.14
 	github.com/fxamacker/cbor/v2 v2.9.4
 	github.com/go-jose/go-jose/v4 v4.1.9
