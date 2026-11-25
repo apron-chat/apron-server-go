@@ -41,7 +41,7 @@ type lineTransport struct {
 func (t *lineTransport) Read(context.Context) ([]byte, error) {
 	for t.lines.Scan() {
 		if line := t.lines.Bytes(); len(line) > 0 {
-			return append([]byte(nil), line...), nil
+			return slices.Clone(line), nil
 		}
 	}
 	if err := t.lines.Err(); err != nil {

@@ -6,6 +6,7 @@
 package livetext
 
 import (
+	"slices"
 	"sync"
 	"unicode/utf8"
 
@@ -74,7 +75,7 @@ func (b *Text) Write(p []byte) bool {
 	}
 	if len(b.data) > 2*hold {
 		excess := len(b.data) - hold
-		b.data = append([]byte(nil), b.data[excess:]...)
+		b.data = slices.Clone(b.data[excess:])
 		b.start += int64(excess)
 	}
 	b.signalLocked()
@@ -105,7 +106,7 @@ func (b *Text) decodeLocked(p []byte, atEOF bool) []byte {
 	// keeps a BOM, and fails only for want of more of src (ErrShortSrc).
 	dst := make([]byte, 3*len(src))
 	nDst, nSrc, _ := unicode.UTF8.NewDecoder().Transform(dst, src, atEOF)
-	b.pending = append([]byte(nil), src[nSrc:]...)
+	b.pending = slices.Clone(src[nSrc:])
 	return dst[:nDst]
 }
 
@@ -220,7 +221,7 @@ func (b *Text) Read(position int64) (chunk []byte, next int64, changed chan stru
 	defer b.mu.Unlock()
 	end := b.start + int64(len(b.data))
 	if position < 0 && !b.terminal {
-		return append([]byte(nil), b.kept...), end, b.changed, b.ended, false
+		return slices.Clone(b.kept), end, b.changed, b.ended, false
 	}
 	if position < 0 {
 		position = b.keptStartLocked()
@@ -228,7 +229,7 @@ func (b *Text) Read(position int64) (chunk []byte, next int64, changed chan stru
 		return nil, position, nil, false, true
 	}
 	position = min(position, end)
-	chunk = append([]byte(nil), b.data[position-b.start:]...)
+	chunk = slices.Clone(b.data[position-b.start:])
 	return chunk, end, b.changed, b.ended, false
 }
 

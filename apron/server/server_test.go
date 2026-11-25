@@ -79,7 +79,7 @@ func (b *backend) Disconnected(c *server.Conn) {
 func (b *backend) disconnectedConns() []*server.Conn {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	return append([]*server.Conn(nil), b.disconnected...)
+	return slices.Clone(b.disconnected)
 }
 
 // wired makes a Server for b with config, and the handlers and hooks b

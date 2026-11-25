@@ -353,7 +353,7 @@ func (s *Scheme) begin(r *authn.Request, action string, local bool) (authn.Resul
 			}
 			s.mu.Lock()
 			if existing := s.byHandle[string(handle)]; existing != nil {
-				h.Credentials = append([]webauthn.Credential(nil), existing.Credentials...)
+				h.Credentials = slices.Clone(existing.Credentials)
 			}
 			s.mu.Unlock()
 			h.Handle = handle
@@ -697,7 +697,7 @@ func (s *Scheme) verifyLogin(raw []byte, data *webauthn.SessionData) (handle []b
 			return nil, errors.New("credential of another user handle")
 		}
 		handle = h.Handle
-		return &holder{Handle: h.Handle, Credentials: append([]webauthn.Credential(nil), h.Credentials...)}, nil
+		return &holder{Handle: h.Handle, Credentials: slices.Clone(h.Credentials)}, nil
 	}, *data, parsed)
 	if verifyErr != nil || verified == nil || credential == nil || credential.Authenticator.CloneWarning {
 		if absent && s.forCeremony(parsed, data) {

@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"net/url"
 	"path"
+	"slices"
 	"strings"
 )
 
@@ -15,7 +16,7 @@ import (
 // "://", against the scheme and host, such as "https://*.example.com". A
 // pattern that is not well formed matches nothing.
 func OriginPatterns(patterns ...string) func(r *http.Request) bool {
-	patterns = append([]string(nil), patterns...)
+	patterns = slices.Clone(patterns)
 	return func(r *http.Request) bool {
 		origin := r.Header.Get("Origin")
 		if origin == "" {
