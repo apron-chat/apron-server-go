@@ -50,7 +50,7 @@ func Expect[T apron.Notification](ctx context.Context, c *Client, match func(T) 
 	return got, nil
 }
 
-// Post posts a message (§3.5.1), as bot.Conn.Post does, and returns its
+// Post posts a message (§3.5.1), as bot.Bot.Post does, and returns its
 // result: the new message's message_id, unless the body was empty. The
 // message's notification, which comes before the result, stays for Next
 // and Expect.

@@ -17,9 +17,6 @@ import (
 
 // Errors of a Local connection.
 var (
-	// ErrClosed is a call on a connection that has ended, such as a
-	// Local one, or a reply to a request whose connection has.
-	ErrClosed = errors.New("wire: the connection is closed")
 	// ErrFellBehind ends a Local connection whose OnFrame did not keep up.
 	ErrFellBehind = errors.New("wire: the connection's frame handler fell behind")
 	// ErrReentrant is a call made from inside the handling of another call
@@ -115,7 +112,7 @@ type localReply struct {
 type inFlight struct{ l *Local }
 
 // Local opens an in-process connection, and returns once its server frame
-// is queued. An error of OnConnect is returned as it is, and ErrClosed when
+// is queued. An error of OnConnect is returned as it is, and apron.ErrClosed when
 // the Server is shut down.
 func (s *Server) Local(options LocalOptions) (*Local, error) {
 	s.made()
@@ -138,7 +135,7 @@ func (s *Server) Local(options LocalOptions) (*Local, error) {
 	if s.closed {
 		s.mu.Unlock()
 		cancel()
-		return nil, ErrClosed
+		return nil, apron.ErrClosed
 	}
 	s.serving.Add(1)
 	s.mu.Unlock()
@@ -174,7 +171,7 @@ func (s *Server) Local(options LocalOptions) (*Local, error) {
 	go func() {
 		defer s.serving.Done()
 		<-c.Done()
-		l.shut(ErrClosed)
+		l.shut(apron.ErrClosed)
 		s.mu.Lock()
 		delete(s.conns, c)
 		s.mu.Unlock()
@@ -220,7 +217,7 @@ func (s *Server) openLocal(ctx context.Context, c *Conn, asked apron.User) error
 	}
 	s.mu.Lock()
 	if err == nil && s.closed {
-		err = ErrClosed
+		err = apron.ErrClosed
 	}
 	if err != nil {
 		s.mu.Unlock()
@@ -239,6 +236,16 @@ func (s *Server) openLocal(ctx context.Context, c *Conn, asked apron.User) error
 // Conn is the connection, for the backend.
 func (l *Local) Conn() *Conn { return l.c }
 
+// User is who the connection is signed in as (Conn.User): the user it
+// asked for, or the one OnConnect made it, or since, such as by a rename;
+// the zero User once the backend signed it out.
+func (l *Local) User() apron.User {
+	if u := l.c.User(); u != nil {
+		return *u
+	}
+	return apron.User{}
+}
+
 // Done is closed when the connection ends, once Err has the reason.
 func (l *Local) Done() <-chan struct{} { return l.closed }
 
@@ -251,7 +258,7 @@ func (l *Local) Err() error {
 }
 
 // Close ends the connection. It returns nil, or, when the connection had
-// ended already, why, as Err does: ErrClosed after an earlier Close or the
+// ended already, why, as Err does: apron.ErrClosed after an earlier Close or the
 // Server's Shutdown, or ErrFellBehind. OnDisconnect may still be running
 // when it returns: Done is closed as the connection ends, before it.
 func (l *Local) Close() error {
@@ -393,6 +400,6 @@ type localWriter struct{ l *Local }
 func (w localWriter) Write(_ context.Context, frame []byte) error { return w.l.receive(frame) }
 func (localWriter) Ping(context.Context) error                    { return nil }
 func (w localWriter) Close() error {
-	w.l.shut(ErrClosed)
+	w.l.shut(apron.ErrClosed)
 	return nil
 }

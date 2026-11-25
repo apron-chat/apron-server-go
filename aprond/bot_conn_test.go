@@ -10,8 +10,9 @@ import (
 	"github.com/apron-chat/apron-server-go/apron"
 )
 
-// A bot's connection in package wire/bot's terms makes typed requests, as
-// the bot, and stays signed in as it.
+// A bot's connection in package apron/server's terms makes requests with
+// package apron's params and results, as the bot, and stays signed in as
+// it.
 func TestBotConn(t *testing.T) {
 	var bot *Bot
 	_, httpServer := newTestServer(t, extensionConfig(testExtension{"helper", func(r *Registrar) error {
@@ -27,10 +28,10 @@ func TestBotConn(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if conn.UserID() != "helper" {
-		t.Fatalf("Conn signed in as %q", conn.UserID())
+	if conn.User().UserID != "helper" {
+		t.Fatalf("Conn signed in as %q", conn.User().UserID)
 	}
-	posted, err := conn.Post(ctx, apron.MessageParams{
+	posted, err := callAs[apron.MessageResult](ctx, conn, "message", apron.MessageParams{
 		RoomID: "general",
 		Body:   &apron.Body{Text: "**hi** @" + c.userID, Format: apron.Markdown, Mentions: []string{c.userID}},
 		Ext:    apron.Ext{}.With("helper", map[string]any{"n": 1}),
@@ -41,17 +42,17 @@ func TestBotConn(t *testing.T) {
 	if got := notificationParams(t, c.read(t), "message"); got["message_id"] != posted.MessageID.String() {
 		t.Fatalf("guest got %#v", got)
 	}
-	if _, err := conn.Post(ctx, apron.MessageParams{RoomID: "nowhere", Body: &apron.Body{Text: "x"}}); apron.CodeOf(err) != CodeInvalidParams {
+	if _, err := conn.Call(ctx, "message", apron.MessageParams{RoomID: "nowhere", Body: &apron.Body{Text: "x"}}); apron.CodeOf(err) != CodeInvalidParams {
 		t.Fatalf("Post to no room: %v", err)
 	}
 	if _, err := conn.Call(ctx, "auth", map[string]any{"scheme": "guest"}); apron.CodeOf(err) != CodeDenied {
 		t.Fatalf("auth on a bot's connection: %v", err)
 	}
-	if _, err := conn.Command(ctx, apron.CommandParams{RoomID: "general", Body: &apron.Body{Text: "/help"}}); err != nil {
+	if _, err := conn.Call(ctx, "command", apron.CommandParams{RoomID: "general", Body: &apron.Body{Text: "/help"}}); err != nil {
 		t.Fatalf("/help: %v", err)
 	}
 
-	page, err := conn.History(ctx, apron.HistoryParams{RoomID: "general", Limit: 10})
+	page, err := callAs[apron.HistoryResult](ctx, conn, "history", apron.HistoryParams{RoomID: "general", Limit: 10})
 	if err != nil || len(page.Messages) != 1 {
 		t.Fatalf("History = %+v, %v", page, err)
 	}

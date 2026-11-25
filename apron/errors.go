@@ -6,6 +6,10 @@ import (
 	"time"
 )
 
+// ErrClosed is a call on a connection that has ended, on either side, or
+// a reply to a request whose connection has.
+var ErrClosed = errors.New("apron: the connection is closed")
+
 // Error codes (PROTOCOL.md §1.1).
 const (
 	CodeParseError     = -32700

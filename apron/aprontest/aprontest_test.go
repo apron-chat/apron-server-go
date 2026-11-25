@@ -217,7 +217,7 @@ func TestConnect(t *testing.T) {
 	if n := c.disconnected.Load(); n != 1 {
 		t.Fatalf("%d disconnected after Close", n)
 	}
-	if _, err := client.Next(timeout(t)); !errors.Is(err, server.ErrClosed) {
+	if _, err := client.Next(timeout(t)); !errors.Is(err, apron.ErrClosed) {
 		t.Fatalf("Next after Close: %v", err)
 	}
 }
@@ -236,7 +236,7 @@ func TestSignIn(t *testing.T) {
 	ctx := timeout(t)
 	for {
 		f, err := client.Next(ctx) // The frames sent after the result, then the close.
-		if errors.Is(err, server.ErrClosed) {
+		if errors.Is(err, apron.ErrClosed) {
 			break
 		}
 		if err != nil || f.Method == "" {

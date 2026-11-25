@@ -184,7 +184,7 @@ func TestClosingConnectionsDoNothing(t *testing.T) {
 	c.closeWithError(Denied("closing"))
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if _, err := l.Call(ctx, "push_register", map[string]any{"kind": "relay", "url": "https://push.example/x", "token": "t"}); !errors.Is(err, server.ErrClosed) {
+	if _, err := l.Call(ctx, "push_register", map[string]any{"kind": "relay", "url": "https://push.example/x", "token": "t"}); !errors.Is(err, apron.ErrClosed) {
 		t.Fatalf("a closing connection's request: %v", err)
 	}
 	if app.pushes.Len() != 0 {

@@ -72,7 +72,10 @@ func NewChat() *Chat {
 	// posts goes through Message, as anyone's does. Its connection opens
 	// at once, so it starts once c.Server is set, for the handlers its
 	// connection calls.
-	if _, err := bot.Start(c.Server, bot.Options{User: apron.User{UserID: "echo", Name: "Echo"}, OnMessage: echo}); err != nil {
+	local := func(_ context.Context, onFrame func(apron.Frame)) (bot.Conn, error) {
+		return c.Server.Local(server.LocalOptions{User: apron.User{UserID: "echo", Name: "Echo"}, OnFrame: onFrame})
+	}
+	if _, err := bot.Start(local, bot.Options{OnMessage: echo}); err != nil {
 		panic(err) // A Server that is not shut down opens it.
 	}
 	return c

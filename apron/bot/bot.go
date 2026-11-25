@@ -1,20 +1,21 @@
-// Package bot runs bots on a server.Server: users of the server's own, in
-// the same program, that read what the server sends them and answer, such
-// as a bot that replies when someone mentions it. It works on any backend,
-// the reference server and a gateway in front of another chat system
-// alike: a bot's connection is in process (server.Server.Local), signed in
-// from the start, and its requests take a network client's path, so the
-// backend checks, delivers, and limits them as anyone's. The backend takes
-// a bot's connection as it takes a network one, in OnConnect, with the
-// value the bot gives it (Options.Data), as it would sign it in.
+// Package bot runs bots: users of a server's that read what it sends them
+// and answer, such as a bot that replies when someone mentions it. A bot
+// works on any connection it is given (Conn), which it opens with a
+// Dialer, and imports only package apron: in the same program as a
+// server, on an in-process connection (server.Server.Local), signed in
+// from the start, whose requests take a network client's path, so the
+// backend checks, delivers, and limits them as anyone's; or on a network
+// connection to any Apron server.
 //
-// A [Conn] is one connection, with typed requests: [Conn.Post],
-// [Conn.Command], [Conn.Join], [Conn.History], and the raw Call of the
-// server.Local it is. A [Bot] keeps one open, opened again when the server
-// ends it, and hands what it receives to its handlers:
+// A [Bot] keeps one connection open, opened again when the server ends
+// it, makes typed requests on it ([Bot.Post], [Bot.Reply],
+// [Bot.Command], [Bot.Join], [Bot.History], and the raw [Bot.Call]), and
+// hands what it receives to its handlers. On a server in the same
+// program:
 //
-//	echo, err := bot.Start(server, bot.Options{
-//		User: apron.User{UserID: "echo", Name: "Echo"},
+//	echo, err := bot.Start(func(_ context.Context, onFrame func(apron.Frame)) (bot.Conn, error) {
+//		return srv.Local(server.LocalOptions{User: apron.User{UserID: "echo", Name: "Echo"}, OnFrame: onFrame})
+//	}, bot.Options{
 //		OnMessage: func(ctx context.Context, b *bot.Bot, m apron.Message) {
 //			if b.Mentioned(m) {
 //				b.Reply(ctx, m, "You said: "+m.Body.Text)
@@ -22,19 +23,17 @@
 //		},
 //	})
 //
-// A bot asks to be Options.User, and the backend may make it another user
-// as its connection opens, such as one with a user_id of the backend's
-// own, or the name it asked for normalized (server.Local): [Bot.User] is
-// who it is, and what tells its own messages from others' and its
-// mentions. A message that names the bot only in its text, as people
-// who type @echo or "echo:" on a client that sends no mentions do, is
-// [Bot.Addressed].
+// The Dialer says who the bot asks to be, and the server may make it
+// another user as its connection opens, such as one with a user_id of the
+// backend's own, or the name it asked for normalized (server.Local):
+// [Bot.User] is who it is, and what tells its own messages from others'
+// and its mentions. A message that names the bot only in its text, as
+// people who type @echo or "echo:" on a client that sends no mentions do,
+// is [Bot.Addressed].
 //
 // A handler may make requests, such as a reply, and wait for their
 // results, which never wait behind the frames it has yet to handle; see
 // Options.OnMessage.
-//
-// Package apron's bots make their requests on a Conn.
 package bot
 
 import (
@@ -50,43 +49,49 @@ import (
 	"unicode/utf8"
 
 	"github.com/apron-chat/apron-server-go/apron"
-	"github.com/apron-chat/apron-server-go/apron/server"
 )
 
-// Conn is a connection of a bot's: a server.Local one, whose requests it
-// makes typed. Its errors are those of server.Local.Call: a request's error
-// reply as a *apron.Error, and server.ErrClosed or server.ErrFellBehind once
-// the connection has ended.
-type Conn struct {
-	*server.Local
+// Conn is a connection a bot makes its requests on, signed in as the
+// bot: an in-process one (*server.Local), or a network one. A Dialer opens
+// one.
+type Conn interface {
+	// Call sends a request with params, any value that encodes as a JSON
+	// object, and returns its result, or its error reply as an
+	// *apron.Error. Once the connection has ended, its error wraps
+	// apron.ErrClosed, or tells why it ended.
+	Call(ctx context.Context, method string, params any) (jsontext.Value, error)
+	// User is who the connection is signed in as: the user it asked for,
+	// or the one the server made it, such as by a rename since; the zero
+	// User once it is signed out.
+	User() apron.User
+	// Done is closed once the connection has ended.
+	Done() <-chan struct{}
+	// Close ends the connection.
+	Close() error
 }
 
-// Dial opens a connection on s, as s.Local does.
-func Dial(s *server.Server, options server.LocalOptions) (*Conn, error) {
-	l, err := s.Local(options)
-	if err != nil {
-		return nil, err
-	}
-	return &Conn{l}, nil
-}
+// A Dialer opens a connection for a bot, signed in as the user the bot is
+// to be, and hands each frame the server sends it but the replies to Call,
+// which go to Call, to onFrame: in order, on a goroutine of the
+// connection's own, from the server frame on. onFrame is nil when the bot
+// has no handler for them, and may be called before the Dialer returns:
+// it waits until it has, so a reply to Call must never wait behind the
+// frames onFrame has yet to take, as it does not on a server.Local. Its
+// error wraps apron.ErrClosed when the connection will never open again,
+// such as on a server that shut down: the bot then stops opening it.
+//
+// On a server.Server in the same program, a Dialer opens a Local
+// connection:
+//
+//	func(_ context.Context, onFrame func(apron.Frame)) (bot.Conn, error) {
+//		return srv.Local(server.LocalOptions{User: echo, OnFrame: onFrame})
+//	}
+type Dialer func(ctx context.Context, onFrame func(apron.Frame)) (Conn, error)
 
-// UserID is the user_id of the user the connection is signed in as.
-func (c *Conn) UserID() string { return c.Conn().UserID() }
-
-// User is who the connection is signed in as: the user it asked for, or
-// the one the backend made it as it opened, or since, such as by a rename
-// (server.Local); the zero User if the backend signed it out.
-func (c *Conn) User() apron.User {
-	if u := c.Conn().User(); u != nil {
-		return *u
-	}
-	return apron.User{}
-}
-
-// call sends a request, and decodes its result.
-func call[T any](ctx context.Context, c *Conn, method string, params any) (T, error) {
+// call sends a request on conn, and decodes its result.
+func call[T any](ctx context.Context, conn Conn, method string, params any) (T, error) {
 	var result T
-	raw, err := c.Call(ctx, method, params)
+	raw, err := conn.Call(ctx, method, params)
 	if err != nil {
 		return result, err
 	}
@@ -96,44 +101,8 @@ func call[T any](ctx context.Context, c *Conn, method string, params any) (T, er
 	return result, nil
 }
 
-// Post posts a message (§3.5.1), and returns its result: the new
-// message's message_id, unless the body was empty.
-func (c *Conn) Post(ctx context.Context, p apron.MessageParams) (apron.MessageResult, error) {
-	return call[apron.MessageResult](ctx, c, "message", p)
-}
-
-// Command runs a command (§4.1), whose body.text is the command line. Its
-// replies come before its result, as notifications.
-func (c *Conn) Command(ctx context.Context, p apron.CommandParams) (apron.CommandResult, error) {
-	return call[apron.CommandResult](ctx, c, "command", p)
-}
-
-// Join joins the room (§4.2.2).
-func (c *Conn) Join(ctx context.Context, roomID string) error {
-	_, err := c.Call(ctx, "room_join", apron.RoomJoinParams{RoomID: roomID})
-	return err
-}
-
-// History reads a page of a room's log, or of every room the connection
-// receives (§4.3).
-func (c *Conn) History(ctx context.Context, p apron.HistoryParams) (apron.HistoryResult, error) {
-	return call[apron.HistoryResult](ctx, c, "history", p)
-}
-
 // Options configure a Bot.
 type Options struct {
-	// User is who the bot asks to be: each of its connections is signed
-	// in as User (server.LocalOptions.User), unless the backend makes it
-	// another user as it opens (Bot.User).
-	User apron.User
-	// Data, if set, makes the backend's value for each connection the bot
-	// opens (server.LocalOptions.Data), such as the backend's own record of
-	// the connection, which its OnConnect tells from a network one's.
-	Data func() any
-	// Queue bounds the frames waiting for the handlers
-	// (server.LocalOptions.Queue). A handler that lets more pile up ends
-	// the connection, and the Bot opens another.
-	Queue int
 	// OnMessage, if set, gets each message the bot receives that is not
 	// its own (§3.5): new messages, their edits and deletions, and
 	// notices, in order, one at a time, on a goroutine of the
@@ -143,9 +112,10 @@ type Options struct {
 	// a result goes straight to the request that waits for it, never
 	// behind the frames OnMessage has yet to handle, so it cannot wait for
 	// itself. The frames that arrive meanwhile wait for OnMessage to
-	// return, which keeps them in order, and count toward Queue: a handler
-	// that waits so long that more than Queue pile up ends the connection
-	// (server.ErrFellBehind), and the Bot opens another, without them. So a
+	// return, which keeps them in order, and count toward the connection's
+	// queue (server.LocalOptions.Queue): a handler that waits so long that
+	// more pile up ends the connection (server.ErrFellBehind), and the Bot
+	// opens another, without them. So a
 	// handler waits only for what the server answers promptly, such as a
 	// reply; one that waits on anything else, such as another service, a
 	// timer, or a server that answers later (server.Reply.Later) after a
@@ -163,13 +133,13 @@ type Options struct {
 // sign-out or when a handler falls behind, unless the server is shut
 // down. Its methods are safe for concurrent use.
 type Bot struct {
-	s       *server.Server
+	dial    Dialer
 	options Options
 	ctx     context.Context
 	cancel  context.CancelFunc
 
 	mu   sync.Mutex
-	conn *Conn
+	conn Conn
 }
 
 // Reopening waits at least this long, and at most that, before the Bot
@@ -179,10 +149,10 @@ const (
 	maxReopen = time.Minute
 )
 
-// Start starts a bot on s, and returns once its first connection is open,
-// or the error of opening it.
-func Start(s *server.Server, options Options) (*Bot, error) {
-	b := &Bot{s: s, options: options}
+// Start starts a bot on the connections dial opens, and returns once its
+// first connection is open, or the error of opening it.
+func Start(dial Dialer, options Options) (*Bot, error) {
+	b := &Bot{dial: dial, options: options}
 	b.ctx, b.cancel = context.WithCancel(context.Background())
 	if _, err := b.Conn(); err != nil {
 		b.cancel()
@@ -192,31 +162,29 @@ func Start(s *server.Server, options Options) (*Bot, error) {
 }
 
 // User is who the bot is: its connection's user (Conn.User), which the
-// backend may have made another than Options.User as it opened, such as
-// one with a user_id of its own, or the name normalized, and which a
-// rename changes; Options.User before its first connection opens.
+// server may have made another than the Dialer asked for as it opened,
+// such as one with a user_id of its own, or the name normalized, and which
+// a rename changes.
 func (b *Bot) User() apron.User {
 	b.mu.Lock()
 	conn := b.conn
 	b.mu.Unlock()
-	if conn != nil {
-		if u := conn.Conn().User(); u != nil {
-			return *u
-		}
+	if conn == nil {
+		return apron.User{}
 	}
-	return b.options.User
+	return conn.User()
 }
 
 // UserID is the bot's user_id, its User's.
 func (b *Bot) UserID() string { return b.User().UserID }
 
 // Conn returns the bot's connection, opened again if it has ended. Once
-// the Bot is closed, it is server.ErrClosed.
-func (b *Bot) Conn() (*Conn, error) {
+// the Bot is closed, its error is apron.ErrClosed.
+func (b *Bot) Conn() (Conn, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if b.ctx.Err() != nil {
-		return nil, server.ErrClosed
+		return nil, apron.ErrClosed
 	}
 	if b.conn != nil {
 		select {
@@ -225,15 +193,20 @@ func (b *Bot) Conn() (*Conn, error) {
 			return b.conn, nil
 		}
 	}
-	options := server.LocalOptions{User: b.options.User, Queue: b.options.Queue}
-	if b.options.Data != nil {
-		options.Data = b.options.Data()
-	}
+	var onFrame func(apron.Frame)
+	var r *receiver
 	listens := b.options.OnMessage != nil || b.options.OnFrame != nil
 	if listens {
-		options.OnFrame = (&receiver{b: b, self: b.options.User.UserID}).receive
+		r = &receiver{b: b, opened: make(chan struct{})}
+		onFrame = r.receive
 	}
-	conn, err := Dial(b.s, options)
+	conn, err := b.dial(b.ctx, onFrame)
+	if r != nil {
+		if err == nil {
+			r.self, r.open = conn.User().UserID, true
+		}
+		close(r.opened)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -248,7 +221,7 @@ func (b *Bot) Conn() (*Conn, error) {
 
 // reopen opens the bot's connection again once conn ends, unless the Bot
 // is closed, or the server shut down.
-func (b *Bot) reopen(conn *Conn) {
+func (b *Bot) reopen(conn Conn) {
 	select {
 	case <-conn.Done():
 	case <-b.ctx.Done():
@@ -260,7 +233,7 @@ func (b *Bot) reopen(conn *Conn) {
 		case <-b.ctx.Done():
 			return
 		}
-		if _, err := b.Conn(); err == nil || errors.Is(err, server.ErrClosed) {
+		if _, err := b.Conn(); err == nil || errors.Is(err, apron.ErrClosed) {
 			return
 		}
 	}
@@ -268,18 +241,28 @@ func (b *Bot) reopen(conn *Conn) {
 
 // receiver hands the frames of one of the bot's connections to its
 // handlers. It keeps the connection's user_id as its frames tell it, the
-// one it asked for until a user notification says otherwise ({"you": ...},
-// §3.3.3), which tells the bot's own messages by the user_id it had when
-// it sent them, whatever it has become since.
+// one it had as it opened until a user notification says otherwise
+// ({"you": ...}, §3.3.3), which tells the bot's own messages by the
+// user_id it had when it sent them, whatever it has become since.
 type receiver struct {
 	b *Bot
-	// self is used only on the connection's frame goroutine.
+	// opened is closed once the Dialer returned, with open set if it
+	// opened the connection, and self its user_id.
+	opened chan struct{}
+	open   bool
+	// self is used only on the connection's frame goroutine, once opened
+	// is closed.
 	self string
 }
 
-// receive hands a frame to the handlers.
+// receive hands a frame to the handlers, once the connection is open.
 func (r *receiver) receive(frame apron.Frame) {
+	<-r.opened
 	b := r.b
+	if !r.open {
+		// The Dialer failed: the connection is not the bot's.
+		return
+	}
 	var head struct {
 		Method string         `json:"method"`
 		ID     jsontext.Value `json:"id"`
@@ -403,13 +386,23 @@ func cutPrefixFold(s, prefix string) (string, bool) {
 	return s, true
 }
 
-// Post posts a message on the bot's connection (Conn.Post).
+// Call sends a request on the bot's connection (Conn.Call).
+func (b *Bot) Call(ctx context.Context, method string, params any) (jsontext.Value, error) {
+	conn, err := b.Conn()
+	if err != nil {
+		return nil, err
+	}
+	return conn.Call(ctx, method, params)
+}
+
+// Post posts a message (§3.5.1), and returns its result: the new
+// message's message_id, unless the body was empty.
 func (b *Bot) Post(ctx context.Context, p apron.MessageParams) (apron.MessageResult, error) {
 	conn, err := b.Conn()
 	if err != nil {
 		return apron.MessageResult{}, err
 	}
-	return conn.Post(ctx, p)
+	return call[apron.MessageResult](ctx, conn, "message", p)
 }
 
 // Reply posts text in the room of the message to, as a reply to it
@@ -422,31 +415,30 @@ func (b *Bot) Reply(ctx context.Context, to apron.Message, text string) (apron.M
 	return b.Post(ctx, p)
 }
 
-// Command runs a command on the bot's connection (Conn.Command).
+// Command runs a command (§4.1), whose body.text is the command line. Its
+// replies come before its result, as notifications.
 func (b *Bot) Command(ctx context.Context, p apron.CommandParams) (apron.CommandResult, error) {
 	conn, err := b.Conn()
 	if err != nil {
 		return apron.CommandResult{}, err
 	}
-	return conn.Command(ctx, p)
+	return call[apron.CommandResult](ctx, conn, "command", p)
 }
 
-// Join joins a room on the bot's connection (Conn.Join).
+// Join joins the room (§4.2.2).
 func (b *Bot) Join(ctx context.Context, roomID string) error {
-	conn, err := b.Conn()
-	if err != nil {
-		return err
-	}
-	return conn.Join(ctx, roomID)
+	_, err := b.Call(ctx, "room_join", apron.RoomJoinParams{RoomID: roomID})
+	return err
 }
 
-// History reads history on the bot's connection (Conn.History).
+// History reads a page of a room's log, or of every room the connection
+// receives (§4.3).
 func (b *Bot) History(ctx context.Context, p apron.HistoryParams) (apron.HistoryResult, error) {
 	conn, err := b.Conn()
 	if err != nil {
 		return apron.HistoryResult{}, err
 	}
-	return conn.History(ctx, p)
+	return call[apron.HistoryResult](ctx, conn, "history", p)
 }
 
 // Close ends the bot's connection, and opens no other: the handlers get

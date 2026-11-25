@@ -15,7 +15,6 @@ import (
 	"sync"
 
 	"github.com/apron-chat/apron-server-go/apron"
-	"github.com/apron-chat/apron-server-go/apron/bot"
 	"github.com/apron-chat/apron-server-go/apron/server"
 	"github.com/apron-chat/apron-server-go/aprond/internal/livetext"
 )
@@ -131,13 +130,14 @@ func (b *Bot) conn() (*Session, error) {
 	return session, nil
 }
 
-// Conn is the bot's own connection in package wire/bot's terms
+// Conn is the bot's own connection in package apron/server's terms
 // (Session.Conn), made again if the server closed it. An extension needs
-// it only for what the Bot's own methods do not cover, in wire's typed
-// params and results: such as Post with a apron.MessageParams, or History,
-// whose page has every kind of record, not only messages (MessageOf reads
-// those).
-func (b *Bot) Conn() (*bot.Conn, error) {
+// it only for what the Bot's own methods do not cover, with package
+// apron's params and results: such as a message request with an
+// apron.MessageParams, or history, whose page has every kind of record,
+// not only messages (MessageOf reads those). It is a bot.Conn, for a
+// bot of package apron/bot.
+func (b *Bot) Conn() (*server.Local, error) {
 	session, err := b.conn()
 	if err != nil {
 		return nil, err
@@ -211,7 +211,7 @@ type Session struct {
 	s    *Server
 	bot  *Bot
 	c    *client
-	conn *bot.Conn
+	conn *server.Local
 	// done is closed once the server has forgotten the connection, with
 	// err set.
 	done  chan struct{}
@@ -251,9 +251,9 @@ func (b *Bot) Connect(options SessionOptions) (*Session, error) {
 	// wire opens the connection as a network one, calling backend.connected
 	// (connectSession) and Hello, which take s.mu, so it is opened without
 	// it.
-	conn, err := bot.Dial(s.srv, local)
+	conn, err := s.srv.Local(local)
 	switch {
-	case errors.Is(err, server.ErrClosed):
+	case errors.Is(err, apron.ErrClosed):
 		return nil, ErrServerClosed
 	case err != nil:
 		return nil, err
@@ -337,13 +337,13 @@ func (s *Server) streamBaseURLLocked() (string, error) {
 // UserID is the bot's user_id.
 func (b *Session) UserID() string { return b.bot.userID }
 
-// Conn is the session's connection in package wire/bot's terms, as
+// Conn is the session's connection in package apron/server's terms, as
 // Bot.Conn is the bot's: for what the session's own methods do not cover,
-// typed with wire's params and results. Its errors are wire's: a refusal
-// as a *apron.Error, which is an *Error, and server.ErrClosed once the
-// session is closed, where the session's own methods return Err's. auth is
-// refused: a session stays signed in as its bot.
-func (b *Session) Conn() *bot.Conn { return b.conn }
+// with package apron's params and results. Its errors are apron/server's:
+// a refusal as a *apron.Error, which is an *Error, and apron.ErrClosed
+// once the session is closed, where the session's own methods return
+// Err's. auth is refused: a session stays signed in as its bot.
+func (b *Session) Conn() *server.Local { return b.conn }
 
 // Done is closed once the session is closed, by Close or by the server.
 func (b *Session) Done() <-chan struct{} { return b.done }
@@ -407,7 +407,7 @@ func (b *Session) Call(ctx context.Context, method string, params any) (jsontext
 // requestErr is the error of a request: why the session closed, once it
 // has.
 func (b *Session) requestErr(err error) error {
-	if errors.Is(err, server.ErrClosed) || errors.Is(err, server.ErrFellBehind) {
+	if errors.Is(err, apron.ErrClosed) || errors.Is(err, server.ErrFellBehind) {
 		return b.closedErr()
 	}
 	return err
@@ -511,7 +511,7 @@ func (b *Session) Post(ctx context.Context, roomID, text string, options ...Post
 	if err := p.check(); err != nil {
 		return "", err
 	}
-	result, err := b.conn.Post(ctx, p.params)
+	result, err := callAs[apron.MessageResult](ctx, b.conn, "message", p.params)
 	if err != nil || result.MessageID == 0 {
 		return "", b.requestErr(err)
 	}
@@ -531,7 +531,8 @@ func newPost(roomID, text, extension string) *postRequest {
 
 // Join joins the room (§4.2.2).
 func (b *Session) Join(ctx context.Context, roomID string) error {
-	return b.requestErr(b.conn.Join(ctx, roomID))
+	_, err := b.conn.Call(ctx, "room_join", apron.RoomJoinParams{RoomID: roomID})
+	return b.requestErr(err)
 }
 
 // HistoryOptions bound a History page (§4.3): records after After, before
@@ -543,8 +544,8 @@ type HistoryOptions struct {
 
 // History returns the room's message records in a page of its log, oldest
 // first, as the bot may read them (§4.3). A message edited within the page
-// has a record for each snapshot. Conn's History reads the page in wire's
-// terms, with its other records and bounds.
+// has a record for each snapshot. A history request on Conn reads the
+// page in package apron's terms, with its other records and bounds.
 func (b *Session) History(ctx context.Context, roomID string, options HistoryOptions) ([]Message, error) {
 	params := apron.HistoryParams{RoomID: roomID, Limit: max(options.Limit, 0)}
 	if options.After > 0 {
@@ -555,7 +556,7 @@ func (b *Session) History(ctx context.Context, roomID string, options HistoryOpt
 		before := apron.LogID(options.Before)
 		params.Before = &before
 	}
-	page, err := b.conn.History(ctx, params)
+	page, err := callAs[apron.HistoryResult](ctx, b.conn, "history", params)
 	if err != nil {
 		return nil, b.requestErr(err)
 	}
@@ -654,7 +655,7 @@ func (b *Session) stream(ctx context.Context, roomID, command, args string, opti
 	if err := p.check(); err != nil {
 		return nil, err
 	}
-	result, err := b.conn.Command(ctx, apron.CommandParams(p.params))
+	result, err := callAs[apron.CommandResult](ctx, b.conn, "command", apron.CommandParams(p.params))
 	if err != nil {
 		return nil, b.requestErr(err)
 	}
@@ -760,4 +761,15 @@ func (w *LiveWriter) Close() error {
 		s.finishLiveLocked(w.e)
 	}
 	return nil
+}
+
+// callAs sends a request on conn, and decodes its result.
+func callAs[T any](ctx context.Context, conn *server.Local, method string, params any) (T, error) {
+	var result T
+	raw, err := conn.Call(ctx, method, params)
+	if err != nil {
+		return result, err
+	}
+	err = json.Unmarshal(raw, &result)
+	return result, err
 }

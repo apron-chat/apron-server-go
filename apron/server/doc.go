@@ -173,7 +173,7 @@
 // up its own connection either, and gets its outcome. When the connection
 // ends first, the request fails, so that its duplicates are not left
 // waiting, and is not kept, so that a retry runs again; Send and Fail then
-// return ErrClosed. Auth is a barrier, finished before the frames after it
+// return apron.ErrClosed. Auth is a barrier, finished before the frames after it
 // (§3.2.2), and is never answered later. A [Handler] answers later as a
 // typed handler does, and [Local.Call] waits for a reply answered later,
 // while the next Call on the connection does not.

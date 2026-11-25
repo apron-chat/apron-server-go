@@ -158,7 +158,7 @@ func expectClosed(t *testing.T, c *aprontest.Client) {
 	switch {
 	case err == nil:
 		t.Fatalf("got %s, want the connection closed", f.Raw)
-	case !errors.Is(err, server.ErrClosed):
+	case !errors.Is(err, apron.ErrClosed):
 		t.Fatalf("the connection stayed open: %v", err)
 	}
 }

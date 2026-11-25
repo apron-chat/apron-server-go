@@ -102,7 +102,7 @@ func (r *Request) finishOrDefer(finish func(dedupOutcome)) (outcome dedupOutcome
 // or whose connection ended before it was answered later.
 func (r *Request) repliedErrLocked() error {
 	if r.later != nil && r.later.closed {
-		return ErrClosed
+		return apron.ErrClosed
 	}
 	return ErrReplied
 }
@@ -132,7 +132,7 @@ func (r *Request) failWith(err error) error {
 	case r.notification:
 		return nil
 	case !r.failLocked(e):
-		return ErrClosed
+		return apron.ErrClosed
 	}
 	return nil
 }

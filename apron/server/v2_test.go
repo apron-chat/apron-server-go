@@ -231,7 +231,7 @@ func TestLocal(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("Local did not close")
 	}
-	if _, err := l.Call(context.Background(), "whoami", nil); !errors.Is(err, server.ErrClosed) {
+	if _, err := l.Call(context.Background(), "whoami", nil); !errors.Is(err, apron.ErrClosed) {
 		t.Fatalf("after Close: %v", err)
 	}
 	deadline := time.Now().Add(5 * time.Second)
@@ -311,7 +311,7 @@ func TestLocalOpens(t *testing.T) {
 		t.Fatalf("Close: %v", err)
 	}
 	<-l.Done()
-	if err := l.Close(); !errors.Is(err, server.ErrClosed) {
+	if err := l.Close(); !errors.Is(err, apron.ErrClosed) {
 		t.Fatalf("a second Close: %v", err)
 	}
 	if err := s.Shutdown(context.Background()); err != nil {
@@ -320,7 +320,7 @@ func TestLocalOpens(t *testing.T) {
 	if n := disconnects.Load(); n != 2 {
 		t.Fatalf("%d disconnects, want the refused connection's and the one that opened", n)
 	}
-	if _, err := s.Local(server.LocalOptions{User: apron.User{UserID: "bot"}}); !errors.Is(err, server.ErrClosed) {
+	if _, err := s.Local(server.LocalOptions{User: apron.User{UserID: "bot"}}); !errors.Is(err, apron.ErrClosed) {
 		t.Fatalf("after Shutdown: %v", err)
 	}
 }
@@ -371,7 +371,7 @@ func TestDisconnectAfterRefusal(t *testing.T) {
 		for {
 			// The server frame and the error, for an *Error.
 			if _, err := client.Next(wait(t)); err != nil {
-				if !errors.Is(err, server.ErrClosed) {
+				if !errors.Is(err, apron.ErrClosed) {
 					t.Fatalf("refused with %v: %v", refusal, err)
 				}
 				break

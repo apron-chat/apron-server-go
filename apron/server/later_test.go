@@ -171,7 +171,7 @@ func TestLaterFail(t *testing.T) {
 
 // A request answered later whose connection ends fails: its duplicate on
 // another connection is not left waiting, the outcome is not kept, and
-// Send returns ErrClosed.
+// Send returns apron.ErrClosed.
 func TestLaterConnectionEnds(t *testing.T) {
 	b := newUpstream()
 	s := wired(b, server.Config{})
@@ -192,8 +192,8 @@ func TestLaterConnectionEnds(t *testing.T) {
 	if pending.ctx.Err() == nil {
 		t.Fatal("the request's ctx outlived its connection")
 	}
-	if err := pending.reply.Send(result("too late")); !errors.Is(err, server.ErrClosed) {
-		t.Fatalf("Send after the connection ended: %v, want ErrClosed", err)
+	if err := pending.reply.Send(result("too late")); !errors.Is(err, apron.ErrClosed) {
+		t.Fatalf("Send after the connection ended: %v, want apron.ErrClosed", err)
 	}
 	// Not kept: a retry runs again.
 	send(t, c2, slow)

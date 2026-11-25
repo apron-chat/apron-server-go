@@ -39,7 +39,7 @@ type Reply[T any] struct {
 // never blocks.
 //
 // Send returns ErrReplied when the request has its reply already, and
-// ErrClosed when the connection is closed. A result the method may not
+// apron.ErrClosed when the connection is closed. A result the method may not
 // have, such as an auth result whose You has no valid user_id, is logged
 // and answered error/internal_error, which Send returns; then is not sent.
 // A handler may return what Send returns.
@@ -79,7 +79,7 @@ func (p Reply[T]) Send(result T, then ...apron.Frame) error {
 // without holding up its own connection either, and gets its outcome. When
 // the connection ends before the reply, the request fails, so that its
 // duplicates are not left waiting, and is not kept for deduplication;
-// Send and Fail then return ErrClosed.
+// Send and Fail then return apron.ErrClosed.
 //
 // Later returns nil, and does nothing, for a request that has its reply.
 // Auth is a barrier, answered before the connection's next frame
@@ -97,7 +97,7 @@ func (p Reply[T]) Later() error {
 // else error/internal_error, which is logged, as an error a handler
 // returns is. It is how a request answered later (Later) fails, and
 // returns nil once the error is queued, ErrReplied when the request has
-// its reply already, and ErrClosed when the connection is closed.
+// its reply already, and apron.ErrClosed when the connection is closed.
 func (p Reply[T]) Fail(err error) error {
 	if p.r == nil {
 		return errors.New("wire: Fail on a zero Reply")
@@ -150,7 +150,7 @@ func (r *Request) send(sent any, value func() (any, error), apply func(), then [
 	switch {
 	case frame == nil:
 		r.c.Close()
-		return ErrClosed
+		return apron.ErrClosed
 	case e != nil:
 		r.c.enqueue([]apron.Frame{frame})
 		return e
@@ -161,7 +161,7 @@ func (r *Request) send(sent any, value func() (any, error), apply func(), then [
 	// A reply is never held back by auth (§3.2.2): what is held is what
 	// comes after it.
 	if !r.c.enqueue(append([]apron.Frame{frame}, then...)) {
-		return ErrClosed
+		return apron.ErrClosed
 	}
 	return nil
 }

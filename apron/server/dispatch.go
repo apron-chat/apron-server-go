@@ -201,7 +201,7 @@ func (s *Server) afterReply(ctx context.Context, method string, err error) {
 	switch e, ok := asError(err); {
 	case ok:
 		s.logger().Debug("wire: a request was refused after its reply", "method", method, "error", e)
-	case ctx.Err() != nil, errors.Is(err, ErrClosed):
+	case ctx.Err() != nil, errors.Is(err, apron.ErrClosed):
 		// Cut short by its connection's end.
 	default:
 		s.logger().Error("wire: a request failed after its reply", "method", method, "error", err)

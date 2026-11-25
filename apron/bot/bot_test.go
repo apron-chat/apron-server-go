@@ -97,6 +97,17 @@ func (c *chat) RoomList(context.Context, *server.Conn, apron.RoomListParams, ser
 	return apron.Unsupported("No rooms")
 }
 
+// *server.Local is the in-process bot.Conn.
+var _ bot.Conn = (*server.Local)(nil)
+
+// local dials Local connections on s with options, as a bot's.
+func local(s *server.Server, options server.LocalOptions) bot.Dialer {
+	return func(_ context.Context, onFrame func(apron.Frame)) (bot.Conn, error) {
+		options.OnFrame = onFrame
+		return s.Local(options)
+	}
+}
+
 func timeout(t *testing.T) context.Context {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	t.Cleanup(cancel)
@@ -108,9 +119,7 @@ func timeout(t *testing.T) context.Context {
 func TestMentions(t *testing.T) {
 	c := newChat()
 	other := make(chan apron.Message, 8)
-	echo, err := bot.Start(c.server, bot.Options{
-		User: apron.User{UserID: "echo", Name: "Echo"},
-		Data: func() any { return "echo's" },
+	echo, err := bot.Start(local(c.server, server.LocalOptions{User: apron.User{UserID: "echo", Name: "Echo"}, Data: "echo's"}), bot.Options{
 		OnMessage: func(ctx context.Context, b *bot.Bot, m apron.Message) {
 			if !b.Mentioned(m) {
 				other <- m
@@ -154,11 +163,11 @@ func TestMentions(t *testing.T) {
 	c.mu.Unlock()
 }
 
-// A Conn's typed requests answer with wire's results and errors.
+// A Bot's typed requests answer with package apron's results and errors.
 func TestRequests(t *testing.T) {
 	c := newChat()
 	ctx := timeout(t)
-	conn, err := bot.Dial(c.server, server.LocalOptions{User: apron.User{UserID: "helper"}})
+	conn, err := bot.Start(local(c.server, server.LocalOptions{User: apron.User{UserID: "helper"}}), bot.Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -185,7 +194,7 @@ func TestRequests(t *testing.T) {
 		t.Fatalf("History: %+v %v", page, err)
 	}
 	conn.Close()
-	if _, err := conn.Post(ctx, apron.MessageParams{Body: &apron.Body{Text: "two"}}); !errors.Is(err, server.ErrClosed) {
+	if _, err := conn.Post(ctx, apron.MessageParams{Body: &apron.Body{Text: "two"}}); !errors.Is(err, apron.ErrClosed) {
 		t.Fatalf("Post after Close: %v", err)
 	}
 }
@@ -195,12 +204,12 @@ func TestRequests(t *testing.T) {
 func TestReopen(t *testing.T) {
 	c := newChat()
 	ctx := timeout(t)
-	quiet, err := bot.Start(c.server, bot.Options{User: apron.User{UserID: "quiet"}})
+	quiet, err := bot.Start(local(c.server, server.LocalOptions{User: apron.User{UserID: "quiet"}}), bot.Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	first, _ := quiet.Conn()
-	first.Conn().Close()
+	first.(*server.Local).Conn().Close()
 	<-first.Done()
 	if _, err := quiet.Post(ctx, apron.MessageParams{Body: &apron.Body{Text: "back"}}); err != nil {
 		t.Fatalf("Post after the server closed the connection: %v", err)
@@ -210,15 +219,14 @@ func TestReopen(t *testing.T) {
 	}
 
 	heard := make(chan string, 8)
-	listener, err := bot.Start(c.server, bot.Options{
-		User:      apron.User{UserID: "listener"},
+	listener, err := bot.Start(local(c.server, server.LocalOptions{User: apron.User{UserID: "listener"}}), bot.Options{
 		OnMessage: func(_ context.Context, _ *bot.Bot, m apron.Message) { heard <- m.Body.Text },
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	conn, _ := listener.Conn()
-	conn.Conn().Close()
+	conn.(*server.Local).Conn().Close()
 	<-conn.Done()
 	deadline := time.Now().Add(3 * time.Second)
 	for {
@@ -241,7 +249,7 @@ func TestReopen(t *testing.T) {
 
 	listener.Close()
 	quiet.Close()
-	if _, err := quiet.Post(ctx, apron.MessageParams{Body: &apron.Body{Text: "gone"}}); !errors.Is(err, server.ErrClosed) {
+	if _, err := quiet.Post(ctx, apron.MessageParams{Body: &apron.Body{Text: "gone"}}); !errors.Is(err, apron.ErrClosed) {
 		t.Fatalf("Post after Close: %v", err)
 	}
 	if err := c.server.Shutdown(ctx); err != nil {
@@ -271,8 +279,7 @@ func TestUserFromBackend(t *testing.T) {
 	}
 	heard := make(chan apron.Message, 8)
 	you := make(chan string, 8)
-	echo, err := bot.Start(c.server, bot.Options{
-		User: apron.User{UserID: "echo", Name: "Echo"},
+	echo, err := bot.Start(local(c.server, server.LocalOptions{User: apron.User{UserID: "echo", Name: "Echo"}}), bot.Options{
 		OnMessage: func(ctx context.Context, b *bot.Bot, m apron.Message) {
 			heard <- m
 			if b.Mentioned(m) {
@@ -329,8 +336,7 @@ func TestUserFromBackend(t *testing.T) {
 func TestAddressed(t *testing.T) {
 	c := newChat()
 	addressed := make(chan string, 8)
-	echo, err := bot.Start(c.server, bot.Options{
-		User: apron.User{UserID: "echo_1", Name: "Echo"},
+	echo, err := bot.Start(local(c.server, server.LocalOptions{User: apron.User{UserID: "echo_1", Name: "Echo"}}), bot.Options{
 		OnMessage: func(_ context.Context, b *bot.Bot, m apron.Message) {
 			if b.Addressed(m) {
 				addressed <- m.Body.Text
@@ -390,9 +396,7 @@ func TestAddresses(t *testing.T) {
 func TestRequestsFromHandler(t *testing.T) {
 	c := newChat()
 	done := make(chan error, 1)
-	echo, err := bot.Start(c.server, bot.Options{
-		User:  apron.User{UserID: "echo"},
-		Queue: 2,
+	echo, err := bot.Start(local(c.server, server.LocalOptions{User: apron.User{UserID: "echo"}, Queue: 2}), bot.Options{
 		OnMessage: func(ctx context.Context, b *bot.Bot, m apron.Message) {
 			for range 10 {
 				if _, err := b.History(ctx, apron.HistoryParams{Limit: 5}); err != nil {

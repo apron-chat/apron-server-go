@@ -153,7 +153,7 @@ func (c *Client) readAll() {
 		payload, err := c.conn.read(context.Background())
 		c.mu.Lock()
 		if err != nil {
-			c.err = fmt.Errorf("%w: %v", server.ErrClosed, err)
+			c.err = fmt.Errorf("%w: %v", apron.ErrClosed, err)
 		} else {
 			c.frames = append(c.frames, parseFrame(payload))
 		}
