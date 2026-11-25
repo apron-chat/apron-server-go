@@ -23,7 +23,6 @@ import (
 	"github.com/coder/websocket"
 	"golang.org/x/time/rate"
 
-	"github.com/apron-chat/apron-server-go/apron"
 	"github.com/apron-chat/apron-server-go/aprond/internal/push"
 	"github.com/apron-chat/apron-server-go/aprond/internal/roomlog"
 	"github.com/apron-chat/apron-server-go/aprond/internal/users"
@@ -410,7 +409,7 @@ func TestPushWakeScopes(t *testing.T) {
 	logID := app.log.NextID()
 	own := formatID(logID)
 	m := app.rooms.NewMessage(own, carol.from(), carol.id)
-	app.commitSnapshotLocked(m, &roomlog.Message{MessageID: own, LogID: own, RoomID: "general", From: carol.from(), Body: &roomlog.Body{Body: apron.Body{Text: "carol's"}}}, logID)
+	app.commitSnapshotLocked(m, &roomlog.Message{MessageID: own, LogID: own, RoomID: "general", From: carol.from(), Body: &roomlog.Body{Text: "carol's"}}, logID)
 	app.unlock()
 	a.notification(t, "message")
 	post(map[string]any{"body": map[string]any{"text": "re"}, "reply_to": map[string]any{"message_id": own}})
@@ -565,7 +564,7 @@ func serverMessage(t *testing.T, app *Server, userID string) int64 {
 	logID := app.log.NextID()
 	id := formatID(logID)
 	m := app.rooms.NewMessage(id, u.from(), u.id)
-	app.commitSnapshotLocked(m, &roomlog.Message{MessageID: id, LogID: id, RoomID: "general", From: u.from(), Body: &roomlog.Body{Body: apron.Body{Text: "theirs"}}}, logID)
+	app.commitSnapshotLocked(m, &roomlog.Message{MessageID: id, LogID: id, RoomID: "general", From: u.from(), Body: &roomlog.Body{Text: "theirs"}}, logID)
 	return logID
 }
 

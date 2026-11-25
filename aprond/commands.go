@@ -419,7 +419,7 @@ func (s *Server) postRoomNoticeLocked(r *roomState, text string) {
 	m := s.rooms.NewMessage(messageID, from, roomNoticeID)
 	s.commitSnapshotLocked(m, &roomlog.Message{
 		MessageID: messageID, LogID: messageID, RoomID: r.ID(), From: from,
-		Body: &roomlog.Body{Body: apron.Body{Text: text}},
+		Body: &roomlog.Body{Text: text},
 	}, logID)
 }
 

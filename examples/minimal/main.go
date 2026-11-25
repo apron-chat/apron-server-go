@@ -115,7 +115,7 @@ func (c *Chat) Auth(_ context.Context, _ *server.Conn, p apron.AuthParams, reply
 	}
 	// The welcome goes right after the result (§3.2.2). you is complete
 	// (§3.3.1): this server publishes user_id and name, and both are set.
-	return reply.Send(apron.AuthResult{You: &apron.CurrentUser{User: apron.User{UserID: id, Name: name}}}, welcome)
+	return reply.Send(apron.AuthResult{You: &apron.CurrentUser{UserID: id, Name: name}}, welcome)
 }
 
 func (c *Chat) Message(_ context.Context, conn *server.Conn, p apron.MessageParams, reply server.Reply[apron.MessageResult]) error {

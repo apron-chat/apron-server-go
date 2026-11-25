@@ -94,7 +94,7 @@ func (b *refreshing) Refresh(_ context.Context, c *server.Conn, method string, _
 	case b.wrong:
 		return map[string]any{"you": map[string]any{"name": "wrong"}}
 	}
-	return &apron.CurrentUser{User: apron.User{UserID: c.User().UserID, Name: fmt.Sprintf("v%d", b.version)}}
+	return &apron.CurrentUser{UserID: c.User().UserID, Name: fmt.Sprintf("v%d", b.version)}
 }
 
 func (b *refreshing) Me(_ context.Context, c *server.Conn, _ apron.MeParams, reply server.Reply[apron.CurrentUser]) error {

@@ -66,7 +66,7 @@ func (c *chat) Auth(_ context.Context, _ *server.Conn, _ apron.AuthParams, reply
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.guests++
-	return reply.Send(apron.AuthResult{You: &apron.CurrentUser{User: apron.User{UserID: fmt.Sprintf("guest_%d", c.guests)}}})
+	return reply.Send(apron.AuthResult{You: &apron.CurrentUser{UserID: fmt.Sprintf("guest_%d", c.guests)}})
 }
 
 func (c *chat) Message(_ context.Context, conn *server.Conn, p apron.MessageParams, reply server.Reply[apron.MessageResult]) error {

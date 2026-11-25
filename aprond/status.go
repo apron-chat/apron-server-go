@@ -349,7 +349,7 @@ func (s *Server) publishLocked(u *userState) bool {
 // is known (§4.5.2).
 func (u *userState) shownObject() apron.CurrentUser {
 	status, seen := u.Presence.Status, u.Presence.Seen
-	object := apron.CurrentUser{User: apron.User{UserID: u.id, Status: status}}
+	object := apron.CurrentUser{UserID: u.id, Status: status}
 	switch {
 	case status == statusNone:
 		object.Cleared = []string{"status"}

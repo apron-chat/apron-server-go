@@ -75,7 +75,7 @@ func (l *limited) Auth(_ context.Context, _ *server.Conn, p apron.AuthParams, re
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.guests++
-	return reply.Send(apron.AuthResult{You: &apron.CurrentUser{User: apron.User{UserID: fmt.Sprintf("guest_%d", l.guests), Name: p.Name}}})
+	return reply.Send(apron.AuthResult{You: &apron.CurrentUser{UserID: fmt.Sprintf("guest_%d", l.guests), Name: p.Name}})
 }
 
 func (l *limited) Message(_ context.Context, c *server.Conn, p apron.MessageParams, reply server.Reply[apron.MessageResult]) error {

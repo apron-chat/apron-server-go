@@ -115,10 +115,10 @@ func (u *userState) profile() apron.CurrentUser {
 // that a role taken away clears the one a client kept (§3.3); guests hold
 // none.
 func (u *userState) current(status string, withSeen bool) apron.CurrentUser {
-	object := apron.CurrentUser{User: apron.User{
+	object := apron.CurrentUser{
 		UserID: u.id, Name: u.Name, Avatar: u.Avatar, Status: status,
 		Roles: slices.Clone(u.roles), Ext: maps.Clone(u.Ext),
-	}}
+	}
 	if withSeen && status == statusOffline && u.Presence.Seen > 0 {
 		object.Seen = strconv.FormatInt(u.Presence.Seen, 10)
 	}

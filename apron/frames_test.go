@@ -89,7 +89,7 @@ func TestEncode(t *testing.T) {
 		{apron.StatusUpdate{Mute: apron.Mute{On: true, Seconds: 3600}}, `{"method":"status","params":{"mute":3600}}`},
 		{apron.Reactions{LogID: 11, MessageID: 3, RoomID: "r", Reactions: []apron.Reaction{{From: apron.User{UserID: "carol"}, Emojis: []string{"👍"}}}},
 			`{"method":"reactions","params":{"log_id":"11","message_id":"3","room_id":"r","reactions":[{"from":{"user_id":"carol"},"emojis":["👍"]}]}}`},
-		{apron.UserUpdate{New: &apron.CurrentUser{User: apron.User{UserID: "ada"}, Cleared: []string{"roles"}}}, `{"method":"user","params":{"new":{"user_id":"ada","roles":[]}}}`},
+		{apron.UserUpdate{New: &apron.CurrentUser{UserID: "ada", Cleared: []string{"roles"}}}, `{"method":"user","params":{"new":{"user_id":"ada","roles":[]}}}`},
 		{apron.RoomUpdate{Left: []apron.RoomRef{{RoomID: "r"}}}, `{"method":"room_update","params":{"left":[{"room_id":"r"}]}}`},
 		{apron.Notice("", "hi"), `{"method":"message","params":{"from":{"user_id":"~private","name":"Only you"},"body":{"text":"hi"}}}`},
 		{apron.Activity{RoomID: "general", From: apron.User{UserID: "alice"}, Typing: new(8), ReadMessageID: 1724803312050},
@@ -118,7 +118,7 @@ func TestEncode(t *testing.T) {
 }
 
 func TestCurrentUser(t *testing.T) {
-	u := apron.CurrentUser{User: apron.User{UserID: "ada", Name: "Ada", Avatar: "https://a", Ext: apron.Ext{}.With("tz", "UTC")}, Cleared: []string{"avatar", "roles", "ext"}}
+	u := apron.CurrentUser{UserID: "ada", Name: "Ada", Avatar: "https://a", Ext: apron.Ext{}.With("tz", "UTC"), Cleared: []string{"avatar", "roles", "ext"}}
 	out, err := json.Marshal(u)
 	if err != nil || string(out) != `{"user_id":"ada","name":"Ada","avatar":"","roles":[],"ext":{}}` {
 		t.Fatalf("marshal: %s %v", out, err)
@@ -127,11 +127,11 @@ func TestCurrentUser(t *testing.T) {
 	if err := json.Unmarshal(out, &back); err != nil || back.Name != "Ada" || !slices.Equal(back.Cleared, []string{"avatar", "roles", "ext"}) {
 		t.Fatalf("unmarshal: %+v %v", back, err)
 	}
-	if _, err := json.Marshal(apron.CurrentUser{User: apron.User{UserID: "ada"}, Cleared: []string{"user_id"}}); err == nil {
+	if _, err := json.Marshal(apron.CurrentUser{UserID: "ada", Cleared: []string{"user_id"}}); err == nil {
 		t.Fatal("cleared user_id was encoded")
 	}
 	// Without Cleared, it is the User.
-	if out, _ := json.Marshal(apron.CurrentUser{User: apron.User{UserID: "ada", Roles: []string{"op"}}}); string(out) != `{"user_id":"ada","roles":["op"]}` {
+	if out, _ := json.Marshal(apron.CurrentUser{UserID: "ada", Roles: []string{"op"}}); string(out) != `{"user_id":"ada","roles":["op"]}` {
 		t.Fatalf("plain: %s", out)
 	}
 }

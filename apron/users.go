@@ -120,7 +120,7 @@ func (u User) Patch(old User) (CurrentUser, bool) {
 	if old.UserID != u.UserID {
 		return CurrentUser{User: u.clone()}, true
 	}
-	patch := CurrentUser{User: User{UserID: u.UserID}}
+	patch := CurrentUser{UserID: u.UserID}
 	changed := false
 	for _, f := range []struct {
 		name     string

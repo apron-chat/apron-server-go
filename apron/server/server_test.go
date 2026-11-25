@@ -58,7 +58,7 @@ func (b *backend) guest(c *server.Conn, p apron.AuthParams) (*apron.CurrentUser,
 	// Queued before the result, sent after it (§3.2.2).
 	c.Notify(apron.Notice("", "welcome "+id))
 	time.Sleep(b.authDelay)
-	return &apron.CurrentUser{User: apron.User{UserID: id, Name: p.Name}}, nil
+	return &apron.CurrentUser{UserID: id, Name: p.Name}, nil
 }
 
 func (b *backend) Message(_ context.Context, c *server.Conn, p apron.MessageParams, reply server.Reply[apron.MessageResult]) error {

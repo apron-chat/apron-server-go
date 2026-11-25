@@ -145,7 +145,7 @@ type oneUser struct{ backend }
 
 func (*oneUser) Auth(_ context.Context, c *server.Conn, _ apron.AuthParams, reply server.Reply[apron.AuthResult]) error {
 	c.Notify(apron.Notice("", "welcome"))
-	return reply.Send(apron.AuthResult{You: &apron.CurrentUser{User: apron.User{UserID: "same"}}})
+	return reply.Send(apron.AuthResult{You: &apron.CurrentUser{UserID: "same"}})
 }
 
 // A duplicate waiting for its original on another connection stops waiting

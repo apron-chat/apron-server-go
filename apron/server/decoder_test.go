@@ -127,7 +127,7 @@ func TestNewReply(t *testing.T) {
 		return rec
 	}
 	rec := send("me", `{}`, func(r *Request) {
-		_ = replyFor[apron.CurrentUser](r, nil).Send(apron.CurrentUser{User: apron.User{UserID: "ada"}, Cleared: []string{"avatar"}})
+		_ = replyFor[apron.CurrentUser](r, nil).Send(apron.CurrentUser{UserID: "ada", Cleared: []string{"avatar"}})
 	})
 	if string(rec.raw) != `{"you":{"user_id":"ada","avatar":""}}` {
 		t.Fatalf("me: %s", rec.raw)
@@ -140,13 +140,13 @@ func TestNewReply(t *testing.T) {
 		t.Fatalf("room_list: %s", rec.raw)
 	}
 	rec = send("x", `{}`, func(r *Request) {
-		_ = replyFor[apron.CurrentUser](r, nil).Send(apron.CurrentUser{User: apron.User{UserID: "ada"}})
+		_ = replyFor[apron.CurrentUser](r, nil).Send(apron.CurrentUser{UserID: "ada"})
 	})
 	if string(rec.raw) != `{"user_id":"ada"}` {
 		t.Fatalf("another method: %s", rec.raw)
 	}
 	rec = send("auth", `{"scheme":"guest"}`, func(r *Request) {
-		if err := replyFor[apron.AuthResult](r, nil).Send(apron.AuthResult{You: &apron.CurrentUser{User: apron.User{UserID: "a b"}}}); apron.CodeOf(err) != apron.CodeInternalError {
+		if err := replyFor[apron.AuthResult](r, nil).Send(apron.AuthResult{You: &apron.CurrentUser{UserID: "a b"}}); apron.CodeOf(err) != apron.CodeInternalError {
 			t.Errorf("an invalid user_id: %v", err)
 		}
 	})

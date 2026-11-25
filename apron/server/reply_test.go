@@ -137,7 +137,7 @@ func (h *rooms) RoomList(_ context.Context, _ *server.Conn, _ apron.RoomListPara
 // Send makes a room_list result what its filter and members ask for.
 func TestRoomListSend(t *testing.T) {
 	member := apron.User{UserID: "bob"}
-	general := apron.RoomView{Room: apron.Room{RoomID: "general"}, Members: []apron.CurrentUser{{User: member}}, MemberCount: 9}
+	general := apron.RoomView{RoomID: "general", Members: []apron.CurrentUser{{User: member}}, MemberCount: 9}
 	h := &rooms{result: apron.RoomListResult{NotJoined: []apron.RoomView{general}, Users: []apron.CurrentUser{{User: member}}}}
 	s := server.New(&backend{}, server.Config{Rooms: h})
 	l := local(t, s)

@@ -19,9 +19,9 @@ func avatarFor(h *hosted) string { return h.avatarFor }
 
 func TestTable(t *testing.T) {
 	table := New[*hosted]()
-	upload := &hosted{Embed: Embed{ID: "embed_1", Kind: "upload", MessageID: "1", BaseURL: "https://chat.example", Secret: "s"}}
-	avatar := &hosted{Embed: Embed{ID: "embed_2", Kind: "upload", BaseURL: "https://chat.example", Secret: "t"}, avatarFor: "ada"}
-	emoji := &hosted{Embed: Embed{ID: "embed_3", Kind: "upload", EmojiKey: ":party:", BaseURL: "https://chat.example", Secret: "u"}}
+	upload := &hosted{ID: "embed_1", Kind: "upload", MessageID: "1", BaseURL: "https://chat.example", Secret: "s"}
+	avatar := &hosted{ID: "embed_2", Kind: "upload", BaseURL: "https://chat.example", Secret: "t", avatarFor: "ada"}
+	emoji := &hosted{ID: "embed_3", Kind: "upload", EmojiKey: ":party:", BaseURL: "https://chat.example", Secret: "u"}
 	for _, h := range []*hosted{upload, avatar, emoji} {
 		table.Add(h)
 	}

@@ -59,7 +59,7 @@ func (c *chat) Auth(_ context.Context, _ *server.Conn, p apron.AuthParams, reply
 	if err != nil {
 		return err
 	}
-	return reply.Send(apron.AuthResult{You: &apron.CurrentUser{User: apron.User{UserID: fmt.Sprintf("guest_%d", c.guests)}}}, welcome)
+	return reply.Send(apron.AuthResult{You: &apron.CurrentUser{UserID: fmt.Sprintf("guest_%d", c.guests)}}, welcome)
 }
 
 func (c *chat) Message(_ context.Context, conn *server.Conn, p apron.MessageParams, reply server.Reply[apron.MessageResult]) error {
@@ -115,14 +115,14 @@ func TestNewReply(t *testing.T) {
 
 	// What the server does with a method's result is done, and recorded.
 	me, you := aprontest.NewReply[apron.CurrentUser](aprontest.NewRequest("me", map[string]any{"name": "Ada"}))
-	if err := me.Send(apron.CurrentUser{User: apron.User{UserID: "ada", Name: "Ada"}}); err != nil {
+	if err := me.Send(apron.CurrentUser{UserID: "ada", Name: "Ada"}); err != nil {
 		t.Fatal(err)
 	}
 	if you.Result().Name != "Ada" || string(you.Raw()) != `{"you":{"user_id":"ada","name":"Ada"}}` {
 		t.Fatalf("me: %+v %s", you.Result(), you.Raw())
 	}
 	auth, signedIn := aprontest.NewReply[apron.AuthResult](aprontest.NewRequest("auth", map[string]any{"scheme": "guest"}))
-	if err := auth.Send(apron.AuthResult{You: &apron.CurrentUser{User: apron.User{UserID: "not valid"}}}); apron.CodeOf(err) != apron.CodeInternalError || apron.CodeOf(signedIn.Err()) != apron.CodeInternalError {
+	if err := auth.Send(apron.AuthResult{You: &apron.CurrentUser{UserID: "not valid"}}); apron.CodeOf(err) != apron.CodeInternalError || apron.CodeOf(signedIn.Err()) != apron.CodeInternalError {
 		t.Fatalf("an invalid auth result: %v, recorded %v", err, signedIn.Err())
 	}
 }
