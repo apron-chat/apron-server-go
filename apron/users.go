@@ -294,6 +294,9 @@ func (s *Server) retireLocked(u *userState) {
 	s.setAvatarEmbedLocked(u, nil)
 	s.users.Delete(u.id)
 	s.users.Touch(u.id)
+	// Its requests kept for deduplication (§1.2) go with it: no retry of
+	// them can come, as its user_id is never signed in again.
+	s.wire.ForgetUser(u.id)
 }
 
 // send queues a frame to every connection of the user.
