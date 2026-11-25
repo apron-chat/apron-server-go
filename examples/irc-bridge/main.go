@@ -78,7 +78,7 @@ func (b *Bridge) outbound(_ context.Context, e aprond.Event) error {
 		if name == "" {
 			name = m.From.UserID
 		}
-		for _, line := range strings.Split(strings.TrimSpace(m.Text), "\n") {
+		for line := range strings.SplitSeq(strings.TrimSpace(m.Text), "\n") {
 			if line = strings.TrimSpace(line); line != "" {
 				if err := conn.send("PRIVMSG", b.Settings.Channel, truncate("<"+name+"> "+line, 400)); err != nil {
 					return err

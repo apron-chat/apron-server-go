@@ -472,7 +472,7 @@ func (s *Server) buildHandler(routes []route) (handler http.Handler, err error) 
 type staticFS struct{ root http.FileSystem }
 
 func (f staticFS) Open(name string) (http.File, error) {
-	for _, part := range strings.Split(path.Clean(name), "/") {
+	for part := range strings.SplitSeq(path.Clean(name), "/") {
 		if strings.HasPrefix(part, ".") {
 			return nil, fs.ErrNotExist
 		}
