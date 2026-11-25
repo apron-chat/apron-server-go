@@ -80,7 +80,7 @@ func (s *Server) saveMessage(c *client, p apron.EditParams, reply server.Reply[a
 	if hasReply {
 		replyID = p.ReplyTo.MessageID.String()
 	}
-	// package wire refuses a deletion without message_id.
+	// package apron/server refuses a deletion without message_id.
 	deleted := p.Deleted
 	var body map[string]any
 	if !deleted {

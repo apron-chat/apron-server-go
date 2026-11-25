@@ -23,8 +23,8 @@ const (
 	privateNoticeID = "~private"
 )
 
-// The server's commands (§4.1) run on a commands.Router, as any wire
-// backend's may: their forms, in the order /help shows them, with their
+// The server's commands (§4.1) run on a commands.Router, as any
+// apron/server backend's may: their forms, in the order /help shows them, with their
 // hints, descriptions, fields, and groups, who may use each form, and how
 // each runs. The Router's Before checks what every command needs, first:
 // the room and the reply (beforeCommand). The server's own commands check

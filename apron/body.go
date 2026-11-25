@@ -176,7 +176,7 @@ func parseBody(raw jsontext.Value, fields map[string]jsontext.Value) (*Body, err
 // markdown, mentions user_ids, and embeds objects with a kind, with the
 // members this package does not know kept in Unknown. A backend checks
 // with it a body that came from elsewhere, such as one its filter
-// rewrote, as wire checks a client's. Its error is always an *Error,
+// rewrote, as apron/server checks a client's. Its error is always an *Error,
 // error/invalid_params.
 func ParseBody(raw jsontext.Value) (*Body, error) {
 	var fields map[string]jsontext.Value

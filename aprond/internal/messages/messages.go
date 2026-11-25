@@ -1,7 +1,7 @@
 // Package messages holds the server's own rules for what a message may
 // hold, beyond the protocol's: the limits on a body (PROTOCOL.md §3.5) and
 // on a message's ext (§4.13), and a reaction set's (§4.7), whose emoji it
-// normalizes. Package wire checks what the protocol defines, such as that
+// normalizes. Package apron/server checks what the protocol defines, such as that
 // mentions are user_ids and embeds objects with a kind, before a request
 // reaches the server; these are the server's policy, checked after it.
 //
@@ -37,7 +37,7 @@ const (
 	MaxDistinctEmoji = 20
 )
 
-// CheckBody checks a body that package wire read, from a client's request
+// CheckBody checks a body that package apron/server read, from a client's request
 // or with apron.ParseBody, against the server's limits: the count of its
 // mentions and of its embeds.
 func CheckBody(body *apron.Body) *apron.Error {
@@ -51,7 +51,7 @@ func CheckBody(body *apron.Body) *apron.Error {
 }
 
 // CheckRaw checks a body that did not come from a client's request, such
-// as one an extension's filter rewrote: as package wire checks a client's
+// as one an extension's filter rewrote: as package apron/server checks a client's
 // (apron.ParseBody), then as CheckBody does.
 func CheckRaw(raw jsontext.Value) *apron.Error {
 	body, err := apron.ParseBody(raw)

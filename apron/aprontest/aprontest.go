@@ -1,9 +1,9 @@
-// Package wiretest tests a backend of package wire, in two ways.
+// Package aprontest tests a server of package apron/server, in two ways.
 //
 // A handler is called directly with a Request on no connection
 // (NewRequest), and a Reply that records what it sends (NewReply):
 //
-//	reply, sent := wiretest.NewReply[apron.HistoryResult](wiretest.NewRequest("history", nil))
+//	reply, sent := aprontest.NewReply[apron.HistoryResult](aprontest.NewRequest("history", nil))
 //	err := backend.History(ctx, conn, apron.HistoryParams{Limit: 10}, reply)
 //	if err != nil || !sent.Sent() || len(sent.Result().Messages) != 10 {
 //		t.Fatalf("history: %v %+v", err, sent.Result())
@@ -16,12 +16,12 @@
 // that one can expect a notification that arrived before the result of
 // the request it waited for:
 //
-//	c, _ := wiretest.SignIn(t, server, map[string]any{"scheme": "guest", "name": "Ada"})
+//	c, _ := aprontest.SignIn(t, srv, map[string]any{"scheme": "guest", "name": "Ada"})
 //	result, err := c.Post(ctx, apron.MessageParams{Body: &apron.Body{Text: "hi"}})
 //	...
-//	echo, err := wiretest.Expect(ctx, c, func(m apron.Message) bool { return m.From.UserID == "echo" })
+//	echo, err := aprontest.Expect(ctx, c, func(m apron.Message) bool { return m.From.UserID == "echo" })
 //
-// Its requests are typed as a bot's are (package wire/bot): Post, Me, and
+// Its requests are typed as a bot's are (package apron/bot): Post, Me, and
 // Command, which returns the notices a command sent before its result,
 // and Call[T] for any other, which decodes the result into a T; and so
 // are the notifications a test expects, with Expect[T], such as
@@ -34,7 +34,7 @@
 // directly, its Recorded's Sent is false when it returns, and Wait waits
 // for the reply:
 //
-//	reply, sent := wiretest.NewReply[apron.CommandResult](wiretest.NewRequest("command", nil))
+//	reply, sent := aprontest.NewReply[apron.CommandResult](aprontest.NewRequest("command", nil))
 //	if err := backend.Command(ctx, conn, p, reply); err != nil || sent.Sent() {
 //		t.Fatalf("command: %v, sent %v; want it answered later", err, sent.Sent())
 //	}
@@ -66,7 +66,7 @@
 // server queued before it handled Sync's request has arrived, after which
 // Pending holds them.
 //
-// Package conformance, below this one, checks a whole Server against the
+// Package conformance (apron/conformance) checks a whole Server against the
 // core of PROTOCOL.md (conformance.Run), as the protocol's own conformance
 // suite does, so that every backend runs those checks as tests.
 package aprontest
@@ -93,13 +93,13 @@ func NewRequest(method string, params any) *server.Request {
 	if params != nil {
 		encoded, err := apron.Marshal(params)
 		if err != nil {
-			panic("wiretest: " + err.Error())
+			panic("aprontest: " + err.Error())
 		}
 		raw = encoded
 	}
 	r, err := testhook.NewRequest(method, raw, &recording{done: make(chan struct{})})
 	if err != nil {
-		panic("wiretest: " + err.Error())
+		panic("aprontest: " + err.Error())
 	}
 	return r.(*server.Request)
 }
@@ -126,7 +126,7 @@ func NewReply[T any](r *server.Request) (server.Reply[T], *Recorded[T]) {
 	}
 	rec, ok := testhook.RecorderOf(r).(*recording)
 	if !ok {
-		panic("wiretest: NewReply needs a request made by NewRequest")
+		panic("aprontest: NewReply needs a request made by NewRequest")
 	}
 	var reply server.Reply[T]
 	testhook.InitReply(&reply, r)
@@ -134,7 +134,7 @@ func NewReply[T any](r *server.Request) (server.Reply[T], *Recorded[T]) {
 }
 
 // Recorded is what a handler sent to a request made by NewRequest: its
-// result, or the error wire answered with in its place, and the frames
+// result, or the error the server answered with in its place, and the frames
 // sent after it. An error the handler returns is its own return value; a
 // Server would send that as the reply.
 type Recorded[T any] struct{ rec *recording }
@@ -202,14 +202,14 @@ func (r *Recorded[T]) Result() T {
 }
 
 // Raw returns the result object as the client would get it, after what
-// wire does with the method's result, or nil.
+// the server does with the method's result, or nil.
 func (r *Recorded[T]) Raw() jsontext.Value {
 	r.rec.mu.Lock()
 	defer r.rec.mu.Unlock()
 	return r.rec.raw
 }
 
-// Err returns the error wire answered with in place of the result, an
+// Err returns the error the server answered with in place of the result, an
 // *apron.Error, such as error/internal_error for a result its method may
 // not have (an auth result whose user_id is not valid), or nil.
 func (r *Recorded[T]) Err() error {

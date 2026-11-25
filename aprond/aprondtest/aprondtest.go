@@ -1,10 +1,10 @@
-// Package aprontest tests an extension of package apron as people use it:
+// Package aprondtest tests an extension of package aprond as people use it:
 // it serves a server with the extension in a test, and connects to it as
 // clients do, as a guest, with an account, with roles, or not signed in
 // yet, so that a test reads as what people do:
 //
 //	func TestWeather(t *testing.T) {
-//		server := aprontest.Serve(t, aprond.DefaultConfig(), &weather.Extension{})
+//		server := aprondtest.Serve(t, aprond.DefaultConfig(), &weather.Extension{})
 //		ada := server.Guest("Ada")
 //		notices, err := ada.Command("general", "/weather Lisbon")
 //		if err != nil || len(notices) != 1 || !strings.Contains(notices[0], "Lisbon") {
@@ -20,19 +20,19 @@
 // A Server is served over HTTP by a test server: the extensions' routes
 // are at its URL, and its WebSocket endpoint at WebSocketURL, which
 // aprontest.Dial and conformance.Config.URL take too. A Client is a
-// WebSocket connection to it, a aprontest.Client (Client.Wire), whose
+// WebSocket connection to it, an aprontest.Client (Client.Wire), whose
 // methods wait at most ten seconds, fail the test when the connection
 // fails, and return the server's error replies as *aprond.Error, such as
 // error/denied for a request an extension refused. Call them from the
 // test's goroutine, as t.Fatal is.
 //
-// The methods take and return apron's types where package apron has one
+// The methods take and return aprond's types where package aprond has one
 // for what they carry, as an extension sees it: the post options of
 // aprond.Session.Post (aprond.Mention, aprond.ReplyTo, aprond.Markdown,
-// aprond.WithExt), aprond.Message, and aprond.Error. Frames that apron has no
+// aprond.WithExt), aprond.Message, and aprond.Error. Frames that aprond has no
 // type of its own for, because extensions never handle them, are package
-// wire's, as a client receives them: the server frame (wire.ServerInfo) and
-// the result of auth (wire.AuthResult).
+// apron's, as a client receives them: the server frame
+// (apron.ServerInfo) and the result of auth (apron.AuthResult).
 //
 // # Members with roles
 //
@@ -105,14 +105,14 @@ func Serve(t testing.TB, config aprond.Config, extensions ...aprond.Extension) *
 	config.Extensions = append(slices.Clip(config.Extensions), extensions...)
 	app, err := aprond.Open(config)
 	if err != nil {
-		t.Fatalf("aprontest: opening the server: %v", err)
+		t.Fatalf("aprondtest: opening the server: %v", err)
 	}
 	httpServer := httptest.NewServer(app.Handler())
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), timeout)
 		defer cancel()
 		if err := app.Shutdown(ctx); err != nil {
-			t.Errorf("aprontest: shutting the server down: %v", err)
+			t.Errorf("aprondtest: shutting the server down: %v", err)
 		}
 		httpServer.Close()
 	})
@@ -141,7 +141,7 @@ func (s *Server) Dial() *Client {
 	defer cancel()
 	conn, err := aprontest.Dial(ctx, s.WebSocketURL())
 	if err != nil {
-		s.t.Fatalf("aprontest: connecting: %v", err)
+		s.t.Fatalf("aprondtest: connecting: %v", err)
 	}
 	s.t.Cleanup(func() { _ = conn.Close() })
 	return &Client{Wire: conn, Extension: s.extension, t: s.t}
@@ -154,7 +154,7 @@ func (s *Server) SignIn(params any) *Client {
 	s.t.Helper()
 	c := s.Dial()
 	if err := c.signIn(params); err != nil {
-		s.t.Fatalf("aprontest: signing in with %v: %v", params, err)
+		s.t.Fatalf("aprondtest: signing in with %v: %v", params, err)
 	}
 	return c
 }
@@ -165,7 +165,7 @@ func (s *Server) Guest(name string) *Client {
 	s.t.Helper()
 	c := s.Dial()
 	if err := c.SignInAsGuest(name); err != nil {
-		s.t.Fatalf("aprontest: signing in as the guest %s: %v", name, err)
+		s.t.Fatalf("aprondtest: signing in as the guest %s: %v", name, err)
 	}
 	return c
 }
@@ -177,18 +177,18 @@ func (s *Server) Guest(name string) *Client {
 func (s *Server) Account(address string) *Client {
 	s.t.Helper()
 	if s.mail == nil {
-		s.t.Fatal("aprontest: Account needs a *aprontest.Mailbox as Config.EmailSender")
+		s.t.Fatal("aprondtest: Account needs a *aprondtest.Mailbox as Config.EmailSender")
 	}
 	c := s.Dial()
 	if err := c.AskForCode(address); err != nil {
-		s.t.Fatalf("aprontest: asking for a code for %s: %v", address, err)
+		s.t.Fatalf("aprondtest: asking for a code for %s: %v", address, err)
 	}
 	code := s.mail.Code(address, timeout)
 	if code == "" {
-		s.t.Fatalf("aprontest: no code was mailed to %s", address)
+		s.t.Fatalf("aprondtest: no code was mailed to %s", address)
 	}
 	if err := c.SignInWithCode(code); err != nil {
-		s.t.Fatalf("aprontest: signing in as %s: %v", address, err)
+		s.t.Fatalf("aprondtest: signing in as %s: %v", address, err)
 	}
 	return c
 }
@@ -199,7 +199,7 @@ func (s *Server) Account(address string) *Client {
 // invitation with these roles makes one (aprond.InvitationOptions): it is a
 // member of the default room, holds roles until RevokeEnrollment, and the
 // invitation admits it to a server whose sign-in an extension restricts.
-// Its identity is the email address userID@aprontest.invalid, with which
+// Its identity is the email address userID@aprondtest.invalid, with which
 // Account signs it in again, on a server with a Mailbox. Its Token signs
 // it in from any origin.
 func (s *Server) Member(userID string, roles ...string) *Client {
@@ -207,16 +207,16 @@ func (s *Server) Member(userID string, roles ...string) *Client {
 	ctx, cancel := context.WithTimeout(s.t.Context(), timeout)
 	defer cancel()
 	options := aprond.InvitationOptions{Name: userID, UserID: userID, Roles: roles}
-	made, token, err := testhook.Member(s.Server, ctx, options, userID+"@aprontest.invalid")
+	made, token, err := testhook.Member(s.Server, ctx, options, userID+"@aprondtest.invalid")
 	if err == nil && made != userID {
 		err = errors.New("the user_id is taken; the account is " + made)
 	}
 	if err != nil {
-		s.t.Fatalf("aprontest: making the member %s: %v", userID, err)
+		s.t.Fatalf("aprondtest: making the member %s: %v", userID, err)
 	}
 	c := s.Dial()
 	if err := c.SignInWithToken(token); err != nil {
-		s.t.Fatalf("aprontest: signing in as the member %s: %v", userID, err)
+		s.t.Fatalf("aprondtest: signing in as the member %s: %v", userID, err)
 	}
 	return c
 }
@@ -235,6 +235,6 @@ func (s *Server) Settle() {
 	ctx, cancel := context.WithTimeout(s.t.Context(), timeout)
 	defer cancel()
 	if err := testhook.Settle(s.Server, ctx); err != nil {
-		s.t.Fatalf("aprontest: the followers did not settle: %v", err)
+		s.t.Fatalf("aprondtest: the followers did not settle: %v", err)
 	}
 }

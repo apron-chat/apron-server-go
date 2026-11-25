@@ -68,7 +68,7 @@ func (m *Mute) UnmarshalJSON(raw []byte) error {
 	case !core.IsNull(raw) && json.Unmarshal(raw, &seconds) == nil && seconds > 0:
 		*m = Mute{On: true, Seconds: seconds}
 	default:
-		return errors.New("wire: mute must be true, false, or a positive whole number of seconds")
+		return errors.New("apron: mute must be true, false, or a positive whole number of seconds")
 	}
 	return nil
 }

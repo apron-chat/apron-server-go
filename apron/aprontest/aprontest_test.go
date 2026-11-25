@@ -113,7 +113,7 @@ func TestNewReply(t *testing.T) {
 		t.Fatalf("sent %v %+v %s %v", sent.Sent(), sent.Result(), sent.Raw(), sent.Err())
 	}
 
-	// What wire does with a method's result is done, and recorded.
+	// What the server does with a method's result is done, and recorded.
 	me, you := aprontest.NewReply[apron.CurrentUser](aprontest.NewRequest("me", map[string]any{"name": "Ada"}))
 	if err := me.Send(apron.CurrentUser{User: apron.User{UserID: "ada", Name: "Ada"}}); err != nil {
 		t.Fatal(err)
@@ -360,7 +360,7 @@ func TestCallFramesConcurrent(t *testing.T) {
 					var before []aprontest.Frame
 					_, before, err = client.CallFrames(ctx, "history", nil)
 					for _, f := range before {
-						if f.Method == "" && strings.HasPrefix(f.ID, "wiretest-") {
+						if f.Method == "" && strings.HasPrefix(f.ID, "aprontest-") {
 							t.Errorf("CallFrames took another call's reply: %s", f.Raw)
 						}
 					}

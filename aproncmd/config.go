@@ -80,7 +80,7 @@ func applyConfig(parser *flags.Parser, fields map[string]reflect.Value, namespac
 			items = []any{values[key]}
 		}
 		if field, ok := fields[name]; ok && field.Kind() == reflect.Slice {
-			// Empty, not nil: an empty list is no default (apron.Open).
+			// Empty, not nil: an empty list is no default (aprond.Open).
 			field.Set(reflect.MakeSlice(field.Type(), 0, len(items)))
 		}
 		for _, item := range items {

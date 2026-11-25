@@ -8,7 +8,7 @@ import (
 )
 
 // ErrReplied is a second reply to a request, which has its reply already.
-var ErrReplied = errors.New("wire: the request has its reply")
+var ErrReplied = errors.New("apron: the request has its reply")
 
 // Reply answers the request a typed handler handles, such as a
 // RoomHandler's room_list. A handler calls Send exactly once, or returns an
@@ -16,7 +16,7 @@ var ErrReplied = errors.New("wire: the request has its reply")
 // nil without sending has {} sent for it; any other that does is a bug, which
 // is logged and answered error/internal_error.
 //
-// Send runs what wire does with the method's result, such as making the
+// Send runs what the Server does with the method's result, such as making the
 // user a me result carries the connection's, and so does it at the moment
 // the result is queued: a backend that keeps its state under a lock calls
 // Send while it holds it.
@@ -45,7 +45,7 @@ type Reply[T any] struct {
 // A handler may return what Send returns.
 func (p Reply[T]) Send(result T, then ...apron.Frame) error {
 	if p.r == nil {
-		return errors.New("wire: Send on a zero Reply")
+		return errors.New("apron: Send on a zero Reply")
 	}
 	value := func() (any, error) { return result, nil }
 	if p.check != nil {
@@ -69,7 +69,7 @@ func (p Reply[T]) Send(result T, then ...apron.Frame) error {
 // connection's, canceled when the connection ends (for a Local
 // connection, also when the Call's ctx is), and the work of a reply
 // answered later uses it. A panic in that work is the backend's: the
-// goroutine is the backend's own, and wire does not recover it.
+// goroutine is the backend's own, and the Server does not recover it.
 //
 // The reply then comes when the backend sends it, after the replies to
 // later requests, maybe: replies may come in any order (§1). The
@@ -88,7 +88,7 @@ func (p Reply[T]) Send(result T, then ...apron.Frame) error {
 // Later, before the reply is sent, is answered with it, as any handler is.
 func (p Reply[T]) Later() error {
 	if p.r == nil {
-		return errors.New("wire: Later on a zero Reply")
+		return errors.New("apron: Later on a zero Reply")
 	}
 	return p.r.answerLater()
 }
@@ -100,7 +100,7 @@ func (p Reply[T]) Later() error {
 // its reply already, and apron.ErrClosed when the connection is closed.
 func (p Reply[T]) Fail(err error) error {
 	if p.r == nil {
-		return errors.New("wire: Fail on a zero Reply")
+		return errors.New("apron: Fail on a zero Reply")
 	}
 	return p.r.failWith(err)
 }
@@ -110,7 +110,7 @@ func (p Reply[T]) Fail(err error) error {
 // scheme's own that AuthParams has no field for.
 func (p Reply[T]) Request() *Request { return p.r }
 
-// initReply is a Reply of any T that a test (package wiretest) makes for a
+// initReply is a Reply of any T that a test (package aprontest) makes for a
 // request: replyFor, for T it cannot name.
 type initReply interface{ init(r *Request) }
 
@@ -127,7 +127,7 @@ func (r *Request) send(sent any, value func() (any, error), apply func(), then [
 	}
 	result, err := value()
 	if err != nil {
-		r.logger().Error("wire: a handler sent a result its method may not have", "method", r.Method, "error", err)
+		r.logger().Error("apron: a handler sent a result its method may not have", "method", r.Method, "error", err)
 		e := internalError()
 		r.failLocked(e)
 		return e
@@ -199,7 +199,7 @@ func isEmpty[T any]() bool {
 
 // errNoReply is a handler's bug: it returned nil without replying.
 func errNoReply(method string) error {
-	return fmt.Errorf("wire: the handler of %s returned nil without replying, as it must, or returning an error", method)
+	return fmt.Errorf("apron: the handler of %s returned nil without replying, as it must, or returning an error", method)
 }
 
 // framesOf returns frames as the byte slices they are.

@@ -298,7 +298,7 @@ func TestLocalOpens(t *testing.T) {
 	if f := <-frames; f != `{"method":"welcome","params":{"to":"bot"}}` {
 		t.Fatalf("second frame %s, want the welcome", f)
 	}
-	if info := l.Conn().ServerInfo(); info.Agent != "wire-test/1" {
+	if info := l.Conn().ServerInfo(); info.Agent != "server-test/1" {
 		t.Fatalf("Info: %+v", info)
 	}
 	if _, err := s.Local(server.LocalOptions{User: apron.User{UserID: "nobody"}, Data: 1}); err != refuse {

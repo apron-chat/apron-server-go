@@ -2,7 +2,7 @@
 
 Each directory is an Apron server of its own: a `main` package that runs
 [`aproncmd.Main`](../aproncmd) with an extension built on package
-[`apron`](../apron), and a test that runs it. They take every `aprond` flag,
+[`aprond`](../aprond), and a test that runs it. They take every `aprond` flag,
 plus their own, named after the extension (`--sso.org`), which a config
 file sets in a table of that name (`[sso]`). Run one with
 `go run ./examples/<name> --help`.
@@ -18,12 +18,13 @@ file sets in a table of that name (`[sso]`). Run one with
 | [`search`](search) | Full-text search as a request and a command, limited to rooms the person may see, and a web archive of public rooms: `Method`, `Advertise`, `OnEventFrom`, `Visible`, `Public`. |
 
 [`minimal`](minimal) is the other kind: a whole server in under two hundred
-lines on package [`wire`](../wire), which speaks the protocol for a program
-that keeps its own state, such as a gateway in front of another chat system.
-Its commands are a [`wire/commands`](../wire/commands) Router, which answers
+lines on package [`apron/server`](../apron/server), which speaks the
+protocol for a program that keeps its own state, such as a gateway in front
+of another chat system. Its commands are an
+[`apron/server/commands`](../apron/server/commands) Router, which answers
 `/help` and lists them, and its bot, which answers when someone mentions
-`@echo`, a [`wire/bot`](../wire/bot) Bot. It takes only `--addr`. Its tests
-use package [`wiretest`](../wire/wiretest), and run the protocol's core
-conformance checks in process
-([`wiretest/conformance`](../wire/wiretest/conformance)); run the whole
+`@echo`, an [`apron/bot`](../apron/bot) Bot. It takes only `--addr`. Its
+tests use package [`aprontest`](../apron/aprontest), and run the protocol's
+core conformance checks in process
+([`apron/conformance`](../apron/conformance)); run the whole
 suite against it with `conform.py ws://127.0.0.1:8080/ws`.

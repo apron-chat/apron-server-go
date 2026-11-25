@@ -12,7 +12,7 @@ import (
 )
 
 // Error codes (PROTOCOL.md §1.1). Extensions return them in an *Error to
-// refuse a request, a command, or a message. They are package wire's.
+// refuse a request, a command, or a message. They are package apron's.
 const (
 	CodeParseError     = apron.CodeParseError
 	CodeInvalidRequest = apron.CodeInvalidRequest
@@ -31,9 +31,9 @@ const (
 	CodeTooLarge = apron.CodeTooLarge
 )
 
-// Error is a protocol error reply (PROTOCOL.md §1.1): package wire's, so
+// Error is a protocol error reply (PROTOCOL.md §1.1): package apron's, so
 // that code written for either package refuses requests the same way. An
-// extension needs nothing of package wire to use it: it refuses with the
+// extension needs nothing of package apron to use it: it refuses with the
 // constructors below, or an Error with one of the Code constants.
 //
 //	type Error struct {
@@ -67,8 +67,8 @@ func RetryAfter(message string, wait time.Duration) *Error { return apron.RetryA
 // size limit.
 func TooLarge(message string) *Error { return apron.TooLarge(message) }
 
-// bodyObject decodes a body package wire read, as the server keeps it:
-// every field as it was sent, those wire does not know too (Body.Unknown),
+// bodyObject decodes a body package apron read, as the server keeps it:
+// every field as it was sent, those apron does not know too (Body.Unknown),
 // as a apron.Body encodes as it was decoded. It is nil for no body.
 func bodyObject(b *apron.Body) map[string]any {
 	if b == nil {

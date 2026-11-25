@@ -63,14 +63,14 @@ type Scheme struct {
 	// none has nor may yet have it, and its script ask the passkey
 	// provider to hide it (signalUnknownCredential). Off, such a login is
 	// the page's usual error. Set it before the server serves the page;
-	// apron.Config's SignalUnknownPasskeys says when it is safe.
+	// aprond.Config's SignalUnknownPasskeys says when it is safe.
 	SignalUnknown bool
 
 	// GuestFirst has a registration make an account only of a signed-in
 	// guest, or with an invitation, even where anyone may sign in as a
 	// guest: one on a connection that is not signed in, without an
 	// invitation, is refused, as on a server without guests. Set it before
-	// the server serves; apron.Config's GuestFirstPasskeys sets it, which
+	// the server serves; aprond.Config's GuestFirstPasskeys sets it, which
 	// also leaves webauthn out of server.signup (§3.2).
 	GuestFirst bool
 

@@ -10,21 +10,23 @@ import (
 	"github.com/apron-chat/apron-server-go/apron/server"
 )
 
-// The server speaks the protocol through package wire, as any server built
-// on it does: wire carries the connections, frames, sign-in order, and
-// deduplication, and backend answers for the Server, as its Backend and
-// each of its handlers. Each handler renders its result as wire's type for
-// it, and sends it with its Reply while it holds s.mu where the result
-// describes state, so that wire's types make the bytes of every result.
-// The Server's own methods beyond the protocol's, such as ext:account's,
-// are wire methods (registerOp), which reply with any result.
+// The server speaks the protocol through package apron/server, as any
+// server built on it does: apron/server carries the connections, frames,
+// sign-in order, and deduplication, and backend answers for the Server, as
+// its Backend and each of its handlers. Each handler renders its result as
+// package apron's type for it, and sends it with its Reply while it holds
+// s.mu where the result describes state, so that apron's types make the
+// bytes of every result. The Server's own methods beyond the protocol's,
+// such as ext:account's, are methods of the server.Server (registerOp),
+// which reply with any result.
 
-// backend is the Server as wire's Backend and handlers, kept unexported so
-// that wire's interfaces are not part of the Server's API.
+// backend is the Server as apron/server's Backend and handlers, kept
+// unexported so that apron/server's interfaces are not part of the
+// Server's API.
 type backend struct{ s *Server }
 
-// newWire makes the Server's wire server, and registers its operations.
-func (s *Server) newWire() {
+// newSrv makes the Server's server.Server, and registers its operations.
+func (s *Server) newSrv() {
 	config := s.config
 	b := backend{s}
 	patterns := server.OriginPatterns(config.OriginPatterns...)
@@ -67,7 +69,7 @@ func (s *Server) newWire() {
 	}
 }
 
-// registerOp makes an operation a wire method.
+// registerOp makes an operation a method of the server.Server.
 func (s *Server) registerOp(name string, op operation) {
 	s.srv.Handle(name, server.Handler{
 		Capability: methodCapabilities[name],

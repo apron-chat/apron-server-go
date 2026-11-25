@@ -152,7 +152,7 @@ func TestTypedParams(t *testing.T) {
 		result, err := l.Call(context.Background(), method, jsontext.Value(params))
 		return string(result), err
 	}
-	// A new message's body keeps the fields wire does not know, and
+	// A new message's body keeps the fields apron does not know, and
 	// encodes as it was sent.
 	if _, err := call("message", `{"body":{"text":"hi","color":"red","mentions":[]}}`); err != nil {
 		t.Fatal(err)

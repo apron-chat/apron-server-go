@@ -114,7 +114,7 @@ func SignIn(t testing.TB, s *server.Server, params any) (*Client, apron.CurrentU
 	defer cancel()
 	result, err := c.Auth(ctx, params)
 	if err != nil || result.You == nil {
-		t.Fatalf("wiretest: signing in with %v: result %+v, error %v", params, result, err)
+		t.Fatalf("aprontest: signing in with %v: result %+v, error %v", params, result, err)
 	}
 	return c, *result.You
 }
@@ -223,7 +223,7 @@ func (c *Client) Auth(ctx context.Context, params any) (apron.AuthResult, error)
 	}
 	var result apron.AuthResult
 	if err := json.Unmarshal(raw, &result); err != nil {
-		return apron.AuthResult{}, fmt.Errorf("wiretest: auth result %s: %w", raw, err)
+		return apron.AuthResult{}, fmt.Errorf("aprontest: auth result %s: %w", raw, err)
 	}
 	return result, nil
 }
@@ -293,7 +293,7 @@ func (c *Client) call(ctx context.Context, method string, params any, take func(
 // send sends a request of method with an id of the Client's own, which it
 // returns.
 func (c *Client) send(ctx context.Context, method string, params any) (string, error) {
-	id := "wiretest-" + strconv.FormatUint(c.nextID.Add(1), 10)
+	id := "aprontest-" + strconv.FormatUint(c.nextID.Add(1), 10)
 	frame := map[string]any{"method": method, "id": id}
 	if params != nil {
 		frame["params"] = params

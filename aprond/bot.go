@@ -204,7 +204,7 @@ func (b *Bot) StreamTerminal(ctx context.Context, roomID, title string, options 
 // Session is one in-process connection of a Bot. It speaks the protocol
 // (PROTOCOL.md) as a WebSocket client does, and gets the frames a client
 // would. Its methods, Post, Join, History, Call, and the streams, are in
-// apron's terms: message_ids as strings, and Messages. It sends one
+// aprond's terms: message_ids as strings, and Messages. It sends one
 // request at a time, in order; its methods are safe to call from any
 // goroutine.
 type Session struct {
@@ -248,7 +248,7 @@ func (b *Bot) Connect(options SessionOptions) (*Session, error) {
 	if options.OnFrame != nil {
 		local.OnFrame = func(frame apron.Frame) { options.OnFrame(jsontext.Value(frame)) }
 	}
-	// wire opens the connection as a network one, calling backend.connected
+	// srv opens the connection as a network one, calling backend.connected
 	// (connectSession) and Hello, which take s.mu, so it is opened without
 	// it.
 	conn, err := s.srv.Local(local)
@@ -263,7 +263,7 @@ func (b *Bot) Connect(options SessionOptions) (*Session, error) {
 }
 
 // connectSession signs a Session's connection in as its bot, as a network
-// connection is signed in by auth, while wire opens it: frames sent to it
+// connection is signed in by auth, while srv opens it: frames sent to it
 // meanwhile, such as those after a sign-in, go after its server frame.
 func (s *Server) connectSession(c *client, wc *server.Conn) error {
 	b := c.session.bot
@@ -288,7 +288,7 @@ func (s *Server) connectSession(c *client, wc *server.Conn) error {
 
 // forgotten records why the session closed, once the server has forgotten
 // its connection (backend.disconnected). Whether it fell behind is read
-// from its server.Local when asked (Err), as wire may forget a connection
+// from its server.Local when asked (Err), as srv may forget a connection
 // that fails to open before Connect has it.
 func (b *Session) forgotten(serverClosed bool) {
 	if serverClosed {
@@ -567,11 +567,11 @@ func (b *Session) History(ctx context.Context, roomID string, options HistoryOpt
 	return messages, nil
 }
 
-// MessageOf is a message as package wire has it, as extensions see
-// messages (Message), for code that reads messages in wire's terms, such as
-// a history page that Conn reads: the same snapshot, with its IDs as
+// MessageOf is a message as package apron has it, as extensions see
+// messages (Message), for code that reads messages in apron's terms, such
+// as a history page that Conn reads: the same snapshot, with its IDs as
 // Message has them, its body's text, format, and mentions in their own
-// fields, and the whole body, those of its members wire has no field for
+// fields, and the whole body, those of its members apron has no field for
 // too, decoded into Body. Host, Bot, Session, and DecodeMessage give
 // Messages already.
 func MessageOf(m apron.Message) Message {
@@ -593,8 +593,8 @@ func MessageOf(m apron.Message) Message {
 	return message
 }
 
-// Wire is the message as package wire has it, as MessageOf reads it, for
-// code in wire's terms, such as a post with Conn: its body is Body, or, for
+// Wire is the message as package apron has it, as MessageOf reads it, for
+// code in apron's terms, such as a post with Conn: its body is Body, or, for
 // a Message made without one, Text, Format, and Mentions, unless it is
 // deleted. An ID that is not a log_id is left out.
 func (m Message) Wire() apron.Message {

@@ -70,7 +70,7 @@ type UserChange struct {
 // (§3.3.3): shares says who does. A change of the user's own profile, as
 // a rename, is the simplest:
 //
-//	server.PublishUser(apron.UserChange{Old: old, New: renamed}, nil)
+//	srv.PublishUser(server.UserChange{Old: old, New: renamed}, nil)
 //
 // When nothing changed, PublishUser does nothing at all: it neither walks
 // the connections nor calls SetUser, so a backend may call it on every
@@ -111,7 +111,7 @@ func (s *Server) PublishUser(change UserChange, shares func(*Conn) bool) bool {
 		others, err = apron.Encode(update)
 	}
 	if err != nil {
-		s.logger().Error("wire: encoding a user notification", "user_id", cur.UserID, "error", err)
+		s.logger().Error("apron: encoding a user notification", "user_id", cur.UserID, "error", err)
 		you, others = nil, nil
 	}
 	for _, c := range s.openConns() {

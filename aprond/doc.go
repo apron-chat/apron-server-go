@@ -1,4 +1,4 @@
-// Package apron is a server for the Apron chat protocol, as a library: the
+// Package aprond is a server for the Apron chat protocol, as a library: the
 // reference implementation of every capability that
 // https://github.com/shazow/apron/blob/main/PROTOCOL.md defines, which a
 // program can embed and extend without forking it. Section references in the
@@ -6,12 +6,12 @@
 //
 // The module's packages each have one role:
 //
-//   - apron, this package, serves the protocol: rooms, history, sign-in,
+//   - aprond, this package, serves the protocol: rooms, history, sign-in,
 //     uploads, push, and the extension API. It is not a program: it parses no
 //     flags, opens no listener, and handles no signals.
 //   - [github.com/apron-chat/apron-server-go/store] keeps a server's state
 //     across restarts, in SQLite or in memory ([Config].Store).
-//   - [github.com/apron-chat/apron-server-go/apron/aprontest] tests
+//   - [github.com/apron-chat/apron-server-go/aprond/aprondtest] tests
 //     extensions: it serves a server with them in a test, and signs in to
 //     it as people do, with guests, accounts, members with roles, and apps
 //     that sign in externally, which post and run commands; and it waits
@@ -20,11 +20,13 @@
 //     a library: flags, a config file, TLS, email delivery, and signals around
 //     this package. Its Main runs a server with extensions added.
 //   - cmd/aprond is the aprond binary, which calls aproncmd.Main.
-//   - [github.com/apron-chat/apron-server-go/wire] is the protocol itself:
-//     connections, frames, sign-in order, and deduplication, with a Backend
-//     that answers. This package is a Backend of it; so is a program that
-//     keeps its own chat state, such as a gateway in front of another chat
-//     system.
+//   - [github.com/apron-chat/apron-server-go/apron] is the protocol itself,
+//     what travels over a connection, and
+//     [github.com/apron-chat/apron-server-go/apron/server] the engine that
+//     serves it: connections, frames, sign-in order, and deduplication, with
+//     a Backend that answers. This package is a Backend of it; so is a
+//     program that keeps its own chat state, such as a gateway in front of
+//     another chat system.
 //
 // # Serving
 //

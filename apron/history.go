@@ -28,7 +28,7 @@ type HistoryResult struct {
 	HistoryLogID LogID `json:"history_log_id"`
 }
 
-// Record is one logged record, for Page: exactly one of Room, Message,
+// Record is one logged record, for server.Page: exactly one of Room, Message,
 // Membership, and Reactions is set, and LogID is its log_id.
 type Record struct {
 	LogID      LogID

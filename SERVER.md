@@ -1819,7 +1819,7 @@ arrived on.
 Each email gives this server's WebSocket URL with the code, as in "Your
 sign-in code for wss://chat.example/ws is 418092", and says to type the
 code only in an app connected to it (§4.11.2). A sender of its own
-(`apron.EmailSender`) finds it in `SignInEmail.Server`, and
+(`aprond.EmailSender`) finds it in `SignInEmail.Server`, and
 `SignInEmail.Text` writes both.
 
 - **Signing in**, proposed on a connection not signed in. The email carries
@@ -1913,7 +1913,7 @@ aprond --public-url https://chat.example.com \
 The SMTP sender requires STARTTLS unless `--email.smtp-insecure` is set, for
 a relay on the same host, or speaks TLS from the start to a relay on port
 465, and bounds each delivery, connection included, to 30 seconds. Embedding applications provide any other delivery by
-implementing `apron.EmailSender`.
+implementing `aprond.EmailSender`.
 
 Invitation tokens that sign up several people
 ([PROTOCOL.md Appendix B](https://github.com/shazow/apron/blob/main/PROTOCOL.md#appendix-b--valid-scenarios-informative))
@@ -2142,8 +2142,8 @@ another client, whose consent names its host.
 
 ## Extensions
 
-Package `apron` is the server as a library, and `aproncmd.Main` runs it with
-extensions of your own (`apron.Extension`), as the servers in
+Package `aprond` is the server as a library, and `aproncmd.Main` runs it with
+extensions of your own (`aprond.Extension`), as the servers in
 [`examples`](examples) do. What extensions add follows the protocol as the
 rest of the server does:
 

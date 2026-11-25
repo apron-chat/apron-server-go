@@ -502,7 +502,7 @@ func commandResult(name string, result map[string]any) (apron.CommandResult, err
 	return typed, nil
 }
 
-// commandCall is the run of an extension's command as apron sees it, in
+// commandCall is the run of an extension's command as aprond sees it, in
 // the room the Router's Before checked, unless it has gone since.
 func (s *Server) commandCall(c *client, call *commands.Call) (*CommandCall, *Error) {
 	body := bodyObject(call.Params.Body)

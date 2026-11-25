@@ -140,7 +140,7 @@ func (c *Conn) Announce(info apron.ServerInfo) bool {
 	info = c.server.complete(info)
 	frame, err := apron.Encode(info)
 	if err != nil {
-		c.server.logger().Error("wire: encoding the server frame", "error", err)
+		c.server.logger().Error("apron: encoding the server frame", "error", err)
 		return false
 	}
 	c.mu.Lock()
@@ -182,7 +182,7 @@ func (c *Conn) Done() <-chan struct{} { return c.rt.Done() }
 func (c *Conn) Notify(n apron.Notification) bool {
 	frame, err := apron.Encode(n)
 	if err != nil {
-		c.server.logger().Error("wire: encoding a notification", "error", err)
+		c.server.logger().Error("apron: encoding a notification", "error", err)
 		return false
 	}
 	return c.Send(frame)

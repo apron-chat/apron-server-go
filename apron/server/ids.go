@@ -32,7 +32,7 @@ func (c *Clock) At(t time.Time) apron.LogID {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.last >= apron.MaxLogID {
-		panic("wire: Clock has issued the last log_id below 2^53")
+		panic("apron: Clock has issued the last log_id below 2^53")
 	}
 	next := c.last + 1
 	if ms := apron.LogID(t.UnixMilli()); ms > next && ms <= apron.MaxLogID {
@@ -56,7 +56,7 @@ func (c *Clock) Last() apron.LogID {
 // log_id is.
 func (c *Clock) Restore(last apron.LogID) {
 	if last > apron.MaxLogID {
-		panic("wire: restoring a Clock past 2^53: " + last.String())
+		panic("apron: restoring a Clock past 2^53: " + last.String())
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()

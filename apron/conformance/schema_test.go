@@ -14,7 +14,7 @@ import (
 func TestSchemaCopy(t *testing.T) {
 	protocol, err := os.ReadFile("../../testdata/apron/schema/apron.schema.json")
 	if errors.Is(err, fs.ErrNotExist) {
-		t.Skip("no testdata/apron: the wire module is not in the server's repository")
+		t.Skip("no testdata/apron: the apron module is not in the server's repository")
 	}
 	if err != nil {
 		t.Fatal(err)

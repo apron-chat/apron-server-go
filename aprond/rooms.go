@@ -93,7 +93,7 @@ func (s *Server) roomViewOfLocked(r *roomState) apron.RoomView {
 }
 
 // decodeRecord decodes a logged record, which the server encoded, as the
-// wire type of its kind, which keeps any member it has no field for
+// package apron type of its kind, which keeps any member it has no field for
 // (Unknown), so that it encodes as the record. A record that is not one is
 // the zero value, as none is.
 func decodeRecord[T any](raw jsontext.Value) T {
@@ -501,7 +501,7 @@ func (s *Server) listRooms(c *client, p apron.RoomListParams, reply server.Reply
 		}
 		return views
 	}
-	// wire sends the arrays the filter asks for, empty too, and no others.
+	// srv sends the arrays the filter asks for, empty too, and no others.
 	result := apron.RoomListResult{Joined: views(joined), NotJoined: views(others)}
 	if hasSince && wantJoined {
 		result.Left = make([]apron.RoomRef, len(left))
@@ -735,7 +735,7 @@ func (s *Server) activity(c *client, p apron.ActivityParams) *Error {
 	if m := s.visibleMessageLocked(c.user, readID); hasRead && (m == nil || m.RoomID() != roomID) {
 		return invalidParams("Unknown read_message_id %q in room %q", readID, roomID)
 	}
-	// The relays this request causes are queued before package wire sends
+	// The relays this request causes are queued before package apron/server sends
 	// its result (§1).
 	if !inRoom {
 		return nil

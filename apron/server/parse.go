@@ -11,7 +11,7 @@ import (
 )
 
 // The parsers read the params of the methods of the Server's Config
-// handlers, with what wire checks of each (see the package documentation's
+// handlers, with what this package checks of each (see the package documentation's
 // table), before a handler gets them. Each returns an error that is an
 // *Error, error/invalid_params, and zero params with it.
 

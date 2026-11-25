@@ -113,7 +113,7 @@ func TestExtensionCommandsRegistrationErrors(t *testing.T) {
 	}
 }
 
-// apron's Field and Group constants are package commands', which checks
+// aprond's Field and Group constants are package commands', which checks
 // them.
 func TestCommandConstants(t *testing.T) {
 	for ours, theirs := range map[string]string{

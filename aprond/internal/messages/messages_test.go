@@ -41,7 +41,7 @@ func TestCheckBody(t *testing.T) {
 	}
 }
 
-// A body from elsewhere than a client is checked as wire checks a
+// A body from elsewhere than a client is checked as apron/server checks a
 // client's, then against the limits.
 func TestCheckRaw(t *testing.T) {
 	many := `{"mentions":["` + strings.Repeat(`a","`, MaxMentions) + `a"]}`

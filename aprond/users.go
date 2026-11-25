@@ -348,8 +348,8 @@ func (u *userState) shownView() apron.User {
 	return shown
 }
 
-// notifyProfileLocked tells of a change to u since before, as package wire
-// does (server.Server.PublishUser): `you` to the user's connections but
+// notifyProfileLocked tells of a change to u since before, as package
+// apron/server does (server.Server.PublishUser): `you` to the user's connections but
 // except, whose result carries the user, and `new` to everyone who shares
 // a room with them (§3.3.3), each with the fields of their view that
 // changed, a cleared one as its empty value (§3.3.1), and only when their

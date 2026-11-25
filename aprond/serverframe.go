@@ -25,7 +25,7 @@ func (s *Server) revealedLocked(c *client) bool {
 }
 
 // serverParams is the `server` frame (PROTOCOL.md §3.1) for a connection
-// whose URLs start with baseURL, whole when revealed; package wire adds the
+// whose URLs start with baseURL, whole when revealed; package apron/server adds the
 // protocol version and the ping interval. Callers hold s.mu.
 func (s *Server) serverParams(baseURL string, revealed bool) apron.ServerInfo {
 	var authSchemes []string
@@ -55,7 +55,7 @@ func (s *Server) serverParams(baseURL string, revealed bool) apron.ServerInfo {
 	})
 	info := apron.ServerInfo{
 		Agent: "apron-go/10",
-		// Package wire adds the capability of each handler and method the
+		// Package apron/server adds the capability of each handler and method the
 		// server has, such as rooms, status, and ext:command_list
 		// (methodCapabilities), so this lists only what no method stands
 		// for: what the server keeps and does beyond its requests, and the

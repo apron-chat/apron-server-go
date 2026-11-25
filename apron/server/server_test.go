@@ -38,7 +38,7 @@ type backend struct {
 }
 
 func (*backend) Hello(context.Context, *server.Conn) apron.ServerInfo {
-	return apron.ServerInfo{Auth: []string{"guest"}, Agent: "wire-test/1"}
+	return apron.ServerInfo{Auth: []string{"guest"}, Agent: "server-test/1"}
 }
 
 func (b *backend) Auth(_ context.Context, c *server.Conn, p apron.AuthParams, reply server.Reply[apron.AuthResult]) error {
@@ -197,7 +197,7 @@ func onlyConn(t *testing.T, s *server.Server) *server.Conn {
 
 func TestServerFrame(t *testing.T) {
 	s := wired(&backend{}, server.Config{PingInterval: 20 * time.Second})
-	if hello := aprontest.Connect(t, s).Hello(); hello.Apron != apron.Version || hello.Ping != 20 || hello.Agent != "wire-test/1" {
+	if hello := aprontest.Connect(t, s).Hello(); hello.Apron != apron.Version || hello.Ping != 20 || hello.Agent != "server-test/1" {
 		t.Fatalf("server frame = %+v", hello)
 	}
 }

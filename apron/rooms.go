@@ -95,9 +95,9 @@ type RoomListParams struct {
 	LatestLogID *LogID
 }
 
-// RoomListResult is the result of room_list. Server sends the arrays the
-// filter asks for, empty or not, and omits the others; Left only with a
-// latest_log_id the backend applied.
+// RoomListResult is the result of room_list. A server.Server sends the
+// arrays the filter asks for, empty or not, and omits the others; Left
+// only with a latest_log_id the backend applied.
 type RoomListResult struct {
 	Joined    []RoomView `json:"joined,omitzero"`
 	NotJoined []RoomView `json:"not_joined,omitzero"`

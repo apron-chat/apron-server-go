@@ -119,10 +119,10 @@ func TestShapesKeepUnknownMembers(t *testing.T) {
 		t.Fatalf("author encodes as %s", got)
 	}
 	if got := string(encode(author.User())); got != `{"user_id":"ada","avatar":"x"}` {
-		t.Fatalf("author's wire.User encodes as %s", got)
+		t.Fatalf("author's apron.User encodes as %s", got)
 	}
 	if got := string(encode(Author{UserID: "ada", Name: "Ada"}.User())); got != `{"user_id":"ada","name":"Ada"}` {
-		t.Fatalf("author's wire.User encodes as %s", got)
+		t.Fatalf("author's apron.User encodes as %s", got)
 	}
 	m := NewMembership(9, "a", Author{UserID: "ada"}, false)
 	if string(m.Raw) != `{"log_id":"9","members":[{"joined":false,"user":{"user_id":"ada"}}],"room_id":"a"}` {

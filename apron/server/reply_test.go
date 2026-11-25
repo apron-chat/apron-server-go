@@ -252,7 +252,7 @@ func TestHandleAnyTime(t *testing.T) {
 	}
 }
 
-// A Server is made with NewServer, with a Backend: a zero one, or one
+// A Server is made with New, with a Backend: a zero one, or one
 // without a Backend, panics at once rather than when it first serves.
 func TestNewServerPanics(t *testing.T) {
 	for name, use := range map[string]func(){

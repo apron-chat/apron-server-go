@@ -1,11 +1,12 @@
-// Package wire serves the Apron protocol for a Backend: the program that
-// decides who everyone is, which rooms exist, and what was said. wire owns
-// no chat state at all; it is the part of PROTOCOL.md that is the same for
-// every server, and every server in this module runs on it: package apron,
-// the reference server, is a Backend like any other, and so is a small
-// gateway in front of another chat system, a bridge, or a bot server.
+// Package server serves the Apron protocol, whose vocabulary is package
+// apron, for a Backend: the program that decides who everyone is, which
+// rooms exist, and what was said. A Server owns no chat state at all; it
+// is the part of PROTOCOL.md that is the same for every server, and every
+// server in this repository runs on it: package aprond, the reference
+// server, is a Backend like any other, and so is a small gateway in front
+// of another chat system, a bridge, or a bot server.
 //
-// What wire does on its own:
+// What a Server does on its own:
 //
 //   - WebSocket transport (§1), or any [Transport] that carries whole
 //     frames, with a bounded write queue per connection that drops a client
@@ -25,18 +26,13 @@
 //     connection goes on to its next frame ([Reply.Later]);
 //   - the params of every typed request, read and checked once (see
 //     Validation), with the core rules of a new message (§3.5.1, §3.6);
-//   - typed frames ([User], [Message], [Room] and [RoomView], [ServerInfo],
-//     ...), which keep the members they have no field for (Unknown), with
-//     ext as raw JSON ([Ext], [MergeExt]), and a message [Body] that
-//     encodes as it was decoded, each field it left out left out and each
-//     it sent empty sent empty (§3.5.1); typed notifications
-//     ([Notification]: [Message], [UserUpdate], [StatusUpdate],
-//     [RoomUpdate], [Reactions], [Activity], [ServerInfo]), sent with
-//     [Conn.Notify] or encoded once with [Encode]; the system identities
-//     ([PrivateNotice], [RoomNotice], [ServerNotice]); log_ids and message_ids
-//     as [LogID], below 2^53, and a [Clock] that issues them (§2.1);
-//   - user changes as patches ([User.Patch], [CurrentUser]), which carry
-//     what changed and clear what was taken away (§3.3.1), published to the
+//   - package apron's typed frames and notifications, sent with
+//     [Conn.Notify], or encoded once with apron.Encode and sent with
+//     [Conn.Send] or [Server.Broadcast]; and a [Clock] that issues log_ids
+//     (§2.1);
+//   - user changes as patches ([apron.User.Patch], [apron.CurrentUser]),
+//     which carry what changed and clear what was taken away (§3.3.1),
+//     published to the
 //     user's connections and those who share a room, each its own view of
 //     the user, such as the chosen status and the shown one
 //     ([Server.PublishUser], [UserChange], §4.5.2).
@@ -52,7 +48,7 @@
 // with [ApplyMe], checks them, tells the user's other connections and
 // those who share a room ([Server.PublishUser], with the request's
 // connection its Except), and answers with the complete object
-// ([User.Complete]), as [ProfileHandler] shows.
+// ([apron.User.Complete]), as [ProfileHandler] shows.
 //
 // Everything else is added one capability at a time, by setting another
 // handler — Edits ([EditHandler], edit), Commands ([CommandHandler],
@@ -89,8 +85,8 @@
 // params raw, for one no Decoder method reads; [Reply.Request], a typed
 // handler's request, for params its typed ones leave out, such as an
 // auth scheme's own; [Conn.Send], frames encoded once, for many
-// connections or a batch; and [Marshal], wire's encoding, for a backend
-// that keeps the bytes it sends.
+// connections or a batch; and [apron.Marshal], the frames' encoding, for
+// a backend that keeps the bytes it sends.
 //
 // # Deduplication
 //
@@ -110,18 +106,18 @@
 //
 // # Putting a server together
 //
-// [NewServer] makes a Server for a Backend, with its [Config]: the
+// [New] makes a Server for a Backend, with its [Config]: the
 // handlers, hooks, and limits it serves with, which are fixed from then
 // on. A backend and its Server refer to each other: the Server calls the
 // backend's handlers, and the backend sends with the Server's methods,
-// such as Broadcast and PublishUser. NewServer calls nothing of the
+// such as Broadcast and PublishUser. New calls nothing of the
 // backend's, so a program makes them in this order:
 //
 //  1. the backend, without the Server;
-//  2. the Server, with NewServer(backend, Config{...}), its handlers
+//  2. the Server, with New(backend, Config{...}), its handlers
 //     the backend's, and its own methods registered (Server.Handle);
 //  3. the Server kept in the backend, for its handlers to send with;
-//  4. then what opens connections: bots (package bot) and other Local
+//  4. then what opens connections: bots (package apron/bot) and other Local
 //     connections, each of which opens one at once, and the HTTP server
 //     that serves the Server's WebSocket.
 //
@@ -129,17 +125,19 @@
 // extension's added while the server runs. examples/minimal does it so:
 //
 //	chat := &Chat{}
-//	chat.server = wire.NewServer(chat, wire.Config{Messages: chat, Profiles: chat})
-//	bot.Start(chat.server, bot.Options{User: wire.User{UserID: "echo"}})
-//	http.Handle("/ws", chat.server)
+//	chat.Server = server.New(chat, server.Config{Messages: chat, Profiles: chat})
+//	bot.Start(func(_ context.Context, onFrame func(apron.Frame)) (bot.Conn, error) {
+//		return chat.Server.Local(server.LocalOptions{User: apron.User{UserID: "echo"}, OnFrame: onFrame})
+//	}, bot.Options{OnMessage: echo})
+//	http.Handle("/ws", chat.Server)
 //
 // # Requests, replies, and ordering
 //
 // Every typed handler gets a [Reply] for its result: [Reply.Send] sends it
-// now, followed by frames with nothing between them, and does what wire
-// does with the method's result as it queues it, such as signing the
+// now, followed by frames with nothing between them, and does what the
+// Server does with the method's result as it queues it, such as signing the
 // connection in with an auth result. A handler sends exactly once, or
-// returns an error; one whose result is [OK] may return nil without
+// returns an error; one whose result is [apron.OK] may return nil without
 // sending, and has {} sent for it. A backend that keeps its state under a
 // lock sends while it holds the lock, so that the result reflects every
 // notification sent before it on the connection, and none after (§1), and
@@ -156,7 +154,7 @@
 // Auth, before it returns the error.
 //
 // [Reply.Request] is the request: its params as they arrived, such as an
-// auth scheme's that [AuthParams] has no field for. Code deep in a
+// auth scheme's that [apron.AuthParams] has no field for. Code deep in a
 // handler's calls that needs the request gets it, or the Reply, passed
 // down: a handler's context carries no Request.
 //
@@ -173,8 +171,8 @@
 // up its own connection either, and gets its outcome. When the connection
 // ends first, the request fails, so that its duplicates are not left
 // waiting, and is not kept, so that a retry runs again; Send and Fail then
-// return apron.ErrClosed. Auth is a barrier, finished before the frames after it
-// (§3.2.2), and is never answered later. A [Handler] answers later as a
+// return apron.ErrClosed. Auth is a barrier, finished before the frames
+// after it (§3.2.2), and is never answered later. A [Handler] answers later as a
 // typed handler does, and [Local.Call] waits for a reply answered later,
 // while the next Call on the connection does not.
 //
@@ -200,14 +198,14 @@
 // changes' frames cross.
 //
 // There is one way for each: Notify sends one notification to one
-// connection; a notification for many is encoded once ([Encode]) and its
+// connection; a notification for many is encoded once ([apron.Encode]) and its
 // Frame sent to each with Broadcast, or with Send, which also sends
 // frames that go together, such as a reply's then frames do. An
-// extension's own notification is a type with a Method ([Notification]).
+// extension's own notification is a type with a Method ([apron.Notification]).
 //
 // # Ordering for asynchronous hosts
 //
-// wire keeps a connection's frames in the order they are queued, and no
+// A Server keeps a connection's frames in the order they are queued, and no
 // more: §1's order of a connection's frames, a result after the
 // notifications of its request's effects and every notification in the
 // order of the changes, holds when the backend queues each frame in that
@@ -246,7 +244,7 @@
 //	host.Deliver(member, barrier{func() { reply.Send(resultOf(change)) }})
 //	return nil
 //
-// wire has no barrier of its own: only the host knows its queues, and when
+// This package has no barrier of its own: only the host knows its queues, and when
 // a change's effects are all in them. Nor is [Conn.HoldUntil] one: it holds
 // the frames queued after it until a condition holds, which suits a change
 // made durable in the background, but a result held behind it still
@@ -255,8 +253,8 @@
 //
 // # Errors and panics
 //
-// A handler's error that is an [*Error] is the error reply, as [CodeOf]
-// tells; any other is error/internal_error, and logged. An error returned
+// A handler's error that is an [*apron.Error] is the error reply, as
+// [apron.CodeOf] tells; any other is error/internal_error, and logged. An error returned
 // after the reply was sent is logged, at debug level for an *Error. A
 // handler that panics is logged, and answered error/internal_error unless
 // it handles a notification; its connection goes on, as in net/http. The
@@ -265,14 +263,14 @@
 //
 // # Validation
 //
-// wire checks what the protocol defines of every request: its syntax and
-// shapes, the same for every server. The backend checks what depends on its
-// state and policy. A request wire refuses never reaches the backend, and
-// the backend counts on what wire checked; params a request has that wire
-// does not know are left to the backend, which reads them with the
+// The Server checks what the protocol defines of every request: its syntax
+// and shapes, the same for every server. The backend checks what depends on
+// its state and policy. A request the Server refuses never reaches the
+// backend, and the backend counts on what the Server checked; params a
+// request has that the Server does not know are left to the backend, which reads them with the
 // Request's Decoder, or raw ([Request.Fields]), or ignores them.
 //
-//	What                         wire checks                              the backend checks
+//	What                         the Server checks                        the backend checks
 //	frames (§1, §1.1)            JSON object, method, request id a        —
 //	                             string of at most MaxRequestIDBytes,
 //	                             params an object, frame size (ReadLimit)
@@ -302,9 +300,9 @@
 //	                                                                      sizes, the most history returns
 //
 // A scheme a server does not offer is unsupported whatever else the auth
-// request holds (§3.2), so wire leaves a requested user_id to the backend,
-// which checks it after the scheme. Activity is a notification: one whose
-// params wire refuses is ignored, as nothing answers it (§1.1).
+// request holds (§3.2), so the Server leaves a requested user_id to the
+// backend, which checks it after the scheme. Activity is a notification:
+// one whose params the Server refuses is ignored, as nothing answers it (§1.1).
 //
 // # Local connections
 //
@@ -319,11 +317,11 @@
 // ([Conn.Local] tells it from a network one), as it would sign a network
 // one in. There the backend may also make it another user than its
 // caller asked for ([Conn.SetUser]), such as one with a user_id of the
-// backend's own, which wire tells the connection of, as a user
+// backend's own, which the Server tells the connection of, as a user
 // notification right after the server frame. As Server.Local calls those
 // hooks in its caller's goroutine, and returns OnConnect's error, a
 // backend does not open a Local connection while holding a lock they
-// take: that waits forever, which wire logs once it has waited ten
+// take: that waits forever, which the Server logs once it has waited ten
 // seconds.
 //
 // OnDisconnect follows every connection OnConnect was told of, network or
@@ -339,7 +337,7 @@
 //
 // # Commands
 //
-// Package commands (wire/commands) is the command capability's parts
+// Package commands (apron/server/commands) is the command capability's parts
 // (§4.1), for any backend: commands registered by name with the forms
 // /help shows, and a Router, a [CommandHandler], that parses the command
 // line, refuses what a form requires and the sender may not use, runs the
@@ -348,55 +346,59 @@
 // (Router.Before), passing what it works out on to the command
 // (Call.Data), and a command may check the rest itself
 // (Command.SkipChecks), or every command (Router.SkipChecks); a command
-// may run without being listed (Command.Unlisted). Package apron runs its
+// may run without being listed (Command.Unlisted). Package aprond runs its
 // commands on one too.
 //
 // # Bots, filters, and what else extends a backend
 //
-// Package bot (wire/bot) runs bots on any backend: a user of the server's
-// own on a Local connection, which a Bot keeps open, with typed requests
-// (Conn.Post, Conn.Command, Conn.Join, Conn.History) and handlers for what
-// it receives, such as a message that mentions it, or names it in its
+// Package bot (apron/bot) runs bots on any backend: a user of the
+// server's own on a Local connection, which a Bot keeps open, with typed
+// requests (Bot.Post, Bot.Command, Bot.Join, Bot.History) and handlers for
+// what it receives, such as a message that mentions it, or names it in its
 // text (Bot.Mentioned, Bot.Addressed, Bot.Reply), and as the user the
-// backend made it (Bot.User). Package apron's bots make their requests on its Conn, and
-// examples/minimal has a Bot. The params of the requests a client sends,
-// such as [MessageParams], encode as it sends them.
+// backend made it (Bot.User). It takes its connection from a Dialer, and a
+// *Local is one. Package aprond's bots make their requests on their own
+// Local connections, and examples/minimal has a Bot. The params of the
+// requests a client sends, such as [apron.MessageParams], encode as it
+// sends them.
 //
 // A message filter, which checks or rewrites what people post before the
 // backend saves it, is a handler that wraps the backend's: the handler
 // fields are interfaces, so a filter is a type that embeds the handler
 // it wraps.
 //
-//	type noShouting struct{ wire.MessageHandler }
+//	type noShouting struct{ server.MessageHandler }
 //
-//	func (f noShouting) Message(ctx context.Context, c *wire.Conn, p wire.MessageParams, reply wire.Reply[wire.MessageResult]) error {
+//	func (f noShouting) Message(ctx context.Context, c *server.Conn, p apron.MessageParams, reply server.Reply[apron.MessageResult]) error {
 //		if text := p.Body.Text; text != strings.ToLower(text) && text == strings.ToUpper(text) {
-//			return wire.InvalidParams("Please don't shout")
+//			return apron.InvalidParams("Please don't shout")
 //		}
 //		return f.MessageHandler.Message(ctx, c, p, reply)
 //	}
 //
-//	server := wire.NewServer(chat, wire.Config{Messages: noShouting{chat}, Profiles: chat})
+//	srv := server.New(chat, server.Config{Messages: noShouting{chat}, Profiles: chat})
 //
 // Edits and commands are wrapped the same way, and a filter that rewrites
-// a body checks what it made as wire checks a client's ([ParseBody]).
-// wire has no filter type: what a filter needs to know, such as whether
-// the sender may see the room, or what an edit's message said, is the
-// backend's, so a backend whose filters need its state, as package
-// apron's do, runs them where it has it.
-// Nor does wire follow what happened, as package apron's extensions do
+// a body checks what it made as the Server checks a client's
+// ([apron.ParseBody]). This package has no filter type: what a filter
+// needs to know, such as whether the sender may see the room, or what an
+// edit's message said, is the backend's, so a backend whose filters need
+// its state, as package aprond's do, runs them where it has it. Nor does
+// a Server follow what happened, as package aprond's extensions do
 // (Registrar.OnEvent, Follow): that is a log, and the log is the backend's.
 //
-// # Testing with wiretest
+// # Testing with aprontest
 //
-// Package wiretest tests a backend: it calls a typed handler directly with
-// a Reply that records what it sends (wiretest.NewReply), and a Handler
-// with a request on no connection (wiretest.NewRequest); and it tests a
-// whole Server as a client sees it (wiretest.Connect, in process, or
-// wiretest.SignIn, which also signs in and closes the connection as the
-// test ends; and wiretest.Dial, over a WebSocket), with a Client that
-// signs in, calls, typed as a bot does (Client.Post, Client.Me,
-// Client.Command, wiretest.Call), and expects the notifications that came
-// before a result (wiretest.Expect, Client.CallFrames), or waits for
-// every frame queued so far (Client.Sync).
+// Package aprontest (apron/aprontest) tests a backend: it calls a typed
+// handler directly with a Reply that records what it sends
+// (aprontest.NewReply), and a Handler with a request on no connection
+// (aprontest.NewRequest); and it tests a whole Server as a client sees it
+// (aprontest.Connect, in process, or aprontest.SignIn, which also signs in
+// and closes the connection as the test ends; and aprontest.Dial, over a
+// WebSocket), with a Client that signs in, calls, typed as a bot does
+// (Client.Post, Client.Me, Client.Command, aprontest.Call), and expects the
+// notifications that came before a result (aprontest.Expect,
+// Client.CallFrames), or waits for every frame queued so far
+// (Client.Sync). Package conformance (apron/conformance) checks a whole
+// Server against the core of PROTOCOL.md.
 package server

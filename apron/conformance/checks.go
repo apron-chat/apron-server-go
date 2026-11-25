@@ -260,9 +260,9 @@ func authUnsupported(c *checker) {
 	}
 }
 
-// authUnsupportedFirst is this package's own: wire leaves a requested
-// user_id to the backend, which checks the scheme first (§3.2; see the
-// Validation section of package wire).
+// authUnsupportedFirst is this package's own: apron/server leaves a
+// requested user_id to the backend, which checks the scheme first (§3.2;
+// see the Validation section of package apron/server).
 func authUnsupportedFirst(c *checker) {
 	missing := c.notOffered()
 	if len(missing) == 0 {

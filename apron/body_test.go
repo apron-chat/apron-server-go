@@ -9,7 +9,7 @@ import (
 )
 
 // A decoded Body encodes as it arrived: each field it left out stays out,
-// and each it carried empty is sent empty, beside the members wire has no
+// and each it carried empty is sent empty, beside the members apron has no
 // field for.
 func TestBodyRoundTrip(t *testing.T) {
 	for _, in := range []string{

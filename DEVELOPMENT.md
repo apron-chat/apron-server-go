@@ -8,33 +8,37 @@ forgets it on restart); see [SERVER.md](SERVER.md#storage).
 
 - The repository root is the Go module and the reference server, implementing
   every capability in [PROTOCOL.md](https://github.com/shazow/apron/blob/main/PROTOCOL.md);
-  `apron` is the server as a Go package, with its extension API; `store`
+  `aprond` is the server as a Go package, with its extension API; `store`
   its storage backends; `aproncmd` the command as a library, which
-  `cmd/aprond` runs; `apron/aprontest` tests extensions as clients use
+  `cmd/aprond` runs; `aprond/aprondtest` tests extensions as clients use
   them, from any module; and `examples` servers built with extensions, each
-  with a test that uses `aprontest`. `wire` is the protocol itself,
-  with no rooms, log, or accounts of its own: connections, frames, the auth
-  barrier, deduplication, and in-process connections, with a Backend that
-  answers. `apron` is a Backend of it, and so is any server built on it,
-  such as a gateway in front of another chat system, or
-  `examples/minimal`. It is a Go module of its own,
-  `github.com/apron-chat/apron-server-go/wire`, and depends only on the
-  standard library and the WebSocket package, so that other programs can
-  embed it cheaply, without this module's dependencies;
-  `wire/internal/wirecore` is its connection runtime and request parsing.
-  `go.work` puts both modules in one workspace, so that a change to `wire`
-  is built and tested here with the server at once; this module's `go.mod`
-  requires the `wire` commit it was last released with, which a release
-  brings up to date (`go get github.com/apron-chat/apron-server-go/wire@<commit>`)
-  so that `go install ...@latest`, which ignores `go.work`, builds.
-  Commands that take package patterns name both modules (`./... ./wire/...`).
-  `wire/commands` gives any backend the command capability (§4.1), and
-  `wire/bot` runs a bot on a connection of its own, in process.
-  `wire/wiretest` tests a backend of it, a handler at a
-  time or a whole server as a client sees it, as `examples/minimal`'s test
-  does, and `wire/wiretest/conformance` runs the protocol's core
-  conformance checks, a port of `conform.py`, as Go tests against any
-  backend in process, as `apron`'s and `examples/minimal`'s tests do. Sign-in schemes live in
+  with a test that uses `aprondtest`. The protocol is a Go module of its
+  own, `github.com/apron-chat/apron-server-go/apron` in `apron/`, which
+  depends only on the standard library and the WebSocket package, so that
+  other programs, clients and servers alike, can embed it cheaply, without
+  this module's dependencies. Package `apron` is the protocol's vocabulary,
+  what travels over a connection, which both sides use; `apron/server` is
+  the engine that serves it, with no rooms, log, or accounts of its own:
+  connections, frames, the auth barrier, deduplication, and in-process
+  connections, with a Backend that answers. `aprond` is a Backend of it,
+  and so is any server built on it, such as a gateway in front of another
+  chat system, or `examples/minimal`. `apron/server/commands` gives any
+  backend the command capability (§4.1); `apron/bot` runs a bot on any
+  connection it is given, such as an in-process one; `apron/aprontest`
+  tests a backend, a handler at a time or a whole server as a client sees
+  it, as `examples/minimal`'s test does; and `apron/conformance` runs the
+  protocol's core conformance checks, a port of `conform.py`, as Go tests
+  against any backend in process, as `aprond`'s and `examples/minimal`'s
+  tests do. `apron/internal/core` is the connection runtime and request
+  parsing. Packages `apron` and `apron/bot` import nothing of
+  `apron/server`, which a test of the module (`TestBoundary`) checks, so
+  that a client imports them without the engine. `go.work` puts both
+  modules in one workspace, so that a change to `apron` is built and
+  tested here with the server at once; this module's `go.mod` requires the
+  `apron` commit it was last released with, which a release brings up to
+  date (`go get github.com/apron-chat/apron-server-go/apron@<commit>`) so
+  that `go install ...@latest`, which ignores `go.work`, builds. Commands
+  that take package patterns name both modules (`./... ./apron/...`). Sign-in schemes live in
   `internal/auth/{email,passkey,external}`, and depend only on
   `internal/authn`, the boundary between them and the server: a scheme
   proves a subject of its own, and the server names the identity, and owns
@@ -295,7 +299,7 @@ WebSockets against the web client's `ChatClient`. Run the latter alone with
 `testdata/apron/tests/conformance/conform.py`, against `aprond`, in a Python
 environment of its own under `build/`, with its passkey checks signing in
 through Chromium. Its core checks also run in `make test`, as
-`wire/wiretest/conformance` (`apron`'s `TestConformance`). To check another
+`apron/conformance` (`aprond`'s `TestConformance`). To check another
 server, run `conform.py ws://127.0.0.1:8080/ws`, or, for a Go backend,
 `conformance.Run` in a test of its own.
 

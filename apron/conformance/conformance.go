@@ -53,8 +53,9 @@
 //     ext, and push_unregister (§4.1 to §4.7, §4.9.1, §4.13);
 //   - the rules checked on every frame, the schema's included.
 //
-// Three more checks are this package's own, of rules wire leaves to the
-// backend (see the Validation section of package wire) that conform.py
+// Three more checks are this package's own, of rules apron/server leaves
+// to the backend (see the Validation section of package apron/server) that
+// conform.py
 // does not check:
 //
 //   - auth.shape.unsupported-first: a scheme the server does not offer is

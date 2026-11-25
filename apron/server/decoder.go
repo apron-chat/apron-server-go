@@ -19,8 +19,8 @@ const (
 // every param it needs and checks once:
 //
 //	d := r.Decoder()
-//	kind := d.String("kind", apron.Required)
-//	token := apron.IfPresent(d, "token", d.String) // nil when left out
+//	kind := d.String("kind", server.Required)
+//	token := server.IfPresent(d, "token", d.String) // nil when left out
 //	if err := d.Err(); err != nil {
 //		return err
 //	}

@@ -13,8 +13,8 @@ import (
 // Version is the protocol version this package speaks.
 const Version = 10
 
-// ServerInfo is the server frame (PROTOCOL.md §3.1). Server fills in Apron
-// and Ping, and adds the capabilities of the methods it handles.
+// ServerInfo is the server frame (PROTOCOL.md §3.1). A server.Server fills
+// in Apron and Ping, and adds the capabilities of the methods it handles.
 type ServerInfo struct {
 	Apron        int               `json:"apron"`
 	Auth         []string          `json:"auth"`
@@ -36,8 +36,8 @@ type ServerInfo struct {
 	Unknown jsontext.Value `json:",embed"`
 }
 
-// Method makes a server frame a Notification (§3.1); Conn.Announce sends
-// one with what Server fills in.
+// Method makes a server frame a Notification (§3.1); server.Conn.Announce
+// sends one with what a server.Server fills in.
 func (ServerInfo) Method() string { return "server" }
 
 // User is a user object (§3.3.1): a recorded one, such as a message's
@@ -111,8 +111,8 @@ func Notice(roomID, text string) Message {
 }
 
 // AuthParams are the params of auth (§3.2). A scheme whose fields are not
-// here, such as webauthn's, reads them from the request's Decoder
-// (Reply.Request).
+// here, such as webauthn's, reads them from the request's server.Decoder
+// (server.Reply.Request).
 type AuthParams struct {
 	Scheme string `json:"scheme"`
 	Name   string `json:"name,omitempty"`
@@ -147,7 +147,7 @@ type AuthResult struct {
 
 // MessageParams are the params of a new message (§3.5.1): a message
 // request without message_id. They encode as a client sends them, such as
-// a bot (package wire/bot).
+// a bot (package apron/bot).
 type MessageParams struct {
 	// RoomID is the room, or "" for the default room.
 	RoomID string `json:"room_id,omitempty"`
@@ -182,7 +182,7 @@ type EditParams struct {
 // are its arguments. They encode as a client sends them.
 type CommandParams struct {
 	// RoomID is the room the command runs in, or "" for the default room,
-	// which the backend names (§3.6.3): with package wire/commands, in its
+	// which the backend names (§3.6.3): with package apron/server/commands, in its
 	// Router.Before.
 	RoomID string `json:"room_id,omitempty"`
 	// Body is never nil.
@@ -252,10 +252,10 @@ type Notification interface {
 }
 
 // Encode renders a notification frame, such as to broadcast it
-// (Server.Broadcast) without encoding it for every connection.
+// (server.Server.Broadcast) without encoding it for every connection.
 func Encode(n Notification) (Frame, error) {
 	if n == nil {
-		return nil, errors.New("wire: encoding a nil notification")
+		return nil, errors.New("apron: encoding a nil notification")
 	}
 	return encodeRaw(n.Method(), n)
 }
@@ -265,7 +265,7 @@ func encodeRaw(method string, params any) (Frame, error) {
 	return marshal(map[string]any{"method": method, "params": params})
 }
 
-// Marshal encodes a value as JSON as wire encodes every frame:
+// Marshal encodes a value as JSON as every frame is encoded:
 // deterministically, with object keys sorted, nil slices and maps as null,
 // and <, >, and & as they are, which only matter for JSON embedded in HTML.
 // A backend that keeps or compares what it sends encodes with it, so that

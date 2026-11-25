@@ -35,7 +35,7 @@ type batch struct {
 
 // Fence is released once the batch it waits for, and every batch before
 // it, are applied, or could not be: Err then says why. It is a connection's
-// fence (wire.Fence).
+// fence (server.Conn.HoldUntil).
 type Fence struct {
 	done chan struct{}
 	err  error

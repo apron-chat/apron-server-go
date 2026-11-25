@@ -44,7 +44,7 @@ func (u CurrentUser) MarshalJSONTo(enc *jsontext.Encoder) error {
 	for _, name := range u.Cleared {
 		switch name {
 		case "user_id":
-			return errors.New("wire: a current user object cannot clear user_id")
+			return errors.New("apron: a current user object cannot clear user_id")
 		case "name":
 			user.Name = ""
 		case "avatar":

@@ -40,7 +40,7 @@ const (
 	KindMembership
 )
 
-// Record is one committed change: Raw is the complete wire object
+// Record is one committed change: Raw is the complete protocol object
 // (including log_id) as it was at commit time, kept as JSON, which history
 // and broadcasts send as is and which costs far less memory than decoded
 // values. Only redaction (§4.4) rewrites a record. A record is referenced
@@ -63,7 +63,7 @@ func New(id int64, kind Kind, value any) *Record {
 	return &Record{ID: id, Kind: kind, Raw: encode(value)}
 }
 
-// encode encodes as package wire encodes frames (apron.Marshal): object keys
+// encode encodes as frames are encoded (apron.Marshal): object keys
 // sorted, nil slices and maps as null, and <, >, and & unescaped.
 func encode(value any) jsontext.Value {
 	payload, err := apron.Marshal(value)

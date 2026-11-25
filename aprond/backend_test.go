@@ -10,7 +10,7 @@ import (
 	"github.com/apron-chat/apron-server-go/aprond/internal/roomlog"
 )
 
-// Every record the server logs is one of wire's types, field for field:
+// Every record the server logs is one of package apron's types, field for field:
 // history and room_list send records as apron.Room, apron.Message,
 // apron.Reactions, and apron.Membership, which keep a member they have no
 // field for (Unknown), so a record that had one would be sent without
@@ -63,7 +63,7 @@ func TestRecordsAreWireTypes(t *testing.T) {
 		}
 		for _, value := range unknown {
 			if value != nil {
-				t.Errorf("record %s has members wire's types do not: %s", record.Raw, value)
+				t.Errorf("record %s has members apron's types do not: %s", record.Raw, value)
 			}
 		}
 		var want, got any

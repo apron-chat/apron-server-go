@@ -1,8 +1,8 @@
-// Package commands gives a wire backend the command capability (§4.1)
-// without writing its parts: commands registered by name, each with the
-// forms /help shows, such as /kick @user [<reason>]; a [Router] that is
-// the Server's [server.CommandHandler], which parses the command line, picks
-// the command and its form, refuses one sent without a field it requires
+// Package commands gives a backend of package apron/server the command
+// capability (§4.1) without writing its parts: commands registered by
+// name, each with the forms /help shows, such as /kick @user [<reason>]; a
+// [Router] that is the Server's [server.CommandHandler], which parses the
+// command line, picks the command and its form, refuses one sent without a field it requires
 // or by someone it is not for, runs it, and answers /help with a ~private
 // notice that lists what the sender can use (§4.1); and the same list as
 // data for a command listing (apron's ext:command_list, [ListMethod]).
@@ -66,7 +66,7 @@
 // SkipChecks: the Router skips them, and its forms' Requires and May then
 // only say what /help and a listing show. A backend whose commands all
 // check something themselves, such as a gateway whose host checks every
-// command, names it once, in Router.SkipChecks. Package apron's own
+// command, names it once, in Router.SkipChecks. Package aprond's own
 // commands check everything themselves; its extensions' leave who may use
 // them to the Router.
 //
@@ -77,7 +77,7 @@
 // The Router holds no lock of the backend's, and calls a form's May
 // without one: a backend that keeps its state under a lock takes it in
 // May, Before, and Run, for as long as each needs it. So May may run code
-// that must not run under the lock, such as package apron's extensions',
+// that must not run under the lock, such as package aprond's extensions',
 // once it has let go of it.
 //
 // A backend that dispatches commands itself still keeps them in a Router,
@@ -263,7 +263,7 @@ func (f *Form) fixed() []string { return strings.Fields(f.Name)[1:] }
 
 // Entry is a form in a command listing: a Command object of apron's
 // ext:command_list. Its fields are in the order of their JSON names, as
-// wire encodes an object's keys.
+// apron.Marshal encodes an object's keys.
 type Entry struct {
 	Description string   `json:"description,omitempty"`
 	Group       string   `json:"group,omitempty"`

@@ -225,7 +225,7 @@ func (s *Server) signOutOthersLocked(u *userState, keep *client) {
 }
 
 // accountOps are the account's methods (ext:account), which read their
-// params and reply as wire methods do.
+// params and reply as the server.Server's methods do.
 func accountOps(ops map[string]operation) {
 	ops[accountExt+".credentials"] = (*Server).listCredentials
 	ops[accountExt+".credential_rename"] = (*Server).renameCredential

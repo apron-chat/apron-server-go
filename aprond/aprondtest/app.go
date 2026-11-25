@@ -47,12 +47,12 @@ func (s *Server) App() *App {
 	c := s.Dial()
 	begun, err := c.Auth(apron.AuthParams{Scheme: "external"})
 	if err != nil {
-		s.t.Fatalf("aprontest: beginning external sign-in: %v", err)
+		s.t.Fatalf("aprondtest: beginning external sign-in: %v", err)
 	}
 	external, _ := begun.Extra["external"].(map[string]any)
 	page, _ := external["url"].(string)
 	if page == "" {
-		s.t.Fatalf("aprontest: the external begin named no sign-in page: %v", begun.Extra)
+		s.t.Fatalf("aprondtest: the external begin named no sign-in page: %v", begun.Extra)
 	}
 	a := &App{
 		Conn: c, URL: page, ClientID: "com.example.app", RedirectURI: "com.example.app:/signed-in",
@@ -89,7 +89,7 @@ func (a *App) Open() Page {
 	a.server.t.Helper()
 	page, err := url.Parse(a.URL)
 	if err != nil {
-		a.server.t.Fatalf("aprontest: the sign-in page %q: %v", a.URL, err)
+		a.server.t.Fatalf("aprondtest: the sign-in page %q: %v", a.URL, err)
 	}
 	query := page.Query()
 	// The app redeems with the client_id it sent: the page's own, if it
@@ -114,7 +114,7 @@ func (a *App) Get(page string) Page {
 	a.server.t.Helper()
 	response, err := a.browser.Get(page)
 	if err != nil {
-		a.server.t.Fatalf("aprontest: opening %s: %v", page, err)
+		a.server.t.Fatalf("aprondtest: opening %s: %v", page, err)
 	}
 	return a.read(response)
 }
@@ -124,7 +124,7 @@ func (a *App) read(response *http.Response) Page {
 	body, err := io.ReadAll(response.Body)
 	response.Body.Close()
 	if err != nil {
-		a.server.t.Fatalf("aprontest: reading %s: %v", response.Request.URL, err)
+		a.server.t.Fatalf("aprondtest: reading %s: %v", response.Request.URL, err)
 	}
 	p := Page{Status: response.StatusCode, Body: string(body), URL: response.Request.URL}
 	if location := response.Header.Get("Location"); strings.HasPrefix(location, a.RedirectURI) {
@@ -145,11 +145,11 @@ func (a *App) Press(page Page, op string) Page {
 	a.server.t.Helper()
 	match := formAction.FindStringSubmatch(page.Body)
 	if match == nil {
-		a.server.t.Fatalf("aprontest: the page has no form: %d %s", page.Status, page.Body)
+		a.server.t.Fatalf("aprondtest: the page has no form: %d %s", page.Status, page.Body)
 	}
 	action, err := url.Parse(html.UnescapeString(match[1]))
 	if err != nil {
-		a.server.t.Fatalf("aprontest: the form's action %q: %v", match[1], err)
+		a.server.t.Fatalf("aprondtest: the form's action %q: %v", match[1], err)
 	}
 	form := url.Values{"op": {op}}
 	for _, field := range hiddenInput.FindAllStringSubmatch(page.Body, -1) {
@@ -157,7 +157,7 @@ func (a *App) Press(page Page, op string) Page {
 	}
 	response, err := a.browser.PostForm(page.URL.ResolveReference(action).String(), form)
 	if err != nil {
-		a.server.t.Fatalf("aprontest: pressing %s: %v", op, err)
+		a.server.t.Fatalf("aprondtest: pressing %s: %v", op, err)
 	}
 	return a.read(response)
 }
@@ -171,11 +171,11 @@ func (a *App) Redeem(page Page) (apron.AuthResult, error) {
 	t := a.server.t
 	t.Helper()
 	if page.Return == nil {
-		t.Fatalf("aprontest: the browser did not return to the app: %d %s", page.Status, page.Body)
+		t.Fatalf("aprondtest: the browser did not return to the app: %d %s", page.Status, page.Body)
 	}
 	query := page.Return.Query()
 	if query.Get("state") != a.State || query.Get("iss") != a.server.URL || query.Get("code") == "" {
-		t.Fatalf("aprontest: the browser returned to the app with %s", page.Return)
+		t.Fatalf("aprondtest: the browser returned to the app with %s", page.Return)
 	}
 	return a.Conn.Auth(struct {
 		Scheme       string `json:"scheme"`

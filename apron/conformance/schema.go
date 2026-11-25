@@ -10,7 +10,7 @@ import (
 )
 
 // schemaDocument is schema/apron.schema.json of the protocol repository,
-// copied, as the wire module cannot reach the protocol's files:
+// copied, as the apron module cannot reach the protocol's files:
 // TestSchemaCopy checks that it is the same as testdata/apron's, when this
 // module is in the server's repository.
 //

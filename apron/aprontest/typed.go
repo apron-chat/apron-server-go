@@ -19,7 +19,7 @@ func Call[T any](ctx context.Context, c *Client, method string, params any) (T, 
 		return result, err
 	}
 	if err := json.Unmarshal(raw, &result); err != nil {
-		return result, fmt.Errorf("wiretest: %s result %s: %w", method, raw, err)
+		return result, fmt.Errorf("aprontest: %s result %s: %w", method, raw, err)
 	}
 	return result, nil
 }

@@ -278,7 +278,7 @@ func (s *Server) settle(ctx context.Context) error {
 // Message is a message record, decoded (PROTOCOL.md §3.5), as extensions
 // see messages: one snapshot of a message, with its message_id a string,
 // as Draft, CommandCall, and ReplyTo take one, and its body's text,
-// format, and mentions in fields of their own. Code in package wire's
+// format, and mentions in fields of their own. Code in package apron's
 // terms converts with MessageOf and Wire.
 type Message struct {
 	ID     string

@@ -51,9 +51,9 @@ func (id LogID) MarshalJSON() ([]byte, error) {
 	case id == 0:
 		return []byte("null"), nil
 	case id < 0:
-		return nil, errors.New("wire: a log_id is not negative: " + id.String())
+		return nil, errors.New("apron: a log_id is not negative: " + id.String())
 	case id > MaxLogID:
-		return nil, errors.New("wire: a log_id is below 2^53: " + id.String())
+		return nil, errors.New("apron: a log_id is below 2^53: " + id.String())
 	}
 	return strconv.AppendQuote(nil, id.String()), nil
 }

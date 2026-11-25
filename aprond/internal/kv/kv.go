@@ -1,4 +1,4 @@
-// Package kv keeps the values extensions store (apron's Host.Store), by
+// Package kv keeps the values extensions store (aprond's Host.Store), by
 // entry kind, one per extension, and key, as the JSON they were handed
 // over as, and which of them changed since they were last written to the
 // store. It knows nothing of extensions, their names, or reserved keys.

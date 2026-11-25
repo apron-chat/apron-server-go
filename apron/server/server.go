@@ -163,7 +163,7 @@ type Config struct {
 // backend.
 func New(backend Backend, config Config) *Server {
 	if backend == nil {
-		panic("wire: New without a Backend")
+		panic("apron: New without a Backend")
 	}
 	perUser := config.DedupSize
 	if perUser == 0 {
@@ -187,7 +187,7 @@ func New(backend Backend, config Config) *Server {
 // one, which has no Backend to serve.
 func (s *Server) made() {
 	if s.backend == nil {
-		panic("wire: a Server is made with New")
+		panic("apron: a Server is made with New")
 	}
 }
 
@@ -207,10 +207,10 @@ var reservedMethods = map[string]string{
 // and its capability is in the server frames sent after.
 func (s *Server) Handle(name string, h Handler) {
 	if h.Serve == nil {
-		panic("wire: Handle " + strconv.Quote(name) + " without Serve")
+		panic("apron: Handle " + strconv.Quote(name) + " without Serve")
 	}
 	if core.NotificationOnly[name] {
-		panic("wire: Handle " + strconv.Quote(name) + ": it is a notification; use HandleNotification")
+		panic("apron: Handle " + strconv.Quote(name) + ": it is a notification; use HandleNotification")
 	}
 	s.register(name, method{capability: h.Capability, noDedup: h.NoDedup, serve: func(ctx context.Context, c *Conn, r *Request) error {
 		return h.Serve(ctx, c, r, replyFor[any](r, nil))
@@ -224,7 +224,7 @@ func (s *Server) Handle(name string, h Handler) {
 // Local.Call refuses a notification method with ErrNotRequest.
 func (s *Server) HandleNotification(name string, h NotificationHandler) {
 	if h.Serve == nil {
-		panic("wire: HandleNotification " + strconv.Quote(name) + " without Serve")
+		panic("apron: HandleNotification " + strconv.Quote(name) + " without Serve")
 	}
 	s.register(name, method{capability: h.Capability, notify: h.Serve})
 }
@@ -232,15 +232,15 @@ func (s *Server) HandleNotification(name string, h NotificationHandler) {
 func (s *Server) register(name string, m method) {
 	s.made()
 	if why, reserved := reservedMethods[name]; reserved {
-		panic("wire: cannot register " + name + ": " + why)
+		panic("apron: cannot register " + name + ": " + why)
 	}
 	if name == "" {
-		panic("wire: cannot register a method without a name")
+		panic("apron: cannot register a method without a name")
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if _, twice := s.registered[name]; twice {
-		panic("wire: method " + strconv.Quote(name) + " registered twice")
+		panic("apron: method " + strconv.Quote(name) + " registered twice")
 	}
 	s.registered[name] = m
 	s.methods[name] = m
@@ -330,11 +330,11 @@ func (s *Server) ServeTransport(ctx context.Context, t Transport, remote net.Add
 	defer s.serving.Done()
 
 	s.checkOnce.Do(func() {
-		s.logger().Debug("wire: serving", "capabilities", s.capabilities())
+		s.logger().Debug("apron: serving", "capabilities", s.capabilities())
 		if _, ok := s.method("message"); !ok {
-			s.logger().Warn("wire: the server takes no messages, which every server should (§3.6): set Config.Messages, or Handle message")
+			s.logger().Warn("apron: the server takes no messages, which every server should (§3.6): set Config.Messages, or Handle message")
 		} else if _, ok := s.method("me"); !ok {
-			s.logger().Warn("wire: the server answers no me, which clients count on to change a user's profile (§3.3.2): set Config.Profiles, or Handle me")
+			s.logger().Warn("apron: the server answers no me, which clients count on to change a user's profile (§3.3.2): set Config.Profiles, or Handle me")
 		}
 	})
 	ctx, cancel := context.WithCancel(ctx)
@@ -389,7 +389,7 @@ func (s *Server) ServeTransport(ctx context.Context, t Transport, remote net.Add
 	c.info = s.complete(s.backend.Hello(ctx, c))
 	frame, err := apron.Encode(c.info)
 	if err != nil {
-		s.logger().Error("wire: encoding the server frame", "error", err)
+		s.logger().Error("apron: encoding the server frame", "error", err)
 		c.Close()
 		s.disconnected(c)
 		return
@@ -437,7 +437,7 @@ func (s *Server) newConn(ctx context.Context, cancel context.CancelFunc, w core.
 				fellBehind()
 				return
 			}
-			s.logger().Warn("wire: closing a connection that fell behind", "remote", c.remote)
+			s.logger().Warn("apron: closing a connection that fell behind", "remote", c.remote)
 		},
 	})
 	return c

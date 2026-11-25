@@ -71,7 +71,7 @@ func TestBotConn(t *testing.T) {
 }
 
 // Message and apron.Message say the same of a message: a reply, a moved
-// snapshot, a body with members wire has no field for, a tombstone, and
+// snapshot, a body with members apron has no field for, a tombstone, and
 // a notice.
 func TestMessageOfAndWire(t *testing.T) {
 	reply := apron.Message{

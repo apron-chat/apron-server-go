@@ -18,14 +18,14 @@ import (
 // Errors of a Local connection.
 var (
 	// ErrFellBehind ends a Local connection whose OnFrame did not keep up.
-	ErrFellBehind = errors.New("wire: the connection's frame handler fell behind")
+	ErrFellBehind = errors.New("apron: the connection's frame handler fell behind")
 	// ErrReentrant is a call made from inside the handling of another call
 	// on the same Local connection, which would wait for itself.
-	ErrReentrant = errors.New("wire: the connection is waiting on this call; use another connection")
+	ErrReentrant = errors.New("apron: the connection is waiting on this call; use another connection")
 	// ErrNotRequest is a Call of a method clients send only as a
 	// notification, such as ping or activity, which is never answered; send
 	// it with Notify.
-	ErrNotRequest = errors.New("wire: the method is a notification, which gets no reply; use Notify")
+	ErrNotRequest = errors.New("apron: the method is a notification, which gets no reply; use Notify")
 )
 
 // LocalOptions configure a Local connection.
@@ -117,7 +117,7 @@ type inFlight struct{ l *Local }
 func (s *Server) Local(options LocalOptions) (*Local, error) {
 	s.made()
 	if !apron.ValidID(options.User.UserID) {
-		return nil, errors.New("wire: a Local connection needs a user")
+		return nil, errors.New("apron: a Local connection needs a user")
 	}
 	queue := orDefault(options.Queue, 1024)
 	l := &Local{s: s, prefix: rand.Text()[:12] + "-", turn: make(chan struct{}, 1), closed: make(chan struct{})}
@@ -160,7 +160,7 @@ func (s *Server) Local(options LocalOptions) (*Local, error) {
 	// itself forever, which no runtime check tells, so the wait is logged.
 	stall := localOpenStall
 	stalled := time.AfterFunc(stall, func() {
-		s.logger().Warn("wire: Server.Local is still waiting for OnConnect and Hello; does its caller hold a lock they take?", "user_id", options.User.UserID, "waited", stall)
+		s.logger().Warn("apron: Server.Local is still waiting for OnConnect and Hello; does its caller hold a lock they take?", "user_id", options.User.UserID, "waited", stall)
 	})
 	err := s.openLocal(ctx, c, options.User)
 	stalled.Stop()
@@ -200,18 +200,18 @@ func (s *Server) openLocal(ctx context.Context, c *Conn, asked apron.User) error
 	}
 	user := c.User()
 	if user == nil || !apron.ValidID(user.UserID) {
-		return fail(errors.New("wire: OnConnect left a Local connection without a user"))
+		return fail(errors.New("apron: OnConnect left a Local connection without a user"))
 	}
 	info := s.complete(s.backend.Hello(ctx, c))
 	frames := make([]apron.Frame, 1, 2)
 	frame, err := apron.Encode(info)
 	if err != nil {
-		s.logger().Error("wire: encoding the server frame", "error", err)
+		s.logger().Error("apron: encoding the server frame", "error", err)
 	}
 	frames[0] = frame
 	if you, changed := user.Patch(asked); changed && err == nil {
 		if frame, err = apron.Encode(apron.UserUpdate{You: &you}); err != nil {
-			s.logger().Error("wire: encoding a Local connection's user", "error", err)
+			s.logger().Error("apron: encoding a Local connection's user", "error", err)
 		}
 		frames = append(frames, frame)
 	}

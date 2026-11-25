@@ -62,7 +62,7 @@ to start a config file.
 
 ## Your own server
 
-The server is also a Go library. Package `apron` serves the protocol, and
+The server is also a Go library. Package `aprond` serves the protocol, and
 extensions add commands, request methods, bots, message filters, sign-in,
 and HTTP routes to it without a fork. `aproncmd.Main` runs it with every
 flag of `aprond`:
@@ -73,18 +73,18 @@ package main
 import (
 	"context"
 
-	"github.com/apron-chat/apron-server-go/apron"
 	"github.com/apron-chat/apron-server-go/aproncmd"
+	"github.com/apron-chat/apron-server-go/aprond"
 )
 
 type Hello struct{}
 
 func (Hello) Name() string { return "hello" }
 
-func (Hello) Init(r *apron.Registrar) error {
-	r.Command(apron.Command{
+func (Hello) Init(r *aprond.Registrar) error {
+	r.Command(aprond.Command{
 		Name: "hello", Help: "say hello",
-		Run: func(_ context.Context, call *apron.CommandCall) (map[string]any, error) {
+		Run: func(_ context.Context, call *aprond.CommandCall) (map[string]any, error) {
 			call.Notice("Hello, " + call.User.Name + "!")
 			return nil, nil
 		},
@@ -96,14 +96,15 @@ func main() { aproncmd.Main(Hello{}) }
 ```
 
 A program that already keeps its own chat state, such as a gateway in front
-of another chat system, uses package [`wire`](wire) instead: it speaks the
-protocol and asks the program for every answer, as
+of another chat system, uses package [`apron/server`](apron/server) instead:
+it speaks the protocol, whose vocabulary is package [`apron`](apron), and
+asks the program for every answer, as
 [`examples/minimal`](examples/minimal) shows in under two hundred lines.
 
 [`examples`](examples) has complete servers: GitHub single sign-on,
 moderation, an AI assistant, an ops room with deploys, an IRC bridge, and
 search with a public archive. See the
-[package documentation](https://pkg.go.dev/github.com/apron-chat/apron-server-go/apron)
+[package documentation](https://pkg.go.dev/github.com/apron-chat/apron-server-go/aprond)
 and [SERVER.md](SERVER.md#extensions).
 
 ## Documentation

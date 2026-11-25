@@ -8,7 +8,7 @@ import (
 )
 
 // errLaterAuth is a Later of an auth request, which is a barrier.
-var errLaterAuth = errors.New("wire: auth is a barrier (§3.2.2), answered before the frames after it, never later")
+var errLaterAuth = errors.New("apron: auth is a barrier (§3.2.2), answered before the frames after it, never later")
 
 // later is the state of a request answered after its handler returns
 // (Reply.Later).
@@ -113,14 +113,14 @@ func (r *Request) failWith(err error) error {
 	var e *apron.Error
 	switch {
 	case err == nil:
-		r.logger().Error("wire: a request was failed with a nil error", "method", r.Method)
+		r.logger().Error("apron: a request was failed with a nil error", "method", r.Method)
 		e = internalError()
 	case r.c != nil:
 		e = r.c.server.protocolError(r.c.ctx, r.Method, err)
 	default:
 		var ok bool
 		if e, ok = asError(err); !ok {
-			r.logger().Error("wire: request failed", "method", r.Method, "error", err)
+			r.logger().Error("apron: request failed", "method", r.Method, "error", err)
 			e = internalError()
 		}
 	}

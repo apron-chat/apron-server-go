@@ -79,7 +79,7 @@ type Request struct {
 	notification bool
 	hasID        bool
 	fields       Fields
-	// rec, for a request on no connection, made by package wiretest, gets
+	// rec, for a request on no connection, made by package aprontest, gets
 	// its reply.
 	rec testhook.Recorder
 	// entry is the request's deduplication entry (§1.2), or nil, and
@@ -137,7 +137,7 @@ func (r *Request) encodeReply(result any, e *apron.Error) (frame apron.Frame, en
 				raw = []byte("{}") // A typed nil, such as a nil map.
 			}
 			if err != nil || !jsontext.Value(raw).IsValid() || raw[0] != '{' {
-				r.logger().Error("wire: a result is not a JSON object", "method", r.Method, "error", err)
+				r.logger().Error("apron: a result is not a JSON object", "method", r.Method, "error", err)
 				e = internalError()
 			} else {
 				encoded = raw
@@ -177,7 +177,7 @@ func (s *Server) protocolError(ctx context.Context, method string, err error) *a
 	// A request cut short by its connection's end is not the backend's
 	// failure.
 	if ctx.Err() == nil {
-		s.logger().Error("wire: request failed", "method", method, "error", err)
+		s.logger().Error("apron: request failed", "method", method, "error", err)
 	}
 	return internalError()
 }
@@ -189,7 +189,7 @@ func (s *Server) protocolError(ctx context.Context, method string, err error) *a
 // goes on.
 func (s *Server) recoverFrame(r *Request) {
 	if v := recover(); v != nil {
-		s.logger().Error("wire: a handler panicked", "method", r.Method, "panic", v, "stack", string(debug.Stack()))
+		s.logger().Error("apron: a handler panicked", "method", r.Method, "panic", v, "stack", string(debug.Stack()))
 		r.fail(internalError())
 	}
 }
@@ -200,11 +200,11 @@ func (s *Server) recoverFrame(r *Request) {
 func (s *Server) afterReply(ctx context.Context, method string, err error) {
 	switch e, ok := asError(err); {
 	case ok:
-		s.logger().Debug("wire: a request was refused after its reply", "method", method, "error", e)
+		s.logger().Debug("apron: a request was refused after its reply", "method", method, "error", e)
 	case ctx.Err() != nil, errors.Is(err, apron.ErrClosed):
 		// Cut short by its connection's end.
 	default:
-		s.logger().Error("wire: a request failed after its reply", "method", method, "error", err)
+		s.logger().Error("apron: a request failed after its reply", "method", method, "error", err)
 	}
 }
 
@@ -371,7 +371,7 @@ func (s *Server) refreshed(method string, original jsontext.Value, result any) a
 	case jsontext.Value:
 		return you
 	}
-	s.logger().Error("wire: RefreshDuplicate brought a me result up to date as something other than a CurrentUser", "type", fmt.Sprintf("%T", result))
+	s.logger().Error("apron: RefreshDuplicate brought a me result up to date as something other than a CurrentUser", "type", fmt.Sprintf("%T", result))
 	return original
 }
 

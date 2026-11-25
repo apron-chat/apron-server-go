@@ -48,7 +48,7 @@ import (
 	"github.com/apron-chat/apron-server-go/store"
 )
 
-// encodeJSON encodes a value as wire encodes frames (apron.Marshal), or
+// encodeJSON encodes a value as frames are encoded (apron.Marshal), or
 // returns nil if it cannot: deterministically, sorting object keys, with
 // encoding/json's null for nil slices and maps, and without escaping <, >,
 // and &, which only matter for JSON embedded in HTML and would make stored
@@ -91,7 +91,7 @@ func formatID(id int64) string {
 
 type client struct {
 	server *Server
-	// conn is the connection as package wire serves it, and session the
+	// conn is the connection as package apron/server serves it, and session the
 	// Session it is, if any.
 	conn    *server.Conn
 	session *Session
@@ -224,7 +224,7 @@ type Server struct {
 	schemeWork sync.WaitGroup
 
 	ops map[string]operation
-	// wire serves the protocol, with s as its Backend (backend.go).
+	// srv serves the protocol, with s as its Backend (backend.go).
 	srv  *server.Server
 	push *webpush.Deliverer
 	// storedVAPID is the webpush key (§4.9) the server made, which push
@@ -348,7 +348,7 @@ func Open(config Config) (*Server, error) {
 		}
 	}
 	s.ops = s.operations()
-	s.newWire()
+	s.newSrv()
 	s.push = webpush.NewDeliverer(config.AllowInsecurePush)
 	if config.VAPIDPrivateKey != "" {
 		key, err := webpush.ParseVAPIDKey(config.VAPIDPrivateKey)
@@ -670,9 +670,9 @@ func (c *client) enqueueBatch(values ...any) bool {
 	return c.conn.Send(frames...)
 }
 
-// operation handles one of the server's own methods, a wire method
-// (server.Handler.Serve): it reads the request's params with wire's
-// Decoder, and replies with reply.Send, or returns nil without replying,
+// operation handles one of the server's own methods, a method of the
+// server.Server (server.Handler.Serve): it reads the request's params with
+// its server.Decoder, and replies with reply.Send, or returns nil without replying,
 // which answers {}, or an error. Operations whose
 // results describe state reply while holding s.mu, so that a result
 // reflects every notification sent before it on the connection, and after
@@ -697,7 +697,7 @@ func (s *Server) operations() map[string]operation {
 var readOnlyOps = map[string]bool{commandListMethod: true}
 
 // methodCapabilities are the capabilities of the server's own methods,
-// which package wire lists in the server frame as it does its handlers'
+// which package apron/server lists in the server frame as it does its handlers'
 // (server.Handler.Capability). A method of a capability that only some
 // connections are told of, such as ext:account's, has none here, and its
 // capability is in serverParams.

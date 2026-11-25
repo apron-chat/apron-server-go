@@ -43,7 +43,7 @@ func (c *Client) refusal(what string, err error) error {
 	if _, ok := errors.AsType[*aprond.Error](err); ok {
 		return err
 	}
-	c.t.Fatalf("aprontest: %s: %v", what, err)
+	c.t.Fatalf("aprondtest: %s: %v", what, err)
 	return err
 }
 
@@ -75,7 +75,7 @@ func (c *Client) signIn(params any) error {
 	c.t.Helper()
 	result, err := c.Auth(params)
 	if err == nil && result.You == nil {
-		err = errors.New("aprontest: the auth result signed nobody in")
+		err = errors.New("aprondtest: the auth result signed nobody in")
 	}
 	return err
 }
@@ -135,7 +135,7 @@ func (c *Client) Call(method string, params, result any) error {
 	}
 	if result != nil {
 		if err := json.Unmarshal(raw, result, json.MatchCaseInsensitiveNames(true)); err != nil {
-			c.t.Fatalf("aprontest: decoding the result of %s, %s: %v", method, raw, err)
+			c.t.Fatalf("aprondtest: decoding the result of %s, %s: %v", method, raw, err)
 		}
 	}
 	return nil
@@ -253,7 +253,7 @@ func (c *Client) Message(match func(aprond.Message) bool) aprond.Message {
 		return false
 	})
 	if err != nil {
-		c.t.Fatalf("aprontest: no message matched: %v", err)
+		c.t.Fatalf("aprondtest: no message matched: %v", err)
 	}
 	return found
 }

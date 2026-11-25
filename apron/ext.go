@@ -21,7 +21,7 @@ type Ext map[string]jsontext.Value
 func (e Ext) With(key string, v any) Ext {
 	raw, err := marshal(v)
 	if err != nil {
-		panic(fmt.Sprintf("wire: ext %q: %v", key, err))
+		panic(fmt.Sprintf("apron: ext %q: %v", key, err))
 	}
 	ext := make(Ext, len(e)+1)
 	maps.Copy(ext, e)
