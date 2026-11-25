@@ -6,13 +6,13 @@ import (
 	"reflect"
 	"testing"
 
+	"github.com/apron-chat/apron-server-go/apron"
 	"github.com/apron-chat/apron-server-go/aprond/internal/roomlog"
-	"github.com/apron-chat/apron-server-go/wire"
 )
 
 // Every record the server logs is one of wire's types, field for field:
-// history and room_list send records as wire.Room, wire.Message,
-// wire.Reactions, and wire.Membership, which keep a member they have no
+// history and room_list send records as apron.Room, apron.Message,
+// apron.Reactions, and apron.Membership, which keep a member they have no
 // field for (Unknown), so a record that had one would be sent without
 // anything noticing that the server and the types drifted apart.
 func TestRecordsAreWireTypes(t *testing.T) {
@@ -41,21 +41,21 @@ func TestRecordsAreWireTypes(t *testing.T) {
 		var unknown []jsontext.Value
 		switch record.Kind {
 		case roomlog.KindRoom:
-			room := decodeRecord[wire.Room](record.Raw)
+			room := decodeRecord[apron.Room](record.Raw)
 			typed, unknown = room, []jsontext.Value{room.Unknown}
 		case roomlog.KindMessage:
-			m := decodeRecord[wire.Message](record.Raw)
+			m := decodeRecord[apron.Message](record.Raw)
 			// The snapshot's own shape has a field for every member too.
 			stored := roomlog.DecodeMessage(record.Raw)
 			typed, unknown = m, []jsontext.Value{m.Unknown, m.From.Unknown, stored.Unknown, stored.From.Unknown}
 		case roomlog.KindReactions:
-			r := decodeRecord[wire.Reactions](record.Raw)
+			r := decodeRecord[apron.Reactions](record.Raw)
 			typed = r
 			for _, reaction := range r.Reactions {
 				unknown = append(unknown, reaction.From.Unknown)
 			}
 		case roomlog.KindMembership:
-			m := decodeRecord[wire.Membership](record.Raw)
+			m := decodeRecord[apron.Membership](record.Raw)
 			typed = m
 			for _, member := range m.Members {
 				unknown = append(unknown, member.User.Unknown)

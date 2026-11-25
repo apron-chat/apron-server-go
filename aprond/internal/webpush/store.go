@@ -5,8 +5,8 @@ import (
 	"encoding/json/v2"
 	"fmt"
 
+	"github.com/apron-chat/apron-server-go/apron"
 	"github.com/apron-chat/apron-server-go/store"
-	"github.com/apron-chat/apron-server-go/wire"
 )
 
 // StoreKind and StoreID name the store entry that keeps the VAPID key a
@@ -53,7 +53,7 @@ func (k *StoredKey) Entries() []store.Entry {
 		return nil
 	}
 	k.dirty = false
-	value, _ := wire.Marshal(k.key.Encoded())
+	value, _ := apron.Marshal(k.key.Encoded())
 	return []store.Entry{{Kind: StoreKind, ID: StoreID, Value: value}}
 }
 

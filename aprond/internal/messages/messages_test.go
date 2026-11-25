@@ -7,11 +7,11 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/apron-chat/apron-server-go/wire"
+	"github.com/apron-chat/apron-server-go/apron"
 )
 
 // code is an error's code, 0 for none.
-func code(err *wire.Error) int {
+func code(err *apron.Error) int {
 	if err == nil {
 		return 0
 	}
@@ -26,14 +26,14 @@ func TestCheckBody(t *testing.T) {
 	embeds := slices.Repeat([]jsontext.Value{jsontext.Value(`{"kind":"upload"}`)}, MaxEmbeds+1)
 	for _, c := range []struct {
 		name string
-		body wire.Body
+		body apron.Body
 		want int
 	}{
-		{"empty", wire.Body{}, 0},
-		{"at the limits", wire.Body{Mentions: mentions[:MaxMentions], Embeds: embeds[:MaxEmbeds]}, 0},
+		{"empty", apron.Body{}, 0},
+		{"at the limits", apron.Body{Mentions: mentions[:MaxMentions], Embeds: embeds[:MaxEmbeds]}, 0},
 		// A count limit the server sets is denied (§1.1).
-		{"mentions", wire.Body{Mentions: mentions}, wire.CodeDenied},
-		{"embeds", wire.Body{Embeds: embeds}, wire.CodeDenied},
+		{"mentions", apron.Body{Mentions: mentions}, apron.CodeDenied},
+		{"embeds", apron.Body{Embeds: embeds}, apron.CodeDenied},
 	} {
 		if got := code(CheckBody(&c.body)); got != c.want {
 			t.Errorf("%s: code %d, want %d", c.name, got, c.want)
@@ -47,11 +47,11 @@ func TestCheckRaw(t *testing.T) {
 	many := `{"mentions":["` + strings.Repeat(`a","`, MaxMentions) + `a"]}`
 	for raw, want := range map[string]int{
 		`{"text":"hi","format":"markdown","mentions":["ada"],"color":"red"}`: 0,
-		`{"text":5}`:              wire.CodeInvalidParams,
-		`{"format":"html"}`:       wire.CodeInvalidParams,
-		`{"embeds":[{"kind":5}]}`: wire.CodeInvalidParams,
-		`[]`:                      wire.CodeInvalidParams,
-		many:                      wire.CodeDenied,
+		`{"text":5}`:              apron.CodeInvalidParams,
+		`{"format":"html"}`:       apron.CodeInvalidParams,
+		`{"embeds":[{"kind":5}]}`: apron.CodeInvalidParams,
+		`[]`:                      apron.CodeInvalidParams,
+		many:                      apron.CodeDenied,
 	} {
 		if got := code(CheckRaw(jsontext.Value(raw))); got != want {
 			t.Errorf("CheckRaw(%.40s) = %d, want %d", raw, got, want)
@@ -60,10 +60,10 @@ func TestCheckRaw(t *testing.T) {
 }
 
 func TestCheckExt(t *testing.T) {
-	if err := CheckExt(wire.Ext{}.With("x", strings.Repeat("a", MaxExtBytes/2))); err != nil {
+	if err := CheckExt(apron.Ext{}.With("x", strings.Repeat("a", MaxExtBytes/2))); err != nil {
 		t.Fatalf("half the limit: %v", err)
 	}
-	if code(CheckExt(wire.Ext{}.With("x", strings.Repeat("a", MaxExtBytes)))) != wire.CodeTooLarge {
+	if code(CheckExt(apron.Ext{}.With("x", strings.Repeat("a", MaxExtBytes)))) != apron.CodeTooLarge {
 		t.Fatal("an ext over the limit was taken")
 	}
 }
@@ -86,9 +86,9 @@ func TestEmojis(t *testing.T) {
 		in   []string
 		want int
 	}{
-		"only U+FE0F": {[]string{"️"}, wire.CodeInvalidParams},
-		"too long":    {[]string{strings.Repeat("x", MaxEmojiBytes+1)}, wire.CodeTooLarge},
-		"too many":    {many, wire.CodeDenied},
+		"only U+FE0F": {[]string{"️"}, apron.CodeInvalidParams},
+		"too long":    {[]string{strings.Repeat("x", MaxEmojiBytes+1)}, apron.CodeTooLarge},
+		"too many":    {many, apron.CodeDenied},
 		"repeated":    {slices.Repeat([]string{"👍"}, MaxDistinctEmoji+1), 0},
 	} {
 		if _, err := Emojis(c.in); code(err) != c.want {

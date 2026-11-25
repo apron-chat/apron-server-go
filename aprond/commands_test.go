@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/apron-chat/apron-server-go/wire/commands"
+	"github.com/apron-chat/apron-server-go/apron/server/commands"
 )
 
 // commandList sends ext:command_list and returns its commands.

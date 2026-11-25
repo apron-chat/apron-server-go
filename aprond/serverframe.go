@@ -4,14 +4,14 @@ import (
 	"maps"
 	"slices"
 
+	"github.com/apron-chat/apron-server-go/apron"
 	"github.com/apron-chat/apron-server-go/internal/auth/external"
 	"github.com/apron-chat/apron-server-go/internal/auth/passkey"
 	"github.com/apron-chat/apron-server-go/internal/authn"
-	"github.com/apron-chat/apron-server-go/wire"
 )
 
 // serverFrameLocked is the `server` frame (PROTOCOL.md §3.1) for c.
-func (s *Server) serverFrameLocked(c *client) wire.ServerInfo {
+func (s *Server) serverFrameLocked(c *client) apron.ServerInfo {
 	return s.serverParams(c.baseURL, s.revealedLocked(c))
 }
 
@@ -27,7 +27,7 @@ func (s *Server) revealedLocked(c *client) bool {
 // serverParams is the `server` frame (PROTOCOL.md §3.1) for a connection
 // whose URLs start with baseURL, whole when revealed; package wire adds the
 // protocol version and the ping interval. Callers hold s.mu.
-func (s *Server) serverParams(baseURL string, revealed bool) wire.ServerInfo {
+func (s *Server) serverParams(baseURL string, revealed bool) apron.ServerInfo {
 	var authSchemes []string
 	for _, scheme := range s.schemes {
 		authSchemes = append(authSchemes, scheme.Name())
@@ -53,7 +53,7 @@ func (s *Server) serverParams(baseURL string, revealed bool) wire.ServerInfo {
 	signup := slices.DeleteFunc(slices.Clone(authSchemes), func(scheme string) bool {
 		return scheme == "token" || scheme == passkey.Name && (!guests || s.config.GuestFirstPasskeys)
 	})
-	info := wire.ServerInfo{
+	info := apron.ServerInfo{
 		Agent: "apron-go/10",
 		// Package wire adds the capability of each handler and method the
 		// server has, such as rooms, status, and ext:command_list
@@ -82,7 +82,7 @@ func (s *Server) serverParams(baseURL string, revealed bool) wire.ServerInfo {
 		// other sessions.
 		info.Capabilities = append(info.Capabilities, "ext:"+accountExt)
 	}
-	var ext wire.Ext
+	var ext apron.Ext
 	if emoji := s.emojiExt(baseURL); emoji != nil && revealed {
 		info.Capabilities = append(info.Capabilities, "ext:emoji")
 		ext = ext.With("emoji", emoji)
@@ -124,7 +124,7 @@ func (s *Server) serverParams(baseURL string, revealed bool) wire.ServerInfo {
 		info.Capabilities = append(info.Capabilities, "ext:"+name)
 		if value := s.advertised[name]; len(value) > 0 {
 			if ext == nil {
-				ext = make(wire.Ext)
+				ext = make(apron.Ext)
 			}
 			ext[name] = value
 		}

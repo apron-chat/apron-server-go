@@ -7,8 +7,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/apron-chat/apron-server-go/apron"
 	"github.com/apron-chat/apron-server-go/aprond/internal/devices"
-	"github.com/apron-chat/apron-server-go/wire"
 )
 
 // `/invite-device <name>` follows apron-server-cloudflare's command of that
@@ -34,21 +34,21 @@ func isASCIIAlphanumeric(b byte) bool {
 // with it close and its push registrations go. A passkey or session token
 // someone got while signed in with the old token stays. The token goes to
 // this connection only, in a ~private notice before the result (§1).
-func (s *Server) inviteDeviceCommand(c *client, r *roomState, _ map[string]any, args, _ string) (wire.CommandResult, *Error) {
+func (s *Server) inviteDeviceCommand(c *client, r *roomState, _ map[string]any, args, _ string) (apron.CommandResult, *Error) {
 	u := c.user
 	if !u.Account() {
-		return wire.CommandResult{}, &Error{Code: CodeDenied, Message: "Sign in with an account to use /invite-device"}
+		return apron.CommandResult{}, &Error{Code: CodeDenied, Message: "Sign in with an account to use /invite-device"}
 	}
 	if c.restrictedService() {
-		return wire.CommandResult{}, serviceRefusal()
+		return apron.CommandResult{}, serviceRefusal()
 	}
 	words := strings.Fields(args)
 	if len(words) != 1 {
-		return wire.CommandResult{}, invalidParams("Usage: /invite-device <name>")
+		return apron.CommandResult{}, invalidParams("Usage: /invite-device <name>")
 	}
 	name := words[0]
 	if !devices.ValidName(name) {
-		return wire.CommandResult{}, invalidParams("A device name is 1 to 32 letters, digits, _, . or -, starting with a letter or digit")
+		return apron.CommandResult{}, invalidParams("A device name is 1 to 32 letters, digits, _, . or -, starting with a letter or digit")
 	}
 	keys, held := s.devices.Of(u)
 	previous := slices.IndexFunc(held, func(d deviceToken) bool { return d.Name == name })
@@ -57,11 +57,11 @@ func (s *Server) inviteDeviceCommand(c *client, r *roomState, _ map[string]any, 
 		for i, d := range held {
 			names[i] = "`" + d.Name + "`"
 		}
-		return wire.CommandResult{}, &Error{Code: CodeDenied, Message: fmt.Sprintf("You have %d device tokens (%s); run /invite-device with one of those names to replace its token", maxDeviceTokens, strings.Join(names, ", "))}
+		return apron.CommandResult{}, &Error{Code: CodeDenied, Message: fmt.Sprintf("You have %d device tokens (%s); run /invite-device with one of those names to replace its token", maxDeviceTokens, strings.Join(names, ", "))}
 	}
 	token, key, err := s.devices.Mint(u, name, time.Now())
 	if err != nil {
-		return wire.CommandResult{}, &Error{Code: CodeInternalError, Message: "Unable to create a device token"}
+		return apron.CommandResult{}, &Error{Code: CodeInternalError, Message: "Unable to create a device token"}
 	}
 	replaced := ""
 	if previous >= 0 {
@@ -77,7 +77,7 @@ func (s *Server) inviteDeviceCommand(c *client, r *roomState, _ map[string]any, 
 	}
 	lines = append(lines, fmt.Sprintf("To sign in, authenticate with the token scheme: `{\"method\": \"auth\", \"params\": {\"scheme\": \"token\", \"token\": \"%s\"}}`", token))
 	c.enqueue(privateNotice(r.ID(), strings.Join(lines, "\n\n")))
-	return wire.CommandResult{}, nil
+	return apron.CommandResult{}, nil
 }
 
 // revokeDeviceLocked forgets the token under old and closes the account's
@@ -105,7 +105,7 @@ func (s *Server) revokeDeviceLocked(c *client, old, replacement [32]byte) {
 // authenticateDeviceLocked signs the connection in with a device token,
 // from any origin or none. The result carries no session token: the device
 // keeps its own.
-func (s *Server) authenticateDeviceLocked(c *client, reply wire.Reply[wire.AuthResult], token string) *Error {
+func (s *Server) authenticateDeviceLocked(c *client, reply apron.Reply[apron.AuthResult], token string) *Error {
 	key := sha256.Sum256([]byte(token))
 	device, ok := s.devices.Get(key)
 	if !ok {

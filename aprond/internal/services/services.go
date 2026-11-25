@@ -26,8 +26,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/apron-chat/apron-server-go/apron"
 	"github.com/apron-chat/apron-server-go/store"
-	"github.com/apron-chat/apron-server-go/wire"
 )
 
 const (
@@ -169,7 +169,7 @@ func (t *Table[U]) Entries(userID func(U) string) []store.Entry {
 	for key := range t.dirty {
 		entry := store.Entry{Kind: EntryKind, ID: hex.EncodeToString(key[:])}
 		if token := t.byKey[key]; token != nil {
-			entry.Value, _ = wire.Marshal(stored{
+			entry.Value, _ = apron.Marshal(stored{
 				ID: token.ID, User: userID(token.User), Name: token.Name, Created: token.Created, Expires: token.Expires, Manage: token.Manage,
 			})
 		}

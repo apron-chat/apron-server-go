@@ -23,8 +23,8 @@ import (
 	"slices"
 	"time"
 
+	"github.com/apron-chat/apron-server-go/apron"
 	"github.com/apron-chat/apron-server-go/store"
-	"github.com/apron-chat/apron-server-go/wire"
 )
 
 const (
@@ -177,7 +177,7 @@ func (t *Table[U]) Entries(userID func(U) string) []store.Entry {
 	for key := range t.dirty {
 		entry := store.Entry{Kind: EntryKind, ID: ID(key)}
 		if s, ok := t.byKey[key]; ok {
-			entry.Value, _ = wire.Marshal(stored{User: userID(s.User), Origin: s.Origin, AnyOrigin: s.AnyOrigin, Expires: s.Expires, Credential: s.Credential})
+			entry.Value, _ = apron.Marshal(stored{User: userID(s.User), Origin: s.Origin, AnyOrigin: s.AnyOrigin, Expires: s.Expires, Credential: s.Credential})
 		}
 		entries = append(entries, entry)
 	}

@@ -7,10 +7,10 @@ import (
 
 	"golang.org/x/time/rate"
 
+	"github.com/apron-chat/apron-server-go/apron"
 	"github.com/apron-chat/apron-server-go/aprond/internal/messages"
 	"github.com/apron-chat/apron-server-go/aprond/internal/roomlog"
 	"github.com/apron-chat/apron-server-go/aprond/internal/rooms"
-	"github.com/apron-chat/apron-server-go/wire"
 )
 
 // messageState is a message as the rooms module keeps it (rooms.Message):
@@ -66,7 +66,7 @@ func storedBody(body map[string]any) *roomlog.Body {
 // (§4.2.2): a poster who has not joined gets only the result. A new message
 // with no text and no embeds is invalid_params (§3.5.1). A new message is a
 // save with no message_id, as backend.Message makes it.
-func (s *Server) saveMessage(c *client, p wire.EditParams, reply wire.Reply[wire.MessageResult]) *Error {
+func (s *Server) saveMessage(c *client, p apron.EditParams, reply apron.Reply[apron.MessageResult]) *Error {
 	roomID := p.RoomID
 	if roomID == "" {
 		roomID = defaultRoomID
@@ -84,7 +84,7 @@ func (s *Server) saveMessage(c *client, p wire.EditParams, reply wire.Reply[wire
 	var body map[string]any
 	if !deleted {
 		if p.Body == nil {
-			return wire.Missing("body")
+			return apron.Missing("body")
 		}
 		if err := messages.CheckBody(p.Body); err != nil {
 			return err
@@ -223,7 +223,7 @@ func (s *Server) saveMessage(c *client, p wire.EditParams, reply wire.Reply[wire
 	}
 	// Embeds are resolved last: a new upload, terminal, or append embed
 	// reserves a write.
-	var written []wire.EmbedWrite
+	var written []apron.EmbedWrite
 	// An editor's save keeps the embeds as they are stored: it starts no
 	// upload or live text, and releases none (ext:editors).
 	if body != nil && !editor {
@@ -284,7 +284,7 @@ func (s *Server) saveMessage(c *client, p wire.EditParams, reply wire.Reply[wire
 	default:
 		s.wakeLocked(current, saved, previous)
 	}
-	result := wire.MessageResult{MessageID: wire.LogID(logID)}
+	result := apron.MessageResult{MessageID: apron.LogID(logID)}
 	if replacing {
 		result.MessageID = p.MessageID
 	}
@@ -379,7 +379,7 @@ func mentions(body map[string]any) []string {
 // react replaces the caller's complete reaction set on one message
 // (§4.7). Entries are kept fully qualified, and duplicates collapse; an
 // unchanged set logs nothing. The broadcast precedes the result (§1).
-func (s *Server) react(c *client, p wire.ReactParams, reply wire.Reply[wire.OK]) *Error {
+func (s *Server) react(c *client, p apron.ReactParams, reply apron.Reply[apron.OK]) *Error {
 	messageID := p.MessageID.String()
 	emojis, err := messages.Emojis(p.Emojis)
 	if err != nil {
@@ -407,6 +407,6 @@ func (s *Server) react(c *client, p wire.ReactParams, reply wire.Reply[wire.OK])
 		record, r := s.rooms.React(m.Message, u.from(), emojis)
 		s.deliverLocked(rawNotification("reactions", record.Raw), r)
 	}
-	_ = reply.Send(wire.OK{})
+	_ = reply.Send(apron.OK{})
 	return nil
 }

@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/apron-chat/apron-server-go/wire/commands"
+	"github.com/apron-chat/apron-server-go/apron/server/commands"
 )
 
 // A command of more forms: each runs its own Run, with the arguments after

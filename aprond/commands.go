@@ -9,10 +9,10 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/apron-chat/apron-server-go/apron"
+	"github.com/apron-chat/apron-server-go/apron/server/commands"
 	"github.com/apron-chat/apron-server-go/aprond/internal/messages"
 	"github.com/apron-chat/apron-server-go/aprond/internal/roomlog"
-	"github.com/apron-chat/apron-server-go/wire"
-	"github.com/apron-chat/apron-server-go/wire/commands"
 )
 
 // Scoped system identities (Appendix A.1). user_ids starting with `~` are
@@ -45,10 +45,10 @@ type serverCommands struct {
 // sending the frames it causes; it returns its result, which the caller
 // sends after them (§1). args is the command line after the command's
 // name, and replyTo the command's reply_to, if any.
-type coreRun func(s *Server, c *client, r *roomState, body map[string]any, args, replyTo string) (wire.CommandResult, *Error)
+type coreRun func(s *Server, c *client, r *roomState, body map[string]any, args, replyTo string) (apron.CommandResult, *Error)
 
 // clientOf is the client of a command's connection.
-func clientOf(wc *wire.Conn) (*client, *Error) {
+func clientOf(wc *apron.Conn) (*client, *Error) {
 	c, ok := wc.Data().(*client)
 	if !ok {
 		return nil, internalError()
@@ -57,7 +57,7 @@ func clientOf(wc *wire.Conn) (*client, *Error) {
 }
 
 // replyIDOf is the message_id a command replies to, or "".
-func replyIDOf(p wire.CommandParams) string {
+func replyIDOf(p apron.CommandParams) string {
 	if p.ReplyTo == nil {
 		return ""
 	}
@@ -76,8 +76,8 @@ func replyError(err *Error) error {
 // reports whether c may use the form in r, or, for a nil r, in some room
 // it can see, under s.mu, which May takes. A user who sees no room may
 // use no command in "some room": each runs in a room.
-func mayLocked(may func(s *Server, c *client, r *roomState) bool) func(context.Context, *wire.Conn, string) bool {
-	return func(_ context.Context, wc *wire.Conn, roomID string) bool {
+func mayLocked(may func(s *Server, c *client, r *roomState) bool) func(context.Context, *apron.Conn, string) bool {
+	return func(_ context.Context, wc *apron.Conn, roomID string) bool {
 		c, ok := wc.Data().(*client)
 		if !ok {
 			return false
@@ -288,7 +288,7 @@ func (s *Server) visibleRoomsLocked(u *userState) []Room {
 // all before the result (§1). Only /embed-terminal and /embed-append make
 // live text, and they make their own embed: a terminal or append embed in a
 // command is invalid_params.
-func (s *Server) command(c *client, p wire.CommandParams, reply wire.Reply[wire.CommandResult]) *Error {
+func (s *Server) command(c *client, p apron.CommandParams, reply apron.Reply[apron.CommandResult]) *Error {
 	if err := messages.CheckBody(p.Body); err != nil {
 		return err
 	}
@@ -397,15 +397,15 @@ func (s *Server) runCoreCommand(c *client, call *commands.Call, run coreRun) *Er
 func cutWord(text string) (word, rest string) { return commands.Cut(text) }
 
 // privateNoticeFrom is the sender of ~private notices.
-var privateNoticeFrom = wire.User{UserID: privateNoticeID, Name: "System message to you"}
+var privateNoticeFrom = apron.User{UserID: privateNoticeID, Name: "System message to you"}
 
 // privateNotice renders a notice for the one connection it is queued on:
 // unlogged, without message_id or log_id (Appendix A.1).
 func privateNotice(roomID, text string) jsontext.Value {
-	return encodeNotification(wire.Message{
+	return encodeNotification(apron.Message{
 		RoomID: roomID,
 		From:   privateNoticeFrom,
-		Body:   &wire.Body{Text: text, Format: wire.Markdown},
+		Body:   &apron.Body{Text: text, Format: apron.Markdown},
 	})
 }
 
@@ -418,7 +418,7 @@ func (s *Server) postRoomNoticeLocked(r *roomState, text string) {
 	m := s.rooms.NewMessage(messageID, from, roomNoticeID)
 	s.commitSnapshotLocked(m, &roomlog.Message{
 		MessageID: messageID, LogID: messageID, RoomID: r.ID(), From: from,
-		Body: &roomlog.Body{Body: wire.Body{Text: text}},
+		Body: &roomlog.Body{Body: apron.Body{Text: text}},
 	}, logID)
 }
 
@@ -443,7 +443,7 @@ const commandListMethod = commands.ListMethod
 // on this connection, in at least one room it can see: what /help lists in
 // each room, as data, one Command object for each form. It takes no params,
 // and ignores any.
-func (s *Server) listCommands(c *client, r *wire.Request, reply wire.Reply[any]) *Error {
+func (s *Server) listCommands(c *client, r *apron.Request, reply apron.Reply[any]) *Error {
 	_ = reply.Send(commands.ListResult{Commands: s.commands.router.List(s.requestContext(c), c.conn)})
 	return nil
 }
@@ -451,13 +451,13 @@ func (s *Server) listCommands(c *client, r *wire.Request, reply wire.Reply[any])
 // avatarCommand takes exactly one upload embed, whose file becomes the
 // sender's avatar when its write finishes (§4.8.6). The result carries the
 // write URL.
-func (s *Server) avatarCommand(c *client, _ *roomState, body map[string]any, _, _ string) (wire.CommandResult, *Error) {
+func (s *Server) avatarCommand(c *client, _ *roomState, body map[string]any, _, _ string) (apron.CommandResult, *Error) {
 	embeds := asList(body["embeds"])
 	if len(embeds) != 1 || embeds[0].(map[string]any)["kind"] != "upload" {
-		return wire.CommandResult{}, invalidParams("/avatar takes exactly one upload embed: attach an image")
+		return apron.CommandResult{}, invalidParams("/avatar takes exactly one upload embed: attach an image")
 	}
 	if err := s.admitPostLocked(c.user); err != nil {
-		return wire.CommandResult{}, err
+		return apron.CommandResult{}, err
 	}
 	e := s.newWriteLocked(c, s.embeds.NewID(), "upload", "")
 	e.avatarFor = c.user
@@ -471,21 +471,21 @@ const maxKickReasonRunes = 200
 // (§4.2.2), the target room_update left, and the remaining members a ~room
 // notice with the reason. Only the room's creator and admins or moderators
 // may kick.
-func (s *Server) kickCommand(c *client, r *roomState, body map[string]any, args, _ string) (wire.CommandResult, *Error) {
+func (s *Server) kickCommand(c *client, r *roomState, body map[string]any, args, _ string) (apron.CommandResult, *Error) {
 	u := c.user
 	targets := mentions(body)
 	if len(targets) != 1 {
-		return wire.CommandResult{}, invalidParams("Usage: /kick @user [<reason>], mentioning exactly one user")
+		return apron.CommandResult{}, invalidParams("Usage: /kick @user [<reason>], mentioning exactly one user")
 	}
 	if !mayRemove(r, u) {
-		return wire.CommandResult{}, &Error{Code: CodeDenied, Message: fmt.Sprintf("Only the creator of %s or a moderator can remove people from it", r.Title())}
+		return apron.CommandResult{}, &Error{Code: CodeDenied, Message: fmt.Sprintf("Only the creator of %s or a moderator can remove people from it", r.Title())}
 	}
 	target := r.Member(targets[0])
 	if target == nil {
-		return wire.CommandResult{}, invalidParams("@%s is not in %s", targets[0], r.Title())
+		return apron.CommandResult{}, invalidParams("@%s is not in %s", targets[0], r.Title())
 	}
 	if target == u {
-		return wire.CommandResult{}, invalidParams("You cannot remove yourself; leave the room instead")
+		return apron.CommandResult{}, invalidParams("You cannot remove yourself; leave the room instead")
 	}
 	// The first argument names the target as the user typed it. Only
 	// body.mentions says who it is (§3.5.5); a user_id has no whitespace
@@ -506,5 +506,5 @@ func (s *Server) kickCommand(c *client, r *roomState, body map[string]any, args,
 		text += ": " + reason
 	}
 	s.postRoomNoticeLocked(r, text)
-	return wire.CommandResult{}, nil
+	return apron.CommandResult{}, nil
 }

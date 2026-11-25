@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/apron-chat/apron-server-go/wire/wiretest"
+	"github.com/apron-chat/apron-server-go/apron/aprontest"
 )
 
 // A guest's requests kept for deduplication (§1.2) go when it is retired,
@@ -25,14 +25,14 @@ func TestDepartedGuestsKeepNoDedup(t *testing.T) {
 		for i := range 100 {
 			c.result(t, "me", fmt.Sprint("same-", i), map[string]any{})
 		}
-		users, requests, bytes := wiretest.DedupUsage(app.wire)
+		users, requests, bytes := aprontest.DedupUsage(app.srv)
 		if users != 1 || requests < 10 || bytes > 1<<20 {
 			t.Fatalf("guest %d: %d users, %d requests, %d bytes kept; want its own, within 1 MiB", g, users, requests, bytes)
 		}
 		_ = c.ws.CloseNow()
 		waitDisconnected(t, app, c.userID)
 		userIDs = append(userIDs, c.userID)
-		if users, requests, bytes := wiretest.DedupUsage(app.wire); users != 0 || requests != 0 || bytes != 0 {
+		if users, requests, bytes := aprontest.DedupUsage(app.srv); users != 0 || requests != 0 || bytes != 0 {
 			t.Fatalf("after guest %d left: %d users, %d requests, %d bytes kept; want none", g, users, requests, bytes)
 		}
 	}

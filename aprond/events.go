@@ -10,8 +10,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/apron-chat/apron-server-go/apron"
 	"github.com/apron-chat/apron-server-go/aprond/internal/roomlog"
-	"github.com/apron-chat/apron-server-go/wire"
 )
 
 // EventKind is the kind of record an Event carries (PROTOCOL.md §2.3).
@@ -344,7 +344,7 @@ func decodeMessageRecord(raw []byte) (Message, bool) {
 		m.Body = bodyObject(&body.Body)
 		m.Text, m.Format = body.Text, body.Format
 		if m.Format == "" {
-			m.Format = wire.Plain
+			m.Format = apron.Plain
 		}
 		m.Mentions = body.Mentions
 	}

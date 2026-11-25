@@ -23,8 +23,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/apron-chat/apron-server-go/apron"
 	"github.com/apron-chat/apron-server-go/store"
-	"github.com/apron-chat/apron-server-go/wire"
 )
 
 const (
@@ -180,7 +180,7 @@ func (t *Table) Entries() []store.Entry {
 	for key := range t.dirty {
 		entry := store.Entry{Kind: EntryKind, ID: hex.EncodeToString(key[:])}
 		if inv := t.byKey[key]; inv != nil {
-			entry.Value, _ = wire.Marshal(inv)
+			entry.Value, _ = apron.Marshal(inv)
 		}
 		entries = append(entries, entry)
 	}

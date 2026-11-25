@@ -7,16 +7,16 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/apron-chat/apron-server-go/apron"
 	"github.com/apron-chat/apron-server-go/aprond/internal/roomlog"
 	"github.com/apron-chat/apron-server-go/store"
-	"github.com/apron-chat/apron-server-go/wire"
 )
 
 func snapshot(t *Table[*user, *Message], m *Message, room, text string) (*roomlog.Record, []*Room[*user], bool) {
 	logID := t.log.NextID()
 	return t.Snapshot(m, &roomlog.Message{
 		MessageID: m.ID(), LogID: roomlog.FormatID(logID), RoomID: room, From: m.From(),
-		Body: &roomlog.Body{Body: wire.Body{Text: text}},
+		Body: &roomlog.Body{Body: apron.Body{Text: text}},
 	}, logID)
 }
 

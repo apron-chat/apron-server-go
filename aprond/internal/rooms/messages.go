@@ -8,9 +8,9 @@ import (
 	"maps"
 	"slices"
 
+	"github.com/apron-chat/apron-server-go/apron"
 	"github.com/apron-chat/apron-server-go/aprond/internal/roomlog"
 	"github.com/apron-chat/apron-server-go/store"
-	"github.com/apron-chat/apron-server-go/wire"
 )
 
 // Message is a message as rooms keep it (§3.5, §4.4): the room it is in,
@@ -228,7 +228,7 @@ func MessageEntry(m *Message) store.Entry {
 			s.Reactions[id] = storedReaction{From: set.From, Emojis: set.Emojis}
 		}
 	}
-	value, _ := wire.Marshal(s)
+	value, _ := apron.Marshal(s)
 	return store.Entry{Kind: MessageEntryKind, ID: m.id, Value: value}
 }
 

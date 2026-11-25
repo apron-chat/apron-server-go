@@ -10,9 +10,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/apron-chat/apron-server-go/apron"
 	"github.com/apron-chat/apron-server-go/aprond/internal/emoji"
 	"github.com/apron-chat/apron-server-go/aprond/internal/messages"
-	"github.com/apron-chat/apron-server-go/wire"
 )
 
 // Custom emoji (ext:emoji in apron's EXTENSIONS.md): images users add with
@@ -164,7 +164,7 @@ func (s *Server) emojiChangedLocked() {
 		baseURL  string
 		revealed bool
 	}
-	frames := make(map[kind]*wire.ServerInfo)
+	frames := make(map[kind]*apron.ServerInfo)
 	for c := range s.clients {
 		key := kind{c.baseURL, s.revealedLocked(c)}
 		frame, seen := frames[key]
@@ -234,11 +234,11 @@ func (s *Server) handleEmoji(w http.ResponseWriter, r *http.Request) {
 // upload's write finishes, which checks the catalog again
 // (refuseEmojiLocked). A connection not offered ext:emoji, whose image
 // URLs clients would refuse, may not add one.
-func (s *Server) emojiCommand(c *client, _ *roomState, body map[string]any, args, _ string) (wire.CommandResult, *Error) {
+func (s *Server) emojiCommand(c *client, _ *roomState, body map[string]any, args, _ string) (apron.CommandResult, *Error) {
 	u := c.user
 	action, key := cutWord(args)
 	if !emojiKeyPattern.MatchString(key) || len(key) > messages.MaxEmojiBytes {
-		return wire.CommandResult{}, invalidParams("Usage: /emoji add :<name>: with one image attached, or /emoji remove :<name>:; a name is letters, digits, _, +, and -, at most %d characters", messages.MaxEmojiBytes-2)
+		return apron.CommandResult{}, invalidParams("Usage: /emoji add :<name>: with one image attached, or /emoji remove :<name>:; a name is letters, digits, _, +, and -, at most %d characters", messages.MaxEmojiBytes-2)
 	}
 	existing := s.emoji.Get(key)
 	// The form's word matches exactly, as command names do.
@@ -246,24 +246,24 @@ func (s *Server) emojiCommand(c *client, _ *roomState, body map[string]any, args
 	case "add":
 		embeds := asList(body["embeds"])
 		if len(embeds) != 1 || embeds[0].(map[string]any)["kind"] != "upload" {
-			return wire.CommandResult{}, invalidParams("/emoji add takes exactly one upload embed: attach an image")
+			return apron.CommandResult{}, invalidParams("/emoji add takes exactly one upload embed: attach an image")
 		}
 		if s.emojiExt(c.baseURL) == nil {
 			// This connection is not offered ext:emoji: the image's URL
 			// would be one clients refuse.
-			return wire.CommandResult{}, &Error{Code: CodeDenied, Message: emojiNeedHTTPS}
+			return apron.CommandResult{}, &Error{Code: CodeDenied, Message: emojiNeedHTTPS}
 		}
 		if existing != nil && !s.mayReplaceEmojiLocked(existing, u.id) {
-			return wire.CommandResult{}, &Error{Code: CodeDenied, Message: fmt.Sprintf("%s is taken; only who added it or an admin can replace it", key)}
+			return apron.CommandResult{}, &Error{Code: CodeDenied, Message: fmt.Sprintf("%s is taken; only who added it or an admin can replace it", key)}
 		}
 		if existing == nil && s.emoji.Len() >= maxCustomEmoji {
-			return wire.CommandResult{}, &Error{Code: CodeDenied, Message: fmt.Sprintf("This server has %d custom emoji, the most it keeps", maxCustomEmoji)}
+			return apron.CommandResult{}, &Error{Code: CodeDenied, Message: fmt.Sprintf("This server has %d custom emoji, the most it keeps", maxCustomEmoji)}
 		}
 		if s.emojiRoomLocked(key) <= 0 {
-			return wire.CommandResult{}, &Error{Code: CodeDenied, Message: s.emojiFullMessage()}
+			return apron.CommandResult{}, &Error{Code: CodeDenied, Message: s.emojiFullMessage()}
 		}
 		if err := s.admitPostLocked(u); err != nil {
-			return wire.CommandResult{}, err
+			return apron.CommandResult{}, err
 		}
 		e := s.newWriteLocked(c, s.embeds.NewID(), "upload", "")
 		e.EmojiKey, e.emojiBy = key, u.id
@@ -271,13 +271,13 @@ func (s *Server) emojiCommand(c *client, _ *roomState, body map[string]any, args
 		return e.writeResult(), nil
 	case "remove":
 		if !u.hasRole("admin") {
-			return wire.CommandResult{}, &Error{Code: CodeDenied, Message: "Only an admin can remove custom emoji"}
+			return apron.CommandResult{}, &Error{Code: CodeDenied, Message: "Only an admin can remove custom emoji"}
 		}
 		if existing == nil {
-			return wire.CommandResult{}, invalidParams("There is no custom emoji %s", key)
+			return apron.CommandResult{}, invalidParams("There is no custom emoji %s", key)
 		}
 		s.removeEmojiLocked(key)
-		return wire.CommandResult{}, nil
+		return apron.CommandResult{}, nil
 	}
-	return wire.CommandResult{}, invalidParams("Usage: /emoji add :<name>: with one image attached, or /emoji remove :<name>:")
+	return apron.CommandResult{}, invalidParams("Usage: /emoji add :<name>: with one image attached, or /emoji remove :<name>:")
 }

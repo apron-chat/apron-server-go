@@ -18,13 +18,13 @@ import (
 
 	"golang.org/x/time/rate"
 
+	"github.com/apron-chat/apron-server-go/apron"
 	"github.com/apron-chat/apron-server-go/aprond/internal/accounts"
 	"github.com/apron-chat/apron-server-go/aprond/internal/proposals"
 	"github.com/apron-chat/apron-server-go/internal/auth/email"
 	"github.com/apron-chat/apron-server-go/internal/auth/external"
 	"github.com/apron-chat/apron-server-go/internal/auth/passkey"
 	"github.com/apron-chat/apron-server-go/internal/authn"
-	"github.com/apron-chat/apron-server-go/wire"
 )
 
 // Sign-in (PROTOCOL.md §3.2) is split between the server and its schemes
@@ -111,7 +111,7 @@ func (s *Server) restoreSchemesLocked() error {
 // authenticate runs an auth request (§3.2): the guest and token schemes
 // under s.mu, and the others by their scheme, outside it, whose result is
 // applied under it.
-func (s *Server) authenticate(c *client, reply wire.Reply[wire.AuthResult]) *Error {
+func (s *Server) authenticate(c *client, reply apron.Reply[apron.AuthResult]) *Error {
 	s.mu.Lock()
 	if c.conn.Closing() {
 		s.unlock()
@@ -194,7 +194,7 @@ func (s *Server) authenticate(c *client, reply wire.Reply[wire.AuthResult]) *Err
 	if own, ok := result.(*authn.Reply); ok && own != nil {
 		// A scheme's own result, such as a ceremony's options, signs
 		// nothing in, and names neither you nor token.
-		_ = reply.Send(wire.AuthResult{Extra: resultFields(own.Result)})
+		_ = reply.Send(apron.AuthResult{Extra: resultFields(own.Result)})
 		return nil
 	}
 	s.mu.Lock()
@@ -225,12 +225,12 @@ func (s *Server) authenticate(c *client, reply wire.Reply[wire.AuthResult]) *Err
 
 // authParams are an auth request's params, as they arrived, which the
 // schemes read too.
-func authParams(reply wire.Reply[wire.AuthResult]) wire.Fields {
+func authParams(reply apron.Reply[apron.AuthResult]) apron.Fields {
 	return reply.Request().Fields()
 }
 
 // resultFields are the fields of a scheme's own result, an object, which
-// an auth result sends beside you and token (wire.AuthResult.Extra).
+// an auth result sends beside you and token (apron.AuthResult.Extra).
 func resultFields(result any) map[string]any {
 	if fields, ok := result.(map[string]any); ok {
 		return fields
@@ -242,7 +242,7 @@ func resultFields(result any) map[string]any {
 
 // presentsServiceToken reports whether a token auth presents a bot's
 // service token, which signs in on a server without sign-in schemes too.
-func presentsServiceToken(reply wire.Reply[wire.AuthResult]) bool {
+func presentsServiceToken(reply apron.Reply[apron.AuthResult]) bool {
 	token, _ := parseString(authParams(reply), "token", optional)
 	return strings.HasPrefix(token, serviceTokenPrefix)
 }
@@ -251,7 +251,7 @@ func presentsServiceToken(reply wire.Reply[wire.AuthResult]) bool {
 // a session the server holds, which signs in on a server without sign-in
 // schemes too, as one made in process does (testhook.Member), or one
 // from before the server's schemes were taken away. Called holding s.mu.
-func (s *Server) presentsSessionLocked(reply wire.Reply[wire.AuthResult]) bool {
+func (s *Server) presentsSessionLocked(reply apron.Reply[apron.AuthResult]) bool {
 	token, _ := parseString(authParams(reply), "token", optional)
 	if token == "" {
 		return false
@@ -262,7 +262,7 @@ func (s *Server) presentsSessionLocked(reply wire.Reply[wire.AuthResult]) bool {
 
 // authenticateGuestLocked signs the connection in as a new guest, or
 // answers with the identity a signed-in connection has.
-func (s *Server) authenticateGuestLocked(c *client, reply wire.Reply[wire.AuthResult]) *Error {
+func (s *Server) authenticateGuestLocked(c *client, reply apron.Reply[apron.AuthResult]) *Error {
 	name, requested, err := parseRequested(reply)
 	if err != nil {
 		return err
@@ -272,7 +272,7 @@ func (s *Server) authenticateGuestLocked(c *client, reply wire.Reply[wire.AuthRe
 		// has. It signs the connection in as no other user, so it is no
 		// sign-in and sends nothing after its result (§4.5).
 		you := c.user.you()
-		result := wire.AuthResult{You: &you}
+		result := apron.AuthResult{You: &you}
 		_ = reply.Send(result)
 		return nil
 	}
@@ -284,7 +284,7 @@ func (s *Server) authenticateGuestLocked(c *client, reply wire.Reply[wire.AuthRe
 }
 
 // authRequestLocked is the copy of an auth request a scheme sees.
-func (s *Server) authRequestLocked(c *client, reply wire.Reply[wire.AuthResult], scheme authn.Scheme, name, requested string) *authn.Request {
+func (s *Server) authRequestLocked(c *client, reply apron.Reply[apron.AuthResult], scheme authn.Scheme, name, requested string) *authn.Request {
 	now := time.Now()
 	r := &authn.Request{
 		Params: maps.Clone(authParams(reply)), Name: normalizeName(name), UserID: requested,
@@ -347,7 +347,7 @@ func commit(proof authn.Proof) (jsontext.Value, *Error) {
 // a bearer token, which anyOrigin lets resume from any origin; otherwise
 // with the account as you. Every check, the allowlist's included, comes
 // before anything changes (§3.2.2).
-func (s *Server) addProvenLocked(c *client, reply wire.Reply[wire.AuthResult], scheme authn.Scheme, proof authn.Proof, session, anyOrigin bool) *Error {
+func (s *Server) addProvenLocked(c *client, reply apron.Reply[apron.AuthResult], scheme authn.Scheme, proof authn.Proof, session, anyOrigin bool) *Error {
 	id, err := identityOf(scheme, proof)
 	if err != nil {
 		return err
@@ -405,7 +405,7 @@ func (s *Server) addProvenLocked(c *client, reply wire.Reply[wire.AuthResult], s
 	}
 	s.provedLocked(c, scheme, proof, time.Now(), wasGuest)
 	you := account.you()
-	_ = reply.Send(wire.AuthResult{You: &you})
+	_ = reply.Send(apron.AuthResult{You: &you})
 	return nil
 }
 
@@ -413,7 +413,7 @@ func (s *Server) addProvenLocked(c *client, reply wire.Reply[wire.AuthResult], s
 // a scheme proved, making one if none has it and the proof may (create),
 // with a token that anyOrigin lets resume from any origin. Every check, the
 // allowlist's included, comes before anything changes (§3.2.2).
-func (s *Server) signInProvenLocked(c *client, reply wire.Reply[wire.AuthResult], scheme authn.Scheme, proof authn.Proof, create, anyOrigin bool) *Error {
+func (s *Server) signInProvenLocked(c *client, reply apron.Reply[apron.AuthResult], scheme authn.Scheme, proof authn.Proof, create, anyOrigin bool) *Error {
 	user, created, err := s.provenAccountLocked(scheme, proof, create)
 	if err != nil {
 		return err
@@ -503,7 +503,7 @@ func (s *Server) setGrantLocked(u *userState, scheme string, roles []string) boo
 // a connection signed in to the proposing account, adds the identity to
 // that account and returns it as you. A token presented on a connection that may
 // not approve it is denied, and its proposal stays for one that may.
-func (s *Server) approveLocked(c *client, reply wire.Reply[wire.AuthResult], token, state, name, requested string) *Error {
+func (s *Server) approveLocked(c *client, reply apron.Reply[apron.AuthResult], token, state, name, requested string) *Error {
 	p := s.proposalLocked(c, token, state, time.Now())
 	if p == nil || p.Proof == nil {
 		return &Error{Code: CodeDenied, Message: "The code is invalid or expired; ask for a new one"}

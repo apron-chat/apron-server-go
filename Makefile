@@ -18,7 +18,7 @@ install: $(WEB)/package.json $(FIXTURES)
 	npm --prefix $(WEB) ci
 	npm --prefix tests/interop ci
 	go mod download
-	cd wire && go mod download
+	cd apron && go mod download
 
 dev-web:
 	npm --prefix $(WEB) run dev -- --host 127.0.0.1 --port 5173 --strictPort
@@ -27,12 +27,12 @@ dev-server:
 	go run ./cmd/aprond
 
 check:
-	go vet ./... ./wire/...
+	go vet ./... ./apron/...
 
 test: test-go test-wire
 
 test-go:
-	go test -race ./... ./wire/...
+	go test -race ./... ./apron/...
 
 # Rendering benchmarks on the production build; fails when a count rises above perf-ceilings.json.
 test-perf: build-web

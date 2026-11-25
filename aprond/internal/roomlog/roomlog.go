@@ -8,7 +8,7 @@
 // is. Every record has a typed shape here (Membership, Reactions,
 // RoomRecord, Message, and the Author and Body they carry) that encodes
 // exactly as the maps the server built before them did, keys sorted, so
-// stored and sent bytes are unchanged. A message's Body is a wire.Body,
+// stored and sent bytes are unchanged. A message's Body is a apron.Body,
 // which keeps what its sender sent and left out.
 //
 // A Log is not safe for concurrent use: every method is called holding the
@@ -25,8 +25,8 @@ import (
 	"slices"
 	"strconv"
 
+	"github.com/apron-chat/apron-server-go/apron"
 	"github.com/apron-chat/apron-server-go/store"
-	"github.com/apron-chat/apron-server-go/wire"
 )
 
 // Kind partitions the log (§2.3). Its values are stored.
@@ -62,10 +62,10 @@ func New(id int64, kind Kind, value any) *Record {
 	return &Record{ID: id, Kind: kind, Raw: encode(value)}
 }
 
-// encode encodes as package wire encodes frames (wire.Marshal): object keys
+// encode encodes as package wire encodes frames (apron.Marshal): object keys
 // sorted, nil slices and maps as null, and <, >, and & unescaped.
 func encode(value any) jsontext.Value {
-	payload, err := wire.Marshal(value)
+	payload, err := apron.Marshal(value)
 	if err != nil {
 		return nil
 	}
@@ -80,7 +80,7 @@ func FormatID(id int64) string { return strconv.FormatInt(id, 10) }
 type Log struct {
 	// clock issues the single log_id sequence shared by every record kind
 	// and room.
-	clock   wire.Clock
+	clock   apron.Clock
 	records []*Record
 	// changed is closed and replaced when a record is added.
 	changed chan struct{}
@@ -102,7 +102,7 @@ func (l *Log) NextID() int64 { return int64(l.clock.Next()) }
 func (l *Log) LastIssued() int64 { return int64(l.clock.Last()) }
 
 // RestoreSequence continues the sequence after last, as stored.
-func (l *Log) RestoreSequence(last int64) { l.clock.Restore(wire.LogID(last)) }
+func (l *Log) RestoreSequence(last int64) { l.clock.Restore(apron.LogID(last)) }
 
 // Append adds a committed record to the log, and to the log of each room
 // it belongs to, whose latest_log_id it becomes.

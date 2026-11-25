@@ -17,11 +17,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/apron-chat/apron-server-go/apron"
 	"github.com/apron-chat/apron-server-go/aprond/internal/embeds"
 	"github.com/apron-chat/apron-server-go/aprond/internal/livetext"
 	"github.com/apron-chat/apron-server-go/aprond/internal/roomlog"
 	"github.com/apron-chat/apron-server-go/aprond/internal/uploads"
-	"github.com/apron-chat/apron-server-go/wire"
 )
 
 // HTTP paths for embed content (§4.8.3). Write URLs carry a one-time token;
@@ -104,7 +104,7 @@ func (e *embedState) fileURL() string {
 // embed gets a write URL, listed in written. Senders' og is dropped: the
 // server only describes media it hosts. A message has at most one append
 // embed (§4.8.5).
-func (s *Server) resolveEmbedsLocked(c *client, messageID string, current *roomlog.Message, body map[string]any) ([]any, []wire.EmbedWrite, *Error) {
+func (s *Server) resolveEmbedsLocked(c *client, messageID string, current *roomlog.Message, body map[string]any) ([]any, []apron.EmbedWrite, *Error) {
 	submitted, _ := body["embeds"].([]any)
 	previous := make(map[string]map[string]any)
 	if current != nil && current.Body != nil {
@@ -142,7 +142,7 @@ func (s *Server) resolveEmbedsLocked(c *client, messageID string, current *rooml
 	}
 
 	embeds := make([]any, 0, len(submitted))
-	var written []wire.EmbedWrite
+	var written []apron.EmbedWrite
 	for _, value := range submitted {
 		embed := cloneObject(value.(map[string]any))
 		if id, has := embed["embed_id"].(string); has {
@@ -196,14 +196,14 @@ func (e *embedState) writeURL() string {
 
 // write is the embed's write, as the result of the request that reserved
 // it lists it for the sender (§4.8.3).
-func (e *embedState) write() wire.EmbedWrite {
-	return wire.EmbedWrite{EmbedID: e.ID, Kind: e.Kind, WriteURL: e.writeURL()}
+func (e *embedState) write() apron.EmbedWrite {
+	return apron.EmbedWrite{EmbedID: e.ID, Kind: e.Kind, WriteURL: e.writeURL()}
 }
 
 // writeResult is the result of a command that made the embed's write: its
 // write URL (§4.8.3).
-func (e *embedState) writeResult() wire.CommandResult {
-	return wire.CommandResult{Embeds: []wire.EmbedWrite{e.write()}}
+func (e *embedState) writeResult() apron.CommandResult {
+	return apron.CommandResult{Embeds: []apron.EmbedWrite{e.write()}}
 }
 
 func asList(value any) []any {

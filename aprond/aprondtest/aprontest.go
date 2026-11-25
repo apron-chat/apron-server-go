@@ -19,8 +19,8 @@
 //
 // A Server is served over HTTP by a test server: the extensions' routes
 // are at its URL, and its WebSocket endpoint at WebSocketURL, which
-// wiretest.Dial and conformance.Config.URL take too. A Client is a
-// WebSocket connection to it, a wiretest.Client (Client.Wire), whose
+// aprontest.Dial and conformance.Config.URL take too. A Client is a
+// WebSocket connection to it, a aprontest.Client (Client.Wire), whose
 // methods wait at most ten seconds, fail the test when the connection
 // fails, and return the server's error replies as *aprond.Error, such as
 // error/denied for a request an extension refused. Call them from the
@@ -73,9 +73,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/apron-chat/apron-server-go/apron/aprontest"
 	"github.com/apron-chat/apron-server-go/aprond"
 	"github.com/apron-chat/apron-server-go/aprond/internal/testhook"
-	"github.com/apron-chat/apron-server-go/wire/wiretest"
 )
 
 // timeout bounds each wait of a Server's or a Client's methods.
@@ -127,7 +127,7 @@ func Serve(t testing.TB, config aprond.Config, extensions ...aprond.Extension) *
 }
 
 // WebSocketURL is the address of the server's WebSocket endpoint, such as
-// ws://127.0.0.1:41234/ws, for wiretest.Dial, or conformance.Config.URL,
+// ws://127.0.0.1:41234/ws, for aprontest.Dial, or conformance.Config.URL,
 // which checks the server and its extensions against the protocol's core.
 func (s *Server) WebSocketURL() string {
 	return "ws" + strings.TrimPrefix(s.URL, "http") + "/ws"
@@ -139,7 +139,7 @@ func (s *Server) Dial() *Client {
 	s.t.Helper()
 	ctx, cancel := context.WithTimeout(s.t.Context(), timeout)
 	defer cancel()
-	conn, err := wiretest.Dial(ctx, s.WebSocketURL())
+	conn, err := aprontest.Dial(ctx, s.WebSocketURL())
 	if err != nil {
 		s.t.Fatalf("aprontest: connecting: %v", err)
 	}

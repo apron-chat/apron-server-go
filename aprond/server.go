@@ -22,6 +22,7 @@ import (
 	"github.com/go-webauthn/webauthn/protocol"
 	"golang.org/x/time/rate"
 
+	"github.com/apron-chat/apron-server-go/apron"
 	"github.com/apron-chat/apron-server-go/aprond/internal/accounts"
 	"github.com/apron-chat/apron-server-go/aprond/internal/devices"
 	"github.com/apron-chat/apron-server-go/aprond/internal/durable"
@@ -44,16 +45,15 @@ import (
 	"github.com/apron-chat/apron-server-go/internal/authn"
 	"github.com/apron-chat/apron-server-go/internal/settings"
 	"github.com/apron-chat/apron-server-go/store"
-	"github.com/apron-chat/apron-server-go/wire"
 )
 
-// encodeJSON encodes a value as wire encodes frames (wire.Marshal), or
+// encodeJSON encodes a value as wire encodes frames (apron.Marshal), or
 // returns nil if it cannot: deterministically, sorting object keys, with
 // encoding/json's null for nil slices and maps, and without escaping <, >,
 // and &, which only matter for JSON embedded in HTML and would make stored
 // text up to six times larger than it arrived.
 func encodeJSON(value any) []byte {
-	payload, err := wire.Marshal(value)
+	payload, err := apron.Marshal(value)
 	if err != nil {
 		return nil
 	}
@@ -92,7 +92,7 @@ type client struct {
 	server *Server
 	// conn is the connection as package wire serves it, and session the
 	// Session it is, if any.
-	conn    *wire.Conn
+	conn    *apron.Conn
 	session *Session
 	// request is the context of the request being processed, which the
 	// extension code it runs gets: canceled when the connection closes. It
@@ -224,7 +224,7 @@ type Server struct {
 
 	ops map[string]operation
 	// wire serves the protocol, with s as its Backend (backend.go).
-	wire *wire.Server
+	srv  *apron.Server
 	push *webpush.Deliverer
 	// storedVAPID is the webpush key (§4.9) the server made, which push
 	// signs with unless Config sets one.
@@ -441,7 +441,7 @@ func (s *Server) buildHandler(routes []route) (handler http.Handler, err error) 
 		}
 	}()
 	mux := http.NewServeMux()
-	mux.Handle("/ws", s.wire)
+	mux.Handle("/ws", s.srv)
 	mux.HandleFunc("/healthz", s.handleHealth)
 	mux.HandleFunc(writePath, s.handleWrite)
 	mux.HandleFunc(filePath, s.handleFile)
@@ -539,8 +539,8 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	go func() {
 		// Each connection is told to come back shortly, after what is
 		// already queued for it.
-		if s.wire != nil {
-			_ = s.wire.Shutdown(ctx)
+		if s.srv != nil {
+			_ = s.srv.Shutdown(ctx)
 		}
 		s.pushes.Wait()
 		s.push.Wait()
@@ -653,7 +653,7 @@ func (c *client) enqueueBatch(values ...any) bool {
 	if c.conn.Closing() {
 		return false
 	}
-	frames := make([]wire.Frame, 0, len(values))
+	frames := make([]apron.Frame, 0, len(values))
 	for _, value := range values {
 		// A frame rendered once for many connections is shared as is; the
 		// writer never modifies it.
@@ -664,19 +664,19 @@ func (c *client) enqueueBatch(values ...any) bool {
 				return false
 			}
 		}
-		frames = append(frames, wire.Frame(payload))
+		frames = append(frames, apron.Frame(payload))
 	}
 	return c.conn.Send(frames...)
 }
 
 // operation handles one of the server's own methods, a wire method
-// (wire.Handler.Serve): it reads the request's params with wire's
+// (apron.Handler.Serve): it reads the request's params with wire's
 // Decoder, and replies with reply.Send, or returns nil without replying,
 // which answers {}, or an error. Operations whose
 // results describe state reply while holding s.mu, so that a result
 // reflects every notification sent before it on the connection, and after
 // the notifications the request causes, which precede its result (§1).
-type operation func(s *Server, c *client, r *wire.Request, reply wire.Reply[any]) *Error
+type operation func(s *Server, c *client, r *apron.Request, reply apron.Reply[any]) *Error
 
 func (s *Server) operations() map[string]operation {
 	ops := map[string]operation{
@@ -697,7 +697,7 @@ var readOnlyOps = map[string]bool{commandListMethod: true}
 
 // methodCapabilities are the capabilities of the server's own methods,
 // which package wire lists in the server frame as it does its handlers'
-// (wire.Handler.Capability). A method of a capability that only some
+// (apron.Handler.Capability). A method of a capability that only some
 // connections are told of, such as ext:account's, has none here, and its
 // capability is in serverParams.
 var methodCapabilities = map[string]string{

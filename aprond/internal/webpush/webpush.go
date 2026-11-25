@@ -25,7 +25,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/apron-chat/apron-server-go/wire"
+	"github.com/apron-chat/apron-server-go/apron"
 )
 
 // Web Push (§4.9, push kind webpush, and relay with keys), with the
@@ -283,7 +283,7 @@ func origin(u *url.URL) string {
 
 // encodeClaims encodes a JWT's claims, keys sorted.
 func encodeClaims(claims map[string]any) []byte {
-	payload, _ := wire.Marshal(claims)
+	payload, _ := apron.Marshal(claims)
 	return payload
 }
 

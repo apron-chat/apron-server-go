@@ -26,6 +26,7 @@ import (
 	"slices"
 	"time"
 
+	"github.com/apron-chat/apron-server-go/apron"
 	"github.com/apron-chat/apron-server-go/aprond/internal/invitations"
 	"github.com/apron-chat/apron-server-go/aprond/internal/presence"
 	"github.com/apron-chat/apron-server-go/aprond/internal/rooms"
@@ -34,7 +35,6 @@ import (
 	"github.com/apron-chat/apron-server-go/internal/auth/passkey"
 	"github.com/apron-chat/apron-server-go/internal/authn"
 	"github.com/apron-chat/apron-server-go/store"
-	"github.com/apron-chat/apron-server-go/wire"
 )
 
 // EntryKind is the kind of the store entries that hold users, named by
@@ -45,7 +45,7 @@ const EntryKind = "user"
 type User struct {
 	Name   string
 	Avatar string
-	Ext    wire.Ext
+	Ext    apron.Ext
 	// Identities are what prove the account, by scheme: its email address,
 	// its passkeys' user handle, its external sign-in. A guest has none.
 	// Records are what each scheme keeps with the account, such as passkey
@@ -234,7 +234,7 @@ func (t *Table[U]) DeleteIdentity(u U, scheme string) {
 type Stored struct {
 	Name        string           `json:"name,omitzero"`
 	Avatar      string           `json:"avatar,omitzero"`
-	Ext         wire.Ext         `json:"ext,omitzero"`
+	Ext         apron.Ext        `json:"ext,omitzero"`
 	AvatarEmbed string           `json:"avatar_embed,omitzero"`
 	LeftAt      map[string]int64 `json:"left_at,omitzero"`
 	// Identities are what prove the account, by scheme; Records what each
@@ -333,7 +333,7 @@ func (t *Table[U]) Entries(avatarEmbed func(U) string) []store.Entry {
 	for id := range t.dirty {
 		entry := store.Entry{Kind: EntryKind, ID: id}
 		if u, ok := t.byID[id]; ok {
-			value, err := wire.Marshal(storedOf(u.Kept(), avatarEmbed(u), now))
+			value, err := apron.Marshal(storedOf(u.Kept(), avatarEmbed(u), now))
 			if err != nil {
 				slog.Error("cannot encode state for the store", "kind", EntryKind, "id", id, "error", err)
 				continue

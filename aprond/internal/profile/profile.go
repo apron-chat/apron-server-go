@@ -15,8 +15,8 @@ import (
 	"encoding/json/v2"
 	"fmt"
 
+	"github.com/apron-chat/apron-server-go/apron"
 	"github.com/apron-chat/apron-server-go/store"
-	"github.com/apron-chat/apron-server-go/wire"
 )
 
 // StoreKind and StoreID name the store entry that keeps the profile.
@@ -81,7 +81,7 @@ func (p *Profile[I]) Entries() []store.Entry {
 	if p.avatar != none {
 		s.AvatarEmbed = p.avatar.ImageID()
 	}
-	value, _ := wire.Marshal(s)
+	value, _ := apron.Marshal(s)
 	return []store.Entry{{Kind: StoreKind, ID: StoreID, Value: value}}
 }
 

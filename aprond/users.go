@@ -12,12 +12,12 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/apron-chat/apron-server-go/apron"
 	"github.com/apron-chat/apron-server-go/aprond/internal/accounts"
 	"github.com/apron-chat/apron-server-go/aprond/internal/push"
 	"github.com/apron-chat/apron-server-go/aprond/internal/roomlog"
 	"github.com/apron-chat/apron-server-go/aprond/internal/users"
 	"github.com/apron-chat/apron-server-go/internal/authn"
-	"github.com/apron-chat/apron-server-go/wire"
 	"golang.org/x/text/secure/precis"
 	"golang.org/x/time/rate"
 )
@@ -104,7 +104,7 @@ func (u *userState) hasRole(role string) bool {
 // profile is the complete current user object for user and users (§3.3),
 // with the published shown status, and seen when it is offline (§4.5.2);
 // you has the chosen status instead.
-func (u *userState) profile() wire.CurrentUser {
+func (u *userState) profile() apron.CurrentUser {
 	return u.current(u.Presence.Status, true)
 }
 
@@ -113,8 +113,8 @@ func (u *userState) profile() wire.CurrentUser {
 // sent, "" too, and so are an account's roles, [] when it has none, so
 // that a role taken away clears the one a client kept (§3.3); guests hold
 // none.
-func (u *userState) current(status string, withSeen bool) wire.CurrentUser {
-	object := wire.CurrentUser{User: wire.User{
+func (u *userState) current(status string, withSeen bool) apron.CurrentUser {
+	object := apron.CurrentUser{User: apron.User{
 		UserID: u.id, Name: u.Name, Avatar: u.Avatar, Status: status,
 		Roles: slices.Clone(u.roles), Ext: maps.Clone(u.Ext),
 	}}
@@ -198,9 +198,9 @@ func (s *Server) roomNamedLocked(id string) bool {
 // signs in again as the same user, is not one, and is sent nothing after
 // its result. No room_update is sent for rooms the identity had already
 // joined: the client lists them with room_list.
-func (s *Server) switchUserLocked(c *client, reply wire.Reply[wire.AuthResult], user *userState, token string, signIn, joinDefault bool) {
+func (s *Server) switchUserLocked(c *client, reply apron.Reply[apron.AuthResult], user *userState, token string, signIn, joinDefault bool) {
 	you := user.you()
-	_ = reply.Send(wire.AuthResult{You: &you, Token: token})
+	_ = reply.Send(apron.AuthResult{You: &you, Token: token})
 	// A connection that got only what signing in needs gets the whole
 	// server frame now (§3.1).
 	if !s.revealedLocked(c) {
@@ -244,7 +244,7 @@ func (s *Server) attachLocked(c *client, user *userState) {
 	// ceremony.
 	c.authStates = nil
 	c.user = user
-	c.conn.SetUser(wire.User{UserID: user.id})
+	c.conn.SetUser(apron.User{UserID: user.id})
 	user.clients[c] = struct{}{}
 	// The previous identity's departure goes first, then the user's own
 	// status.
@@ -296,7 +296,7 @@ func (s *Server) retireLocked(u *userState) {
 	s.users.Touch(u.id)
 	// Its requests kept for deduplication (§1.2) go with it: no retry of
 	// them can come, as its user_id is never signed in again.
-	s.wire.ForgetUser(u.id)
+	s.srv.ForgetUser(u.id)
 }
 
 // send queues a frame to every connection of the user.
@@ -324,10 +324,10 @@ func (s *Server) sharersLocked(u *userState) []*userState {
 	return users
 }
 
-// userViews are a user as its two audiences see it (wire.UserChange): its
+// userViews are a user as its two audiences see it (apron.UserChange): its
 // own connections, which see the chosen status (you), and everyone else,
 // who see the shown status (shownView).
-type userViews struct{ you, shown wire.User }
+type userViews struct{ you, shown apron.User }
 
 // views are u as each audience sees it now, for a change to be told from.
 func (u *userState) views() userViews {
@@ -339,7 +339,7 @@ func (u *userState) views() userViews {
 // changes only when the shown status becomes offline (§4.5.2), the change
 // of one view to another carries seen only then, with that status, and
 // never clears it: a user object carries seen only with a shown offline.
-func (u *userState) shownView() wire.User {
+func (u *userState) shownView() apron.User {
 	shown := u.profile().User
 	if u.Presence.Seen > 0 {
 		shown.Seen = strconv.FormatInt(u.Presence.Seen, 10)
@@ -348,7 +348,7 @@ func (u *userState) shownView() wire.User {
 }
 
 // notifyProfileLocked tells of a change to u since before, as package wire
-// does (wire.Server.PublishUser): `you` to the user's connections but
+// does (apron.Server.PublishUser): `you` to the user's connections but
 // except, whose result carries the user, and `new` to everyone who shares
 // a room with them (§3.3.3), each with the fields of their view that
 // changed, a cleared one as its empty value (§3.3.1), and only when their
@@ -367,11 +367,11 @@ func (s *Server) publishUserLocked(u *userState, except *client, before userView
 		sharers[other] = true
 	}
 	now := u.views()
-	change := wire.UserChange{Old: before.you, New: now.you, OldShown: before.shown, NewShown: now.shown}
+	change := apron.UserChange{Old: before.you, New: now.you, OldShown: before.shown, NewShown: now.shown}
 	if except != nil {
 		change.Except = except.conn
 	}
-	s.wire.PublishUser(change, func(wc *wire.Conn) bool {
+	s.srv.PublishUser(change, func(wc *apron.Conn) bool {
 		c, ok := wc.Data().(*client)
 		return ok && c.user != nil && sharers[c.user]
 	})
@@ -379,7 +379,7 @@ func (s *Server) publishUserLocked(u *userState, except *client, before userView
 
 // withRemoved clears each removed field of a profile, which sends it as
 // its empty value.
-func withRemoved(profile wire.CurrentUser, removed []string) wire.CurrentUser {
+func withRemoved(profile apron.CurrentUser, removed []string) apron.CurrentUser {
 	for _, field := range removed {
 		if !slices.Contains(profile.Cleared, field) {
 			profile.Cleared = append(profile.Cleared, field)
@@ -398,7 +398,7 @@ func withRemoved(profile wire.CurrentUser, removed []string) wire.CurrentUser {
 // user's limit on status changes (admitStatusLocked), beyond which the
 // request is retry_after and changes nothing. roles are not settable, and
 // like other unknown fields are ignored.
-func (s *Server) updateProfile(c *client, p wire.MeParams, reply wire.Reply[wire.CurrentUser]) *Error {
+func (s *Server) updateProfile(c *client, p apron.MeParams, reply apron.Reply[apron.CurrentUser]) *Error {
 	var name, avatar, status string
 	hasName, hasAvatar, hasStatus := p.Name != nil, p.Avatar != nil, p.Status != nil
 	if hasName {

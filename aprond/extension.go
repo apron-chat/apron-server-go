@@ -15,10 +15,10 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/apron-chat/apron-server-go/apron"
+	"github.com/apron-chat/apron-server-go/apron/server/commands"
 	"github.com/apron-chat/apron-server-go/aprond/internal/messages"
 	"github.com/apron-chat/apron-server-go/internal/auth/email"
-	"github.com/apron-chat/apron-server-go/wire"
-	"github.com/apron-chat/apron-server-go/wire/commands"
 )
 
 // Extension adds features to a Server without forking it: commands, request
@@ -429,8 +429,8 @@ func (c Command) forms() ([]Form, error) {
 // whether the connection's user may use the form in the room roomID, or,
 // for "", in some room it can see: fn runs outside s.mu, with copies of the
 // user and the rooms made under it.
-func available(fn func(u User, r Room) bool) func(ctx context.Context, c *wire.Conn, roomID string) bool {
-	return func(_ context.Context, wc *wire.Conn, roomID string) bool {
+func available(fn func(u User, r Room) bool) func(ctx context.Context, c *apron.Conn, roomID string) bool {
+	return func(_ context.Context, wc *apron.Conn, roomID string) bool {
 		c, ok := wc.Data().(*client)
 		if !ok {
 			return false
@@ -472,7 +472,7 @@ func (h *Host) runCommand(ctx context.Context, call *commands.Call, run func(con
 	if callErr != nil {
 		return callErr
 	}
-	var typed wire.CommandResult
+	var typed apron.CommandResult
 	result, runErr := run(ctx, cc)
 	if runErr == nil {
 		typed, runErr = commandResult(call.Form.Name, result)
@@ -486,8 +486,8 @@ func (h *Host) runCommand(ctx context.Context, call *commands.Call, run func(con
 
 // commandResult is the result of the form name's Run as a CommandResult,
 // or the error of one that is none.
-func commandResult(name string, result map[string]any) (wire.CommandResult, error) {
-	var typed wire.CommandResult
+func commandResult(name string, result map[string]any) (apron.CommandResult, error) {
+	var typed apron.CommandResult
 	if result == nil {
 		result = map[string]any{}
 	}
@@ -561,7 +561,7 @@ func (r *Registrar) Method(name string, fn MethodFunc) {
 		case h.s.ops[name] != nil:
 			return fmt.Errorf("method %q exists already", name)
 		}
-		h.s.ops[name] = func(s *Server, c *client, r *wire.Request, reply wire.Reply[any]) *Error {
+		h.s.ops[name] = func(s *Server, c *client, r *apron.Request, reply apron.Reply[any]) *Error {
 			s.mu.RLock()
 			user := userViewOf(c.user)
 			s.mu.RUnlock()
@@ -596,7 +596,7 @@ func (h *Host) Advertise(value any) error {
 	var encoded jsontext.Value
 	if value != nil {
 		var err error
-		if encoded, err = wire.Marshal(value); err != nil {
+		if encoded, err = apron.Marshal(value); err != nil {
 			return fmt.Errorf("apron: advertised value: %w", err)
 		}
 	}
@@ -681,7 +681,7 @@ func (d *Draft) SetExt(value any) error {
 	encoded := jsontext.Value(`{}`) // an empty value clears the key (§4.12)
 	if value != nil {
 		var err error
-		if encoded, err = wire.Marshal(value); err != nil {
+		if encoded, err = apron.Marshal(value); err != nil {
 			return fmt.Errorf("apron: ext value: %w", err)
 		}
 	}
@@ -758,7 +758,7 @@ func (s *Server) filterMessage(c *client, d *Draft) *Error {
 			return filter.host.protocolError(err)
 		}
 	}
-	encoded, err := wire.Marshal(d.Body)
+	encoded, err := apron.Marshal(d.Body)
 	var body map[string]any
 	if err != nil || json.Unmarshal(encoded, &body) != nil || body == nil {
 		return internalError()
@@ -960,7 +960,7 @@ func checkKey(key string) error {
 }
 
 func (kv KV) put(key string, value any) error {
-	raw, err := wire.Marshal(value)
+	raw, err := apron.Marshal(value)
 	if err != nil {
 		return err
 	}

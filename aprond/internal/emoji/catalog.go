@@ -8,8 +8,8 @@ import (
 	"fmt"
 	"regexp"
 
+	"github.com/apron-chat/apron-server-go/apron"
 	"github.com/apron-chat/apron-server-go/store"
-	"github.com/apron-chat/apron-server-go/wire"
 )
 
 // Custom emoji (ext:emoji in apron's EXTENSIONS.md) are images users add
@@ -130,7 +130,7 @@ func (c *Catalog[I]) render() {
 		}
 		catalog[key] = s
 	}
-	c.rendered, _ = wire.Marshal(catalog)
+	c.rendered, _ = apron.Marshal(catalog)
 	sum := sha256.Sum256(c.rendered)
 	c.name = "catalog-" + hex.EncodeToString(sum[:8]) + ".json"
 }
@@ -154,7 +154,7 @@ func (c *Catalog[I]) Entries() []store.Entry {
 	for key, entry := range c.entries {
 		all[key] = stored{Embed: entry.Image.ImageID(), By: entry.By, Width: entry.Width, Height: entry.Height}
 	}
-	value, err := wire.Marshal(all)
+	value, err := apron.Marshal(all)
 	if err != nil {
 		return nil
 	}

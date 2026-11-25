@@ -3,7 +3,7 @@ package main
 import (
 	"testing"
 
-	"github.com/apron-chat/apron-server-go/wire/wiretest/conformance"
+	"github.com/apron-chat/apron-server-go/apron/conformance"
 )
 
 // TestConformance runs the protocol's core checks against the chat, in

@@ -4,7 +4,7 @@ import (
 	"encoding/json/jsontext"
 	"encoding/json/v2"
 
-	"github.com/apron-chat/apron-server-go/wire"
+	"github.com/apron-chat/apron-server-go/apron"
 )
 
 // The shapes of the records. Each declares its members in the order of
@@ -27,8 +27,8 @@ type Author struct {
 // User is the author as package wire's recorded user object, such as an
 // activity notification's from (§4.6), with the members it has no field
 // for.
-func (a Author) User() wire.User {
-	return wire.User{UserID: a.UserID, Name: a.Name, Unknown: a.Unknown}
+func (a Author) User() apron.User {
+	return apron.User{UserID: a.UserID, Name: a.Name, Unknown: a.Unknown}
 }
 
 // Membership is a membership record (§4.2.2).
@@ -75,7 +75,7 @@ func NewReactions(id int64, message, room string, reactions []Reaction) *Record 
 // fields, title, description, and ext, which are left out when empty.
 type RoomRecord struct {
 	Description  string         `json:"description,omitzero"`
-	Ext          wire.Ext       `json:"ext,omitempty"`
+	Ext          apron.Ext      `json:"ext,omitempty"`
 	LogID        string         `json:"log_id"`
 	ParentRoomID string         `json:"parent_room_id,omitzero"`
 	PrevLogID    string         `json:"prev_log_id,omitzero"`
@@ -92,7 +92,7 @@ type RoomRecord struct {
 type Message struct {
 	Body       *Body          `json:"body,omitzero"`
 	Deleted    bool           `json:"deleted,omitzero"`
-	Ext        wire.Ext       `json:"ext,omitempty"`
+	Ext        apron.Ext      `json:"ext,omitempty"`
 	From       Author         `json:"from"`
 	LogID      string         `json:"log_id"`
 	MessageID  string         `json:"message_id"`
@@ -141,12 +141,12 @@ func (m *Message) Mentions() []string {
 	return m.Body.Mentions
 }
 
-// Body is a message body (§3.5) as a snapshot holds it: a wire.Body, which
+// Body is a message body (§3.5) as a snapshot holds it: a apron.Body, which
 // keeps a member the sender left out out, one it sent empty empty, and
 // those it has no field for (Unknown). Its members encode in the order of
 // their names, Unknown's among them, as the maps the server kept bodies in
 // did.
-type Body struct{ wire.Body }
+type Body struct{ apron.Body }
 
 // MarshalJSONTo writes the body's members, sorted by name.
 func (b Body) MarshalJSONTo(enc *jsontext.Encoder) error {

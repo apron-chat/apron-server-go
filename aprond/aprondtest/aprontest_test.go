@@ -8,10 +8,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/apron-chat/apron-server-go/apron"
+	"github.com/apron-chat/apron-server-go/apron/conformance"
 	"github.com/apron-chat/apron-server-go/aprond"
 	"github.com/apron-chat/apron-server-go/aprond/aprondtest"
-	"github.com/apron-chat/apron-server-go/wire"
-	"github.com/apron-chat/apron-server-go/wire/wiretest/conformance"
 )
 
 // echo is an extension with a command, a method, and a bot, for the tests.
@@ -68,7 +68,7 @@ func TestClients(t *testing.T) {
 	if got := ada.Message(func(m aprond.Message) bool { return m.From.UserID == "echo" }); got.ID != posted || got.Text != "from the bot" {
 		t.Fatalf("message = %+v, want %s", got, posted)
 	}
-	if _, err := ada.Command("general", "/echo"); wire.CodeOf(err) != aprond.CodeInvalidParams {
+	if _, err := ada.Command("general", "/echo"); apron.CodeOf(err) != aprond.CodeInvalidParams {
 		t.Fatalf("/echo with no text = %v", err)
 	}
 
@@ -87,7 +87,7 @@ func TestClients(t *testing.T) {
 	if err := ada.Call("echo.words", map[string]any{"text": "a b"}, &result); err != nil || result.Text != "a b" || result.Words == nil {
 		t.Fatalf("echo.words = %+v, %v", result, err)
 	}
-	if err := ada.Call("echo.words", map[string]any{"text": 1}, nil); wire.CodeOf(err) != aprond.CodeInvalidParams {
+	if err := ada.Call("echo.words", map[string]any{"text": 1}, nil); apron.CodeOf(err) != aprond.CodeInvalidParams {
 		t.Fatalf("echo.words with a number = %v", err)
 	}
 
@@ -162,7 +162,7 @@ func TestMessages(t *testing.T) {
 	if got := ada.Message(func(m aprond.Message) bool { return m.ID == reply }); got.ReplyTo != asked {
 		t.Fatalf("reply = %+v", got)
 	}
-	if _, err := ada.Post("general", "x", aprond.ReplyTo("nope")); wire.CodeOf(err) != aprond.CodeInvalidParams {
+	if _, err := ada.Post("general", "x", aprond.ReplyTo("nope")); apron.CodeOf(err) != aprond.CodeInvalidParams {
 		t.Fatalf("a reply to no message_id = %v", err)
 	}
 
@@ -172,7 +172,7 @@ func TestMessages(t *testing.T) {
 	if got := bob.Message(func(m aprond.Message) bool { return m.ID == asked }); got.Text != "edited" || got.New() {
 		t.Fatalf("edit = %+v", got)
 	}
-	if err := bob.Edit("general", asked, "mine now"); wire.CodeOf(err) == 0 {
+	if err := bob.Edit("general", asked, "mine now"); apron.CodeOf(err) == 0 {
 		t.Fatal("Bob edited Ada's message")
 	}
 	if err := ada.Delete("general", asked); err != nil {
@@ -207,7 +207,7 @@ func TestMembersAndSettle(t *testing.T) {
 		t.Fatalf("/count = %q, %v", notices, err)
 	}
 	// A member signs in again with its token, and its user_id is its own.
-	if again := server.SignIn(wire.AuthParams{Scheme: "token", Token: mo.Token}); again.UserID != "mo" {
+	if again := server.SignIn(apron.AuthParams{Scheme: "token", Token: mo.Token}); again.UserID != "mo" {
 		t.Fatalf("token signed in as %q", again.UserID)
 	}
 }

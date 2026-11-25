@@ -27,9 +27,9 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/apron-chat/apron-server-go/apron"
 	"github.com/apron-chat/apron-server-go/aprond/internal/roomlog"
 	"github.com/apron-chat/apron-server-go/store"
-	"github.com/apron-chat/apron-server-go/wire"
 )
 
 // Member is a user as rooms know them.
@@ -548,7 +548,7 @@ func Entry[U Member](r *Room[U]) store.Entry {
 			s.Reads[id] = storedCursor{From: cursor.From, MessageID: cursor.MessageID, ID: cursor.ID}
 		}
 	}
-	value, _ := wire.Marshal(s)
+	value, _ := apron.Marshal(s)
 	return store.Entry{Kind: EntryKind, ID: r.id, Value: value}
 }
 

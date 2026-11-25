@@ -10,7 +10,7 @@ package testhook
 import (
 	"context"
 
-	"github.com/apron-chat/apron-server-go/wire"
+	"github.com/apron-chat/apron-server-go/apron"
 )
 
 var (
@@ -27,5 +27,5 @@ var (
 	// MessageParams are the params of a message request that posts text to
 	// the room with options ([]apron.PostOption), as a Session's Post sends
 	// them, with apron.WithExt's value under extension's name.
-	MessageParams func(roomID, text, extension string, options any) (wire.MessageParams, error)
+	MessageParams func(roomID, text, extension string, options any) (apron.MessageParams, error)
 )

@@ -7,18 +7,18 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/apron-chat/apron-server-go/apron"
+	"github.com/apron-chat/apron-server-go/apron/aprontest"
 	"github.com/apron-chat/apron-server-go/aprond"
 	"github.com/apron-chat/apron-server-go/aprond/internal/testhook"
-	"github.com/apron-chat/apron-server-go/wire"
-	"github.com/apron-chat/apron-server-go/wire/wiretest"
 )
 
 // Client is a connection to a Server.
 type Client struct {
 	// Wire is the connection, for what the methods below do not do, such
-	// as reading frames in the order they arrived (wiretest.Client.Next,
+	// as reading frames in the order they arrived (aprontest.Client.Next,
 	// CallFrames, and Sync).
-	Wire *wiretest.Client
+	Wire *aprontest.Client
 	// UserID is the user_id the client last signed in as, and Token the
 	// session token that sign-in gave, if any, which signs in again
 	// (SignInWithToken); both are "" before.
@@ -48,14 +48,14 @@ func (c *Client) refusal(what string, err error) error {
 }
 
 // Hello is the server frame (§3.1) the client got as it connected.
-func (c *Client) Hello() wire.ServerInfo { return c.Wire.Hello() }
+func (c *Client) Hello() apron.ServerInfo { return c.Wire.Hello() }
 
 // Auth sends an auth request (§3.2) with params, such as {"scheme":
 // "guest"}, and returns its result, or the server's error reply. A result
 // with You signed the client in, as UserID and Token then say; one
 // without, such as the begin step of external sign-in, signed nobody in.
 // The SignIn methods below send the protocol's own schemes.
-func (c *Client) Auth(params any) (wire.AuthResult, error) {
+func (c *Client) Auth(params any) (apron.AuthResult, error) {
 	c.t.Helper()
 	ctx, cancel := c.deadline()
 	defer cancel()
@@ -85,7 +85,7 @@ func (c *Client) signIn(params any) error {
 // Config.DisableGuests.
 func (c *Client) SignInAsGuest(name string) error {
 	c.t.Helper()
-	return c.signIn(wire.AuthParams{Scheme: "guest", Name: name})
+	return c.signIn(apron.AuthParams{Scheme: "guest", Name: name})
 }
 
 // SignInWithToken signs the client in with a token (§3.2.1), such as
@@ -93,7 +93,7 @@ func (c *Client) SignInAsGuest(name string) error {
 // token of a session that was signed out.
 func (c *Client) SignInWithToken(token string) error {
 	c.t.Helper()
-	return c.signIn(wire.AuthParams{Scheme: "token", Token: token})
+	return c.signIn(apron.AuthParams{Scheme: "token", Token: token})
 }
 
 // AskForCode asks the server to send a sign-in code to address (§4.11),
@@ -113,7 +113,7 @@ func (c *Client) AskForCode(address string) error {
 // sent after AskForCode (§4.11), or returns the server's error reply.
 func (c *Client) SignInWithCode(code string) error {
 	c.t.Helper()
-	return c.signIn(wire.AuthParams{Scheme: "email", Token: code})
+	return c.signIn(apron.AuthParams{Scheme: "email", Token: code})
 }
 
 // Call sends a request of method with params, such as an extension's
@@ -144,7 +144,7 @@ func (c *Client) Call(method string, params, result any) error {
 // messageParams are a message request's params of text to a room with
 // options, or the error of options the server would refuse, such as a
 // ReplyTo that names no message_id.
-func (c *Client) messageParams(roomID, text string, options []aprond.PostOption) (wire.MessageParams, error) {
+func (c *Client) messageParams(roomID, text string, options []aprond.PostOption) (apron.MessageParams, error) {
 	return testhook.MessageParams(roomID, text, c.Extension, options)
 }
 
@@ -174,12 +174,12 @@ func (c *Client) Post(roomID, text string, options ...aprond.PostOption) (messag
 // edit is the params of a message request that saves an existing message
 // (§4.4).
 type edit struct {
-	RoomID    string           `json:"room_id"`
-	MessageID string           `json:"message_id"`
-	Deleted   bool             `json:"deleted,omitzero"`
-	Body      *wire.Body       `json:"body,omitempty"`
-	ReplyTo   *wire.MessageRef `json:"reply_to,omitempty"`
-	Ext       wire.Ext         `json:"ext,omitempty"`
+	RoomID    string            `json:"room_id"`
+	MessageID string            `json:"message_id"`
+	Deleted   bool              `json:"deleted,omitzero"`
+	Body      *apron.Body       `json:"body,omitempty"`
+	ReplyTo   *apron.MessageRef `json:"reply_to,omitempty"`
+	Ext       apron.Ext         `json:"ext,omitempty"`
 }
 
 // Edit saves the message messageID in a room with text as its new body
@@ -206,7 +206,7 @@ func (c *Client) Delete(roomID, messageID string) error {
 // room_id, or the server's error reply.
 func (c *Client) CreateRoom(title string, private bool) (roomID string, err error) {
 	c.t.Helper()
-	var result wire.RoomSetResult
+	var result apron.RoomSetResult
 	err = c.Call("room_set", struct {
 		Title   string `json:"title"`
 		Private bool   `json:"private,omitzero"`
@@ -217,7 +217,7 @@ func (c *Client) CreateRoom(title string, private bool) (roomID string, err erro
 // Command runs a command line, such as "/weather Lisbon", in a room
 // (§4.1), and returns the text of the notices it sent the client, which
 // arrive before its reply (aprond.CommandCall.Notice), and its error reply,
-// if any. It takes those notices, as wiretest.Client.Command does, and
+// if any. It takes those notices, as aprontest.Client.Command does, and
 // leaves every other frame, such as the message snapshots that arrived
 // meanwhile, for Message.
 func (c *Client) Command(roomID, line string) (notices []string, err error) {
@@ -241,7 +241,7 @@ func (c *Client) Message(match func(aprond.Message) bool) aprond.Message {
 	ctx, cancel := c.deadline()
 	defer cancel()
 	var found aprond.Message
-	_, err := c.Wire.Expect(ctx, func(f wiretest.Frame) bool {
+	_, err := c.Wire.Expect(ctx, func(f aprontest.Frame) bool {
 		if f.Method != "message" {
 			return false
 		}

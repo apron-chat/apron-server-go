@@ -9,9 +9,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/apron-chat/apron-server-go/apron"
 	"github.com/apron-chat/apron-server-go/aprond/internal/livetext"
 	"github.com/apron-chat/apron-server-go/aprond/internal/roomlog"
-	"github.com/apron-chat/apron-server-go/wire"
 )
 
 // Live text (§4.8.3): terminal (§4.8.6) and append (§4.8.5) embeds, which
@@ -437,7 +437,7 @@ const maxLiveTitleRunes = 200
 
 // embedTerminalCommand prepares a terminal embed titled by the rest of the
 // line, if any: see liveCommand.
-func (s *Server) embedTerminalCommand(c *client, r *roomState, body map[string]any, args, replyTo string) (wire.CommandResult, *Error) {
+func (s *Server) embedTerminalCommand(c *client, r *roomState, body map[string]any, args, replyTo string) (apron.CommandResult, *Error) {
 	title, _, _ := strings.Cut(args, "\n")
 	title = strings.TrimSpace(title)
 	if runes := []rune(title); len(runes) > maxLiveTitleRunes {
@@ -449,7 +449,7 @@ func (s *Server) embedTerminalCommand(c *client, r *roomState, body map[string]a
 // embedAppendCommand prepares an append embed whose message starts with the
 // rest of the line, as Markdown: see liveCommand. A paragraph break follows
 // opening text, so that the streamed text starts a paragraph of its own.
-func (s *Server) embedAppendCommand(c *client, r *roomState, body map[string]any, args, replyTo string) (wire.CommandResult, *Error) {
+func (s *Server) embedAppendCommand(c *client, r *roomState, body map[string]any, args, replyTo string) (apron.CommandResult, *Error) {
 	if args != "" {
 		args += "\n\n"
 	}
@@ -462,17 +462,17 @@ func (s *Server) embedAppendCommand(c *client, r *roomState, body map[string]any
 // URL (§4.8.3), and a ~private notice shows it with ways to use it. A write
 // that does not start in time expires, and nothing is posted. It counts as
 // a new message toward MessagesPerMinute.
-func (s *Server) liveCommand(c *client, r *roomState, body map[string]any, kind, text, replyTo string) (wire.CommandResult, *Error) {
+func (s *Server) liveCommand(c *client, r *roomState, body map[string]any, kind, text, replyTo string) (apron.CommandResult, *Error) {
 	if len(asList(body["embeds"])) > 0 {
-		return wire.CommandResult{}, invalidParams("/embed-%s takes no embeds: it makes its own", kind)
+		return apron.CommandResult{}, invalidParams("/embed-%s takes no embeds: it makes its own", kind)
 	}
 	if replyTo != "" {
 		if target := s.visibleMessageLocked(c.user, replyTo); target != nil && r.RevealsTo(s.rooms.Get(target.RoomID())) {
-			return wire.CommandResult{}, &Error{Code: CodeDenied, Message: "A reply cannot quote a message that fewer people can see"}
+			return apron.CommandResult{}, &Error{Code: CodeDenied, Message: "A reply cannot quote a message that fewer people can see"}
 		}
 	}
 	if err := s.admitPostLocked(c.user); err != nil {
-		return wire.CommandResult{}, err
+		return apron.CommandResult{}, err
 	}
 	e := s.newWriteLocked(c, s.embeds.NewID(), kind, "")
 	e.post = &pendingPost{user: c.user, roomID: r.ID(), replyTo: replyTo, text: text}

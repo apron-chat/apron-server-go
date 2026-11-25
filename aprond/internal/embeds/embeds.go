@@ -24,8 +24,8 @@ import (
 	"path/filepath"
 	"slices"
 
+	"github.com/apron-chat/apron-server-go/apron"
 	"github.com/apron-chat/apron-server-go/store"
-	"github.com/apron-chat/apron-server-go/wire"
 )
 
 // EntryKind is the kind of the store entries that hold embeds, named by
@@ -249,7 +249,7 @@ func (t *Table[E]) Entries(avatarFor func(E) string) []store.Entry {
 			if embed.Path != "" {
 				s.File = filepath.Base(embed.Path)
 			}
-			value, err := wire.Marshal(s)
+			value, err := apron.Marshal(s)
 			if err != nil {
 				// An embed that cannot be stored is left as it was.
 				continue

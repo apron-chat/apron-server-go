@@ -14,9 +14,9 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/apron-chat/apron-server-go/apron"
+	"github.com/apron-chat/apron-server-go/apron/bot"
 	"github.com/apron-chat/apron-server-go/aprond/internal/livetext"
-	"github.com/apron-chat/apron-server-go/wire"
-	"github.com/apron-chat/apron-server-go/wire/bot"
 )
 
 // Errors of Sessions, which Session.Err reports and their requests return.
@@ -27,13 +27,13 @@ var (
 	// ErrFellBehind is why the server closed a Session whose OnFrame fell
 	// too far behind its frames, as it disconnects a client that does not
 	// read.
-	ErrFellBehind = wire.ErrFellBehind
+	ErrFellBehind = apron.ErrFellBehind
 	// ErrReentrant is returned by a request a Session is asked to send
 	// while the request it is sending waits on the caller, such as from a
 	// filter or command that the session's own message runs: the session
 	// sends one request at a time. Send it with another Session
 	// (Bot.Connect).
-	ErrReentrant = wire.ErrReentrant
+	ErrReentrant = apron.ErrReentrant
 )
 
 // Bot is an account an extension owns and speaks through: it holds the
@@ -133,7 +133,7 @@ func (b *Bot) conn() (*Session, error) {
 // Conn is the bot's own connection in package wire/bot's terms
 // (Session.Conn), made again if the server closed it. An extension needs
 // it only for what the Bot's own methods do not cover, in wire's typed
-// params and results: such as Post with a wire.MessageParams, or History,
+// params and results: such as Post with a apron.MessageParams, or History,
 // whose page has every kind of record, not only messages (MessageOf reads
 // those).
 func (b *Bot) Conn() (*bot.Conn, error) {
@@ -239,20 +239,20 @@ func (b *Bot) Connect(options SessionOptions) (*Session, error) {
 	c := &client{server: s}
 	session := &Session{s: s, bot: b, c: c, done: make(chan struct{})}
 	c.session = session
-	local := wire.LocalOptions{
-		User:  wire.User{UserID: b.userID},
+	local := apron.LocalOptions{
+		User:  apron.User{UserID: b.userID},
 		Data:  c,
 		Queue: max(s.config.OutgoingQueue, sessionFrameQueue),
 	}
 	if options.OnFrame != nil {
-		local.OnFrame = func(frame wire.Frame) { options.OnFrame(jsontext.Value(frame)) }
+		local.OnFrame = func(frame apron.Frame) { options.OnFrame(jsontext.Value(frame)) }
 	}
 	// wire opens the connection as a network one, calling backend.connected
 	// (connectSession) and Hello, which take s.mu, so it is opened without
 	// it.
-	conn, err := bot.Dial(s.wire, local)
+	conn, err := bot.Dial(s.srv, local)
 	switch {
-	case errors.Is(err, wire.ErrClosed):
+	case errors.Is(err, apron.ErrClosed):
 		return nil, ErrServerClosed
 	case err != nil:
 		return nil, err
@@ -264,7 +264,7 @@ func (b *Bot) Connect(options SessionOptions) (*Session, error) {
 // connectSession signs a Session's connection in as its bot, as a network
 // connection is signed in by auth, while wire opens it: frames sent to it
 // meanwhile, such as those after a sign-in, go after its server frame.
-func (s *Server) connectSession(c *client, wc *wire.Conn) error {
+func (s *Server) connectSession(c *client, wc *apron.Conn) error {
 	b := c.session.bot
 	s.mu.Lock()
 	defer s.unlock()
@@ -287,7 +287,7 @@ func (s *Server) connectSession(c *client, wc *wire.Conn) error {
 
 // forgotten records why the session closed, once the server has forgotten
 // its connection (backend.disconnected). Whether it fell behind is read
-// from its wire.Local when asked (Err), as wire may forget a connection
+// from its apron.Local when asked (Err), as wire may forget a connection
 // that fails to open before Connect has it.
 func (b *Session) forgotten(serverClosed bool) {
 	if serverClosed {
@@ -339,7 +339,7 @@ func (b *Session) UserID() string { return b.bot.userID }
 // Conn is the session's connection in package wire/bot's terms, as
 // Bot.Conn is the bot's: for what the session's own methods do not cover,
 // typed with wire's params and results. Its errors are wire's: a refusal
-// as a *wire.Error, which is an *Error, and wire.ErrClosed once the
+// as a *apron.Error, which is an *Error, and apron.ErrClosed once the
 // session is closed, where the session's own methods return Err's. auth is
 // refused: a session stays signed in as its bot.
 func (b *Session) Conn() *bot.Conn { return b.conn }
@@ -367,7 +367,7 @@ func (b *Session) Err() error {
 // closing records why the session is closing, unless that was recorded
 // already: it fell behind, or else it was closed.
 func (b *Session) closing() {
-	if errors.Is(b.conn.Err(), wire.ErrFellBehind) {
+	if errors.Is(b.conn.Err(), apron.ErrFellBehind) {
 		b.setErr(ErrFellBehind)
 	}
 	b.setErr(ErrSessionClosed)
@@ -383,7 +383,7 @@ func (b *Session) Close() error {
 }
 
 func (b *Session) closedErr() error {
-	if errors.Is(b.conn.Err(), wire.ErrFellBehind) {
+	if errors.Is(b.conn.Err(), apron.ErrFellBehind) {
 		return ErrFellBehind
 	}
 	if err := b.Err(); err != nil {
@@ -406,7 +406,7 @@ func (b *Session) Call(ctx context.Context, method string, params any) (jsontext
 // requestErr is the error of a request: why the session closed, once it
 // has.
 func (b *Session) requestErr(err error) error {
-	if errors.Is(err, wire.ErrClosed) || errors.Is(err, wire.ErrFellBehind) {
+	if errors.Is(err, apron.ErrClosed) || errors.Is(err, apron.ErrFellBehind) {
 		return b.closedErr()
 	}
 	return err
@@ -415,7 +415,7 @@ func (b *Session) requestErr(err error) error {
 // postRequest is a message a Session posts, as options set it: the params
 // of a new message, or of a command that streams live text.
 type postRequest struct {
-	params    wire.MessageParams
+	params    apron.MessageParams
 	extension string
 	// extErr is the error of an ext value that is not JSON, and replyErr
 	// of a reply_to that is no message_id.
@@ -430,7 +430,7 @@ func (p *postRequest) check() error {
 	switch {
 	case p.extErr != nil:
 		return p.extErr
-	case !wire.ValidID(p.params.RoomID):
+	case !apron.ValidID(p.params.RoomID):
 		return InvalidParams("room_id must be an ID: not empty, without whitespace or control characters")
 	}
 	return p.replyErr
@@ -459,12 +459,12 @@ func (r replyTo) applyPost(p *postRequest) {
 		return
 	}
 	// The server's own error for a reply_to that names no message_id.
-	id, err := wire.ParseLogID(string(r))
+	id, err := apron.ParseLogID(string(r))
 	if err != nil || id == 0 {
 		p.replyErr = InvalidParams("reply_to.message_id must be a positive decimal string")
 		return
 	}
-	p.params.ReplyTo = &wire.MessageRef{MessageID: id}
+	p.params.ReplyTo = &apron.MessageRef{MessageID: id}
 }
 
 func (r replyTo) applyStream(p *postRequest) { r.applyPost(p) }
@@ -475,7 +475,7 @@ func ReplyTo(messageID string) ReplyOption { return replyTo(messageID) }
 
 // Markdown renders the message's text as Markdown (§3.5.2).
 func Markdown() PostOption {
-	return postFunc(func(p *postRequest) { p.params.Body.Format = wire.Markdown })
+	return postFunc(func(p *postRequest) { p.params.Body.Format = apron.Markdown })
 }
 
 // Mention mentions users (§3.5.5), whom the text names as @user_id.
@@ -489,13 +489,13 @@ func Mention(userIDs ...string) PostOption {
 // (§4.12), such as a bridge's ID for the message it relays.
 func WithExt(value any) PostOption {
 	return postFunc(func(p *postRequest) {
-		encoded, err := wire.Marshal(value)
+		encoded, err := apron.Marshal(value)
 		if err != nil {
 			p.extErr = err
 			return
 		}
 		if p.params.Ext == nil {
-			p.params.Ext = make(wire.Ext)
+			p.params.Ext = make(apron.Ext)
 		}
 		p.params.Ext[p.extension] = encoded
 	})
@@ -525,7 +525,7 @@ func (b *Session) post(roomID, text string) *postRequest {
 // newPost starts a message with text to the room, whose WithExt writes
 // under extension's name.
 func newPost(roomID, text, extension string) *postRequest {
-	return &postRequest{params: wire.MessageParams{RoomID: roomID, Body: &wire.Body{Text: text}}, extension: extension}
+	return &postRequest{params: apron.MessageParams{RoomID: roomID, Body: &apron.Body{Text: text}}, extension: extension}
 }
 
 // Join joins the room (§4.2.2).
@@ -545,13 +545,13 @@ type HistoryOptions struct {
 // has a record for each snapshot. Conn's History reads the page in wire's
 // terms, with its other records and bounds.
 func (b *Session) History(ctx context.Context, roomID string, options HistoryOptions) ([]Message, error) {
-	params := wire.HistoryParams{RoomID: roomID, Limit: max(options.Limit, 0)}
+	params := apron.HistoryParams{RoomID: roomID, Limit: max(options.Limit, 0)}
 	if options.After > 0 {
-		after := wire.LogID(options.After)
+		after := apron.LogID(options.After)
 		params.After = &after
 	}
 	if options.Before > 0 {
-		before := wire.LogID(options.Before)
+		before := apron.LogID(options.Before)
 		params.Before = &before
 	}
 	page, err := b.conn.History(ctx, params)
@@ -572,7 +572,7 @@ func (b *Session) History(ctx context.Context, roomID string, options HistoryOpt
 // fields, and the whole body, those of its members wire has no field for
 // too, decoded into Body. Host, Bot, Session, and DecodeMessage give
 // Messages already.
-func MessageOf(m wire.Message) Message {
+func MessageOf(m apron.Message) Message {
 	message := Message{
 		LogID: int64(m.LogID), RoomID: m.RoomID, PrevLogID: int64(m.PrevLogID), PrevRoomID: m.PrevRoomID,
 		From: Sender{UserID: m.From.UserID, Name: m.From.Name}, Deleted: m.Deleted, Ext: maps.Clone(m.Ext),
@@ -585,7 +585,7 @@ func MessageOf(m wire.Message) Message {
 	}
 	if body := m.Body; body != nil {
 		message.Body = bodyObject(body)
-		message.Text, message.Format = body.Text, cmp.Or(body.Format, wire.Plain)
+		message.Text, message.Format = body.Text, cmp.Or(body.Format, apron.Plain)
 		message.Mentions = slices.Clone(body.Mentions)
 	}
 	return message
@@ -595,23 +595,23 @@ func MessageOf(m wire.Message) Message {
 // code in wire's terms, such as a post with Conn: its body is Body, or, for
 // a Message made without one, Text, Format, and Mentions, unless it is
 // deleted. An ID that is not a log_id is left out.
-func (m Message) Wire() wire.Message {
-	message := wire.Message{
-		LogID: wire.LogID(m.LogID), RoomID: m.RoomID, PrevLogID: wire.LogID(m.PrevLogID), PrevRoomID: m.PrevRoomID,
-		From: wire.User{UserID: m.From.UserID, Name: m.From.Name}, Deleted: m.Deleted, Ext: maps.Clone(m.Ext),
+func (m Message) Wire() apron.Message {
+	message := apron.Message{
+		LogID: apron.LogID(m.LogID), RoomID: m.RoomID, PrevLogID: apron.LogID(m.PrevLogID), PrevRoomID: m.PrevRoomID,
+		From: apron.User{UserID: m.From.UserID, Name: m.From.Name}, Deleted: m.Deleted, Ext: maps.Clone(m.Ext),
 	}
-	message.MessageID, _ = wire.ParseLogID(m.ID)
-	if id, err := wire.ParseLogID(m.ReplyTo); err == nil && id != 0 {
-		message.ReplyTo = &wire.MessageRef{MessageID: id}
+	message.MessageID, _ = apron.ParseLogID(m.ID)
+	if id, err := apron.ParseLogID(m.ReplyTo); err == nil && id != 0 {
+		message.ReplyTo = &apron.MessageRef{MessageID: id}
 	}
 	switch {
 	case m.Body != nil:
-		var body wire.Body
+		var body apron.Body
 		if json.Unmarshal(encodeJSON(m.Body), &body) == nil {
 			message.Body = &body
 		}
 	case !m.Deleted:
-		message.Body = &wire.Body{Text: m.Text, Format: m.Format, Mentions: slices.Clone(m.Mentions)}
+		message.Body = &apron.Body{Text: m.Text, Format: m.Format, Mentions: slices.Clone(m.Mentions)}
 	}
 	return message
 }
@@ -653,7 +653,7 @@ func (b *Session) stream(ctx context.Context, roomID, command, args string, opti
 	if err := p.check(); err != nil {
 		return nil, err
 	}
-	result, err := b.conn.Command(ctx, wire.CommandParams(p.params))
+	result, err := b.conn.Command(ctx, apron.CommandParams(p.params))
 	if err != nil {
 		return nil, b.requestErr(err)
 	}

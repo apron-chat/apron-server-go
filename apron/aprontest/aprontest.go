@@ -1,0 +1,225 @@
+// Package wiretest tests a backend of package wire, in two ways.
+//
+// A handler is called directly with a Request on no connection
+// (NewRequest), and a Reply that records what it sends (NewReply):
+//
+//	reply, sent := wiretest.NewReply[apron.HistoryResult](wiretest.NewRequest("history", nil))
+//	err := backend.History(ctx, conn, apron.HistoryParams{Limit: 10}, reply)
+//	if err != nil || !sent.Sent() || len(sent.Result().Messages) != 10 {
+//		t.Fatalf("history: %v %+v", err, sent.Result())
+//	}
+//
+// A whole Server is tested as a client sees it, with a Client: in process
+// (Connect, or SignIn, which also signs in; either closes it as the test
+// ends), or over a WebSocket (Dial), with the server frame, auth, and
+// every frame after, in order. A Client keeps the frames a test has not taken yet, so
+// that one can expect a notification that arrived before the result of
+// the request it waited for:
+//
+//	c, _ := wiretest.SignIn(t, server, map[string]any{"scheme": "guest", "name": "Ada"})
+//	result, err := c.Post(ctx, apron.MessageParams{Body: &apron.Body{Text: "hi"}})
+//	...
+//	echo, err := wiretest.Expect(ctx, c, func(m apron.Message) bool { return m.From.UserID == "echo" })
+//
+// Its requests are typed as a bot's are (package wire/bot): Post, Me, and
+// Command, which returns the notices a command sent before its result,
+// and Call[T] for any other, which decodes the result into a T; and so
+// are the notifications a test expects, with Expect[T], such as
+// Expect[apron.UserUpdate] or Expect[apron.Message]. Client.Call and
+// Client.Expect are the same raw: a request's params as any value that encodes as an
+// object, and its result and the frames as JSON.
+//
+// A handler that answers later (apron.Reply.Later) returns before its
+// reply is sent, which a goroutine of the backend's own sends: called
+// directly, its Recorded's Sent is false when it returns, and Wait waits
+// for the reply:
+//
+//	reply, sent := wiretest.NewReply[apron.CommandResult](wiretest.NewRequest("command", nil))
+//	if err := backend.Command(ctx, conn, p, reply); err != nil || sent.Sent() {
+//		t.Fatalf("command: %v, sent %v; want it answered later", err, sent.Sent())
+//	}
+//	upstream.answer()
+//	if err := sent.Wait(ctx); err != nil || sent.Err() != nil {
+//		t.Fatalf("command: %v %v", err, sent.Err())
+//	}
+//
+// An error the handler returns after Later is its own return value, as
+// any is. Through a Client, a request's Call returns once its reply comes,
+// so a test makes the Call of one answered later from a goroutine, and
+// meanwhile sees the requests sent after it answered first, as replies may
+// come in any order (§1):
+//
+//	done := make(chan error, 1)
+//	go func() { _, err := c.Call(ctx, "command", slow); done <- err }()
+//	upstream.waitFor(slow)
+//	if _, err := c.Call(ctx, "command", fast); err != nil { // Not held up.
+//		t.Fatal(err)
+//	}
+//	upstream.answer()
+//	if err := <-done; err != nil {
+//		t.Fatal(err)
+//	}
+//
+// Frames arrive whenever the server sends them, so what a test asserts
+// of their order it reads in order: CallFrames returns the frames that
+// arrived before a request's reply, and Sync waits until every frame the
+// server queued before it handled Sync's request has arrived, after which
+// Pending holds them.
+//
+// Package conformance, below this one, checks a whole Server against the
+// core of PROTOCOL.md (conformance.Run), as the protocol's own conformance
+// suite does, so that every backend runs those checks as tests.
+package aprontest
+
+import (
+	"context"
+	"encoding/json/jsontext"
+	"encoding/json/v2"
+	"slices"
+	"sync"
+
+	"github.com/apron-chat/apron-server-go/apron"
+	"github.com/apron-chat/apron-server-go/apron/internal/testhook"
+)
+
+// NewRequest returns a request of method on no connection, with params,
+// any value that encodes as a JSON object, {} for nil, as a handler gets
+// it: for a Handler (Server.Handle), and for NewReply. What a handler
+// sends to it is recorded, and read with NewReply's Recorded. Its Conn is nil. It panics on params that are
+// not an object.
+func NewRequest(method string, params any) *apron.Request {
+	raw := jsontext.Value("{}")
+	if params != nil {
+		encoded, err := apron.Marshal(params)
+		if err != nil {
+			panic("wiretest: " + err.Error())
+		}
+		raw = encoded
+	}
+	r, err := testhook.NewRequest(method, raw, &recording{done: make(chan struct{})})
+	if err != nil {
+		panic("wiretest: " + err.Error())
+	}
+	return r.(*apron.Request)
+}
+
+// DedupUsage reports what s keeps for deduplication (§1.2): of how many
+// users, how many requests, and what they cost, as Config.DedupBytes counts
+// it; for a test that its backend forgets the users that are gone for good
+// (Server.ForgetUser).
+func DedupUsage(s *apron.Server) (users, requests, bytes int) {
+	return testhook.DedupUsage(s)
+}
+
+// NewReply returns the Reply of r, a request made by NewRequest, or of a
+// request of no method when r is nil, for a typed handler of T, and what is
+// sent to r. Send does what the Server does with the result of r's method
+// when T is its result type, such as the {"you": ...} around a me result;
+// Recorded has both. NewReply panics on a request NewRequest did not make.
+//
+// A Handler's test makes its Reply with T any, and reads what it sent
+// with Recorded.Raw.
+func NewReply[T any](r *apron.Request) (apron.Reply[T], *Recorded[T]) {
+	if r == nil {
+		r = NewRequest("", nil)
+	}
+	rec, ok := testhook.RecorderOf(r).(*recording)
+	if !ok {
+		panic("wiretest: NewReply needs a request made by NewRequest")
+	}
+	var reply apron.Reply[T]
+	testhook.InitReply(&reply, r)
+	return reply, &Recorded[T]{rec}
+}
+
+// Recorded is what a handler sent to a request made by NewRequest: its
+// result, or the error wire answered with in its place, and the frames
+// sent after it. An error the handler returns is its own return value; a
+// Server would send that as the reply.
+type Recorded[T any] struct{ rec *recording }
+
+// recording is what was sent to one request.
+type recording struct {
+	mu    sync.Mutex
+	sent  bool
+	value any
+	raw   jsontext.Value
+	err   error
+	then  []apron.Frame
+	// done is closed once the request has its reply.
+	done chan struct{}
+}
+
+func (r *recording) Record(sent any, raw jsontext.Value, err error, then [][]byte) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !r.sent {
+		close(r.done)
+	}
+	r.sent, r.value, r.raw, r.err = true, sent, raw, err
+	r.then = nil
+	for _, frame := range then {
+		r.then = append(r.then, slices.Clone(apron.Frame(frame)))
+	}
+}
+
+// Sent reports whether the request has its reply: false for one answered
+// later (apron.Reply.Later) until it is sent, which Wait waits for.
+func (r *Recorded[T]) Sent() bool {
+	r.rec.mu.Lock()
+	defer r.rec.mu.Unlock()
+	return r.rec.sent
+}
+
+// Wait waits until the request has its reply, such as one a handler sends
+// after it returns (apron.Reply.Later), or until ctx is done, and returns
+// ctx's error then.
+func (r *Recorded[T]) Wait(ctx context.Context) error {
+	select {
+	case <-r.rec.done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// Result returns the result the handler sent: the value it gave Send,
+// when it is a T, and else the result as encoded (Raw),
+// decoded into a T. It is the zero T until the request has its reply, or
+// when the reply is an error.
+func (r *Recorded[T]) Result() T {
+	r.rec.mu.Lock()
+	defer r.rec.mu.Unlock()
+	var result T
+	if value, ok := r.rec.value.(T); ok {
+		return value
+	}
+	if r.rec.raw != nil {
+		_ = json.Unmarshal(r.rec.raw, &result)
+	}
+	return result
+}
+
+// Raw returns the result object as the client would get it, after what
+// wire does with the method's result, or nil.
+func (r *Recorded[T]) Raw() jsontext.Value {
+	r.rec.mu.Lock()
+	defer r.rec.mu.Unlock()
+	return r.rec.raw
+}
+
+// Err returns the error wire answered with in place of the result, an
+// *apron.Error, such as error/internal_error for a result its method may
+// not have (an auth result whose user_id is not valid), or nil.
+func (r *Recorded[T]) Err() error {
+	r.rec.mu.Lock()
+	defer r.rec.mu.Unlock()
+	return r.rec.err
+}
+
+// Then returns the frames sent right after the result, in order.
+func (r *Recorded[T]) Then() []apron.Frame {
+	r.rec.mu.Lock()
+	defer r.rec.mu.Unlock()
+	return slices.Clone(r.rec.then)
+}

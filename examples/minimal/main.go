@@ -17,9 +17,9 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/apron-chat/apron-server-go/wire"
-	"github.com/apron-chat/apron-server-go/wire/bot"
-	"github.com/apron-chat/apron-server-go/wire/commands"
+	"github.com/apron-chat/apron-server-go/apron"
+	"github.com/apron-chat/apron-server-go/apron/bot"
+	"github.com/apron-chat/apron-server-go/apron/server/commands"
 )
 
 func main() {
@@ -32,21 +32,21 @@ func main() {
 	log.Fatal(http.ListenAndServe(*addr, mux))
 }
 
-// Chat is a one-room chat: the backend of its wire.Server.
+// Chat is a one-room chat: the backend of its apron.Server.
 type Chat struct {
-	Server   *wire.Server
-	clock    wire.Clock
+	Server   *apron.Server
+	clock    apron.Clock
 	commands commands.Router
 
 	mu       sync.Mutex
 	guests   int
-	messages map[wire.LogID]bool
+	messages map[apron.LogID]bool
 }
 
 const room = "general"
 
 func NewChat() *Chat {
-	c := &Chat{messages: make(map[wire.LogID]bool)}
+	c := &Chat{messages: make(map[apron.LogID]bool)}
 	// The Router answers /help, and lists the commands for clients that
 	// complete them (ext:command_list).
 	c.commands.MustAdd(commands.Command{
@@ -54,24 +54,24 @@ func NewChat() *Chat {
 		Forms: []commands.Form{{Usage: "/nick <name>", Help: "change your name"}},
 		Run:   c.nick,
 	})
-	c.Server = wire.NewServer(c, wire.Config{
+	c.Server = apron.NewServer(c, apron.Config{
 		Messages: c,
 		Profiles: c,
 		Commands: &c.commands,
 		// Browsers open a WebSocket from the page's origin, and by
 		// default only the server's own may: a web client served from
 		// elsewhere, such as a dev server on another port, needs its
-		// origin let in, as wire.OriginPatterns("localhost:*") does. This
+		// origin let in, as apron.OriginPatterns("localhost:*") does. This
 		// server signs in guests, with no cookies for another site's page
 		// to use, so it lets in any.
-		CheckOrigin: wire.AnyOrigin,
+		CheckOrigin: apron.AnyOrigin,
 	})
 	c.Server.Handle(commands.ListMethod, c.commands.ListHandler())
 	// The bot is a user on a connection of its own, in process: what it
 	// posts goes through Message, as anyone's does. Its connection opens
 	// at once, so it starts once c.Server is set, for the handlers its
 	// connection calls.
-	if _, err := bot.Start(c.Server, bot.Options{User: wire.User{UserID: "echo", Name: "Echo"}, OnMessage: echo}); err != nil {
+	if _, err := bot.Start(c.Server, bot.Options{User: apron.User{UserID: "echo", Name: "Echo"}, OnMessage: echo}); err != nil {
 		panic(err) // A Server that is not shut down opens it.
 	}
 	return c
@@ -80,14 +80,14 @@ func NewChat() *Chat {
 // echo is the bot's: it answers a message that mentions it, or names it
 // in its text, as in "echo: hi" from a client that sends no mentions, with
 // what it said, as a reply.
-func echo(ctx context.Context, b *bot.Bot, m wire.Message) {
+func echo(ctx context.Context, b *bot.Bot, m apron.Message) {
 	if b.Addressed(m) {
 		_, _ = b.Reply(ctx, m, m.From.Name+" said: "+m.Body.Text)
 	}
 }
 
-func (*Chat) Hello(context.Context, *wire.Conn) wire.ServerInfo {
-	return wire.ServerInfo{Auth: []string{"guest"}, Agent: "apron-minimal/1", Title: "Minimal"}
+func (*Chat) Hello(context.Context, *apron.Conn) apron.ServerInfo {
+	return apron.ServerInfo{Auth: []string{"guest"}, Agent: "apron-minimal/1", Title: "Minimal"}
 }
 
 // Each handler replies with reply.Send under c.mu, as it changes what the
@@ -95,7 +95,7 @@ func (*Chat) Hello(context.Context, *wire.Conn) wire.ServerInfo {
 // the order of the changes (§1), and a connection is signed in as Send
 // queues its auth result, before anything broadcast after it.
 
-func (c *Chat) Auth(_ context.Context, _ *wire.Conn, p wire.AuthParams, reply wire.Reply[wire.AuthResult]) error {
+func (c *Chat) Auth(_ context.Context, _ *apron.Conn, p apron.AuthParams, reply apron.Reply[apron.AuthResult]) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.guests++
@@ -104,29 +104,29 @@ func (c *Chat) Auth(_ context.Context, _ *wire.Conn, p wire.AuthParams, reply wi
 	if name == "" {
 		name = id
 	}
-	welcome, err := wire.Encode(wire.Notice(room, "Welcome, "+name+"! Try /help."))
+	welcome, err := apron.Encode(apron.Notice(room, "Welcome, "+name+"! Try /help."))
 	if err != nil {
 		return err
 	}
 	// The welcome goes right after the result (§3.2.2). you is complete
 	// (§3.3.1): this server publishes user_id and name, and both are set.
-	return reply.Send(wire.AuthResult{You: &wire.CurrentUser{User: wire.User{UserID: id, Name: name}}}, welcome)
+	return reply.Send(apron.AuthResult{You: &apron.CurrentUser{User: apron.User{UserID: id, Name: name}}}, welcome)
 }
 
-func (c *Chat) Message(_ context.Context, conn *wire.Conn, p wire.MessageParams, reply wire.Reply[wire.MessageResult]) error {
+func (c *Chat) Message(_ context.Context, conn *apron.Conn, p apron.MessageParams, reply apron.Reply[apron.MessageResult]) error {
 	if p.RoomID != "" && p.RoomID != room {
-		return wire.InvalidParams("There is only one room, " + room)
+		return apron.InvalidParams("There is only one room, " + room)
 	}
 	if p.Body.Empty() {
-		return wire.InvalidParams("A new message needs text or embeds") // §3.5.1
+		return apron.InvalidParams("A new message needs text or embeds") // §3.5.1
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if p.ReplyTo != nil && !c.messages[p.ReplyTo.MessageID] {
-		return wire.InvalidParams("reply_to names no message")
+		return apron.InvalidParams("reply_to names no message")
 	}
 	id := c.clock.Next()
-	frame, err := wire.Encode(wire.Message{
+	frame, err := apron.Encode(apron.Message{
 		MessageID: id, LogID: id, RoomID: room, From: *conn.User(), Body: p.Body, ReplyTo: p.ReplyTo,
 	})
 	if err != nil {
@@ -136,20 +136,20 @@ func (c *Chat) Message(_ context.Context, conn *wire.Conn, p wire.MessageParams,
 	// Every connection is in the one room; the sender's copy goes before
 	// the result.
 	c.Server.Broadcast(frame, nil)
-	return reply.Send(wire.MessageResult{MessageID: id})
+	return reply.Send(apron.MessageResult{MessageID: id})
 }
 
 // Me changes the user's profile (§3.3.2): it tells what changed to the
 // user's other connections as you, and to everyone else as new (§3.3.3),
 // as everyone shares the one room, and answers with the complete object,
 // the fields the change cleared as their empty values.
-func (c *Chat) Me(_ context.Context, conn *wire.Conn, p wire.MeParams, reply wire.Reply[wire.CurrentUser]) error {
+func (c *Chat) Me(_ context.Context, conn *apron.Conn, p apron.MeParams, reply apron.Reply[apron.CurrentUser]) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	old := *conn.User()
-	you := wire.ApplyMe(old, p)
+	you := apron.ApplyMe(old, p)
 	you.Name = strings.TrimSpace(you.Name)
-	c.Server.PublishUser(wire.UserChange{Old: old, New: you, Except: conn}, nil)
+	c.Server.PublishUser(apron.UserChange{Old: old, New: you, Except: conn}, nil)
 	return reply.Send(you.Complete(old))
 }
 
@@ -164,6 +164,6 @@ func (c *Chat) nick(_ context.Context, call *commands.Call) error {
 	old := *call.Conn.User()
 	you := old
 	you.Name = call.Args
-	c.Server.PublishUser(wire.UserChange{Old: old, New: you}, nil)
+	c.Server.PublishUser(apron.UserChange{Old: old, New: you}, nil)
 	return call.Done()
 }

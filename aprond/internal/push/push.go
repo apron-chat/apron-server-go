@@ -25,9 +25,9 @@ import (
 	"slices"
 	"time"
 
+	"github.com/apron-chat/apron-server-go/apron"
 	"github.com/apron-chat/apron-server-go/aprond/internal/webpush"
 	"github.com/apron-chat/apron-server-go/store"
-	"github.com/apron-chat/apron-server-go/wire"
 )
 
 const (
@@ -328,7 +328,7 @@ func (t *Table) Entries() []store.Entry {
 			if p.Keys != nil {
 				s.P256DH, s.Auth = webpush.EncodeBase64URL(p.Keys.P256DH), webpush.EncodeBase64URL(p.Keys.Auth)
 			}
-			value, err := wire.Marshal(s)
+			value, err := apron.Marshal(s)
 			if err != nil {
 				slog.Error("cannot encode state for the store", "kind", EntryKind, "id", key, "error", err)
 				continue

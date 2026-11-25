@@ -8,9 +8,9 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/apron-chat/apron-server-go/apron"
 	"github.com/apron-chat/apron-server-go/aprond/internal/presence"
 	"github.com/apron-chat/apron-server-go/aprond/internal/users"
-	"github.com/apron-chat/apron-server-go/wire"
 )
 
 // Status (§4.5). The chosen status is set with `me`: online (the default),
@@ -64,16 +64,16 @@ func settableStatus(value string) bool { return presence.Settable(value) }
 // muteState is a mute (§4.5): until a time, forever, or, when zero, none.
 type muteState = users.Mute
 
-// muteValue is a mute as a `status` notification carries it (wire.Mute):
+// muteValue is a mute as a `status` notification carries it (apron.Mute):
 // true, the seconds left, rounded up, or false when there is none.
-func muteValue(m muteState, now time.Time) wire.Mute {
+func muteValue(m muteState, now time.Time) apron.Mute {
 	switch {
 	case m.Forever:
-		return wire.Mute{On: true}
+		return apron.Mute{On: true}
 	case !m.Active(now):
-		return wire.Mute{}
+		return apron.Mute{}
 	}
-	return wire.Mute{On: true, Seconds: int64((m.Until.Sub(now) + time.Second - 1) / time.Second)}
+	return apron.Mute{On: true, Seconds: int64((m.Until.Sub(now) + time.Second - 1) / time.Second)}
 }
 
 // statusUpdate is one parsed `status` request. A nil field was absent.
@@ -91,7 +91,7 @@ type statusUpdate struct {
 
 // statusUpdateOf is a status request (§4.5.3), as package wire reads it,
 // with a mute longer than maxMuteSeconds shortened to it.
-func statusUpdateOf(p wire.StatusParams) statusUpdate {
+func statusUpdateOf(p apron.StatusParams) statusUpdate {
 	update := statusUpdate{roomID: p.RoomID, scoped: p.RoomID != ""}
 	if p.Idle != nil {
 		idle := !p.Idle.Attended
@@ -128,7 +128,7 @@ func (update statusUpdate) mute(now time.Time) muteState {
 // package wire ignores. On an error nothing changes: invalid params, a mute
 // of a room the user cannot see, a mute of another room beyond
 // maxRoomMutes, or more requests than the user's limit (admitStatusLocked).
-func (s *Server) status(c *client, p wire.StatusParams, reply wire.Reply[wire.OK]) *Error {
+func (s *Server) status(c *client, p apron.StatusParams, reply apron.Reply[apron.OK]) *Error {
 	update := statusUpdateOf(p)
 	s.mu.Lock()
 	defer s.unlock()
@@ -150,7 +150,7 @@ func (s *Server) status(c *client, p wire.StatusParams, reply wire.Reply[wire.OK
 		return err
 	}
 	s.applyStatusLocked(c, u, update)
-	_ = reply.Send(wire.OK{})
+	_ = reply.Send(apron.OK{})
 	return nil
 }
 
@@ -201,10 +201,10 @@ func (s *Server) applyStatusLocked(c *client, u *userState, update statusUpdate)
 
 // muteFrame is the `status` notification that tells the user's connections
 // of a mute, everywhere or, with roomID, of that room (§4.5). Its params
-// are a map, not a wire.StatusUpdate, which would send room_id first: the
+// are a map, not a apron.StatusUpdate, which would send room_id first: the
 // server has always sent its keys sorted.
 func muteFrame(roomID string, mute muteState, now time.Time) jsontext.Value {
-	return encodeNotification(wire.StatusUpdate{RoomID: roomID, Mute: muteValue(mute, now)})
+	return encodeNotification(apron.StatusUpdate{RoomID: roomID, Mute: muteValue(mute, now)})
 }
 
 // sendAfterAuthLocked sends a connection that has just signed in, after
@@ -317,7 +317,7 @@ func (u *userState) shownStatus() string {
 
 // you is the user's own current object (§3.3): its profile, with the
 // chosen status in place of the shown one, and never seen (§4.5.2).
-func (u *userState) you() wire.CurrentUser {
+func (u *userState) you() apron.CurrentUser {
 	return u.current(u.Presence.Chosen, false)
 }
 
@@ -346,9 +346,9 @@ func (s *Server) publishLocked(u *userState) bool {
 // shownObject is the bare current object of u that others see: user_id and
 // the published shown status, "" too, with seen when it is offline, if it
 // is known (§4.5.2).
-func (u *userState) shownObject() wire.CurrentUser {
+func (u *userState) shownObject() apron.CurrentUser {
 	status, seen := u.Presence.Status, u.Presence.Seen
-	object := wire.CurrentUser{User: wire.User{UserID: u.id, Status: status}}
+	object := apron.CurrentUser{User: apron.User{UserID: u.id, Status: status}}
 	switch {
 	case status == statusNone:
 		object.Cleared = []string{"status"}
@@ -410,7 +410,7 @@ func (s *Server) sendStatusLocked(u *userState, users []*userState) {
 // `{new: {user_id, status}}`, with seen when it is offline (§4.5.2).
 func statusFrame(u *userState) jsontext.Value {
 	shown := u.shownObject()
-	return notification("user", wire.UserUpdate{New: &shown})
+	return notification("user", apron.UserUpdate{New: &shown})
 }
 
 // announceJoinStatusLocked tells the other members of r the published

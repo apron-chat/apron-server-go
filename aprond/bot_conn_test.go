@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/apron-chat/apron-server-go/wire"
+	"github.com/apron-chat/apron-server-go/apron"
 )
 
 // A bot's connection in package wire/bot's terms makes typed requests, as
@@ -30,10 +30,10 @@ func TestBotConn(t *testing.T) {
 	if conn.UserID() != "helper" {
 		t.Fatalf("Conn signed in as %q", conn.UserID())
 	}
-	posted, err := conn.Post(ctx, wire.MessageParams{
+	posted, err := conn.Post(ctx, apron.MessageParams{
 		RoomID: "general",
-		Body:   &wire.Body{Text: "**hi** @" + c.userID, Format: wire.Markdown, Mentions: []string{c.userID}},
-		Ext:    wire.Ext{}.With("helper", map[string]any{"n": 1}),
+		Body:   &apron.Body{Text: "**hi** @" + c.userID, Format: apron.Markdown, Mentions: []string{c.userID}},
+		Ext:    apron.Ext{}.With("helper", map[string]any{"n": 1}),
 	})
 	if err != nil || posted.MessageID == 0 {
 		t.Fatalf("Post = %+v, %v", posted, err)
@@ -41,17 +41,17 @@ func TestBotConn(t *testing.T) {
 	if got := notificationParams(t, c.read(t), "message"); got["message_id"] != posted.MessageID.String() {
 		t.Fatalf("guest got %#v", got)
 	}
-	if _, err := conn.Post(ctx, wire.MessageParams{RoomID: "nowhere", Body: &wire.Body{Text: "x"}}); wire.CodeOf(err) != CodeInvalidParams {
+	if _, err := conn.Post(ctx, apron.MessageParams{RoomID: "nowhere", Body: &apron.Body{Text: "x"}}); apron.CodeOf(err) != CodeInvalidParams {
 		t.Fatalf("Post to no room: %v", err)
 	}
-	if _, err := conn.Call(ctx, "auth", map[string]any{"scheme": "guest"}); wire.CodeOf(err) != CodeDenied {
+	if _, err := conn.Call(ctx, "auth", map[string]any{"scheme": "guest"}); apron.CodeOf(err) != CodeDenied {
 		t.Fatalf("auth on a bot's connection: %v", err)
 	}
-	if _, err := conn.Command(ctx, wire.CommandParams{RoomID: "general", Body: &wire.Body{Text: "/help"}}); err != nil {
+	if _, err := conn.Command(ctx, apron.CommandParams{RoomID: "general", Body: &apron.Body{Text: "/help"}}); err != nil {
 		t.Fatalf("/help: %v", err)
 	}
 
-	page, err := conn.History(ctx, wire.HistoryParams{RoomID: "general", Limit: 10})
+	page, err := conn.History(ctx, apron.HistoryParams{RoomID: "general", Limit: 10})
 	if err != nil || len(page.Messages) != 1 {
 		t.Fatalf("History = %+v, %v", page, err)
 	}
@@ -61,7 +61,7 @@ func TestBotConn(t *testing.T) {
 	}
 	m := MessageOf(page.Messages[0])
 	if !reflect.DeepEqual(m, history[0]) || m.ID != posted.MessageID.String() || m.Text != "**hi** @"+c.userID ||
-		m.Format != wire.Markdown || !m.MentionsUser(c.userID) || string(m.Ext["helper"]) != `{"n":1}` {
+		m.Format != apron.Markdown || !m.MentionsUser(c.userID) || string(m.Ext["helper"]) != `{"n":1}` {
 		t.Fatalf("MessageOf = %#v, History has %#v", m, history[0])
 	}
 	if back := MessageOf(m.Wire()); !reflect.DeepEqual(back, m) {
@@ -69,20 +69,20 @@ func TestBotConn(t *testing.T) {
 	}
 }
 
-// Message and wire.Message say the same of a message: a reply, a moved
+// Message and apron.Message say the same of a message: a reply, a moved
 // snapshot, a body with members wire has no field for, a tombstone, and
 // a notice.
 func TestMessageOfAndWire(t *testing.T) {
-	reply := wire.Message{
+	reply := apron.Message{
 		MessageID: 7, LogID: 9, RoomID: "general", PrevLogID: 8, PrevRoomID: "random",
-		From:    wire.User{UserID: "ada", Name: "Ada"},
-		Body:    &wire.Body{Text: "yes", Mentions: []string{"bob"}, Unknown: jsontext.Value(`{"x":1}`)},
-		ReplyTo: &wire.MessageRef{MessageID: 3},
-		Ext:     wire.Ext{"irc": jsontext.Value(`{"nick":"ada_"}`)},
+		From:    apron.User{UserID: "ada", Name: "Ada"},
+		Body:    &apron.Body{Text: "yes", Mentions: []string{"bob"}, Unknown: jsontext.Value(`{"x":1}`)},
+		ReplyTo: &apron.MessageRef{MessageID: 3},
+		Ext:     apron.Ext{"irc": jsontext.Value(`{"nick":"ada_"}`)},
 	}
 	m := MessageOf(reply)
 	if m.ID != "7" || m.LogID != 9 || m.PrevLogID != 8 || m.PrevRoomID != "random" || m.ReplyTo != "3" ||
-		m.Text != "yes" || m.Format != wire.Plain || m.Body["x"] != float64(1) || m.From.Name != "Ada" || m.New() {
+		m.Text != "yes" || m.Format != apron.Plain || m.Body["x"] != float64(1) || m.From.Name != "Ada" || m.New() {
 		t.Fatalf("MessageOf = %#v", m)
 	}
 	back := m.Wire()
@@ -94,16 +94,16 @@ func TestMessageOfAndWire(t *testing.T) {
 		t.Fatalf("MessageOf(Wire()) = %#v, want %#v", MessageOf(back), m)
 	}
 
-	tombstone := MessageOf(wire.Message{MessageID: 7, LogID: 10, PrevLogID: 9, RoomID: "general", From: wire.User{UserID: "ada"}, Deleted: true})
+	tombstone := MessageOf(apron.Message{MessageID: 7, LogID: 10, PrevLogID: 9, RoomID: "general", From: apron.User{UserID: "ada"}, Deleted: true})
 	if !tombstone.Deleted || tombstone.Body != nil || tombstone.Wire().Body != nil {
 		t.Fatalf("tombstone = %#v", tombstone)
 	}
-	notice := MessageOf(wire.Notice("general", "hello"))
+	notice := MessageOf(apron.Notice("general", "hello"))
 	if notice.ID != "" || notice.From.UserID != privateNoticeID || notice.Text != "hello" || notice.Wire().MessageID != 0 {
 		t.Fatalf("notice = %#v", notice)
 	}
-	made := Message{ID: "12", RoomID: "general", Text: "hand made", Format: wire.Markdown}.Wire()
-	if made.MessageID != 12 || made.Body == nil || made.Body.Text != "hand made" || made.Body.Format != wire.Markdown {
+	made := Message{ID: "12", RoomID: "general", Text: "hand made", Format: apron.Markdown}.Wire()
+	if made.MessageID != 12 || made.Body == nil || made.Body.Text != "hand made" || made.Body.Format != apron.Markdown {
 		t.Fatalf("Wire of a Message without Body = %#v", made)
 	}
 }

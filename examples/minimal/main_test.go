@@ -7,26 +7,26 @@ import (
 	"testing"
 	"time"
 
-	"github.com/apron-chat/apron-server-go/wire"
-	"github.com/apron-chat/apron-server-go/wire/wiretest"
+	"github.com/apron-chat/apron-server-go/apron"
+	"github.com/apron-chat/apron-server-go/apron/aprontest"
 )
 
 // signIn connects a guest, and takes the welcome notice after the result.
-func signIn(t *testing.T, ctx context.Context, chat *Chat, name string) (*wiretest.Client, wire.User) {
+func signIn(t *testing.T, ctx context.Context, chat *Chat, name string) (*aprontest.Client, apron.User) {
 	t.Helper()
-	c, you := wiretest.SignIn(t, chat.Server, map[string]any{"scheme": "guest", "name": name})
+	c, you := aprontest.SignIn(t, chat.Server, map[string]any{"scheme": "guest", "name": name})
 	if hello := c.Hello(); hello.Title != "Minimal" || you.Name != name {
 		t.Fatalf("server frame %+v, you %+v", hello, you)
 	}
-	if welcome, err := wiretest.Expect[wire.Message](ctx, c, nil); err != nil || welcome.From.UserID != wire.Private.UserID || !strings.HasPrefix(welcome.Body.Text, "Welcome, "+name) {
+	if welcome, err := aprontest.Expect[apron.Message](ctx, c, nil); err != nil || welcome.From.UserID != apron.Private.UserID || !strings.HasPrefix(welcome.Body.Text, "Welcome, "+name) {
 		t.Fatalf("welcome: %+v %v", welcome, err)
 	}
 	return c, you.User
 }
 
 // text is a message request's params with text.
-func text(s string) wire.MessageParams {
-	return wire.MessageParams{Body: &wire.Body{Text: s}}
+func text(s string) apron.MessageParams {
+	return apron.MessageParams{Body: &apron.Body{Text: s}}
 }
 
 func TestChat(t *testing.T) {
@@ -41,30 +41,30 @@ func TestChat(t *testing.T) {
 	if err != nil || sent.MessageID == 0 {
 		t.Fatalf("message: %+v %v", sent, err)
 	}
-	for _, c := range []*wiretest.Client{ada, bob} {
-		if m, err := wiretest.Expect[wire.Message](ctx, c, nil); err != nil || m.MessageID != sent.MessageID || m.Body.Text != "hi" || m.From.Name != "Ada" {
+	for _, c := range []*aprontest.Client{ada, bob} {
+		if m, err := aprontest.Expect[apron.Message](ctx, c, nil); err != nil || m.MessageID != sent.MessageID || m.Body.Text != "hi" || m.From.Name != "Ada" {
 			t.Fatalf("message: %+v %v", m, err)
 		}
 	}
 	elsewhere := text("x")
 	elsewhere.RoomID = "elsewhere"
-	if _, err := ada.Post(ctx, elsewhere); wire.CodeOf(err) != wire.CodeInvalidParams {
+	if _, err := ada.Post(ctx, elsewhere); apron.CodeOf(err) != apron.CodeInvalidParams {
 		t.Fatalf("another room: %v", err)
 	}
 	toNothing := text("x")
-	toNothing.ReplyTo = &wire.MessageRef{MessageID: 999}
-	if _, err := ada.Post(ctx, toNothing); wire.CodeOf(err) != wire.CodeInvalidParams {
+	toNothing.ReplyTo = &apron.MessageRef{MessageID: 999}
+	if _, err := ada.Post(ctx, toNothing); apron.CodeOf(err) != apron.CodeInvalidParams {
 		t.Fatalf("a reply to nothing: %v", err)
 	}
 
 	// A profile change is the result, complete, with what it clears as its
 	// empty value (§3.3.2), and goes to the others as new (§3.3.3).
 	empty := ""
-	you, err := bob.Me(ctx, wire.MeParams{Name: &empty})
+	you, err := bob.Me(ctx, apron.MeParams{Name: &empty})
 	if err != nil || you.UserID != bobUser.UserID || !slices.Equal(you.Cleared, []string{"name"}) {
 		t.Fatalf("me: %+v %v", you, err)
 	}
-	update, err := wiretest.Expect(ctx, ada, func(u wire.UserUpdate) bool { return u.New != nil })
+	update, err := aprontest.Expect(ctx, ada, func(u apron.UserUpdate) bool { return u.New != nil })
 	if err != nil || update.New.UserID != bobUser.UserID || !slices.Equal(update.New.Cleared, []string{"name"}) {
 		t.Fatalf("ada's user frame: %+v %v", update, err)
 	}
@@ -72,27 +72,27 @@ func TestChat(t *testing.T) {
 	if err := bob.Sync(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if i := slices.IndexFunc(bob.Pending(), wiretest.Method("user")); i >= 0 {
+	if i := slices.IndexFunc(bob.Pending(), aprontest.Method("user")); i >= 0 {
 		t.Fatalf("bob's user frame %s besides the result", bob.Pending()[i].Raw)
 	}
 
 	if notices, err := ada.Command(ctx, "", "/help"); err != nil || len(notices) != 1 || !strings.Contains(notices[0], "/help") || !strings.Contains(notices[0], "/nick <name>") {
 		t.Fatalf("/help: %q %v", notices, err)
 	}
-	if _, err := ada.Command(ctx, "", "/nope"); wire.CodeOf(err) != wire.CodeInvalidParams {
+	if _, err := ada.Command(ctx, "", "/nope"); apron.CodeOf(err) != apron.CodeInvalidParams {
 		t.Fatalf("an unknown command: %v", err)
 	}
-	if _, err := ada.Command(ctx, "", "/nick"); wire.CodeOf(err) != wire.CodeInvalidParams {
+	if _, err := ada.Command(ctx, "", "/nick"); apron.CodeOf(err) != apron.CodeInvalidParams {
 		t.Fatalf("/nick without a name: %v", err)
 	}
 
 	// /nick renames, as me does: the user update comes before the result.
-	_, before, err := ada.CallFrames(ctx, "command", wire.CommandParams{Body: &wire.Body{Text: "/nick Ada L."}})
-	var renamed wire.UserUpdate
+	_, before, err := ada.CallFrames(ctx, "command", apron.CommandParams{Body: &apron.Body{Text: "/nick Ada L."}})
+	var renamed apron.UserUpdate
 	if err != nil || len(before) != 1 || before[0].Decode(&renamed) != nil || renamed.You == nil || renamed.You.Name != "Ada L." {
 		t.Fatalf("/nick: %v %v", before, err)
 	}
-	if update, err := wiretest.Expect[wire.UserUpdate](ctx, bob, nil); err != nil || update.New == nil || update.New.Name != "Ada L." {
+	if update, err := aprontest.Expect[apron.UserUpdate](ctx, bob, nil); err != nil || update.New == nil || update.New.Name != "Ada L." {
 		t.Fatalf("bob's user frame: %+v %v", update, err)
 	}
 	if raw, err := ada.Call(ctx, "ext:command_list", nil); err != nil || string(raw) != `{"commands":[{"description":"list the commands you can use here","group":"all","name":"help"},{"description":"change your name","hint":"<name>","name":"nick"}]}` {
@@ -108,16 +108,16 @@ func TestEcho(t *testing.T) {
 	chat := NewChat()
 	ada, _ := signIn(t, ctx, chat, "Ada")
 	bob, _ := signIn(t, ctx, chat, "Bob")
-	for _, body := range []wire.Body{
+	for _, body := range []apron.Body{
 		{Text: "@echo hi", Mentions: []string{"echo"}},
 		{Text: "echo: hi"},
 	} {
-		asked, err := ada.Post(ctx, wire.MessageParams{Body: &body})
+		asked, err := ada.Post(ctx, apron.MessageParams{Body: &body})
 		if err != nil {
 			t.Fatal(err)
 		}
-		for _, c := range []*wiretest.Client{ada, bob} {
-			m, err := wiretest.Expect(ctx, c, func(m wire.Message) bool { return m.From.UserID == "echo" })
+		for _, c := range []*aprontest.Client{ada, bob} {
+			m, err := aprontest.Expect(ctx, c, func(m apron.Message) bool { return m.From.UserID == "echo" })
 			if err != nil || m.Body.Text != "Ada said: "+body.Text || m.ReplyTo == nil || m.ReplyTo.MessageID != asked.MessageID {
 				t.Fatalf("the bot's reply %+v: %v", m, err)
 			}

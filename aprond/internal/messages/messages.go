@@ -17,8 +17,8 @@ import (
 	"fmt"
 	"slices"
 
+	"github.com/apron-chat/apron-server-go/apron"
 	"github.com/apron-chat/apron-server-go/aprond/internal/emoji"
-	"github.com/apron-chat/apron-server-go/wire"
 )
 
 // The server's limits on a message.
@@ -38,9 +38,9 @@ const (
 )
 
 // CheckBody checks a body that package wire read, from a client's request
-// or with wire.ParseBody, against the server's limits: the count of its
+// or with apron.ParseBody, against the server's limits: the count of its
 // mentions and of its embeds.
-func CheckBody(body *wire.Body) *wire.Error {
+func CheckBody(body *apron.Body) *apron.Error {
 	if len(body.Mentions) > MaxMentions {
 		return denied("A message mentions at most %d users", MaxMentions)
 	}
@@ -52,23 +52,23 @@ func CheckBody(body *wire.Body) *wire.Error {
 
 // CheckRaw checks a body that did not come from a client's request, such
 // as one an extension's filter rewrote: as package wire checks a client's
-// (wire.ParseBody), then as CheckBody does.
-func CheckRaw(raw jsontext.Value) *wire.Error {
-	body, err := wire.ParseBody(raw)
+// (apron.ParseBody), then as CheckBody does.
+func CheckRaw(raw jsontext.Value) *apron.Error {
+	body, err := apron.ParseBody(raw)
 	if err != nil {
-		if e, ok := errors.AsType[*wire.Error](err); ok {
+		if e, ok := errors.AsType[*apron.Error](err); ok {
 			return e
 		}
-		return wire.InvalidParams(err.Error())
+		return apron.InvalidParams(err.Error())
 	}
 	return CheckBody(body)
 }
 
 // CheckExt checks a message's ext, merged, against MaxExtBytes: one over
 // it is too_large, and the write that made it changes nothing (§4.13).
-func CheckExt(ext wire.Ext) *wire.Error {
-	if encoded, _ := wire.Marshal(ext); len(encoded) > MaxExtBytes {
-		return &wire.Error{Code: wire.CodeTooLarge, Message: fmt.Sprintf("The message's ext would be over %d bytes", MaxExtBytes)}
+func CheckExt(ext apron.Ext) *apron.Error {
+	if encoded, _ := apron.Marshal(ext); len(encoded) > MaxExtBytes {
+		return &apron.Error{Code: apron.CodeTooLarge, Message: fmt.Sprintf("The message's ext would be over %d bytes", MaxExtBytes)}
 	}
 	return nil
 }
@@ -78,14 +78,14 @@ func CheckExt(ext wire.Ext) *wire.Error {
 // kept once, in the order it first came. An entry that is empty once
 // qualified is invalid_params, one over MaxEmojiBytes too_large, and a set
 // of more than MaxDistinctEmoji denied.
-func Emojis(values []string) ([]string, *wire.Error) {
+func Emojis(values []string) ([]string, *apron.Error) {
 	emojis := make([]string, 0, len(values))
 	for _, entry := range values {
 		if entry = emoji.Qualify(entry); entry == "" {
-			return nil, wire.InvalidParams("emojis must be non-empty strings")
+			return nil, apron.InvalidParams("emojis must be non-empty strings")
 		}
 		if len(entry) > MaxEmojiBytes {
-			return nil, &wire.Error{Code: wire.CodeTooLarge, Message: fmt.Sprintf("An emoji is at most %d bytes", MaxEmojiBytes)}
+			return nil, &apron.Error{Code: apron.CodeTooLarge, Message: fmt.Sprintf("An emoji is at most %d bytes", MaxEmojiBytes)}
 		}
 		if !slices.Contains(emojis, entry) {
 			emojis = append(emojis, entry)
@@ -98,6 +98,6 @@ func Emojis(values []string) ([]string, *wire.Error) {
 }
 
 // denied is the error of a count over a limit the server sets (§1.1).
-func denied(format string, limit int) *wire.Error {
-	return &wire.Error{Code: wire.CodeDenied, Message: fmt.Sprintf(format, limit)}
+func denied(format string, limit int) *apron.Error {
+	return &apron.Error{Code: apron.CodeDenied, Message: fmt.Sprintf(format, limit)}
 }

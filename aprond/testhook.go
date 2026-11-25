@@ -6,10 +6,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/apron-chat/apron-server-go/apron"
 	"github.com/apron-chat/apron-server-go/aprond/internal/testhook"
 	"github.com/apron-chat/apron-server-go/internal/auth/email"
 	"github.com/apron-chat/apron-server-go/internal/authn"
-	"github.com/apron-chat/apron-server-go/wire"
 )
 
 // The hooks package aprontest calls, for what a test does in process that
@@ -21,7 +21,7 @@ func init() {
 	testhook.Member = func(server any, ctx context.Context, options any, address string) (string, string, error) {
 		return server.(*Server).member(ctx, options.(InvitationOptions), address)
 	}
-	testhook.MessageParams = func(roomID, text, extension string, options any) (wire.MessageParams, error) {
+	testhook.MessageParams = func(roomID, text, extension string, options any) (apron.MessageParams, error) {
 		p := newPost(roomID, text, extension)
 		for _, option := range options.([]PostOption) {
 			option.applyPost(p)

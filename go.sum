@@ -1,7 +1,5 @@
 github.com/BurntSushi/toml v1.6.0 h1:dRaEfpa2VI55EwlIW72hMRHdWouJeRF7TPYhI+AUQjk=
 github.com/BurntSushi/toml v1.6.0/go.mod h1:ukJfTF/6rtPPRCnwkur4qwRxa8vTRFBF0uk2lLoLwho=
-github.com/apron-chat/apron-server-go/wire v0.0.0-20261125050210-d4266de46e93 h1:xNVmJPijebVsF8Mg0xVzl0SwCLfEiL12PsNDauKHwAc=
-github.com/apron-chat/apron-server-go/wire v0.0.0-20261125050210-d4266de46e93/go.mod h1:gNW4u6aSRhOmcZFrawwo3gHz5GDHhP0qzk/XZHQDPu8=
 github.com/coder/websocket v1.8.14 h1:9L0p0iKiNOibykf283eHkKUHHrpG7f65OE3BhhO7v9g=
 github.com/coder/websocket v1.8.14/go.mod h1:NX3SzP+inril6yawo5CQXx8+fk145lPDC6pumgx0mVg=
 github.com/dustin/go-humanize v1.0.1 h1:GzkhY7T5VNhEkwH0PVJgjz+fX1rhBrR7pRT3mDkpeCY=

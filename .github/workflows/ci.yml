@@ -40,7 +40,7 @@ jobs:
           go-version-file: go.mod
           cache-dependency-path: |
             go.sum
-            wire/go.sum
+            apron/go.sum
       - run: make install
       - run: make check test build
       # Both Chromium builds: the headless shell for most tests and the

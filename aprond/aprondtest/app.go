@@ -11,7 +11,7 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/apron-chat/apron-server-go/wire"
+	"github.com/apron-chat/apron-server-go/apron"
 )
 
 // App is an app on the person's device, com.example.app, signing in with
@@ -45,7 +45,7 @@ type App struct {
 func (s *Server) App() *App {
 	s.t.Helper()
 	c := s.Dial()
-	begun, err := c.Auth(wire.AuthParams{Scheme: "external"})
+	begun, err := c.Auth(apron.AuthParams{Scheme: "external"})
 	if err != nil {
 		s.t.Fatalf("aprontest: beginning external sign-in: %v", err)
 	}
@@ -167,7 +167,7 @@ func (a *App) Press(page Page, op string) Page {
 // Conn in, or the server's error reply. It fails the test when the browser
 // did not return to the app with a code, this request's state, and the
 // server as the issuer.
-func (a *App) Redeem(page Page) (wire.AuthResult, error) {
+func (a *App) Redeem(page Page) (apron.AuthResult, error) {
 	t := a.server.t
 	t.Helper()
 	if page.Return == nil {

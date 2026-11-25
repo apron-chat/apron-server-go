@@ -10,9 +10,9 @@ import (
 	"slices"
 	"time"
 
+	"github.com/apron-chat/apron-server-go/apron"
 	"github.com/apron-chat/apron-server-go/aprond/internal/invitations"
 	"github.com/apron-chat/apron-server-go/internal/authn"
-	"github.com/apron-chat/apron-server-go/wire"
 )
 
 // Invitations. An invitation makes one account: a connection that is not
@@ -127,7 +127,7 @@ func (s *Server) invite(ctx context.Context, by string, options InvitationOption
 	}
 	var data jsontext.Value
 	if options.Data != nil {
-		raw, err := wire.Marshal(options.Data)
+		raw, err := apron.Marshal(options.Data)
 		if err != nil {
 			return Invitation{}, fmt.Errorf("apron: invitation data: %w", err)
 		}
@@ -242,9 +242,9 @@ func (s *Server) revokeEnrollmentLocked(u *userState) {
 // presentedInvitationLocked returns the invitation an auth request presents
 // with "invitation", if any, and refuses one that is unknown, used, or
 // expired, or presented on a connection signed in already.
-func (s *Server) presentedInvitationLocked(c *client, reply wire.Reply[wire.AuthResult]) (*invitation, *Error) {
+func (s *Server) presentedInvitationLocked(c *client, reply apron.Reply[apron.AuthResult]) (*invitation, *Error) {
 	d := authParams(reply).Decoder()
-	token := wire.IfPresent(d, "invitation", d.String)
+	token := apron.IfPresent(d, "invitation", d.String)
 	if err := paramError(d.Err()); err != nil || token == nil {
 		return nil, err
 	}
@@ -263,7 +263,7 @@ func (s *Server) presentedInvitationLocked(c *client, reply wire.Reply[wire.Auth
 // invitation, the identity, and the allowlist are checked again first,
 // since the scheme ran outside s.mu, and nothing changes unless all pass.
 // The reply waits until the change is stored.
-func (s *Server) enrollLocked(c *client, reply wire.Reply[wire.AuthResult], scheme authn.Scheme, proof authn.Proof, invitationID string, anyOrigin bool) *Error {
+func (s *Server) enrollLocked(c *client, reply apron.Reply[apron.AuthResult], scheme authn.Scheme, proof authn.Proof, invitationID string, anyOrigin bool) *Error {
 	inv, err := s.presentedInvitationLocked(c, reply)
 	if err != nil {
 		return err
