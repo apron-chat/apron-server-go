@@ -136,9 +136,14 @@ func TestDedupScope(t *testing.T) {
 		}
 		conns[name] = c
 	}
-	for name, want := range map[string]int{"full": 1, "restricted": 2, "full again": 1} {
-		if got := retry(t, conns[name], "x"); got != want {
-			t.Fatalf("%s: answered by call %d, want %d", name, got, want)
+	// In this order: the first request runs, and only its duplicate from
+	// another scope runs again.
+	for _, step := range []struct {
+		name string
+		want int
+	}{{"full", 1}, {"restricted", 2}, {"full again", 1}} {
+		if got := retry(t, conns[step.name], "x"); got != step.want {
+			t.Fatalf("%s: answered by call %d, want %d", step.name, got, step.want)
 		}
 	}
 }
