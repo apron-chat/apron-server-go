@@ -83,8 +83,9 @@ const (
 type Option func(*options)
 
 type options struct {
-	onFrame func(apron.Frame)
-	header  http.Header
+	onFrame    func(apron.Frame)
+	header     http.Header
+	httpClient *http.Client
 }
 
 // OnFrame has f get each frame the server sends the connection but the
@@ -108,6 +109,14 @@ func OnFrame(f func(apron.Frame)) Option {
 // as an Origin that the server checks, or a cookie.
 func Header(header http.Header) Option {
 	return func(o *options) { o.header = header }
+}
+
+// HTTPClient opens the WebSocket with client rather than
+// http.DefaultClient, such as one with a proxy, TLS roots of its own, or a
+// transport that dials in memory. Its Timeout, if any, bounds opening
+// the WebSocket, not the connection. A nil client is no option.
+func HTTPClient(client *http.Client) Option {
+	return func(o *options) { o.httpClient = client }
 }
 
 // Conn is a connection to an Apron server, signed in. Its methods are safe
@@ -166,7 +175,7 @@ func Dial(ctx context.Context, url string, auth apron.AuthParams, opts ...Option
 	for _, opt := range opts {
 		opt(&o)
 	}
-	ws, _, err := websocket.Dial(ctx, url, &websocket.DialOptions{HTTPHeader: o.header})
+	ws, _, err := websocket.Dial(ctx, url, &websocket.DialOptions{HTTPHeader: o.header, HTTPClient: o.httpClient})
 	if err != nil {
 		return nil, err
 	}
