@@ -15,10 +15,10 @@ import (
 
 // Client is a connection to a Server.
 type Client struct {
-	// Wire is the connection, for what the methods below do not do, such
+	// Conn is the connection, for what the methods below do not do, such
 	// as reading frames in the order they arrived (aprontest.Client.Next,
 	// CallFrames, and Sync).
-	Wire *aprontest.Client
+	Conn *aprontest.Client
 	// UserID is the user_id the client last signed in as, and Token the
 	// session token that sign-in gave, if any, which signs in again
 	// (SignInWithToken); both are "" before.
@@ -48,7 +48,7 @@ func (c *Client) refusal(what string, err error) error {
 }
 
 // Hello is the server frame (§3.1) the client got as it connected.
-func (c *Client) Hello() apron.ServerInfo { return c.Wire.Hello() }
+func (c *Client) Hello() apron.ServerInfo { return c.Conn.Hello() }
 
 // Auth sends an auth request (§3.2) with params, such as {"scheme":
 // "guest"}, and returns its result, or the server's error reply. A result
@@ -59,7 +59,7 @@ func (c *Client) Auth(params any) (apron.AuthResult, error) {
 	c.t.Helper()
 	ctx, cancel := c.deadline()
 	defer cancel()
-	result, err := c.Wire.Auth(ctx, params)
+	result, err := c.Conn.Auth(ctx, params)
 	if err != nil {
 		return result, c.refusal("auth", err)
 	}
@@ -129,7 +129,7 @@ func (c *Client) Call(method string, params, result any) error {
 	c.t.Helper()
 	ctx, cancel := c.deadline()
 	defer cancel()
-	raw, err := c.Wire.Call(ctx, method, params)
+	raw, err := c.Conn.Call(ctx, method, params)
 	if err != nil {
 		return c.refusal(method, err)
 	}
@@ -161,7 +161,7 @@ func (c *Client) Post(roomID, text string, options ...aprond.PostOption) (messag
 	}
 	ctx, cancel := c.deadline()
 	defer cancel()
-	result, err := c.Wire.Post(ctx, params)
+	result, err := c.Conn.Post(ctx, params)
 	if err != nil {
 		return "", c.refusal("message", err)
 	}
@@ -224,7 +224,7 @@ func (c *Client) Command(roomID, line string) (notices []string, err error) {
 	c.t.Helper()
 	ctx, cancel := c.deadline()
 	defer cancel()
-	notices, err = c.Wire.Command(ctx, roomID, line)
+	notices, err = c.Conn.Command(ctx, roomID, line)
 	if err != nil {
 		return notices, c.refusal(line, err)
 	}
@@ -241,7 +241,7 @@ func (c *Client) Message(match func(aprond.Message) bool) aprond.Message {
 	ctx, cancel := c.deadline()
 	defer cancel()
 	var found aprond.Message
-	_, err := c.Wire.Expect(ctx, func(f aprontest.Frame) bool {
+	_, err := c.Conn.Expect(ctx, func(f aprontest.Frame) bool {
 		if f.Method != "message" {
 			return false
 		}
@@ -265,7 +265,7 @@ func (c *Client) Closed() bool {
 	ctx, cancel := c.deadline()
 	defer cancel()
 	for {
-		if _, err := c.Wire.Next(ctx); err != nil {
+		if _, err := c.Conn.Next(ctx); err != nil {
 			return ctx.Err() == nil
 		}
 	}

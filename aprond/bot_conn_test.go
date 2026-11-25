@@ -65,15 +65,15 @@ func TestBotConn(t *testing.T) {
 		m.Format != apron.Markdown || !m.MentionsUser(c.userID) || string(m.Ext["helper"]) != `{"n":1}` {
 		t.Fatalf("MessageOf = %#v, History has %#v", m, history[0])
 	}
-	if back := MessageOf(m.Wire()); !reflect.DeepEqual(back, m) {
-		t.Fatalf("MessageOf(Wire()) = %#v, want %#v", back, m)
+	if back := MessageOf(m.Apron()); !reflect.DeepEqual(back, m) {
+		t.Fatalf("MessageOf(Apron()) = %#v, want %#v", back, m)
 	}
 }
 
 // Message and apron.Message say the same of a message: a reply, a moved
 // snapshot, a body with members apron has no field for, a tombstone, and
 // a notice.
-func TestMessageOfAndWire(t *testing.T) {
+func TestMessageOfAndApron(t *testing.T) {
 	reply := apron.Message{
 		MessageID: 7, LogID: 9, RoomID: "general", PrevLogID: 8, PrevRoomID: "random",
 		From:    apron.User{UserID: "ada", Name: "Ada"},
@@ -86,25 +86,25 @@ func TestMessageOfAndWire(t *testing.T) {
 		m.Text != "yes" || m.Format != apron.Plain || m.Body["x"] != float64(1) || m.From.Name != "Ada" || m.New() {
 		t.Fatalf("MessageOf = %#v", m)
 	}
-	back := m.Wire()
+	back := m.Apron()
 	if back.MessageID != 7 || back.ReplyTo.MessageID != 3 || back.Body.Text != "yes" || string(back.Body.Unknown) != `{"x":1}` ||
 		string(back.Ext["irc"]) != `{"nick":"ada_"}` {
-		t.Fatalf("Wire = %#v", back)
+		t.Fatalf("Apron = %#v", back)
 	}
 	if !reflect.DeepEqual(MessageOf(back), m) {
-		t.Fatalf("MessageOf(Wire()) = %#v, want %#v", MessageOf(back), m)
+		t.Fatalf("MessageOf(Apron()) = %#v, want %#v", MessageOf(back), m)
 	}
 
 	tombstone := MessageOf(apron.Message{MessageID: 7, LogID: 10, PrevLogID: 9, RoomID: "general", From: apron.User{UserID: "ada"}, Deleted: true})
-	if !tombstone.Deleted || tombstone.Body != nil || tombstone.Wire().Body != nil {
+	if !tombstone.Deleted || tombstone.Body != nil || tombstone.Apron().Body != nil {
 		t.Fatalf("tombstone = %#v", tombstone)
 	}
 	notice := MessageOf(apron.Notice("general", "hello"))
-	if notice.ID != "" || notice.From.UserID != privateNoticeID || notice.Text != "hello" || notice.Wire().MessageID != 0 {
+	if notice.ID != "" || notice.From.UserID != privateNoticeID || notice.Text != "hello" || notice.Apron().MessageID != 0 {
 		t.Fatalf("notice = %#v", notice)
 	}
-	made := Message{ID: "12", RoomID: "general", Text: "hand made", Format: apron.Markdown}.Wire()
+	made := Message{ID: "12", RoomID: "general", Text: "hand made", Format: apron.Markdown}.Apron()
 	if made.MessageID != 12 || made.Body == nil || made.Body.Text != "hand made" || made.Body.Format != apron.Markdown {
-		t.Fatalf("Wire of a Message without Body = %#v", made)
+		t.Fatalf("Apron of a Message without Body = %#v", made)
 	}
 }

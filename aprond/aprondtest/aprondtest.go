@@ -20,7 +20,7 @@
 // A Server is served over HTTP by a test server: the extensions' routes
 // are at its URL, and its WebSocket endpoint at WebSocketURL, which
 // aprontest.Dial and conformance.Config.URL take too. A Client is a
-// WebSocket connection to it, an aprontest.Client (Client.Wire), whose
+// WebSocket connection to it, an aprontest.Client (Client.Conn), whose
 // methods wait at most ten seconds, fail the test when the connection
 // fails, and return the server's error replies as *aprond.Error, such as
 // error/denied for a request an extension refused. Call them from the
@@ -144,7 +144,7 @@ func (s *Server) Dial() *Client {
 		s.t.Fatalf("aprondtest: connecting: %v", err)
 	}
 	s.t.Cleanup(func() { _ = conn.Close() })
-	return &Client{Wire: conn, Extension: s.extension, t: s.t}
+	return &Client{Conn: conn, Extension: s.extension, t: s.t}
 }
 
 // SignIn connects a client and signs it in with the params of an auth

@@ -65,7 +65,7 @@ func TestDeploy(t *testing.T) {
 	ada.Message(func(m aprond.Message) bool {
 		// The terminal embed shows the program's output.
 		var terminal struct{ Output string }
-		body := m.Wire().Body
+		body := m.Apron().Body
 		return body != nil && len(body.Embeds) == 1 && json.Unmarshal(body.Embeds[0], &terminal) == nil &&
 			strings.Contains(terminal.Output, "deployed the api")
 	})

@@ -593,11 +593,11 @@ func MessageOf(m apron.Message) Message {
 	return message
 }
 
-// Wire is the message as package apron has it, as MessageOf reads it, for
+// Apron is the message as package apron has it, as MessageOf reads it, for
 // code in apron's terms, such as a post with Conn: its body is Body, or, for
 // a Message made without one, Text, Format, and Mentions, unless it is
 // deleted. An ID that is not a log_id is left out.
-func (m Message) Wire() apron.Message {
+func (m Message) Apron() apron.Message {
 	message := apron.Message{
 		LogID: apron.LogID(m.LogID), RoomID: m.RoomID, PrevLogID: apron.LogID(m.PrevLogID), PrevRoomID: m.PrevRoomID,
 		From: apron.User{UserID: m.From.UserID, Name: m.From.Name}, Deleted: m.Deleted, Ext: maps.Clone(m.Ext),

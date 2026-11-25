@@ -279,7 +279,7 @@ func (s *Server) settle(ctx context.Context) error {
 // see messages: one snapshot of a message, with its message_id a string,
 // as Draft, CommandCall, and ReplyTo take one, and its body's text,
 // format, and mentions in fields of their own. Code in package apron's
-// terms converts with MessageOf and Wire.
+// terms converts with MessageOf and Apron.
 type Message struct {
 	ID     string
 	LogID  int64
