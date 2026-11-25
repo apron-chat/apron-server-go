@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"io"
+	"slices"
 	"sync"
 )
 
@@ -52,7 +53,7 @@ func (t *lineTransport) Read(context.Context) ([]byte, error) {
 func (t *lineTransport) Write(_ context.Context, frame []byte) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	_, err := t.rw.Write(append(frame[:len(frame):len(frame)], '\n'))
+	_, err := t.rw.Write(append(slices.Clip(frame), '\n'))
 	return err
 }
 
