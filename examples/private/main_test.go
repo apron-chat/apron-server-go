@@ -7,23 +7,23 @@ import (
 	"testing"
 	"time"
 
-	"github.com/apron-chat/apron-server-go/apron"
-	"github.com/apron-chat/apron-server-go/apron/aprontest"
+	"github.com/apron-chat/apron-server-go/aprond"
+	"github.com/apron-chat/apron-server-go/aprond/aprondtest"
 	"github.com/apron-chat/apron-server-go/store"
 )
 
-func serve(t *testing.T, memory store.Store, mail *aprontest.Mailbox) *aprontest.Server {
+func serve(t *testing.T, memory store.Store, mail *aprondtest.Mailbox) *aprondtest.Server {
 	p := &Private{}
 	p.Settings.Allow = []string{"ada@example.com"}
-	config := apron.DefaultConfig()
+	config := aprond.DefaultConfig()
 	config.Store = memory
 	config.EmailSender = mail
-	config.Roles = map[string][]string{apron.RoleAdmin: {"ada@example.com"}}
-	return aprontest.Serve(t, config, p)
+	config.Roles = map[string][]string{aprond.RoleAdmin: {"ada@example.com"}}
+	return aprondtest.Serve(t, config, p)
 }
 
 func TestPrivate(t *testing.T) {
-	memory, mail := store.NewMemory(), &aprontest.Mailbox{}
+	memory, mail := store.NewMemory(), &aprondtest.Mailbox{}
 	server := serve(t, memory, mail)
 
 	// Before signing in, nobody learns more than how to sign in.

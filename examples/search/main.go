@@ -24,37 +24,37 @@ import (
 	"time"
 	"unicode"
 
-	"github.com/apron-chat/apron-server-go/apron"
 	"github.com/apron-chat/apron-server-go/aproncmd"
+	"github.com/apron-chat/apron-server-go/aprond"
 )
 
 func main() { aproncmd.Main(&Search{}) }
 
 // Search is an in-memory inverted index of the messages' current text.
 type Search struct {
-	host *apron.Host
+	host *aprond.Host
 
 	mu       sync.RWMutex
-	messages map[string]apron.Message   // by message_id, the latest snapshot
+	messages map[string]aprond.Message  // by message_id, the latest snapshot
 	postings map[string]map[string]bool // by token, the message_ids that have it
 }
 
 func (*Search) Name() string { return "search" }
 
-func (s *Search) Init(r *apron.Registrar) error {
+func (s *Search) Init(r *aprond.Registrar) error {
 	s.host = r.Host
-	s.messages = make(map[string]apron.Message)
+	s.messages = make(map[string]aprond.Message)
 	s.postings = make(map[string]map[string]bool)
-	r.OnEventFrom(0, func(_ context.Context, e apron.Event) error {
-		if m, ok := apron.DecodeMessage(e); ok {
+	r.OnEventFrom(0, func(_ context.Context, e aprond.Event) error {
+		if m, ok := aprond.DecodeMessage(e); ok {
 			s.index(m)
 		}
 		return nil
 	})
 	r.Method("search.query", s.query)
-	r.Command(apron.Command{
+	r.Command(aprond.Command{
 		Name: "search", Usage: "/search <words>", Help: "find messages with these words",
-		Run: func(_ context.Context, call *apron.CommandCall) (map[string]any, error) {
+		Run: func(_ context.Context, call *aprond.CommandCall) (map[string]any, error) {
 			hits := s.search(call.User, call.Args, "", 10)
 			if len(hits) == 0 {
 				call.Notice("Nothing found for " + call.Args)
@@ -76,7 +76,7 @@ func (s *Search) Init(r *apron.Registrar) error {
 
 // index replaces what the index holds for a message with its snapshot. A
 // deletion's tombstone removes it.
-func (s *Search) index(m apron.Message) {
+func (s *Search) index(m aprond.Message) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if old, ok := s.messages[m.ID]; ok {
@@ -111,13 +111,13 @@ func tokens(text string) []string {
 
 // search returns the latest messages with every word of query that u may
 // see, in roomID if it is set.
-func (s *Search) search(u apron.User, query, roomID string, limit int) []apron.Message {
+func (s *Search) search(u aprond.User, query, roomID string, limit int) []aprond.Message {
 	words := tokens(query)
 	if len(words) == 0 {
 		return nil
 	}
 	s.mu.RLock()
-	var hits []apron.Message
+	var hits []aprond.Message
 	for id := range s.postings[words[0]] {
 		if !slices.ContainsFunc(words[1:], func(word string) bool { return !s.postings[word][id] }) {
 			if m := s.messages[id]; roomID == "" || m.RoomID == roomID {
@@ -126,10 +126,10 @@ func (s *Search) search(u apron.User, query, roomID string, limit int) []apron.M
 		}
 	}
 	s.mu.RUnlock()
-	slices.SortFunc(hits, func(a, b apron.Message) int { return cmp.Compare(b.LogID, a.LogID) })
+	slices.SortFunc(hits, func(a, b aprond.Message) int { return cmp.Compare(b.LogID, a.LogID) })
 	// Only rooms the person may see: a private room's messages never show.
 	visible := make(map[string]bool)
-	hits = slices.DeleteFunc(hits, func(m apron.Message) bool {
+	hits = slices.DeleteFunc(hits, func(m aprond.Message) bool {
 		ok, seen := visible[m.RoomID]
 		if !seen {
 			ok = s.host.Visible(u, m.RoomID)
@@ -140,7 +140,7 @@ func (s *Search) search(u apron.User, query, roomID string, limit int) []apron.M
 	return hits[:min(len(hits), limit)]
 }
 
-func (s *Search) query(_ context.Context, call *apron.MethodCall) (any, error) {
+func (s *Search) query(_ context.Context, call *aprond.MethodCall) (any, error) {
 	var params struct {
 		Q      string `json:"q"`
 		RoomID string `json:"room_id"`
@@ -150,7 +150,7 @@ func (s *Search) query(_ context.Context, call *apron.MethodCall) (any, error) {
 		return nil, err
 	}
 	if strings.TrimSpace(params.Q) == "" {
-		return nil, apron.InvalidParams("q must name words to find")
+		return nil, aprond.InvalidParams("q must name words to find")
 	}
 	if params.Limit <= 0 || params.Limit > 100 {
 		params.Limit = 20
@@ -190,7 +190,7 @@ var pages = template.Must(template.New("").Funcs(template.FuncMap{
 
 // archiveIndex lists the public rooms.
 func (s *Search) archiveIndex(w http.ResponseWriter, _ *http.Request) {
-	rooms := slices.DeleteFunc(s.host.Rooms(), func(r apron.Room) bool { return !s.host.Public(r.ID) })
+	rooms := slices.DeleteFunc(s.host.Rooms(), func(r aprond.Room) bool { return !s.host.Public(r.ID) })
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_ = pages.ExecuteTemplate(w, "index", rooms)
 }
@@ -204,7 +204,7 @@ func (s *Search) archiveRoom(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.mu.RLock()
-	var messages []apron.Message
+	var messages []aprond.Message
 	for _, m := range s.messages {
 		if m.RoomID == room.ID {
 			messages = append(messages, m)
@@ -212,7 +212,7 @@ func (s *Search) archiveRoom(w http.ResponseWriter, r *http.Request) {
 	}
 	s.mu.RUnlock()
 	// A message_id is its first log_id, a decimal string.
-	slices.SortFunc(messages, func(a, b apron.Message) int {
+	slices.SortFunc(messages, func(a, b aprond.Message) int {
 		return cmp.Or(cmp.Compare(len(a.ID), len(b.ID)), cmp.Compare(a.ID, b.ID))
 	})
 	messages = messages[max(0, len(messages)-200):]

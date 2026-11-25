@@ -25,7 +25,7 @@ import (
 	"golang.org/x/net/netutil"
 	"golang.org/x/sync/errgroup"
 
-	"github.com/apron-chat/apron-server-go/apron"
+	"github.com/apron-chat/apron-server-go/aprond"
 	"github.com/apron-chat/apron-server-go/internal/settings"
 	"github.com/apron-chat/apron-server-go/store"
 )
@@ -138,7 +138,7 @@ type Options struct {
 // the config file, zero too, as --weather.timeout 0, or else to its
 // default. A list emptied in the config file stays empty.
 //
-// The defaults apply without Main too: apron.Open sets each setting that
+// The defaults apply without Main too: aprond.Open sets each setting that
 // is zero and has a default tag to its default, so that an extension
 // opened by a program or a test of its own, with the settings it sets in
 // Go, finds the others' defaults in Init, as with Main. There a zero
@@ -151,7 +151,7 @@ type Options struct {
 // which Main sets as any other, and which Open sets to the default only
 // while nil, so that a program's &zero stays zero.
 type Configurable interface {
-	apron.Extension
+	aprond.Extension
 	Flags() any
 }
 
@@ -160,7 +160,7 @@ type Configurable interface {
 // exits. A server of your own is a main package that calls it:
 //
 //	func main() { aproncmd.Main(weather.New()) }
-func Main(extensions ...apron.Extension) {
+func Main(extensions ...aprond.Extension) {
 	var options Options
 	options.Store = "sqlite:" + filepath.Join(userDataDir(), "aprond.db")
 	options.Upload.Dir = filepath.Join(userDataDir(), "uploads")
@@ -201,7 +201,7 @@ func Main(extensions ...apron.Extension) {
 
 // addExtensionFlags adds the options of each Configurable extension as a
 // group namespaced by its name.
-func addExtensionFlags(parser *flags.Parser, extensions []apron.Extension) ([]configTarget, error) {
+func addExtensionFlags(parser *flags.Parser, extensions []aprond.Extension) ([]configTarget, error) {
 	var targets []configTarget
 	for _, extension := range extensions {
 		configurable, ok := extension.(Configurable)
@@ -219,7 +219,7 @@ func addExtensionFlags(parser *flags.Parser, extensions []apron.Extension) ([]co
 	return targets, nil
 }
 
-// markParsed tells apron.Open that the extensions' settings are parsed:
+// markParsed tells aprond.Open that the extensions' settings are parsed:
 // every one is set, to its default when the command line and the config
 // file left it out, so that Open keeps one given as zero.
 func markParsed(targets []configTarget) {
@@ -231,18 +231,18 @@ func markParsed(targets []configTarget) {
 // ServerConfig converts parsed runner options into a server configuration, using
 // the same conversion and validation as Run. It does not open a store or start
 // listeners. Custom runners can adjust the returned configuration before calling
-// apron.Open and manage their own listener and shutdown lifecycle.
+// aprond.Open and manage their own listener and shutdown lifecycle.
 //
 // Options should first be populated with flag defaults, just as they are for Run.
 // This conversion does not apply those defaults to a zero-valued Options.
-func ServerConfig(options Options) (apron.Config, error) {
+func ServerConfig(options Options) (aprond.Config, error) {
 	return serverConfig(options)
 }
 
 // serverConfig turns options into the server's configuration.
 // The caller closes config.Store unless it hands it to a server.
-func serverConfig(options Options) (apron.Config, error) {
-	config := apron.DefaultConfig()
+func serverConfig(options Options) (aprond.Config, error) {
+	config := aprond.DefaultConfig()
 	config.StaticDir = options.StaticDir
 	config.AllowAnyOrigin = options.AllowAnyOrigin
 	config.PublicURL = options.PublicURL
@@ -310,7 +310,7 @@ func serverConfig(options Options) (apron.Config, error) {
 		if options.PublicURL != "" || len(options.TLS.Domains) > 0 {
 			return config, errors.New("--email.sender log writes sign-in codes to the server log, so anyone who reads it can sign in as anyone; it is for development and refused with --public-url or --tls.domain: use --email.sender smtp")
 		}
-		config.EmailSender = apron.LogEmailSender{}
+		config.EmailSender = aprond.LogEmailSender{}
 	case options.Email.Sender == "smtp":
 		sender, err := newSMTPSender(options.Email.SMTPAddr, options.Email.From, options.Email.SMTPUser, options.Email.SMTPPassword, options.Email.SMTPInsecure)
 		if err != nil {
@@ -323,7 +323,7 @@ func serverConfig(options Options) (apron.Config, error) {
 		config.EmailLinkURL = config.PublicURL
 	}
 	if options.External.Issuer != "" {
-		config.ExternalIssuer = &apron.ExternalIssuer{Issuer: options.External.Issuer, Scope: options.External.Scope}
+		config.ExternalIssuer = &aprond.ExternalIssuer{Issuer: options.External.Issuer, Scope: options.External.Scope}
 	}
 	if options.WebAuthn.RPID != "" {
 		var err error
@@ -342,7 +342,7 @@ func serverConfig(options Options) (apron.Config, error) {
 
 // Run serves with options and extensions until SIGINT or SIGTERM, or until
 // any listener fails, then shuts every server down.
-func Run(logger *slog.Logger, options Options, extensions ...apron.Extension) error {
+func Run(logger *slog.Logger, options Options, extensions ...aprond.Extension) error {
 	config, err := serverConfig(options)
 	if err != nil {
 		return err
@@ -357,12 +357,12 @@ func Run(logger *slog.Logger, options Options, extensions ...apron.Extension) er
 	if err != nil {
 		return err
 	}
-	// A store that fails stays failed (apron.ErrStoreFailed): stop serving
+	// A store that fails stays failed (aprond.ErrStoreFailed): stop serving
 	// rather than go on acknowledging what is not kept.
 	storeFailed := make(chan error, 1)
 	config.OnStoreError = func(err error) { storeFailed <- err }
 	// The server owns the store from here, and closes it when Open fails.
-	app, err := apron.Open(config)
+	app, err := aprond.Open(config)
 	if err != nil {
 		return fmt.Errorf("starting the server with %s: %w", options.Store, err)
 	}

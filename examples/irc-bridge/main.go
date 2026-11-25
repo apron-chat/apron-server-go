@@ -19,8 +19,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/apron-chat/apron-server-go/apron"
 	"github.com/apron-chat/apron-server-go/aproncmd"
+	"github.com/apron-chat/apron-server-go/aprond"
 )
 
 func main() { aproncmd.Main(&Bridge{}) }
@@ -34,8 +34,8 @@ type Bridge struct {
 		Channel   string `long:"channel" description:"The IRC channel, such as #my-project"`
 		Room      string `long:"room" default:"general" description:"The Apron room bridged to the channel"`
 	}
-	host  *apron.Host
-	relay *apron.Bot
+	host  *aprond.Host
+	relay *aprond.Bot
 
 	mu   sync.Mutex
 	conn *ircConn // nil while disconnected
@@ -44,13 +44,13 @@ type Bridge struct {
 func (*Bridge) Name() string { return "irc-bridge" }
 func (b *Bridge) Flags() any { return &b.Settings }
 
-func (b *Bridge) Init(r *apron.Registrar) error {
+func (b *Bridge) Init(r *aprond.Registrar) error {
 	if b.Settings.Server == "" || !strings.HasPrefix(b.Settings.Channel, "#") {
 		return errors.New("set --irc-bridge.server and --irc-bridge.channel")
 	}
 	b.host = r.Host
 	var err error
-	if b.relay, err = r.Bot("irc", apron.BotOptions{Name: "IRC"}); err != nil {
+	if b.relay, err = r.Bot("irc", aprond.BotOptions{Name: "IRC"}); err != nil {
 		return err
 	}
 	if err := b.relay.Join(r.Context(), b.Settings.Room); err != nil {
@@ -65,8 +65,8 @@ func (b *Bridge) Init(r *apron.Registrar) error {
 
 // outbound sends a message posted in the room to the channel. While the
 // bridge is disconnected it fails, and Follow sends the event again later.
-func (b *Bridge) outbound(_ context.Context, e apron.Event) error {
-	m, ok := apron.DecodeMessage(e)
+func (b *Bridge) outbound(_ context.Context, e aprond.Event) error {
+	m, ok := aprond.DecodeMessage(e)
 	if ok && m.New() && !m.Deleted && m.RoomID == b.Settings.Room && m.From.UserID != b.relay.UserID() && !strings.HasPrefix(m.From.UserID, "~") {
 		b.mu.Lock()
 		conn := b.conn
@@ -152,8 +152,8 @@ func (b *Bridge) session(ctx context.Context) error {
 				if action, ok := strings.CutPrefix(text, "\x01ACTION "); ok {
 					text = "_" + strings.TrimSuffix(action, "\x01") + "_"
 				}
-				_, err := b.relay.Post(ctx, b.Settings.Room, "**"+from+":** "+text, apron.Markdown(),
-					apron.WithExt(map[string]any{"channel": b.Settings.Channel, "nick": from}))
+				_, err := b.relay.Post(ctx, b.Settings.Room, "**"+from+":** "+text, aprond.Markdown(),
+					aprond.WithExt(map[string]any{"channel": b.Settings.Channel, "nick": from}))
 				if err != nil {
 					b.host.Logger().Error("posting from IRC", "error", err)
 				}

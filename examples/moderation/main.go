@@ -17,8 +17,8 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/apron-chat/apron-server-go/apron"
 	"github.com/apron-chat/apron-server-go/aproncmd"
+	"github.com/apron-chat/apron-server-go/aprond"
 )
 
 func main() { aproncmd.Main(&Moderation{}) }
@@ -31,7 +31,7 @@ type Moderation struct {
 		// hours.
 		LinkAge time.Duration `long:"link-age" default:"24h" description:"How old an account must be to post links; guests never may"`
 	}
-	host  *apron.Host
+	host  *aprond.Host
 	words map[string]bool
 
 	mu sync.Mutex
@@ -49,7 +49,7 @@ var (
 	wordPattern = regexp.MustCompile(`[\p{L}\p{N}]+`)
 )
 
-func (m *Moderation) Init(r *apron.Registrar) error {
+func (m *Moderation) Init(r *aprond.Registrar) error {
 	m.host = r.Host
 	m.posted = make(map[string]time.Time)
 	m.words = make(map[string]bool)
@@ -60,11 +60,11 @@ func (m *Moderation) Init(r *apron.Registrar) error {
 	r.OnEvent(m.notePost)
 	// /slowmode has two forms, which /help lists apart: /slowmode <seconds>
 	// and /slowmode off. Moderators may use both in the room they run in.
-	r.Command(apron.Command{
+	r.Command(aprond.Command{
 		Name: "slowmode",
-		Uses: []string{apron.FieldRoom}, Requires: []string{apron.FieldRoom}, Group: apron.GroupRole,
-		Available: func(u apron.User, _ apron.Room) bool { return moderates(u) },
-		Forms: []apron.Form{
+		Uses: []string{aprond.FieldRoom}, Requires: []string{aprond.FieldRoom}, Group: aprond.GroupRole,
+		Available: func(u aprond.User, _ aprond.Room) bool { return moderates(u) },
+		Forms: []aprond.Form{
 			{Usage: "/slowmode <seconds>", Help: "limit how often each member may post here", Run: m.slowmode},
 			{Name: "slowmode off", Help: "let members post as often as they like here", Run: m.slowmodeOff},
 		},
@@ -72,13 +72,13 @@ func (m *Moderation) Init(r *apron.Registrar) error {
 	return nil
 }
 
-func moderates(u apron.User) bool {
-	return u.HasRole(apron.RoleModerator) || u.HasRole(apron.RoleAdmin)
+func moderates(u aprond.User) bool {
+	return u.HasRole(aprond.RoleModerator) || u.HasRole(aprond.RoleAdmin)
 }
 
 // notePost records when each member posted in each room, for slow mode.
-func (m *Moderation) notePost(_ context.Context, e apron.Event) {
-	if message, ok := apron.DecodeMessage(e); ok && message.New() {
+func (m *Moderation) notePost(_ context.Context, e aprond.Event) {
+	if message, ok := aprond.DecodeMessage(e); ok && message.New() {
 		m.mu.Lock()
 		m.posted[message.RoomID+"\x00"+message.From.UserID] = time.Now()
 		m.mu.Unlock()
@@ -87,16 +87,16 @@ func (m *Moderation) notePost(_ context.Context, e apron.Event) {
 
 // filter refuses links from new accounts, keeps slow mode, and masks
 // words. Bots are trusted; edits are not slowed down.
-func (m *Moderation) filter(_ context.Context, d *apron.Draft) error {
+func (m *Moderation) filter(_ context.Context, d *aprond.Draft) error {
 	if d.From.Bot {
 		return nil
 	}
 	if linkPattern.MatchString(d.Text()) && !m.mayLink(d.From) {
-		return apron.Denied(fmt.Sprintf("New accounts can post links once they are %s old", m.Settings.LinkAge))
+		return aprond.Denied(fmt.Sprintf("New accounts can post links once they are %s old", m.Settings.LinkAge))
 	}
 	if d.MessageID == "" && !moderates(d.From) {
 		if wait := m.slowed(d.RoomID, d.From.ID); wait > 0 {
-			return apron.RetryAfter("Slow mode is on in this room", wait)
+			return aprond.RetryAfter("Slow mode is on in this room", wait)
 		}
 	}
 	if len(m.words) > 0 {
@@ -111,7 +111,7 @@ func (m *Moderation) filter(_ context.Context, d *apron.Draft) error {
 	return nil
 }
 
-func (m *Moderation) mayLink(u apron.User) bool {
+func (m *Moderation) mayLink(u aprond.User) bool {
 	switch {
 	case moderates(u):
 		return true
@@ -136,7 +136,7 @@ func (m *Moderation) slowed(roomID, userID string) time.Duration {
 
 // slowmode limits how often each member may post in the room; 0 seconds
 // turns slow mode off.
-func (m *Moderation) slowmode(ctx context.Context, call *apron.CommandCall) (map[string]any, error) {
+func (m *Moderation) slowmode(ctx context.Context, call *aprond.CommandCall) (map[string]any, error) {
 	seconds, err := strconv.Atoi(call.Args)
 	switch {
 	case err == nil && seconds == 0:
@@ -150,7 +150,7 @@ func (m *Moderation) slowmode(ctx context.Context, call *apron.CommandCall) (map
 	return nil, m.host.RoomNotice(call.Room.ID, fmt.Sprintf("@%s turned slow mode on: one message every %d seconds", call.User.ID, seconds))
 }
 
-func (m *Moderation) slowmodeOff(_ context.Context, call *apron.CommandCall) (map[string]any, error) {
+func (m *Moderation) slowmodeOff(_ context.Context, call *aprond.CommandCall) (map[string]any, error) {
 	if err := m.host.Store().Delete("slowmode/" + call.Room.ID); err != nil {
 		return nil, err
 	}

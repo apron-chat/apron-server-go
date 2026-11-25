@@ -10,15 +10,15 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/apron-chat/apron-server-go/apron"
-	"github.com/apron-chat/apron-server-go/apron/aprontest"
+	"github.com/apron-chat/apron-server-go/aprond"
+	"github.com/apron-chat/apron-server-go/aprond/aprondtest"
 )
 
 func TestOps(t *testing.T) {
 	o := &Ops{}
 	o.Settings.WebhookSecret = "s3cret"
 	o.Settings.Services = []string{"api=echo deployed the api"}
-	server := aprontest.Serve(t, apron.DefaultConfig(), o)
+	server := aprondtest.Serve(t, aprond.DefaultConfig(), o)
 	ada := server.Guest("Ada")
 
 	body := []byte(`{"action":"opened","repository":{"full_name":"acme/app"},"sender":{"login":"octocat"},
@@ -42,7 +42,7 @@ func TestOps(t *testing.T) {
 	if status := post("sha256=" + hex.EncodeToString(mac.Sum(nil))); status != http.StatusNoContent {
 		t.Fatalf("signed webhook = %d", status)
 	}
-	got := ada.Message(func(m apron.Message) bool { return m.From.UserID == "ops" })
+	got := ada.Message(func(m aprond.Message) bool { return m.From.UserID == "ops" })
 	if !strings.Contains(got.Text, "**octocat** opened [acme/app#7 Fix it]") {
 		t.Fatalf("webhook message = %q", got.Text)
 	}
@@ -56,20 +56,20 @@ func TestOps(t *testing.T) {
 func TestDeploy(t *testing.T) {
 	o := &Ops{}
 	o.Settings.Services = []string{"api=echo deployed the api"}
-	server := aprontest.Serve(t, apron.DefaultConfig(), o)
+	server := aprondtest.Serve(t, aprond.DefaultConfig(), o)
 	ada, lead := server.Guest("Ada"), server.Member("lead", RoleDeployer)
 
 	if _, err := lead.Command("general", "/deploy api"); err != nil {
 		t.Fatal(err)
 	}
-	ada.Message(func(m apron.Message) bool {
+	ada.Message(func(m aprond.Message) bool {
 		// The terminal embed shows the program's output.
 		var terminal struct{ Output string }
 		body := m.Wire().Body
 		return body != nil && len(body.Embeds) == 1 && json.Unmarshal(body.Embeds[0], &terminal) == nil &&
 			strings.Contains(terminal.Output, "deployed the api")
 	})
-	done := ada.Message(func(m apron.Message) bool { return strings.HasPrefix(m.Text, "✅") })
+	done := ada.Message(func(m aprond.Message) bool { return strings.HasPrefix(m.Text, "✅") })
 	if done.Text != "✅ deployed api" {
 		t.Fatalf("outcome = %q", done.Text)
 	}

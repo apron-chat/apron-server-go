@@ -11,7 +11,7 @@ import (
 
 	flags "github.com/jessevdk/go-flags"
 
-	"github.com/apron-chat/apron-server-go/apron"
+	"github.com/apron-chat/apron-server-go/aprond"
 )
 
 func parse(t *testing.T, args ...string) (*Options, *flags.Parser) {
@@ -185,7 +185,7 @@ func TestEmailSenders(t *testing.T) {
 		}
 	}
 	options, _ := parse(t, "--email.enable", "--email.sender", "log")
-	if config, err := serverConfig(*options); err != nil || config.EmailSender != (apron.LogEmailSender{}) || config.EmailLinkURL != "" {
+	if config, err := serverConfig(*options); err != nil || config.EmailSender != (aprond.LogEmailSender{}) || config.EmailLinkURL != "" {
 		t.Fatalf("log sender %T, link %q, error %v", config.EmailSender, config.EmailLinkURL, err)
 	}
 	// The log sender is for development: a public server refuses it.
@@ -276,15 +276,15 @@ type weatherExtension struct {
 	}
 }
 
-func (*weatherExtension) Name() string                { return "weather" }
-func (*weatherExtension) Init(*apron.Registrar) error { return nil }
-func (w *weatherExtension) Flags() any                { return &w.settings }
+func (*weatherExtension) Name() string                 { return "weather" }
+func (*weatherExtension) Init(*aprond.Registrar) error { return nil }
+func (w *weatherExtension) Flags() any                 { return &w.settings }
 
 func TestExtensionFlags(t *testing.T) {
 	weather := &weatherExtension{}
 	var options Options
 	parser := flags.NewParser(&options, flags.Default&^flags.PrintErrors)
-	targets, err := addExtensionFlags(parser, []apron.Extension{weather})
+	targets, err := addExtensionFlags(parser, []aprond.Extension{weather})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -307,14 +307,14 @@ func TestExtensionFlags(t *testing.T) {
 	}
 }
 
-// apron.Open gives an extension's settings their defaults however it is
+// aprond.Open gives an extension's settings their defaults however it is
 // opened, and keeps what is set: a list the config file empties included.
 func TestExtensionDefaultsWithoutMain(t *testing.T) {
 	open := func(weather *weatherExtension) {
 		t.Helper()
-		config := apron.DefaultConfig()
-		config.Extensions = []apron.Extension{weather}
-		server, err := apron.Open(config)
+		config := aprond.DefaultConfig()
+		config.Extensions = []aprond.Extension{weather}
+		server, err := aprond.Open(config)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -332,7 +332,7 @@ func TestExtensionDefaultsWithoutMain(t *testing.T) {
 	emptied := &weatherExtension{}
 	var options Options
 	parser := flags.NewParser(&options, flags.Default&^flags.PrintErrors)
-	targets, err := addExtensionFlags(parser, []apron.Extension{emptied})
+	targets, err := addExtensionFlags(parser, []aprond.Extension{emptied})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -358,9 +358,9 @@ func TestExtensionDefaultsWithoutMain(t *testing.T) {
 	}
 
 	bad := &badDefault{}
-	config := apron.DefaultConfig()
-	config.Extensions = []apron.Extension{bad}
-	if _, err := apron.Open(config); err == nil || !strings.Contains(err.Error(), "extension bad") {
+	config := aprond.DefaultConfig()
+	config.Extensions = []aprond.Extension{bad}
+	if _, err := aprond.Open(config); err == nil || !strings.Contains(err.Error(), "extension bad") {
 		t.Fatalf("Open with a default that is not a duration = %v", err)
 	}
 }
@@ -381,7 +381,7 @@ func TestExtensionZeroSettings(t *testing.T) {
 		weather := &weatherExtension{}
 		options := Options{}
 		parser := flags.NewParser(&options, flags.Default&^flags.PrintErrors)
-		targets, err := addExtensionFlags(parser, []apron.Extension{weather})
+		targets, err := addExtensionFlags(parser, []aprond.Extension{weather})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -394,9 +394,9 @@ func TestExtensionZeroSettings(t *testing.T) {
 			}
 		}
 		markParsed(targets)
-		config := apron.DefaultConfig()
-		config.Extensions = []apron.Extension{weather}
-		server, err := apron.Open(config)
+		config := aprond.DefaultConfig()
+		config.Extensions = []aprond.Extension{weather}
+		server, err := aprond.Open(config)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -417,6 +417,6 @@ type badDefault struct {
 	}
 }
 
-func (*badDefault) Name() string                { return "bad" }
-func (*badDefault) Init(*apron.Registrar) error { return nil }
-func (b *badDefault) Flags() any                { return &b.settings }
+func (*badDefault) Name() string                 { return "bad" }
+func (*badDefault) Init(*aprond.Registrar) error { return nil }
+func (b *badDefault) Flags() any                 { return &b.settings }

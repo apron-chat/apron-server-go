@@ -4,8 +4,8 @@ import (
 	"context"
 	"time"
 
-	"github.com/apron-chat/apron-server-go/apron"
 	"github.com/apron-chat/apron-server-go/aproncmd"
+	"github.com/apron-chat/apron-server-go/aprond"
 )
 
 // Uptime is an extension with a setting of its own.
@@ -22,11 +22,11 @@ func (*Uptime) Name() string { return "uptime" }
 // or precision in the config file's [uptime] table.
 func (u *Uptime) Flags() any { return &u.Settings }
 
-func (u *Uptime) Init(r *apron.Registrar) error {
+func (u *Uptime) Init(r *aprond.Registrar) error {
 	u.started = time.Now()
-	r.Command(apron.Command{
+	r.Command(aprond.Command{
 		Name: "uptime", Help: "how long the server has run",
-		Run: func(_ context.Context, call *apron.CommandCall) (map[string]any, error) {
+		Run: func(_ context.Context, call *aprond.CommandCall) (map[string]any, error) {
 			call.Notice("Up for " + time.Since(u.started).Round(u.Settings.Precision).String())
 			return nil, nil
 		},

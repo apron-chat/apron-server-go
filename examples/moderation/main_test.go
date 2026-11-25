@@ -5,18 +5,18 @@ import (
 	"testing"
 	"time"
 
-	"github.com/apron-chat/apron-server-go/apron"
-	"github.com/apron-chat/apron-server-go/apron/aprontest"
+	"github.com/apron-chat/apron-server-go/aprond"
+	"github.com/apron-chat/apron-server-go/aprond/aprondtest"
 )
 
 func TestModeration(t *testing.T) {
 	m := &Moderation{}
 	m.Settings.Words = []string{"darn", "ärger"}
-	server := aprontest.Serve(t, apron.DefaultConfig(), m)
+	server := aprondtest.Serve(t, aprond.DefaultConfig(), m)
 	if m.Settings.LinkAge != 24*time.Hour {
 		t.Fatalf("LinkAge = %v, want its default", m.Settings.LinkAge)
 	}
-	ada, bob, mo := server.Guest("Ada"), server.Guest("Bob"), server.Member("mo", apron.RoleModerator)
+	ada, bob, mo := server.Guest("Ada"), server.Guest("Bob"), server.Member("mo", aprond.RoleModerator)
 
 	if _, err := ada.Post("general", "see https://example.com"); err == nil || !strings.Contains(err.Error(), "links") {
 		t.Fatalf("a guest posted a link: %v", err)
@@ -28,7 +28,7 @@ func TestModeration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := bob.Message(func(m apron.Message) bool { return m.ID == id }); got.Text != "well d***, so much Ä****" {
+	if got := bob.Message(func(m aprond.Message) bool { return m.ID == id }); got.Text != "well d***, so much Ä****" {
 		t.Fatalf("masked = %q", got.Text)
 	}
 	if _, err := ada.Command("general", "/slowmode 30"); err == nil {

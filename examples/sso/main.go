@@ -34,8 +34,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/apron-chat/apron-server-go/apron"
 	"github.com/apron-chat/apron-server-go/aproncmd"
+	"github.com/apron-chat/apron-server-go/aprond"
 )
 
 func main() { aproncmd.Main(&SSO{}) }
@@ -48,8 +48,8 @@ type SSO struct {
 		Org          string   `long:"org" description:"Only members of this GitHub organization may sign in; empty lets in everyone"`
 		Admins       []string `long:"admin" description:"A GitHub login that gets the admin role; repeat for more"`
 	}
-	host   *apron.Host
-	signIn *apron.ExternalSignIn
+	host   *aprond.Host
+	signIn *aprond.ExternalSignIn
 	client *http.Client
 	// github is where GitHub's sign-in pages and API are, which tests
 	// replace.
@@ -64,7 +64,7 @@ func (s *SSO) Flags() any { return &s.Settings }
 // development server should rely on.
 func (s *SSO) callback(r *http.Request) string { return s.host.BaseURL(r) + "/sso/callback" }
 
-func (s *SSO) Init(r *apron.Registrar) error {
+func (s *SSO) Init(r *aprond.Registrar) error {
 	if s.Settings.ClientID == "" || s.Settings.ClientSecret == "" {
 		return errors.New("set --sso.client-id and --sso.client-secret")
 	}
@@ -80,7 +80,7 @@ func (s *SSO) Init(r *apron.Registrar) error {
 
 // start sends the person to GitHub. The sign-in's ID is unguessable and
 // works once, so it serves as OAuth's state.
-func (s *SSO) start(w http.ResponseWriter, r *http.Request, req apron.ExternalRequest) {
+func (s *SSO) start(w http.ResponseWriter, r *http.Request, req aprond.ExternalRequest) {
 	query := url.Values{
 		"client_id":    {s.Settings.ClientID},
 		"redirect_uri": {s.callback(r)},
@@ -116,9 +116,9 @@ func (s *SSO) finish(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (s *SSO) identify(ctx context.Context, code, callback string) (apron.Identity, error) {
+func (s *SSO) identify(ctx context.Context, code, callback string) (aprond.Identity, error) {
 	if code == "" {
-		return apron.Identity{}, errors.New("GitHub sent no code")
+		return aprond.Identity{}, errors.New("GitHub sent no code")
 	}
 	var token struct {
 		AccessToken string `json:"access_token"`
@@ -128,10 +128,10 @@ func (s *SSO) identify(ctx context.Context, code, callback string) (apron.Identi
 	request, _ := http.NewRequestWithContext(ctx, http.MethodPost, s.github.web+"/login/oauth/access_token", strings.NewReader(form.Encode()))
 	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	if err := s.fetch(request, &token); err != nil {
-		return apron.Identity{}, err
+		return aprond.Identity{}, err
 	}
 	if token.AccessToken == "" {
-		return apron.Identity{}, fmt.Errorf("GitHub refused the code: %s", token.Error)
+		return aprond.Identity{}, fmt.Errorf("GitHub refused the code: %s", token.Error)
 	}
 
 	var user struct {
@@ -140,22 +140,22 @@ func (s *SSO) identify(ctx context.Context, code, callback string) (apron.Identi
 		Name  string `json:"name"`
 	}
 	if err := s.api(ctx, token.AccessToken, "/user", &user); err != nil {
-		return apron.Identity{}, err
+		return aprond.Identity{}, err
 	}
 	if org := s.Settings.Org; org != "" {
 		var membership struct {
 			State string `json:"state"`
 		}
 		if err := s.api(ctx, token.AccessToken, "/user/memberships/orgs/"+url.PathEscape(org), &membership); err != nil || membership.State != "active" {
-			return apron.Identity{}, fmt.Errorf("%s is not a member of %s", user.Login, org)
+			return aprond.Identity{}, fmt.Errorf("%s is not a member of %s", user.Login, org)
 		}
 	}
-	identity := apron.Identity{Subject: "github:" + strconv.FormatInt(user.ID, 10), Name: user.Name, UserID: user.Login}
+	identity := aprond.Identity{Subject: "github:" + strconv.FormatInt(user.ID, 10), Name: user.Name, UserID: user.Login}
 	if identity.Name == "" {
 		identity.Name = user.Login
 	}
 	if slices.ContainsFunc(s.Settings.Admins, func(login string) bool { return strings.EqualFold(login, user.Login) }) {
-		identity.Roles = []string{apron.RoleAdmin}
+		identity.Roles = []string{aprond.RoleAdmin}
 	}
 	return identity, nil
 }

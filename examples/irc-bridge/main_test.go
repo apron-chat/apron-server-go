@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/apron-chat/apron-server-go/apron"
-	"github.com/apron-chat/apron-server-go/apron/aprontest"
+	"github.com/apron-chat/apron-server-go/aprond"
+	"github.com/apron-chat/apron-server-go/aprond/aprondtest"
 )
 
 func TestBridge(t *testing.T) {
@@ -53,7 +53,7 @@ func TestBridge(t *testing.T) {
 	b := &Bridge{}
 	b.Settings.Server, b.Settings.Plaintext, b.Settings.Nick = listener.Addr().String(), true, "bridge"
 	b.Settings.Channel = "#apron"
-	server := aprontest.Serve(t, apron.DefaultConfig(), b)
+	server := aprondtest.Serve(t, aprond.DefaultConfig(), b)
 	ada := server.Guest("Ada")
 
 	// What is posted while the bridge is not in the channel is relayed
@@ -66,7 +66,7 @@ func TestBridge(t *testing.T) {
 	expectSent(t, sent, "PRIVMSG #apron :<Ada> while you were out")
 	say <- ":alice!a@test PRIVMSG #apron :hello from irc"
 
-	relayed := ada.Message(func(m apron.Message) bool { return m.From.UserID == "irc" })
+	relayed := ada.Message(func(m aprond.Message) bool { return m.From.UserID == "irc" })
 	if relayed.Text != "**alice:** hello from irc" {
 		t.Fatalf("relayed = %q", relayed.Text)
 	}

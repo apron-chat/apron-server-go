@@ -6,12 +6,12 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/apron-chat/apron-server-go/apron"
-	"github.com/apron-chat/apron-server-go/apron/aprontest"
+	"github.com/apron-chat/apron-server-go/aprond"
+	"github.com/apron-chat/apron-server-go/aprond/aprondtest"
 )
 
 func TestSearch(t *testing.T) {
-	server := aprontest.Serve(t, apron.DefaultConfig(), &Search{})
+	server := aprondtest.Serve(t, aprond.DefaultConfig(), &Search{})
 	ada, bob := server.Guest("Ada"), server.Guest("Bob")
 	if _, err := ada.Post("general", "The deploy failed again <script>"); err != nil {
 		t.Fatal(err)
@@ -29,7 +29,7 @@ func TestSearch(t *testing.T) {
 	}
 
 	// The index follows the log on its own goroutine: wait for it.
-	expect := func(c *aprontest.Client, q string, want int) {
+	expect := func(c *aprondtest.Client, q string, want int) {
 		t.Helper()
 		server.Settle()
 		var result struct{ Results []any }
@@ -75,10 +75,10 @@ func TestSearch(t *testing.T) {
 }
 
 func TestNoArchiveWithoutGuests(t *testing.T) {
-	config := apron.DefaultConfig()
+	config := aprond.DefaultConfig()
 	config.DisableGuests = true
-	config.EmailSender = apron.LogEmailSender{}
-	server := aprontest.Serve(t, config, &Search{})
+	config.EmailSender = aprond.LogEmailSender{}
+	server := aprondtest.Serve(t, config, &Search{})
 	response, err := http.Get(server.URL + "/search/archive/general")
 	if err != nil {
 		t.Fatal(err)

@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/apron-chat/apron-server-go/apron"
-	"github.com/apron-chat/apron-server-go/apron/aprontest"
+	"github.com/apron-chat/apron-server-go/aprond"
+	"github.com/apron-chat/apron-server-go/aprond/aprondtest"
 )
 
 // gitHub is a fake GitHub, which signs in octocat, a member of acme
@@ -60,9 +60,9 @@ func TestSignInWithGitHub(t *testing.T) {
 	s.Settings.ClientID, s.Settings.ClientSecret, s.Settings.Org = "id", "secret", "acme"
 	s.Settings.Admins = []string{"OctoCat"}
 	s.github.web, s.github.api = github.URL, github.URL
-	config := apron.DefaultConfig()
+	config := aprond.DefaultConfig()
 	config.DisableGuests = true
-	server := aprontest.Serve(t, config, s)
+	server := aprondtest.Serve(t, config, s)
 
 	// An app on this device opens the page, which sends the person to
 	// GitHub and back, then says who is asking, and the person allows it.
@@ -78,7 +78,7 @@ func TestSignInWithGitHub(t *testing.T) {
 	if err != nil || result.You == nil {
 		t.Fatalf("redeeming the code: %v", err)
 	}
-	if you := result.You; you.UserID != "octocat" || you.Name != "The Octocat" || result.Token == "" || !slices.Contains(you.Roles, apron.RoleAdmin) {
+	if you := result.You; you.UserID != "octocat" || you.Name != "The Octocat" || result.Token == "" || !slices.Contains(you.Roles, aprond.RoleAdmin) {
 		t.Fatalf("you = %#v", you)
 	}
 
