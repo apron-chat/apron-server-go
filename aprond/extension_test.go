@@ -487,7 +487,7 @@ func TestSessionThatFallsBehindIsForgotten(t *testing.T) {
 	}}))
 	defer close(block)
 	c := dialTestClient(t, httpServer)
-	for i := 0; i < sessionFrameQueue+16; i++ {
+	for range sessionFrameQueue + 16 {
 		select {
 		case <-session.Done():
 		default:
