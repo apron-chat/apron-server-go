@@ -18,7 +18,7 @@ func signIn(t *testing.T, ctx context.Context, chat *Chat, name string) (*apront
 	if hello := c.Hello(); hello.Title != "Minimal" || you.Name != name {
 		t.Fatalf("server frame %+v, you %+v", hello, you)
 	}
-	if welcome, err := aprontest.Expect[apron.Message](ctx, c, nil); err != nil || welcome.From.UserID != apron.Private.UserID || !strings.HasPrefix(welcome.Body.Text, "Welcome, "+name) {
+	if welcome, err := aprontest.Expect[apron.Message](ctx, c, nil); err != nil || welcome.From.UserID != apron.PrivateNotice.UserID || !strings.HasPrefix(welcome.Body.Text, "Welcome, "+name) {
 		t.Fatalf("welcome: %+v %v", welcome, err)
 	}
 	return c, you.User

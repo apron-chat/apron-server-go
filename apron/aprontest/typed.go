@@ -69,7 +69,7 @@ func (c *Client) Me(ctx context.Context, p apron.MeParams) (apron.CurrentUser, e
 
 // Command runs a command line, such as "/nick Ada", in a room, "" for the
 // default room (§4.1), and returns the text of the notices sent to the
-// connection ahead of its result, in order: the messages from apron.Private,
+// connection ahead of its result, in order: the messages from apron.PrivateNotice,
 // such as what /help lists, which it takes. The other frames, such as the
 // command's effects, stay for Next and Expect. Its error is the error
 // reply, as an *apron.Error, which comes with the notices ahead of it.
@@ -82,7 +82,7 @@ func (c *Client) Command(ctx context.Context, roomID, line string) (notices []st
 	p := apron.CommandParams{RoomID: roomID, Body: &apron.Body{Text: line}}
 	_, frames, err := c.call(ctx, "command", p, func(f Frame) bool {
 		var m apron.Message
-		return f.Method == "message" && f.Decode(&m) == nil && m.From.UserID == apron.Private.UserID
+		return f.Method == "message" && f.Decode(&m) == nil && m.From.UserID == apron.PrivateNotice.UserID
 	})
 	for _, f := range frames {
 		var m apron.Message

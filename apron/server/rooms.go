@@ -48,16 +48,16 @@ func (ReadOnlyRooms) RoomSet(context.Context, *Conn, apron.RoomSetParams, Reply[
 // others absent, and without members, no room has its members, nor the
 // result users.
 func normalizeRoomList(p apron.RoomListParams, result apron.RoomListResult) apron.RoomListResult {
-	if p.Filter != apron.FilterNotJoined && result.Joined == nil {
+	if p.Filter != apron.RoomsNotJoined && result.Joined == nil {
 		result.Joined = []apron.RoomView{}
 	}
-	if p.Filter != apron.FilterJoined && result.NotJoined == nil {
+	if p.Filter != apron.RoomsJoined && result.NotJoined == nil {
 		result.NotJoined = []apron.RoomView{}
 	}
-	if p.Filter == apron.FilterJoined {
+	if p.Filter == apron.RoomsJoined {
 		result.NotJoined = nil
 	}
-	if p.Filter == apron.FilterNotJoined {
+	if p.Filter == apron.RoomsNotJoined {
 		result.Joined = nil
 	}
 	if !p.Members {

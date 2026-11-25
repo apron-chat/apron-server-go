@@ -131,7 +131,7 @@ func command(t *testing.T, c *aprontest.Client, roomID, text string, mentions ..
 	var texts []string
 	for _, f := range before {
 		var m apron.Message
-		if f.Method != "message" || f.Decode(&m) != nil || m.From.UserID != apron.Private.UserID || m.RoomID != roomID || m.Body.Format != apron.Markdown {
+		if f.Method != "message" || f.Decode(&m) != nil || m.From.UserID != apron.PrivateNotice.UserID || m.RoomID != roomID || m.Body.Format != apron.Markdown {
 			t.Fatalf("%s: before its result %s", text, f.Raw)
 		}
 		texts = append(texts, m.Body.Text)

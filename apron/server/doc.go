@@ -33,7 +33,7 @@
 //     ([Notification]: [Message], [UserUpdate], [StatusUpdate],
 //     [RoomUpdate], [Reactions], [Activity], [ServerInfo]), sent with
 //     [Conn.Notify] or encoded once with [Encode]; the system identities
-//     ([Private], [RoomNotice], [ServerNotice]); log_ids and message_ids
+//     ([PrivateNotice], [RoomNotice], [ServerNotice]); log_ids and message_ids
 //     as [LogID], below 2^53, and a [Clock] that issues them (§2.1);
 //   - user changes as patches ([User.Patch], [CurrentUser]), which carry
 //     what changed and clear what was taken away (§3.3.1), published to the

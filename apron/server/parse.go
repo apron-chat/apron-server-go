@@ -115,10 +115,10 @@ func parseMe(r *Request) (apron.MeParams, error) {
 // not_joined, or all, the default.
 func parseRoomList(r *Request) (apron.RoomListParams, error) {
 	d := r.Decoder()
-	p := apron.RoomListParams{Filter: apron.FilterAll}
+	p := apron.RoomListParams{Filter: apron.RoomsAll}
 	if filter := IfPresent(d, "filter", d.String); filter != nil {
-		p.Filter = *filter
-		if p.Filter != apron.FilterAll && p.Filter != apron.FilterJoined && p.Filter != apron.FilterNotJoined {
+		p.Filter = apron.RoomFilter(*filter)
+		if p.Filter != apron.RoomsAll && p.Filter != apron.RoomsJoined && p.Filter != apron.RoomsNotJoined {
 			d.Fail(apron.InvalidParams("filter must be joined, not_joined, or all"))
 		}
 	}

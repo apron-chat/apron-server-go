@@ -446,7 +446,7 @@ const (
 // The result is followed by the read cursors kept for the listed rooms
 // (§4.6).
 func (s *Server) listRooms(c *client, p apron.RoomListParams, reply server.Reply[apron.RoomListResult]) *Error {
-	wantJoined, wantOthers := p.Filter != apron.FilterNotJoined, p.Filter != apron.FilterJoined
+	wantJoined, wantOthers := p.Filter != apron.RoomsNotJoined, p.Filter != apron.RoomsJoined
 	withMembers := p.Members
 	parentID, hasParent := p.ParentRoomID, p.ParentRoomID != ""
 	roomID, hasRoom := p.RoomID, p.RoomID != ""

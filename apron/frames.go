@@ -67,9 +67,10 @@ func (u User) clone() User {
 // The system identities (Appendix A.1): a message from one says who else
 // received it.
 var (
-	// Private is the sender of a transient notice to one connection, such as
-	// a command's reply. Its messages have no message_id.
-	Private = User{UserID: "~private", Name: "Only you"}
+	// PrivateNotice is the sender of a transient notice to one
+	// connection, such as a command's reply. Its messages have no
+	// message_id.
+	PrivateNotice = User{UserID: "~private", Name: "Only you"}
 	// RoomNotice is the sender of a logged notice to every member of a room.
 	RoomNotice = User{UserID: "~room", Name: "Room"}
 	// ServerNotice is the sender of a logged notice to everyone.
@@ -106,7 +107,7 @@ func (Message) Method() string { return "message" }
 // Notice is a transient ~private notice with text, shown in roomID, or
 // wherever the client likes when roomID is empty.
 func Notice(roomID, text string) Message {
-	return Message{RoomID: roomID, From: Private, Body: &Body{Text: text}}
+	return Message{RoomID: roomID, From: PrivateNotice, Body: &Body{Text: text}}
 }
 
 // AuthParams are the params of auth (§3.2). A scheme whose fields are not

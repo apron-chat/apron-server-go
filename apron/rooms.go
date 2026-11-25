@@ -69,18 +69,24 @@ type RoomUpdate struct {
 // Method makes a RoomUpdate a Notification.
 func (RoomUpdate) Method() string { return "room_update" }
 
-// The values of RoomListParams.Filter.
+// RoomFilter is a room_list filter (§4.2.1): which rooms it lists.
+type RoomFilter string
+
+// The room_list filters.
 const (
-	FilterAll       = "all"
-	FilterJoined    = "joined"
-	FilterNotJoined = "not_joined"
+	// RoomsAll lists both joined and not_joined, the default.
+	RoomsAll RoomFilter = "all"
+	// RoomsJoined lists only joined: the rooms the user joined.
+	RoomsJoined RoomFilter = "joined"
+	// RoomsNotJoined lists only not_joined: the visible rooms the user did
+	// not join.
+	RoomsNotJoined RoomFilter = "not_joined"
 )
 
-// RoomListParams are the params of room_list (§4.2.1). Filter is one of the
-// Filter constants, FilterAll when the client sent none; an empty ID was
-// not sent.
+// RoomListParams are the params of room_list (§4.2.1). Filter is RoomsAll
+// when the client sent none; an empty ID was not sent.
 type RoomListParams struct {
-	Filter       string
+	Filter       RoomFilter
 	ParentRoomID string
 	RoomID       string
 	Members      bool

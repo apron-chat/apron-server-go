@@ -386,7 +386,7 @@ type Router struct {
 	// says what is wrong with it. A command cannot take one back.
 	SkipChecks Checks
 	// NoticeFrom is who the Router's ~private notices are from: those of
-	// Call.Notice, and /help's. The zero User is apron.Private; a backend
+	// Call.Notice, and /help's. The zero User is apron.PrivateNotice; a backend
 	// that names its own system identities otherwise sets it, with the
 	// user_id "~private" (Appendix A.1).
 	NoticeFrom apron.User

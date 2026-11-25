@@ -1228,7 +1228,7 @@ func commandHelp(c *checker) {
 	i, reply := c.request(conn, "command", obj{"room_id": c.r.room, "body": obj{"text": "/help"}}, "")
 	c.must(has(reply, "result") && !has(reply["result"], "message_id"), "got %s", describe(reply))
 	j, notice := conn.wait(func(f obj) bool {
-		return f["method"] == "message" && get(f, "params", "from", "user_id") == apron.Private.UserID
+		return f["method"] == "message" && get(f, "params", "from", "user_id") == apron.PrivateNotice.UserID
 	}, start, waitFor)
 	c.should(notice != nil && j < i, "no ~private notice before the result")
 	c.must(!has(notice["params"], "message_id"), "the notice has a message_id")
