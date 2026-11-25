@@ -1,7 +1,7 @@
 package main
 
 import (
-	"encoding/json"
+	"encoding/json/v2"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -37,17 +37,17 @@ func fakeGitHub(t *testing.T) *gitHub {
 			http.Error(w, "bad code", http.StatusBadRequest)
 			return
 		}
-		json.NewEncoder(w).Encode(map[string]any{"access_token": "t0ken"})
+		json.MarshalWrite(w, map[string]any{"access_token": "t0ken"})
 	})
 	mux.HandleFunc("GET /user", func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(map[string]any{"id": 583231, "login": "octocat", "name": "The Octocat"})
+		json.MarshalWrite(w, map[string]any{"id": 583231, "login": "octocat", "name": "The Octocat"})
 	})
 	mux.HandleFunc("GET /user/memberships/orgs/acme", func(w http.ResponseWriter, r *http.Request) {
 		if g.left {
 			http.NotFound(w, r)
 			return
 		}
-		json.NewEncoder(w).Encode(map[string]any{"state": "active"})
+		json.MarshalWrite(w, map[string]any{"state": "active"})
 	})
 	g.Server = httptest.NewServer(mux)
 	t.Cleanup(g.Close)

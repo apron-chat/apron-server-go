@@ -5,7 +5,7 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
+	"encoding/json/v2"
 	"net/http"
 	"strings"
 	"testing"
@@ -64,7 +64,9 @@ func TestDeploy(t *testing.T) {
 	}
 	ada.Message(func(m aprond.Message) bool {
 		// The terminal embed shows the program's output.
-		var terminal struct{ Output string }
+		var terminal struct {
+			Output string `json:"output"`
+		}
 		body := m.Apron().Body
 		return body != nil && len(body.Embeds) == 1 && json.Unmarshal(body.Embeds[0], &terminal) == nil &&
 			strings.Contains(terminal.Output, "deployed the api")

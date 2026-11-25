@@ -4,7 +4,8 @@ package main
 
 import (
 	"context"
-	"encoding/json"
+	"encoding/json/jsontext"
+	"encoding/json/v2"
 	"fmt"
 	"net"
 	"net/http"
@@ -20,7 +21,7 @@ import (
 
 type connection struct {
 	ws     *websocket.Conn
-	frames chan json.RawMessage
+	frames chan jsontext.Value
 	done   chan struct{}
 }
 
@@ -41,7 +42,7 @@ func main() {
 		}
 		defer ws.CloseNow()
 		ws.SetReadLimit(256 << 10)
-		c := &connection{ws: ws, frames: make(chan json.RawMessage, 128), done: make(chan struct{})}
+		c := &connection{ws: ws, frames: make(chan jsontext.Value, 128), done: make(chan struct{})}
 		mu.Lock()
 		nextID++
 		id := strconv.Itoa(nextID)
@@ -64,7 +65,7 @@ func main() {
 				return
 			}
 			select {
-			case c.frames <- json.RawMessage(frame):
+			case c.frames <- jsontext.Value(frame):
 			case <-r.Context().Done():
 				return
 			}
@@ -73,7 +74,7 @@ func main() {
 	mux.HandleFunc("GET /next", func(w http.ResponseWriter, r *http.Request) {
 		select {
 		case id := <-accepted:
-			_ = json.NewEncoder(w).Encode(id)
+			_ = json.MarshalWrite(w, id)
 		case <-r.Context().Done():
 		}
 	})
@@ -87,8 +88,10 @@ func main() {
 		}
 		switch r.PathValue("action") {
 		case "send":
-			var frame json.RawMessage
-			if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 256<<10)).Decode(&frame); err != nil {
+			// Relayed as it is: a fixture may send what a strict decoder
+			// refuses, such as a duplicate name.
+			var frame jsontext.Value
+			if err := json.UnmarshalRead(http.MaxBytesReader(w, r.Body, 256<<10), &frame, jsontext.AllowDuplicateNames(true), jsontext.AllowInvalidUTF8(true)); err != nil {
 				http.Error(w, err.Error(), http.StatusBadRequest)
 				return
 			}

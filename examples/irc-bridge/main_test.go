@@ -2,7 +2,7 @@ package main
 
 import (
 	"bufio"
-	"encoding/json"
+	"encoding/json/v2"
 	"net"
 	"strings"
 	"testing"
@@ -70,7 +70,9 @@ func TestBridge(t *testing.T) {
 	if relayed.Text != "**alice:** hello from irc" {
 		t.Fatalf("relayed = %q", relayed.Text)
 	}
-	var ext struct{ Nick string }
+	var ext struct {
+		Nick string `json:"nick"`
+	}
 	if err := json.Unmarshal(relayed.Ext["irc-bridge"], &ext); err != nil || ext.Nick != "alice" {
 		t.Fatalf("ext = %s", relayed.Ext["irc-bridge"])
 	}

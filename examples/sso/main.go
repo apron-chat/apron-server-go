@@ -24,7 +24,7 @@ package main
 
 import (
 	"context"
-	"encoding/json"
+	"encoding/json/v2"
 	"errors"
 	"fmt"
 	"net/http"
@@ -176,5 +176,5 @@ func (s *SSO) fetch(request *http.Request, into any) error {
 	if response.StatusCode != http.StatusOK {
 		return fmt.Errorf("%s: %s", request.URL.Path, response.Status)
 	}
-	return json.NewDecoder(response.Body).Decode(into)
+	return json.UnmarshalRead(response.Body, into)
 }
