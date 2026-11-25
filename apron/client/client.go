@@ -360,11 +360,9 @@ func (c *Conn) keepAlive() {
 		if interval <= 0 {
 			return
 		}
-		timer := time.NewTimer(interval)
 		select {
-		case <-timer.C:
+		case <-time.After(interval):
 		case <-c.done:
-			timer.Stop()
 			return
 		}
 		if heard := c.heard.Swap(false); pinged && !heard {

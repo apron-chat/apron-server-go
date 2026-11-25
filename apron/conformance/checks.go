@@ -5,7 +5,6 @@ import (
 	"maps"
 	"reflect"
 	"slices"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -1081,7 +1080,7 @@ func signInJoined(c *checker) {
 			lacking = append(lacking, room)
 		}
 	}
-	sort.Strings(lacking)
+	slices.Sort(lacking)
 	c.must(len(lacking) == 0, "room_list joined lacks %s", strings.Join(lacking, ", "))
 }
 

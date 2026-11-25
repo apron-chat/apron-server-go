@@ -98,9 +98,7 @@ func Encrypt(plaintext []byte, keys Keys) ([]byte, error) {
 		return nil, err
 	}
 	salt := make([]byte, 16)
-	if _, err := rand.Read(salt); err != nil {
-		return nil, err
-	}
+	rand.Read(salt)
 	return encryptWith(plaintext, keys, local, salt)
 }
 
