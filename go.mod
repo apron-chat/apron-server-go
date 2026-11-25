@@ -2,6 +2,8 @@ module github.com/apron-chat/apron-server-go
 
 go 1.27.0
 
+toolchain go1.27.4
+
 require (
 	github.com/BurntSushi/toml v1.6.0
 	github.com/apron-chat/apron-server-go/apron v0.0.0-20261125183732-e12899ed7039
