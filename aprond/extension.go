@@ -150,18 +150,11 @@ func (h *Host) Go(fn func(ctx context.Context)) bool {
 // the server is closed.
 func (s *Server) goExtension(fn func()) bool {
 	s.mu.Lock()
-	closed := s.closed
-	if !closed {
-		s.extensionWork.Add(1)
-	}
-	s.mu.Unlock()
-	if closed {
+	defer s.mu.Unlock()
+	if s.closed {
 		return false
 	}
-	go func() {
-		defer s.extensionWork.Done()
-		fn()
-	}()
+	s.extensionWork.Go(fn)
 	return true
 }
 

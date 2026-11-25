@@ -259,9 +259,7 @@ func (p *Deliverer) Deliver(registration Target, payload []byte, urgency, latest
 		p.latest[latest] = waiting
 	}
 	p.mu.Unlock()
-	p.pending.Add(1)
-	go func() {
-		defer p.pending.Done()
+	p.pending.Go(func() {
 		defer p.release(registration.UserID, host, lane)
 		// The host's lane first, then a shared slot: a stalled host holds at
 		// most its lane's share of the slots.
@@ -291,17 +289,15 @@ func (p *Deliverer) Deliver(registration Target, payload []byte, urgency, latest
 		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, maxPushResponseDrain))
 		response.Body.Close()
 		done(response.StatusCode)
-	}()
+	})
 }
 
 // dropped tells done of a delivery dropped before it started, apart, since
 // the caller may hold the lock done takes.
 func (p *Deliverer) dropped(done func(status int)) {
-	p.pending.Add(1)
-	go func() {
-		defer p.pending.Done()
+	p.pending.Go(func() {
 		done(0)
-	}()
+	})
 }
 
 // request builds a delivery (§4.9), with TTL and Urgency for every kind.

@@ -141,9 +141,7 @@ func (s *Server) Local(options LocalOptions) (*Local, error) {
 	s.mu.Unlock()
 
 	if options.OnFrame != nil {
-		s.serving.Add(1)
-		go func() {
-			defer s.serving.Done()
+		s.serving.Go(func() {
 			for {
 				select {
 				case frame := <-l.frames:
@@ -152,7 +150,7 @@ func (s *Server) Local(options LocalOptions) (*Local, error) {
 					return
 				}
 			}
-		}()
+		})
 	}
 	// In process, there is no transport to ping.
 	c.rt.Start(false)

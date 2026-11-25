@@ -737,18 +737,11 @@ func (sc schemeCore) Issue(proof authn.Proof, create bool) (string, error) {
 func (sc schemeCore) Go(fn func(ctx context.Context)) bool {
 	s := sc.s
 	s.mu.Lock()
-	closed := s.closed
-	if !closed {
-		s.schemeWork.Add(1)
-	}
-	s.mu.Unlock()
-	if closed {
+	defer s.mu.Unlock()
+	if s.closed {
 		return false
 	}
-	go func() {
-		defer s.schemeWork.Done()
-		fn(s.extContext)
-	}()
+	s.schemeWork.Go(func() { fn(s.extContext) })
 	return true
 }
 
