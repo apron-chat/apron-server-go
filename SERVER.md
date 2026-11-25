@@ -375,6 +375,15 @@ accepted with any scheme and not used. A scheme the server does not offer is
 `unsupported` (§3.2): one it does not know, and `webauthn`, `email`, and
 `token` while their sign-in is not configured.
 
+Removing every sign-in scheme (passkeys, email, external) does not lock
+out the sessions the server already issued: a server with no schemes still
+accepts `token` for a session token it holds, and for a bot's service
+token, so that accounts made in process, and those made before the schemes
+were taken away, still sign in (device tokens do not). To lock accounts
+out, revoke their sessions explicitly too: `Server.SignOut` (or
+`Host.SignOut`) for an account, which ends its session and device tokens,
+or the account's own `account.sign_out` ([Passkeys](#managing-passkeys)).
+
 `auth` with scheme `guest` assigns `guest_<n>` from a server-wide counter
 (`guest_1`, `guest_2`, …) and honors an optional requested `name`. A
 `user_id` is never empty and has no whitespace or control characters
