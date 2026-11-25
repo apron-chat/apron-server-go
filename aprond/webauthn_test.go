@@ -137,7 +137,11 @@ func (a *testAuthenticator) registration(t *testing.T, options map[string]any, o
 		t.Fatalf("registration public key: %#v", publicKey)
 	}
 	a.handle = user["id"].(string)
-	cose, err := cbor.Marshal(map[int]any{1: 2, 3: -7, -1: 1, -2: a.key.X.FillBytes(make([]byte, 32)), -3: a.key.Y.FillBytes(make([]byte, 32))})
+	point, err := a.key.PublicKey.Bytes() // 0x04, x, y
+	if err != nil {
+		t.Fatal(err)
+	}
+	cose, err := cbor.Marshal(map[int]any{1: 2, 3: -7, -1: 1, -2: point[1:33], -3: point[33:]})
 	if err != nil {
 		t.Fatal(err)
 	}

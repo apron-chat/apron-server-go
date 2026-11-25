@@ -87,9 +87,10 @@ func newFakeIssuer(t *testing.T) *fakeIssuer {
 		}
 	})
 	mux.HandleFunc("GET /jwks", func(w http.ResponseWriter, r *http.Request) {
+		point, _ := f.key.PublicKey.Bytes() // 0x04, x, y
 		writeTestJSON(w, map[string]any{"keys": []any{map[string]any{
 			"kty": "EC", "crv": "P-256", "kid": "k1", "use": "sig", "alg": "ES256",
-			"x": b64(f.key.X.FillBytes(make([]byte, 32))), "y": b64(f.key.Y.FillBytes(make([]byte, 32))),
+			"x": b64(point[1:33]), "y": b64(point[33:]),
 		}}})
 	})
 	mux.HandleFunc("GET /authorize", func(w http.ResponseWriter, r *http.Request) {
