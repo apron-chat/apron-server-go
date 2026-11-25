@@ -6,11 +6,13 @@ import (
 	"encoding/json/v2"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/coder/websocket"
@@ -66,6 +68,63 @@ func (c *chat) serve(t *testing.T) string {
 	t.Cleanup(ts.Close)
 	return "ws" + strings.TrimPrefix(ts.URL, "http")
 }
+
+// serveInMemory serves handler over HTTP on connections in memory, until
+// the test ends, and returns its address and the option that dials it. A
+// test in a synctest bubble serves so, as a real network's waits are not
+// the bubble's.
+func serveInMemory(t *testing.T, handler http.Handler) (string, client.Option) {
+	p := &pipes{conns: make(chan net.Conn), closed: make(chan struct{})}
+	srv := &http.Server{Handler: handler}
+	go srv.Serve(p)
+	transport := &http.Transport{DialContext: p.dial}
+	t.Cleanup(func() {
+		_ = srv.Close()
+		transport.CloseIdleConnections()
+	})
+	return "ws://chat.test/ws", client.HTTPClient(&http.Client{Transport: transport})
+}
+
+// pipes is a net.Listener whose connections are the server ends of
+// net.Pipes that dial opens.
+type pipes struct {
+	conns  chan net.Conn
+	closed chan struct{}
+	once   sync.Once
+}
+
+func (p *pipes) dial(ctx context.Context, _, _ string) (net.Conn, error) {
+	server, client := net.Pipe()
+	select {
+	case p.conns <- server:
+		return client, nil
+	case <-p.closed:
+		return nil, net.ErrClosed
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+func (p *pipes) Accept() (net.Conn, error) {
+	select {
+	case conn := <-p.conns:
+		return conn, nil
+	case <-p.closed:
+		return nil, net.ErrClosed
+	}
+}
+
+func (p *pipes) Close() error {
+	p.once.Do(func() { close(p.closed) })
+	return nil
+}
+
+func (*pipes) Addr() net.Addr { return pipeAddr{} }
+
+type pipeAddr struct{}
+
+func (pipeAddr) Network() string { return "pipe" }
+func (pipeAddr) String() string  { return "chat.test" }
 
 func (*chat) Hello(context.Context, *server.Conn) apron.ServerInfo {
 	return apron.ServerInfo{Auth: []string{"guest", "token"}, Title: "Test"}
@@ -259,30 +318,35 @@ func TestUser(t *testing.T) {
 }
 
 func TestDialErrors(t *testing.T) {
-	ctx := timeout(t)
-	c := newChat(server.Config{MaxConnections: 1})
-	url := c.serve(t)
+	synctest.Test(t, func(t *testing.T) {
+		ctx := timeout(t)
+		c := newChat(server.Config{MaxConnections: 1})
+		url, memory := serveInMemory(t, c.server)
 
-	// An auth error reply is returned as it is.
-	_, err := client.Dial(ctx, url, apron.AuthParams{Scheme: "token", Token: "eve"})
-	if apron.CodeOf(err) != apron.CodeDenied || errors.Is(err, apron.ErrClosed) {
-		t.Fatalf("bad token: %v", err)
-	}
-	if _, err := client.Dial(ctx, url, apron.AuthParams{Scheme: "passkey"}); apron.CodeOf(err) != apron.CodeUnsupported {
-		t.Fatalf("unknown scheme: %v", err)
-	}
+		// An auth error reply is returned as it is. Once all is still, the
+		// server has let go of the connection, which leaves room for the next.
+		_, err := client.Dial(ctx, url, apron.AuthParams{Scheme: "token", Token: "eve"}, memory)
+		if apron.CodeOf(err) != apron.CodeDenied || errors.Is(err, apron.ErrClosed) {
+			t.Fatalf("bad token: %v", err)
+		}
+		synctest.Wait()
+		if _, err := client.Dial(ctx, url, apron.AuthParams{Scheme: "passkey"}, memory); apron.CodeOf(err) != apron.CodeUnsupported {
+			t.Fatalf("unknown scheme: %v", err)
+		}
+		synctest.Wait()
 
-	// A server at capacity says so, and closes the connection: not for
-	// good.
-	dial(t, url, apron.AuthParams{Scheme: "guest"})
-	_, err = client.Dial(ctx, url, apron.AuthParams{Scheme: "guest"})
-	if apron.CodeOf(err) != apron.CodeRetryAfter || errors.Is(err, apron.ErrClosed) {
-		t.Fatalf("at capacity: %v", err)
-	}
+		// A server at capacity says so, and closes the connection: not for
+		// good.
+		dial(t, url, apron.AuthParams{Scheme: "guest"}, memory)
+		_, err = client.Dial(ctx, url, apron.AuthParams{Scheme: "guest"}, memory)
+		if apron.CodeOf(err) != apron.CodeRetryAfter || errors.Is(err, apron.ErrClosed) {
+			t.Fatalf("at capacity: %v", err)
+		}
 
-	if _, err := client.Dial(ctx, "ws://127.0.0.1:1/ws", apron.AuthParams{Scheme: "guest"}); err == nil || errors.Is(err, apron.ErrClosed) {
-		t.Fatalf("nothing listening: %v", err)
-	}
+		if _, err := client.Dial(ctx, "ws://127.0.0.1:1/ws", apron.AuthParams{Scheme: "guest"}); err == nil || errors.Is(err, apron.ErrClosed) {
+			t.Fatalf("nothing listening: %v", err)
+		}
+	})
 }
 
 func TestHeader(t *testing.T) {
@@ -323,45 +387,51 @@ func TestClose(t *testing.T) {
 
 // A server that ends the connection fails the calls waiting on it.
 func TestServerEnds(t *testing.T) {
-	ctx := timeout(t)
-	c := newChat(server.Config{})
-	conn := dial(t, c.serve(t), apron.AuthParams{Scheme: "guest"})
-	failed := make(chan error, 1)
-	go func() {
-		_, err := conn.Command(ctx, apron.CommandParams{Body: &apron.Body{Text: "/wait"}})
-		failed <- err
-	}()
-	time.Sleep(50 * time.Millisecond)
-	shutdown, cancel := context.WithTimeout(ctx, 50*time.Millisecond)
-	defer cancel()
-	go c.server.Shutdown(shutdown)
-	select {
-	case <-conn.Done():
-	case <-ctx.Done():
-		t.Fatal("the connection did not end")
-	}
-	if err := <-failed; !errors.Is(err, apron.ErrClosed) {
-		t.Fatalf("waiting call: %v", err)
-	}
-	if err := conn.Err(); !errors.Is(err, apron.ErrClosed) {
-		t.Fatalf("err %v", err)
-	}
-	close(c.release)
+	synctest.Test(t, func(t *testing.T) {
+		ctx := timeout(t)
+		c := newChat(server.Config{})
+		url, memory := serveInMemory(t, c.server)
+		conn := dial(t, url, apron.AuthParams{Scheme: "guest"}, memory)
+		failed := make(chan error, 1)
+		go func() {
+			_, err := conn.Command(ctx, apron.CommandParams{Body: &apron.Body{Text: "/wait"}})
+			failed <- err
+		}()
+		synctest.Wait() // The command waits.
+		shutdown, cancel := context.WithTimeout(ctx, 50*time.Millisecond)
+		defer cancel()
+		go c.server.Shutdown(shutdown)
+		select {
+		case <-conn.Done():
+		case <-ctx.Done():
+			t.Fatal("the connection did not end")
+		}
+		if err := <-failed; !errors.Is(err, apron.ErrClosed) {
+			t.Fatalf("waiting call: %v", err)
+		}
+		if err := conn.Err(); !errors.Is(err, apron.ErrClosed) {
+			t.Fatalf("err %v", err)
+		}
+		close(c.release)
+	})
 }
 
 // A call whose context is done returns, and leaves the connection open.
 func TestCallContext(t *testing.T) {
-	c := newChat(server.Config{})
-	conn := dial(t, c.serve(t), apron.AuthParams{Scheme: "guest"})
-	short, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
-	defer cancel()
-	if _, err := conn.Command(short, apron.CommandParams{Body: &apron.Body{Text: "/wait"}}); !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("call: %v", err)
-	}
-	close(c.release)
-	if _, err := conn.Post(timeout(t), text("still here")); err != nil {
-		t.Fatal(err)
-	}
+	synctest.Test(t, func(t *testing.T) {
+		c := newChat(server.Config{})
+		url, memory := serveInMemory(t, c.server)
+		conn := dial(t, url, apron.AuthParams{Scheme: "guest"}, memory)
+		short, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+		defer cancel()
+		if _, err := conn.Command(short, apron.CommandParams{Body: &apron.Body{Text: "/wait"}}); !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("call: %v", err)
+		}
+		close(c.release)
+		if _, err := conn.Post(timeout(t), text("still here")); err != nil {
+			t.Fatal(err)
+		}
+	})
 }
 
 // OnFrame may make calls and wait for them: their replies do not wait
@@ -400,82 +470,91 @@ func TestCallFromOnFrame(t *testing.T) {
 
 // An OnFrame that lets too many frames pile up ends the connection.
 func TestFellBehind(t *testing.T) {
-	ctx := timeout(t)
-	c := newChat(server.Config{})
-	stuck := make(chan struct{})
-	defer close(stuck)
-	conn := dial(t, c.serve(t), apron.AuthParams{Scheme: "guest"}, client.OnFrame(func(apron.Frame) { <-stuck }))
-	for i := 0; ; i++ {
-		if _, err := conn.Post(ctx, text("x")); err != nil {
-			if !errors.Is(err, apron.ErrClosed) || i < 1000 {
-				t.Fatalf("post %d: %v", i, err)
+	synctest.Test(t, func(t *testing.T) {
+		ctx := timeout(t)
+		c := newChat(server.Config{})
+		stuck := make(chan struct{})
+		defer close(stuck)
+		conn := dial(t, c.serve(t), apron.AuthParams{Scheme: "guest"}, client.OnFrame(func(apron.Frame) { <-stuck }))
+		for i := 0; ; i++ {
+			if _, err := conn.Post(ctx, text("x")); err != nil {
+				if !errors.Is(err, apron.ErrClosed) || i < 1000 {
+					t.Fatalf("post %d: %v", i, err)
+				}
+				break
 			}
-			break
 		}
-	}
-	if err := conn.Err(); !errors.Is(err, client.ErrFellBehind) || !errors.Is(err, apron.ErrClosed) {
-		t.Fatalf("err %v", err)
-	}
+		if err := conn.Err(); !errors.Is(err, client.ErrFellBehind) || !errors.Is(err, apron.ErrClosed) {
+			t.Fatalf("err %v", err)
+		}
+	})
 }
 
 // A Conn pings as the server frame asks, and the connection stays open.
 func TestPing(t *testing.T) {
-	t.Parallel()
-	c := newChat(server.Config{PingInterval: time.Second})
-	conn := dial(t, c.serve(t), apron.AuthParams{Scheme: "guest"})
-	if conn.Hello().Ping != 1 {
-		t.Fatalf("ping %d", conn.Hello().Ping)
-	}
-	select {
-	case <-conn.Done():
-		t.Fatalf("ended: %v", conn.Err())
-	case <-time.After(2500 * time.Millisecond):
-	}
+	synctest.Test(t, func(t *testing.T) {
+		c := newChat(server.Config{PingInterval: time.Second})
+		url, memory := serveInMemory(t, c.server)
+		conn := dial(t, url, apron.AuthParams{Scheme: "guest"}, memory)
+		if conn.Hello().Ping != 1 {
+			t.Fatalf("ping %d", conn.Hello().Ping)
+		}
+		select {
+		case <-conn.Done():
+			t.Fatalf("ended: %v", conn.Err())
+		case <-time.After(10 * time.Second):
+		}
+	})
 }
 
-// A server that stops answering pings is gone.
+// A server that stops answering pings is gone, once a ping has gone a
+// whole interval unanswered.
 func TestUnanswered(t *testing.T) {
-	t.Parallel()
-	pinged := make(chan struct{}, 8)
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		ws, err := websocket.Accept(w, r, nil)
-		if err != nil {
-			return
-		}
-		defer ws.CloseNow()
-		ctx := r.Context()
-		ws.Write(ctx, websocket.MessageText, []byte(`{"method":"server","params":{"apron":10,"auth":["guest"],"ping":1}}`))
-		for {
-			_, frame, err := ws.Read(ctx)
+	synctest.Test(t, func(t *testing.T) {
+		pinged := make(chan struct{}, 8)
+		url, memory := serveInMemory(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			ws, err := websocket.Accept(w, r, nil)
 			if err != nil {
 				return
 			}
-			var request struct {
-				ID     string `json:"id"`
-				Method string `json:"method"`
+			defer ws.CloseNow()
+			ctx := r.Context()
+			ws.Write(ctx, websocket.MessageText, []byte(`{"method":"server","params":{"apron":10,"auth":["guest"],"ping":1}}`))
+			for {
+				_, frame, err := ws.Read(ctx)
+				if err != nil {
+					return
+				}
+				var request struct {
+					ID     string `json:"id"`
+					Method string `json:"method"`
+				}
+				json.Unmarshal(frame, &request)
+				switch request.Method {
+				case "auth":
+					ws.Write(ctx, websocket.MessageText, []byte(`{"id":"`+request.ID+`","result":{"you":{"user_id":"x"}}}`))
+				case "ping":
+					pinged <- struct{}{}
+				}
 			}
-			json.Unmarshal(frame, &request)
-			switch request.Method {
-			case "auth":
-				ws.Write(ctx, websocket.MessageText, []byte(`{"id":"`+request.ID+`","result":{"you":{"user_id":"x"}}}`))
-			case "ping":
-				pinged <- struct{}{}
-			}
+		}))
+		conn := dial(t, url, apron.AuthParams{Scheme: "guest"}, memory)
+		dialed := time.Now()
+		select {
+		case <-conn.Done():
+		case <-time.After(5 * time.Second):
+			t.Fatal("the connection did not end")
 		}
-	}))
-	defer ts.Close()
-	conn := dial(t, "ws"+strings.TrimPrefix(ts.URL, "http"), apron.AuthParams{Scheme: "guest"})
-	select {
-	case <-conn.Done():
-	case <-time.After(5 * time.Second):
-		t.Fatal("the connection did not end")
-	}
-	if err := conn.Err(); !errors.Is(err, client.ErrUnanswered) {
-		t.Fatalf("err %v", err)
-	}
-	if len(pinged) == 0 {
-		t.Fatal("no ping")
-	}
+		if took := time.Since(dialed); took != 2*time.Second {
+			t.Errorf("ended after %v, want 2s: a ping at 1s, unanswered at 2s", took)
+		}
+		if err := conn.Err(); !errors.Is(err, client.ErrUnanswered) {
+			t.Fatalf("err %v", err)
+		}
+		if len(pinged) == 0 {
+			t.Fatal("no ping")
+		}
+	})
 }
 
 // A bot runs over the network on a Dialer of Dial.
