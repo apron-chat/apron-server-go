@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/apron-chat/apron-server-go/apron"
@@ -223,47 +224,50 @@ func TestLaterAuth(t *testing.T) {
 // A Local call waits for a reply answered later, and the next call on the
 // connection does not; a Handler answers later as a typed handler does.
 func TestLaterLocal(t *testing.T) {
-	b := newUpstream()
-	s := wired(b, server.Config{})
-	release := make(chan struct{})
-	s.Handle("ext:slow", server.Handler{Serve: func(ctx context.Context, c *server.Conn, r *server.Request, reply server.Reply[any]) error {
+	synctest.Test(t, func(t *testing.T) {
+		b := newUpstream()
+		s := wired(b, server.Config{})
+		release := make(chan struct{})
+		s.Handle("ext:slow", server.Handler{Serve: func(ctx context.Context, c *server.Conn, r *server.Request, reply server.Reply[any]) error {
+			go func() {
+				<-release
+				// The work answered later may call the connection again.
+				if _, err := c.Data().(*server.Local).Call(ctx, "command", map[string]any{"body": map[string]any{"text": "/now"}}); err != nil {
+					_ = reply.Fail(err)
+					return
+				}
+				_ = reply.Send(map[string]any{"raw": true})
+			}()
+			return reply.Later()
+		}})
+		l := local(t, s)
+		l.Conn().SetData(l)
+		done := make(chan string, 1)
 		go func() {
-			<-release
-			// The work answered later may call the connection again.
-			if _, err := c.Data().(*server.Local).Call(ctx, "command", map[string]any{"body": map[string]any{"text": "/now"}}); err != nil {
-				_ = reply.Fail(err)
-				return
+			result, err := call(t, l, "ext:slow", `{}`)
+			if err != nil {
+				result = err.Error()
 			}
-			_ = reply.Send(map[string]any{"raw": true})
+			done <- result
 		}()
-		return reply.Later()
-	}})
-	l := local(t, s)
-	l.Conn().SetData(l)
-	done := make(chan string, 1)
-	go func() {
-		result, err := call(t, l, "ext:slow", `{}`)
-		if err != nil {
-			result = err.Error()
+		// Once all is still, the call waits for its reply.
+		synctest.Wait()
+		if result, err := call(t, l, "command", `{"body":{"text":"/now"}}`); err != nil || result != `{}` {
+			t.Fatalf("a call behind one answered later: %s %v", result, err)
 		}
-		done <- result
-	}()
-	time.Sleep(10 * time.Millisecond)
-	if result, err := call(t, l, "command", `{"body":{"text":"/now"}}`); err != nil || result != `{}` {
-		t.Fatalf("a call behind one answered later: %s %v", result, err)
-	}
-	select {
-	case result := <-done:
-		t.Fatalf("Call returned %s before the reply", result)
-	default:
-	}
-	close(release)
-	select {
-	case result := <-done:
-		if result != `{"raw":true}` {
-			t.Fatalf("Call: %s", result)
+		select {
+		case result := <-done:
+			t.Fatalf("Call returned %s before the reply", result)
+		default:
 		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("Call did not return the reply answered later")
-	}
+		close(release)
+		select {
+		case result := <-done:
+			if result != `{"raw":true}` {
+				t.Fatalf("Call: %s", result)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("Call did not return the reply answered later")
+		}
+	})
 }

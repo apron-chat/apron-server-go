@@ -99,8 +99,8 @@ type Local struct {
 }
 
 // localOpenStall is how long Server.Local waits for OnConnect and Hello
-// before it logs that it does. Tests shorten it.
-var localOpenStall = 10 * time.Second
+// before it logs that it does.
+const localOpenStall = 10 * time.Second
 
 type localReply struct {
 	result jsontext.Value

@@ -10,6 +10,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/apron-chat/apron-server-go/apron"
@@ -184,66 +185,65 @@ func TestAnnounce(t *testing.T) {
 }
 
 func TestLocal(t *testing.T) {
-	b := &backend{}
-	s := wired(b, server.Config{})
-	var once sync.Once
-	s.Handle("whoami", server.Handler{Serve: func(ctx context.Context, c *server.Conn, r *server.Request, reply server.Reply[any]) error {
-		c.NotifyRaw("hello", map[string]any{})
-		var err error
-		once.Do(func() {
-			// Calling back into the same connection would wait for itself.
-			_, err = c.Data().(*server.Local).Call(ctx, "whoami", nil)
-		})
-		if !errors.Is(err, server.ErrReentrant) && err != nil {
-			t.Errorf("reentrant call: %v", err)
+	synctest.Test(t, func(t *testing.T) {
+		b := &backend{}
+		s := wired(b, server.Config{})
+		var once sync.Once
+		s.Handle("whoami", server.Handler{Serve: func(ctx context.Context, c *server.Conn, r *server.Request, reply server.Reply[any]) error {
+			c.NotifyRaw("hello", map[string]any{})
+			var err error
+			once.Do(func() {
+				// Calling back into the same connection would wait for itself.
+				_, err = c.Data().(*server.Local).Call(ctx, "whoami", nil)
+			})
+			if !errors.Is(err, server.ErrReentrant) && err != nil {
+				t.Errorf("reentrant call: %v", err)
+			}
+			return reply.Send(map[string]any{"user_id": c.UserID()})
+		}})
+		frames := make(chan string, 8)
+		l, err := s.Local(server.LocalOptions{User: apron.User{UserID: "bot"}, OnFrame: func(f apron.Frame) { frames <- string(f) }})
+		if err != nil {
+			t.Fatal(err)
 		}
-		return reply.Send(map[string]any{"user_id": c.UserID()})
-	}})
-	frames := make(chan string, 8)
-	l, err := s.Local(server.LocalOptions{User: apron.User{UserID: "bot"}, OnFrame: func(f apron.Frame) { frames <- string(f) }})
-	if err != nil {
-		t.Fatal(err)
-	}
-	l.Conn().SetData(l)
-	result, err := l.Call(context.Background(), "whoami", nil)
-	if err != nil || !strings.Contains(string(result), `"bot"`) {
-		t.Fatalf("Call: %s %v", result, err)
-	}
-	if f := <-frames; !strings.HasPrefix(f, `{"method":"server"`) {
-		t.Fatalf("first frame: %s, want the server frame", f)
-	}
-	if f := <-frames; !strings.Contains(f, `"hello"`) {
-		t.Fatalf("OnFrame: %s", f)
-	}
-	_, err = l.Call(context.Background(), "nope", nil)
-	if e, ok := errors.AsType[*apron.Error](err); !ok || e.Code != apron.CodeUnsupported {
-		t.Fatalf("unknown method: %v", err)
-	}
-	if _, err := l.Call(context.Background(), "message", map[string]any{"body": map[string]any{"text": "hi"}}); err != nil || b.messages.Load() != 1 {
-		t.Fatalf("message: %v", err)
-	}
-	if len(s.Conns()) != 1 {
-		t.Fatalf("%d connections", len(s.Conns()))
-	}
-	l.Close()
-	select {
-	case <-l.Done():
-	case <-time.After(5 * time.Second):
-		t.Fatal("Local did not close")
-	}
-	if _, err := l.Call(context.Background(), "whoami", nil); !errors.Is(err, apron.ErrClosed) {
-		t.Fatalf("after Close: %v", err)
-	}
-	deadline := time.Now().Add(5 * time.Second)
-	for len(s.Conns()) != 0 || len(b.disconnectedConns()) != 1 {
-		if time.Now().After(deadline) {
+		l.Conn().SetData(l)
+		result, err := l.Call(context.Background(), "whoami", nil)
+		if err != nil || !strings.Contains(string(result), `"bot"`) {
+			t.Fatalf("Call: %s %v", result, err)
+		}
+		if f := <-frames; !strings.HasPrefix(f, `{"method":"server"`) {
+			t.Fatalf("first frame: %s, want the server frame", f)
+		}
+		if f := <-frames; !strings.Contains(f, `"hello"`) {
+			t.Fatalf("OnFrame: %s", f)
+		}
+		_, err = l.Call(context.Background(), "nope", nil)
+		if e, ok := errors.AsType[*apron.Error](err); !ok || e.Code != apron.CodeUnsupported {
+			t.Fatalf("unknown method: %v", err)
+		}
+		if _, err := l.Call(context.Background(), "message", map[string]any{"body": map[string]any{"text": "hi"}}); err != nil || b.messages.Load() != 1 {
+			t.Fatalf("message: %v", err)
+		}
+		if len(s.Conns()) != 1 {
+			t.Fatalf("%d connections", len(s.Conns()))
+		}
+		l.Close()
+		select {
+		case <-l.Done():
+		case <-time.After(5 * time.Second):
+			t.Fatal("Local did not close")
+		}
+		if _, err := l.Call(context.Background(), "whoami", nil); !errors.Is(err, apron.ErrClosed) {
+			t.Fatalf("after Close: %v", err)
+		}
+		synctest.Wait()
+		if len(s.Conns()) != 0 || len(b.disconnectedConns()) != 1 {
 			t.Fatal("the Local connection was not forgotten")
 		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	if err := s.Shutdown(context.Background()); err != nil {
-		t.Fatal(err)
-	}
+		if err := s.Shutdown(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	})
 }
 
 func TestLocalFellBehind(t *testing.T) {
@@ -359,32 +359,31 @@ func TestConnLocal(t *testing.T) {
 // *Error or any other error, so that the backend undoes what OnConnect did
 // in one place.
 func TestDisconnectAfterRefusal(t *testing.T) {
-	for _, refusal := range []error{apron.Denied("No"), errors.New("no")} {
-		b := &backend{}
-		var config server.Config
-		config.OnConnect = func(_ context.Context, c *server.Conn) error {
-			c.SetData("half done")
-			return refusal
-		}
-		s := wired(b, config)
-		client := aprontest.Connect(t, s)
-		for {
-			// The server frame and the error, for an *Error.
-			if _, err := client.Next(wait(t)); err != nil {
-				if !errors.Is(err, apron.ErrClosed) {
-					t.Fatalf("refused with %v: %v", refusal, err)
+	synctest.Test(t, func(t *testing.T) {
+		for _, refusal := range []error{apron.Denied("No"), errors.New("no")} {
+			b := &backend{}
+			var config server.Config
+			config.OnConnect = func(_ context.Context, c *server.Conn) error {
+				c.SetData("half done")
+				return refusal
+			}
+			s := wired(b, config)
+			client := aprontest.Connect(t, s)
+			for {
+				// The server frame and the error, for an *Error.
+				if _, err := client.Next(wait(t)); err != nil {
+					if !errors.Is(err, apron.ErrClosed) {
+						t.Fatalf("refused with %v: %v", refusal, err)
+					}
+					break
 				}
-				break
+			}
+			synctest.Wait()
+			if d := b.disconnectedConns(); len(d) != 1 || d[0].Data() != "half done" {
+				t.Fatalf("refused with %v: disconnected %v", refusal, d)
 			}
 		}
-		deadline := time.Now().Add(5 * time.Second)
-		for len(b.disconnectedConns()) == 0 && time.Now().Before(deadline) {
-			time.Sleep(time.Millisecond)
-		}
-		if d := b.disconnectedConns(); len(d) != 1 || d[0].Data() != "half done" {
-			t.Fatalf("refused with %v: disconnected %v", refusal, d)
-		}
-	}
+	})
 }
 
 // OnConnect may make a Local connection another user than its caller

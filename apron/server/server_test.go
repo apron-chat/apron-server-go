@@ -14,6 +14,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/coder/websocket"
@@ -282,35 +283,38 @@ func TestAuthSchemes(t *testing.T) {
 // TestAuthBarrier pipelines a request behind auth: it is processed after
 // the sign-in, and the notification Auth queued comes after its result.
 func TestAuthBarrier(t *testing.T) {
-	b := &backend{authDelay: 50 * time.Millisecond}
-	s := wired(b, server.Config{})
-	c := aprontest.Connect(t, s)
-	send(t, c, `{"method":"auth","id":"a","params":{"scheme":"guest","name":"Ada"}}`)
-	send(t, c, `{"method":"message","id":"m","params":{"body":{"text":"hi"}}}`)
-	// A frame broadcast while Auth runs is held too.
-	time.Sleep(10 * time.Millisecond)
-	conn := onlyConn(t, s)
-	frame, err := server.EncodeRaw("status", map[string]any{"x": 1})
-	if err != nil {
-		t.Fatal(err)
-	}
-	conn.Send(frame)
+	synctest.Test(t, func(t *testing.T) {
+		b := &backend{authDelay: 50 * time.Millisecond}
+		s := wired(b, server.Config{})
+		c := aprontest.Connect(t, s)
+		send(t, c, `{"method":"auth","id":"a","params":{"scheme":"guest","name":"Ada"}}`)
+		send(t, c, `{"method":"message","id":"m","params":{"body":{"text":"hi"}}}`)
+		// A frame broadcast while Auth runs is held too: once all is still,
+		// Auth is in its delay.
+		synctest.Wait()
+		conn := onlyConn(t, s)
+		frame, err := server.EncodeRaw("status", map[string]any{"x": 1})
+		if err != nil {
+			t.Fatal(err)
+		}
+		conn.Send(frame)
 
-	if f := next(t, c); f.ID != "a" || fields(f)["you"] == nil {
-		t.Fatalf("first reply = %s, want the auth result", f.Raw)
-	}
-	if f := next(t, c); f.Method != "message" {
-		t.Fatalf("got %s, want the held welcome notice", f.Raw)
-	}
-	if f := next(t, c); f.Method != "status" {
-		t.Fatalf("got %s, want the held status", f.Raw)
-	}
-	if f := next(t, c); f.ID != "m" || fields(f)["message_id"] == nil {
-		t.Fatalf("got %s, want the message result", f.Raw)
-	}
-	if conn.UserID() != "guest_1" || conn.User().Name != "Ada" {
-		t.Fatalf("conn user = %v", conn.User())
-	}
+		if f := next(t, c); f.ID != "a" || fields(f)["you"] == nil {
+			t.Fatalf("first reply = %s, want the auth result", f.Raw)
+		}
+		if f := next(t, c); f.Method != "message" {
+			t.Fatalf("got %s, want the held welcome notice", f.Raw)
+		}
+		if f := next(t, c); f.Method != "status" {
+			t.Fatalf("got %s, want the held status", f.Raw)
+		}
+		if f := next(t, c); f.ID != "m" || fields(f)["message_id"] == nil {
+			t.Fatalf("got %s, want the message result", f.Raw)
+		}
+		if conn.UserID() != "guest_1" || conn.User().Name != "Ada" {
+			t.Fatalf("conn user = %v", conn.User())
+		}
+	})
 }
 
 // refusing refuses a sign-in as "slow", once the test lets it.
@@ -584,43 +588,39 @@ func TestEditor(t *testing.T) {
 }
 
 func TestSlowClientDisconnected(t *testing.T) {
-	b := &backend{}
-	s := wired(b, server.Config{OutgoingQueue: 2})
-	// A client that reads nothing: the server frame is being written, and
-	// the frames after it wait.
-	serverEnd, client := net.Pipe()
-	defer client.Close()
-	go s.ServeTransport(context.Background(), server.LineTransport(serverEnd, 1<<16), nil, nil)
-	deadline := time.Now().Add(5 * time.Second)
-	for len(s.Conns()) == 0 {
-		if time.Now().After(deadline) {
-			t.Fatal("the connection did not open")
+	synctest.Test(t, func(t *testing.T) {
+		b := &backend{}
+		s := wired(b, server.Config{OutgoingQueue: 2})
+		// A client that reads nothing: the server frame is being written, and
+		// the frames after it wait.
+		serverEnd, client := net.Pipe()
+		defer client.Close()
+		go s.ServeTransport(context.Background(), server.LineTransport(serverEnd, 1<<16), nil, nil)
+		synctest.Wait()
+		conn := onlyConn(t, s)
+		frame, _ := server.EncodeRaw("status", map[string]any{})
+		sent := 0
+		for range 10 {
+			if !conn.Send(frame) {
+				break
+			}
+			sent++
 		}
-		time.Sleep(time.Millisecond)
-	}
-	conn := onlyConn(t, s)
-	frame, _ := server.EncodeRaw("status", map[string]any{})
-	sent := 0
-	for range 10 {
-		if !conn.Send(frame) {
-			break
+		if sent >= 10 {
+			t.Fatal("every frame was queued")
 		}
-		sent++
-	}
-	if sent >= 10 {
-		t.Fatal("every frame was queued")
-	}
-	select {
-	case <-conn.Done():
-	case <-time.After(5 * time.Second):
-		t.Fatal("the slow connection stayed open")
-	}
-	if conn.Context().Err() == nil {
-		t.Fatal("the connection's context was not canceled")
-	}
-	if conn.Send(frame) {
-		t.Fatal("Send on a closed connection reported true")
-	}
+		select {
+		case <-conn.Done():
+		case <-time.After(5 * time.Second):
+			t.Fatal("the slow connection stayed open")
+		}
+		if conn.Context().Err() == nil {
+			t.Fatal("the connection's context was not canceled")
+		}
+		if conn.Send(frame) {
+			t.Fatal("Send on a closed connection reported true")
+		}
+	})
 }
 
 func TestCloseWithError(t *testing.T) {

@@ -10,6 +10,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/apron-chat/apron-server-go/apron"
@@ -98,34 +99,31 @@ func TestHandlerPanics(t *testing.T) {
 
 // An error returned after the reply is logged, at debug level for an *Error.
 func TestErrorAfterReply(t *testing.T) {
-	var logged bytes.Buffer
-	var mu sync.Mutex
-	s := wired(&backend{}, server.Config{Logger: slog.New(slog.NewTextHandler(lockedWriter{&mu, &logged}, &slog.HandlerOptions{Level: slog.LevelDebug}))})
-	s.Handle("late", server.Handler{Serve: func(_ context.Context, _ *server.Conn, r *server.Request, reply server.Reply[any]) error {
-		_ = reply.Send(nil)
-		return apron.Denied("too late")
-	}})
-	c := aprontest.Connect(t, s)
-	signIn(t, c)
-	if _, err := c.Call(wait(t), "late", nil); err != nil {
-		t.Fatal(err)
-	}
-	// The client has the reply before the handler returns its error, which
-	// is logged once it does.
-	logs := func() string {
-		mu.Lock()
-		defer mu.Unlock()
-		return logged.String()
-	}
-	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(time.Millisecond) {
-		out := logs()
-		if strings.Contains(out, "level=DEBUG") && strings.Contains(out, "too late") {
-			break
+	synctest.Test(t, func(t *testing.T) {
+		var logged bytes.Buffer
+		var mu sync.Mutex
+		s := wired(&backend{}, server.Config{Logger: slog.New(slog.NewTextHandler(lockedWriter{&mu, &logged}, &slog.HandlerOptions{Level: slog.LevelDebug}))})
+		s.Handle("late", server.Handler{Serve: func(_ context.Context, _ *server.Conn, r *server.Request, reply server.Reply[any]) error {
+			_ = reply.Send(nil)
+			return apron.Denied("too late")
+		}})
+		c := aprontest.Connect(t, s)
+		signIn(t, c)
+		if _, err := c.Call(wait(t), "late", nil); err != nil {
+			t.Fatal(err)
 		}
-		if time.Now().After(deadline) {
+		// The client has the reply before the handler returns its error, which
+		// is logged once it does.
+		logs := func() string {
+			mu.Lock()
+			defer mu.Unlock()
+			return logged.String()
+		}
+		synctest.Wait()
+		if out := logs(); !strings.Contains(out, "level=DEBUG") || !strings.Contains(out, "too late") {
 			t.Fatalf("log: %s", out)
 		}
-	}
+	})
 }
 
 type lockedWriter struct {
@@ -151,35 +149,37 @@ func (*oneUser) Auth(_ context.Context, c *server.Conn, _ apron.AuthParams, repl
 // A duplicate waiting for its original on another connection stops waiting
 // when its own connection ends.
 func TestDuplicateWaitEndsWithConnection(t *testing.T) {
-	b := &oneUser{}
-	s := wired(b, server.Config{})
-	started, release := make(chan struct{}), make(chan struct{})
-	defer close(release)
-	s.Handle("slow", server.Handler{Serve: func(context.Context, *server.Conn, *server.Request, server.Reply[any]) error {
-		close(started)
-		<-release
-		return nil
-	}})
-	c1, c2 := aprontest.Connect(t, s), aprontest.Connect(t, s)
-	signIn(t, c1)
-	signIn(t, c2)
-	send(t, c1, `{"method":"slow","id":"x"}`)
-	<-started
-	send(t, c2, `{"method":"slow","id":"x"}`)
-	time.Sleep(20 * time.Millisecond) // Let it start waiting.
-	closed := make(chan struct{})
-	go func() {
-		defer close(closed)
-		_ = c2.Close()
-	}()
-	select {
-	case <-closed:
-	case <-time.After(5 * time.Second):
-		t.Fatal("the duplicate's connection did not end while its original ran")
-	}
-	if n := len(b.disconnectedConns()); n != 1 {
-		t.Fatalf("%d connections ended, want the duplicate's", n)
-	}
+	synctest.Test(t, func(t *testing.T) {
+		b := &oneUser{}
+		s := wired(b, server.Config{})
+		started, release := make(chan struct{}), make(chan struct{})
+		defer close(release)
+		s.Handle("slow", server.Handler{Serve: func(context.Context, *server.Conn, *server.Request, server.Reply[any]) error {
+			close(started)
+			<-release
+			return nil
+		}})
+		c1, c2 := aprontest.Connect(t, s), aprontest.Connect(t, s)
+		signIn(t, c1)
+		signIn(t, c2)
+		send(t, c1, `{"method":"slow","id":"x"}`)
+		<-started
+		send(t, c2, `{"method":"slow","id":"x"}`)
+		synctest.Wait() // Let it start waiting.
+		closed := make(chan struct{})
+		go func() {
+			defer close(closed)
+			_ = c2.Close()
+		}()
+		select {
+		case <-closed:
+		case <-time.After(5 * time.Second):
+			t.Fatal("the duplicate's connection did not end while its original ran")
+		}
+		if n := len(b.disconnectedConns()); n != 1 {
+			t.Fatalf("%d connections ended, want the duplicate's", n)
+		}
+	})
 }
 
 // Local notifications are handled, and a Call of a notification-only method
