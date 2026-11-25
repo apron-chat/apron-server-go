@@ -537,10 +537,16 @@ func (c *Conn) write(ctx context.Context, payload []byte) error {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), writeTimeout)
 	defer cancel()
 	if err := c.ws.Write(ctx, websocket.MessageText, payload); err != nil {
-		if ended := c.Err(); ended != nil {
-			return ended
+		// A write that fails ends the connection, whose reader then ends
+		// too and says why, such as with the error the server sent before
+		// it closed (one at capacity, §1.1): that tells more than the
+		// write, which may fail first.
+		select {
+		case <-c.done:
+			return c.Err()
+		case <-time.After(writeTimeout):
+			return err
 		}
-		return err
 	}
 	return nil
 }
