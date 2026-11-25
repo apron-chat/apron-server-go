@@ -103,7 +103,10 @@ asks the program for every answer, as
 
 [`examples`](examples) has complete servers: GitHub single sign-on,
 moderation, an AI assistant, an ops room with deploys, an IRC bridge, and
-search with a public archive. See the
+search with a public archive. A program that talks to any Apron server,
+such as a script, a CLI, or a bot on a server it does not run, uses package
+[`apron/client`](apron/client), as the client examples do: a notifier for
+CI, a tail of a room, and a bot over the network. See the
 [package documentation](https://pkg.go.dev/github.com/apron-chat/apron-server-go/aprond)
 and [SERVER.md](SERVER.md#extensions).
 

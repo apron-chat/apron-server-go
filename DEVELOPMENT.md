@@ -11,8 +11,8 @@ forgets it on restart); see [SERVER.md](SERVER.md#storage).
   `aprond` is the server as a Go package, with its extension API; `store`
   its storage backends; `aproncmd` the command as a library, which
   `cmd/aprond` runs; `aprond/aprondtest` tests extensions as clients use
-  them, from any module; and `examples` servers built with extensions, each
-  with a test that uses `aprondtest`. The protocol is a Go module of its
+  them, from any module; and `examples` servers built with extensions, and
+  clients, each with a test that uses `aprondtest`. The protocol is a Go module of its
   own, `github.com/apron-chat/apron-server-go/apron` in `apron/`, which
   depends only on the standard library and the WebSocket package, so that
   other programs, clients and servers alike, can embed it cheaply, without
@@ -24,13 +24,16 @@ forgets it on restart); see [SERVER.md](SERVER.md#storage).
   and so is any server built on it, such as a gateway in front of another
   chat system, or `examples/minimal`. `apron/server/commands` gives any
   backend the command capability (§4.1); `apron/bot` runs a bot on any
-  connection it is given, such as an in-process one; `apron/aprontest`
+  connection it is given, such as an in-process one; `apron/client` is a
+  network client of any Apron server, on which a bot runs too, as
+  `examples/notify`, `examples/tail`, and `examples/remote-bot` show;
+  `apron/aprontest`
   tests a backend, a handler at a time or a whole server as a client sees
   it, as `examples/minimal`'s test does; and `apron/conformance` runs the
   protocol's core conformance checks, a port of `conform.py`, as Go tests
   against any backend in process, as `aprond`'s and `examples/minimal`'s
   tests do. `apron/internal/core` is the connection runtime and request
-  parsing. Packages `apron` and `apron/bot` import nothing of
+  parsing. Packages `apron`, `apron/bot`, and `apron/client` import nothing of
   `apron/server`, which a test of the module (`TestBoundary`) checks, so
   that a client imports them without the engine. `go.work` puts both
   modules in one workspace, so that a change to `apron` is built and
