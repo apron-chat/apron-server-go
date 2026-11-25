@@ -6,6 +6,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 
 	"github.com/apron-chat/apron-server-go/apron"
 	"github.com/apron-chat/apron-server-go/apron/aprontest"
@@ -39,79 +40,87 @@ func retry(t *testing.T, c *aprontest.Client, id string) int {
 // guest, keeps no memory, which it otherwise does until other users' push
 // it out, as it may come back to retry (§1.2).
 func TestDedupForgetUser(t *testing.T) {
-	s := wired(&backend{}, server.Config{})
-	calls := padded(s, 10<<10)
-	c := aprontest.Connect(t, s)
-	userID := signIn(t, c)
-	for range 2 {
-		if retry(t, c, "k") != 1 {
-			t.Fatal("a retry ran again")
+	synctest.Test(t, func(t *testing.T) {
+		s := wired(&backend{}, server.Config{})
+		calls := padded(s, 10<<10)
+		c := aprontest.Connect(t, s)
+		userID := signIn(t, c)
+		for range 2 {
+			if retry(t, c, "k") != 1 {
+				t.Fatal("a retry ran again")
+			}
 		}
-	}
-	for range 20 {
-		if _, err := c.Call(wait(t), "big", nil); err != nil {
-			t.Fatal(err)
+		for range 20 {
+			if _, err := c.Call(wait(t), "big", nil); err != nil {
+				t.Fatal(err)
+			}
 		}
-	}
-	// Kept across the connection's end, for a retry on the next.
-	_ = c.Close()
-	expectClosed(t, c)
-	if users, requests, bytes := aprontest.DedupUsage(s); users != 1 || requests != 21 || bytes < 21*10<<10 {
-		t.Fatalf("%d users, %d requests, %d bytes kept; want 1, 21, and their results", users, requests, bytes)
-	}
-	s.ForgetUser(userID)
-	if users, requests, bytes := aprontest.DedupUsage(s); users != 0 || requests != 0 || bytes != 0 {
-		t.Fatalf("%d users, %d requests, %d bytes kept once the user is forgotten", users, requests, bytes)
-	}
-	if n := calls.Load(); n != 21 {
-		t.Fatalf("%d calls, want 21", n)
-	}
+		// Kept across the connection's end, for a retry on the next.
+		_ = c.Close()
+		expectClosed(t, c)
+		// A request is finished, and what it keeps counted, after its
+		// reply is sent: once all is still, every one is.
+		synctest.Wait()
+		if users, requests, bytes := aprontest.DedupUsage(s); users != 1 || requests != 21 || bytes < 21*10<<10 {
+			t.Fatalf("%d users, %d requests, %d bytes kept; want 1, 21, and their results", users, requests, bytes)
+		}
+		s.ForgetUser(userID)
+		if users, requests, bytes := aprontest.DedupUsage(s); users != 0 || requests != 0 || bytes != 0 {
+			t.Fatalf("%d users, %d requests, %d bytes kept once the user is forgotten", users, requests, bytes)
+		}
+		if n := calls.Load(); n != 21 {
+			t.Fatalf("%d calls, want 21", n)
+		}
+	})
 }
 
 // What is kept is bounded in bytes, for each user and for all, the oldest
 // of the least recently active users forgotten first; a result too large
 // to fit is not kept.
 func TestDedupBytes(t *testing.T) {
-	const size = 10 << 10
-	s := wired(&backend{}, server.Config{DedupBytes: 100 << 10, DedupTotalBytes: 250 << 10})
-	calls := padded(s, size)
-	conns := make([]*aprontest.Client, 4)
-	for i := range conns {
-		conns[i] = aprontest.Connect(t, s)
-		signIn(t, conns[i])
-		for j := range 30 {
-			retry(t, conns[i], fmt.Sprint(j))
-			users, _, bytes := aprontest.DedupUsage(s)
-			if bytes > 250<<10 {
-				t.Fatalf("%d bytes kept, over DedupTotalBytes", bytes)
-			}
-			if users == i+1 && bytes > (i+1)*100<<10 {
-				t.Fatalf("%d bytes kept for %d users, over DedupBytes each", bytes, users)
+	synctest.Test(t, func(t *testing.T) {
+		const size = 10 << 10
+		s := wired(&backend{}, server.Config{DedupBytes: 100 << 10, DedupTotalBytes: 250 << 10})
+		calls := padded(s, size)
+		conns := make([]*aprontest.Client, 4)
+		for i := range conns {
+			conns[i] = aprontest.Connect(t, s)
+			signIn(t, conns[i])
+			for j := range 30 {
+				retry(t, conns[i], fmt.Sprint(j))
+				users, _, bytes := aprontest.DedupUsage(s)
+				if bytes > 250<<10 {
+					t.Fatalf("%d bytes kept, over DedupTotalBytes", bytes)
+				}
+				if users == i+1 && bytes > (i+1)*100<<10 {
+					t.Fatalf("%d bytes kept for %d users, over DedupBytes each", bytes, users)
+				}
 			}
 		}
-	}
-	n := int(calls.Load())
-	last := conns[len(conns)-1]
-	if retry(t, last, "29") != n {
-		t.Fatal("the latest request of the latest user was not kept")
-	}
-	if retry(t, last, "0") != n+1 {
-		t.Fatal("the oldest request of a user over DedupBytes was kept")
-	}
-	if retry(t, conns[0], "29") != n+2 {
-		t.Fatal("the least recently active user's request was kept over DedupTotalBytes")
-	}
+		n := int(calls.Load())
+		last := conns[len(conns)-1]
+		if retry(t, last, "29") != n {
+			t.Fatal("the latest request of the latest user was not kept")
+		}
+		if retry(t, last, "0") != n+1 {
+			t.Fatal("the oldest request of a user over DedupBytes was kept")
+		}
+		if retry(t, conns[0], "29") != n+2 {
+			t.Fatal("the least recently active user's request was kept over DedupTotalBytes")
+		}
 
-	huge := wired(&backend{}, server.Config{DedupBytes: 4 << 10})
-	padded(huge, 8<<10)
-	c := aprontest.Connect(t, huge)
-	signIn(t, c)
-	if retry(t, c, "h") != 1 || retry(t, c, "h") != 2 {
-		t.Fatal("a result larger than DedupBytes was kept")
-	}
-	if _, requests, bytes := aprontest.DedupUsage(huge); requests != 0 || bytes != 0 {
-		t.Fatalf("%d requests, %d bytes kept; want none", requests, bytes)
-	}
+		huge := wired(&backend{}, server.Config{DedupBytes: 4 << 10})
+		padded(huge, 8<<10)
+		c := aprontest.Connect(t, huge)
+		signIn(t, c)
+		if retry(t, c, "h") != 1 || retry(t, c, "h") != 2 {
+			t.Fatal("a result larger than DedupBytes was kept")
+		}
+		synctest.Wait() // The result too large to keep is forgotten after its reply.
+		if _, requests, bytes := aprontest.DedupUsage(huge); requests != 0 || bytes != 0 {
+			t.Fatalf("%d requests, %d bytes kept; want none", requests, bytes)
+		}
+	})
 }
 
 // scoped signs every connection in as one user, in the deduplication scope
