@@ -17,6 +17,7 @@ import (
 	"github.com/coder/websocket"
 
 	"github.com/apron-chat/apron-server-go/apron"
+	"github.com/apron-chat/apron-server-go/apron/server"
 )
 
 // Frame is a frame from the server: a reply, which has an id, a
@@ -84,14 +85,14 @@ type clientConn interface {
 // OnConnect, the server frame, auth, and all, but for an HTTP request,
 // which the connection has none of. The connection closes as the test ends
 // (t.Cleanup).
-func Connect(t testing.TB, s *apron.Server) *Client {
+func Connect(t testing.TB, s *server.Server) *Client {
 	t.Helper()
-	server, client := net.Pipe()
+	serverEnd, client := net.Pipe()
 	limit := s.ReadLimit()
 	served := make(chan struct{})
 	go func() {
 		defer close(served)
-		s.ServeTransport(context.Background(), apron.LineTransport(server, int(limit)), nil, nil)
+		s.ServeTransport(context.Background(), server.LineTransport(serverEnd, int(limit)), nil, nil)
 	}()
 	c := start(&lineConn{conn: client, lines: bufio.NewReader(client)}, served)
 	t.Cleanup(func() { _ = c.Close() })
@@ -106,7 +107,7 @@ const signInWait = 10 * time.Second
 // Client and the result's you, and fails the test unless the result signs
 // the connection in within ten seconds. The frames sent after the result,
 // such as a welcome notice, stay for Next and Expect.
-func SignIn(t testing.TB, s *apron.Server, params any) (*Client, apron.CurrentUser) {
+func SignIn(t testing.TB, s *server.Server, params any) (*Client, apron.CurrentUser) {
 	t.Helper()
 	c := Connect(t, s)
 	ctx, cancel := context.WithTimeout(t.Context(), signInWait)
@@ -152,7 +153,7 @@ func (c *Client) readAll() {
 		payload, err := c.conn.read(context.Background())
 		c.mu.Lock()
 		if err != nil {
-			c.err = fmt.Errorf("%w: %v", apron.ErrClosed, err)
+			c.err = fmt.Errorf("%w: %v", server.ErrClosed, err)
 		} else {
 			c.frames = append(c.frames, parseFrame(payload))
 		}

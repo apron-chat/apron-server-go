@@ -14,13 +14,14 @@ import (
 
 	"github.com/apron-chat/apron-server-go/apron"
 	"github.com/apron-chat/apron-server-go/apron/aprontest"
+	"github.com/apron-chat/apron-server-go/apron/server"
 )
 
 // chat is a test backend: guests, one room whose messages everyone gets,
 // history, and typing.
 type chat struct {
-	server *apron.Server
-	clock  apron.Clock
+	server *server.Server
+	clock  server.Clock
 
 	mu      sync.Mutex
 	guests  int
@@ -32,22 +33,22 @@ type chat struct {
 
 func newChat() *chat {
 	c := &chat{}
-	c.server = apron.NewServer(c, c.config(apron.Config{}))
+	c.server = server.New(c, c.config(server.Config{}))
 	return c
 }
 
 // config is more with the chat's handlers and hooks.
-func (c *chat) config(more apron.Config) apron.Config {
+func (c *chat) config(more server.Config) server.Config {
 	more.Messages, more.History, more.Activity = c, c, c
-	more.OnDisconnect = func(*apron.Conn) { c.disconnected.Add(1) }
+	more.OnDisconnect = func(*server.Conn) { c.disconnected.Add(1) }
 	return more
 }
 
-func (*chat) Hello(context.Context, *apron.Conn) apron.ServerInfo {
+func (*chat) Hello(context.Context, *server.Conn) apron.ServerInfo {
 	return apron.ServerInfo{Auth: []string{"guest"}, Title: "Test"}
 }
 
-func (c *chat) Auth(_ context.Context, _ *apron.Conn, p apron.AuthParams, reply apron.Reply[apron.AuthResult]) error {
+func (c *chat) Auth(_ context.Context, _ *server.Conn, p apron.AuthParams, reply server.Reply[apron.AuthResult]) error {
 	if p.Name == "refuse" {
 		return apron.Denied("Not you")
 	}
@@ -61,7 +62,7 @@ func (c *chat) Auth(_ context.Context, _ *apron.Conn, p apron.AuthParams, reply 
 	return reply.Send(apron.AuthResult{You: &apron.CurrentUser{User: apron.User{UserID: fmt.Sprintf("guest_%d", c.guests)}}}, welcome)
 }
 
-func (c *chat) Message(_ context.Context, conn *apron.Conn, p apron.MessageParams, reply apron.Reply[apron.MessageResult]) error {
+func (c *chat) Message(_ context.Context, conn *server.Conn, p apron.MessageParams, reply server.Reply[apron.MessageResult]) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	id := c.clock.Next()
@@ -75,17 +76,17 @@ func (c *chat) Message(_ context.Context, conn *apron.Conn, p apron.MessageParam
 	return reply.Send(apron.MessageResult{MessageID: id})
 }
 
-func (c *chat) History(_ context.Context, _ *apron.Conn, p apron.HistoryParams, reply apron.Reply[apron.HistoryResult]) error {
+func (c *chat) History(_ context.Context, _ *server.Conn, p apron.HistoryParams, reply server.Reply[apron.HistoryResult]) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	log := apron.Log{Records: c.records, Latest: c.clock.Last()}
+	log := server.Log{Records: c.records, Latest: c.clock.Last()}
 	if len(c.records) > 0 {
 		log.Lower = c.records[0].LogID
 	}
-	return reply.Send(apron.Page(log, p, 50))
+	return reply.Send(server.Page(log, p, 50))
 }
 
-func (c *chat) Activity(_ context.Context, _ *apron.Conn, p apron.ActivityParams) {
+func (c *chat) Activity(_ context.Context, _ *server.Conn, p apron.ActivityParams) {
 	if p.Typing != nil {
 		c.typing.Add(1)
 	}
@@ -129,9 +130,9 @@ func TestNewReply(t *testing.T) {
 // A Handler gets a request with params, and its reply and the frames after
 // it are recorded.
 func TestNewRequest(t *testing.T) {
-	h := apron.Handler{Serve: func(_ context.Context, _ *apron.Conn, r *apron.Request, reply apron.Reply[any]) error {
+	h := server.Handler{Serve: func(_ context.Context, _ *server.Conn, r *server.Request, reply server.Reply[any]) error {
 		d := r.Decoder()
-		text := d.String("text", apron.Required)
+		text := d.String("text", server.Required)
 		if err := d.Err(); err != nil {
 			return err
 		}
@@ -216,7 +217,7 @@ func TestConnect(t *testing.T) {
 	if n := c.disconnected.Load(); n != 1 {
 		t.Fatalf("%d disconnected after Close", n)
 	}
-	if _, err := client.Next(timeout(t)); !errors.Is(err, apron.ErrClosed) {
+	if _, err := client.Next(timeout(t)); !errors.Is(err, server.ErrClosed) {
 		t.Fatalf("Next after Close: %v", err)
 	}
 }
@@ -235,7 +236,7 @@ func TestSignIn(t *testing.T) {
 	ctx := timeout(t)
 	for {
 		f, err := client.Next(ctx) // The frames sent after the result, then the close.
-		if errors.Is(err, apron.ErrClosed) {
+		if errors.Is(err, server.ErrClosed) {
 			break
 		}
 		if err != nil || f.Method == "" {
@@ -246,9 +247,9 @@ func TestSignIn(t *testing.T) {
 
 func TestDial(t *testing.T) {
 	c := newChat()
-	server := httptest.NewServer(c.server)
-	defer server.Close()
-	client, err := aprontest.Dial(timeout(t), "ws"+strings.TrimPrefix(server.URL, "http"))
+	ts := httptest.NewServer(c.server)
+	defer ts.Close()
+	client, err := aprontest.Dial(timeout(t), "ws"+strings.TrimPrefix(ts.URL, "http"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -282,7 +283,7 @@ func TestCallFramesAndSync(t *testing.T) {
 	ctx := timeout(t)
 	c := newChat()
 	// test.order sends a notice before its reply and one after it.
-	c.server.Handle("test.order", apron.Handler{Serve: func(_ context.Context, conn *apron.Conn, r *apron.Request, reply apron.Reply[any]) error {
+	c.server.Handle("test.order", server.Handler{Serve: func(_ context.Context, conn *server.Conn, r *server.Request, reply server.Reply[any]) error {
 		conn.Notify(apron.Notice("", "before"))
 		_ = reply.Send(nil)
 		conn.Notify(apron.Notice("", "after"))
@@ -387,7 +388,7 @@ type slow struct {
 
 func newSlow() *slow { return &slow{asked: make(chan string, 4), answers: make(chan string)} }
 
-func (s *slow) Command(_ context.Context, _ *apron.Conn, p apron.CommandParams, reply apron.Reply[apron.CommandResult]) error {
+func (s *slow) Command(_ context.Context, _ *server.Conn, p apron.CommandParams, reply server.Reply[apron.CommandResult]) error {
 	if p.Body.Text == "/fast" {
 		return reply.Send(apron.CommandResult{})
 	}
@@ -422,7 +423,7 @@ func TestLater(t *testing.T) {
 		t.Fatalf("Wait: %v, sent %v %s", err, sent.Sent(), sent.Raw())
 	}
 
-	client, _ := aprontest.SignIn(t, apron.NewServer(newChat(), apron.Config{Commands: s}), map[string]any{"scheme": "guest"})
+	client, _ := aprontest.SignIn(t, server.New(newChat(), server.Config{Commands: s}), map[string]any{"scheme": "guest"})
 	done := make(chan string, 1)
 	go func() {
 		result, err := client.Call(ctx, "command", map[string]any{"body": map[string]any{"text": "/slow"}})

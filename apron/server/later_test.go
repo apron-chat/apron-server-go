@@ -1,4 +1,4 @@
-package apron_test
+package server_test
 
 import (
 	"context"
@@ -11,6 +11,7 @@ import (
 
 	"github.com/apron-chat/apron-server-go/apron"
 	"github.com/apron-chat/apron-server-go/apron/aprontest"
+	"github.com/apron-chat/apron-server-go/apron/server"
 )
 
 // upstream answers commands later, as a gateway to a slow upstream does:
@@ -26,12 +27,12 @@ type upstream struct {
 type pending struct {
 	ctx   context.Context
 	text  string
-	reply apron.Reply[apron.CommandResult]
+	reply server.Reply[apron.CommandResult]
 }
 
 func newUpstream() *upstream { return &upstream{calls: make(chan pending, 8)} }
 
-func (b *upstream) Command(ctx context.Context, _ *apron.Conn, p apron.CommandParams, reply apron.Reply[apron.CommandResult]) error {
+func (b *upstream) Command(ctx context.Context, _ *server.Conn, p apron.CommandParams, reply server.Reply[apron.CommandResult]) error {
 	if p.Body.Text == "/now" {
 		return reply.Send(apron.CommandResult{})
 	}
@@ -67,7 +68,7 @@ func result(text string) apron.CommandResult {
 // goroutine, with the handler's ctx still live.
 func TestLater(t *testing.T) {
 	b := newUpstream()
-	s := wired(b, apron.Config{})
+	s := wired(b, server.Config{})
 	c := aprontest.Connect(t, s)
 	signIn(t, c)
 	send(t, c, `{"method":"command","id":"slow","params":{"body":{"text":"/slow"}}}`)
@@ -87,7 +88,7 @@ func TestLater(t *testing.T) {
 	if f := next(t, c); f.ID != "slow" || string(f.Result) != `{"text":"done"}` {
 		t.Fatalf("got %s, want the reply answered later", f.Raw)
 	}
-	if err := pending.reply.Send(result("again")); !errors.Is(err, apron.ErrReplied) {
+	if err := pending.reply.Send(result("again")); !errors.Is(err, server.ErrReplied) {
 		t.Fatalf("a second Send: %v, want ErrReplied", err)
 	}
 }
@@ -97,7 +98,7 @@ func TestLater(t *testing.T) {
 // outcome; the backend runs the request once.
 func TestLaterDuplicate(t *testing.T) {
 	b := newUpstream()
-	s := wired(b, apron.Config{})
+	s := wired(b, server.Config{})
 	c1, c2 := aprontest.Connect(t, s), aprontest.Connect(t, s)
 	signIn(t, c1)
 	signIn(t, c2)
@@ -136,7 +137,7 @@ func TestLaterDuplicate(t *testing.T) {
 // A request answered later that fails is not kept: a retry runs again.
 func TestLaterFail(t *testing.T) {
 	b := newUpstream()
-	s := wired(b, apron.Config{Logger: slog.New(slog.DiscardHandler)})
+	s := wired(b, server.Config{Logger: slog.New(slog.DiscardHandler)})
 	c := aprontest.Connect(t, s)
 	signIn(t, c)
 	const slow = `{"method":"command","id":"f","params":{"body":{"text":"/slow"}}}`
@@ -156,14 +157,14 @@ func TestLaterFail(t *testing.T) {
 	if f := next(t, c); code(f) != apron.CodeInternalError || strings.Contains(string(f.Raw), "secret") {
 		t.Fatalf("got %s, want internal_error", f.Raw)
 	}
-	if err := pending.reply.Fail(apron.Denied("again")); !errors.Is(err, apron.ErrReplied) {
+	if err := pending.reply.Fail(apron.Denied("again")); !errors.Is(err, server.ErrReplied) {
 		t.Fatalf("a second Fail: %v, want ErrReplied", err)
 	}
 	// A handler that returns an error after Later is answered with it.
 	if _, err := c.Call(wait(t), "command", params(`{"body":{"text":"/changed-mind"}}`)); apron.CodeOf(err) != apron.CodeDenied {
 		t.Fatalf("got %v, want the handler's error", err)
 	}
-	if err := b.take(t).reply.Send(result("late")); !errors.Is(err, apron.ErrReplied) {
+	if err := b.take(t).reply.Send(result("late")); !errors.Is(err, server.ErrReplied) {
 		t.Fatalf("Send after the handler's error: %v, want ErrReplied", err)
 	}
 }
@@ -173,7 +174,7 @@ func TestLaterFail(t *testing.T) {
 // Send returns ErrClosed.
 func TestLaterConnectionEnds(t *testing.T) {
 	b := newUpstream()
-	s := wired(b, apron.Config{})
+	s := wired(b, server.Config{})
 	c1, c2 := aprontest.Connect(t, s), aprontest.Connect(t, s)
 	signIn(t, c1)
 	signIn(t, c2)
@@ -191,7 +192,7 @@ func TestLaterConnectionEnds(t *testing.T) {
 	if pending.ctx.Err() == nil {
 		t.Fatal("the request's ctx outlived its connection")
 	}
-	if err := pending.reply.Send(result("too late")); !errors.Is(err, apron.ErrClosed) {
+	if err := pending.reply.Send(result("too late")); !errors.Is(err, server.ErrClosed) {
 		t.Fatalf("Send after the connection ended: %v, want ErrClosed", err)
 	}
 	// Not kept: a retry runs again.
@@ -207,13 +208,13 @@ func TestLaterConnectionEnds(t *testing.T) {
 // laterAuth tries to answer auth later, which it may not.
 type laterAuth struct{ backend }
 
-func (*laterAuth) Auth(_ context.Context, _ *apron.Conn, _ apron.AuthParams, reply apron.Reply[apron.AuthResult]) error {
+func (*laterAuth) Auth(_ context.Context, _ *server.Conn, _ apron.AuthParams, reply server.Reply[apron.AuthResult]) error {
 	return reply.Later()
 }
 
 // Auth is a barrier, and is never answered later.
 func TestLaterAuth(t *testing.T) {
-	c := aprontest.Connect(t, wired(&laterAuth{}, apron.Config{Logger: slog.New(slog.DiscardHandler)}))
+	c := aprontest.Connect(t, wired(&laterAuth{}, server.Config{Logger: slog.New(slog.DiscardHandler)}))
 	if _, err := c.Auth(wait(t), map[string]any{"scheme": "guest"}); apron.CodeOf(err) != apron.CodeInternalError {
 		t.Fatalf("got %v, want internal_error", err)
 	}
@@ -223,13 +224,13 @@ func TestLaterAuth(t *testing.T) {
 // connection does not; a Handler answers later as a typed handler does.
 func TestLaterLocal(t *testing.T) {
 	b := newUpstream()
-	s := wired(b, apron.Config{})
+	s := wired(b, server.Config{})
 	release := make(chan struct{})
-	s.Handle("ext:slow", apron.Handler{Serve: func(ctx context.Context, c *apron.Conn, r *apron.Request, reply apron.Reply[any]) error {
+	s.Handle("ext:slow", server.Handler{Serve: func(ctx context.Context, c *server.Conn, r *server.Request, reply server.Reply[any]) error {
 		go func() {
 			<-release
 			// The work answered later may call the connection again.
-			if _, err := c.Data().(*apron.Local).Call(ctx, "command", map[string]any{"body": map[string]any{"text": "/now"}}); err != nil {
+			if _, err := c.Data().(*server.Local).Call(ctx, "command", map[string]any{"body": map[string]any{"text": "/now"}}); err != nil {
 				_ = reply.Fail(err)
 				return
 			}

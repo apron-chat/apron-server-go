@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/apron-chat/apron-server-go/apron"
+	"github.com/apron-chat/apron-server-go/apron/server"
 	"github.com/apron-chat/apron-server-go/aprond/internal/presence"
 	"github.com/apron-chat/apron-server-go/aprond/internal/users"
 )
@@ -128,7 +129,7 @@ func (update statusUpdate) mute(now time.Time) muteState {
 // package wire ignores. On an error nothing changes: invalid params, a mute
 // of a room the user cannot see, a mute of another room beyond
 // maxRoomMutes, or more requests than the user's limit (admitStatusLocked).
-func (s *Server) status(c *client, p apron.StatusParams, reply apron.Reply[apron.OK]) *Error {
+func (s *Server) status(c *client, p apron.StatusParams, reply server.Reply[apron.OK]) *Error {
 	update := statusUpdateOf(p)
 	s.mu.Lock()
 	defer s.unlock()

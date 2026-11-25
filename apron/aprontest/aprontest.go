@@ -29,7 +29,7 @@
 // Client.Expect are the same raw: a request's params as any value that encodes as an
 // object, and its result and the frames as JSON.
 //
-// A handler that answers later (apron.Reply.Later) returns before its
+// A handler that answers later (server.Reply.Later) returns before its
 // reply is sent, which a goroutine of the backend's own sends: called
 // directly, its Recorded's Sent is false when it returns, and Wait waits
 // for the reply:
@@ -80,6 +80,7 @@ import (
 
 	"github.com/apron-chat/apron-server-go/apron"
 	"github.com/apron-chat/apron-server-go/apron/internal/testhook"
+	"github.com/apron-chat/apron-server-go/apron/server"
 )
 
 // NewRequest returns a request of method on no connection, with params,
@@ -87,7 +88,7 @@ import (
 // it: for a Handler (Server.Handle), and for NewReply. What a handler
 // sends to it is recorded, and read with NewReply's Recorded. Its Conn is nil. It panics on params that are
 // not an object.
-func NewRequest(method string, params any) *apron.Request {
+func NewRequest(method string, params any) *server.Request {
 	raw := jsontext.Value("{}")
 	if params != nil {
 		encoded, err := apron.Marshal(params)
@@ -100,14 +101,14 @@ func NewRequest(method string, params any) *apron.Request {
 	if err != nil {
 		panic("wiretest: " + err.Error())
 	}
-	return r.(*apron.Request)
+	return r.(*server.Request)
 }
 
 // DedupUsage reports what s keeps for deduplication (§1.2): of how many
 // users, how many requests, and what they cost, as Config.DedupBytes counts
 // it; for a test that its backend forgets the users that are gone for good
 // (Server.ForgetUser).
-func DedupUsage(s *apron.Server) (users, requests, bytes int) {
+func DedupUsage(s *server.Server) (users, requests, bytes int) {
 	return testhook.DedupUsage(s)
 }
 
@@ -119,7 +120,7 @@ func DedupUsage(s *apron.Server) (users, requests, bytes int) {
 //
 // A Handler's test makes its Reply with T any, and reads what it sent
 // with Recorded.Raw.
-func NewReply[T any](r *apron.Request) (apron.Reply[T], *Recorded[T]) {
+func NewReply[T any](r *server.Request) (server.Reply[T], *Recorded[T]) {
 	if r == nil {
 		r = NewRequest("", nil)
 	}
@@ -127,7 +128,7 @@ func NewReply[T any](r *apron.Request) (apron.Reply[T], *Recorded[T]) {
 	if !ok {
 		panic("wiretest: NewReply needs a request made by NewRequest")
 	}
-	var reply apron.Reply[T]
+	var reply server.Reply[T]
 	testhook.InitReply(&reply, r)
 	return reply, &Recorded[T]{rec}
 }
@@ -164,7 +165,7 @@ func (r *recording) Record(sent any, raw jsontext.Value, err error, then [][]byt
 }
 
 // Sent reports whether the request has its reply: false for one answered
-// later (apron.Reply.Later) until it is sent, which Wait waits for.
+// later (server.Reply.Later) until it is sent, which Wait waits for.
 func (r *Recorded[T]) Sent() bool {
 	r.rec.mu.Lock()
 	defer r.rec.mu.Unlock()
@@ -172,7 +173,7 @@ func (r *Recorded[T]) Sent() bool {
 }
 
 // Wait waits until the request has its reply, such as one a handler sends
-// after it returns (apron.Reply.Later), or until ctx is done, and returns
+// after it returns (server.Reply.Later), or until ctx is done, and returns
 // ctx's error then.
 func (r *Recorded[T]) Wait(ctx context.Context) error {
 	select {

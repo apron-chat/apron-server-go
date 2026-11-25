@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/apron-chat/apron-server-go/apron"
+	"github.com/apron-chat/apron-server-go/apron/server"
 	"github.com/apron-chat/apron-server-go/aprond/internal/invitations"
 	"github.com/apron-chat/apron-server-go/internal/authn"
 )
@@ -242,9 +243,9 @@ func (s *Server) revokeEnrollmentLocked(u *userState) {
 // presentedInvitationLocked returns the invitation an auth request presents
 // with "invitation", if any, and refuses one that is unknown, used, or
 // expired, or presented on a connection signed in already.
-func (s *Server) presentedInvitationLocked(c *client, reply apron.Reply[apron.AuthResult]) (*invitation, *Error) {
+func (s *Server) presentedInvitationLocked(c *client, reply server.Reply[apron.AuthResult]) (*invitation, *Error) {
 	d := authParams(reply).Decoder()
-	token := apron.IfPresent(d, "invitation", d.String)
+	token := server.IfPresent(d, "invitation", d.String)
 	if err := paramError(d.Err()); err != nil || token == nil {
 		return nil, err
 	}
@@ -263,7 +264,7 @@ func (s *Server) presentedInvitationLocked(c *client, reply apron.Reply[apron.Au
 // invitation, the identity, and the allowlist are checked again first,
 // since the scheme ran outside s.mu, and nothing changes unless all pass.
 // The reply waits until the change is stored.
-func (s *Server) enrollLocked(c *client, reply apron.Reply[apron.AuthResult], scheme authn.Scheme, proof authn.Proof, invitationID string, anyOrigin bool) *Error {
+func (s *Server) enrollLocked(c *client, reply server.Reply[apron.AuthResult], scheme authn.Scheme, proof authn.Proof, invitationID string, anyOrigin bool) *Error {
 	inv, err := s.presentedInvitationLocked(c, reply)
 	if err != nil {
 		return err

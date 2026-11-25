@@ -23,6 +23,7 @@ import (
 	"golang.org/x/time/rate"
 
 	"github.com/apron-chat/apron-server-go/apron"
+	"github.com/apron-chat/apron-server-go/apron/server"
 	"github.com/apron-chat/apron-server-go/aprond/internal/accounts"
 	"github.com/apron-chat/apron-server-go/aprond/internal/devices"
 	"github.com/apron-chat/apron-server-go/aprond/internal/durable"
@@ -92,7 +93,7 @@ type client struct {
 	server *Server
 	// conn is the connection as package wire serves it, and session the
 	// Session it is, if any.
-	conn    *apron.Conn
+	conn    *server.Conn
 	session *Session
 	// request is the context of the request being processed, which the
 	// extension code it runs gets: canceled when the connection closes. It
@@ -224,7 +225,7 @@ type Server struct {
 
 	ops map[string]operation
 	// wire serves the protocol, with s as its Backend (backend.go).
-	srv  *apron.Server
+	srv  *server.Server
 	push *webpush.Deliverer
 	// storedVAPID is the webpush key (§4.9) the server made, which push
 	// signs with unless Config sets one.
@@ -670,13 +671,13 @@ func (c *client) enqueueBatch(values ...any) bool {
 }
 
 // operation handles one of the server's own methods, a wire method
-// (apron.Handler.Serve): it reads the request's params with wire's
+// (server.Handler.Serve): it reads the request's params with wire's
 // Decoder, and replies with reply.Send, or returns nil without replying,
 // which answers {}, or an error. Operations whose
 // results describe state reply while holding s.mu, so that a result
 // reflects every notification sent before it on the connection, and after
 // the notifications the request causes, which precede its result (§1).
-type operation func(s *Server, c *client, r *apron.Request, reply apron.Reply[any]) *Error
+type operation func(s *Server, c *client, r *server.Request, reply server.Reply[any]) *Error
 
 func (s *Server) operations() map[string]operation {
 	ops := map[string]operation{
@@ -697,7 +698,7 @@ var readOnlyOps = map[string]bool{commandListMethod: true}
 
 // methodCapabilities are the capabilities of the server's own methods,
 // which package wire lists in the server frame as it does its handlers'
-// (apron.Handler.Capability). A method of a capability that only some
+// (server.Handler.Capability). A method of a capability that only some
 // connections are told of, such as ext:account's, has none here, and its
 // capability is in serverParams.
 var methodCapabilities = map[string]string{

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/apron-chat/apron-server-go/apron"
+	"github.com/apron-chat/apron-server-go/apron/server"
 	"github.com/apron-chat/apron-server-go/internal/authn"
 	"github.com/apron-chat/apron-server-go/store"
 )
@@ -175,7 +176,7 @@ func TestClosingConnectionsDoNothing(t *testing.T) {
 	}
 	defer app.Shutdown(context.Background())
 	c := &client{server: app, user: newUserState("ada", "Ada")}
-	l, err := app.srv.Local(apron.LocalOptions{User: apron.User{UserID: "ada"}, Data: c})
+	l, err := app.srv.Local(server.LocalOptions{User: apron.User{UserID: "ada"}, Data: c})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -183,7 +184,7 @@ func TestClosingConnectionsDoNothing(t *testing.T) {
 	c.closeWithError(Denied("closing"))
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if _, err := l.Call(ctx, "push_register", map[string]any{"kind": "relay", "url": "https://push.example/x", "token": "t"}); !errors.Is(err, apron.ErrClosed) {
+	if _, err := l.Call(ctx, "push_register", map[string]any{"kind": "relay", "url": "https://push.example/x", "token": "t"}); !errors.Is(err, server.ErrClosed) {
 		t.Fatalf("a closing connection's request: %v", err)
 	}
 	if app.pushes.Len() != 0 {

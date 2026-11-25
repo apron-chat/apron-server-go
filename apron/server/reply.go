@@ -1,16 +1,14 @@
-package apron
+package server
 
 import (
 	"errors"
 	"fmt"
+
+	"github.com/apron-chat/apron-server-go/apron"
 )
 
 // ErrReplied is a second reply to a request, which has its reply already.
 var ErrReplied = errors.New("wire: the request has its reply")
-
-// OK is the result of a request that answers nothing but success, {}:
-// room_join, room_leave, status, and reactions.
-type OK struct{}
 
 // Reply answers the request a typed handler handles, such as a
 // RoomHandler's room_list. A handler calls Send exactly once, or returns an
@@ -45,7 +43,7 @@ type Reply[T any] struct {
 // have, such as an auth result whose You has no valid user_id, is logged
 // and answered error/internal_error, which Send returns; then is not sent.
 // A handler may return what Send returns.
-func (p Reply[T]) Send(result T, then ...Frame) error {
+func (p Reply[T]) Send(result T, then ...apron.Frame) error {
 	if p.r == nil {
 		return errors.New("wire: Send on a zero Reply")
 	}
@@ -121,7 +119,7 @@ func (p *Reply[T]) init(r *Request) { *p = replyFor[T](r, nil) }
 // send queues the reply to r: the value it renders, followed by then. apply
 // runs as it is queued. sent is the result as the handler gave it, which a
 // request on no connection records.
-func (r *Request) send(sent any, value func() (any, error), apply func(), then []Frame) error {
+func (r *Request) send(sent any, value func() (any, error), apply func(), then []apron.Frame) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.replied {
@@ -154,7 +152,7 @@ func (r *Request) send(sent any, value func() (any, error), apply func(), then [
 		r.c.Close()
 		return ErrClosed
 	case e != nil:
-		r.c.enqueue([]Frame{frame})
+		r.c.enqueue([]apron.Frame{frame})
 		return e
 	}
 	if apply != nil {
@@ -162,7 +160,7 @@ func (r *Request) send(sent any, value func() (any, error), apply func(), then [
 	}
 	// A reply is never held back by auth (§3.2.2): what is held is what
 	// comes after it.
-	if !r.c.enqueue(append([]Frame{frame}, then...)) {
+	if !r.c.enqueue(append([]apron.Frame{frame}, then...)) {
 		return ErrClosed
 	}
 	return nil
@@ -170,7 +168,7 @@ func (r *Request) send(sent any, value func() (any, error), apply func(), then [
 
 // failLocked queues an error reply, with r.mu held, and reports whether it
 // was queued.
-func (r *Request) failLocked(e *Error) bool {
+func (r *Request) failLocked(e *apron.Error) bool {
 	r.replied = true
 	r.outcome = dedupOutcome{err: e}
 	r.forgetUnkeptLocked()
@@ -180,7 +178,7 @@ func (r *Request) failLocked(e *Error) bool {
 		return true
 	}
 	frame, _, _ := r.encodeReply(nil, e)
-	return frame != nil && r.c.enqueue([]Frame{frame})
+	return frame != nil && r.c.enqueue([]apron.Frame{frame})
 }
 
 // forgetUnkeptLocked, with r.mu held, drops the request's deduplication
@@ -195,7 +193,7 @@ func (r *Request) forgetUnkeptLocked() {
 // isEmpty reports whether T is OK, whose handlers may return without
 // sending.
 func isEmpty[T any]() bool {
-	_, ok := any(*new(T)).(OK)
+	_, ok := any(*new(T)).(apron.OK)
 	return ok
 }
 
@@ -205,7 +203,7 @@ func errNoReply(method string) error {
 }
 
 // framesOf returns frames as the byte slices they are.
-func framesOf(frames []Frame) [][]byte {
+func framesOf(frames []apron.Frame) [][]byte {
 	raw := make([][]byte, len(frames))
 	for i, frame := range frames {
 		raw[i] = frame

@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/apron-chat/apron-server-go/apron"
+	"github.com/apron-chat/apron-server-go/apron/server"
 	"github.com/apron-chat/apron-server-go/apron/server/commands"
 	"github.com/apron-chat/apron-server-go/aprond/internal/messages"
 	"github.com/apron-chat/apron-server-go/aprond/internal/roomlog"
@@ -48,7 +49,7 @@ type serverCommands struct {
 type coreRun func(s *Server, c *client, r *roomState, body map[string]any, args, replyTo string) (apron.CommandResult, *Error)
 
 // clientOf is the client of a command's connection.
-func clientOf(wc *apron.Conn) (*client, *Error) {
+func clientOf(wc *server.Conn) (*client, *Error) {
 	c, ok := wc.Data().(*client)
 	if !ok {
 		return nil, internalError()
@@ -76,8 +77,8 @@ func replyError(err *Error) error {
 // reports whether c may use the form in r, or, for a nil r, in some room
 // it can see, under s.mu, which May takes. A user who sees no room may
 // use no command in "some room": each runs in a room.
-func mayLocked(may func(s *Server, c *client, r *roomState) bool) func(context.Context, *apron.Conn, string) bool {
-	return func(_ context.Context, wc *apron.Conn, roomID string) bool {
+func mayLocked(may func(s *Server, c *client, r *roomState) bool) func(context.Context, *server.Conn, string) bool {
+	return func(_ context.Context, wc *server.Conn, roomID string) bool {
 		c, ok := wc.Data().(*client)
 		if !ok {
 			return false
@@ -288,7 +289,7 @@ func (s *Server) visibleRoomsLocked(u *userState) []Room {
 // all before the result (§1). Only /embed-terminal and /embed-append make
 // live text, and they make their own embed: a terminal or append embed in a
 // command is invalid_params.
-func (s *Server) command(c *client, p apron.CommandParams, reply apron.Reply[apron.CommandResult]) *Error {
+func (s *Server) command(c *client, p apron.CommandParams, reply server.Reply[apron.CommandResult]) *Error {
 	if err := messages.CheckBody(p.Body); err != nil {
 		return err
 	}
@@ -443,7 +444,7 @@ const commandListMethod = commands.ListMethod
 // on this connection, in at least one room it can see: what /help lists in
 // each room, as data, one Command object for each form. It takes no params,
 // and ignores any.
-func (s *Server) listCommands(c *client, r *apron.Request, reply apron.Reply[any]) *Error {
+func (s *Server) listCommands(c *client, r *server.Request, reply server.Reply[any]) *Error {
 	_ = reply.Send(commands.ListResult{Commands: s.commands.router.List(s.requestContext(c), c.conn)})
 	return nil
 }

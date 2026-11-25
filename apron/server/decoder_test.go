@@ -1,10 +1,12 @@
-package apron
+package server
 
 import (
 	"encoding/json/jsontext"
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/apron-chat/apron-server-go/apron"
 )
 
 // A Decoder keeps its first error, in the order of the reads, and reads
@@ -28,10 +30,10 @@ func TestDecoder(t *testing.T) {
 	if n := d.Count("n", Required); n != 0 {
 		t.Fatalf("n = %d after an error", n)
 	}
-	var none *Error
+	var none *apron.Error
 	d.Fail(none)
-	d.Fail(InvalidParams("later"))
-	if err := d.Err(); CodeOf(err) != CodeInvalidParams || !strings.Contains(err.Error(), "kind must be a string") {
+	d.Fail(apron.InvalidParams("later"))
+	if err := d.Err(); apron.CodeOf(err) != apron.CodeInvalidParams || !strings.Contains(err.Error(), "kind must be a string") {
 		t.Fatalf("Err = %v, want the first", err)
 	}
 	if got := IfPresent(d, "n", d.Count); got != nil {
@@ -80,7 +82,7 @@ func TestParsers(t *testing.T) {
 		switch {
 		case tc.want == "" && err != nil:
 			t.Errorf("%s %s: %v", tc.name, tc.params, err)
-		case tc.want != "" && (CodeOf(err) != CodeInvalidParams || !strings.Contains(err.Error(), tc.want)):
+		case tc.want != "" && (apron.CodeOf(err) != apron.CodeInvalidParams || !strings.Contains(err.Error(), tc.want)):
 			t.Errorf("%s %s: %v, want %q", tc.name, tc.params, err, tc.want)
 		}
 	}
@@ -125,24 +127,26 @@ func TestNewReply(t *testing.T) {
 		return rec
 	}
 	rec := send("me", `{}`, func(r *Request) {
-		_ = replyFor[CurrentUser](r, nil).Send(CurrentUser{User: User{UserID: "ada"}, Cleared: []string{"avatar"}})
+		_ = replyFor[apron.CurrentUser](r, nil).Send(apron.CurrentUser{User: apron.User{UserID: "ada"}, Cleared: []string{"avatar"}})
 	})
 	if string(rec.raw) != `{"you":{"user_id":"ada","avatar":""}}` {
 		t.Fatalf("me: %s", rec.raw)
 	}
-	if you, ok := rec.sent.(CurrentUser); !ok || you.UserID != "ada" {
+	if you, ok := rec.sent.(apron.CurrentUser); !ok || you.UserID != "ada" {
 		t.Fatalf("me sent %#v", rec.sent)
 	}
-	rec = send("room_list", `{"filter":"joined"}`, func(r *Request) { _ = replyFor[RoomListResult](r, nil).Send(RoomListResult{}) })
+	rec = send("room_list", `{"filter":"joined"}`, func(r *Request) { _ = replyFor[apron.RoomListResult](r, nil).Send(apron.RoomListResult{}) })
 	if string(rec.raw) != `{"joined":[]}` {
 		t.Fatalf("room_list: %s", rec.raw)
 	}
-	rec = send("x", `{}`, func(r *Request) { _ = replyFor[CurrentUser](r, nil).Send(CurrentUser{User: User{UserID: "ada"}}) })
+	rec = send("x", `{}`, func(r *Request) {
+		_ = replyFor[apron.CurrentUser](r, nil).Send(apron.CurrentUser{User: apron.User{UserID: "ada"}})
+	})
 	if string(rec.raw) != `{"user_id":"ada"}` {
 		t.Fatalf("another method: %s", rec.raw)
 	}
 	rec = send("auth", `{"scheme":"guest"}`, func(r *Request) {
-		if err := replyFor[AuthResult](r, nil).Send(AuthResult{You: &CurrentUser{User: User{UserID: "a b"}}}); CodeOf(err) != CodeInternalError {
+		if err := replyFor[apron.AuthResult](r, nil).Send(apron.AuthResult{You: &apron.CurrentUser{User: apron.User{UserID: "a b"}}}); apron.CodeOf(err) != apron.CodeInternalError {
 			t.Errorf("an invalid user_id: %v", err)
 		}
 	})
@@ -150,10 +154,10 @@ func TestNewReply(t *testing.T) {
 		t.Fatal("an invalid auth result was not recorded as an error")
 	}
 	send("x", `{}`, func(r *Request) {
-		if err := replyFor[OK](r, nil).Send(OK{}); err != nil {
+		if err := replyFor[apron.OK](r, nil).Send(apron.OK{}); err != nil {
 			t.Fatal(err)
 		}
-		if err := replyFor[OK](r, nil).Send(OK{}); err != ErrReplied {
+		if err := replyFor[apron.OK](r, nil).Send(apron.OK{}); err != ErrReplied {
 			t.Fatalf("a second reply: %v", err)
 		}
 	})

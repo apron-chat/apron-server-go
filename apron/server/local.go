@@ -1,4 +1,4 @@
-package apron
+package server
 
 import (
 	"context"
@@ -11,6 +11,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/apron-chat/apron-server-go/apron"
 	"github.com/apron-chat/apron-server-go/apron/internal/core"
 )
 
@@ -34,7 +35,7 @@ var (
 type LocalOptions struct {
 	// User is who the connection asks to be: it is signed in as User from
 	// the start, unless OnConnect makes it another user (see Local).
-	User User
+	User apron.User
 	// Data is the backend's value for the connection (Conn.SetData), set
 	// before OnConnect is called, such as the backend's own record of the
 	// connection, which OnConnect then tells from a network one's.
@@ -50,7 +51,7 @@ type LocalOptions struct {
 	// itself. Those frames, the ones sent while it waits, such as the
 	// notifications its own request causes, wait in the queue meanwhile,
 	// and count toward Queue.
-	OnFrame func(Frame)
+	OnFrame func(apron.Frame)
 	// Queue bounds the frames waiting to be written to the connection, and
 	// those waiting for OnFrame; 1024 by default. An OnFrame that lets more
 	// pile up ends the connection with ErrFellBehind.
@@ -92,7 +93,7 @@ type Local struct {
 	// are processed one at a time.
 	turn    chan struct{}
 	pending sync.Map // request id → chan localReply
-	frames  chan Frame
+	frames  chan apron.Frame
 
 	closed    chan struct{}
 	closeOnce sync.Once
@@ -106,7 +107,7 @@ var localOpenStall = 10 * time.Second
 
 type localReply struct {
 	result jsontext.Value
-	err    *Error
+	err    *apron.Error
 }
 
 // inFlight is the context key of a call being handled on a Local
@@ -118,13 +119,13 @@ type inFlight struct{ l *Local }
 // the Server is shut down.
 func (s *Server) Local(options LocalOptions) (*Local, error) {
 	s.made()
-	if !ValidID(options.User.UserID) {
+	if !apron.ValidID(options.User.UserID) {
 		return nil, errors.New("wire: a Local connection needs a user")
 	}
 	queue := orDefault(options.Queue, 1024)
 	l := &Local{s: s, prefix: rand.Text()[:12] + "-", turn: make(chan struct{}, 1), closed: make(chan struct{})}
 	if options.OnFrame != nil {
-		l.frames = make(chan Frame, queue)
+		l.frames = make(chan apron.Frame, queue)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	c := s.newConn(ctx, cancel, localWriter{l}, queue, func() { l.shut(ErrFellBehind) })
@@ -187,7 +188,7 @@ func (s *Server) Local(options LocalOptions) (*Local, error) {
 // OnConnect made it, if another than asked, which go before anything the
 // backend sends meanwhile. A connection that does not open is closed, and
 // OnDisconnect called for it, once OnConnect was.
-func (s *Server) openLocal(ctx context.Context, c *Conn, asked User) error {
+func (s *Server) openLocal(ctx context.Context, c *Conn, asked apron.User) error {
 	c.hold()
 	fail := func(err error) error {
 		c.release(true)
@@ -201,18 +202,18 @@ func (s *Server) openLocal(ctx context.Context, c *Conn, asked User) error {
 		}
 	}
 	user := c.User()
-	if user == nil || !ValidID(user.UserID) {
+	if user == nil || !apron.ValidID(user.UserID) {
 		return fail(errors.New("wire: OnConnect left a Local connection without a user"))
 	}
 	info := s.complete(s.backend.Hello(ctx, c))
-	frames := make([]Frame, 1, 2)
-	frame, err := Encode(info)
+	frames := make([]apron.Frame, 1, 2)
+	frame, err := apron.Encode(info)
 	if err != nil {
 		s.logger().Error("wire: encoding the server frame", "error", err)
 	}
 	frames[0] = frame
 	if you, changed := user.Patch(asked); changed && err == nil {
-		if frame, err = Encode(UserUpdate{You: &you}); err != nil {
+		if frame, err = apron.Encode(apron.UserUpdate{You: &you}); err != nil {
 			s.logger().Error("wire: encoding a Local connection's user", "error", err)
 		}
 		frames = append(frames, frame)
@@ -330,7 +331,7 @@ func (l *Local) process(ctx context.Context, method, id string, params any) erro
 	if params != nil {
 		frame["params"] = params
 	}
-	payload, err := marshal(frame)
+	payload, err := core.Marshal(frame)
 	if err != nil {
 		return err
 	}
@@ -363,7 +364,7 @@ func (l *Local) receive(payload []byte) error {
 		ID     *string        `json:"id"`
 		Method string         `json:"method"`
 		Result jsontext.Value `json:"result"`
-		Error  *Error         `json:"error"`
+		Error  *apron.Error   `json:"error"`
 	}
 	if err := json.Unmarshal(payload, &frame); err != nil {
 		return err
@@ -378,7 +379,7 @@ func (l *Local) receive(payload []byte) error {
 		return nil
 	}
 	select {
-	case l.frames <- Frame(payload):
+	case l.frames <- apron.Frame(payload):
 		return nil
 	default:
 		l.shut(ErrFellBehind)

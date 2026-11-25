@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/apron-chat/apron-server-go/apron"
+	"github.com/apron-chat/apron-server-go/apron/server"
 	"github.com/apron-chat/apron-server-go/internal/authn"
 )
 
@@ -262,7 +263,7 @@ type credentialEntry struct {
 	Scheme   string `json:"scheme"`
 }
 
-func (s *Server) listCredentials(c *client, r *apron.Request, reply apron.Reply[any]) *Error {
+func (s *Server) listCredentials(c *client, r *server.Request, reply server.Reply[any]) *Error {
 	s.mu.Lock()
 	defer s.unlock()
 	if err := accountLocked(c); err != nil {
@@ -289,7 +290,7 @@ func (s *Server) listCredentials(c *client, r *apron.Request, reply apron.Reply[
 
 // credentialParams parses a credential's scheme, webauthn by default, and
 // id.
-func credentialParams(r *apron.Request) (string, string, *Error) {
+func credentialParams(r *server.Request) (string, string, *Error) {
 	d := r.Decoder()
 	scheme := d.String("scheme", optional)
 	id := d.String("id", required)
@@ -301,7 +302,7 @@ func credentialParams(r *apron.Request) (string, string, *Error) {
 
 // renameCredential names one of the account's credentials, and answers {}
 // once it has.
-func (s *Server) renameCredential(c *client, r *apron.Request, reply apron.Reply[any]) *Error {
+func (s *Server) renameCredential(c *client, r *server.Request, reply server.Reply[any]) *Error {
 	scheme, id, err := credentialParams(r)
 	if err != nil {
 		return err
@@ -332,7 +333,7 @@ func (s *Server) renameCredential(c *client, r *apron.Request, reply apron.Reply
 // removeCredential removes one of the account's credentials
 // (removeCredentialLocked), and answers {} once that is stored, before it
 // closes the connection, if it signed in with it.
-func (s *Server) removeCredential(c *client, r *apron.Request, reply apron.Reply[any]) *Error {
+func (s *Server) removeCredential(c *client, r *server.Request, reply server.Reply[any]) *Error {
 	scheme, id, err := credentialParams(r)
 	if err != nil {
 		return err
@@ -360,7 +361,7 @@ func (s *Server) removeCredential(c *client, r *apron.Request, reply apron.Reply
 // signed in with, and the push registrations it made, and closes it, or, with
 // `others`, ends every other session and device token of the account and
 // closes its other connections, which needs a recent reauthentication.
-func (s *Server) signOut(c *client, r *apron.Request, reply apron.Reply[any]) *Error {
+func (s *Server) signOut(c *client, r *server.Request, reply server.Reply[any]) *Error {
 	d := r.Decoder()
 	others := d.Bool("others", optional)
 	if err := paramError(d.Err()); err != nil {

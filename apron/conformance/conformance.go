@@ -83,7 +83,7 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/apron-chat/apron-server-go/apron"
+	"github.com/apron-chat/apron-server-go/apron/server"
 )
 
 // Config is the server to check, and how to sign in to it.
@@ -105,7 +105,7 @@ type Config struct {
 	// Server is the server to check: each connection is to it, in
 	// process, over a LineTransport (Server.ServeTransport) with no HTTP
 	// request. Exactly one of Server and URL is set.
-	Server *apron.Server
+	Server *server.Server
 	// URL is the WebSocket address of a server to check over the network
 	// instead, such as ws://127.0.0.1:8080/ws.
 	URL string

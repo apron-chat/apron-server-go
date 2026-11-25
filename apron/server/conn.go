@@ -1,4 +1,4 @@
-package apron
+package server
 
 import (
 	"context"
@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"sync"
 
+	"github.com/apron-chat/apron-server-go/apron"
 	"github.com/apron-chat/apron-server-go/apron/internal/core"
 )
 
@@ -13,7 +14,7 @@ import (
 type Conn struct {
 	server  *Server
 	rt      *core.Conn
-	info    ServerInfo
+	info    apron.ServerInfo
 	remote  net.Addr
 	request *http.Request
 	local   bool
@@ -21,13 +22,13 @@ type Conn struct {
 	cancel  context.CancelFunc
 
 	mu   sync.Mutex
-	user *User
+	user *apron.User
 	// scope is the connection's deduplication scope (SetDedupScope).
 	scope string
 	// holding is set while auth runs: notifications queued meanwhile wait
 	// in held until its result is queued (§3.2.2).
 	holding bool
-	held    [][]Frame
+	held    [][]apron.Frame
 	data    any
 }
 
@@ -41,13 +42,13 @@ type Pending interface {
 
 // User returns a copy of the connection's identity, its roles and ext
 // included, or nil before it signs in.
-func (c *Conn) User() *User {
+func (c *Conn) User() *apron.User {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.user == nil {
 		return nil
 	}
-	u := c.user.clone()
+	u := cloneUser(*c.user)
 	return &u
 }
 
@@ -65,8 +66,8 @@ func (c *Conn) UserID() string {
 // rename, to a copy of u. It sends nothing: the backend tells clients with
 // a user notification (§3.3.3), but for a Local connection's identity
 // changed in OnConnect, which the Server tells it of (Server.Local).
-func (c *Conn) SetUser(u User) {
-	u = u.clone()
+func (c *Conn) SetUser(u apron.User) {
+	u = cloneUser(u)
 	c.mu.Lock()
 	c.user = &u
 	c.mu.Unlock()
@@ -125,7 +126,7 @@ func (c *Conn) SetData(v any) {
 }
 
 // ServerInfo returns the server frame the connection was last sent.
-func (c *Conn) ServerInfo() ServerInfo {
+func (c *Conn) ServerInfo() apron.ServerInfo {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.info
@@ -135,9 +136,9 @@ func (c *Conn) ServerInfo() ServerInfo {
 // (§3.1), such as after a sign-in reveals more of the server. Server fills
 // it in as it does Backend.Hello's. Unlike Hello, it may be called while
 // the backend holds its own locks.
-func (c *Conn) Announce(info ServerInfo) bool {
+func (c *Conn) Announce(info apron.ServerInfo) bool {
 	info = c.server.complete(info)
-	frame, err := Encode(info)
+	frame, err := apron.Encode(info)
 	if err != nil {
 		c.server.logger().Error("wire: encoding the server frame", "error", err)
 		return false
@@ -178,8 +179,8 @@ func (c *Conn) Done() <-chan struct{} { return c.rt.Done() }
 // the connection is closed, or the notification cannot be encoded, which
 // is logged. Like Send, it never blocks. To send one notification to many
 // connections, Encode it once, and Broadcast or Send the Frame.
-func (c *Conn) Notify(n Notification) bool {
-	frame, err := Encode(n)
+func (c *Conn) Notify(n apron.Notification) bool {
+	frame, err := apron.Encode(n)
 	if err != nil {
 		c.server.logger().Error("wire: encoding a notification", "error", err)
 		return false
@@ -200,7 +201,7 @@ func (c *Conn) Notify(n Notification) bool {
 // describe (§1); one that sends after it lets go of the lock lets two
 // senders' frames cross, such as two messages whose log_ids arrive out of
 // order.
-func (c *Conn) Send(frames ...Frame) bool {
+func (c *Conn) Send(frames ...apron.Frame) bool {
 	if len(frames) == 0 {
 		return true
 	}
@@ -214,7 +215,7 @@ func (c *Conn) Send(frames ...Frame) bool {
 	return c.enqueue(frames)
 }
 
-func (c *Conn) enqueue(frames []Frame) bool {
+func (c *Conn) enqueue(frames []apron.Frame) bool {
 	return c.rt.Send(framesOf(frames)...)
 }
 
@@ -253,8 +254,8 @@ func (c *Conn) Close() { c.rt.Stop() }
 
 // CloseWithError sends an error about the connection as a whole, after the
 // frames already queued, then closes it (§1.1).
-func (c *Conn) CloseWithError(e *Error) {
-	payload, err := marshal(map[string]any{"error": e})
+func (c *Conn) CloseWithError(e *apron.Error) {
+	payload, err := core.Marshal(map[string]any{"error": e})
 	if err != nil {
 		return
 	}

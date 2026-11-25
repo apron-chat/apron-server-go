@@ -1,4 +1,4 @@
-package apron_test
+package server_test
 
 import (
 	"context"
@@ -10,29 +10,30 @@ import (
 
 	"github.com/apron-chat/apron-server-go/apron"
 	"github.com/apron-chat/apron-server-go/apron/aprontest"
+	"github.com/apron-chat/apron-server-go/apron/server"
 )
 
 // helloBackend is a Backend of Local connections only.
 type helloBackend struct{}
 
-func (helloBackend) Hello(context.Context, *apron.Conn) apron.ServerInfo {
+func (helloBackend) Hello(context.Context, *server.Conn) apron.ServerInfo {
 	return apron.ServerInfo{Auth: []string{"guest"}}
 }
 
-func (helloBackend) Auth(context.Context, *apron.Conn, apron.AuthParams, apron.Reply[apron.AuthResult]) error {
+func (helloBackend) Auth(context.Context, *server.Conn, apron.AuthParams, server.Reply[apron.AuthResult]) error {
 	return apron.Denied("No sign-in")
 }
 
 // viewer is a Local connection and the frames sent to it.
 type viewer struct {
-	l      *apron.Local
+	l      *server.Local
 	frames chan string
 }
 
-func openViewer(t *testing.T, s *apron.Server, u apron.User) viewer {
+func openViewer(t *testing.T, s *server.Server, u apron.User) viewer {
 	t.Helper()
 	frames := make(chan string, 16)
-	l, err := s.Local(apron.LocalOptions{User: u, OnFrame: func(f apron.Frame) { frames <- string(f) }})
+	l, err := s.Local(server.LocalOptions{User: u, OnFrame: func(f apron.Frame) { frames <- string(f) }})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -58,18 +59,18 @@ func (v viewer) expect(t *testing.T, want string) {
 // PublishUser sends the user's own connections the patch of their
 // view, and others the patch of the shown one, each only when it changed.
 func TestPublishUserViews(t *testing.T) {
-	s := apron.NewServer(helloBackend{}, apron.Config{})
+	s := server.New(helloBackend{}, server.Config{})
 	chosen := apron.User{UserID: "ada", Name: "Ada", Status: "online"}
 	ada := openViewer(t, s, chosen)
 	ada2 := openViewer(t, s, chosen)
 	bob := openViewer(t, s, apron.User{UserID: "bob"})
 	eve := openViewer(t, s, apron.User{UserID: "eve"})
-	notEve := func(c *apron.Conn) bool { return c.UserID() != "eve" }
+	notEve := func(c *server.Conn) bool { return c.UserID() != "eve" }
 	// marker is a change everyone is sent, which shows that nothing was
 	// sent before it.
 	marker := func(name string) {
 		t.Helper()
-		if !s.PublishUser(apron.UserChange{Old: apron.User{UserID: "carol"}, New: apron.User{UserID: "carol", Name: name}}, nil) {
+		if !s.PublishUser(server.UserChange{Old: apron.User{UserID: "carol"}, New: apron.User{UserID: "carol", Name: name}}, nil) {
 			t.Fatal("marker: no change")
 		}
 		for _, v := range []viewer{ada, ada2, bob, eve} {
@@ -81,7 +82,7 @@ func TestPublishUserViews(t *testing.T) {
 	// is shown while she is online (§4.5.1).
 	dnd := chosen
 	dnd.Status = "dnd"
-	if !s.PublishUser(apron.UserChange{Old: chosen, New: dnd, OldShown: chosen, NewShown: dnd}, notEve) {
+	if !s.PublishUser(server.UserChange{Old: chosen, New: dnd, OldShown: chosen, NewShown: dnd}, notEve) {
 		t.Fatal("dnd: no change")
 	}
 	ada.expect(t, `{"method":"user","params":{"you":{"user_id":"ada","status":"dnd"}}}`)
@@ -93,7 +94,7 @@ func TestPublishUserViews(t *testing.T) {
 	invisible := chosen
 	invisible.Status = "invisible"
 	shownOffline := apron.User{UserID: "ada", Name: "Ada", Status: "offline", Seen: "1724803600000"}
-	if !s.PublishUser(apron.UserChange{Old: dnd, New: invisible, OldShown: dnd, NewShown: shownOffline}, notEve) {
+	if !s.PublishUser(server.UserChange{Old: dnd, New: invisible, OldShown: dnd, NewShown: shownOffline}, notEve) {
 		t.Fatal("invisible: no change")
 	}
 	ada.expect(t, `{"method":"user","params":{"you":{"user_id":"ada","status":"invisible"}}}`)
@@ -110,7 +111,7 @@ func TestPublishUserViews(t *testing.T) {
 	ada.l.Conn().SetUser(apron.User{UserID: "ada", Name: "Stale"})
 	idle, online := chosen, chosen
 	idle.Status = "idle"
-	if !s.PublishUser(apron.UserChange{Old: chosen, New: chosen, OldShown: online, NewShown: idle}, notEve) {
+	if !s.PublishUser(server.UserChange{Old: chosen, New: chosen, OldShown: online, NewShown: idle}, notEve) {
 		t.Fatal("idle: no change")
 	}
 	bob.expect(t, `{"method":"user","params":{"new":{"user_id":"ada","status":"idle"}}}`)
@@ -124,8 +125,8 @@ func TestPublishUserViews(t *testing.T) {
 	renamed := invisible
 	renamed.Name = "Ada L"
 	shownRenamed := shownOffline
-	if !s.PublishUser(apron.UserChange{Old: invisible, New: renamed, OldShown: shownOffline, NewShown: shownRenamed},
-		func(*apron.Conn) bool { t.Error("shares called without a change of others' view"); return true }) {
+	if !s.PublishUser(server.UserChange{Old: invisible, New: renamed, OldShown: shownOffline, NewShown: shownRenamed},
+		func(*server.Conn) bool { t.Error("shares called without a change of others' view"); return true }) {
 		t.Fatal("own view: no change")
 	}
 	ada.expect(t, `{"method":"user","params":{"you":{"user_id":"ada","name":"Ada L"}}}`)
@@ -136,8 +137,8 @@ func TestPublishUserViews(t *testing.T) {
 	marker("4")
 
 	// Neither: nothing at all.
-	if s.PublishUser(apron.UserChange{Old: renamed, New: renamed, OldShown: shownOffline, NewShown: shownOffline},
-		func(*apron.Conn) bool { t.Error("shares called without a change"); return true }) {
+	if s.PublishUser(server.UserChange{Old: renamed, New: renamed, OldShown: shownOffline, NewShown: shownOffline},
+		func(*server.Conn) bool { t.Error("shares called without a change"); return true }) {
 		t.Fatal("reported a change where there was none")
 	}
 	marker("5")
@@ -145,7 +146,7 @@ func TestPublishUserViews(t *testing.T) {
 	// A user_id change: others are sent the shown objects, old too, with
 	// Old's and New's user_ids whatever the shown objects hold.
 	account := apron.User{UserID: "ada_l", Name: "Ada L", Status: "invisible"}
-	if !s.PublishUser(apron.UserChange{Old: renamed, New: account, OldShown: shownOffline, NewShown: apron.User{UserID: "ignored", Name: "Ada L", Status: "offline"}}, notEve) {
+	if !s.PublishUser(server.UserChange{Old: renamed, New: account, OldShown: shownOffline, NewShown: apron.User{UserID: "ignored", Name: "Ada L", Status: "offline"}}, notEve) {
 		t.Fatal("user_id: no change")
 	}
 	ada.expect(t, `{"method":"user","params":{"you":{"user_id":"ada_l","name":"Ada L","status":"invisible"}}}`)
@@ -159,7 +160,7 @@ func TestPublishUserViews(t *testing.T) {
 	// Without NewShown, everyone sees Old and New, as with PublishUser.
 	back := account
 	back.Status = "online"
-	if !s.PublishUser(apron.UserChange{Old: account, New: back, OldShown: apron.User{UserID: "x", Name: "unused"}}, nil) {
+	if !s.PublishUser(server.UserChange{Old: account, New: back, OldShown: apron.User{UserID: "x", Name: "unused"}}, nil) {
 		t.Fatal("one view: no change")
 	}
 	ada.expect(t, `{"method":"user","params":{"you":{"user_id":"ada_l","status":"online"}}}`)
@@ -172,7 +173,7 @@ func TestPublishUserViews(t *testing.T) {
 	// nothing, and keeps its identity.
 	named := back
 	named.Name = "Ada"
-	if !s.PublishUser(apron.UserChange{Old: back, New: named, Except: ada.l.Conn()}, nil) {
+	if !s.PublishUser(server.UserChange{Old: back, New: named, Except: ada.l.Conn()}, nil) {
 		t.Fatal("except: no change")
 	}
 	ada2.expect(t, `{"method":"user","params":{"you":{"user_id":"ada_l","name":"Ada"}}}`)
@@ -190,7 +191,7 @@ func TestPublishUserViews(t *testing.T) {
 func TestApplyMeAndComplete(t *testing.T) {
 	old := apron.User{UserID: "ada", Name: "Ada", Avatar: "https://a/1", Roles: []string{"admin"}, Status: "online", Ext: apron.Ext{"tz": []byte(`"UTC"`), "irc": []byte(`{"nick":"ada_"}`)}}
 	name, empty, status := "Ada L", "", "dnd"
-	cur := apron.ApplyMe(old, apron.MeParams{Name: &name, Avatar: &empty, Status: &status, Ext: apron.Ext{"tz": []byte(`""`), "lang": []byte(`"en"`)}})
+	cur := server.ApplyMe(old, apron.MeParams{Name: &name, Avatar: &empty, Status: &status, Ext: apron.Ext{"tz": []byte(`""`), "lang": []byte(`"en"`)}})
 	if cur.Name != "Ada L" || cur.Avatar != "" || cur.Status != "online" || !slices.Equal(cur.Roles, old.Roles) ||
 		len(cur.Ext) != 2 || string(cur.Ext["irc"]) != `{"nick":"ada_"}` || string(cur.Ext["lang"]) != `"en"` {
 		t.Fatalf("ApplyMe: %+v", cur)
@@ -202,7 +203,7 @@ func TestApplyMeAndComplete(t *testing.T) {
 	if old.Roles[0] != "admin" {
 		t.Fatal("ApplyMe's result shares old's roles")
 	}
-	if same := apron.ApplyMe(old, apron.MeParams{}); !reflect.DeepEqual(same, old) {
+	if same := server.ApplyMe(old, apron.MeParams{}); !reflect.DeepEqual(same, old) {
 		t.Fatalf("an empty me: %+v", same)
 	}
 
@@ -233,11 +234,11 @@ func TestNoMeWarning(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			var log logged
-			config := apron.Config{Messages: &backend{}, Logger: log.logger()}
+			config := server.Config{Messages: &backend{}, Logger: log.logger()}
 			if test.profiles {
 				config.Profiles = profiles{}
 			}
-			s := apron.NewServer(&backend{}, config)
+			s := server.New(&backend{}, config)
 			c := aprontest.Connect(t, s)
 			if err := c.Sync(wait(t)); err != nil {
 				t.Fatal(err)
@@ -255,6 +256,6 @@ func TestNoMeWarning(t *testing.T) {
 
 type profiles struct{}
 
-func (profiles) Me(_ context.Context, c *apron.Conn, p apron.MeParams, reply apron.Reply[apron.CurrentUser]) error {
+func (profiles) Me(_ context.Context, c *server.Conn, p apron.MeParams, reply server.Reply[apron.CurrentUser]) error {
 	return reply.Send(apron.CurrentUser{User: *c.User()})
 }

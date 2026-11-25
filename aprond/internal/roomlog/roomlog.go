@@ -26,6 +26,7 @@ import (
 	"strconv"
 
 	"github.com/apron-chat/apron-server-go/apron"
+	"github.com/apron-chat/apron-server-go/apron/server"
 	"github.com/apron-chat/apron-server-go/store"
 )
 
@@ -80,7 +81,7 @@ func FormatID(id int64) string { return strconv.FormatInt(id, 10) }
 type Log struct {
 	// clock issues the single log_id sequence shared by every record kind
 	// and room.
-	clock   apron.Clock
+	clock   server.Clock
 	records []*Record
 	// changed is closed and replaced when a record is added.
 	changed chan struct{}

@@ -1,4 +1,4 @@
-package apron_test
+package server_test
 
 import (
 	"bytes"
@@ -14,20 +14,21 @@ import (
 
 	"github.com/apron-chat/apron-server-go/apron"
 	"github.com/apron-chat/apron-server-go/apron/aprontest"
+	"github.com/apron-chat/apron-server-go/apron/server"
 )
 
 // The Decoder's errors are plain errors, nil when there is none, and
 // *Errors underneath when there is.
 func TestParamErrors(t *testing.T) {
-	read := func(f apron.Fields, name string) error {
+	read := func(f server.Fields, name string) error {
 		d := f.Decoder()
-		d.String(name, apron.Optional)
+		d.String(name, server.Optional)
 		return d.Err()
 	}
-	if err := read(apron.Fields{}, "x"); err != nil {
+	if err := read(server.Fields{}, "x"); err != nil {
 		t.Fatalf("an absent field: %v", err)
 	}
-	err := read(apron.Fields{"x": []byte("1")}, "x")
+	err := read(server.Fields{"x": []byte("1")}, "x")
 	if apron.CodeOf(err) != apron.CodeInvalidParams {
 		t.Fatalf("a number for a string: %v", err)
 	}
@@ -49,7 +50,7 @@ func TestParamErrors(t *testing.T) {
 // panicky is a backend whose Auth panics for the name "panic".
 type panicky struct{ backend }
 
-func (b *panicky) Auth(ctx context.Context, c *apron.Conn, p apron.AuthParams, reply apron.Reply[apron.AuthResult]) error {
+func (b *panicky) Auth(ctx context.Context, c *server.Conn, p apron.AuthParams, reply server.Reply[apron.AuthResult]) error {
 	if p.Name == "panic" {
 		c.Notify(apron.Notice("", "held"))
 		panic("auth went wrong")
@@ -60,15 +61,15 @@ func (b *panicky) Auth(ctx context.Context, c *apron.Conn, p apron.AuthParams, r
 // A panicking handler is answered error/internal_error, its outcome is not
 // kept, and the connection goes on.
 func TestHandlerPanics(t *testing.T) {
-	s := wired(&panicky{}, apron.Config{Logger: slog.New(slog.DiscardHandler)})
+	s := wired(&panicky{}, server.Config{Logger: slog.New(slog.DiscardHandler)})
 	var calls atomic.Int64
-	s.Handle("boom", apron.Handler{Serve: func(_ context.Context, _ *apron.Conn, r *apron.Request, reply apron.Reply[any]) error {
+	s.Handle("boom", server.Handler{Serve: func(_ context.Context, _ *server.Conn, r *server.Request, reply server.Reply[any]) error {
 		if calls.Add(1) == 1 {
 			panic("first time")
 		}
 		return reply.Send(map[string]any{"ok": true})
 	}})
-	s.HandleNotification("tick", apron.NotificationHandler{Serve: func(context.Context, *apron.Conn, *apron.Request) {
+	s.HandleNotification("tick", server.NotificationHandler{Serve: func(context.Context, *server.Conn, *server.Request) {
 		panic("in a notification")
 	}})
 	c := aprontest.Connect(t, s)
@@ -99,8 +100,8 @@ func TestHandlerPanics(t *testing.T) {
 func TestErrorAfterReply(t *testing.T) {
 	var logged bytes.Buffer
 	var mu sync.Mutex
-	s := wired(&backend{}, apron.Config{Logger: slog.New(slog.NewTextHandler(lockedWriter{&mu, &logged}, &slog.HandlerOptions{Level: slog.LevelDebug}))})
-	s.Handle("late", apron.Handler{Serve: func(_ context.Context, _ *apron.Conn, r *apron.Request, reply apron.Reply[any]) error {
+	s := wired(&backend{}, server.Config{Logger: slog.New(slog.NewTextHandler(lockedWriter{&mu, &logged}, &slog.HandlerOptions{Level: slog.LevelDebug}))})
+	s.Handle("late", server.Handler{Serve: func(_ context.Context, _ *server.Conn, r *server.Request, reply server.Reply[any]) error {
 		_ = reply.Send(nil)
 		return apron.Denied("too late")
 	}})
@@ -142,7 +143,7 @@ func (w lockedWriter) Write(p []byte) (int, error) {
 // request ids (§1.2).
 type oneUser struct{ backend }
 
-func (*oneUser) Auth(_ context.Context, c *apron.Conn, _ apron.AuthParams, reply apron.Reply[apron.AuthResult]) error {
+func (*oneUser) Auth(_ context.Context, c *server.Conn, _ apron.AuthParams, reply server.Reply[apron.AuthResult]) error {
 	c.Notify(apron.Notice("", "welcome"))
 	return reply.Send(apron.AuthResult{You: &apron.CurrentUser{User: apron.User{UserID: "same"}}})
 }
@@ -151,10 +152,10 @@ func (*oneUser) Auth(_ context.Context, c *apron.Conn, _ apron.AuthParams, reply
 // when its own connection ends.
 func TestDuplicateWaitEndsWithConnection(t *testing.T) {
 	b := &oneUser{}
-	s := wired(b, apron.Config{})
+	s := wired(b, server.Config{})
 	started, release := make(chan struct{}), make(chan struct{})
 	defer close(release)
-	s.Handle("slow", apron.Handler{Serve: func(context.Context, *apron.Conn, *apron.Request, apron.Reply[any]) error {
+	s.Handle("slow", server.Handler{Serve: func(context.Context, *server.Conn, *server.Request, server.Reply[any]) error {
 		close(started)
 		<-release
 		return nil
@@ -184,13 +185,13 @@ func TestDuplicateWaitEndsWithConnection(t *testing.T) {
 // Local notifications are handled, and a Call of a notification-only method
 // returns at once.
 func TestLocalNotify(t *testing.T) {
-	s := wired(&backend{}, apron.Config{})
+	s := wired(&backend{}, server.Config{})
 	got := make(chan string, 1)
-	s.HandleNotification("activity", apron.NotificationHandler{Capability: "activity", Serve: func(_ context.Context, _ *apron.Conn, r *apron.Request) {
+	s.HandleNotification("activity", server.NotificationHandler{Capability: "activity", Serve: func(_ context.Context, _ *server.Conn, r *server.Request) {
 		v := r.Fields()["typing"]
 		got <- string(v)
 	}})
-	l, err := s.Local(apron.LocalOptions{User: apron.User{UserID: "bot"}})
+	l, err := s.Local(server.LocalOptions{User: apron.User{UserID: "bot"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -204,7 +205,7 @@ func TestLocalNotify(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	for _, method := range []string{"ping", "activity"} {
-		if _, err := l.Call(ctx, method, nil); !errors.Is(err, apron.ErrNotRequest) {
+		if _, err := l.Call(ctx, method, nil); !errors.Is(err, server.ErrNotRequest) {
 			t.Errorf("Call(%s): %v, want ErrNotRequest", method, err)
 		}
 	}
@@ -216,7 +217,7 @@ type connecting struct {
 	connected atomic.Int64
 }
 
-func (b *connecting) Connected(context.Context, *apron.Conn) error {
+func (b *connecting) Connected(context.Context, *server.Conn) error {
 	b.connected.Add(1)
 	return nil
 }
@@ -225,7 +226,7 @@ func (b *connecting) Connected(context.Context, *apron.Conn) error {
 // it, though it is sent the server frame.
 func TestMaxConnectionsFirst(t *testing.T) {
 	b := &connecting{}
-	s := wired(b, apron.Config{MaxConnections: 1, OnConnect: b.Connected})
+	s := wired(b, server.Config{MaxConnections: 1, OnConnect: b.Connected})
 	c1, c2 := aprontest.Connect(t, s), aprontest.Connect(t, s)
 	if f := next(t, c2); code(f) != apron.CodeRetryAfter {
 		t.Fatalf("got %s, want retry_after", f.Raw)
@@ -244,9 +245,9 @@ func TestMaxConnectionsFirst(t *testing.T) {
 
 // Conn.User and SetUser copy the user, roles and ext included.
 func TestUserCopies(t *testing.T) {
-	s := wired(&backend{}, apron.Config{})
+	s := wired(&backend{}, server.Config{})
 	roles := []string{"op"}
-	l, err := s.Local(apron.LocalOptions{User: apron.User{UserID: "bot", Roles: roles, Ext: apron.Ext{}.With("x", map[string]any{"y": 1})}})
+	l, err := s.Local(server.LocalOptions{User: apron.User{UserID: "bot", Roles: roles, Ext: apron.Ext{}.With("x", map[string]any{"y": 1})}})
 	if err != nil {
 		t.Fatal(err)
 	}

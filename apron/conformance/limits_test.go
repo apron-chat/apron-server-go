@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/apron-chat/apron-server-go/apron"
+	"github.com/apron-chat/apron-server-go/apron/server"
 )
 
 // TestLimits runs the checks that a server's limits keep from running
@@ -29,7 +30,7 @@ func TestLimits(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			chat := &limited{maxText: test.maxText, keep: test.keep}
-			chat.server = apron.NewServer(chat, apron.Config{Messages: chat, History: chat, Logger: slog.New(slog.DiscardHandler)})
+			chat.server = server.New(chat, server.Config{Messages: chat, History: chat, Logger: slog.New(slog.DiscardHandler)})
 			r := &run{config: Config{Server: chat.server}, order: map[orderKey]int64{}, violations: map[string]map[string]bool{}}
 			for _, item := range checks {
 				if !slices.Contains(reported, item.id) {
@@ -55,9 +56,9 @@ func TestLimits(t *testing.T) {
 // maxText, unless 0, and keeps the last keep messages of its log, or all
 // of them for 0.
 type limited struct {
-	server        *apron.Server
+	server        *server.Server
 	maxText, keep int
-	clock         apron.Clock
+	clock         server.Clock
 
 	mu     sync.Mutex
 	guests int
@@ -66,18 +67,18 @@ type limited struct {
 	latest apron.LogID
 }
 
-func (*limited) Hello(context.Context, *apron.Conn) apron.ServerInfo {
+func (*limited) Hello(context.Context, *server.Conn) apron.ServerInfo {
 	return apron.ServerInfo{Auth: []string{"guest"}}
 }
 
-func (l *limited) Auth(_ context.Context, _ *apron.Conn, p apron.AuthParams, reply apron.Reply[apron.AuthResult]) error {
+func (l *limited) Auth(_ context.Context, _ *server.Conn, p apron.AuthParams, reply server.Reply[apron.AuthResult]) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.guests++
 	return reply.Send(apron.AuthResult{You: &apron.CurrentUser{User: apron.User{UserID: fmt.Sprintf("guest_%d", l.guests), Name: p.Name}}})
 }
 
-func (l *limited) Message(_ context.Context, c *apron.Conn, p apron.MessageParams, reply apron.Reply[apron.MessageResult]) error {
+func (l *limited) Message(_ context.Context, c *server.Conn, p apron.MessageParams, reply server.Reply[apron.MessageResult]) error {
 	if p.RoomID != "" && p.RoomID != "general" {
 		return apron.InvalidParams("There is only one room, general")
 	}
@@ -111,11 +112,11 @@ func (l *limited) Message(_ context.Context, c *apron.Conn, p apron.MessageParam
 	return reply.Send(apron.MessageResult{MessageID: id})
 }
 
-func (l *limited) History(_ context.Context, _ *apron.Conn, p apron.HistoryParams, reply apron.Reply[apron.HistoryResult]) error {
+func (l *limited) History(_ context.Context, _ *server.Conn, p apron.HistoryParams, reply server.Reply[apron.HistoryResult]) error {
 	if p.RoomID != "" && p.RoomID != "general" {
 		return apron.InvalidParams("There is only one room, general")
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	return reply.Send(apron.Page(apron.Log{Records: l.log, Lower: l.lower, Latest: l.latest}, p, 200))
+	return reply.Send(server.Page(server.Log{Records: l.log, Lower: l.lower, Latest: l.latest}, p, 200))
 }

@@ -4,6 +4,8 @@ import (
 	"encoding/json/jsontext"
 	"fmt"
 	"maps"
+
+	"github.com/apron-chat/apron-server-go/apron/internal/core"
 )
 
 // Ext is an ext object (§4.13), keyed by extension name, each value kept
@@ -28,24 +30,7 @@ func (e Ext) With(key string, v any) Ext {
 }
 
 // clone returns a copy of e that shares nothing with it, or nil.
-func (e Ext) clone() Ext {
-	if e == nil {
-		return nil
-	}
-	ext := make(Ext, len(e))
-	for key, value := range e {
-		ext[key] = cloneRaw(value)
-	}
-	return ext
-}
-
-// cloneRaw copies a raw value, keeping nil nil.
-func cloneRaw(v jsontext.Value) jsontext.Value {
-	if v == nil {
-		return nil
-	}
-	return append(jsontext.Value{}, v...)
-}
+func (e Ext) clone() Ext { return core.CloneExt(e) }
 
 // MergeExt merges a write's ext into a kept one, one level deep (§4.13):
 // each key the write carries replaces the kept value, a key whose value is

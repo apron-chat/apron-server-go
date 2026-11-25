@@ -1,8 +1,10 @@
-package apron
+package server
 
 import (
 	"context"
 	"errors"
+
+	"github.com/apron-chat/apron-server-go/apron"
 )
 
 // errLaterAuth is a Later of an auth request, which is a barrier.
@@ -108,7 +110,7 @@ func (r *Request) repliedErrLocked() error {
 // failWith sends err as the request's error reply, as a handler's error is
 // (Server.protocolError).
 func (r *Request) failWith(err error) error {
-	var e *Error
+	var e *apron.Error
 	switch {
 	case err == nil:
 		r.logger().Error("wire: a request was failed with a nil error", "method", r.Method)

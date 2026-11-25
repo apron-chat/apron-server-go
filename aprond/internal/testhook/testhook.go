@@ -3,7 +3,7 @@
 // extensions' followers, make an account with roles, and build a message
 // request from apron's post options. Package apron sets each hook as it is
 // initialized, so a program that imports aprontest imports apron, and finds
-// them set. A hook takes the *apron.Server as server, which this package
+// them set. A hook takes the *server.Server as server, which this package
 // cannot name.
 package testhook
 

@@ -7,6 +7,7 @@ import (
 	"net/http"
 
 	"github.com/apron-chat/apron-server-go/apron"
+	"github.com/apron-chat/apron-server-go/apron/server"
 )
 
 // The server speaks the protocol through package wire, as any server built
@@ -26,8 +27,8 @@ type backend struct{ s *Server }
 func (s *Server) newWire() {
 	config := s.config
 	b := backend{s}
-	patterns := apron.OriginPatterns(config.OriginPatterns...)
-	s.srv = apron.NewServer(b, apron.Config{
+	patterns := server.OriginPatterns(config.OriginPatterns...)
+	s.srv = server.New(b, server.Config{
 		Messages:  b,
 		Edits:     b,
 		Commands:  b,
@@ -44,7 +45,7 @@ func (s *Server) newWire() {
 		// Every scheme goes through to Auth, which knows the server's own
 		// rules, such as a service token's sign-in where no scheme offers
 		// tokens.
-		CheckScheme: func(context.Context, *apron.Conn, apron.AuthParams) error { return nil },
+		CheckScheme: func(context.Context, *server.Conn, apron.AuthParams) error { return nil },
 		CheckOrigin: func(r *http.Request) bool {
 			// Native apps' passkey origins (§4.10) open WebSockets too.
 			return config.AllowAnyOrigin || patterns(r) || s.nativeOrigin(r.Header.Get("Origin"))
@@ -68,10 +69,10 @@ func (s *Server) newWire() {
 
 // registerOp makes an operation a wire method.
 func (s *Server) registerOp(name string, op operation) {
-	s.srv.Handle(name, apron.Handler{
+	s.srv.Handle(name, server.Handler{
 		Capability: methodCapabilities[name],
 		NoDedup:    readOnlyOps[name],
-		Serve: func(ctx context.Context, wc *apron.Conn, r *apron.Request, reply apron.Reply[any]) error {
+		Serve: func(ctx context.Context, wc *server.Conn, r *server.Request, reply server.Reply[any]) error {
 			return backend{s}.serve(ctx, wc, func(c *client) *Error { return op(s, c, r, reply) })
 		},
 	})
@@ -79,7 +80,7 @@ func (s *Server) registerOp(name string, op operation) {
 
 // serve runs a handler for the connection's client, with the request's
 // context as the one extension code it runs gets (Host).
-func (b backend) serve(ctx context.Context, wc *apron.Conn, handle func(c *client) *Error) error {
+func (b backend) serve(ctx context.Context, wc *server.Conn, handle func(c *client) *Error) error {
 	c, ok := wc.Data().(*client)
 	if !ok {
 		return internalError()
@@ -95,7 +96,7 @@ func (b backend) serve(ctx context.Context, wc *apron.Conn, handle func(c *clien
 
 // connected keeps a new WebSocket's client, or signs a Session's in, whose
 // client its Bot made (Bot.Connect).
-func (b backend) connected(_ context.Context, wc *apron.Conn) error {
+func (b backend) connected(_ context.Context, wc *server.Conn) error {
 	s := b.s
 	if c, ok := wc.Data().(*client); ok && c.session != nil {
 		return s.connectSession(c, wc)
@@ -120,7 +121,7 @@ func (b backend) connected(_ context.Context, wc *apron.Conn) error {
 }
 
 // disconnected forgets a closed connection, network or session.
-func (b backend) disconnected(wc *apron.Conn) {
+func (b backend) disconnected(wc *server.Conn) {
 	c, ok := wc.Data().(*client)
 	if !ok {
 		return
@@ -144,7 +145,7 @@ func (b backend) disconnected(wc *apron.Conn) {
 }
 
 // Hello is the server frame of a new connection.
-func (b backend) Hello(_ context.Context, wc *apron.Conn) apron.ServerInfo {
+func (b backend) Hello(_ context.Context, wc *server.Conn) apron.ServerInfo {
 	s := b.s
 	c, ok := wc.Data().(*client)
 	s.mu.Lock()
@@ -160,7 +161,7 @@ func (b backend) Hello(_ context.Context, wc *apron.Conn) apron.ServerInfo {
 // identity's in the same hold (attachLocked), so that every notification
 // it sends after the result reaches the connection. The schemes read
 // params of their own, such as a ceremony's, from the request's.
-func (b backend) Auth(ctx context.Context, wc *apron.Conn, _ apron.AuthParams, reply apron.Reply[apron.AuthResult]) error {
+func (b backend) Auth(ctx context.Context, wc *server.Conn, _ apron.AuthParams, reply server.Reply[apron.AuthResult]) error {
 	return b.serve(ctx, wc, func(c *client) *Error { return b.s.authenticate(c, reply) })
 }
 
@@ -168,7 +169,7 @@ func (b backend) Auth(ctx context.Context, wc *apron.Conn, _ apron.AuthParams, r
 // the current profile, and a message or command result lists only the write
 // URLs that are still unused. Other results name what the request made,
 // which does not change.
-func (b backend) refresh(_ context.Context, wc *apron.Conn, method string, result jsontext.Value) any {
+func (b backend) refresh(_ context.Context, wc *server.Conn, method string, result jsontext.Value) any {
 	s := b.s
 	c, ok := wc.Data().(*client)
 	if !ok {
@@ -215,25 +216,25 @@ func (s *Server) unusedWritesLocked(writes []apron.EmbedWrite) []apron.EmbedWrit
 
 // Rooms (§4.2).
 
-func (b backend) RoomJoin(ctx context.Context, wc *apron.Conn, p apron.RoomJoinParams, reply apron.Reply[apron.OK]) error {
+func (b backend) RoomJoin(ctx context.Context, wc *server.Conn, p apron.RoomJoinParams, reply server.Reply[apron.OK]) error {
 	return b.serve(ctx, wc, func(c *client) *Error { return b.s.joinRoom(c, p, reply) })
 }
 
-func (b backend) RoomLeave(ctx context.Context, wc *apron.Conn, p apron.RoomLeaveParams, reply apron.Reply[apron.OK]) error {
+func (b backend) RoomLeave(ctx context.Context, wc *server.Conn, p apron.RoomLeaveParams, reply server.Reply[apron.OK]) error {
 	return b.serve(ctx, wc, func(c *client) *Error { return b.s.leaveRoom(c, p, reply) })
 }
 
-func (b backend) RoomList(ctx context.Context, wc *apron.Conn, p apron.RoomListParams, reply apron.Reply[apron.RoomListResult]) error {
+func (b backend) RoomList(ctx context.Context, wc *server.Conn, p apron.RoomListParams, reply server.Reply[apron.RoomListResult]) error {
 	return b.serve(ctx, wc, func(c *client) *Error { return b.s.listRooms(c, p, reply) })
 }
 
-func (b backend) RoomSet(ctx context.Context, wc *apron.Conn, p apron.RoomSetParams, reply apron.Reply[apron.RoomSetResult]) error {
+func (b backend) RoomSet(ctx context.Context, wc *server.Conn, p apron.RoomSetParams, reply server.Reply[apron.RoomSetResult]) error {
 	return b.serve(ctx, wc, func(c *client) *Error { return b.s.setRoom(c, p, reply) })
 }
 
 // History (§4.3).
 
-func (b backend) History(ctx context.Context, wc *apron.Conn, p apron.HistoryParams, reply apron.Reply[apron.HistoryResult]) error {
+func (b backend) History(ctx context.Context, wc *server.Conn, p apron.HistoryParams, reply server.Reply[apron.HistoryResult]) error {
 	return b.serve(ctx, wc, func(c *client) *Error { return b.s.history(c, p, reply) })
 }
 
@@ -241,42 +242,42 @@ func (b backend) History(ctx context.Context, wc *apron.Conn, p apron.HistoryPar
 
 // Me changes the user's profile. updateProfile sends the user's complete
 // object while it holds s.mu, which makes it the connection's user.
-func (b backend) Me(ctx context.Context, wc *apron.Conn, p apron.MeParams, reply apron.Reply[apron.CurrentUser]) error {
+func (b backend) Me(ctx context.Context, wc *server.Conn, p apron.MeParams, reply server.Reply[apron.CurrentUser]) error {
 	return b.serve(ctx, wc, func(c *client) *Error { return b.s.updateProfile(c, p, reply) })
 }
 
 // Status (§4.5).
 
-func (b backend) Status(ctx context.Context, wc *apron.Conn, p apron.StatusParams, reply apron.Reply[apron.OK]) error {
+func (b backend) Status(ctx context.Context, wc *server.Conn, p apron.StatusParams, reply server.Reply[apron.OK]) error {
 	return b.serve(ctx, wc, func(c *client) *Error { return b.s.status(c, p, reply) })
 }
 
 // Activity (§4.6): a notification, which gets no reply.
 
-func (b backend) Activity(ctx context.Context, wc *apron.Conn, p apron.ActivityParams) {
+func (b backend) Activity(ctx context.Context, wc *server.Conn, p apron.ActivityParams) {
 	_ = b.serve(ctx, wc, func(c *client) *Error { return b.s.activity(c, p) })
 }
 
 // Reactions (§4.7).
 
-func (b backend) React(ctx context.Context, wc *apron.Conn, p apron.ReactParams, reply apron.Reply[apron.OK]) error {
+func (b backend) React(ctx context.Context, wc *server.Conn, p apron.ReactParams, reply server.Reply[apron.OK]) error {
 	return b.serve(ctx, wc, func(c *client) *Error { return b.s.react(c, p, reply) })
 }
 
 // Messages (§3.5, §4.4) and commands (§4.1).
 
 // Message saves a new message, as a save without a message_id.
-func (b backend) Message(ctx context.Context, wc *apron.Conn, p apron.MessageParams, reply apron.Reply[apron.MessageResult]) error {
+func (b backend) Message(ctx context.Context, wc *server.Conn, p apron.MessageParams, reply server.Reply[apron.MessageResult]) error {
 	return b.Edit(ctx, wc, apron.EditParams{RoomID: p.RoomID, Body: p.Body, ReplyTo: p.ReplyTo, Ext: p.Ext}, reply)
 }
 
 // Edit saves an existing message: an edit, a move, or a deletion, as
 // saveMessage handles new ones.
-func (b backend) Edit(ctx context.Context, wc *apron.Conn, p apron.EditParams, reply apron.Reply[apron.MessageResult]) error {
+func (b backend) Edit(ctx context.Context, wc *server.Conn, p apron.EditParams, reply server.Reply[apron.MessageResult]) error {
 	return b.serve(ctx, wc, func(c *client) *Error { return b.s.saveMessage(c, p, reply) })
 }
 
 // Command runs a command, which replies with its typed Reply.
-func (b backend) Command(ctx context.Context, wc *apron.Conn, p apron.CommandParams, reply apron.Reply[apron.CommandResult]) error {
+func (b backend) Command(ctx context.Context, wc *server.Conn, p apron.CommandParams, reply server.Reply[apron.CommandResult]) error {
 	return b.serve(ctx, wc, func(c *client) *Error { return b.s.command(c, p, reply) })
 }

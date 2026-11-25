@@ -13,6 +13,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/apron-chat/apron-server-go/apron"
+	"github.com/apron-chat/apron-server-go/apron/server"
 	"github.com/apron-chat/apron-server-go/aprond/internal/accounts"
 	"github.com/apron-chat/apron-server-go/aprond/internal/push"
 	"github.com/apron-chat/apron-server-go/aprond/internal/roomlog"
@@ -198,7 +199,7 @@ func (s *Server) roomNamedLocked(id string) bool {
 // signs in again as the same user, is not one, and is sent nothing after
 // its result. No room_update is sent for rooms the identity had already
 // joined: the client lists them with room_list.
-func (s *Server) switchUserLocked(c *client, reply apron.Reply[apron.AuthResult], user *userState, token string, signIn, joinDefault bool) {
+func (s *Server) switchUserLocked(c *client, reply server.Reply[apron.AuthResult], user *userState, token string, signIn, joinDefault bool) {
 	you := user.you()
 	_ = reply.Send(apron.AuthResult{You: &you, Token: token})
 	// A connection that got only what signing in needs gets the whole
@@ -324,7 +325,7 @@ func (s *Server) sharersLocked(u *userState) []*userState {
 	return users
 }
 
-// userViews are a user as its two audiences see it (apron.UserChange): its
+// userViews are a user as its two audiences see it (server.UserChange): its
 // own connections, which see the chosen status (you), and everyone else,
 // who see the shown status (shownView).
 type userViews struct{ you, shown apron.User }
@@ -348,7 +349,7 @@ func (u *userState) shownView() apron.User {
 }
 
 // notifyProfileLocked tells of a change to u since before, as package wire
-// does (apron.Server.PublishUser): `you` to the user's connections but
+// does (server.Server.PublishUser): `you` to the user's connections but
 // except, whose result carries the user, and `new` to everyone who shares
 // a room with them (§3.3.3), each with the fields of their view that
 // changed, a cleared one as its empty value (§3.3.1), and only when their
@@ -367,11 +368,11 @@ func (s *Server) publishUserLocked(u *userState, except *client, before userView
 		sharers[other] = true
 	}
 	now := u.views()
-	change := apron.UserChange{Old: before.you, New: now.you, OldShown: before.shown, NewShown: now.shown}
+	change := server.UserChange{Old: before.you, New: now.you, OldShown: before.shown, NewShown: now.shown}
 	if except != nil {
 		change.Except = except.conn
 	}
-	s.srv.PublishUser(change, func(wc *apron.Conn) bool {
+	s.srv.PublishUser(change, func(wc *server.Conn) bool {
 		c, ok := wc.Data().(*client)
 		return ok && c.user != nil && sharers[c.user]
 	})
@@ -398,7 +399,7 @@ func withRemoved(profile apron.CurrentUser, removed []string) apron.CurrentUser 
 // user's limit on status changes (admitStatusLocked), beyond which the
 // request is retry_after and changes nothing. roles are not settable, and
 // like other unknown fields are ignored.
-func (s *Server) updateProfile(c *client, p apron.MeParams, reply apron.Reply[apron.CurrentUser]) *Error {
+func (s *Server) updateProfile(c *client, p apron.MeParams, reply server.Reply[apron.CurrentUser]) *Error {
 	var name, avatar, status string
 	hasName, hasAvatar, hasStatus := p.Name != nil, p.Avatar != nil, p.Status != nil
 	if hasName {

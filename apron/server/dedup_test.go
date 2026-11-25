@@ -1,4 +1,4 @@
-package apron_test
+package server_test
 
 import (
 	"context"
@@ -9,14 +9,15 @@ import (
 
 	"github.com/apron-chat/apron-server-go/apron"
 	"github.com/apron-chat/apron-server-go/apron/aprontest"
+	"github.com/apron-chat/apron-server-go/apron/server"
 )
 
 // padded registers "big", whose results have size bytes of padding, and
 // counts its calls.
-func padded(s *apron.Server, size int) *atomic.Int64 {
+func padded(s *server.Server, size int) *atomic.Int64 {
 	calls := new(atomic.Int64)
 	pad := strings.Repeat("x", size)
-	s.Handle("big", apron.Handler{Serve: func(_ context.Context, _ *apron.Conn, _ *apron.Request, reply apron.Reply[any]) error {
+	s.Handle("big", server.Handler{Serve: func(_ context.Context, _ *server.Conn, _ *server.Request, reply server.Reply[any]) error {
 		return reply.Send(map[string]any{"call": calls.Add(1), "pad": pad})
 	}})
 	return calls
@@ -38,7 +39,7 @@ func retry(t *testing.T, c *aprontest.Client, id string) int {
 // guest, keeps no memory, which it otherwise does until other users' push
 // it out, as it may come back to retry (§1.2).
 func TestDedupForgetUser(t *testing.T) {
-	s := wired(&backend{}, apron.Config{})
+	s := wired(&backend{}, server.Config{})
 	calls := padded(s, 10<<10)
 	c := aprontest.Connect(t, s)
 	userID := signIn(t, c)
@@ -70,7 +71,7 @@ func TestDedupForgetUser(t *testing.T) {
 // to fit is not kept.
 func TestDedupBytes(t *testing.T) {
 	const size = 10 << 10
-	s := wired(&backend{}, apron.Config{DedupBytes: 100 << 10, DedupTotalBytes: 250 << 10})
+	s := wired(&backend{}, server.Config{DedupBytes: 100 << 10, DedupTotalBytes: 250 << 10})
 	calls := padded(s, size)
 	conns := make([]*aprontest.Client, 4)
 	for i := range conns {
@@ -99,7 +100,7 @@ func TestDedupBytes(t *testing.T) {
 		t.Fatal("the least recently active user's request was kept over DedupTotalBytes")
 	}
 
-	huge := wired(&backend{}, apron.Config{DedupBytes: 4 << 10})
+	huge := wired(&backend{}, server.Config{DedupBytes: 4 << 10})
 	padded(huge, 8<<10)
 	c := aprontest.Connect(t, huge)
 	signIn(t, c)
@@ -115,7 +116,7 @@ func TestDedupBytes(t *testing.T) {
 // its name asks for.
 type scoped struct{ oneUser }
 
-func (*scoped) Auth(_ context.Context, c *apron.Conn, p apron.AuthParams, reply apron.Reply[apron.AuthResult]) error {
+func (*scoped) Auth(_ context.Context, c *server.Conn, p apron.AuthParams, reply server.Reply[apron.AuthResult]) error {
 	c.SetDedupScope(p.Name)
 	return reply.Send(apron.AuthResult{You: &apron.CurrentUser{User: apron.User{UserID: "same"}}})
 }
@@ -124,7 +125,7 @@ func (*scoped) Auth(_ context.Context, c *apron.Conn, p apron.AuthParams, reply 
 // scope: on another, such as one signed in with a restricted token, it
 // runs again, and its handler decides.
 func TestDedupScope(t *testing.T) {
-	s := wired(&scoped{}, apron.Config{})
+	s := wired(&scoped{}, server.Config{})
 	padded(s, 0)
 	conns := map[string]*aprontest.Client{}
 	for _, name := range []string{"full", "restricted", "full again"} {

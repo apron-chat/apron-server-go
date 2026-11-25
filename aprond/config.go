@@ -7,7 +7,7 @@ import (
 
 	"github.com/go-webauthn/webauthn/webauthn"
 
-	"github.com/apron-chat/apron-server-go/apron"
+	"github.com/apron-chat/apron-server-go/apron/server"
 	"github.com/apron-chat/apron-server-go/store"
 )
 
@@ -43,7 +43,7 @@ const (
 	retryAfterSeconds = 30
 	// maxRequestIDBytes bounds a request id, which deduplication keeps
 	// (§1.2) for the latest maxDedupEntries requests of each user.
-	maxRequestIDBytes = apron.MaxRequestIDBytes
+	maxRequestIDBytes = server.MaxRequestIDBytes
 )
 
 // DefaultTerminalViewerURL is where a browser that opens a terminal's url is

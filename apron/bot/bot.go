@@ -1,8 +1,8 @@
-// Package bot runs bots on a apron.Server: users of the server's own, in
+// Package bot runs bots on a server.Server: users of the server's own, in
 // the same program, that read what the server sends them and answer, such
 // as a bot that replies when someone mentions it. It works on any backend,
 // the reference server and a gateway in front of another chat system
-// alike: a bot's connection is in process (apron.Server.Local), signed in
+// alike: a bot's connection is in process (server.Server.Local), signed in
 // from the start, and its requests take a network client's path, so the
 // backend checks, delivers, and limits them as anyone's. The backend takes
 // a bot's connection as it takes a network one, in OnConnect, with the
@@ -10,7 +10,7 @@
 //
 // A [Conn] is one connection, with typed requests: [Conn.Post],
 // [Conn.Command], [Conn.Join], [Conn.History], and the raw Call of the
-// apron.Local it is. A [Bot] keeps one open, opened again when the server
+// server.Local it is. A [Bot] keeps one open, opened again when the server
 // ends it, and hands what it receives to its handlers:
 //
 //	echo, err := bot.Start(server, bot.Options{
@@ -24,7 +24,7 @@
 //
 // A bot asks to be Options.User, and the backend may make it another user
 // as its connection opens, such as one with a user_id of the backend's
-// own, or the name it asked for normalized (apron.Local): [Bot.User] is
+// own, or the name it asked for normalized (server.Local): [Bot.User] is
 // who it is, and what tells its own messages from others' and its
 // mentions. A message that names the bot only in its text, as people
 // who type @echo or "echo:" on a client that sends no mentions do, is
@@ -50,18 +50,19 @@ import (
 	"unicode/utf8"
 
 	"github.com/apron-chat/apron-server-go/apron"
+	"github.com/apron-chat/apron-server-go/apron/server"
 )
 
-// Conn is a connection of a bot's: a apron.Local one, whose requests it
-// makes typed. Its errors are those of apron.Local.Call: a request's error
-// reply as a *apron.Error, and apron.ErrClosed or apron.ErrFellBehind once
+// Conn is a connection of a bot's: a server.Local one, whose requests it
+// makes typed. Its errors are those of server.Local.Call: a request's error
+// reply as a *apron.Error, and server.ErrClosed or server.ErrFellBehind once
 // the connection has ended.
 type Conn struct {
-	*apron.Local
+	*server.Local
 }
 
 // Dial opens a connection on s, as s.Local does.
-func Dial(s *apron.Server, options apron.LocalOptions) (*Conn, error) {
+func Dial(s *server.Server, options server.LocalOptions) (*Conn, error) {
 	l, err := s.Local(options)
 	if err != nil {
 		return nil, err
@@ -74,7 +75,7 @@ func (c *Conn) UserID() string { return c.Conn().UserID() }
 
 // User is who the connection is signed in as: the user it asked for, or
 // the one the backend made it as it opened, or since, such as by a rename
-// (apron.Local); the zero User if the backend signed it out.
+// (server.Local); the zero User if the backend signed it out.
 func (c *Conn) User() apron.User {
 	if u := c.Conn().User(); u != nil {
 		return *u
@@ -122,15 +123,15 @@ func (c *Conn) History(ctx context.Context, p apron.HistoryParams) (apron.Histor
 // Options configure a Bot.
 type Options struct {
 	// User is who the bot asks to be: each of its connections is signed
-	// in as User (apron.LocalOptions.User), unless the backend makes it
+	// in as User (server.LocalOptions.User), unless the backend makes it
 	// another user as it opens (Bot.User).
 	User apron.User
 	// Data, if set, makes the backend's value for each connection the bot
-	// opens (apron.LocalOptions.Data), such as the backend's own record of
+	// opens (server.LocalOptions.Data), such as the backend's own record of
 	// the connection, which its OnConnect tells from a network one's.
 	Data func() any
 	// Queue bounds the frames waiting for the handlers
-	// (apron.LocalOptions.Queue). A handler that lets more pile up ends
+	// (server.LocalOptions.Queue). A handler that lets more pile up ends
 	// the connection, and the Bot opens another.
 	Queue int
 	// OnMessage, if set, gets each message the bot receives that is not
@@ -144,10 +145,10 @@ type Options struct {
 	// itself. The frames that arrive meanwhile wait for OnMessage to
 	// return, which keeps them in order, and count toward Queue: a handler
 	// that waits so long that more than Queue pile up ends the connection
-	// (apron.ErrFellBehind), and the Bot opens another, without them. So a
+	// (server.ErrFellBehind), and the Bot opens another, without them. So a
 	// handler waits only for what the server answers promptly, such as a
 	// reply; one that waits on anything else, such as another service, a
-	// timer, or a server that answers later (apron.Reply.Later) after a
+	// timer, or a server that answers later (server.Reply.Later) after a
 	// slow upstream, does it on a goroutine of its own, and gives up the
 	// order of what it sends after.
 	OnMessage func(ctx context.Context, b *Bot, m apron.Message)
@@ -162,7 +163,7 @@ type Options struct {
 // sign-out or when a handler falls behind, unless the server is shut
 // down. Its methods are safe for concurrent use.
 type Bot struct {
-	s       *apron.Server
+	s       *server.Server
 	options Options
 	ctx     context.Context
 	cancel  context.CancelFunc
@@ -180,7 +181,7 @@ const (
 
 // Start starts a bot on s, and returns once its first connection is open,
 // or the error of opening it.
-func Start(s *apron.Server, options Options) (*Bot, error) {
+func Start(s *server.Server, options Options) (*Bot, error) {
 	b := &Bot{s: s, options: options}
 	b.ctx, b.cancel = context.WithCancel(context.Background())
 	if _, err := b.Conn(); err != nil {
@@ -210,12 +211,12 @@ func (b *Bot) User() apron.User {
 func (b *Bot) UserID() string { return b.User().UserID }
 
 // Conn returns the bot's connection, opened again if it has ended. Once
-// the Bot is closed, it is apron.ErrClosed.
+// the Bot is closed, it is server.ErrClosed.
 func (b *Bot) Conn() (*Conn, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if b.ctx.Err() != nil {
-		return nil, apron.ErrClosed
+		return nil, server.ErrClosed
 	}
 	if b.conn != nil {
 		select {
@@ -224,7 +225,7 @@ func (b *Bot) Conn() (*Conn, error) {
 			return b.conn, nil
 		}
 	}
-	options := apron.LocalOptions{User: b.options.User, Queue: b.options.Queue}
+	options := server.LocalOptions{User: b.options.User, Queue: b.options.Queue}
 	if b.options.Data != nil {
 		options.Data = b.options.Data()
 	}
@@ -259,7 +260,7 @@ func (b *Bot) reopen(conn *Conn) {
 		case <-b.ctx.Done():
 			return
 		}
-		if _, err := b.Conn(); err == nil || errors.Is(err, apron.ErrClosed) {
+		if _, err := b.Conn(); err == nil || errors.Is(err, server.ErrClosed) {
 			return
 		}
 	}

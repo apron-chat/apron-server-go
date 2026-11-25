@@ -1,4 +1,4 @@
-package apron
+package server
 
 import (
 	"context"
@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"sync"
 
+	"github.com/apron-chat/apron-server-go/apron"
 	"github.com/apron-chat/apron-server-go/apron/internal/core"
 	"github.com/apron-chat/apron-server-go/apron/internal/testhook"
 )
@@ -113,7 +114,7 @@ func (r *Request) failed() bool {
 }
 
 // fail sends an error reply, unless the request has its reply.
-func (r *Request) fail(e *Error) {
+func (r *Request) fail(e *apron.Error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.replied || r.notification {
@@ -123,7 +124,7 @@ func (r *Request) fail(e *Error) {
 }
 
 // encodeReply renders the reply to r: its result, or e.
-func (r *Request) encodeReply(result any, e *Error) (frame Frame, encoded jsontext.Value, _ *Error) {
+func (r *Request) encodeReply(result any, e *apron.Error) (frame apron.Frame, encoded jsontext.Value, _ *apron.Error) {
 	if e == nil {
 		switch v := result.(type) {
 		case jsontext.Value:
@@ -131,7 +132,7 @@ func (r *Request) encodeReply(result any, e *Error) (frame Frame, encoded jsonte
 		case nil:
 			encoded = jsontext.Value("{}")
 		default:
-			raw, err := marshal(v)
+			raw, err := core.Marshal(v)
 			if err == nil && string(raw) == "null" {
 				raw = []byte("{}") // A typed nil, such as a nil map.
 			}
@@ -153,7 +154,7 @@ func (r *Request) encodeReply(result any, e *Error) (frame Frame, encoded jsonte
 	if r.hasID {
 		reply["id"] = r.ID
 	}
-	payload, err := marshal(reply)
+	payload, err := core.Marshal(reply)
 	if err != nil {
 		return nil, nil, e
 	}
@@ -169,7 +170,7 @@ func (r *Request) logger() *slog.Logger {
 }
 
 // protocolError turns a handler's error into the error reply.
-func (s *Server) protocolError(ctx context.Context, method string, err error) *Error {
+func (s *Server) protocolError(ctx context.Context, method string, err error) *apron.Error {
 	if e, ok := asError(err); ok {
 		return e
 	}
@@ -221,7 +222,7 @@ func (s *Server) processFrame(ctx context.Context, c *Conn, payload []byte) {
 	if failed != nil {
 		// An error about a frame that has no id omits it (§1.1).
 		r.notification = false
-		perr := &Error{Code: failed.Code, Message: failed.Message}
+		perr := &apron.Error{Code: failed.Code, Message: failed.Message}
 		switch {
 		case core.NotificationOnly[parsed.Method]:
 			// A notification is never answered, and a ping with other
@@ -269,15 +270,15 @@ func (s *Server) processFrame(ctx context.Context, c *Conn, payload []byte) {
 	userID, scope := c.dedupScope()
 	switch {
 	case userID == "":
-		r.fail(Denied("Sign in before sending requests"))
+		r.fail(apron.Denied("Sign in before sending requests"))
 		return
 	case len(r.ID) > MaxRequestIDBytes:
 		// Request ids are any string (§2.4), but each is kept for
 		// deduplication, so their size is bounded.
-		r.fail(TooLarge(fmt.Sprintf("A request id is at most %d bytes", MaxRequestIDBytes)))
+		r.fail(apron.TooLarge(fmt.Sprintf("A request id is at most %d bytes", MaxRequestIDBytes)))
 		return
 	case !found:
-		r.fail(Unsupported("Unsupported method " + strconv.Quote(r.Method)))
+		r.fail(apron.Unsupported("Unsupported method " + strconv.Quote(r.Method)))
 		return
 	}
 
@@ -290,7 +291,7 @@ func (s *Server) processFrame(ctx context.Context, c *Conn, payload []byte) {
 	entry, prior := s.dedup.claim(userID, key, fingerprint)
 	if prior != nil {
 		if prior.Fingerprint != fingerprint {
-			r.fail(InvalidParams(fmt.Sprintf("Request id %q was already used for another operation", r.ID)))
+			r.fail(apron.InvalidParams(fmt.Sprintf("Request id %q was already used for another operation", r.ID)))
 			return
 		}
 		select {
@@ -361,9 +362,9 @@ func (s *Server) refreshed(method string, original jsontext.Value, result any) a
 		return result
 	}
 	switch you := result.(type) {
-	case CurrentUser:
+	case apron.CurrentUser:
 		return meResult{You: you}
-	case *CurrentUser:
+	case *apron.CurrentUser:
 		if you != nil {
 			return meResult{You: *you}
 		}
@@ -478,24 +479,24 @@ func (s *Server) message(messages MessageHandler, edits EditHandler) func(contex
 		if err != nil {
 			return err
 		}
-		reply := replyFor[MessageResult](r, nil)
+		reply := replyFor[apron.MessageResult](r, nil)
 		if m.edit() {
 			switch {
 			case edits == nil:
-				return Unsupported("This server does not edit messages")
+				return apron.Unsupported("This server does not edit messages")
 			case m.messageID == 0:
 				// Only a save of an existing message deletes it (§4.4).
-				return InvalidParams("Cannot create a deleted message")
+				return apron.InvalidParams("Cannot create a deleted message")
 			}
 			return edits.Edit(ctx, c, m.editParams(), reply)
 		}
 		if m.body == nil {
-			return Missing("body")
+			return apron.Missing("body")
 		}
 		if messages == nil {
-			return Unsupported("This server takes no new messages")
+			return apron.Unsupported("This server takes no new messages")
 		}
-		return messages.Message(ctx, c, MessageParams{RoomID: m.roomID, Body: m.body, ReplyTo: m.replyTo, Ext: m.ext}, reply)
+		return messages.Message(ctx, c, apron.MessageParams{RoomID: m.roomID, Body: m.body, ReplyTo: m.replyTo, Ext: m.ext}, reply)
 	}
 }
 
@@ -504,16 +505,16 @@ var definedSchemes = []string{"guest", "token", "webauthn", "email", "external"}
 
 // checkScheme is the default of Config.CheckScheme: the schemes of the
 // server frame.
-func checkScheme(_ context.Context, c *Conn, p AuthParams) error {
+func checkScheme(_ context.Context, c *Conn, p apron.AuthParams) error {
 	info := c.ServerInfo()
 	if slices.Contains(info.Auth, p.Scheme) || slices.Contains(info.Signup, p.Scheme) {
 		return nil
 	}
 	if slices.Contains(definedSchemes, p.Scheme) {
-		return Unsupported("This server does not offer sign-in with " + p.Scheme)
+		return apron.Unsupported("This server does not offer sign-in with " + p.Scheme)
 	}
 	// Even a scheme PROTOCOL.md does not define is unsupported (§3.2).
-	return Unsupported("Unknown sign-in scheme " + strconv.Quote(p.Scheme))
+	return apron.Unsupported("Unknown sign-in scheme " + strconv.Quote(p.Scheme))
 }
 
 // authenticate handles auth, which is a barrier (§3.2.2): the frames after
@@ -548,6 +549,6 @@ func (s *Server) authenticate(ctx context.Context, c *Conn, r *Request) {
 	// A panic is answered before the frames held meanwhile are let go, as
 	// an error is.
 	defer s.recoverFrame(r)
-	err = s.backend.Auth(ctx, c, p, replyFor[AuthResult](r, p))
+	err = s.backend.Auth(ctx, c, p, replyFor[apron.AuthResult](r, p))
 	s.finish(ctx, r, true, err)
 }

@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/apron-chat/apron-server-go/apron"
+	"github.com/apron-chat/apron-server-go/apron/server"
 	"github.com/apron-chat/apron-server-go/apron/server/commands"
 	"github.com/apron-chat/apron-server-go/aprond/internal/messages"
 	"github.com/apron-chat/apron-server-go/internal/auth/email"
@@ -429,8 +430,8 @@ func (c Command) forms() ([]Form, error) {
 // whether the connection's user may use the form in the room roomID, or,
 // for "", in some room it can see: fn runs outside s.mu, with copies of the
 // user and the rooms made under it.
-func available(fn func(u User, r Room) bool) func(ctx context.Context, c *apron.Conn, roomID string) bool {
-	return func(_ context.Context, wc *apron.Conn, roomID string) bool {
+func available(fn func(u User, r Room) bool) func(ctx context.Context, c *server.Conn, roomID string) bool {
+	return func(_ context.Context, wc *server.Conn, roomID string) bool {
 		c, ok := wc.Data().(*client)
 		if !ok {
 			return false
@@ -561,7 +562,7 @@ func (r *Registrar) Method(name string, fn MethodFunc) {
 		case h.s.ops[name] != nil:
 			return fmt.Errorf("method %q exists already", name)
 		}
-		h.s.ops[name] = func(s *Server, c *client, r *apron.Request, reply apron.Reply[any]) *Error {
+		h.s.ops[name] = func(s *Server, c *client, r *server.Request, reply server.Reply[any]) *Error {
 			s.mu.RLock()
 			user := userViewOf(c.user)
 			s.mu.RUnlock()

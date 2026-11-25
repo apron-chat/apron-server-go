@@ -399,4 +399,4 @@
 // Client.Command, wiretest.Call), and expects the notifications that came
 // before a result (wiretest.Expect, Client.CallFrames), or waits for
 // every frame queued so far (Client.Sync).
-package apron
+package server

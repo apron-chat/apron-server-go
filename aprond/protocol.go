@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/apron-chat/apron-server-go/apron"
+	"github.com/apron-chat/apron-server-go/apron/server"
 )
 
 // Error codes (PROTOCOL.md §1.1). Extensions return them in an *Error to
@@ -82,7 +83,7 @@ func invalidParams(format string, args ...any) *Error {
 	return &Error{Code: CodeInvalidParams, Message: fmt.Sprintf(format, args...)}
 }
 
-// paramError is the error of a apron.Decoder, which is an *Error whenever it is not nil, as an *Error:
+// paramError is the error of a server.Decoder, which is an *Error whenever it is not nil, as an *Error:
 // nil stays a nil *Error.
 func paramError(err error) *Error {
 	if err == nil {
@@ -94,15 +95,15 @@ func paramError(err error) *Error {
 	return internalError()
 }
 
-// Whether a param read with parseString or a apron.Decoder may be left out.
+// Whether a param read with parseString or a server.Decoder may be left out.
 const (
-	required = apron.Required
-	optional = apron.Optional
+	required = server.Required
+	optional = server.Optional
 )
 
 // parseString reads one string param, for a request that reads only it;
-// one that reads more reads them with a apron.Decoder.
-func parseString(params apron.Fields, name string, p apron.Requirement) (string, *Error) {
+// one that reads more reads them with a server.Decoder.
+func parseString(params server.Fields, name string, p server.Requirement) (string, *Error) {
 	d := params.Decoder()
 	value := d.String(name, p)
 	return value, paramError(d.Err())

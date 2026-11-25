@@ -60,7 +60,7 @@ type User struct {
 func (u User) clone() User {
 	u.Roles = slices.Clone(u.Roles)
 	u.Ext = u.Ext.clone()
-	u.Unknown = cloneRaw(u.Unknown)
+	u.Unknown = core.CloneRaw(u.Unknown)
 	return u
 }
 
@@ -278,3 +278,7 @@ func marshal(value any) ([]byte, error) { return core.Marshal(value) }
 func ValidID(id string) bool {
 	return id != "" && !strings.ContainsFunc(id, func(r rune) bool { return unicode.IsSpace(r) || unicode.IsControl(r) })
 }
+
+// OK is the result of a request that answers nothing but success, {}:
+// room_join, room_leave, status, and reactions.
+type OK struct{}

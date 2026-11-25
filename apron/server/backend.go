@@ -1,6 +1,10 @@
-package apron
+package server
 
-import "context"
+import (
+	"context"
+
+	"github.com/apron-chat/apron-server-go/apron"
+)
 
 // Backend answers for a Server: who it is (the server frame), and who each
 // connection is (auth). Everything else it does, it adds with the
@@ -18,7 +22,7 @@ type Backend interface {
 	// refused at capacity (Config.MaxConnections) is sent one too, before
 	// its error, so Hello is called for it without OnConnect, and must not
 	// count on what OnConnect keeps with a connection.
-	Hello(ctx context.Context, c *Conn) ServerInfo
+	Hello(ctx context.Context, c *Conn) apron.ServerInfo
 	// Auth signs a connection in (§3.2), and answers with reply.Send, or
 	// returns an error. A result with You set signs the connection in as
 	// You (Conn.SetUser) as Send queues it, so a backend that calls Send
@@ -36,7 +40,7 @@ type Backend interface {
 	// Auth, such as a goroutine that relays a host's events to it, stops
 	// them before it returns an error, or the frames they send after
 	// reach a connection that is not signed in.
-	Auth(ctx context.Context, c *Conn, p AuthParams, reply Reply[AuthResult]) error
+	Auth(ctx context.Context, c *Conn, p apron.AuthParams, reply Reply[apron.AuthResult]) error
 }
 
 // MessageHandler saves new messages (§3.5.1): the core message request,
@@ -48,14 +52,14 @@ type Backend interface {
 // nor broadcast, once the backend has checked what it names, such as its
 // room.
 type MessageHandler interface {
-	Message(ctx context.Context, c *Conn, p MessageParams, reply Reply[MessageResult]) error
+	Message(ctx context.Context, c *Conn, p apron.MessageParams, reply Reply[apron.MessageResult]) error
 }
 
 // EditHandler handles a message request with message_id: an edit, a move,
 // or a deletion, and adds capability edit (§4.4). A deletion without
 // message_id is invalid_params before it gets here.
 type EditHandler interface {
-	Edit(ctx context.Context, c *Conn, p EditParams, reply Reply[MessageResult]) error
+	Edit(ctx context.Context, c *Conn, p apron.EditParams, reply Reply[apron.MessageResult]) error
 }
 
 // ProfileHandler handles me (§3.3.2), the core request that changes the
@@ -81,12 +85,12 @@ type EditHandler interface {
 //		return reply.Send(cur.Complete(old))
 //	}
 type ProfileHandler interface {
-	Me(ctx context.Context, c *Conn, p MeParams, reply Reply[CurrentUser]) error
+	Me(ctx context.Context, c *Conn, p apron.MeParams, reply Reply[apron.CurrentUser]) error
 }
 
 // CommandHandler handles command requests, and adds capability command
 // (§4.1). The body is present. The result is empty, or the embeds the
 // command made.
 type CommandHandler interface {
-	Command(ctx context.Context, c *Conn, p CommandParams, reply Reply[CommandResult]) error
+	Command(ctx context.Context, c *Conn, p apron.CommandParams, reply Reply[apron.CommandResult]) error
 }

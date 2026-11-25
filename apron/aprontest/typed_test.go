@@ -8,6 +8,7 @@ import (
 
 	"github.com/apron-chat/apron-server-go/apron"
 	"github.com/apron-chat/apron-server-go/apron/aprontest"
+	"github.com/apron-chat/apron-server-go/apron/server"
 )
 
 // typedChat is chat with profiles, by ApplyMe and PublishUser, and commands
@@ -16,22 +17,22 @@ type typedChat struct{ *chat }
 
 func newTypedChat() *typedChat {
 	c := &typedChat{&chat{}}
-	c.server = apron.NewServer(c.chat, c.config(apron.Config{Profiles: c, Commands: c}))
+	c.server = server.New(c.chat, c.config(server.Config{Profiles: c, Commands: c}))
 	return c
 }
 
-func (c *typedChat) Me(_ context.Context, conn *apron.Conn, p apron.MeParams, reply apron.Reply[apron.CurrentUser]) error {
+func (c *typedChat) Me(_ context.Context, conn *server.Conn, p apron.MeParams, reply server.Reply[apron.CurrentUser]) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	old := *conn.User()
-	cur := apron.ApplyMe(old, p)
-	c.server.PublishUser(apron.UserChange{Old: old, New: cur, Except: conn}, nil)
+	cur := server.ApplyMe(old, p)
+	c.server.PublishUser(server.UserChange{Old: old, New: cur, Except: conn}, nil)
 	return reply.Send(cur.Complete(old))
 }
 
 // Command sends a notice, broadcasts the line, sends another notice, and
 // fails a line that says so.
-func (c *typedChat) Command(_ context.Context, conn *apron.Conn, p apron.CommandParams, reply apron.Reply[apron.CommandResult]) error {
+func (c *typedChat) Command(_ context.Context, conn *server.Conn, p apron.CommandParams, reply server.Reply[apron.CommandResult]) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	conn.Notify(apron.Notice(p.RoomID, "one"))

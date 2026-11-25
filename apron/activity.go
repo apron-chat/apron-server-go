@@ -1,7 +1,6 @@
 package apron
 
 import (
-	"context"
 	"encoding/json/jsontext"
 )
 
@@ -35,12 +34,6 @@ type Reaction struct {
 	Emojis []string `json:"emojis"`
 }
 
-// ReactionHandler handles reactions, and adds capability reactions (§4.7).
-// It broadcasts the reaction set, including to c, before it replies.
-type ReactionHandler interface {
-	React(ctx context.Context, c *Conn, p ReactParams, reply Reply[OK]) error
-}
-
 // ActivityParams are an activity notification's (§4.6): typing, and how far
 // the user has read. A nil field was left out.
 type ActivityParams struct {
@@ -72,11 +65,3 @@ type Activity struct {
 
 // Method makes an Activity a Notification.
 func (Activity) Method() string { return "activity" }
-
-// ActivityHandler handles activity notifications, and adds capability
-// activity (§4.6). They get no reply: params that are not valid are
-// ignored. A backend relays the activity it applies as Activity
-// notifications.
-type ActivityHandler interface {
-	Activity(ctx context.Context, c *Conn, p ActivityParams)
-}

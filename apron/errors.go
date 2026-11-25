@@ -53,6 +53,9 @@ func RetryAfter(message string, wait time.Duration) *Error {
 	return &Error{Code: CodeRetryAfter, Message: message, Data: map[string]any{"retry_after": seconds}}
 }
 
+// Missing is the error of a request that lacks a required param.
+func Missing(name string) *Error { return InvalidParams("Missing " + name) }
+
 // TooLarge is a CodeTooLarge error.
 func TooLarge(message string) *Error { return &Error{Code: CodeTooLarge, Message: message} }
 
@@ -67,12 +70,6 @@ func CodeOf(err error) int {
 		return e.Code
 	}
 	return CodeInternalError
-}
-
-// internalError is what a client is told about an error that is not an
-// *Error: nothing, as its text may be about the server's internals.
-func internalError() *Error {
-	return &Error{Code: CodeInternalError, Message: "Internal server error"}
 }
 
 // asError returns err as an *Error, or nil and false when it is not one.

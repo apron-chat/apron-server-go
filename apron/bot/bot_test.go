@@ -14,15 +14,16 @@ import (
 	"github.com/apron-chat/apron-server-go/apron"
 	"github.com/apron-chat/apron-server-go/apron/aprontest"
 	"github.com/apron-chat/apron-server-go/apron/bot"
+	"github.com/apron-chat/apron-server-go/apron/server"
 	"github.com/apron-chat/apron-server-go/apron/server/commands"
 )
 
 // chat is a test backend: guests, one room whose messages everyone gets,
 // history, a /ping command, and no room requests.
 type chat struct {
-	apron.ReadOnlyRooms
-	server   *apron.Server
-	clock    apron.Clock
+	server.ReadOnlyRooms
+	server   *server.Server
+	clock    server.Clock
 	commands commands.Router
 
 	// rename, if set, is who OnConnect makes a Local connection.
@@ -40,9 +41,9 @@ func newChat() *chat {
 		call.Notice("pong " + call.Conn.UserID())
 		return call.Done()
 	}})
-	c.server = apron.NewServer(c, apron.Config{
+	c.server = server.New(c, server.Config{
 		Messages: c, History: c, Commands: &c.commands, Rooms: c,
-		OnConnect: func(_ context.Context, conn *apron.Conn) error {
+		OnConnect: func(_ context.Context, conn *server.Conn) error {
 			c.mu.Lock()
 			defer c.mu.Unlock()
 			if data, ok := conn.Data().(string); ok {
@@ -57,18 +58,18 @@ func newChat() *chat {
 	return c
 }
 
-func (*chat) Hello(context.Context, *apron.Conn) apron.ServerInfo {
+func (*chat) Hello(context.Context, *server.Conn) apron.ServerInfo {
 	return apron.ServerInfo{Auth: []string{"guest"}}
 }
 
-func (c *chat) Auth(_ context.Context, _ *apron.Conn, _ apron.AuthParams, reply apron.Reply[apron.AuthResult]) error {
+func (c *chat) Auth(_ context.Context, _ *server.Conn, _ apron.AuthParams, reply server.Reply[apron.AuthResult]) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.guests++
 	return reply.Send(apron.AuthResult{You: &apron.CurrentUser{User: apron.User{UserID: fmt.Sprintf("guest_%d", c.guests)}}})
 }
 
-func (c *chat) Message(_ context.Context, conn *apron.Conn, p apron.MessageParams, reply apron.Reply[apron.MessageResult]) error {
+func (c *chat) Message(_ context.Context, conn *server.Conn, p apron.MessageParams, reply server.Reply[apron.MessageResult]) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	id := c.clock.Next()
@@ -82,17 +83,17 @@ func (c *chat) Message(_ context.Context, conn *apron.Conn, p apron.MessageParam
 	return reply.Send(apron.MessageResult{MessageID: id})
 }
 
-func (c *chat) History(_ context.Context, _ *apron.Conn, p apron.HistoryParams, reply apron.Reply[apron.HistoryResult]) error {
+func (c *chat) History(_ context.Context, _ *server.Conn, p apron.HistoryParams, reply server.Reply[apron.HistoryResult]) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	log := apron.Log{Records: c.records, Latest: c.clock.Last()}
+	log := server.Log{Records: c.records, Latest: c.clock.Last()}
 	if len(c.records) > 0 {
 		log.Lower = c.records[0].LogID
 	}
-	return reply.Send(apron.Page(log, p, 50))
+	return reply.Send(server.Page(log, p, 50))
 }
 
-func (c *chat) RoomList(context.Context, *apron.Conn, apron.RoomListParams, apron.Reply[apron.RoomListResult]) error {
+func (c *chat) RoomList(context.Context, *server.Conn, apron.RoomListParams, server.Reply[apron.RoomListResult]) error {
 	return apron.Unsupported("No rooms")
 }
 
@@ -157,7 +158,7 @@ func TestMentions(t *testing.T) {
 func TestRequests(t *testing.T) {
 	c := newChat()
 	ctx := timeout(t)
-	conn, err := bot.Dial(c.server, apron.LocalOptions{User: apron.User{UserID: "helper"}})
+	conn, err := bot.Dial(c.server, server.LocalOptions{User: apron.User{UserID: "helper"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -184,7 +185,7 @@ func TestRequests(t *testing.T) {
 		t.Fatalf("History: %+v %v", page, err)
 	}
 	conn.Close()
-	if _, err := conn.Post(ctx, apron.MessageParams{Body: &apron.Body{Text: "two"}}); !errors.Is(err, apron.ErrClosed) {
+	if _, err := conn.Post(ctx, apron.MessageParams{Body: &apron.Body{Text: "two"}}); !errors.Is(err, server.ErrClosed) {
 		t.Fatalf("Post after Close: %v", err)
 	}
 }
@@ -240,7 +241,7 @@ func TestReopen(t *testing.T) {
 
 	listener.Close()
 	quiet.Close()
-	if _, err := quiet.Post(ctx, apron.MessageParams{Body: &apron.Body{Text: "gone"}}); !errors.Is(err, apron.ErrClosed) {
+	if _, err := quiet.Post(ctx, apron.MessageParams{Body: &apron.Body{Text: "gone"}}); !errors.Is(err, server.ErrClosed) {
 		t.Fatalf("Post after Close: %v", err)
 	}
 	if err := c.server.Shutdown(ctx); err != nil {

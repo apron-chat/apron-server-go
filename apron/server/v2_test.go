@@ -1,4 +1,4 @@
-package apron_test
+package server_test
 
 import (
 	"context"
@@ -14,17 +14,18 @@ import (
 
 	"github.com/apron-chat/apron-server-go/apron"
 	"github.com/apron-chat/apron-server-go/apron/aprontest"
+	"github.com/apron-chat/apron-server-go/apron/server"
 )
 
 // A handler that replies itself, as a backend holding its own lock does,
 // gets its result and its frames out together, and nothing else.
 func TestReplyInHandler(t *testing.T) {
-	s := wired(&backend{}, apron.Config{})
+	s := wired(&backend{}, server.Config{})
 	var mu sync.Mutex
-	s.Handle("snapshot", apron.Handler{Serve: func(ctx context.Context, c *apron.Conn, r *apron.Request, reply apron.Reply[any]) error {
+	s.Handle("snapshot", server.Handler{Serve: func(ctx context.Context, c *server.Conn, r *server.Request, reply server.Reply[any]) error {
 		mu.Lock()
 		defer mu.Unlock()
-		after, _ := apron.EncodeRaw("cursor", map[string]any{"n": 1})
+		after, _ := server.EncodeRaw("cursor", map[string]any{"n": 1})
 		if reply.Send(map[string]any{"state": 1}, after) != nil {
 			t.Error("Reply failed")
 		}
@@ -55,9 +56,9 @@ func TestReplyInHandler(t *testing.T) {
 // Notification methods run with or without an id, only once signed in, and
 // are never answered.
 func TestNotificationMethod(t *testing.T) {
-	s := wired(&backend{}, apron.Config{})
+	s := wired(&backend{}, server.Config{})
 	got := make(chan string, 4)
-	s.HandleNotification("activity", apron.NotificationHandler{Capability: "activity", Serve: func(_ context.Context, _ *apron.Conn, r *apron.Request) {
+	s.HandleNotification("activity", server.NotificationHandler{Capability: "activity", Serve: func(_ context.Context, _ *server.Conn, r *server.Request) {
 		v := r.Fields()["typing"]
 		got <- string(v)
 	}})
@@ -86,7 +87,7 @@ type refreshing struct {
 // Refresh brings a me result up to date as the user's current object, and
 // any other method's as it likes; wrong brings me's up as a map, which a
 // me result may not be.
-func (b *refreshing) Refresh(_ context.Context, c *apron.Conn, method string, _ jsontext.Value) any {
+func (b *refreshing) Refresh(_ context.Context, c *server.Conn, method string, _ jsontext.Value) any {
 	switch {
 	case method != "me":
 		return map[string]any{"method": method, "version": b.version}
@@ -96,7 +97,7 @@ func (b *refreshing) Refresh(_ context.Context, c *apron.Conn, method string, _ 
 	return &apron.CurrentUser{User: apron.User{UserID: c.User().UserID, Name: fmt.Sprintf("v%d", b.version)}}
 }
 
-func (b *refreshing) Me(_ context.Context, c *apron.Conn, _ apron.MeParams, reply apron.Reply[apron.CurrentUser]) error {
+func (b *refreshing) Me(_ context.Context, c *server.Conn, _ apron.MeParams, reply server.Reply[apron.CurrentUser]) error {
 	b.version++
 	return reply.Send(apron.CurrentUser{User: *c.User()})
 }
@@ -108,8 +109,8 @@ func (b *refreshing) Me(_ context.Context, c *apron.Conn, _ apron.MeParams, repl
 func TestRefreshDuplicate(t *testing.T) {
 	var log logged
 	b := &refreshing{}
-	s := wired(b, apron.Config{RefreshDuplicate: b.Refresh, Logger: log.logger()})
-	s.Handle("ext:count", apron.Handler{Serve: func(_ context.Context, _ *apron.Conn, r *apron.Request, reply apron.Reply[any]) error {
+	s := wired(b, server.Config{RefreshDuplicate: b.Refresh, Logger: log.logger()})
+	s.Handle("ext:count", server.Handler{Serve: func(_ context.Context, _ *server.Conn, r *server.Request, reply server.Reply[any]) error {
 		return reply.Send(map[string]any{"version": 0})
 	}})
 	c := aprontest.Connect(t, s)
@@ -142,7 +143,7 @@ func TestRefreshDuplicate(t *testing.T) {
 
 type anyScheme struct{ backend }
 
-func (*anyScheme) CheckScheme(_ context.Context, _ *apron.Conn, p apron.AuthParams) error {
+func (*anyScheme) CheckScheme(_ context.Context, _ *server.Conn, p apron.AuthParams) error {
 	if p.Scheme == "secret" {
 		return nil
 	}
@@ -151,7 +152,7 @@ func (*anyScheme) CheckScheme(_ context.Context, _ *apron.Conn, p apron.AuthPara
 
 func TestCheckScheme(t *testing.T) {
 	b := &anyScheme{}
-	c := aprontest.Connect(t, wired(b, apron.Config{CheckScheme: b.CheckScheme}))
+	c := aprontest.Connect(t, wired(b, server.Config{CheckScheme: b.CheckScheme}))
 	if _, err := c.Auth(wait(t), map[string]any{"scheme": "guest"}); apron.CodeOf(err) != apron.CodeDenied {
 		t.Fatalf("got %v", err)
 	}
@@ -161,8 +162,8 @@ func TestCheckScheme(t *testing.T) {
 }
 
 func TestAnnounce(t *testing.T) {
-	s := wired(&backend{}, apron.Config{})
-	s.Handle("ext:thing", apron.Handler{Capability: "ext:thing", Serve: func(context.Context, *apron.Conn, *apron.Request, apron.Reply[any]) error { return nil }})
+	s := wired(&backend{}, server.Config{})
+	s.Handle("ext:thing", server.Handler{Capability: "ext:thing", Serve: func(context.Context, *server.Conn, *server.Request, server.Reply[any]) error { return nil }})
 	c := aprontest.Connect(t, s)
 	signIn(t, c)
 	conn := onlyConn(t, s)
@@ -184,22 +185,22 @@ func TestAnnounce(t *testing.T) {
 
 func TestLocal(t *testing.T) {
 	b := &backend{}
-	s := wired(b, apron.Config{})
+	s := wired(b, server.Config{})
 	var once sync.Once
-	s.Handle("whoami", apron.Handler{Serve: func(ctx context.Context, c *apron.Conn, r *apron.Request, reply apron.Reply[any]) error {
+	s.Handle("whoami", server.Handler{Serve: func(ctx context.Context, c *server.Conn, r *server.Request, reply server.Reply[any]) error {
 		c.NotifyRaw("hello", map[string]any{})
 		var err error
 		once.Do(func() {
 			// Calling back into the same connection would wait for itself.
-			_, err = c.Data().(*apron.Local).Call(ctx, "whoami", nil)
+			_, err = c.Data().(*server.Local).Call(ctx, "whoami", nil)
 		})
-		if !errors.Is(err, apron.ErrReentrant) && err != nil {
+		if !errors.Is(err, server.ErrReentrant) && err != nil {
 			t.Errorf("reentrant call: %v", err)
 		}
 		return reply.Send(map[string]any{"user_id": c.UserID()})
 	}})
 	frames := make(chan string, 8)
-	l, err := s.Local(apron.LocalOptions{User: apron.User{UserID: "bot"}, OnFrame: func(f apron.Frame) { frames <- string(f) }})
+	l, err := s.Local(server.LocalOptions{User: apron.User{UserID: "bot"}, OnFrame: func(f apron.Frame) { frames <- string(f) }})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -230,7 +231,7 @@ func TestLocal(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("Local did not close")
 	}
-	if _, err := l.Call(context.Background(), "whoami", nil); !errors.Is(err, apron.ErrClosed) {
+	if _, err := l.Call(context.Background(), "whoami", nil); !errors.Is(err, server.ErrClosed) {
 		t.Fatalf("after Close: %v", err)
 	}
 	deadline := time.Now().Add(5 * time.Second)
@@ -246,10 +247,10 @@ func TestLocal(t *testing.T) {
 }
 
 func TestLocalFellBehind(t *testing.T) {
-	s := wired(&backend{}, apron.Config{})
+	s := wired(&backend{}, server.Config{})
 	block := make(chan struct{})
 	defer close(block)
-	l, err := s.Local(apron.LocalOptions{User: apron.User{UserID: "bot"}, Queue: 2, OnFrame: func(apron.Frame) { <-block }})
+	l, err := s.Local(server.LocalOptions{User: apron.User{UserID: "bot"}, Queue: 2, OnFrame: func(apron.Frame) { <-block }})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -261,7 +262,7 @@ func TestLocalFellBehind(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("a Local whose OnFrame fell behind stayed open")
 	}
-	if !errors.Is(l.Err(), apron.ErrFellBehind) {
+	if !errors.Is(l.Err(), server.ErrFellBehind) {
 		t.Fatalf("Err: %v", l.Err())
 	}
 }
@@ -273,8 +274,8 @@ func TestLocalFellBehind(t *testing.T) {
 func TestLocalOpens(t *testing.T) {
 	refuse := errors.New("refused")
 	var disconnects atomic.Int64
-	var config apron.Config
-	config.OnConnect = func(_ context.Context, c *apron.Conn) error {
+	var config server.Config
+	config.OnConnect = func(_ context.Context, c *server.Conn) error {
 		if c.HTTPRequest() != nil || c.Data() == nil || !c.Local() {
 			t.Errorf("OnConnect: request %v, data %v, local %v", c.HTTPRequest(), c.Data(), c.Local())
 		}
@@ -284,10 +285,10 @@ func TestLocalOpens(t *testing.T) {
 		c.NotifyRaw("welcome", map[string]any{"to": c.UserID()})
 		return nil
 	}
-	config.OnDisconnect = func(*apron.Conn) { disconnects.Add(1) }
+	config.OnDisconnect = func(*server.Conn) { disconnects.Add(1) }
 	s := wired(&backend{}, config)
 	frames := make(chan string, 8)
-	l, err := s.Local(apron.LocalOptions{User: apron.User{UserID: "bot"}, Data: 1, OnFrame: func(f apron.Frame) { frames <- string(f) }})
+	l, err := s.Local(server.LocalOptions{User: apron.User{UserID: "bot"}, Data: 1, OnFrame: func(f apron.Frame) { frames <- string(f) }})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -300,7 +301,7 @@ func TestLocalOpens(t *testing.T) {
 	if info := l.Conn().ServerInfo(); info.Agent != "wire-test/1" {
 		t.Fatalf("Info: %+v", info)
 	}
-	if _, err := s.Local(apron.LocalOptions{User: apron.User{UserID: "nobody"}, Data: 1}); err != refuse {
+	if _, err := s.Local(server.LocalOptions{User: apron.User{UserID: "nobody"}, Data: 1}); err != refuse {
 		t.Fatalf("a refused Local: %v", err)
 	}
 	if n := disconnects.Load(); n != 1 {
@@ -310,7 +311,7 @@ func TestLocalOpens(t *testing.T) {
 		t.Fatalf("Close: %v", err)
 	}
 	<-l.Done()
-	if err := l.Close(); !errors.Is(err, apron.ErrClosed) {
+	if err := l.Close(); !errors.Is(err, server.ErrClosed) {
 		t.Fatalf("a second Close: %v", err)
 	}
 	if err := s.Shutdown(context.Background()); err != nil {
@@ -319,7 +320,7 @@ func TestLocalOpens(t *testing.T) {
 	if n := disconnects.Load(); n != 2 {
 		t.Fatalf("%d disconnects, want the refused connection's and the one that opened", n)
 	}
-	if _, err := s.Local(apron.LocalOptions{User: apron.User{UserID: "bot"}}); !errors.Is(err, apron.ErrClosed) {
+	if _, err := s.Local(server.LocalOptions{User: apron.User{UserID: "bot"}}); !errors.Is(err, server.ErrClosed) {
 		t.Fatalf("after Shutdown: %v", err)
 	}
 }
@@ -328,8 +329,8 @@ func TestLocalOpens(t *testing.T) {
 // though neither has an HTTP request.
 func TestConnLocal(t *testing.T) {
 	local := make(chan bool, 2)
-	var config apron.Config
-	config.OnConnect = func(_ context.Context, c *apron.Conn) error {
+	var config server.Config
+	config.OnConnect = func(_ context.Context, c *server.Conn) error {
 		if c.HTTPRequest() != nil {
 			t.Errorf("OnConnect: request %v", c.HTTPRequest())
 		}
@@ -344,7 +345,7 @@ func TestConnLocal(t *testing.T) {
 	if <-local {
 		t.Error("a ServeTransport connection is Local")
 	}
-	l, err := s.Local(apron.LocalOptions{User: apron.User{UserID: "bot"}})
+	l, err := s.Local(server.LocalOptions{User: apron.User{UserID: "bot"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -360,8 +361,8 @@ func TestConnLocal(t *testing.T) {
 func TestDisconnectAfterRefusal(t *testing.T) {
 	for _, refusal := range []error{apron.Denied("No"), errors.New("no")} {
 		b := &backend{}
-		var config apron.Config
-		config.OnConnect = func(_ context.Context, c *apron.Conn) error {
+		var config server.Config
+		config.OnConnect = func(_ context.Context, c *server.Conn) error {
 			c.SetData("half done")
 			return refusal
 		}
@@ -370,7 +371,7 @@ func TestDisconnectAfterRefusal(t *testing.T) {
 		for {
 			// The server frame and the error, for an *Error.
 			if _, err := client.Next(wait(t)); err != nil {
-				if !errors.Is(err, apron.ErrClosed) {
+				if !errors.Is(err, server.ErrClosed) {
 					t.Fatalf("refused with %v: %v", refusal, err)
 				}
 				break
@@ -391,14 +392,14 @@ func TestDisconnectAfterRefusal(t *testing.T) {
 // after its server frame, before what OnConnect sent it; it may not leave
 // it signed out.
 func TestLocalUserFromOnConnect(t *testing.T) {
-	var config apron.Config
+	var config server.Config
 	var signedOut atomic.Int64
-	config.OnDisconnect = func(c *apron.Conn) {
+	config.OnDisconnect = func(c *server.Conn) {
 		if c.User() == nil {
 			signedOut.Add(1)
 		}
 	}
-	config.OnConnect = func(_ context.Context, c *apron.Conn) error {
+	config.OnConnect = func(_ context.Context, c *server.Conn) error {
 		u := c.User()
 		switch u.UserID {
 		case "echo":
@@ -425,7 +426,7 @@ func TestLocalUserFromOnConnect(t *testing.T) {
 		{apron.User{UserID: "kept", Name: "Kept"}, "", "kept"},
 	} {
 		frames := make(chan string, 8)
-		l, err := s.Local(apron.LocalOptions{User: tc.asked, OnFrame: func(f apron.Frame) { frames <- string(f) }})
+		l, err := s.Local(server.LocalOptions{User: tc.asked, OnFrame: func(f apron.Frame) { frames <- string(f) }})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -445,7 +446,7 @@ func TestLocalUserFromOnConnect(t *testing.T) {
 		}
 		l.Close()
 	}
-	if _, err := s.Local(apron.LocalOptions{User: apron.User{UserID: "gone"}}); err == nil {
+	if _, err := s.Local(server.LocalOptions{User: apron.User{UserID: "gone"}}); err == nil {
 		t.Fatal("a Local connection OnConnect signed out opened")
 	}
 	if n := signedOut.Load(); n != 1 {

@@ -1,7 +1,7 @@
 // Package commands gives a wire backend the command capability (§4.1)
 // without writing its parts: commands registered by name, each with the
 // forms /help shows, such as /kick @user [<reason>]; a [Router] that is
-// the Server's [apron.CommandHandler], which parses the command line, picks
+// the Server's [server.CommandHandler], which parses the command line, picks
 // the command and its form, refuses one sent without a field it requires
 // or by someone it is not for, runs it, and answers /help with a ~private
 // notice that lists what the sender can use (§4.1); and the same list as
@@ -18,8 +18,8 @@
 //			return call.Done()
 //		},
 //	})
-//	server := apron.NewServer(chat, apron.Config{Messages: chat, Profiles: chat, Commands: &router})
-//	server.Handle(commands.ListMethod, router.ListHandler()) // optional
+//	srv := server.New(chat, server.Config{Messages: chat, Profiles: chat, Commands: &router})
+//	srv.Handle(commands.ListMethod, router.ListHandler()) // optional
 //
 // # Command lines
 //
@@ -39,7 +39,7 @@
 // with [Call.Notice], which the sender sees before the result, then the
 // result with Call.Reply ([Call.Done] for {}), or an error. A backend that
 // keeps its state under a lock replies while it holds it; one whose
-// command takes long answers later (apron.Reply.Later). A failure is an
+// command takes long answers later (server.Reply.Later). A failure is an
 // ordinary *apron.Error, whose message the client shows: the Router
 // answers a line it cannot run invalid_params with what to do instead,
 // and a form the sender may not use denied.
@@ -94,6 +94,7 @@ import (
 	"unicode"
 
 	"github.com/apron-chat/apron-server-go/apron"
+	"github.com/apron-chat/apron-server-go/apron/server"
 )
 
 // The fields of a command request, besides body.text, that a form may use
@@ -225,7 +226,7 @@ type Form struct {
 	// command's room, and Router.Command refuses the others, as denied.
 	// It may be called for every form on each /help and listing: keep it
 	// cheap, and free of side effects.
-	May func(ctx context.Context, c *apron.Conn, roomID string) bool
+	May func(ctx context.Context, c *server.Conn, roomID string) bool
 }
 
 // Synopsis is the form as /help shows it, such as "/kick @user [<reason>]".
@@ -510,7 +511,7 @@ func (r *Router) Find(name, args string) (*Command, *Form) {
 // /help lists them, or, for "", in a room it can see, as a listing does,
 // in the order of their commands: /help first, unless a command named
 // help was added. Unlisted commands are left out.
-func (r *Router) Usable(ctx context.Context, c *apron.Conn, roomID string) []Form {
+func (r *Router) Usable(ctx context.Context, c *server.Conn, roomID string) []Form {
 	var forms []Form
 	if !r.hasHelp {
 		forms = append(forms, helpForm)
@@ -530,7 +531,7 @@ func (r *Router) Usable(ctx context.Context, c *apron.Conn, roomID string) []For
 
 // List is what a listing lists for c: an Entry for each form c may use in
 // a room it can see.
-func (r *Router) List(ctx context.Context, c *apron.Conn) []Entry {
+func (r *Router) List(ctx context.Context, c *server.Conn) []Entry {
 	return Entries(r.Usable(ctx, c, ""))
 }
 
@@ -539,11 +540,11 @@ func (r *Router) List(ctx context.Context, c *apron.Conn) []Entry {
 // it gives clients that know apron's ext:command_list, such as to
 // complete what people type, the commands of any backend. It takes no
 // params, and ignores any.
-func (r *Router) ListHandler() apron.Handler {
-	return apron.Handler{
+func (r *Router) ListHandler() server.Handler {
+	return server.Handler{
 		Capability: ListMethod,
 		NoDedup:    true,
-		Serve: func(ctx context.Context, c *apron.Conn, req *apron.Request, reply apron.Reply[any]) error {
+		Serve: func(ctx context.Context, c *server.Conn, req *server.Request, reply server.Reply[any]) error {
 			return reply.Send(ListResult{Commands: r.List(ctx, c)})
 		},
 	}
@@ -555,7 +556,7 @@ func (r *Router) ListHandler() apron.Handler {
 // it; it answers /help itself. A line it cannot run is invalid_params,
 // saying what to do instead, and a form c may not use is denied. The
 // package documentation lists the checks in their order (Checks).
-func (r *Router) Command(ctx context.Context, c *apron.Conn, p apron.CommandParams, reply apron.Reply[apron.CommandResult]) error {
+func (r *Router) Command(ctx context.Context, c *server.Conn, p apron.CommandParams, reply server.Reply[apron.CommandResult]) error {
 	name, args, ok := Parse(p.Body.Text)
 	if !ok {
 		return apron.InvalidParams("A command starts with /; try /help")
@@ -655,14 +656,14 @@ func (r *Router) runHelp(ctx context.Context, call *Call) error {
 // Call is one run of a command.
 type Call struct {
 	// Conn sent the command.
-	Conn *apron.Conn
+	Conn *server.Conn
 	// Params are the command's: its room, "" for the default room, its
 	// body, whose text is the command line, and its other arguments. The
 	// Router knows no rooms, so "" stays "" for May, /help, and Run,
 	// unless Router.Before sets the backend's default room (§3.6.3).
 	Params apron.CommandParams
 	// Reply answers the command, once its notices are sent.
-	Reply apron.Reply[apron.CommandResult]
+	Reply server.Reply[apron.CommandResult]
 	// Name is the command's name, and Args the command line after it,
 	// trimmed.
 	Name, Args string

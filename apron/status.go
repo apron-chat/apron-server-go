@@ -2,9 +2,10 @@ package apron
 
 import (
 	"bytes"
-	"context"
 	"encoding/json/v2"
 	"errors"
+
+	"github.com/apron-chat/apron-server-go/apron/internal/core"
 )
 
 // The status values every server with capability status accepts (§4.5.1),
@@ -64,7 +65,7 @@ func (m *Mute) UnmarshalJSON(raw []byte) error {
 		*m = Mute{On: true}
 	case bytes.Equal(raw, []byte("false")):
 		*m = Mute{}
-	case !isNull(raw) && json.Unmarshal(raw, &seconds) == nil && seconds > 0:
+	case !core.IsNull(raw) && json.Unmarshal(raw, &seconds) == nil && seconds > 0:
 		*m = Mute{On: true, Seconds: seconds}
 	default:
 		return errors.New("wire: mute must be true, false, or a positive whole number of seconds")
@@ -83,11 +84,3 @@ type StatusUpdate struct {
 
 // Method makes a StatusUpdate a Notification.
 func (StatusUpdate) Method() string { return "status" }
-
-// StatusHandler handles the status request, and adds capability status
-// (§4.5). A backend sends the user's mutes to its connections as status
-// notifications, and statuses as user notifications. The statuses it
-// accepts with me, other than online and "", are ServerInfo.Status.
-type StatusHandler interface {
-	Status(ctx context.Context, c *Conn, p StatusParams, reply Reply[OK]) error
-}

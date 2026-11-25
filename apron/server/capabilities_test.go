@@ -1,12 +1,14 @@
-package apron
+package server
 
 import (
 	"encoding/json/jsontext"
 	"testing"
 	"time"
+
+	"github.com/apron-chat/apron-server-go/apron"
 )
 
-func ptr(n LogID) *LogID { return &n }
+func ptr(n apron.LogID) *apron.LogID { return &n }
 
 func req(params string) *Request {
 	r, err := detachedRequest("", jsontext.Value(params), nil)
@@ -16,10 +18,10 @@ func req(params string) *Request {
 	return r
 }
 
-func logOf(ids ...LogID) []Record {
-	var log []Record
+func logOf(ids ...apron.LogID) []apron.Record {
+	var log []apron.Record
 	for _, id := range ids {
-		log = append(log, Record{LogID: id, Message: &Message{MessageID: id, LogID: id}})
+		log = append(log, apron.Record{LogID: id, Message: &apron.Message{MessageID: id, LogID: id}})
 	}
 	return log
 }
@@ -28,22 +30,22 @@ func TestPage(t *testing.T) {
 	records := logOf(10, 20, 30, 40, 50)
 	cases := []struct {
 		name        string
-		p           HistoryParams
+		p           apron.HistoryParams
 		limit       int
-		lower       LogID
-		first, last LogID
+		lower       apron.LogID
+		first, last apron.LogID
 		more        bool
 		count       int
 	}{
-		{"newest without after", HistoryParams{}, 2, 10, 40, 50, true, 2},
-		{"oldest with after", HistoryParams{After: ptr(15)}, 2, 10, 20, 30, true, 2},
-		{"inclusive bounds", HistoryParams{After: ptr(20), Before: ptr(40)}, 10, 10, 20, 40, false, 3},
-		{"one record", HistoryParams{After: ptr(30), Before: ptr(30)}, 10, 10, 30, 30, false, 1},
-		{"client limit under the server's", HistoryParams{Limit: 1}, 10, 10, 50, 50, true, 1},
-		{"below the lower bound", HistoryParams{Before: ptr(25)}, 10, 30, 0, 0, false, 0},
-		{"empty", HistoryParams{After: ptr(60)}, 10, 10, 0, 0, false, 0},
-		{"a limit of 0 is 1", HistoryParams{}, 0, 10, 50, 50, true, 1},
-		{"a negative limit is 1", HistoryParams{After: ptr(10)}, -5, 10, 10, 10, true, 1},
+		{"newest without after", apron.HistoryParams{}, 2, 10, 40, 50, true, 2},
+		{"oldest with after", apron.HistoryParams{After: ptr(15)}, 2, 10, 20, 30, true, 2},
+		{"inclusive bounds", apron.HistoryParams{After: ptr(20), Before: ptr(40)}, 10, 10, 20, 40, false, 3},
+		{"one record", apron.HistoryParams{After: ptr(30), Before: ptr(30)}, 10, 10, 30, 30, false, 1},
+		{"client limit under the server's", apron.HistoryParams{Limit: 1}, 10, 10, 50, 50, true, 1},
+		{"below the lower bound", apron.HistoryParams{Before: ptr(25)}, 10, 30, 0, 0, false, 0},
+		{"empty", apron.HistoryParams{After: ptr(60)}, 10, 10, 0, 0, false, 0},
+		{"a limit of 0 is 1", apron.HistoryParams{}, 0, 10, 50, 50, true, 1},
+		{"a negative limit is 1", apron.HistoryParams{After: ptr(10)}, -5, 10, 10, 10, true, 1},
 	}
 	for _, c := range cases {
 		r := Page(Log{Records: records, Lower: c.lower, Latest: 50}, c.p, c.limit)
@@ -54,7 +56,7 @@ func TestPage(t *testing.T) {
 			t.Errorf("%s: bounds %v %v", c.name, r.LatestLogID, r.HistoryLogID)
 		}
 	}
-	if r := Page(Log{}, HistoryParams{}, 10); r.HistoryLogID != 0 || r.LatestLogID != 0 || r.More {
+	if r := Page(Log{}, apron.HistoryParams{}, 10); r.HistoryLogID != 0 || r.LatestLogID != 0 || r.More {
 		t.Errorf("empty log: %+v", r)
 	}
 }
@@ -104,9 +106,9 @@ func TestParseStatus(t *testing.T) {
 			t.Errorf("%s was accepted", bad)
 		}
 	}
-	for _, m := range []Mute{{}, {On: true}, {On: true, Seconds: 60}} {
+	for _, m := range []apron.Mute{{}, {On: true}, {On: true, Seconds: 60}} {
 		got, _ := m.MarshalJSON()
-		want := map[Mute]string{{}: "false", {On: true}: "true", {On: true, Seconds: 60}: "60"}[m]
+		want := map[apron.Mute]string{{}: "false", {On: true}: "true", {On: true, Seconds: 60}: "60"}[m]
 		if string(got) != want {
 			t.Errorf("%+v encodes as %s", m, got)
 		}

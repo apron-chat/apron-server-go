@@ -1,17 +1,18 @@
-package apron
+package server
 
 import (
 	"container/list"
 	"encoding/json/jsontext"
 	"sync"
 
+	"github.com/apron-chat/apron-server-go/apron"
 	"github.com/apron-chat/apron-server-go/apron/internal/core"
 )
 
 // dedupOutcome is a request's encoded result, or its error.
 type dedupOutcome struct {
 	result jsontext.Value
-	err    *Error
+	err    *apron.Error
 }
 
 type dedupEntry = core.DedupEntry[dedupOutcome]

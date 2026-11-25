@@ -8,6 +8,7 @@ import (
 	"golang.org/x/time/rate"
 
 	"github.com/apron-chat/apron-server-go/apron"
+	"github.com/apron-chat/apron-server-go/apron/server"
 	"github.com/apron-chat/apron-server-go/aprond/internal/messages"
 	"github.com/apron-chat/apron-server-go/aprond/internal/roomlog"
 	"github.com/apron-chat/apron-server-go/aprond/internal/rooms"
@@ -66,7 +67,7 @@ func storedBody(body map[string]any) *roomlog.Body {
 // (§4.2.2): a poster who has not joined gets only the result. A new message
 // with no text and no embeds is invalid_params (§3.5.1). A new message is a
 // save with no message_id, as backend.Message makes it.
-func (s *Server) saveMessage(c *client, p apron.EditParams, reply apron.Reply[apron.MessageResult]) *Error {
+func (s *Server) saveMessage(c *client, p apron.EditParams, reply server.Reply[apron.MessageResult]) *Error {
 	roomID := p.RoomID
 	if roomID == "" {
 		roomID = defaultRoomID
@@ -379,7 +380,7 @@ func mentions(body map[string]any) []string {
 // react replaces the caller's complete reaction set on one message
 // (§4.7). Entries are kept fully qualified, and duplicates collapse; an
 // unchanged set logs nothing. The broadcast precedes the result (§1).
-func (s *Server) react(c *client, p apron.ReactParams, reply apron.Reply[apron.OK]) *Error {
+func (s *Server) react(c *client, p apron.ReactParams, reply server.Reply[apron.OK]) *Error {
 	messageID := p.MessageID.String()
 	emojis, err := messages.Emojis(p.Emojis)
 	if err != nil {

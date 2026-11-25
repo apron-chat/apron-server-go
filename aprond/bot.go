@@ -16,6 +16,7 @@ import (
 
 	"github.com/apron-chat/apron-server-go/apron"
 	"github.com/apron-chat/apron-server-go/apron/bot"
+	"github.com/apron-chat/apron-server-go/apron/server"
 	"github.com/apron-chat/apron-server-go/aprond/internal/livetext"
 )
 
@@ -27,13 +28,13 @@ var (
 	// ErrFellBehind is why the server closed a Session whose OnFrame fell
 	// too far behind its frames, as it disconnects a client that does not
 	// read.
-	ErrFellBehind = apron.ErrFellBehind
+	ErrFellBehind = server.ErrFellBehind
 	// ErrReentrant is returned by a request a Session is asked to send
 	// while the request it is sending waits on the caller, such as from a
 	// filter or command that the session's own message runs: the session
 	// sends one request at a time. Send it with another Session
 	// (Bot.Connect).
-	ErrReentrant = apron.ErrReentrant
+	ErrReentrant = server.ErrReentrant
 )
 
 // Bot is an account an extension owns and speaks through: it holds the
@@ -239,7 +240,7 @@ func (b *Bot) Connect(options SessionOptions) (*Session, error) {
 	c := &client{server: s}
 	session := &Session{s: s, bot: b, c: c, done: make(chan struct{})}
 	c.session = session
-	local := apron.LocalOptions{
+	local := server.LocalOptions{
 		User:  apron.User{UserID: b.userID},
 		Data:  c,
 		Queue: max(s.config.OutgoingQueue, sessionFrameQueue),
@@ -252,7 +253,7 @@ func (b *Bot) Connect(options SessionOptions) (*Session, error) {
 	// it.
 	conn, err := bot.Dial(s.srv, local)
 	switch {
-	case errors.Is(err, apron.ErrClosed):
+	case errors.Is(err, server.ErrClosed):
 		return nil, ErrServerClosed
 	case err != nil:
 		return nil, err
@@ -264,7 +265,7 @@ func (b *Bot) Connect(options SessionOptions) (*Session, error) {
 // connectSession signs a Session's connection in as its bot, as a network
 // connection is signed in by auth, while wire opens it: frames sent to it
 // meanwhile, such as those after a sign-in, go after its server frame.
-func (s *Server) connectSession(c *client, wc *apron.Conn) error {
+func (s *Server) connectSession(c *client, wc *server.Conn) error {
 	b := c.session.bot
 	s.mu.Lock()
 	defer s.unlock()
@@ -287,7 +288,7 @@ func (s *Server) connectSession(c *client, wc *apron.Conn) error {
 
 // forgotten records why the session closed, once the server has forgotten
 // its connection (backend.disconnected). Whether it fell behind is read
-// from its apron.Local when asked (Err), as wire may forget a connection
+// from its server.Local when asked (Err), as wire may forget a connection
 // that fails to open before Connect has it.
 func (b *Session) forgotten(serverClosed bool) {
 	if serverClosed {
@@ -339,7 +340,7 @@ func (b *Session) UserID() string { return b.bot.userID }
 // Conn is the session's connection in package wire/bot's terms, as
 // Bot.Conn is the bot's: for what the session's own methods do not cover,
 // typed with wire's params and results. Its errors are wire's: a refusal
-// as a *apron.Error, which is an *Error, and apron.ErrClosed once the
+// as a *apron.Error, which is an *Error, and server.ErrClosed once the
 // session is closed, where the session's own methods return Err's. auth is
 // refused: a session stays signed in as its bot.
 func (b *Session) Conn() *bot.Conn { return b.conn }
@@ -367,7 +368,7 @@ func (b *Session) Err() error {
 // closing records why the session is closing, unless that was recorded
 // already: it fell behind, or else it was closed.
 func (b *Session) closing() {
-	if errors.Is(b.conn.Err(), apron.ErrFellBehind) {
+	if errors.Is(b.conn.Err(), server.ErrFellBehind) {
 		b.setErr(ErrFellBehind)
 	}
 	b.setErr(ErrSessionClosed)
@@ -383,7 +384,7 @@ func (b *Session) Close() error {
 }
 
 func (b *Session) closedErr() error {
-	if errors.Is(b.conn.Err(), apron.ErrFellBehind) {
+	if errors.Is(b.conn.Err(), server.ErrFellBehind) {
 		return ErrFellBehind
 	}
 	if err := b.Err(); err != nil {
@@ -406,7 +407,7 @@ func (b *Session) Call(ctx context.Context, method string, params any) (jsontext
 // requestErr is the error of a request: why the session closed, once it
 // has.
 func (b *Session) requestErr(err error) error {
-	if errors.Is(err, apron.ErrClosed) || errors.Is(err, apron.ErrFellBehind) {
+	if errors.Is(err, server.ErrClosed) || errors.Is(err, server.ErrFellBehind) {
 		return b.closedErr()
 	}
 	return err

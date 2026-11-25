@@ -19,6 +19,7 @@ import (
 
 	"github.com/apron-chat/apron-server-go/apron"
 	"github.com/apron-chat/apron-server-go/apron/bot"
+	"github.com/apron-chat/apron-server-go/apron/server"
 	"github.com/apron-chat/apron-server-go/apron/server/commands"
 )
 
@@ -32,10 +33,10 @@ func main() {
 	log.Fatal(http.ListenAndServe(*addr, mux))
 }
 
-// Chat is a one-room chat: the backend of its apron.Server.
+// Chat is a one-room chat: the backend of its server.Server.
 type Chat struct {
-	Server   *apron.Server
-	clock    apron.Clock
+	Server   *server.Server
+	clock    server.Clock
 	commands commands.Router
 
 	mu       sync.Mutex
@@ -54,17 +55,17 @@ func NewChat() *Chat {
 		Forms: []commands.Form{{Usage: "/nick <name>", Help: "change your name"}},
 		Run:   c.nick,
 	})
-	c.Server = apron.NewServer(c, apron.Config{
+	c.Server = server.New(c, server.Config{
 		Messages: c,
 		Profiles: c,
 		Commands: &c.commands,
 		// Browsers open a WebSocket from the page's origin, and by
 		// default only the server's own may: a web client served from
 		// elsewhere, such as a dev server on another port, needs its
-		// origin let in, as apron.OriginPatterns("localhost:*") does. This
+		// origin let in, as server.OriginPatterns("localhost:*") does. This
 		// server signs in guests, with no cookies for another site's page
 		// to use, so it lets in any.
-		CheckOrigin: apron.AnyOrigin,
+		CheckOrigin: server.AnyOrigin,
 	})
 	c.Server.Handle(commands.ListMethod, c.commands.ListHandler())
 	// The bot is a user on a connection of its own, in process: what it
@@ -86,7 +87,7 @@ func echo(ctx context.Context, b *bot.Bot, m apron.Message) {
 	}
 }
 
-func (*Chat) Hello(context.Context, *apron.Conn) apron.ServerInfo {
+func (*Chat) Hello(context.Context, *server.Conn) apron.ServerInfo {
 	return apron.ServerInfo{Auth: []string{"guest"}, Agent: "apron-minimal/1", Title: "Minimal"}
 }
 
@@ -95,7 +96,7 @@ func (*Chat) Hello(context.Context, *apron.Conn) apron.ServerInfo {
 // the order of the changes (§1), and a connection is signed in as Send
 // queues its auth result, before anything broadcast after it.
 
-func (c *Chat) Auth(_ context.Context, _ *apron.Conn, p apron.AuthParams, reply apron.Reply[apron.AuthResult]) error {
+func (c *Chat) Auth(_ context.Context, _ *server.Conn, p apron.AuthParams, reply server.Reply[apron.AuthResult]) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.guests++
@@ -113,7 +114,7 @@ func (c *Chat) Auth(_ context.Context, _ *apron.Conn, p apron.AuthParams, reply 
 	return reply.Send(apron.AuthResult{You: &apron.CurrentUser{User: apron.User{UserID: id, Name: name}}}, welcome)
 }
 
-func (c *Chat) Message(_ context.Context, conn *apron.Conn, p apron.MessageParams, reply apron.Reply[apron.MessageResult]) error {
+func (c *Chat) Message(_ context.Context, conn *server.Conn, p apron.MessageParams, reply server.Reply[apron.MessageResult]) error {
 	if p.RoomID != "" && p.RoomID != room {
 		return apron.InvalidParams("There is only one room, " + room)
 	}
@@ -143,13 +144,13 @@ func (c *Chat) Message(_ context.Context, conn *apron.Conn, p apron.MessageParam
 // user's other connections as you, and to everyone else as new (§3.3.3),
 // as everyone shares the one room, and answers with the complete object,
 // the fields the change cleared as their empty values.
-func (c *Chat) Me(_ context.Context, conn *apron.Conn, p apron.MeParams, reply apron.Reply[apron.CurrentUser]) error {
+func (c *Chat) Me(_ context.Context, conn *server.Conn, p apron.MeParams, reply server.Reply[apron.CurrentUser]) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	old := *conn.User()
-	you := apron.ApplyMe(old, p)
+	you := server.ApplyMe(old, p)
 	you.Name = strings.TrimSpace(you.Name)
-	c.Server.PublishUser(apron.UserChange{Old: old, New: you, Except: conn}, nil)
+	c.Server.PublishUser(server.UserChange{Old: old, New: you, Except: conn}, nil)
 	return reply.Send(you.Complete(old))
 }
 
@@ -164,6 +165,6 @@ func (c *Chat) nick(_ context.Context, call *commands.Call) error {
 	old := *call.Conn.User()
 	you := old
 	you.Name = call.Args
-	c.Server.PublishUser(apron.UserChange{Old: old, New: you}, nil)
+	c.Server.PublishUser(server.UserChange{Old: old, New: you}, nil)
 	return call.Done()
 }

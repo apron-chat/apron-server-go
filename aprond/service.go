@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/apron-chat/apron-server-go/apron"
+	"github.com/apron-chat/apron-server-go/apron/server"
 	"github.com/apron-chat/apron-server-go/aprond/internal/services"
 )
 
@@ -222,7 +223,7 @@ func (s *Server) revokeServicesOfLocked(u *userState) {
 
 // authenticateServiceLocked signs the connection in with a service token,
 // from any origin.
-func (s *Server) authenticateServiceLocked(c *client, reply apron.Reply[apron.AuthResult], token string) *Error {
+func (s *Server) authenticateServiceLocked(c *client, reply server.Reply[apron.AuthResult], token string) *Error {
 	key := sha256.Sum256([]byte(token))
 	t := s.services.Get(key)
 	if t == nil || !time.Now().Before(t.Expires) {
@@ -240,7 +241,7 @@ func (s *Server) authenticateServiceLocked(c *client, reply apron.Reply[apron.Au
 
 // setService notes the service token the connection signed in with, zero
 // for none, and whether it may manage its account. A restricted one has a
-// deduplication scope of its own (apron.Conn.SetDedupScope): a retry of
+// deduplication scope of its own (server.Conn.SetDedupScope): a retry of
 // another connection's request (§1.2) runs again on it, so that it never
 // gets the outcome of what the handler refuses it, such as an account
 // method's.

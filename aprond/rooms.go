@@ -8,6 +8,7 @@ import (
 	"slices"
 
 	"github.com/apron-chat/apron-server-go/apron"
+	"github.com/apron-chat/apron-server-go/apron/server"
 	"github.com/apron-chat/apron-server-go/aprond/internal/roomlog"
 	"github.com/apron-chat/apron-server-go/aprond/internal/rooms"
 )
@@ -311,7 +312,7 @@ func (s *Server) announceRoomLocked(r *roomState, editor *userState) {
 // other members as room_update updated, without joining them. An edit goes
 // as updated to the room's members, to the parent's members for a thread
 // that is not private, and to the editor.
-func (s *Server) setRoom(c *client, p apron.RoomSetParams, reply apron.Reply[apron.RoomSetResult]) *Error {
+func (s *Server) setRoom(c *client, p apron.RoomSetParams, reply server.Reply[apron.RoomSetResult]) *Error {
 	updating := p.RoomID != ""
 	roomID, parentID := p.RoomID, ""
 	if !updating {
@@ -444,7 +445,7 @@ const (
 //
 // The result is followed by the read cursors kept for the listed rooms
 // (§4.6).
-func (s *Server) listRooms(c *client, p apron.RoomListParams, reply apron.Reply[apron.RoomListResult]) *Error {
+func (s *Server) listRooms(c *client, p apron.RoomListParams, reply server.Reply[apron.RoomListResult]) *Error {
 	wantJoined, wantOthers := p.Filter != apron.FilterNotJoined, p.Filter != apron.FilterJoined
 	withMembers := p.Members
 	parentID, hasParent := p.ParentRoomID, p.ParentRoomID != ""
@@ -538,7 +539,7 @@ func profiles(users map[string]*userState) []apron.CurrentUser {
 // With the user_id of another user, a member of the room adds that user,
 // which is how people are brought into a private room; adding a member
 // changes nothing.
-func (s *Server) joinRoom(c *client, p apron.RoomJoinParams, reply apron.Reply[apron.OK]) *Error {
+func (s *Server) joinRoom(c *client, p apron.RoomJoinParams, reply server.Reply[apron.OK]) *Error {
 	roomID, targetID := p.RoomID, p.UserID
 	hasTarget := targetID != ""
 	s.mu.Lock()
@@ -587,7 +588,7 @@ func (s *Server) joinRoom(c *client, p apron.RoomJoinParams, reply apron.Reply[a
 //
 // With the user_id of another user, it removes that user, which the room's
 // creator and users with the admin or moderator role may do.
-func (s *Server) leaveRoom(c *client, p apron.RoomLeaveParams, reply apron.Reply[apron.OK]) *Error {
+func (s *Server) leaveRoom(c *client, p apron.RoomLeaveParams, reply server.Reply[apron.OK]) *Error {
 	roomID, targetID := p.RoomID, p.UserID
 	hasTarget := targetID != ""
 	s.mu.Lock()
@@ -629,7 +630,7 @@ func (s *Server) leaveRoom(c *client, p apron.RoomLeaveParams, reply apron.Reply
 // prev_room_id, so a window bounded to one log_id (after == before) in the
 // room a snapshot names walks prev_log_id back through a message's edits
 // (§4.3.1). Across rooms, it comes once.
-func (s *Server) history(c *client, p apron.HistoryParams, reply apron.Reply[apron.HistoryResult]) *Error {
+func (s *Server) history(c *client, p apron.HistoryParams, reply server.Reply[apron.HistoryResult]) *Error {
 	roomID, hasRoom := p.RoomID, p.RoomID != ""
 	var after, before int64
 	hasAfter, hasBefore := p.After != nil, p.Before != nil

@@ -1,4 +1,6 @@
-package apron
+package server
+
+import "github.com/apron-chat/apron-server-go/apron"
 
 // Requirement says whether a param a Decoder reads is required.
 type Requirement bool
@@ -48,7 +50,7 @@ func (d *Decoder) Err() error { return d.err }
 // the handler's own, such as one value's range, in the order of the reads.
 // A nil err records nothing, and neither does a nil *Error.
 func (d *Decoder) Fail(err error) {
-	if e, ok := err.(*Error); ok && e == nil {
+	if e, ok := err.(*apron.Error); ok && e == nil {
 		return
 	}
 	if d.err == nil {
@@ -74,7 +76,7 @@ func read[T any](d *Decoder, name string, p Requirement, get func(string) (T, bo
 		d.err = err
 		return zero
 	case !present && p == Required:
-		d.err = Missing(name)
+		d.err = apron.Missing(name)
 		return zero
 	}
 	return value
@@ -103,25 +105,25 @@ func (d *Decoder) Object(name string, r Requirement) Fields {
 
 // Ext reads an ext param (§4.13): an object whose values are any JSON,
 // kept as they arrived, compacted; nil when left out.
-func (d *Decoder) Ext(name string, r Requirement) Ext {
+func (d *Decoder) Ext(name string, r Requirement) apron.Ext {
 	return read(d, name, r, d.fields.extParam)
 }
 
 // LogID reads a log_id param, such as a history bound (§2.1): a decimal
 // string of a non-negative number below 2^53, as ParseLogID reads it.
-func (d *Decoder) LogID(name string, r Requirement) LogID {
+func (d *Decoder) LogID(name string, r Requirement) apron.LogID {
 	return read(d, name, r, d.fields.logIDParam)
 }
 
 // MessageID reads a message_id param (§2.2): a log_id that is not 0.
-func (d *Decoder) MessageID(name string, r Requirement) LogID {
+func (d *Decoder) MessageID(name string, r Requirement) apron.LogID {
 	return read(d, name, r, d.fields.messageIDParam)
 }
 
 // MessageRef reads a reference to a message (§3.5.4), {"message_id": ...}.
-func (d *Decoder) MessageRef(name string, r Requirement) MessageRef {
+func (d *Decoder) MessageRef(name string, r Requirement) apron.MessageRef {
 	id := read(d, name, r, d.fields.messageRefParam)
-	return MessageRef{MessageID: id}
+	return apron.MessageRef{MessageID: id}
 }
 
 // Count reads a positive integer param, such as a limit.

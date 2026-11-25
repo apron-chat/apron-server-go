@@ -1,4 +1,4 @@
-package apron_test
+package server_test
 
 import (
 	"bytes"
@@ -18,12 +18,13 @@ import (
 
 	"github.com/apron-chat/apron-server-go/apron"
 	"github.com/apron-chat/apron-server-go/apron/aprontest"
+	"github.com/apron-chat/apron-server-go/apron/server"
 )
 
 // local opens a Local connection to s as ada, closed when the test ends.
-func local(t *testing.T, s *apron.Server) *apron.Local {
+func local(t *testing.T, s *server.Server) *server.Local {
 	t.Helper()
-	l, err := s.Local(apron.LocalOptions{User: apron.User{UserID: "ada"}})
+	l, err := s.Local(server.LocalOptions{User: apron.User{UserID: "ada"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -31,7 +32,7 @@ func local(t *testing.T, s *apron.Server) *apron.Local {
 	return l
 }
 
-func call(t *testing.T, l *apron.Local, method, params string) (string, error) {
+func call(t *testing.T, l *server.Local, method, params string) (string, error) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -61,7 +62,7 @@ type commands struct {
 	second error
 }
 
-func (h *commands) Command(_ context.Context, _ *apron.Conn, p apron.CommandParams, reply apron.Reply[apron.CommandResult]) error {
+func (h *commands) Command(_ context.Context, _ *server.Conn, p apron.CommandParams, reply server.Reply[apron.CommandResult]) error {
 	switch p.Body.Text {
 	case "/twice":
 		first := reply.Send(apron.CommandResult{Unknown: jsontext.Value(`{"n":1}`)})
@@ -84,7 +85,7 @@ func (h *commands) Command(_ context.Context, _ *apron.Conn, p apron.CommandPara
 // statuses answers status with nothing, as a Reply[OK] handler may.
 type statuses struct{}
 
-func (statuses) Status(context.Context, *apron.Conn, apron.StatusParams, apron.Reply[apron.OK]) error {
+func (statuses) Status(context.Context, *server.Conn, apron.StatusParams, server.Reply[apron.OK]) error {
 	return nil
 }
 
@@ -94,7 +95,7 @@ func (statuses) Status(context.Context, *apron.Conn, apron.StatusParams, apron.R
 func TestSendOnce(t *testing.T) {
 	var log logged
 	h := &commands{}
-	s := apron.NewServer(&backend{}, apron.Config{Commands: h, Status: statuses{}, Logger: log.logger()})
+	s := server.New(&backend{}, server.Config{Commands: h, Status: statuses{}, Logger: log.logger()})
 	l := local(t, s)
 	if result, err := call(t, l, "command", `{"body":{"text":"/twice"}}`); err != nil || result != `{"n":1}` {
 		t.Fatalf("got %s %v, want the first result", result, err)
@@ -102,7 +103,7 @@ func TestSendOnce(t *testing.T) {
 	h.mu.Lock()
 	second := h.second
 	h.mu.Unlock()
-	if !errors.Is(second, apron.ErrReplied) {
+	if !errors.Is(second, server.ErrReplied) {
 		t.Fatalf("a second Send returned %v, want ErrReplied", second)
 	}
 	if _, err := call(t, l, "command", `{"body":{"text":"/forget"}}`); apron.CodeOf(err) != apron.CodeInternalError {
@@ -125,11 +126,11 @@ func TestSendOnce(t *testing.T) {
 
 // rooms lists what it is given, and embeds ReadOnlyRooms for the rest.
 type rooms struct {
-	apron.ReadOnlyRooms
+	server.ReadOnlyRooms
 	result apron.RoomListResult
 }
 
-func (h *rooms) RoomList(_ context.Context, _ *apron.Conn, _ apron.RoomListParams, reply apron.Reply[apron.RoomListResult]) error {
+func (h *rooms) RoomList(_ context.Context, _ *server.Conn, _ apron.RoomListParams, reply server.Reply[apron.RoomListResult]) error {
 	return reply.Send(h.result)
 }
 
@@ -138,7 +139,7 @@ func TestRoomListSend(t *testing.T) {
 	member := apron.User{UserID: "bob"}
 	general := apron.RoomView{Room: apron.Room{RoomID: "general"}, Members: []apron.CurrentUser{{User: member}}, MemberCount: 9}
 	h := &rooms{result: apron.RoomListResult{NotJoined: []apron.RoomView{general}, Users: []apron.CurrentUser{{User: member}}}}
-	s := apron.NewServer(&backend{}, apron.Config{Rooms: h})
+	s := server.New(&backend{}, server.Config{Rooms: h})
 	l := local(t, s)
 	for _, tc := range []struct{ params, want string }{
 		{`{}`, `{"joined":[],"not_joined":[{"room_id":"general"}]}`},
@@ -157,7 +158,7 @@ func TestRoomListSend(t *testing.T) {
 // ReadOnlyRooms refuses what a RoomList-only handler does not take,
 // and the server has capability rooms.
 func TestReadOnlyRooms(t *testing.T) {
-	s := apron.NewServer(&backend{}, apron.Config{Rooms: &rooms{}})
+	s := server.New(&backend{}, server.Config{Rooms: &rooms{}})
 	l := local(t, s)
 	for method, params := range map[string]string{
 		"room_join":  `{"room_id":"general"}`,
@@ -179,11 +180,11 @@ func TestReadOnlyRooms(t *testing.T) {
 // state under a lock does: the connection gets both.
 type broadcasting struct {
 	backend
-	s  *apron.Server
+	s  *server.Server
 	mu sync.Mutex
 }
 
-func (b *broadcasting) Auth(_ context.Context, c *apron.Conn, p apron.AuthParams, reply apron.Reply[apron.AuthResult]) error {
+func (b *broadcasting) Auth(_ context.Context, c *server.Conn, p apron.AuthParams, reply server.Reply[apron.AuthResult]) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	you := apron.User{UserID: "ada", Name: "Ada"}
@@ -196,15 +197,15 @@ func (b *broadcasting) Auth(_ context.Context, c *apron.Conn, p apron.AuthParams
 	if c.UserID() != "ada" {
 		return errors.New("not signed in as Send returned")
 	}
-	frame, _ := apron.EncodeRaw("joined", map[string]any{"user_id": "ada"})
+	frame, _ := server.EncodeRaw("joined", map[string]any{"user_id": "ada"})
 	b.s.Broadcast(frame, nil)
-	b.s.PublishUser(apron.UserChange{Old: you, New: apron.User{UserID: "ada", Name: "Ada L"}}, nil)
+	b.s.PublishUser(server.UserChange{Old: you, New: apron.User{UserID: "ada", Name: "Ada L"}}, nil)
 	return nil
 }
 
 func TestAuthSendSignsIn(t *testing.T) {
 	b := &broadcasting{}
-	b.s = apron.NewServer(b, apron.Config{Logger: slog.New(slog.DiscardHandler)})
+	b.s = server.New(b, server.Config{Logger: slog.New(slog.DiscardHandler)})
 	c := aprontest.Connect(t, b.s)
 	if _, err := c.Auth(wait(t), map[string]any{"scheme": "guest", "user_id": "bad id"}); apron.CodeOf(err) != apron.CodeInternalError {
 		t.Fatalf("got %v, want internal_error for an invalid user_id", err)
@@ -228,8 +229,8 @@ func TestAuthSendSignsIn(t *testing.T) {
 // A method may be registered before the Server serves, and after.
 func TestHandleAnyTime(t *testing.T) {
 	b := &backend{}
-	s := apron.NewServer(b, apron.Config{Messages: b, Commands: &commands{}})
-	s.Handle("echo", apron.Handler{Capability: "ext:echo", Serve: func(_ context.Context, _ *apron.Conn, r *apron.Request, reply apron.Reply[any]) error {
+	s := server.New(b, server.Config{Messages: b, Commands: &commands{}})
+	s.Handle("echo", server.Handler{Capability: "ext:echo", Serve: func(_ context.Context, _ *server.Conn, r *server.Request, reply server.Reply[any]) error {
 		return reply.Send(r.Fields())
 	}})
 	l := local(t, s)
@@ -241,7 +242,7 @@ func TestHandleAnyTime(t *testing.T) {
 	}
 	// A method registered once the Server serves is served, and listed in
 	// the server frames after.
-	s.Handle("late", apron.Handler{Capability: "ext:late", Serve: func(context.Context, *apron.Conn, *apron.Request, apron.Reply[any]) error { return nil }})
+	s.Handle("late", server.Handler{Capability: "ext:late", Serve: func(context.Context, *server.Conn, *server.Request, server.Reply[any]) error { return nil }})
 	if result, err := call(t, l, "late", `{}`); err != nil || result != `{}` {
 		t.Fatalf("late: %s %v", result, err)
 	}
@@ -255,11 +256,11 @@ func TestHandleAnyTime(t *testing.T) {
 // without a Backend, panics at once rather than when it first serves.
 func TestNewServerPanics(t *testing.T) {
 	for name, use := range map[string]func(){
-		"no backend": func() { apron.NewServer(nil, apron.Config{}) },
+		"no backend": func() { server.New(nil, server.Config{}) },
 		"zero Handle": func() {
-			new(apron.Server).Handle("x", apron.Handler{Serve: func(context.Context, *apron.Conn, *apron.Request, apron.Reply[any]) error { return nil }})
+			new(server.Server).Handle("x", server.Handler{Serve: func(context.Context, *server.Conn, *server.Request, server.Reply[any]) error { return nil }})
 		},
-		"zero Local": func() { _, _ = new(apron.Server).Local(apron.LocalOptions{User: apron.User{UserID: "ada"}}) },
+		"zero Local": func() { _, _ = new(server.Server).Local(server.LocalOptions{User: apron.User{UserID: "ada"}}) },
 	} {
 		func() {
 			defer func() {
@@ -274,19 +275,19 @@ func TestNewServerPanics(t *testing.T) {
 
 // Handle and HandleNotification refuse what they cannot serve.
 func TestHandlePanics(t *testing.T) {
-	serve := func(context.Context, *apron.Conn, *apron.Request, apron.Reply[any]) error { return nil }
-	notify := func(context.Context, *apron.Conn, *apron.Request) {}
-	for name, register := range map[string]func(s *apron.Server){
-		"auth":                  func(s *apron.Server) { s.Handle("auth", apron.Handler{Serve: serve}) },
-		"ping":                  func(s *apron.Server) { s.Handle("ping", apron.Handler{Serve: serve}) },
-		"ping notification":     func(s *apron.Server) { s.HandleNotification("ping", apron.NotificationHandler{Serve: notify}) },
-		"activity as a request": func(s *apron.Server) { s.Handle("activity", apron.Handler{Serve: serve}) },
-		"no Serve":              func(s *apron.Server) { s.Handle("x", apron.Handler{}) },
-		"no notification Serve": func(s *apron.Server) { s.HandleNotification("x", apron.NotificationHandler{}) },
-		"no name":               func(s *apron.Server) { s.Handle("", apron.Handler{Serve: serve}) },
-		"twice": func(s *apron.Server) {
-			s.Handle("x", apron.Handler{Serve: serve})
-			s.HandleNotification("x", apron.NotificationHandler{Serve: notify})
+	serve := func(context.Context, *server.Conn, *server.Request, server.Reply[any]) error { return nil }
+	notify := func(context.Context, *server.Conn, *server.Request) {}
+	for name, register := range map[string]func(s *server.Server){
+		"auth":                  func(s *server.Server) { s.Handle("auth", server.Handler{Serve: serve}) },
+		"ping":                  func(s *server.Server) { s.Handle("ping", server.Handler{Serve: serve}) },
+		"ping notification":     func(s *server.Server) { s.HandleNotification("ping", server.NotificationHandler{Serve: notify}) },
+		"activity as a request": func(s *server.Server) { s.Handle("activity", server.Handler{Serve: serve}) },
+		"no Serve":              func(s *server.Server) { s.Handle("x", server.Handler{}) },
+		"no notification Serve": func(s *server.Server) { s.HandleNotification("x", server.NotificationHandler{}) },
+		"no name":               func(s *server.Server) { s.Handle("", server.Handler{Serve: serve}) },
+		"twice": func(s *server.Server) {
+			s.Handle("x", server.Handler{Serve: serve})
+			s.HandleNotification("x", server.NotificationHandler{Serve: notify})
 		},
 	} {
 		func() {
@@ -295,7 +296,7 @@ func TestHandlePanics(t *testing.T) {
 					t.Errorf("%s: no panic", name)
 				}
 			}()
-			register(apron.NewServer(&backend{}, apron.Config{}))
+			register(server.New(&backend{}, server.Config{}))
 		}()
 	}
 }
@@ -307,11 +308,11 @@ func TestHandlePanics(t *testing.T) {
 func TestOverride(t *testing.T) {
 	for _, capability := range []string{"edit", ""} {
 		b := &editor{}
-		s := apron.NewServer(b, apron.Config{Messages: b, Edits: b})
-		s.Handle("message", apron.Handler{Capability: capability, Serve: func(_ context.Context, _ *apron.Conn, r *apron.Request, reply apron.Reply[any]) error {
+		s := server.New(b, server.Config{Messages: b, Edits: b})
+		s.Handle("message", server.Handler{Capability: capability, Serve: func(_ context.Context, _ *server.Conn, r *server.Request, reply server.Reply[any]) error {
 			return reply.Send(map[string]any{"overridden": true})
 		}})
-		s.HandleNotification("tick", apron.NotificationHandler{Serve: func(context.Context, *apron.Conn, *apron.Request) {}})
+		s.HandleNotification("tick", server.NotificationHandler{Serve: func(context.Context, *server.Conn, *server.Request) {}})
 		l := local(t, s)
 		if result, err := call(t, l, "message", `{"message_id":"1","deleted":true}`); err != nil || result != `{"overridden":true}` || b.edits.Load() != 0 {
 			t.Fatalf("got %s %v, %d edits", result, err, b.edits.Load())
@@ -320,14 +321,14 @@ func TestOverride(t *testing.T) {
 		if got, want := l.Conn().ServerInfo().Capabilities, []string{capability}; !slices.Equal(got, want) && !(capability == "" && len(got) == 0) {
 			t.Errorf("override with capability %q: capabilities %v", capability, got)
 		}
-		if _, err := call(t, l, "tick", `{}`); !errors.Is(err, apron.ErrNotRequest) {
+		if _, err := call(t, l, "tick", `{}`); !errors.Is(err, server.ErrNotRequest) {
 			t.Errorf("Call(tick): %v, want ErrNotRequest", err)
 		}
 	}
 }
 
 func TestOriginPatterns(t *testing.T) {
-	check := apron.OriginPatterns("*.example.com", "https://app.test")
+	check := server.OriginPatterns("*.example.com", "https://app.test")
 	for _, tc := range []struct {
 		origin string
 		want   bool
@@ -349,7 +350,7 @@ func TestOriginPatterns(t *testing.T) {
 			t.Errorf("Origin %q: %v, want %v", tc.origin, got, tc.want)
 		}
 	}
-	if !apron.AnyOrigin(httptest.NewRequest(http.MethodGet, "/", nil)) {
+	if !server.AnyOrigin(httptest.NewRequest(http.MethodGet, "/", nil)) {
 		t.Error("AnyOrigin refused")
 	}
 }
@@ -357,23 +358,23 @@ func TestOriginPatterns(t *testing.T) {
 // CheckOrigin decides who opens a WebSocket; without it, only the server's
 // own origin may.
 func TestCheckOrigin(t *testing.T) {
-	dial := func(s *apron.Server, origin string) error {
-		server := httptest.NewServer(s)
-		defer server.Close()
+	dial := func(s *server.Server, origin string) error {
+		ts := httptest.NewServer(s)
+		defer ts.Close()
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		header := http.Header{}
 		header.Set("Origin", origin)
-		ws, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(server.URL, "http"), &websocket.DialOptions{HTTPHeader: header})
+		ws, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(ts.URL, "http"), &websocket.DialOptions{HTTPHeader: header})
 		if err == nil {
 			ws.CloseNow()
 		}
 		return err
 	}
-	if err := dial(wired(&backend{}, apron.Config{}), "https://elsewhere.test"); err == nil {
+	if err := dial(wired(&backend{}, server.Config{}), "https://elsewhere.test"); err == nil {
 		t.Error("another origin opened a WebSocket by default")
 	}
-	allowed := wired(&backend{}, apron.Config{CheckOrigin: apron.OriginPatterns("elsewhere.test")})
+	allowed := wired(&backend{}, server.Config{CheckOrigin: server.OriginPatterns("elsewhere.test")})
 	if err := dial(allowed, "https://elsewhere.test"); err != nil {
 		t.Errorf("an allowed origin: %v", err)
 	}
@@ -386,7 +387,7 @@ func TestCheckOrigin(t *testing.T) {
 // notification past MaxLogID, and then a result with a negative one.
 type badLogIDs struct{ notified chan bool }
 
-func (h badLogIDs) serve(_ context.Context, c *apron.Conn, _ *apron.Request, reply apron.Reply[any]) error {
+func (h badLogIDs) serve(_ context.Context, c *server.Conn, _ *server.Request, reply server.Reply[any]) error {
 	h.notified <- c.Notify(apron.Message{LogID: apron.MaxLogID + 1, RoomID: "r", From: apron.User{UserID: "ada"}, Body: &apron.Body{Text: "x"}})
 	return reply.Send(map[string]any{"log_id": apron.LogID(-1)})
 }
@@ -396,8 +397,8 @@ func (h badLogIDs) serve(_ context.Context, c *apron.Conn, _ *apron.Request, rep
 func TestLogIDOutOfRangeNotSent(t *testing.T) {
 	var log logged
 	h := badLogIDs{make(chan bool, 1)}
-	s := apron.NewServer(&backend{}, apron.Config{Logger: log.logger()})
-	s.Handle("x_bad", apron.Handler{Serve: h.serve})
+	s := server.New(&backend{}, server.Config{Logger: log.logger()})
+	s.Handle("x_bad", server.Handler{Serve: h.serve})
 	l := local(t, s)
 	if result, err := call(t, l, "x_bad", `{}`); apron.CodeOf(err) != apron.CodeInternalError {
 		t.Fatalf("got %s %v, want internal_error", result, err)

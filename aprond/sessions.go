@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/apron-chat/apron-server-go/apron"
+	"github.com/apron-chat/apron-server-go/apron/server"
 	"github.com/apron-chat/apron-server-go/aprond/internal/devices"
 	"github.com/apron-chat/apron-server-go/aprond/internal/sessions"
 )
@@ -25,7 +26,7 @@ type session = sessions.Session[*userState]
 // a sign-in (§4.5). joinDefault joins a new account to the default room.
 // The token resumes from the connection's origin, or with anyOrigin from
 // any.
-func (s *Server) signInLocked(c *client, reply apron.Reply[apron.AuthResult], user *userState, now time.Time, signIn, joinDefault, anyOrigin bool) *Error {
+func (s *Server) signInLocked(c *client, reply server.Reply[apron.AuthResult], user *userState, now time.Time, signIn, joinDefault, anyOrigin bool) *Error {
 	if err := s.admitLocked(user); err != nil {
 		return err
 	}
@@ -57,7 +58,7 @@ func (s *Server) newSessionLocked(user *userState, origin string, anyOrigin bool
 
 // parseRequested parses the name and user_id that an auth request may request
 // for a new account.
-func parseRequested(reply apron.Reply[apron.AuthResult]) (name, requested string, err *Error) {
+func parseRequested(reply server.Reply[apron.AuthResult]) (name, requested string, err *Error) {
 	d := authParams(reply).Decoder()
 	name = d.String("name", optional)
 	requested = d.String("user_id", optional)
@@ -70,7 +71,7 @@ func parseRequested(reply apron.Reply[apron.AuthResult]) (name, requested string
 // authenticateToken resumes a sign-in through the protocol's token scheme
 // (§3.2), signs in with a device token (devices.go), or approves a
 // proposal with its temporary token (§4.11.2). Called holding s.mu.
-func (s *Server) authenticateToken(c *client, reply apron.Reply[apron.AuthResult]) *Error {
+func (s *Server) authenticateToken(c *client, reply server.Reply[apron.AuthResult]) *Error {
 	// Any token auth ends the schemes' pending work on the connection, such
 	// as a passkey ceremony, whether or not it signs in.
 	c.authStates = nil

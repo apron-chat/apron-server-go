@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/apron-chat/apron-server-go/apron"
+	"github.com/apron-chat/apron-server-go/apron/server"
 	"github.com/apron-chat/apron-server-go/aprond/internal/devices"
 )
 
@@ -105,7 +106,7 @@ func (s *Server) revokeDeviceLocked(c *client, old, replacement [32]byte) {
 // authenticateDeviceLocked signs the connection in with a device token,
 // from any origin or none. The result carries no session token: the device
 // keeps its own.
-func (s *Server) authenticateDeviceLocked(c *client, reply apron.Reply[apron.AuthResult], token string) *Error {
+func (s *Server) authenticateDeviceLocked(c *client, reply server.Reply[apron.AuthResult], token string) *Error {
 	key := sha256.Sum256([]byte(token))
 	device, ok := s.devices.Get(key)
 	if !ok {

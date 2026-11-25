@@ -1,4 +1,4 @@
-package apron_test
+package server_test
 
 import (
 	"bufio"
@@ -20,12 +20,13 @@ import (
 
 	"github.com/apron-chat/apron-server-go/apron"
 	"github.com/apron-chat/apron-server-go/apron/aprontest"
+	"github.com/apron-chat/apron-server-go/apron/server"
 )
 
 // backend is a test Backend: guests sign in as guest_<n>, with a notice
 // sent while Auth runs, and messages are counted.
 type backend struct {
-	clock    apron.Clock
+	clock    server.Clock
 	guests   atomic.Int64
 	messages atomic.Int64
 	// authDelay makes Auth wait, so that frames pipelined behind it are
@@ -33,14 +34,14 @@ type backend struct {
 	authDelay time.Duration
 
 	mu           sync.Mutex
-	disconnected []*apron.Conn
+	disconnected []*server.Conn
 }
 
-func (*backend) Hello(context.Context, *apron.Conn) apron.ServerInfo {
+func (*backend) Hello(context.Context, *server.Conn) apron.ServerInfo {
 	return apron.ServerInfo{Auth: []string{"guest"}, Agent: "wire-test/1"}
 }
 
-func (b *backend) Auth(_ context.Context, c *apron.Conn, p apron.AuthParams, reply apron.Reply[apron.AuthResult]) error {
+func (b *backend) Auth(_ context.Context, c *server.Conn, p apron.AuthParams, reply server.Reply[apron.AuthResult]) error {
 	you, err := b.guest(c, p)
 	if err != nil {
 		return err
@@ -49,7 +50,7 @@ func (b *backend) Auth(_ context.Context, c *apron.Conn, p apron.AuthParams, rep
 }
 
 // guest is who Auth signs a connection in as.
-func (b *backend) guest(c *apron.Conn, p apron.AuthParams) (*apron.CurrentUser, error) {
+func (b *backend) guest(c *server.Conn, p apron.AuthParams) (*apron.CurrentUser, error) {
 	if p.Name == "refuse" {
 		return nil, apron.Denied("No")
 	}
@@ -60,7 +61,7 @@ func (b *backend) guest(c *apron.Conn, p apron.AuthParams) (*apron.CurrentUser, 
 	return &apron.CurrentUser{User: apron.User{UserID: id, Name: p.Name}}, nil
 }
 
-func (b *backend) Message(_ context.Context, c *apron.Conn, p apron.MessageParams, reply apron.Reply[apron.MessageResult]) error {
+func (b *backend) Message(_ context.Context, c *server.Conn, p apron.MessageParams, reply server.Reply[apron.MessageResult]) error {
 	if p.Body.Empty() {
 		return apron.InvalidParams("A new message needs text or embeds")
 	}
@@ -68,41 +69,41 @@ func (b *backend) Message(_ context.Context, c *apron.Conn, p apron.MessageParam
 	return reply.Send(apron.MessageResult{MessageID: b.clock.Next()})
 }
 
-func (b *backend) Disconnected(c *apron.Conn) {
+func (b *backend) Disconnected(c *server.Conn) {
 	b.mu.Lock()
 	b.disconnected = append(b.disconnected, c)
 	b.mu.Unlock()
 }
 
-func (b *backend) disconnectedConns() []*apron.Conn {
+func (b *backend) disconnectedConns() []*server.Conn {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	return append([]*apron.Conn(nil), b.disconnected...)
+	return append([]*server.Conn(nil), b.disconnected...)
 }
 
 // wired makes a Server for b with config, and the handlers and hooks b
 // has methods for that config does not set, as each test backend is one
 // value for all of them.
-func wired(b apron.Backend, config apron.Config) *apron.Server {
-	if h, ok := b.(apron.MessageHandler); ok {
+func wired(b server.Backend, config server.Config) *server.Server {
+	if h, ok := b.(server.MessageHandler); ok {
 		config.Messages = h
 	}
-	if h, ok := b.(apron.EditHandler); ok {
+	if h, ok := b.(server.EditHandler); ok {
 		config.Edits = h
 	}
-	if h, ok := b.(apron.CommandHandler); ok {
+	if h, ok := b.(server.CommandHandler); ok {
 		config.Commands = h
 	}
-	if h, ok := b.(apron.ProfileHandler); ok {
+	if h, ok := b.(server.ProfileHandler); ok {
 		config.Profiles = h
 	}
-	if h, ok := b.(apron.RoomHandler); ok {
+	if h, ok := b.(server.RoomHandler); ok {
 		config.Rooms = h
 	}
-	if h, ok := b.(interface{ Disconnected(*apron.Conn) }); ok && config.OnDisconnect == nil {
+	if h, ok := b.(interface{ Disconnected(*server.Conn) }); ok && config.OnDisconnect == nil {
 		config.OnDisconnect = h.Disconnected
 	}
-	return apron.NewServer(b, config)
+	return server.New(b, config)
 }
 
 // wait is a context for a test's waits on the server.
@@ -157,7 +158,7 @@ func expectClosed(t *testing.T, c *aprontest.Client) {
 	switch {
 	case err == nil:
 		t.Fatalf("got %s, want the connection closed", f.Raw)
-	case !errors.Is(err, apron.ErrClosed):
+	case !errors.Is(err, server.ErrClosed):
 		t.Fatalf("the connection stayed open: %v", err)
 	}
 }
@@ -185,7 +186,7 @@ func signIn(t *testing.T, c *aprontest.Client) string {
 	return result.You.UserID
 }
 
-func onlyConn(t *testing.T, s *apron.Server) *apron.Conn {
+func onlyConn(t *testing.T, s *server.Server) *server.Conn {
 	t.Helper()
 	conns := s.Conns()
 	if len(conns) != 1 {
@@ -195,14 +196,14 @@ func onlyConn(t *testing.T, s *apron.Server) *apron.Conn {
 }
 
 func TestServerFrame(t *testing.T) {
-	s := wired(&backend{}, apron.Config{PingInterval: 20 * time.Second})
+	s := wired(&backend{}, server.Config{PingInterval: 20 * time.Second})
 	if hello := aprontest.Connect(t, s).Hello(); hello.Apron != apron.Version || hello.Ping != 20 || hello.Agent != "wire-test/1" {
 		t.Fatalf("server frame = %+v", hello)
 	}
 }
 
 func TestFramingErrors(t *testing.T) {
-	c := aprontest.Connect(t, wired(&backend{}, apron.Config{}))
+	c := aprontest.Connect(t, wired(&backend{}, server.Config{}))
 	for _, tc := range []struct {
 		send string
 		code int
@@ -242,7 +243,7 @@ func TestFramingErrors(t *testing.T) {
 
 func TestDeniedBeforeAuth(t *testing.T) {
 	b := &backend{}
-	c := aprontest.Connect(t, wired(b, apron.Config{}))
+	c := aprontest.Connect(t, wired(b, server.Config{}))
 	message := params(`{"body":{"text":"hi"}}`)
 	if _, err := c.Call(wait(t), "message", message); apron.CodeOf(err) != apron.CodeDenied {
 		t.Fatalf("got %v, want denied", err)
@@ -263,7 +264,7 @@ func TestDeniedBeforeAuth(t *testing.T) {
 }
 
 func TestAuthSchemes(t *testing.T) {
-	c := aprontest.Connect(t, wired(&backend{}, apron.Config{}))
+	c := aprontest.Connect(t, wired(&backend{}, server.Config{}))
 	for _, tc := range []struct {
 		params string
 		code   int
@@ -282,14 +283,14 @@ func TestAuthSchemes(t *testing.T) {
 // the sign-in, and the notification Auth queued comes after its result.
 func TestAuthBarrier(t *testing.T) {
 	b := &backend{authDelay: 50 * time.Millisecond}
-	s := wired(b, apron.Config{})
+	s := wired(b, server.Config{})
 	c := aprontest.Connect(t, s)
 	send(t, c, `{"method":"auth","id":"a","params":{"scheme":"guest","name":"Ada"}}`)
 	send(t, c, `{"method":"message","id":"m","params":{"body":{"text":"hi"}}}`)
 	// A frame broadcast while Auth runs is held too.
 	time.Sleep(10 * time.Millisecond)
 	conn := onlyConn(t, s)
-	frame, err := apron.EncodeRaw("status", map[string]any{"x": 1})
+	frame, err := server.EncodeRaw("status", map[string]any{"x": 1})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -318,7 +319,7 @@ type refusing struct {
 	started, proceed chan struct{}
 }
 
-func (b *refusing) Auth(ctx context.Context, c *apron.Conn, p apron.AuthParams, reply apron.Reply[apron.AuthResult]) error {
+func (b *refusing) Auth(ctx context.Context, c *server.Conn, p apron.AuthParams, reply server.Reply[apron.AuthResult]) error {
 	if p.Name != "slow" {
 		return b.backend.Auth(ctx, c, p, reply)
 	}
@@ -336,7 +337,7 @@ func TestFailedAuthHeldFrames(t *testing.T) {
 	for _, signedIn := range []bool{true, false} {
 		t.Run(fmt.Sprintf("signed in %v", signedIn), func(t *testing.T) {
 			b := &refusing{started: make(chan struct{}), proceed: make(chan struct{})}
-			s := wired(b, apron.Config{})
+			s := wired(b, server.Config{})
 			c := aprontest.Connect(t, s)
 			var userID string
 			if signedIn {
@@ -344,7 +345,7 @@ func TestFailedAuthHeldFrames(t *testing.T) {
 			}
 			send(t, c, `{"method":"auth","id":"a","params":{"scheme":"guest","name":"slow"}}`)
 			<-b.started
-			frame, err := apron.EncodeRaw("status", map[string]any{"x": 1})
+			frame, err := server.EncodeRaw("status", map[string]any{"x": 1})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -369,7 +370,7 @@ func TestFailedAuthHeldFrames(t *testing.T) {
 }
 
 func TestUnsupportedMethod(t *testing.T) {
-	c := aprontest.Connect(t, wired(&backend{}, apron.Config{}))
+	c := aprontest.Connect(t, wired(&backend{}, server.Config{}))
 	signIn(t, c)
 	// me and command without Profiles or Commands are unsupported too.
 	for method, p := range map[string]string{"nope": `{}`, "me": `{"name":"B"}`, "command": `{"body":{"text":"/help"}}`} {
@@ -385,11 +386,11 @@ func TestUnsupportedMethod(t *testing.T) {
 }
 
 func TestHandle(t *testing.T) {
-	s := wired(&backend{}, apron.Config{})
-	s.Handle("echo", apron.Handler{Capability: "ext:echo", Serve: func(_ context.Context, _ *apron.Conn, r *apron.Request, reply apron.Reply[any]) error {
+	s := wired(&backend{}, server.Config{})
+	s.Handle("echo", server.Handler{Capability: "ext:echo", Serve: func(_ context.Context, _ *server.Conn, r *server.Request, reply server.Reply[any]) error {
 		return reply.Send(r.Fields())
 	}})
-	s.Handle("fail", apron.Handler{NoDedup: true, Serve: func(context.Context, *apron.Conn, *apron.Request, apron.Reply[any]) error {
+	s.Handle("fail", server.Handler{NoDedup: true, Serve: func(context.Context, *server.Conn, *server.Request, server.Reply[any]) error {
 		return errors.New("secret detail")
 	}})
 	c := aprontest.Connect(t, s)
@@ -407,7 +408,7 @@ func TestHandle(t *testing.T) {
 
 func TestDedup(t *testing.T) {
 	b := &backend{}
-	c := aprontest.Connect(t, wired(b, apron.Config{}))
+	c := aprontest.Connect(t, wired(b, server.Config{}))
 	signIn(t, c)
 	send(t, c, `{"method":"message","id":"d","params":{"room_id":"r","body":{"text":"hi"}}}`)
 	first := next(t, c)
@@ -444,7 +445,7 @@ type returning struct {
 	returning chan struct{}
 }
 
-func (b *returning) Command(_ context.Context, _ *apron.Conn, _ apron.CommandParams, reply apron.Reply[apron.CommandResult]) error {
+func (b *returning) Command(_ context.Context, _ *server.Conn, _ apron.CommandParams, reply server.Reply[apron.CommandResult]) error {
 	n := b.calls.Add(1)
 	_ = reply.Fail(apron.Denied(fmt.Sprintf("call %d", n)))
 	b.stall(n)
@@ -465,8 +466,8 @@ func (b *returning) stall(n int64) {
 // its outcome.
 func TestDedupForgetsBeforeTheReply(t *testing.T) {
 	b := &returning{returning: make(chan struct{})}
-	s := wired(b, apron.Config{})
-	s.Handle("read", apron.Handler{NoDedup: true, Serve: func(_ context.Context, _ *apron.Conn, r *apron.Request, reply apron.Reply[any]) error {
+	s := wired(b, server.Config{})
+	s.Handle("read", server.Handler{NoDedup: true, Serve: func(_ context.Context, _ *server.Conn, r *server.Request, reply server.Reply[any]) error {
 		n := b.calls.Add(1)
 		_ = reply.Send(map[string]any{"call": n})
 		b.stall(n)
@@ -498,7 +499,7 @@ func TestDedupForgetsBeforeTheReply(t *testing.T) {
 
 func TestDedupPerUser(t *testing.T) {
 	b := &backend{}
-	s := wired(b, apron.Config{})
+	s := wired(b, server.Config{})
 	c1, c2 := aprontest.Connect(t, s), aprontest.Connect(t, s)
 	signIn(t, c1)
 	signIn(t, c2)
@@ -515,7 +516,7 @@ func TestDedupPerUser(t *testing.T) {
 
 func TestDedupOff(t *testing.T) {
 	b := &backend{}
-	c := aprontest.Connect(t, wired(b, apron.Config{DedupSize: -1}))
+	c := aprontest.Connect(t, wired(b, server.Config{DedupSize: -1}))
 	signIn(t, c)
 	for range 2 {
 		send(t, c, `{"method":"message","id":"d","params":{"body":{"text":"hi"}}}`)
@@ -528,7 +529,7 @@ func TestDedupOff(t *testing.T) {
 
 func TestMessageChecks(t *testing.T) {
 	b := &backend{}
-	c := aprontest.Connect(t, wired(b, apron.Config{}))
+	c := aprontest.Connect(t, wired(b, server.Config{}))
 	signIn(t, c)
 	if result, err := c.Call(wait(t), "message", params(`{"body":{"text":""}}`)); apron.CodeOf(err) != apron.CodeInvalidParams {
 		t.Fatalf("an empty message got %s %v, want invalid_params", result, err)
@@ -562,14 +563,14 @@ type editor struct {
 	edits atomic.Int64
 }
 
-func (e *editor) Edit(_ context.Context, _ *apron.Conn, _ apron.EditParams, reply apron.Reply[apron.MessageResult]) error {
+func (e *editor) Edit(_ context.Context, _ *server.Conn, _ apron.EditParams, reply server.Reply[apron.MessageResult]) error {
 	e.edits.Add(1)
 	return reply.Send(apron.MessageResult{})
 }
 
 func TestEditor(t *testing.T) {
 	b := &editor{}
-	c := aprontest.Connect(t, wired(b, apron.Config{}))
+	c := aprontest.Connect(t, wired(b, server.Config{}))
 	if capabilities := c.Hello().Capabilities; !slices.Equal(capabilities, []string{"edit"}) {
 		t.Fatalf("capabilities = %v, want edit", capabilities)
 	}
@@ -584,12 +585,12 @@ func TestEditor(t *testing.T) {
 
 func TestSlowClientDisconnected(t *testing.T) {
 	b := &backend{}
-	s := wired(b, apron.Config{OutgoingQueue: 2})
+	s := wired(b, server.Config{OutgoingQueue: 2})
 	// A client that reads nothing: the server frame is being written, and
 	// the frames after it wait.
-	server, client := net.Pipe()
+	serverEnd, client := net.Pipe()
 	defer client.Close()
-	go s.ServeTransport(context.Background(), apron.LineTransport(server, 1<<16), nil, nil)
+	go s.ServeTransport(context.Background(), server.LineTransport(serverEnd, 1<<16), nil, nil)
 	deadline := time.Now().Add(5 * time.Second)
 	for len(s.Conns()) == 0 {
 		if time.Now().After(deadline) {
@@ -598,7 +599,7 @@ func TestSlowClientDisconnected(t *testing.T) {
 		time.Sleep(time.Millisecond)
 	}
 	conn := onlyConn(t, s)
-	frame, _ := apron.EncodeRaw("status", map[string]any{})
+	frame, _ := server.EncodeRaw("status", map[string]any{})
 	sent := 0
 	for range 10 {
 		if !conn.Send(frame) {
@@ -624,7 +625,7 @@ func TestSlowClientDisconnected(t *testing.T) {
 
 func TestCloseWithError(t *testing.T) {
 	b := &backend{}
-	s := wired(b, apron.Config{})
+	s := wired(b, server.Config{})
 	c := aprontest.Connect(t, s)
 	signIn(t, c)
 	conn := onlyConn(t, s)
@@ -650,9 +651,9 @@ func TestCloseWithError(t *testing.T) {
 }
 
 func TestLineTransport(t *testing.T) {
-	server, conn := net.Pipe()
+	serverEnd, conn := net.Pipe()
 	defer conn.Close()
-	transport := apron.LineTransport(server, 16)
+	transport := server.LineTransport(serverEnd, 16)
 	go func() { _, _ = io.WriteString(conn, "\n\n{\"a\":1}\n") }()
 	frame, err := transport.Read(context.Background())
 	if err != nil || string(frame) != `{"a":1}` {
@@ -679,7 +680,7 @@ func TestLineTransport(t *testing.T) {
 // TestFrameTooLarge closes a connection whose client sends more than the
 // transport's limit.
 func TestFrameTooLarge(t *testing.T) {
-	c := aprontest.Connect(t, wired(&backend{}, apron.Config{ReadLimit: 1 << 16}))
+	c := aprontest.Connect(t, wired(&backend{}, server.Config{ReadLimit: 1 << 16}))
 	// The write fails once the server stops reading and closes.
 	go func() {
 		_ = c.Send(context.Background(), []byte(`{"method":"message","id":"x","params":{"body":{"text":"`+strings.Repeat("x", 1<<17)+`"}}}`))
@@ -688,7 +689,7 @@ func TestFrameTooLarge(t *testing.T) {
 }
 
 func TestShutdown(t *testing.T) {
-	s := wired(&backend{}, apron.Config{})
+	s := wired(&backend{}, server.Config{})
 	c := aprontest.Connect(t, s)
 	signIn(t, c)
 	if err := s.Shutdown(wait(t)); err != nil {
@@ -699,19 +700,19 @@ func TestShutdown(t *testing.T) {
 		t.Fatal("connections left after Shutdown")
 	}
 	// A connection after Shutdown is closed at once.
-	server, conn := net.Pipe()
+	serverEnd, conn := net.Pipe()
 	defer conn.Close()
-	s.ServeTransport(context.Background(), apron.LineTransport(server, 1024), nil, nil)
+	s.ServeTransport(context.Background(), server.LineTransport(serverEnd, 1024), nil, nil)
 	if _, err := conn.Read(make([]byte, 1)); err == nil {
 		t.Fatal("a connection after Shutdown was served")
 	}
 }
 
 func TestBroadcast(t *testing.T) {
-	s := wired(&backend{}, apron.Config{})
+	s := wired(&backend{}, server.Config{})
 	c1, c2 := aprontest.Connect(t, s), aprontest.Connect(t, s) // c2 is not signed in: not broadcast to.
 	signIn(t, c1)
-	frame, _ := apron.EncodeRaw("status", map[string]any{"x": 1})
+	frame, _ := server.EncodeRaw("status", map[string]any{"x": 1})
 	s.Broadcast(frame, nil)
 	if f := next(t, c1); f.Method != "status" {
 		t.Fatalf("got %s", f.Raw)
@@ -725,11 +726,11 @@ func TestBroadcast(t *testing.T) {
 }
 
 func TestWebSocket(t *testing.T) {
-	s := wired(&backend{}, apron.Config{CheckOrigin: apron.AnyOrigin})
-	server := httptest.NewServer(s)
-	defer server.Close()
+	s := wired(&backend{}, server.Config{CheckOrigin: server.AnyOrigin})
+	ts := httptest.NewServer(s)
+	defer ts.Close()
 	ctx := wait(t)
-	ws, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(server.URL, "http"), nil)
+	ws, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(ts.URL, "http"), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -769,7 +770,7 @@ func (f *fence) Done() <-chan struct{} { return f.done }
 func (f *fence) Err() error            { return f.err }
 
 func TestSendFramesAndFence(t *testing.T) {
-	s := wired(&backend{}, apron.Config{OutgoingQueue: 2})
+	s := wired(&backend{}, server.Config{OutgoingQueue: 2})
 	c := aprontest.Connect(t, s)
 	signIn(t, c)
 	conn := onlyConn(t, s)
@@ -778,8 +779,8 @@ func TestSendFramesAndFence(t *testing.T) {
 		t.Fatal("HoldUntil failed")
 	}
 	// Three frames in one place in the queue, behind the fence.
-	a, _ := apron.EncodeRaw("a", map[string]any{})
-	b, _ := apron.EncodeRaw("b", map[string]any{})
+	a, _ := server.EncodeRaw("a", map[string]any{})
+	b, _ := server.EncodeRaw("b", map[string]any{})
 	if !conn.Send(a, b, a) || !conn.Send() {
 		t.Fatal("Send failed")
 	}
@@ -806,7 +807,7 @@ func TestSendFramesAndFence(t *testing.T) {
 func TestFenceDuringAuth(t *testing.T) {
 	f := &fence{done: make(chan struct{})}
 	b := &fencingBackend{fence: f}
-	c := aprontest.Connect(t, wired(b, apron.Config{}))
+	c := aprontest.Connect(t, wired(b, server.Config{}))
 	send(t, c, `{"method":"auth","id":"a","params":{"scheme":"guest","name":"Ada"}}`)
 	quiet(t, c)
 	close(f.done)
@@ -823,7 +824,7 @@ type fencingBackend struct {
 	fence *fence
 }
 
-func (b *fencingBackend) Auth(_ context.Context, c *apron.Conn, p apron.AuthParams, reply apron.Reply[apron.AuthResult]) error {
+func (b *fencingBackend) Auth(_ context.Context, c *server.Conn, p apron.AuthParams, reply server.Reply[apron.AuthResult]) error {
 	you, err := b.guest(c, p)
 	if err != nil {
 		return err
@@ -833,7 +834,7 @@ func (b *fencingBackend) Auth(_ context.Context, c *apron.Conn, p apron.AuthPara
 }
 
 func TestMaxConnections(t *testing.T) {
-	s := wired(&backend{}, apron.Config{MaxConnections: 1})
+	s := wired(&backend{}, server.Config{MaxConnections: 1})
 	c1, c2 := aprontest.Connect(t, s), aprontest.Connect(t, s)
 	if f := next(t, c2); code(f) != apron.CodeRetryAfter || f.ID != "" {
 		t.Fatalf("got %s, want retry_after", f.Raw)

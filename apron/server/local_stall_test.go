@@ -1,4 +1,4 @@
-package apron
+package server
 
 import (
 	"bytes"
@@ -8,21 +8,23 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/apron-chat/apron-server-go/apron"
 )
 
 // stallBackend is a Backend whose Hello waits for release, as one would for
 // a lock its caller holds.
 type stallBackend struct{ release chan struct{} }
 
-func (b stallBackend) Hello(context.Context, *Conn) ServerInfo {
+func (b stallBackend) Hello(context.Context, *Conn) apron.ServerInfo {
 	if b.release != nil {
 		<-b.release
 	}
-	return ServerInfo{}
+	return apron.ServerInfo{}
 }
 
-func (stallBackend) Auth(context.Context, *Conn, AuthParams, Reply[AuthResult]) error {
-	return Denied("no")
+func (stallBackend) Auth(context.Context, *Conn, apron.AuthParams, Reply[apron.AuthResult]) error {
+	return apron.Denied("no")
 }
 
 // syncBuffer is a log that tests read while the server writes it.
@@ -55,10 +57,10 @@ func TestLocalStallWarning(t *testing.T) {
 
 	var log syncBuffer
 	release := make(chan struct{})
-	s := NewServer(stallBackend{release}, Config{Logger: slog.New(slog.NewTextHandler(&log, nil))})
+	s := New(stallBackend{release}, Config{Logger: slog.New(slog.NewTextHandler(&log, nil))})
 	opened := make(chan error, 1)
 	go func() {
-		l, err := s.Local(LocalOptions{User: User{UserID: "ada"}})
+		l, err := s.Local(LocalOptions{User: apron.User{UserID: "ada"}})
 		if err == nil {
 			err = l.Close()
 		}
@@ -91,9 +93,9 @@ func TestLocalNoStallWarning(t *testing.T) {
 	localOpenStall = 200 * time.Millisecond
 
 	var log syncBuffer
-	s := NewServer(stallBackend{}, Config{Logger: slog.New(slog.NewTextHandler(&log, nil))})
+	s := New(stallBackend{}, Config{Logger: slog.New(slog.NewTextHandler(&log, nil))})
 	start := time.Now()
-	l, err := s.Local(LocalOptions{User: User{UserID: "ada"}})
+	l, err := s.Local(LocalOptions{User: apron.User{UserID: "ada"}})
 	if err != nil {
 		t.Fatal(err)
 	}

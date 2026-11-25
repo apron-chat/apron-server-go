@@ -1,4 +1,4 @@
-package apron
+package server
 
 import (
 	"context"
@@ -15,11 +15,12 @@ import (
 
 	"github.com/coder/websocket"
 
+	"github.com/apron-chat/apron-server-go/apron"
 	"github.com/apron-chat/apron-server-go/apron/internal/core"
 )
 
 // Server serves the protocol for a Backend, and the handlers of its
-// Config. NewServer makes one, with its configuration, which is fixed from
+// Config. New makes one, with its configuration, which is fixed from
 // then on: a Server has no settings to change after, so none is ever set
 // too late. Methods (Handle, HandleNotification) may be registered at any
 // time, such as an extension's own as it is added: one registered while
@@ -45,7 +46,7 @@ type Server struct {
 
 // Config is what a Server serves with besides its Backend: the handlers
 // of the protocol's requests, the hooks of a connection's life, and the
-// limits of its transport. NewServer takes a copy; the zero Config serves
+// limits of its transport. New takes a copy; the zero Config serves
 // auth alone, with every limit its default.
 type Config struct {
 	// The handlers of the protocol's requests: each that is set adds its
@@ -97,7 +98,7 @@ type Config struct {
 	// such as one the server frame does not list for everyone. Without it,
 	// the schemes are those of the frame's Auth and Signup: any other
 	// scheme is unsupported, even one PROTOCOL.md does not define (§3.2).
-	CheckScheme func(ctx context.Context, c *Conn, p AuthParams) error
+	CheckScheme func(ctx context.Context, c *Conn, p apron.AuthParams) error
 	// CheckOrigin decides whether a WebSocket may open, by the request that
 	// opens it, such as by its Origin header, as OriginPatterns does; nil
 	// accepts only the server's own origin, and requests without one.
@@ -147,22 +148,22 @@ type Config struct {
 	// ShutdownError, if set, is sent to each open connection on Shutdown,
 	// after the frames already queued, such as error/retry_after to have
 	// clients come back shortly; without it, connections close at once.
-	ShutdownError *Error
+	ShutdownError *apron.Error
 	// HoldFailed is sent in place of the frames held for a Pending that
 	// failed (Conn.HoldUntil), before the connection closes;
 	// error/internal_error by default.
-	HoldFailed *Error
+	HoldFailed *apron.Error
 }
 
-// NewServer returns a Server for backend, which serves with config. It
+// New returns a Server for backend, which serves with config. It
 // calls nothing of the backend's, so a backend and its Server, which refer
 // to each other, are made in this order: the backend, then its Server,
 // kept in the backend for its handlers to send with, then what opens
 // connections (see the package documentation). It panics without a
 // backend.
-func NewServer(backend Backend, config Config) *Server {
+func New(backend Backend, config Config) *Server {
 	if backend == nil {
-		panic("wire: NewServer without a Backend")
+		panic("wire: New without a Backend")
 	}
 	perUser := config.DedupSize
 	if perUser == 0 {
@@ -182,11 +183,11 @@ func NewServer(backend Backend, config Config) *Server {
 	return s
 }
 
-// made panics for a Server that NewServer did not make, such as a zero
+// made panics for a Server that New did not make, such as a zero
 // one, which has no Backend to serve.
 func (s *Server) made() {
 	if s.backend == nil {
-		panic("wire: a Server is made with NewServer")
+		panic("wire: a Server is made with New")
 	}
 }
 
@@ -278,7 +279,7 @@ func (s *Server) holdFailed() []byte {
 	if e == nil {
 		e = internalError()
 	}
-	frame, _ := marshal(map[string]any{"error": e})
+	frame, _ := core.Marshal(map[string]any{"error": e})
 	return frame
 }
 
@@ -353,11 +354,11 @@ func (s *Server) ServeTransport(ctx context.Context, t Transport, remote net.Add
 	case s.config.MaxConnections > 0 && s.network >= s.config.MaxConnections:
 		s.mu.Unlock()
 		c.info = s.complete(s.backend.Hello(ctx, c))
-		if frame, err := Encode(c.info); err == nil {
+		if frame, err := apron.Encode(c.info); err == nil {
 			c.rt.Send(frame)
 		}
 		// An error about the connection as a whole omits id (§1.1).
-		c.CloseWithError(RetryAfter("Server at capacity; try again shortly", 30*time.Second))
+		c.CloseWithError(apron.RetryAfter("Server at capacity; try again shortly", 30*time.Second))
 		s.waitClosed(c)
 		return
 	}
@@ -373,7 +374,7 @@ func (s *Server) ServeTransport(ctx context.Context, t Transport, remote net.Add
 		if err := connect(ctx, c); err != nil {
 			if e, ok := asError(err); ok {
 				c.info = s.complete(s.backend.Hello(ctx, c))
-				if frame, err := Encode(c.info); err == nil {
+				if frame, err := apron.Encode(c.info); err == nil {
 					c.rt.Send(frame)
 				}
 				c.CloseWithError(e)
@@ -386,7 +387,7 @@ func (s *Server) ServeTransport(ctx context.Context, t Transport, remote net.Add
 		}
 	}
 	c.info = s.complete(s.backend.Hello(ctx, c))
-	frame, err := Encode(c.info)
+	frame, err := apron.Encode(c.info)
 	if err != nil {
 		s.logger().Error("wire: encoding the server frame", "error", err)
 		c.Close()
@@ -460,8 +461,8 @@ func (s *Server) disconnected(c *Conn) {
 // complete fills in what Server owns of a server frame: the protocol
 // version, the ping interval, and the capabilities of the methods it
 // handles.
-func (s *Server) complete(info ServerInfo) ServerInfo {
-	info.Apron = Version
+func (s *Server) complete(info apron.ServerInfo) apron.ServerInfo {
+	info.Apron = apron.Version
 	info.Ping = max(1, int(s.pingInterval()/time.Second))
 	info.Capabilities = slices.Clone(info.Capabilities)
 	for _, capability := range s.capabilities() {
@@ -506,7 +507,7 @@ func (s *Server) openConns() []*Conn {
 // the change the frame describes, so that every connection gets such
 // frames in the order of the changes. to is called in the caller's
 // goroutine, so it may read what that lock guards.
-func (s *Server) Broadcast(frame Frame, to func(*Conn) bool) {
+func (s *Server) Broadcast(frame apron.Frame, to func(*Conn) bool) {
 	for _, c := range s.openConns() {
 		if c.UserID() != "" && (to == nil || to(c)) {
 			c.Send(frame)

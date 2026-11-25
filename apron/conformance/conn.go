@@ -13,7 +13,7 @@ import (
 
 	"github.com/coder/websocket"
 
-	"github.com/apron-chat/apron-server-go/apron"
+	"github.com/apron-chat/apron-server-go/apron/server"
 )
 
 // The times a check waits. The Python suite waits two seconds for a frame
@@ -54,11 +54,11 @@ func (c *checker) open(signIn bool, name string, slow bool) *conn {
 	}
 	conn := newConn(c.r, t)
 	c.conns = append(c.conns, conn)
-	_, server := conn.wait(method("server"), 0, waitFor)
-	c.must(server != nil, "no server frame on connect")
+	_, frame := conn.wait(method("server"), 0, waitFor)
+	c.must(frame != nil, "no server frame on connect")
 	c.r.mu.Lock()
 	if c.r.server == nil {
-		c.r.server, _ = server["params"].(obj)
+		c.r.server, _ = frame["params"].(obj)
 		if c.r.server == nil {
 			c.r.server = obj{}
 		}
@@ -113,13 +113,13 @@ func (r *run) dial(ctx context.Context, slow bool) (transport, error) {
 }
 
 // connect connects to s in process, over a LineTransport on a net.Pipe.
-func connect(s *apron.Server) transport {
-	server, client := net.Pipe()
+func connect(s *server.Server) transport {
+	serverEnd, client := net.Pipe()
 	limit := s.ReadLimit()
 	served := make(chan struct{})
 	go func() {
 		defer close(served)
-		s.ServeTransport(context.Background(), apron.LineTransport(server, int(limit)), nil, nil)
+		s.ServeTransport(context.Background(), server.LineTransport(serverEnd, int(limit)), nil, nil)
 	}()
 	return &pipeTransport{conn: client, lines: bufio.NewReader(client), served: served}
 }

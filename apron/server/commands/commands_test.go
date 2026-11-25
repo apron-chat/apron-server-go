@@ -14,6 +14,7 @@ import (
 
 	"github.com/apron-chat/apron-server-go/apron"
 	"github.com/apron-chat/apron-server-go/apron/aprontest"
+	"github.com/apron-chat/apron-server-go/apron/server"
 	"github.com/apron-chat/apron-server-go/apron/server/commands"
 )
 
@@ -24,11 +25,11 @@ type backend struct {
 	guests int
 }
 
-func (*backend) Hello(context.Context, *apron.Conn) apron.ServerInfo {
+func (*backend) Hello(context.Context, *server.Conn) apron.ServerInfo {
 	return apron.ServerInfo{Auth: []string{"guest"}}
 }
 
-func (b *backend) Auth(_ context.Context, _ *apron.Conn, _ apron.AuthParams, reply apron.Reply[apron.AuthResult]) error {
+func (b *backend) Auth(_ context.Context, _ *server.Conn, _ apron.AuthParams, reply server.Reply[apron.AuthResult]) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.guests++
@@ -36,7 +37,7 @@ func (b *backend) Auth(_ context.Context, _ *apron.Conn, _ apron.AuthParams, rep
 }
 
 // admin lets guest_1 use a form.
-func admin(_ context.Context, c *apron.Conn, _ string) bool { return c.UserID() == "guest_1" }
+func admin(_ context.Context, c *server.Conn, _ string) bool { return c.UserID() == "guest_1" }
 
 func timeout(t *testing.T) context.Context {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -63,7 +64,7 @@ func testRouter(t *testing.T) *commands.Router {
 			Forms: []commands.Form{{
 				Hint: "<text>", Help: "set the topic",
 				Uses: []string{commands.FieldRoom}, Requires: []string{commands.FieldRoom},
-				May: func(_ context.Context, _ *apron.Conn, roomID string) bool { return roomID != "lobby" },
+				May: func(_ context.Context, _ *server.Conn, roomID string) bool { return roomID != "lobby" },
 			}},
 			Run: echo,
 		},
@@ -95,11 +96,11 @@ func testRouter(t *testing.T) *commands.Router {
 }
 
 func connect(t *testing.T, router *commands.Router) (*aprontest.Client, *aprontest.Client) {
-	server := apron.NewServer(&backend{}, apron.Config{Commands: router, Logger: slog.New(slog.DiscardHandler)})
-	server.Handle(commands.ListMethod, router.ListHandler())
+	srv := server.New(&backend{}, server.Config{Commands: router, Logger: slog.New(slog.DiscardHandler)})
+	srv.Handle(commands.ListMethod, router.ListHandler())
 	var clients []*aprontest.Client
 	for range 2 {
-		c, _ := aprontest.SignIn(t, server, map[string]any{"scheme": "guest"})
+		c, _ := aprontest.SignIn(t, srv, map[string]any{"scheme": "guest"})
 		clients = append(clients, c)
 	}
 	if !slices.Contains(clients[0].Hello().Capabilities, commands.ListMethod) {
