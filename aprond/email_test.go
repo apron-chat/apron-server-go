@@ -3,6 +3,7 @@ package aprond
 import (
 	"context"
 	"fmt"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -71,9 +72,7 @@ func propose(t *testing.T, c *testClient, email string) {
 func approve(t *testing.T, c *testClient, token string, extra map[string]any) ([]map[string]any, map[string]any) {
 	t.Helper()
 	params := map[string]any{"scheme": "email", "token": token}
-	for key, value := range extra {
-		params[key] = value
-	}
+	maps.Copy(params, extra)
 	return c.request(t, "auth", c.nextID("approve"), params)
 }
 

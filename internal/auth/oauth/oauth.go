@@ -15,6 +15,7 @@ import (
 	"crypto/subtle"
 	"encoding/base64"
 	"errors"
+	"maps"
 	"net"
 	"net/http"
 	"net/url"
@@ -264,9 +265,7 @@ func (r *Request) Grant() Grant {
 func (r *Request) ReturnURL(params url.Values) string {
 	target, _ := url.Parse(r.RedirectURI)
 	query := target.Query()
-	for name, values := range params {
-		query[name] = values
-	}
+	maps.Copy(query, params)
 	if r.State != "" {
 		query.Set("state", r.State)
 	}

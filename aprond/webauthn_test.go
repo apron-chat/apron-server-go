@@ -10,6 +10,7 @@ import (
 	"encoding/binary"
 	"encoding/json/v2"
 	"fmt"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -56,9 +57,7 @@ func passkeyCall(t *testing.T, c *testClient, id, action, step string, extra map
 			params["challenge_id"] = c.passkeyChallenge
 		}
 	}
-	for key, value := range extra {
-		params[key] = value
-	}
+	maps.Copy(params, extra)
 	c.write(t, map[string]any{"method": "auth", "id": id, "params": params})
 	frame := c.read(t)
 	if frame["id"] != id {
@@ -125,9 +124,7 @@ func b64(value []byte) string { return base64.RawURLEncoding.EncodeToString(valu
 
 func clientData(kind, challenge, origin string, extra map[string]any) []byte {
 	fields := map[string]any{"type": kind, "challenge": challenge, "origin": origin, "crossOrigin": false}
-	for key, value := range extra {
-		fields[key] = value
-	}
+	maps.Copy(fields, extra)
 	data, _ := json.Marshal(fields)
 	return data
 }

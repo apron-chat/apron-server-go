@@ -3,6 +3,7 @@ package aprond
 import (
 	"context"
 	"encoding/json/v2"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -82,9 +83,7 @@ func (p *passkeyPage) open(t *testing.T, client *oauthtest.Client, begin map[str
 func (p *passkeyPage) script(t *testing.T, client *oauthtest.Client, screen oauthtest.Response, op string, extra url.Values) (int, map[string]any) {
 	t.Helper()
 	form := url.Values{"flow": {screen.Data("flow")}, "op": {op}}
-	for key, value := range extra {
-		form[key] = value
-	}
+	maps.Copy(form, extra)
 	r := client.Post(p.at(screen.Data("post")), form)
 	var answer map[string]any
 	if err := json.Unmarshal([]byte(r.Body), &answer); err != nil {

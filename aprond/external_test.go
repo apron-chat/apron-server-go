@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json/v2"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -486,9 +487,7 @@ func TestExternalMetadataAndTokenEndpoint(t *testing.T) {
 		"resource":   {"resource": {"https://other.example"}},
 	} {
 		form := url.Values{"grant_type": {"authorization_code"}, "code": {externalCode(t, app, issuer+"/oauth/authorize", issuer)}, "code_verifier": {app.Verifier}, "redirect_uri": {app.RedirectURI}, "client_id": {app.ClientID}}
-		for key, value := range change {
-			form[key] = value
-		}
+		maps.Copy(form, change)
 		if status, _, body := httpDo(t, http.MethodPost, issuer+"/oauth/token", strings.NewReader(form.Encode()), "application/x-www-form-urlencoded"); status != http.StatusBadRequest {
 			t.Errorf("%s: %d %s", name, status, body)
 		}

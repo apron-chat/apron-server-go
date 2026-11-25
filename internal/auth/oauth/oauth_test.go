@@ -3,6 +3,7 @@ package oauth
 import (
 	"crypto/sha256"
 	"encoding/base64"
+	"maps"
 	"net/url"
 	"strings"
 	"testing"
@@ -56,9 +57,7 @@ func TestParse(t *testing.T) {
 	}
 	// A loopback development server takes its https:// spelling too.
 	dev := url.Values{}
-	for k, v := range good {
-		dev[k] = v
-	}
+	maps.Copy(dev, good)
 	dev.Set("resource", "https://127.0.0.1:8080")
 	if _, problem := Parse(dev, "http://127.0.0.1:8080"); problem != nil {
 		t.Fatalf("dev resource: %#v", problem)

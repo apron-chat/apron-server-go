@@ -3,6 +3,7 @@ package aprond
 import (
 	"context"
 	"encoding/json/v2"
+	"maps"
 	"net/http/httptest"
 	"slices"
 	"testing"
@@ -33,9 +34,7 @@ func invitedServer(t *testing.T, backing store.Store) (*Server, *httptest.Server
 func registerInvited(t *testing.T, c *testClient, a *testAuthenticator, token string, extra map[string]any) map[string]any {
 	t.Helper()
 	begin := map[string]any{"invitation": token}
-	for key, value := range extra {
-		begin[key] = value
-	}
+	maps.Copy(begin, extra)
 	options := passkeyResult(t, passkeyCall(t, c, c.nextID("begin"), "register", "begin", begin))
 	return passkeyCall(t, c, c.nextID("finish"), "register", "finish", map[string]any{
 		"invitation": token, "credential": a.registration(t, options, testPasskeyOrigin),
