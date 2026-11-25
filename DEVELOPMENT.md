@@ -40,9 +40,10 @@ forgets it on restart); see [SERVER.md](SERVER.md#storage).
   that `go install ...@latest`, which ignores `go.work`, builds. Commands
   that take package patterns name both modules (`./... ./apron/...`). Sign-in schemes live in
   `internal/auth/{email,passkey,external}`, and depend only on
-  `internal/authn`, the boundary between them and the server: a scheme
-  proves a subject of its own, and the server names the identity, and owns
-  accounts, tokens, email proposals, the allowlist, and roles. The schemes'
+  `internal/authn`, the boundary between them and the server, which a
+  test of it (`TestBoundary`) checks: a scheme proves a subject of its
+  own, and the server names the identity, and owns accounts, tokens,
+  email proposals, the allowlist, and roles. The schemes'
   OAuth pages (external sign-in's `/oauth/authorize`, and the passkey page)
   share `internal/auth/oauth`: authorization requests, codes, redirects,
   and the confirmation screens; `internal/oauthtest` drives them in tests
