@@ -78,8 +78,7 @@ func CodeOf(err error) int {
 
 // asError returns err as an *Error, or nil and false when it is not one.
 func asError(err error) (*Error, bool) {
-	var e *Error
-	if errors.As(err, &e) && e != nil {
+	if e, ok := errors.AsType[*Error](err); ok && e != nil {
 		return e, true
 	}
 	return nil, false

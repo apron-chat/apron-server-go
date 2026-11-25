@@ -17,8 +17,7 @@ func internalError() *apron.Error {
 // asError returns err as an *apron.Error, or nil and false when it is not
 // one.
 func asError(err error) (*apron.Error, bool) {
-	var e *apron.Error
-	if errors.As(err, &e) && e != nil {
+	if e, ok := errors.AsType[*apron.Error](err); ok && e != nil {
 		return e, true
 	}
 	return nil, false

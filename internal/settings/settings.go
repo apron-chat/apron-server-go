@@ -45,8 +45,7 @@ func ApplyDefaults(settings any) error {
 	defaults := reflect.New(target.Elem().Type())
 	parser := flags.NewParser(defaults.Interface(), flags.None)
 	if _, err := parser.ParseArgs([]string{}); err != nil {
-		var flagErr *flags.Error
-		if !errors.As(err, &flagErr) || flagErr.Type != flags.ErrRequired {
+		if flagErr, ok := errors.AsType[*flags.Error](err); !ok || flagErr.Type != flags.ErrRequired {
 			return err
 		}
 	}

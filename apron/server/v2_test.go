@@ -215,8 +215,8 @@ func TestLocal(t *testing.T) {
 	if f := <-frames; !strings.Contains(f, `"hello"`) {
 		t.Fatalf("OnFrame: %s", f)
 	}
-	var e *apron.Error
-	if _, err := l.Call(context.Background(), "nope", nil); !errors.As(err, &e) || e.Code != apron.CodeUnsupported {
+	_, err = l.Call(context.Background(), "nope", nil)
+	if e, ok := errors.AsType[*apron.Error](err); !ok || e.Code != apron.CodeUnsupported {
 		t.Fatalf("unknown method: %v", err)
 	}
 	if _, err := l.Call(context.Background(), "message", map[string]any{"body": map[string]any{"text": "hi"}}); err != nil || b.messages.Load() != 1 {

@@ -202,8 +202,8 @@ func TestRequests(t *testing.T) {
 	if _, err := ada.Post(ctx, apron.MessageParams{}); apron.CodeOf(err) != apron.CodeInvalidParams {
 		t.Fatalf("post without a body: %v", err)
 	}
-	var e *apron.Error
-	if _, err := ada.Call(ctx, "nonsense", nil); !errors.As(err, &e) || e.Code != apron.CodeUnsupported {
+	_, err = ada.Call(ctx, "nonsense", nil)
+	if e, ok := errors.AsType[*apron.Error](err); !ok || e.Code != apron.CodeUnsupported {
 		t.Fatalf("unknown method: %v", err)
 	}
 	if _, err := ada.Command(ctx, apron.CommandParams{Body: &apron.Body{Text: "/nonsense"}}); err == nil {

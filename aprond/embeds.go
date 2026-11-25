@@ -558,7 +558,7 @@ func (s *Server) writeUpload(w http.ResponseWriter, r *http.Request, e *embedSta
 		}
 		http.Error(w, message, status)
 	}
-	var tooLarge *http.MaxBytesError
+	_, tooLarge := errors.AsType[*http.MaxBytesError](err)
 	switch {
 	case e.revoked:
 		fail(http.StatusForbidden, writeRevokedMessage)
@@ -570,7 +570,7 @@ func (s *Server) writeUpload(w http.ResponseWriter, r *http.Request, e *embedSta
 		e.revoked = true
 		fail(http.StatusForbidden, writeRevokedMessage)
 		return
-	case errors.As(err, &tooLarge):
+	case tooLarge:
 		fail(http.StatusRequestEntityTooLarge, tooLargeMessage)
 		return
 	case errors.Is(err, errNotAvatar):

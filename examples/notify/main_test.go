@@ -37,8 +37,8 @@ func TestNotify(t *testing.T) {
 
 	// A token the server does not take is its error reply.
 	env["APRON_TOKEN"] = "nonsense"
-	var refused *apron.Error
-	if err := run([]string{"hi"}, nil, func(k string) string { return env[k] }); !errors.As(err, &refused) {
+	err := run([]string{"hi"}, nil, func(k string) string { return env[k] })
+	if _, ok := errors.AsType[*apron.Error](err); !ok {
 		t.Fatalf("bad token: %v", err)
 	}
 	if err := run(nil, strings.NewReader(""), func(k string) string { return env[k] }); err == nil {
