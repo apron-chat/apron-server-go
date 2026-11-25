@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/apron-chat/apron-server-go/apron"
@@ -117,50 +118,53 @@ func timeout(t *testing.T) context.Context {
 // A bot answers a mention with a reply, and only a mention: not its own
 // messages, not others'.
 func TestMentions(t *testing.T) {
-	c := newChat()
-	other := make(chan apron.Message, 8)
-	echo, err := bot.Start(local(c.server, server.LocalOptions{User: apron.User{UserID: "echo", Name: "Echo"}, Data: "echo's"}), bot.Options{
-		OnMessage: func(ctx context.Context, b *bot.Bot, m apron.Message) {
-			if !b.Mentioned(m) {
-				other <- m
-				return
-			}
-			if _, err := b.Reply(ctx, m, "You said: "+m.Body.Text); err != nil {
-				t.Error(err)
-			}
-		},
+	synctest.Test(t, func(t *testing.T) {
+		c := newChat()
+		other := make(chan apron.Message, 8)
+		echo, err := bot.Start(local(c.server, server.LocalOptions{User: apron.User{UserID: "echo", Name: "Echo"}, Data: "echo's"}), bot.Options{
+			OnMessage: func(ctx context.Context, b *bot.Bot, m apron.Message) {
+				if !b.Mentioned(m) {
+					other <- m
+					return
+				}
+				if _, err := b.Reply(ctx, m, "You said: "+m.Body.Text); err != nil {
+					t.Error(err)
+				}
+			},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { echo.Close() })
+		ctx := timeout(t)
+		client, _ := aprontest.SignIn(t, c.server, map[string]any{"scheme": "guest"})
+		if _, err := client.Post(ctx, apron.MessageParams{Body: &apron.Body{Text: "hi all"}}); err != nil {
+			t.Fatal(err)
+		}
+		asked, err := client.Post(ctx, apron.MessageParams{Body: &apron.Body{Text: "@echo hello", Mentions: []string{"echo"}}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		reply, err := aprontest.Expect(ctx, client, func(m apron.Message) bool { return m.From.UserID == "echo" })
+		if err != nil || reply.Body.Text != "You said: @echo hello" || reply.ReplyTo == nil || reply.ReplyTo.MessageID != asked.MessageID {
+			t.Fatalf("reply %+v: %v", reply, err)
+		}
+		// The bot was told of the message that did not mention it, not of
+		// its own reply.
+		if m := <-other; m.Body.Text != "hi all" {
+			t.Fatalf("other: %+v", m)
+		}
+		synctest.Wait()
+		select {
+		case m := <-other:
+			t.Fatalf("other: %+v", m)
+		default:
+		}
+		if c.mu.Lock(); !slices.Equal(c.connected, []string{"echo's"}) {
+			t.Errorf("OnConnect saw %q", c.connected)
+		}
+		c.mu.Unlock()
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { echo.Close() })
-	ctx := timeout(t)
-	client, _ := aprontest.SignIn(t, c.server, map[string]any{"scheme": "guest"})
-	if _, err := client.Post(ctx, apron.MessageParams{Body: &apron.Body{Text: "hi all"}}); err != nil {
-		t.Fatal(err)
-	}
-	asked, err := client.Post(ctx, apron.MessageParams{Body: &apron.Body{Text: "@echo hello", Mentions: []string{"echo"}}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	reply, err := aprontest.Expect(ctx, client, func(m apron.Message) bool { return m.From.UserID == "echo" })
-	if err != nil || reply.Body.Text != "You said: @echo hello" || reply.ReplyTo == nil || reply.ReplyTo.MessageID != asked.MessageID {
-		t.Fatalf("reply %+v: %v", reply, err)
-	}
-	// The bot was told of the message that did not mention it, not of
-	// its own reply.
-	if m := <-other; m.Body.Text != "hi all" {
-		t.Fatalf("other: %+v", m)
-	}
-	select {
-	case m := <-other:
-		t.Fatalf("other: %+v", m)
-	case <-time.After(50 * time.Millisecond):
-	}
-	if c.mu.Lock(); !slices.Equal(c.connected, []string{"echo's"}) {
-		t.Errorf("OnConnect saw %q", c.connected)
-	}
-	c.mu.Unlock()
 }
 
 // A Bot's typed requests answer with package apron's results and errors.
@@ -202,59 +206,69 @@ func TestRequests(t *testing.T) {
 // A Bot opens its connection again when the server ends it, at once for
 // a request, and by itself when it listens; not once it is closed.
 func TestReopen(t *testing.T) {
-	c := newChat()
-	ctx := timeout(t)
-	quiet, err := bot.Start(local(c.server, server.LocalOptions{User: apron.User{UserID: "quiet"}}), bot.Options{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	first, _ := quiet.Conn()
-	first.(*server.Local).Conn().Close()
-	<-first.Done()
-	if _, err := quiet.Post(ctx, apron.MessageParams{Body: &apron.Body{Text: "back"}}); err != nil {
-		t.Fatalf("Post after the server closed the connection: %v", err)
-	}
-	if second, _ := quiet.Conn(); second == first {
-		t.Fatal("the connection was not opened again")
-	}
+	synctest.Test(t, func(t *testing.T) {
+		c := newChat()
+		ctx := timeout(t)
+		quiet, err := bot.Start(local(c.server, server.LocalOptions{User: apron.User{UserID: "quiet"}}), bot.Options{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		first, _ := quiet.Conn()
+		first.(*server.Local).Conn().Close()
+		<-first.Done()
+		if _, err := quiet.Post(ctx, apron.MessageParams{Body: &apron.Body{Text: "back"}}); err != nil {
+			t.Fatalf("Post after the server closed the connection: %v", err)
+		}
+		if second, _ := quiet.Conn(); second == first {
+			t.Fatal("the connection was not opened again")
+		}
 
-	heard := make(chan string, 8)
-	listener, err := bot.Start(local(c.server, server.LocalOptions{User: apron.User{UserID: "listener"}}), bot.Options{
-		OnMessage: func(_ context.Context, _ *bot.Bot, m apron.Message) { heard <- m.Body.Text },
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	conn, _ := listener.Conn()
-	conn.(*server.Local).Conn().Close()
-	<-conn.Done()
-	deadline := time.Now().Add(3 * time.Second)
-	for {
+		heard := make(chan string, 8)
+		listener, err := bot.Start(local(c.server, server.LocalOptions{User: apron.User{UserID: "listener"}}), bot.Options{
+			OnMessage: func(_ context.Context, _ *bot.Bot, m apron.Message) { heard <- m.Body.Text },
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		conn, _ := listener.Conn()
+		conn.(*server.Local).Conn().Close()
+		<-conn.Done()
+		// It opens again after a second (minReopen), by the bubble's clock:
+		// not before.
+		time.Sleep(time.Second - time.Nanosecond)
+		if _, err := quiet.Post(ctx, apron.MessageParams{Body: &apron.Body{Text: "early"}}); err != nil {
+			t.Fatal(err)
+		}
+		synctest.Wait()
+		select {
+		case text := <-heard:
+			t.Fatalf("heard %q before the listener opened again", text)
+		default:
+		}
+		time.Sleep(time.Nanosecond)
+		synctest.Wait()
 		if _, err := quiet.Post(ctx, apron.MessageParams{Body: &apron.Body{Text: "anyone?"}}); err != nil {
 			t.Fatal(err)
 		}
+		synctest.Wait()
 		select {
 		case text := <-heard:
 			if text != "anyone?" {
 				t.Fatalf("heard %q", text)
 			}
-		case <-time.After(100 * time.Millisecond):
-			if time.Now().After(deadline) {
-				t.Fatal("the listener did not come back")
-			}
-			continue
+		default:
+			t.Fatal("the listener did not come back")
 		}
-		break
-	}
 
-	listener.Close()
-	quiet.Close()
-	if _, err := quiet.Post(ctx, apron.MessageParams{Body: &apron.Body{Text: "gone"}}); !errors.Is(err, apron.ErrClosed) {
-		t.Fatalf("Post after Close: %v", err)
-	}
-	if err := c.server.Shutdown(ctx); err != nil {
-		t.Fatal(err)
-	}
+		listener.Close()
+		quiet.Close()
+		if _, err := quiet.Post(ctx, apron.MessageParams{Body: &apron.Body{Text: "gone"}}); !errors.Is(err, apron.ErrClosed) {
+			t.Fatalf("Post after Close: %v", err)
+		}
+		if err := c.server.Shutdown(ctx); err != nil {
+			t.Fatal(err)
+		}
+	})
 }
 
 // say posts text as a new guest, with mentions, and returns its message.
@@ -273,62 +287,65 @@ func say(t *testing.T, c *chat, text string, mentions ...string) (*aprontest.Cli
 // told so, User says so, its own messages are told by that user_id, and
 // its mentions are of it.
 func TestUserFromBackend(t *testing.T) {
-	c := newChat()
-	c.rename = func(u apron.User) apron.User {
-		return apron.User{UserID: "b1", Name: strings.ToLower(u.Name)}
-	}
-	heard := make(chan apron.Message, 8)
-	you := make(chan string, 8)
-	echo, err := bot.Start(local(c.server, server.LocalOptions{User: apron.User{UserID: "echo", Name: "Echo"}}), bot.Options{
-		OnMessage: func(ctx context.Context, b *bot.Bot, m apron.Message) {
-			heard <- m
-			if b.Mentioned(m) {
-				if _, err := b.Reply(ctx, m, "hi"); err != nil {
-					t.Error(err)
+	synctest.Test(t, func(t *testing.T) {
+		c := newChat()
+		c.rename = func(u apron.User) apron.User {
+			return apron.User{UserID: "b1", Name: strings.ToLower(u.Name)}
+		}
+		heard := make(chan apron.Message, 8)
+		you := make(chan string, 8)
+		echo, err := bot.Start(local(c.server, server.LocalOptions{User: apron.User{UserID: "echo", Name: "Echo"}}), bot.Options{
+			OnMessage: func(ctx context.Context, b *bot.Bot, m apron.Message) {
+				heard <- m
+				if b.Mentioned(m) {
+					if _, err := b.Reply(ctx, m, "hi"); err != nil {
+						t.Error(err)
+					}
 				}
-			}
-		},
-		OnFrame: func(_ context.Context, _ *bot.Bot, f apron.Frame) {
-			var n struct {
-				Method string           `json:"method"`
-				Params apron.UserUpdate `json:"params"`
-			}
-			if json.Unmarshal(f, &n) == nil && n.Method == "user" && n.Params.You != nil {
-				you <- n.Params.You.UserID + " " + n.Params.You.Name
-			}
-		},
+			},
+			OnFrame: func(_ context.Context, _ *bot.Bot, f apron.Frame) {
+				var n struct {
+					Method string           `json:"method"`
+					Params apron.UserUpdate `json:"params"`
+				}
+				if json.Unmarshal(f, &n) == nil && n.Method == "user" && n.Params.You != nil {
+					you <- n.Params.You.UserID + " " + n.Params.You.Name
+				}
+			},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { echo.Close() })
+		if u := echo.User(); u.UserID != "b1" || u.Name != "echo" || echo.UserID() != "b1" {
+			t.Fatalf("User %+v, UserID %s", u, echo.UserID())
+		}
+		if got := <-you; got != "b1 echo" {
+			t.Fatalf("told %q", got)
+		}
+		// Mentions of the user_id it asked for are not of it.
+		say(t, c, "@echo", "echo")
+		if m := <-heard; m.Body.Text != "@echo" {
+			t.Fatalf("heard %+v", m)
+		}
+		client, asked := say(t, c, "@b1", "b1")
+		if _, err := client.Expect(timeout(t), func(f aprontest.Frame) bool {
+			var m apron.Message
+			return f.Method == "message" && f.Decode(&m) == nil && m.From.UserID == "b1" && m.ReplyTo != nil && m.ReplyTo.MessageID == asked
+		}); err != nil {
+			t.Fatal(err)
+		}
+		// It heard the mention, and not its own reply.
+		if m := <-heard; m.Body.Text != "@b1" {
+			t.Fatalf("heard %+v", m)
+		}
+		synctest.Wait()
+		select {
+		case m := <-heard:
+			t.Fatalf("heard %+v", m)
+		default:
+		}
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { echo.Close() })
-	if u := echo.User(); u.UserID != "b1" || u.Name != "echo" || echo.UserID() != "b1" {
-		t.Fatalf("User %+v, UserID %s", u, echo.UserID())
-	}
-	if got := <-you; got != "b1 echo" {
-		t.Fatalf("told %q", got)
-	}
-	// Mentions of the user_id it asked for are not of it.
-	say(t, c, "@echo", "echo")
-	if m := <-heard; m.Body.Text != "@echo" {
-		t.Fatalf("heard %+v", m)
-	}
-	client, asked := say(t, c, "@b1", "b1")
-	if _, err := client.Expect(timeout(t), func(f aprontest.Frame) bool {
-		var m apron.Message
-		return f.Method == "message" && f.Decode(&m) == nil && m.From.UserID == "b1" && m.ReplyTo != nil && m.ReplyTo.MessageID == asked
-	}); err != nil {
-		t.Fatal(err)
-	}
-	// It heard the mention, and not its own reply.
-	if m := <-heard; m.Body.Text != "@b1" {
-		t.Fatalf("heard %+v", m)
-	}
-	select {
-	case m := <-heard:
-		t.Fatalf("heard %+v", m)
-	case <-time.After(50 * time.Millisecond):
-	}
 }
 
 // Addressed takes a message that names the bot in its text, as well as
