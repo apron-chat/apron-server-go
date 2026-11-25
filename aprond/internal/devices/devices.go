@@ -94,16 +94,14 @@ func (t *Table[U]) Get(key Key) (Device[U], bool) {
 // Mint makes a device token that signs in as user, named name, and returns
 // it with the key it is kept under. It does not check name, nor the
 // user's other tokens (Of).
-func (t *Table[U]) Mint(user U, name string, now time.Time) (string, Key, error) {
+func (t *Table[U]) Mint(user U, name string, now time.Time) (string, Key) {
 	secret := make([]byte, 32)
-	if _, err := rand.Read(secret); err != nil {
-		return "", Key{}, err
-	}
+	rand.Read(secret)
 	token := Prefix + base64.RawURLEncoding.EncodeToString(secret)
 	key := sha256.Sum256([]byte(token))
 	t.byKey[key] = Device[U]{User: user, Name: name, Created: now}
 	t.dirty[key] = struct{}{}
-	return token, key, nil
+	return token, key
 }
 
 // Delete forgets the device token under key, and deletes it from the

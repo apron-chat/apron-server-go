@@ -78,13 +78,11 @@ func New[U comparable](expired func(key Key, t *Token[U])) *Table[U] {
 
 // NewToken makes a new service token, and returns it with the key it would
 // be kept under.
-func NewToken() (string, Key, error) {
+func NewToken() (string, Key) {
 	secret := make([]byte, 32)
-	if _, err := rand.Read(secret); err != nil {
-		return "", Key{}, err
-	}
+	rand.Read(secret)
 	token := Prefix + base64.RawURLEncoding.EncodeToString(secret)
-	return token, sha256.Sum256([]byte(token)), nil
+	return token, sha256.Sum256([]byte(token))
 }
 
 // NewID makes a new token ID.

@@ -574,10 +574,7 @@ func (sc *schemeConn) ProposeCode(spec authn.CodeProposal) (authn.Tokens, error)
 		return authn.Tokens{}, errors.New("apron: a proposal proves an empty subject")
 	}
 	s := sc.s
-	code, err := proposals.Code()
-	if err != nil {
-		return authn.Tokens{}, err
-	}
+	code := proposals.Code()
 	s.mu.Lock()
 	defer s.unlock()
 	if !s.proposals.Room(spec.LinkPage != "", spec.State != "", sc.now) {
@@ -718,10 +715,7 @@ func (sc schemeCore) Issue(proof authn.Proof, create bool) (string, error) {
 	if err != nil {
 		return "", &authn.Error{Code: err.Code, Message: err.Message, Data: err.Data}
 	}
-	token, key, err := s.newSessionLocked(user, "", true, time.Now())
-	if err != nil {
-		return "", &authn.Error{Code: err.Code, Message: err.Message}
-	}
+	token, key := s.sessions.Issue(user, "", true, time.Now())
 	if session, ok := s.sessions.Get(key); ok {
 		session.Credential = credentialKey(sc.scheme.Name(), proof.Credential)
 		s.sessions.Put(key, session)

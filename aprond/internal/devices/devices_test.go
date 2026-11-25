@@ -12,14 +12,14 @@ import (
 func TestTable(t *testing.T) {
 	now := time.Now()
 	table := New[string]()
-	token, key, err := table.Mint("ada", "laptop", now)
-	if err != nil || key != sha256.Sum256([]byte(token)) || !strings.HasPrefix(token, Prefix) {
-		t.Fatalf("Mint: %q %v", token, err)
+	token, key := table.Mint("ada", "laptop", now)
+	if key != sha256.Sum256([]byte(token)) || !strings.HasPrefix(token, Prefix) {
+		t.Fatalf("Mint: %q", token)
 	}
 	if d, ok := table.Get(key); !ok || d.User != "ada" || d.Name != "laptop" || !d.Created.Equal(now) {
 		t.Fatalf("device %+v", d)
 	}
-	_, phone, _ := table.Mint("ada", "phone", now.Add(time.Second))
+	_, phone := table.Mint("ada", "phone", now.Add(time.Second))
 	table.Mint("bob", "laptop", now)
 	if keys, devices := table.Of("ada"); len(keys) != 2 || keys[0] != key || keys[1] != phone || devices[1].Name != "phone" {
 		t.Fatalf("Of: %v %+v", keys, devices)

@@ -127,10 +127,7 @@ func (s *Server) issueServiceToken(ctx context.Context, userID string, options S
 	if len(options.Name) > services.MaxNameBytes {
 		return ServiceToken{}, fmt.Errorf("apron: a service token's name is at most %d bytes", services.MaxNameBytes)
 	}
-	token, key, err := services.NewToken()
-	if err != nil {
-		return ServiceToken{}, err
-	}
+	token, key := services.NewToken()
 	now := time.Now()
 	s.mu.Lock()
 	if s.store.Stopped() {

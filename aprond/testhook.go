@@ -55,12 +55,9 @@ func (s *Server) member(ctx context.Context, options InvitationOptions, address 
 	user := s.enrollAccountLocked(inv, invited.Token, id, nil, authn.Proof{}, now)
 	s.joinDefaultRoomLocked(user)
 	s.joinInvitedLocked(user, inv)
-	token, _, sessionErr := s.newSessionLocked(user, "", true, now)
+	token, _ := s.sessions.Issue(user, "", true, now)
 	f := s.newFenceLocked()
 	s.unlock()
-	if sessionErr != nil {
-		return "", "", sessionErr
-	}
 	if err := f.Wait(ctx); err != nil {
 		return "", "", err
 	}

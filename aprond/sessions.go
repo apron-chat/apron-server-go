@@ -31,10 +31,7 @@ func (s *Server) signInLocked(c *client, reply server.Reply[apron.AuthResult], u
 		return err
 	}
 	s.sessions.Delete(c.token)
-	token, key, err := s.newSessionLocked(user, c.origin, anyOrigin, now)
-	if err != nil {
-		return err
-	}
+	token, key := s.sessions.Issue(user, c.origin, anyOrigin, now)
 	c.token = key
 	c.setService([32]byte{}, false)
 	// A sign-in that proved a credential notes it after (provedLocked). A
@@ -43,17 +40,6 @@ func (s *Server) signInLocked(c *client, reply server.Reply[apron.AuthResult], u
 	c.credential = ""
 	s.switchUserLocked(c, reply, user, token, signIn, joinDefault)
 	return nil
-}
-
-// newSessionLocked makes a bearer token that resumes user's sign-in from
-// origin, or with anyOrigin from any origin or none (§3.2.1), and returns it
-// with the key it is kept under.
-func (s *Server) newSessionLocked(user *userState, origin string, anyOrigin bool, now time.Time) (string, [32]byte, *Error) {
-	token, key, err := s.sessions.Issue(user, origin, anyOrigin, now)
-	if err != nil {
-		return "", [32]byte{}, &Error{Code: CodeInternalError, Message: "Unable to create a sign-in session"}
-	}
-	return token, key, nil
 }
 
 // parseRequested parses the name and user_id that an auth request may request

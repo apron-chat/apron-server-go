@@ -60,10 +60,7 @@ func (s *Server) inviteDeviceCommand(c *client, r *roomState, _ map[string]any, 
 		}
 		return apron.CommandResult{}, &Error{Code: CodeDenied, Message: fmt.Sprintf("You have %d device tokens (%s); run /invite-device with one of those names to replace its token", maxDeviceTokens, strings.Join(names, ", "))}
 	}
-	token, key, err := s.devices.Mint(u, name, time.Now())
-	if err != nil {
-		return apron.CommandResult{}, &Error{Code: CodeInternalError, Message: "Unable to create a device token"}
-	}
+	token, key := s.devices.Mint(u, name, time.Now())
 	replaced := ""
 	if previous >= 0 {
 		replaced = ", and replaces its earlier token"

@@ -20,9 +20,9 @@ func TestTable(t *testing.T) {
 		expired = append(expired, token.ID)
 	})
 	defer table.Stop()
-	token, key, err := NewToken()
-	if err != nil || key != sha256.Sum256([]byte(token)) || !strings.HasPrefix(token, Prefix) {
-		t.Fatalf("NewToken: %q %v", token, err)
+	token, key := NewToken()
+	if key != sha256.Sum256([]byte(token)) || !strings.HasPrefix(token, Prefix) {
+		t.Fatalf("NewToken: %q", token)
 	}
 	now := time.Now()
 	table.Add(key, &Token[string]{ID: NewID(), User: "agent", Name: "python", Created: now, Expires: now.Add(time.Hour), Manage: true})
@@ -87,9 +87,6 @@ func TestTable(t *testing.T) {
 
 func mustKey(t *testing.T) Key {
 	t.Helper()
-	_, key, err := NewToken()
-	if err != nil {
-		t.Fatal(err)
-	}
+	_, key := NewToken()
 	return key
 }

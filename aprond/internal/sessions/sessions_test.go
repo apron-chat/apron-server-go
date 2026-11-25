@@ -10,14 +10,14 @@ import (
 func TestTable(t *testing.T) {
 	now := time.Now()
 	table := New[string]()
-	token, key, err := table.Issue("ada", "https://chat.example", false, now)
-	if err != nil || key != sha256.Sum256([]byte(token)) {
-		t.Fatalf("Issue: %v", err)
+	token, key := table.Issue("ada", "https://chat.example", false, now)
+	if key != sha256.Sum256([]byte(token)) {
+		t.Fatalf("Issue: %q", token)
 	}
 	if s, ok := table.Get(key); !ok || s.User != "ada" || s.Origin != "https://chat.example" || !s.Expires.Equal(now.Add(Lifetime)) {
 		t.Fatalf("session %+v", s)
 	}
-	_, anyKey, _ := table.Issue("ada", "https://chat.example", true, now)
+	_, anyKey := table.Issue("ada", "https://chat.example", true, now)
 	if s, _ := table.Get(anyKey); s.Origin != "" || !s.AnyOrigin {
 		t.Fatalf("a token from any origin keeps one: %+v", s)
 	}

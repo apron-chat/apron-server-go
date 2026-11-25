@@ -236,10 +236,7 @@ func values(table map[string]*Proposal) []*Proposal {
 }
 
 // Code returns a code to type: six digits.
-func Code() (string, error) {
-	number, err := rand.Int(rand.Reader, big.NewInt(1_000_000))
-	if err != nil {
-		return "", err
-	}
-	return fmt.Sprintf("%06d", number), nil
+func Code() string {
+	number, _ := rand.Int(rand.Reader, big.NewInt(1_000_000)) // never fails (crypto/rand)
+	return fmt.Sprintf("%06d", number)
 }

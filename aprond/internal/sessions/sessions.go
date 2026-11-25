@@ -98,11 +98,9 @@ func (t *Table[U]) Len() int { return len(t.byKey) }
 // anyOrigin from any origin or none (§3.2.1), for Lifetime from now, and
 // returns it with the key it is kept under. The user's other sessions past
 // MaxPerUser are forgotten (Cap).
-func (t *Table[U]) Issue(user U, origin string, anyOrigin bool, now time.Time) (string, Key, error) {
+func (t *Table[U]) Issue(user U, origin string, anyOrigin bool, now time.Time) (string, Key) {
 	secret := make([]byte, 32)
-	if _, err := rand.Read(secret); err != nil {
-		return "", Key{}, err
-	}
+	rand.Read(secret)
 	token := base64.RawURLEncoding.EncodeToString(secret)
 	key := sha256.Sum256([]byte(token))
 	if anyOrigin {
@@ -110,7 +108,7 @@ func (t *Table[U]) Issue(user U, origin string, anyOrigin bool, now time.Time) (
 	}
 	t.Put(key, Session[U]{User: user, Origin: origin, AnyOrigin: anyOrigin, Expires: now.Add(Lifetime)})
 	t.Cap(user, key)
-	return token, key, nil
+	return token, key
 }
 
 // Cap forgets user's sessions beyond MaxPerUser, but never keep, the one
