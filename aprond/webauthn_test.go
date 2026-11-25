@@ -46,6 +46,14 @@ func passkeyTestServer(t *testing.T) (*Server, *httptest.Server) {
 	return newTestServer(t, config)
 }
 
+// passkeyMemoryServer is passkeyTestServer in memory (newMemoryServer).
+func passkeyMemoryServer(t *testing.T) (*Server, *httptest.Server) {
+	t.Helper()
+	config := DefaultConfig()
+	config.WebAuthn = testWebAuthn(t)
+	return newMemoryServer(t, config)
+}
+
 func passkeyCall(t *testing.T, c *testClient, id, action, step string, extra map[string]any) map[string]any {
 	t.Helper()
 	params := map[string]any{"scheme": "webauthn", "action": action}

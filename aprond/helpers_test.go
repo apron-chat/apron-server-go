@@ -8,11 +8,13 @@ import (
 	"image"
 	"image/png"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
 	"slices"
 	"strconv"
+	"sync"
 	"testing"
 	"time"
 
@@ -58,6 +60,72 @@ func newTestServer(t *testing.T, config Config) (*Server, *httptest.Server) {
 	return app, httpServer
 }
 
+// newMemoryServer is newTestServer on connections in memory (net.Pipe),
+// which its Client dials, as dialOrigin does: so that a test runs in a
+// synctest bubble, whose clock is fake, as a real network's waits are not
+// the bubble's. httpDo dials over TCP, so such a test does not use it.
+func newMemoryServer(t *testing.T, config Config) (*Server, *httptest.Server) {
+	t.Helper()
+	app, err := Open(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	httpServer := httptest.NewUnstartedServer(app.Handler())
+	_ = httpServer.Listener.Close()
+	pipes := &pipeListener{conns: make(chan net.Conn), closed: make(chan struct{})}
+	httpServer.Listener = pipes
+	httpServer.Start()
+	httpServer.Client().Transport.(*http.Transport).DialContext = pipes.dial
+	t.Cleanup(func() {
+		if err := app.Shutdown(context.Background()); err != nil {
+			t.Errorf("shutdown: %v", err)
+		}
+		httpServer.Close()
+	})
+	return app, httpServer
+}
+
+// pipeListener is a net.Listener whose connections are the server ends of
+// the net.Pipes that dial opens.
+type pipeListener struct {
+	conns  chan net.Conn
+	closed chan struct{}
+	once   sync.Once
+}
+
+func (p *pipeListener) dial(ctx context.Context, _, _ string) (net.Conn, error) {
+	server, client := net.Pipe()
+	select {
+	case p.conns <- server:
+		return client, nil
+	case <-p.closed:
+		return nil, net.ErrClosed
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+func (p *pipeListener) Accept() (net.Conn, error) {
+	select {
+	case conn := <-p.conns:
+		return conn, nil
+	case <-p.closed:
+		return nil, net.ErrClosed
+	}
+}
+
+func (p *pipeListener) Close() error {
+	p.once.Do(func() { close(p.closed) })
+	return nil
+}
+
+func (*pipeListener) Addr() net.Addr { return pipeAddr{} }
+
+type pipeAddr struct{}
+
+func (pipeAddr) Network() string { return "pipe" }
+func (pipeAddr) String() string  { return "aprond.test" }
+
 // ioTimeout bounds a test client's dial, and each frame it reads or writes:
 // generous, as a large frame takes seconds to build and encode with -race on
 // a busy machine. A test that expects nothing to arrive uses a fence (drain)
@@ -99,9 +167,9 @@ func dialRaw(t *testing.T, httpServer *httptest.Server) (*testClient, map[string
 // frame.
 func dialOrigin(t *testing.T, httpServer *httptest.Server, origin string) (*testClient, map[string]any) {
 	t.Helper()
-	var options *websocket.DialOptions
+	options := &websocket.DialOptions{HTTPClient: httpServer.Client()}
 	if origin != "" {
-		options = &websocket.DialOptions{HTTPHeader: http.Header{"Origin": {origin}}}
+		options.HTTPHeader = http.Header{"Origin": {origin}}
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), ioTimeout)
 	ws, _, err := websocket.Dial(ctx, wsURL(httpServer), options)
