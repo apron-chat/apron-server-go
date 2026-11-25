@@ -16,6 +16,10 @@
 //	  --origin https://chat.example --disable-guests \
 //	  --sso.client-id ... --sso.client-secret ... \
 //	  --sso.org my-team --sso.admin octocat
+//
+// Set --public-url in a deployment: without it, the callback URL the
+// extension sends to GitHub follows the Host header of the request that
+// started the sign-in, which the client chooses.
 package main
 
 import (
@@ -55,8 +59,9 @@ type SSO struct {
 func (*SSO) Name() string { return "sso" }
 func (s *SSO) Flags() any { return &s.Settings }
 
-// callback is the OAuth app's callback URL, on this server as r reached
-// it: its --public-url, if set.
+// callback is the OAuth app's callback URL: under --public-url, if set,
+// and else under the scheme and Host header r arrived with, which only a
+// development server should rely on.
 func (s *SSO) callback(r *http.Request) string { return s.host.BaseURL(r) + "/sso/callback" }
 
 func (s *SSO) Init(r *apron.Registrar) error {
