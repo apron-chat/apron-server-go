@@ -40,6 +40,20 @@ type ServerInfo struct {
 // sends one with what a server.Server fills in.
 func (ServerInfo) Method() string { return "server" }
 
+// Has reports whether the server frame lists capability, such as "history"
+// or "ext:limits" (§4): a client uses a feature only while the latest
+// server frame lists it, and falls back without it.
+func (s ServerInfo) Has(capability string) bool { return slices.Contains(s.Capabilities, capability) }
+
+// Offers reports whether a client may send auth with scheme (§3.2): one of
+// auth, which sign in, or of signup, which make an account. A scheme it
+// offers neither way is unsupported. A server may still accept a scheme it
+// does not list, such as a token it issued, so a client that holds one
+// tries it.
+func (s ServerInfo) Offers(scheme string) bool {
+	return slices.Contains(s.Auth, scheme) || slices.Contains(s.Signup, scheme)
+}
+
 // User is a user object (§3.3.1): a recorded one, such as a message's
 // from, or a complete current one. A current object that carries cleared
 // fields, as a user notification does, is a CurrentUser.
