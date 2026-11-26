@@ -6,7 +6,7 @@ toolchain go1.27.4
 
 require (
 	github.com/BurntSushi/toml v1.6.0
-	github.com/apron-chat/apron-server-go/apron v0.0.0-20261126032953-511019f357ce
+	github.com/apron-chat/apron-server-go/apron v0.0.0-20261126182724-27796da5bc2a
 	github.com/coder/websocket v1.8.14
 	github.com/fxamacker/cbor/v2 v2.9.4
 	github.com/go-jose/go-jose/v4 v4.1.9
