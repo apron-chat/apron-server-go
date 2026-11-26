@@ -37,3 +37,58 @@ type Record struct {
 	Membership *Membership
 	Reactions  *Reactions
 }
+
+// Next returns the params of the page after r, a result of p, in p's
+// direction (§4.3.2): forward from after = r.LastLogID + 1 when p has After,
+// and back from before = r.FirstLogID - 1 when it has not, with p's other
+// bounds and limit. It reports false when there is no such page: r's more
+// is false, or r is empty, or the continuation passes p's other bound.
+//
+// The continuation is computed from the slice's bounds, as numbers, never
+// from the records, which a server may have compacted (§4.3.4).
+func (p HistoryParams) Next(r HistoryResult) (HistoryParams, bool) {
+	if !r.More || r.FirstLogID == 0 || r.LastLogID == 0 {
+		return p, false
+	}
+	next := p
+	if p.After != nil {
+		after := r.LastLogID + 1
+		if after > MaxLogID || p.Before != nil && after > *p.Before {
+			return p, false
+		}
+		next.After = &after
+		return next, true
+	}
+	before := r.FirstLogID - 1
+	if before < 1 {
+		return p, false
+	}
+	next.Before = &before
+	return next, true
+}
+
+// LowerBound returns the effective lower bound of the log that r describes
+// (§4.3.3): its history_log_id, or, when that is null, latest_log_id + 1,
+// past every record. A client that needs a record below it cannot get it:
+// it clears what it keeps of the room, and starts again from the bound
+// (§4.3.5).
+func (r HistoryResult) LowerBound() LogID {
+	if r.HistoryLogID != 0 {
+		return r.HistoryLogID
+	}
+	return r.LatestLogID + 1
+}
+
+// LowerBound returns the effective lower bound of the room's history, as
+// HistoryResult.LowerBound does, from its delivery fields (§4.3.3), and
+// reports false when the room record has no history_log_id, as without
+// capability history.
+func (v RoomView) LowerBound() (LogID, bool) {
+	if v.HistoryLogID == nil {
+		return 0, false
+	}
+	if *v.HistoryLogID != 0 {
+		return *v.HistoryLogID, true
+	}
+	return v.LatestLogID + 1, true
+}
