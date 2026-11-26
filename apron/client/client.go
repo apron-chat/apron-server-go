@@ -1,7 +1,9 @@
 // Package client is a network client of any Apron server (PROTOCOL.md):
 // [Dial] opens a WebSocket to the server's address, reads its server frame
-// (§3.1), and signs in (§3.2), and the [Conn] it returns makes requests,
-// typed ([Conn.Post], [Conn.History], [Conn.Me], [Conn.Command]) or raw
+// (§3.1), and signs in (§3.2), as [Connect] and [Conn.Auth] do one at a
+// time, and the [Conn] it returns makes requests, typed ([Conn.Post],
+// [Conn.History] and [Conn.HistoryPages], [Conn.RoomList],
+// [Conn.RoomJoin], [Conn.RoomLeave], [Conn.Me], [Conn.Command]) or raw
 // ([Conn.Call], [Conn.Notify]), and hands every frame the server sends but
 // the replies, such as new messages, to its OnFrame. It imports only
 // package apron, so that a program that talks to a server imports none of
@@ -47,6 +49,7 @@ import (
 	"encoding/json/v2"
 	"errors"
 	"fmt"
+	"iter"
 	"net/http"
 	"slices"
 	"strconv"
@@ -119,8 +122,8 @@ func HTTPClient(client *http.Client) Option {
 	return func(o *options) { o.httpClient = client }
 }
 
-// Conn is a connection to an Apron server, signed in. Its methods are safe
-// for concurrent use.
+// Conn is a connection to an Apron server: signed in, as Dial returns it,
+// or not yet, as Connect does. Its methods are safe for concurrent use.
 type Conn struct {
 	ws     *websocket.Conn
 	prefix string
@@ -161,7 +164,8 @@ type reply struct {
 // wss://chat.example/ws, and signs in with auth (§3.2), such as
 // {Scheme: "token", Token: ...} or {Scheme: "guest", Name: "CI"}; it
 // returns the connection once the auth result has signed it in. ctx bounds
-// connecting and signing in, not the connection.
+// connecting and signing in, not the connection. It is Connect, then
+// Conn.Auth.
 //
 // An error reply to auth, such as error/denied for a token that was
 // revoked, is returned as an *apron.Error, after which a client does not
@@ -171,6 +175,32 @@ type reply struct {
 // one at capacity (error/retry_after, which is returned): a bot opens it
 // again later.
 func Dial(ctx context.Context, url string, auth apron.AuthParams, opts ...Option) (*Conn, error) {
+	c, err := Connect(ctx, url, opts...)
+	if err != nil {
+		return nil, err
+	}
+	result, err := c.Auth(ctx, auth)
+	if err == nil && result.You == nil {
+		err = errors.New("client: auth signed nobody in")
+	}
+	if err != nil {
+		if errors.Is(err, apron.ErrClosed) {
+			err = c.dialError()
+		}
+		c.abandon()
+		return nil, err
+	}
+	return c, nil
+}
+
+// Connect connects to the Apron server at url, as Dial does, and returns
+// the connection once its server frame has arrived (§3.1), without signing
+// in: Hello says which schemes the server offers, for a client that picks
+// one, or that only reads the server frame, and Auth signs in. Until it
+// does, the server denies other requests (§3.2.2), and User is the zero
+// User. ctx bounds connecting, not the connection. Its errors never wrap
+// apron.ErrClosed, as Dial's do not.
+func Connect(ctx context.Context, url string, opts ...Option) (*Conn, error) {
 	var o options
 	for _, opt := range opts {
 		opt(&o)
@@ -203,18 +233,19 @@ func Dial(ctx context.Context, url string, auth apron.AuthParams, opts ...Option
 		return nil, ctx.Err()
 	}
 	go c.keepAlive()
-	result, err := call[apron.AuthResult](ctx, c, "auth", auth)
-	if err == nil && result.You == nil {
-		err = errors.New("client: auth signed nobody in")
-	}
-	if err != nil {
-		if errors.Is(err, apron.ErrClosed) {
-			err = c.dialError()
-		}
-		c.abandon()
-		return nil, err
-	}
 	return c, nil
+}
+
+// Auth sends auth (§3.2), and returns its result: with You, the
+// connection is signed in as You, which User is from then on, and with
+// Token, the token to sign in with next time (§3.2.1); without You, it
+// authenticated nothing, such as the begin step of a ceremony. An error
+// reply, such as error/unsupported for a scheme the server does not offer
+// or error/denied for a token it refused, is an *apron.Error, and changes
+// nothing (§3.2.2). A scheme whose fields AuthParams lacks, such as
+// webauthn's, is sent with Call.
+func (c *Conn) Auth(ctx context.Context, p apron.AuthParams) (apron.AuthResult, error) {
+	return call[apron.AuthResult](ctx, c, "auth", p)
 }
 
 // abandon ends a connection that Dial does not return, without waiting
@@ -225,15 +256,15 @@ func (c *Conn) abandon() {
 	c.ws.CloseNow()
 }
 
-// dialError is why a connection ended while Dial opened it, without
-// apron.ErrClosed.
+// dialError is why a connection ended while Dial or Connect opened it,
+// without apron.ErrClosed.
 func (c *Conn) dialError() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if e, ok := c.reason.(*apron.Error); ok {
 		return e
 	}
-	return fmt.Errorf("client: the connection ended while signing in: %v", c.reason)
+	return fmt.Errorf("client: the connection ended before it was open: %v", c.reason)
 }
 
 // read reads frames until the connection ends.
@@ -573,6 +604,56 @@ func (c *Conn) Post(ctx context.Context, p apron.MessageParams) (apron.MessageRe
 // receives (§4.3).
 func (c *Conn) History(ctx context.Context, p apron.HistoryParams) (apron.HistoryResult, error) {
 	return call[apron.HistoryResult](ctx, c, "history", p)
+}
+
+// HistoryPages pages through a log from p (§4.3.2): it yields the result
+// of p, then of each continuation in p's direction (HistoryParams.Next),
+// forward from p.After when p has one, and back from p.Before, or the
+// newest, when it has not, until a result's more is false. An error ends
+// it, yielded with a zero result, as does a loop that stops. Each page is
+// one request, sent once the loop has taken the page before.
+//
+// A page whose effective lower bound (HistoryResult.LowerBound) is past
+// the after it asked for lacks the records between them, which the
+// server no longer holds: a client that recovers a room checks for it
+// (§4.3.5).
+func (c *Conn) HistoryPages(ctx context.Context, p apron.HistoryParams) iter.Seq2[apron.HistoryResult, error] {
+	return func(yield func(apron.HistoryResult, error) bool) {
+		for {
+			page, err := c.History(ctx, p)
+			if err != nil {
+				yield(apron.HistoryResult{}, err)
+				return
+			}
+			if !yield(page, nil) {
+				return
+			}
+			next, ok := p.Next(page)
+			if !ok {
+				return
+			}
+			p = next
+		}
+	}
+}
+
+// RoomList lists rooms (§4.2.1), as its params filter them.
+func (c *Conn) RoomList(ctx context.Context, p apron.RoomListParams) (apron.RoomListResult, error) {
+	return call[apron.RoomListResult](ctx, c, "room_list", p)
+}
+
+// RoomJoin joins a room (§4.2.2): the user, or with UserID, another user,
+// where the server allows it. The room_update that the join causes, which
+// lists the room in joined, goes to OnFrame, before the result.
+func (c *Conn) RoomJoin(ctx context.Context, p apron.RoomJoinParams) error {
+	_, err := c.Call(ctx, "room_join", p)
+	return err
+}
+
+// RoomLeave leaves a room (§4.2.2), as RoomJoin joins one.
+func (c *Conn) RoomLeave(ctx context.Context, p apron.RoomLeaveParams) error {
+	_, err := c.Call(ctx, "room_leave", p)
+	return err
 }
 
 // Me changes the user's profile (§3.3.2), and returns the result's you:
