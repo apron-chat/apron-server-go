@@ -26,14 +26,15 @@ forgets it on restart); see [SERVER.md](SERVER.md#storage).
   backend the command capability (§4.1); `apron/bot` runs a bot on any
   connection it is given, such as an in-process one; `apron/client` is a
   network client of any Apron server, on which a bot runs too, as
-  `examples/notify`, `examples/tail`, and `examples/remote-bot` show;
-  `apron/aprontest`
+  `examples/notify`, `examples/tail`, `examples/remote-bot`, and
+  `examples/aproncli` show; `apron/archive` reads and writes archives
+  (apron-web's ARCHIVE.md), as `aproncli export` does; `apron/aprontest`
   tests a backend, a handler at a time or a whole server as a client sees
   it, as `examples/minimal`'s test does; and `apron/conformance` runs the
   protocol's core conformance checks, a port of `conform.py`, as Go tests
   against any backend in process, as `aprond`'s and `examples/minimal`'s
   tests do. `apron/internal/core` is the connection runtime and request
-  parsing. Packages `apron`, `apron/bot`, and `apron/client` import nothing of
+  parsing. Packages `apron`, `apron/archive`, `apron/bot`, and `apron/client` import nothing of
   `apron/server`, which a test of the module (`TestBoundary`) checks, so
   that a client imports them without the engine. `go.work` puts both
   modules in one workspace, so that a change to `apron` is built and
