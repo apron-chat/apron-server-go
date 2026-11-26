@@ -145,8 +145,12 @@ type Bot struct {
 	ctx     context.Context
 	cancel  context.CancelFunc
 
-	mu   sync.Mutex
-	conn Conn
+	// dialing is held while the connection opens, so that one opens at a
+	// time; mu guards conn, and is never held while one opens, so that
+	// Close and User do not wait for a Dialer.
+	dialing sync.Mutex
+	mu      sync.Mutex
+	conn    Conn
 }
 
 // Reopening waits at least this long, and at most that, before the Bot
@@ -188,16 +192,19 @@ func (b *Bot) UserID() string { return b.User().UserID }
 // Conn returns the bot's connection, opened again if it has ended. Once
 // the Bot is closed, its error is apron.ErrClosed.
 func (b *Bot) Conn() (Conn, error) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
+	b.dialing.Lock()
+	defer b.dialing.Unlock()
 	if b.ctx.Err() != nil {
 		return nil, apron.ErrClosed
 	}
-	if b.conn != nil {
+	b.mu.Lock()
+	current := b.conn
+	b.mu.Unlock()
+	if current != nil {
 		select {
-		case <-b.conn.Done():
+		case <-current.Done():
 		default:
-			return b.conn, nil
+			return current, nil
 		}
 	}
 	var onFrame func(apron.Frame)
@@ -217,7 +224,16 @@ func (b *Bot) Conn() (Conn, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Close cancels b.ctx before it closes b.conn, under mu: a connection
+	// that opened as it did is closed here, or by Close.
+	b.mu.Lock()
+	if b.ctx.Err() != nil {
+		b.mu.Unlock()
+		conn.Close()
+		return nil, apron.ErrClosed
+	}
 	b.conn = conn
+	b.mu.Unlock()
 	if listens {
 		// A bot that listens is not left without a connection until its
 		// next request.
@@ -451,9 +467,10 @@ func (b *Bot) History(ctx context.Context, p apron.HistoryParams) (apron.History
 // Close ends the bot's connection, and opens no other: the handlers get
 // nothing more, and their context is canceled.
 func (b *Bot) Close() error {
+	// Canceled first, which ends a Dialer still opening a connection.
+	b.cancel()
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	b.cancel()
 	if b.conn != nil {
 		b.conn.Close()
 	}

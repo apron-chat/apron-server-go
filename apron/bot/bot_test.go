@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -266,6 +267,56 @@ func TestReopen(t *testing.T) {
 			t.Fatalf("Post after Close: %v", err)
 		}
 		if err := c.server.Shutdown(ctx); err != nil {
+			t.Fatal(err)
+		}
+	})
+}
+
+// Close, and User, do not wait for a Dialer still opening the connection
+// again, as one waiting on a server that never answers does: Close ends
+// it.
+func TestCloseWhileReopening(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		c := newChat()
+		first := local(c.server, server.LocalOptions{User: apron.User{UserID: "stuck"}})
+		var dials atomic.Int32
+		redialed := make(chan error, 1)
+		dial := func(ctx context.Context, onFrame func(apron.Frame)) (bot.Conn, error) {
+			if dials.Add(1) == 1 {
+				return first(ctx, onFrame)
+			}
+			<-ctx.Done()
+			redialed <- ctx.Err()
+			return nil, ctx.Err()
+		}
+		b, err := bot.Start(dial, bot.Options{OnMessage: func(context.Context, *bot.Bot, apron.Message) {}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		conn, _ := b.Conn()
+		conn.(*server.Local).Conn().Close()
+		<-conn.Done()
+		time.Sleep(time.Second) // minReopen
+		synctest.Wait()
+		if dials.Load() != 2 {
+			t.Fatalf("%d dials, want the second under way", dials.Load())
+		}
+		done := make(chan struct{})
+		go func() {
+			b.User()
+			b.Close()
+			close(done)
+		}()
+		synctest.Wait()
+		select {
+		case <-done:
+		default:
+			t.Fatal("Close waited for the Dialer")
+		}
+		if err := <-redialed; !errors.Is(err, context.Canceled) {
+			t.Fatalf("the Dialer's context: %v", err)
+		}
+		if err := c.server.Shutdown(timeout(t)); err != nil {
 			t.Fatal(err)
 		}
 	})
