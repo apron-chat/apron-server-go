@@ -14,14 +14,16 @@
 //     connection they are given, such as an in-process one of apron/server;
 //   - [github.com/apron-chat/apron-server-go/apron/client]: a network
 //     client of any Apron server, on which a bot runs over the network too;
+//   - [github.com/apron-chat/apron-server-go/apron/archive]: archives, a
+//     chat saved as one file of the results of room_list and history;
 //   - [github.com/apron-chat/apron-server-go/apron/aprontest]: tests of a
 //     backend of apron/server, a handler at a time or a whole server as a
 //     client sees it;
 //   - [github.com/apron-chat/apron-server-go/apron/conformance]: the
 //     protocol's core conformance checks, as Go tests against any server.
 //
-// Packages apron, bot, and client import nothing of apron/server, so that
-// a client imports them without the engine.
+// Packages apron, archive, bot, and client import nothing of apron/server,
+// so that a client imports them without the engine.
 //
 // # The vocabulary
 //
