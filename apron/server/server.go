@@ -353,8 +353,9 @@ func (s *Server) ServeTransport(ctx context.Context, t Transport, remote net.Add
 		return
 	case s.config.MaxConnections > 0 && s.network >= s.config.MaxConnections:
 		s.mu.Unlock()
-		c.info = s.complete(s.backend.Hello(ctx, c))
-		if frame, err := apron.Encode(c.info); err == nil {
+		info := s.complete(s.backend.Hello(ctx, c))
+		c.opened(info)
+		if frame, err := apron.Encode(info); err == nil {
 			c.rt.Send(frame)
 		}
 		// An error about the connection as a whole omits id (§1.1).
@@ -370,11 +371,17 @@ func (s *Server) ServeTransport(ctx context.Context, t Transport, remote net.Add
 		s.mu.Unlock()
 	}()
 
+	// What the backend sends the connection once OnConnect has told it of
+	// the connection, such as a new server frame (Conn.Announce), waits
+	// until its server frame is queued, which goes first (§3.1).
+	c.hold()
 	if connect := s.config.OnConnect; connect != nil {
 		if err := connect(ctx, c); err != nil {
+			c.release(true)
 			if e, ok := asError(err); ok {
-				c.info = s.complete(s.backend.Hello(ctx, c))
-				if frame, err := apron.Encode(c.info); err == nil {
+				info := s.complete(s.backend.Hello(ctx, c))
+				c.opened(info)
+				if frame, err := apron.Encode(info); err == nil {
 					c.rt.Send(frame)
 				}
 				c.CloseWithError(e)
@@ -386,10 +393,11 @@ func (s *Server) ServeTransport(ctx context.Context, t Transport, remote net.Add
 			return
 		}
 	}
-	c.info = s.complete(s.backend.Hello(ctx, c))
-	frame, err := apron.Encode(c.info)
+	info := s.complete(s.backend.Hello(ctx, c))
+	frame, err := apron.Encode(info)
 	if err != nil {
 		s.logger().Error("apron: encoding the server frame", "error", err)
+		c.release(true)
 		c.Close()
 		s.disconnected(c)
 		return
@@ -398,6 +406,7 @@ func (s *Server) ServeTransport(ctx context.Context, t Transport, remote net.Add
 	s.mu.Lock()
 	if s.closed {
 		s.mu.Unlock()
+		c.release(true)
 		c.Close()
 		s.disconnected(c)
 		return
@@ -412,8 +421,11 @@ func (s *Server) ServeTransport(ctx context.Context, t Transport, remote net.Add
 		s.disconnected(c)
 	}()
 
-	// The server frame goes first, before any frame is read (§3.1).
+	// The server frame goes first, before any frame is read (§3.1), then
+	// what the backend sent meanwhile.
+	c.opened(info)
 	c.rt.Send(frame)
+	c.release(false)
 	// Frames are processed in order, each to completion before the next,
 	// which makes auth a barrier (§3.2.2), by a worker of the connection's
 	// own; the reader goes on reading meanwhile, which keeps the

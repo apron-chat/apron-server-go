@@ -223,9 +223,7 @@ func (s *Server) openLocal(ctx context.Context, c *Conn, asked apron.User) error
 	}
 	s.conns[c] = struct{}{}
 	s.mu.Unlock()
-	c.mu.Lock()
-	c.info = info
-	c.mu.Unlock()
+	c.opened(info)
 	c.enqueue(frames)
 	c.release(false)
 	return nil

@@ -14,7 +14,6 @@ import (
 type Conn struct {
 	server  *Server
 	rt      *core.Conn
-	info    apron.ServerInfo
 	remote  net.Addr
 	request *http.Request
 	local   bool
@@ -23,10 +22,16 @@ type Conn struct {
 
 	mu   sync.Mutex
 	user *apron.User
+	// info is the last server frame the connection was sent, or is about
+	// to be; announced is set once Announce has replaced it, so that the
+	// frame a connection opens with, made before, does not (opened).
+	info      apron.ServerInfo
+	announced bool
 	// scope is the connection's deduplication scope (SetDedupScope).
 	scope string
-	// holding is set while auth runs: notifications queued meanwhile wait
-	// in held until its result is queued (§3.2.2).
+	// holding is set while the connection opens, and while auth runs:
+	// notifications queued meanwhile wait in held until its server frame,
+	// or auth's result, is queued (§3.1, §3.2.2).
 	holding bool
 	held    [][]apron.Frame
 	data    any
@@ -144,9 +149,20 @@ func (c *Conn) Announce(info apron.ServerInfo) bool {
 		return false
 	}
 	c.mu.Lock()
-	c.info = info
+	c.info, c.announced = info, true
 	c.mu.Unlock()
 	return c.Send(frame)
+}
+
+// opened records info as the server frame the connection opens with,
+// unless Announce replaced it while the connection was held, opening: that
+// one's frame is queued after (release), so it is the last.
+func (c *Conn) opened(info apron.ServerInfo) {
+	c.mu.Lock()
+	if !c.announced {
+		c.info = info
+	}
+	c.mu.Unlock()
 }
 
 // Closing reports whether the connection is closing or closed: its last

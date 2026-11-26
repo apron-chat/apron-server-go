@@ -184,6 +184,30 @@ func TestAnnounce(t *testing.T) {
 	}
 }
 
+// A server frame announced while a network connection opens, once
+// OnConnect has told the backend of it, goes after the one it opens with,
+// and is the connection's ServerInfo.
+func TestAnnounceWhileOpening(t *testing.T) {
+	conns := make(chan *server.Conn, 1)
+	s := wired(&backend{}, server.Config{OnConnect: func(_ context.Context, c *server.Conn) error {
+		c.Announce(apron.ServerInfo{Title: "Revealed"})
+		conns <- c
+		return nil
+	}})
+	c := aprontest.Connect(t, s)
+	if title := c.Hello().Title; title == "Revealed" {
+		t.Fatalf("the first server frame is the announced one")
+	}
+	f := next(t, c)
+	var info apron.ServerInfo
+	if err := f.Decode(&info); err != nil || f.Method != "server" || info.Title != "Revealed" {
+		t.Fatalf("got %s, want the announced server frame", f.Raw)
+	}
+	if conn := <-conns; conn.ServerInfo().Title != "Revealed" {
+		t.Fatalf("ServerInfo: %+v", conn.ServerInfo())
+	}
+}
+
 func TestLocal(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		b := &backend{}
