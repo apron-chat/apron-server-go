@@ -44,10 +44,16 @@
 //     [ParseLogID], §2.1);
 //   - the error reply, [Error], with its codes and constructors ([Denied],
 //     [InvalidParams], [Missing], [Unsupported], [TooLarge], [RetryAfter]),
-//     and [CodeOf], the code a client is told for any error; and
+//     [CodeOf], the code a client is told for any error, and [RetryDelay],
+//     the wait a retry_after asks for, with its ext:limits category; and
 //     [ErrClosed], a call on a connection that has ended, on either side;
 //   - the checks of what the protocol defines of a value: [ParseBody],
-//     [ValidID], and room_list's filters ([RoomFilter]).
+//     [ValidID], room_list's filters ([RoomFilter]), and what a server
+//     frame offers ([ServerInfo.Has], [ServerInfo.Offers]);
+//   - the reading of a log: the continuation of a history page
+//     ([HistoryParams.Next], §4.3.2), the effective lower bound
+//     ([HistoryResult.LowerBound], §4.3.3), and [Replay], the state that
+//     records leave whatever their order (§2.3).
 //
 // [Marshal] encodes a value as every frame is encoded: deterministically,
 // so that a program that keeps or compares what it sends has the frames'
