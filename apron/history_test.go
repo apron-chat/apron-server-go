@@ -1,6 +1,7 @@
 package apron_test
 
 import (
+	"encoding/json/v2"
 	"testing"
 
 	"github.com/apron-chat/apron-server-go/apron"
@@ -59,5 +60,30 @@ func TestLowerBound(t *testing.T) {
 		if got, ok := c.view.LowerBound(); got != c.want || ok != c.ok {
 			t.Errorf("%+v: LowerBound = %v, %v", c.view, got, ok)
 		}
+	}
+}
+
+// A bound of 0 is sent as "0", not null, which would leave it out.
+func TestHistoryParamsJSON(t *testing.T) {
+	zero, ten := apron.LogID(0), apron.LogID(10)
+	for _, c := range []struct {
+		p    apron.HistoryParams
+		want string
+	}{
+		{apron.HistoryParams{}, `{}`},
+		{apron.HistoryParams{RoomID: "r", After: &zero, Before: &ten, Limit: 5}, `{"room_id":"r","after":"0","before":"10","limit":5}`},
+	} {
+		got, err := apron.Marshal(c.p)
+		if err != nil || string(got) != c.want {
+			t.Errorf("%+v: %s, %v; want %s", c.p, got, err, c.want)
+		}
+		var back apron.HistoryParams
+		if err := json.Unmarshal(got, &back); err != nil || !equalParams(back, c.p) {
+			t.Errorf("%s decodes as %+v, %v", got, back, err)
+		}
+	}
+	negative := apron.LogID(-1)
+	if _, err := apron.Marshal(apron.HistoryParams{After: &negative}); err == nil {
+		t.Error("a negative bound encoded")
 	}
 }

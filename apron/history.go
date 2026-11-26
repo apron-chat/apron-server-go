@@ -1,15 +1,46 @@
 package apron
 
+import "errors"
+
 // HistoryParams are the params of history (§4.3): an empty RoomID is every
 // room the connection receives; After and Before are inclusive log_id
 // bounds, nil when left out, which also sets the direction: from the oldest
 // with After, and from the newest without; Limit is positive, 0 for the
-// backend's default. They encode as a client sends them.
+// backend's default. They encode as a client sends them, a bound of 0 as
+// "0", a valid bound below every log_id, rather than null.
 type HistoryParams struct {
 	RoomID string `json:"room_id,omitempty"`
 	After  *LogID `json:"after,omitempty"`
 	Before *LogID `json:"before,omitempty"`
 	Limit  int    `json:"limit,omitzero"`
+}
+
+// MarshalJSON writes the params, each bound as a decimal string.
+func (p HistoryParams) MarshalJSON() ([]byte, error) {
+	bound := func(id *LogID) (*string, error) {
+		if id == nil {
+			return nil, nil
+		}
+		if *id < 0 || *id > MaxLogID {
+			return nil, errors.New("apron: a history bound is a log_id: " + id.String())
+		}
+		s := id.String()
+		return &s, nil
+	}
+	after, err := bound(p.After)
+	if err != nil {
+		return nil, err
+	}
+	before, err := bound(p.Before)
+	if err != nil {
+		return nil, err
+	}
+	return marshal(struct {
+		RoomID string  `json:"room_id,omitempty"`
+		After  *string `json:"after,omitempty"`
+		Before *string `json:"before,omitempty"`
+		Limit  int     `json:"limit,omitzero"`
+	}{p.RoomID, after, before, p.Limit})
 }
 
 // HistoryResult is the result of history (§4.3). Its rooms are logged
