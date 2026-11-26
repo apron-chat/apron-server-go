@@ -15,7 +15,7 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
+	"encoding/json/v2"
 	"errors"
 	"fmt"
 	"io"
@@ -26,8 +26,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/apron-chat/apron-server-go/apron"
 	"github.com/apron-chat/apron-server-go/aproncmd"
+	"github.com/apron-chat/apron-server-go/aprond"
 )
 
 func main() { aproncmd.Main(&Ops{}) }
@@ -40,8 +40,8 @@ type Ops struct {
 		Services      []string      `long:"service" description:"A service /deploy runs, as name=command, split into words without a shell; repeat for more"`
 		Timeout       time.Duration `long:"timeout" default:"30m" description:"How long a deploy may run"`
 	}
-	host     *apron.Host
-	bot      *apron.Bot
+	host     *aprond.Host
+	bot      *aprond.Bot
 	services map[string][]string
 
 	mu        sync.Mutex
@@ -54,16 +54,8 @@ func (o *Ops) Flags() any { return &o.Settings }
 // RoleDeployer may run /deploy.
 const RoleDeployer = "deployer"
 
-func (o *Ops) Init(r *apron.Registrar) error {
+func (o *Ops) Init(r *aprond.Registrar) error {
 	o.host = r.Host
-	// Settings left at zero, as when the extension is used without
-	// aproncmd's flags, take the flags' defaults.
-	if o.Settings.Room == "" {
-		o.Settings.Room = "general"
-	}
-	if o.Settings.Timeout <= 0 {
-		o.Settings.Timeout = 30 * time.Minute
-	}
 	o.services = make(map[string][]string)
 	o.deploying = make(map[string]bool)
 	for _, service := range o.Settings.Services {
@@ -74,20 +66,20 @@ func (o *Ops) Init(r *apron.Registrar) error {
 		o.services[name] = strings.Fields(command)
 	}
 	var err error
-	if o.bot, err = r.Bot("ops", apron.BotOptions{Name: "Ops"}); err != nil {
+	if o.bot, err = r.Bot("ops", aprond.BotOptions{Name: "Ops"}); err != nil {
 		return err
 	}
 	if err := o.bot.Join(r.Context(), o.Settings.Room); err != nil {
 		return fmt.Errorf("joining %s: %w", o.Settings.Room, err)
 	}
 	r.Handle("POST /ops/github", http.HandlerFunc(o.webhook))
-	r.Command(apron.Command{
+	r.Command(aprond.Command{
 		Name: "deploy", Usage: "/deploy <service>", Help: "deploy a service and stream its output here",
 		// It streams into the room it runs in, replying to what it replies to.
-		Uses:      []string{"room_id", "reply_to"},
-		Requires:  []string{"room_id"},
-		Group:     "role",
-		Available: func(u apron.User, _ apron.Room) bool { return u.HasRole(RoleDeployer) || u.HasRole(apron.RoleAdmin) },
+		Uses:      []string{aprond.FieldRoom, aprond.FieldReplyTo},
+		Requires:  []string{aprond.FieldRoom},
+		Group:     aprond.GroupRole,
+		Available: func(u aprond.User, _ aprond.Room) bool { return u.HasRole(RoleDeployer) || u.HasRole(aprond.RoleAdmin) },
 		Run:       o.deploy,
 	})
 	return nil
@@ -109,7 +101,7 @@ func (o *Ops) webhook(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
-	if _, err := o.bot.Post(r.Context(), o.Settings.Room, text, apron.Markdown()); err != nil {
+	if _, err := o.bot.Post(r.Context(), o.Settings.Room, text, aprond.Markdown()); err != nil {
 		o.host.Logger().Error("posting a webhook", "error", err)
 		http.Error(w, "could not post", http.StatusServiceUnavailable)
 		return
@@ -187,7 +179,7 @@ func summarize(event string, body []byte) string {
 
 // deploy runs a service's deploy command, one at a time per service, with
 // its output in a terminal in the room the command was run in.
-func (o *Ops) deploy(ctx context.Context, call *apron.CommandCall) (map[string]any, error) {
+func (o *Ops) deploy(ctx context.Context, call *aprond.CommandCall) (map[string]any, error) {
 	argv, ok := o.services[call.Args]
 	if !ok {
 		names := make([]string, 0, len(o.services))
@@ -195,16 +187,16 @@ func (o *Ops) deploy(ctx context.Context, call *apron.CommandCall) (map[string]a
 			names = append(names, name)
 		}
 		slices.Sort(names)
-		return nil, apron.InvalidParams("Usage: /deploy <service>, one of: " + strings.Join(names, ", "))
+		return nil, aprond.InvalidParams("Usage: /deploy <service>, one of: " + strings.Join(names, ", "))
 	}
 	o.mu.Lock()
 	busy := o.deploying[call.Args]
 	o.deploying[call.Args] = true
 	o.mu.Unlock()
 	if busy {
-		return nil, apron.Denied(call.Args + " is deploying already")
+		return nil, aprond.Denied(call.Args + " is deploying already")
 	}
-	term, err := o.bot.StreamTerminal(ctx, call.Room.ID, "deploy "+call.Args+" by "+call.User.ID, apron.ReplyTo(call.ReplyTo))
+	term, err := o.bot.StreamTerminal(ctx, call.Room.ID, "deploy "+call.Args+" by "+call.User.ID, aprond.ReplyTo(call.ReplyTo))
 	if err != nil {
 		o.done(call.Args)
 		return nil, err
@@ -221,13 +213,13 @@ func (o *Ops) deploy(ctx context.Context, call *apron.CommandCall) (map[string]a
 		if err != nil {
 			outcome = fmt.Sprintf("❌ deploying %s failed: %s", call.Args, err)
 		}
-		if _, postErr := o.bot.Post(ctx, call.Room.ID, outcome, apron.ReplyTo(term.MessageID())); postErr != nil && !errors.Is(postErr, apron.ErrServerClosed) {
+		if _, postErr := o.bot.Post(ctx, call.Room.ID, outcome, aprond.ReplyTo(term.MessageID())); postErr != nil && !errors.Is(postErr, aprond.ErrServerClosed) {
 			o.host.Logger().Error("posting a deploy's outcome", "error", postErr)
 		}
 	})
 	if !started {
 		o.done(call.Args)
-		return nil, apron.ErrServerClosed
+		return nil, aprond.ErrServerClosed
 	}
 	call.Notice("Deploying " + call.Args + "…")
 	return nil, nil

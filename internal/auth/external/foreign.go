@@ -180,9 +180,9 @@ func (f *Foreign) redeem(ctx context.Context, p codeParams, origin string) (stri
 	}}
 	answer, exchangeErr := config.Exchange(context.WithValue(ctx, oauth2.HTTPClient, f.client), p.code,
 		oauth2.VerifierOption(p.verifier), oauth2.SetAuthURLParam("resource", origin))
-	var unreachable *url.Error
+	_, unreachable := errors.AsType[*url.Error](exchangeErr)
 	switch {
-	case errors.As(exchangeErr, &unreachable):
+	case unreachable:
 		return "", authn.RetryAfter("The sign-in provider is unreachable; try again shortly", 30*time.Second)
 	case exchangeErr != nil:
 		return "", authn.Denied("The sign-in code is invalid, used, or expired; sign in again")

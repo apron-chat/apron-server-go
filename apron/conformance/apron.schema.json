@@ -1,0 +1,2004 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/shazow/apron/blob/main/schema/apron.schema.json",
+  "title": "Apron Chat Protocol frames",
+  "description": "Informative JSON Schema for Apron Chat Protocol frames (PROTOCOL.md). PROTOCOL.md is normative. Unknown keys are allowed, since receivers ignore them (§1). Results carry no method, so validate them against <Method>Result with the request's method.",
+  "anyOf": [
+    {
+      "$ref": "#/$defs/ClientFrame"
+    },
+    {
+      "$ref": "#/$defs/ServerFrame"
+    }
+  ],
+  "$defs": {
+    "Id": {
+      "description": "A request id (§1.1, §2).",
+      "type": "string"
+    },
+    "UserId": {
+      "description": "A user_id: not empty, with no whitespace or control characters (§2). Suggested convention: letters, digits, _ . - (Appendix A.3).",
+      "type": "string",
+      "pattern": "^[^\\s\\u0000-\\u001f\\u007f-\\u009f]+$"
+    },
+    "RoomId": {
+      "description": "A room_id: not empty, with no whitespace or control characters (§2). Suggested convention: letters, digits, _ . - (Appendix A.3).",
+      "type": "string",
+      "pattern": "^[^\\s\\u0000-\\u001f\\u007f-\\u009f]+$"
+    },
+    "LogId": {
+      "description": "A position in the server's log: decimal Unix epoch milliseconds (§2).",
+      "type": "string",
+      "pattern": "^[1-9][0-9]*$"
+    },
+    "Ext": {
+      "description": "Extension data, keyed by extension name without the ext: prefix (§4). With capability ext, servers keep the ext that clients write on users, messages, and rooms, and writes merge it one level deep; without it, servers may drop it (§4.13).",
+      "type": "object",
+      "propertyNames": {
+        "not": {
+          "pattern": "^ext:"
+        }
+      }
+    },
+    "User": {
+      "description": "A user object (§3.3). An empty value clears a field.",
+      "type": "object",
+      "properties": {
+        "user_id": {
+          "$ref": "#/$defs/UserId"
+        },
+        "name": {
+          "type": "string"
+        },
+        "avatar": {
+          "description": "Image URL (§4.8.7).",
+          "type": "string"
+        },
+        "roles": {
+          "description": "Server-defined labels for display (§3.3).",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "status": {
+          "type": "string",
+          "description": "Current objects only. The chosen status in you: online (default), \"\" (none), dnd, or invisible. The shown status in every other object: online, idle, offline, dnd, or \"\". Clients show other values as unknown (§4.5)."
+        },
+        "seen": {
+          "description": "With capability status: when the shown status last became offline, in the format of a log_id. Only with a shown offline, so never in you (§4.5.2).",
+          "$ref": "#/$defs/LogId"
+        },
+        "ext": {
+          "description": "Extension data (§4.13). Complete objects carry all of it; a user notification carries the keys that changed.",
+          "$ref": "#/$defs/Ext"
+        }
+      },
+      "required": [
+        "user_id"
+      ],
+      "dependentSchemas": {
+        "seen": {
+          "properties": {
+            "status": {
+              "const": "offline"
+            }
+          },
+          "required": [
+            "status"
+          ]
+        }
+      }
+    },
+    "OwnUser": {
+      "description": "The user's own current object, you: it carries the chosen status, and never seen (§3.3, §4.5.2).",
+      "allOf": [
+        {
+          "$ref": "#/$defs/User"
+        }
+      ],
+      "properties": {
+        "seen": false
+      }
+    },
+    "RecordedUser": {
+      "description": "A recorded user object: the from of a message or a reaction, and the user of a membership. It describes the user at the time of the record, and carries no status or seen (§3.3, §4.5).",
+      "allOf": [
+        {
+          "$ref": "#/$defs/User"
+        }
+      ],
+      "properties": {
+        "status": false,
+        "seen": false
+      }
+    },
+    "OgMedia": {
+      "type": "object",
+      "properties": {
+        "url": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string"
+        },
+        "width": {
+          "type": "integer"
+        },
+        "height": {
+          "type": "integer"
+        },
+        "alt": {
+          "type": "string"
+        }
+      }
+    },
+    "Og": {
+      "description": "OpenGraph description of an embed (§4.8.1).",
+      "type": "object",
+      "properties": {
+        "title": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "site_name": {
+          "type": "string"
+        },
+        "image": {
+          "$ref": "#/$defs/OgMedia"
+        },
+        "video": {
+          "$ref": "#/$defs/OgMedia"
+        },
+        "audio": {
+          "$ref": "#/$defs/OgMedia"
+        }
+      }
+    },
+    "Embed": {
+      "description": "An embed in a message body (§4.8).",
+      "type": "object",
+      "properties": {
+        "kind": {
+          "description": "\"upload\", \"append\", \"terminal\", \"iframe\", \"html\", or another kind.",
+          "type": "string"
+        },
+        "embed_id": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "url": {
+          "type": "string"
+        },
+        "og": {
+          "$ref": "#/$defs/Og"
+        },
+        "height": {
+          "type": "number"
+        },
+        "html": {
+          "type": "string"
+        },
+        "output": {
+          "description": "The kept output of a terminal embed, once the output ends; set by the server (§4.8.6).",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind"
+      ]
+    },
+    "Body": {
+      "description": "A message body (§3.5).",
+      "type": "object",
+      "properties": {
+        "text": {
+          "type": "string",
+          "default": ""
+        },
+        "format": {
+          "enum": [
+            "plain",
+            "markdown"
+          ],
+          "default": "plain"
+        },
+        "mentions": {
+          "description": "The user_ids the message mentions.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/UserId"
+          }
+        },
+        "embeds": {
+          "description": "At most one embed of kind append (§4.8.5).",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Embed"
+          },
+          "contains": {
+            "properties": {
+              "kind": {
+                "const": "append"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "minContains": 0,
+          "maxContains": 1
+        }
+      }
+    },
+    "MessageRef": {
+      "description": "A bare message reference.",
+      "type": "object",
+      "properties": {
+        "message_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "message_id"
+      ]
+    },
+    "Message": {
+      "description": "A message snapshot or transient notice, as the server sends it (§3.5).",
+      "type": "object",
+      "properties": {
+        "body": {
+          "$ref": "#/$defs/Body"
+        },
+        "room_id": {
+          "$ref": "#/$defs/RoomId"
+        },
+        "reply_to": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MessageRef"
+            },
+            {
+              "$ref": "#/$defs/Message"
+            }
+          ]
+        },
+        "message_id": {
+          "description": "Absent on transient notices.",
+          "type": "string"
+        },
+        "log_id": {
+          "$ref": "#/$defs/LogId"
+        },
+        "from": {
+          "$ref": "#/$defs/RecordedUser"
+        },
+        "prev_log_id": {
+          "$ref": "#/$defs/LogId"
+        },
+        "prev_room_id": {
+          "$ref": "#/$defs/RoomId"
+        },
+        "deleted": {
+          "type": "boolean",
+          "default": false
+        },
+        "ext": {
+          "description": "Extension data (§4.13). Absent on tombstones.",
+          "$ref": "#/$defs/Ext"
+        }
+      },
+      "required": [
+        "from"
+      ],
+      "if": {
+        "properties": {
+          "deleted": {
+            "const": true
+          }
+        },
+        "required": [
+          "deleted"
+        ]
+      },
+      "then": {
+        "description": "A tombstone carries no body and no ext (§4.4).",
+        "properties": {
+          "body": false,
+          "ext": false
+        }
+      }
+    },
+    "Room": {
+      "description": "A room record (§4.2).",
+      "type": "object",
+      "properties": {
+        "room_id": {
+          "$ref": "#/$defs/RoomId"
+        },
+        "parent_room_id": {
+          "$ref": "#/$defs/RoomId"
+        },
+        "private": {
+          "type": "boolean",
+          "default": false
+        },
+        "title": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "log_id": {
+          "$ref": "#/$defs/LogId"
+        },
+        "prev_log_id": {
+          "$ref": "#/$defs/LogId"
+        },
+        "latest_log_id": {
+          "$ref": "#/$defs/LogId"
+        },
+        "history_log_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LogId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "members": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/User"
+          }
+        },
+        "member_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "ext": {
+          "description": "Extension data (§4.13).",
+          "$ref": "#/$defs/Ext"
+        }
+      },
+      "required": [
+        "room_id"
+      ]
+    },
+    "RoomRef": {
+      "type": "object",
+      "properties": {
+        "room_id": {
+          "$ref": "#/$defs/RoomId"
+        }
+      },
+      "required": [
+        "room_id"
+      ]
+    },
+    "Membership": {
+      "description": "A membership record (§4.2.2).",
+      "type": "object",
+      "properties": {
+        "log_id": {
+          "$ref": "#/$defs/LogId"
+        },
+        "room_id": {
+          "$ref": "#/$defs/RoomId"
+        },
+        "members": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "user": {
+                "$ref": "#/$defs/RecordedUser"
+              },
+              "joined": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "user",
+              "joined"
+            ]
+          }
+        }
+      },
+      "required": [
+        "log_id",
+        "room_id",
+        "members"
+      ]
+    },
+    "ReactionSet": {
+      "description": "A reactions record (§4.7).",
+      "type": "object",
+      "properties": {
+        "log_id": {
+          "$ref": "#/$defs/LogId"
+        },
+        "message_id": {
+          "type": "string"
+        },
+        "room_id": {
+          "$ref": "#/$defs/RoomId"
+        },
+        "reactions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "from": {
+                "$ref": "#/$defs/RecordedUser"
+              },
+              "emojis": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            },
+            "required": [
+              "from",
+              "emojis"
+            ]
+          }
+        }
+      },
+      "required": [
+        "log_id",
+        "message_id",
+        "room_id",
+        "reactions"
+      ]
+    },
+    "Server": {
+      "description": "The server frame (§3.1).",
+      "type": "object",
+      "properties": {
+        "apron": {
+          "description": "Protocol version.",
+          "type": "integer",
+          "minimum": 1
+        },
+        "auth": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1
+        },
+        "agent": {
+          "description": "Implementation/version string, for debugging.",
+          "type": "string"
+        },
+        "capabilities": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        },
+        "welcome": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "avatar": {
+          "type": "string"
+        },
+        "signup": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "labels": {
+          "description": "A label for each sign-in scheme, such as {\"external\": \"Acme SSO\"} (§3.2).",
+          "type": "object",
+          "additionalProperties": {"type": "string"}
+        },
+        "ping": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "status": {
+          "description": "Optional values accepted as a chosen status, with capability status; online and \"\" are always accepted and not listed (§4.5.1).",
+          "type": "array",
+          "items": {
+            "type": "string",
+            "not": {
+              "enum": [
+                "online",
+                ""
+              ]
+            }
+          }
+        },
+        "push": {
+          "type": "object",
+          "properties": {
+            "webpush": {
+              "type": "object",
+              "properties": {
+                "key": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "key"
+              ]
+            },
+            "wake": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "ext": {
+          "description": "Data of extensions that define it on the server frame, each under its name (§4.13).",
+          "$ref": "#/$defs/Ext"
+        }
+      },
+      "required": [
+        "apron",
+        "auth"
+      ]
+    },
+    "Error": {
+      "description": "An error (§1.1).",
+      "type": "object",
+      "properties": {
+        "code": {
+          "type": "integer"
+        },
+        "message": {
+          "type": "string"
+        },
+        "data": {}
+      },
+      "required": [
+        "code",
+        "message"
+      ]
+    },
+    "AuthParams": {
+      "description": "§3.2, §4.10, §4.11, §4.12",
+      "type": "object",
+      "properties": {
+        "scheme": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "user_id": {
+          "$ref": "#/$defs/UserId"
+        },
+        "agent": {
+          "type": "string"
+        },
+        "token": {
+          "type": "string"
+        },
+        "email": {
+          "type": "string"
+        },
+        "state": {
+          "description": "email: an unguessable value the client chooses for a proposal, returned unchanged in each link (§4.11.1); an approval may carry it, so that a short token works on another connection (§4.11.3).",
+          "type": "string",
+          "maxLength": 256
+        },
+        "action": {
+          "enum": [
+            "register",
+            "login"
+          ]
+        },
+        "step": {
+          "enum": [
+            "begin",
+            "finish"
+          ]
+        },
+        "challenge_id": {
+          "type": "string"
+        },
+        "credential": {
+          "type": "object"
+        },
+        "code": {
+          "description": "external, or a webauthn finish from the passkey page: the authorization code (§4.12.2, §4.10.1).",
+          "type": "string"
+        },
+        "code_verifier": {
+          "description": "The PKCE verifier of the code (§4.12.2).",
+          "type": "string"
+        },
+        "redirect_uri": {
+          "description": "The redirect_uri that the authorization request sent (§4.12.2).",
+          "type": "string"
+        },
+        "client_id": {
+          "description": "The client_id that the authorization request sent (§4.12.2).",
+          "type": "string"
+        }
+      },
+      "required": [
+        "scheme"
+      ]
+    },
+    "MeParams": {
+      "description": "§3.3",
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "avatar": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string",
+          "description": "The chosen status, with capability status (§4.5.1)."
+        },
+        "ext": {
+          "description": "With capability ext: the keys to change; the server merges them one level deep (§4.13).",
+          "$ref": "#/$defs/Ext"
+        }
+      }
+    },
+    "MessageParams": {
+      "type": "object",
+      "properties": {
+        "body": {
+          "$ref": "#/$defs/Body"
+        },
+        "room_id": {
+          "$ref": "#/$defs/RoomId"
+        },
+        "reply_to": {
+          "$ref": "#/$defs/MessageRef"
+        },
+        "message_id": {
+          "type": "string"
+        },
+        "deleted": {
+          "type": "boolean"
+        },
+        "ext": {
+          "description": "With capability ext: the keys to change; the server merges them one level deep (§4.13).",
+          "$ref": "#/$defs/Ext"
+        }
+      },
+      "description": "Creates a message, or saves one given message_id (§3.5, §4.4)."
+    },
+    "CommandParams": {
+      "type": "object",
+      "properties": {
+        "body": {
+          "$ref": "#/$defs/Body"
+        },
+        "room_id": {
+          "$ref": "#/$defs/RoomId"
+        },
+        "reply_to": {
+          "$ref": "#/$defs/MessageRef"
+        },
+        "ext": {
+          "description": "Extension data, an argument like the other params (§4.1, §4.13).",
+          "$ref": "#/$defs/Ext"
+        }
+      },
+      "description": "§4.1"
+    },
+    "HistoryParams": {
+      "description": "§4.3",
+      "type": "object",
+      "properties": {
+        "room_id": {
+          "$ref": "#/$defs/RoomId"
+        },
+        "after": {
+          "$ref": "#/$defs/LogId"
+        },
+        "before": {
+          "$ref": "#/$defs/LogId"
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "RoomListParams": {
+      "description": "§4.2.1",
+      "type": "object",
+      "properties": {
+        "filter": {
+          "enum": [
+            "joined",
+            "not_joined",
+            "all"
+          ],
+          "default": "all"
+        },
+        "parent_room_id": {
+          "$ref": "#/$defs/RoomId"
+        },
+        "room_id": {
+          "$ref": "#/$defs/RoomId"
+        },
+        "members": {
+          "type": "boolean"
+        },
+        "user_id": {
+          "$ref": "#/$defs/UserId"
+        },
+        "latest_log_id": {
+          "$ref": "#/$defs/LogId"
+        }
+      }
+    },
+    "RoomJoinParams": {
+      "description": "§4.2.2",
+      "type": "object",
+      "properties": {
+        "room_id": {
+          "$ref": "#/$defs/RoomId"
+        },
+        "user_id": {
+          "$ref": "#/$defs/UserId"
+        }
+      },
+      "required": [
+        "room_id"
+      ]
+    },
+    "RoomLeaveParams": {
+      "description": "§4.2.2",
+      "type": "object",
+      "properties": {
+        "room_id": {
+          "$ref": "#/$defs/RoomId"
+        },
+        "user_id": {
+          "$ref": "#/$defs/UserId"
+        }
+      },
+      "required": [
+        "room_id"
+      ]
+    },
+    "RoomSetParams": {
+      "description": "§4.2.4",
+      "type": "object",
+      "properties": {
+        "room_id": {
+          "$ref": "#/$defs/RoomId"
+        },
+        "parent_room_id": {
+          "$ref": "#/$defs/RoomId"
+        },
+        "private": {
+          "type": "boolean"
+        },
+        "title": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "ext": {
+          "description": "With capability ext: the keys to change; the server merges them one level deep (§4.13).",
+          "$ref": "#/$defs/Ext"
+        }
+      }
+    },
+    "ReactionsParams": {
+      "description": "§4.7",
+      "type": "object",
+      "properties": {
+        "message_id": {
+          "type": "string"
+        },
+        "emojis": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "message_id",
+        "emojis"
+      ]
+    },
+    "PushRegisterParams": {
+      "description": "§4.9",
+      "type": "object",
+      "properties": {
+        "kind": {
+          "description": "A key of server.push other than wake (§4.9).",
+          "type": "string",
+          "not": {
+            "const": "wake"
+          }
+        },
+        "url": {
+          "type": "string"
+        },
+        "token": {
+          "type": "string"
+        },
+        "push_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{1,64}$"
+        },
+        "keys": {
+          "type": "object",
+          "properties": {
+            "p256dh": {
+              "type": "string"
+            },
+            "auth": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "p256dh",
+            "auth"
+          ]
+        },
+        "wake": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "kind",
+        "url"
+      ],
+      "if": {
+        "properties": {
+          "kind": {
+            "const": "webpush"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "keys"
+        ]
+      }
+    },
+    "PushUnregisterParams": {
+      "description": "§4.9",
+      "type": "object",
+      "properties": {
+        "url": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "url"
+      ]
+    },
+    "ActivityParams": {
+      "description": "§4.6",
+      "type": "object",
+      "properties": {
+        "room_id": {
+          "$ref": "#/$defs/RoomId"
+        },
+        "typing": {
+          "type": "number",
+          "minimum": 0
+        },
+        "read_message_id": {
+          "type": "string"
+        }
+      }
+    },
+    "AuthResult": {
+      "description": "§3.2",
+      "type": "object",
+      "properties": {
+        "you": {
+          "$ref": "#/$defs/OwnUser"
+        },
+        "token": {
+          "type": "string"
+        },
+        "challenge_id": {
+          "type": "string"
+        },
+        "public_key": {
+          "type": "object"
+        },
+        "external": {
+          "$ref": "#/$defs/External"
+        }
+      }
+    },
+    "External": {
+      "description": "The sign-in page of an external begin (§4.12.1), or a webauthn begin's passkey page (§4.10.1).",
+      "type": "object",
+      "properties": {
+        "url": {
+          "description": "The authorization endpoint, an absolute https URL (http only on a loopback host: localhost or a name under it, 127.0.0.0/8, or [::1]). Clients keep its query.",
+          "type": "string",
+          "pattern": "^(https://|http://(([a-z0-9-]+\\.)*localhost|127(\\.[0-9]{1,3}){3}|\\[::1\\])([:/?]|$))"
+        },
+        "issuer": {
+          "description": "The authorization server of url; absent: the server's origin. Clients that redeem on the connection need not read it (§4.12.1).",
+          "type": "string"
+        }
+      },
+      "required": [
+        "url"
+      ]
+    },
+    "MeResult": {
+      "type": "object",
+      "properties": {
+        "you": {
+          "$ref": "#/$defs/OwnUser"
+        }
+      },
+      "required": [
+        "you"
+      ]
+    },
+    "MessageResult": {
+      "type": "object",
+      "properties": {
+        "message_id": {
+          "type": "string"
+        },
+        "embeds": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "embed_id": {
+                "type": "string"
+              },
+              "kind": {
+                "type": "string"
+              },
+              "write_url": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "embed_id",
+              "kind",
+              "write_url"
+            ]
+          }
+        }
+      },
+      "required": [
+        "message_id"
+      ],
+      "description": "The permanent ID of the message (§3.5.1)."
+    },
+    "CommandResult": {
+      "type": "object",
+      "properties": {
+        "embeds": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "embed_id": {
+                "type": "string"
+              },
+              "kind": {
+                "type": "string"
+              },
+              "write_url": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "embed_id",
+              "kind",
+              "write_url"
+            ]
+          }
+        }
+      }
+    },
+    "HistoryResult": {
+      "description": "§4.3",
+      "type": "object",
+      "properties": {
+        "rooms": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Room"
+          }
+        },
+        "messages": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Message"
+          }
+        },
+        "reactions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ReactionSet"
+          }
+        },
+        "first_log_id": {
+          "$ref": "#/$defs/LogId"
+        },
+        "last_log_id": {
+          "$ref": "#/$defs/LogId"
+        },
+        "more": {
+          "type": "boolean"
+        },
+        "latest_log_id": {
+          "$ref": "#/$defs/LogId"
+        },
+        "history_log_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LogId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "memberships": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Membership"
+          }
+        }
+      },
+      "required": [
+        "more",
+        "latest_log_id",
+        "history_log_id"
+      ]
+    },
+    "RoomListResult": {
+      "description": "§4.2.1",
+      "type": "object",
+      "properties": {
+        "joined": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Room"
+          }
+        },
+        "not_joined": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Room"
+          }
+        },
+        "left": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/RoomRef"
+          }
+        },
+        "users": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/User"
+          }
+        }
+      }
+    },
+    "RoomJoinResult": {
+      "type": "object"
+    },
+    "RoomLeaveResult": {
+      "type": "object"
+    },
+    "RoomSetResult": {
+      "type": "object",
+      "properties": {
+        "room_id": {
+          "$ref": "#/$defs/RoomId"
+        }
+      },
+      "required": [
+        "room_id"
+      ]
+    },
+    "ReactionsResult": {
+      "type": "object"
+    },
+    "PushRegisterResult": {
+      "type": "object"
+    },
+    "PushUnregisterResult": {
+      "type": "object"
+    },
+    "StatusResult": {
+      "type": "object"
+    },
+    "ServerEvent": {
+      "$ref": "#/$defs/Server"
+    },
+    "MessageEvent": {
+      "$ref": "#/$defs/Message"
+    },
+    "RoomUpdateEvent": {
+      "description": "§4.2.3",
+      "type": "object",
+      "properties": {
+        "joined": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Room"
+          }
+        },
+        "left": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/RoomRef"
+          }
+        },
+        "updated": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Room"
+          }
+        },
+        "users": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/User"
+          }
+        },
+        "memberships": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Membership"
+          }
+        }
+      }
+    },
+    "UserEvent": {
+      "description": "§3.3",
+      "type": "object",
+      "properties": {
+        "you": {
+          "$ref": "#/$defs/OwnUser"
+        },
+        "new": {
+          "$ref": "#/$defs/User"
+        },
+        "old": {
+          "$ref": "#/$defs/User"
+        }
+      },
+      "anyOf": [
+        {
+          "required": [
+            "you"
+          ]
+        },
+        {
+          "required": [
+            "new"
+          ]
+        }
+      ],
+      "dependentRequired": {
+        "old": [
+          "new"
+        ]
+      }
+    },
+    "ReactionsEvent": {
+      "$ref": "#/$defs/ReactionSet"
+    },
+    "ActivityEvent": {
+      "description": "§4.6",
+      "type": "object",
+      "properties": {
+        "room_id": {
+          "$ref": "#/$defs/RoomId"
+        },
+        "from": {
+          "$ref": "#/$defs/User"
+        },
+        "typing": {
+          "type": "number",
+          "minimum": 0
+        },
+        "read_message_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "from"
+      ]
+    },
+    "ClientRequest": {
+      "description": "A client request (§1.1).",
+      "type": "object",
+      "required": [
+        "method",
+        "id"
+      ],
+      "properties": {
+        "method": {
+          "anyOf": [
+            {
+              "enum": [
+                "auth",
+                "command",
+                "history",
+                "me",
+                "message",
+                "push_register",
+                "push_unregister",
+                "reactions",
+                "room_join",
+                "room_leave",
+                "room_list",
+                "room_set",
+                "status"
+              ]
+            },
+            {
+              "$ref": "#/$defs/UnknownMethod"
+            }
+          ]
+        },
+        "id": {
+          "$ref": "#/$defs/Id"
+        },
+        "params": {
+          "type": "object"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "method": {
+                "const": "auth"
+              }
+            },
+            "required": [
+              "method"
+            ]
+          },
+          "then": {
+            "required": [
+              "params"
+            ],
+            "properties": {
+              "params": {
+                "$ref": "#/$defs/AuthParams"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "method": {
+                "const": "me"
+              }
+            },
+            "required": [
+              "method"
+            ]
+          },
+          "then": {
+            "properties": {
+              "params": {
+                "$ref": "#/$defs/MeParams"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "method": {
+                "const": "message"
+              }
+            },
+            "required": [
+              "method"
+            ]
+          },
+          "then": {
+            "properties": {
+              "params": {
+                "$ref": "#/$defs/MessageParams"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "method": {
+                "const": "command"
+              }
+            },
+            "required": [
+              "method"
+            ]
+          },
+          "then": {
+            "properties": {
+              "params": {
+                "$ref": "#/$defs/CommandParams"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "method": {
+                "const": "history"
+              }
+            },
+            "required": [
+              "method"
+            ]
+          },
+          "then": {
+            "properties": {
+              "params": {
+                "$ref": "#/$defs/HistoryParams"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "method": {
+                "const": "room_list"
+              }
+            },
+            "required": [
+              "method"
+            ]
+          },
+          "then": {
+            "properties": {
+              "params": {
+                "$ref": "#/$defs/RoomListParams"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "method": {
+                "const": "room_join"
+              }
+            },
+            "required": [
+              "method"
+            ]
+          },
+          "then": {
+            "required": [
+              "params"
+            ],
+            "properties": {
+              "params": {
+                "$ref": "#/$defs/RoomJoinParams"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "method": {
+                "const": "room_leave"
+              }
+            },
+            "required": [
+              "method"
+            ]
+          },
+          "then": {
+            "required": [
+              "params"
+            ],
+            "properties": {
+              "params": {
+                "$ref": "#/$defs/RoomLeaveParams"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "method": {
+                "const": "room_set"
+              }
+            },
+            "required": [
+              "method"
+            ]
+          },
+          "then": {
+            "properties": {
+              "params": {
+                "$ref": "#/$defs/RoomSetParams"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "method": {
+                "const": "reactions"
+              }
+            },
+            "required": [
+              "method"
+            ]
+          },
+          "then": {
+            "required": [
+              "params"
+            ],
+            "properties": {
+              "params": {
+                "$ref": "#/$defs/ReactionsParams"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "method": {
+                "const": "push_register"
+              }
+            },
+            "required": [
+              "method"
+            ]
+          },
+          "then": {
+            "required": [
+              "params"
+            ],
+            "properties": {
+              "params": {
+                "$ref": "#/$defs/PushRegisterParams"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "method": {
+                "const": "push_unregister"
+              }
+            },
+            "required": [
+              "method"
+            ]
+          },
+          "then": {
+            "required": [
+              "params"
+            ],
+            "properties": {
+              "params": {
+                "$ref": "#/$defs/PushUnregisterParams"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "method": {
+                "const": "status"
+              }
+            },
+            "required": [
+              "method"
+            ]
+          },
+          "then": {
+            "required": [
+              "params"
+            ],
+            "properties": {
+              "params": {
+                "$ref": "#/$defs/StatusParams"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "ClientNotification": {
+      "description": "A client notification (§1, §4.6).",
+      "type": "object",
+      "required": [
+        "method"
+      ],
+      "not": {
+        "required": [
+          "id"
+        ]
+      },
+      "properties": {
+        "method": {
+          "anyOf": [
+            {
+              "enum": [
+                "activity",
+                "ping"
+              ]
+            },
+            {
+              "$ref": "#/$defs/UnknownMethod"
+            }
+          ]
+        },
+        "params": {
+          "type": "object"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "method": {
+                "const": "activity"
+              }
+            },
+            "required": [
+              "method"
+            ]
+          },
+          "then": {
+            "required": [
+              "params"
+            ],
+            "properties": {
+              "params": {
+                "$ref": "#/$defs/ActivityParams"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "method": {
+                "const": "ping"
+              }
+            },
+            "required": [
+              "method"
+            ]
+          },
+          "then": {
+            "propertyNames": {
+              "const": "method"
+            }
+          }
+        }
+      ]
+    },
+    "ServerNotification": {
+      "description": "A server notification (§1, §4.5).",
+      "type": "object",
+      "required": [
+        "method"
+      ],
+      "not": {
+        "required": [
+          "id"
+        ]
+      },
+      "properties": {
+        "method": {
+          "anyOf": [
+            {
+              "enum": [
+                "activity",
+                "message",
+                "reactions",
+                "room_update",
+                "server",
+                "user",
+                "pong",
+                "status"
+              ]
+            },
+            {
+              "$ref": "#/$defs/UnknownMethod"
+            }
+          ]
+        },
+        "params": {
+          "type": "object"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "method": {
+                "const": "server"
+              }
+            },
+            "required": [
+              "method"
+            ]
+          },
+          "then": {
+            "required": [
+              "params"
+            ],
+            "properties": {
+              "params": {
+                "$ref": "#/$defs/ServerEvent"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "method": {
+                "const": "message"
+              }
+            },
+            "required": [
+              "method"
+            ]
+          },
+          "then": {
+            "required": [
+              "params"
+            ],
+            "properties": {
+              "params": {
+                "$ref": "#/$defs/MessageEvent"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "method": {
+                "const": "room_update"
+              }
+            },
+            "required": [
+              "method"
+            ]
+          },
+          "then": {
+            "required": [
+              "params"
+            ],
+            "properties": {
+              "params": {
+                "$ref": "#/$defs/RoomUpdateEvent"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "method": {
+                "const": "user"
+              }
+            },
+            "required": [
+              "method"
+            ]
+          },
+          "then": {
+            "required": [
+              "params"
+            ],
+            "properties": {
+              "params": {
+                "$ref": "#/$defs/UserEvent"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "method": {
+                "const": "reactions"
+              }
+            },
+            "required": [
+              "method"
+            ]
+          },
+          "then": {
+            "required": [
+              "params"
+            ],
+            "properties": {
+              "params": {
+                "$ref": "#/$defs/ReactionsEvent"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "method": {
+                "const": "activity"
+              }
+            },
+            "required": [
+              "method"
+            ]
+          },
+          "then": {
+            "required": [
+              "params"
+            ],
+            "properties": {
+              "params": {
+                "$ref": "#/$defs/ActivityEvent"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "method": {
+                "const": "status"
+              }
+            },
+            "required": [
+              "method"
+            ]
+          },
+          "then": {
+            "required": [
+              "params"
+            ],
+            "properties": {
+              "params": {
+                "$ref": "#/$defs/StatusEvent"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "Response": {
+      "description": "A successful reply; its result shape depends on the request's method (<Method>Result).",
+      "type": "object",
+      "required": [
+        "id",
+        "result"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/Id"
+        },
+        "result": {
+          "type": "object"
+        }
+      },
+      "not": {
+        "required": [
+          "error"
+        ]
+      }
+    },
+    "ErrorResponse": {
+      "description": "An error reply, without id when not tied to a request (§1.1).",
+      "type": "object",
+      "required": [
+        "error"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/Id"
+        },
+        "error": {
+          "$ref": "#/$defs/Error"
+        }
+      },
+      "not": {
+        "required": [
+          "result"
+        ]
+      }
+    },
+    "ClientFrame": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/ClientRequest"
+        },
+        {
+          "$ref": "#/$defs/ClientNotification"
+        }
+      ]
+    },
+    "ServerFrame": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/ServerNotification"
+        },
+        {
+          "$ref": "#/$defs/Response"
+        },
+        {
+          "$ref": "#/$defs/ErrorResponse"
+        }
+      ]
+    },
+    "UnknownMethod": {
+      "description": "A method this schema does not define. Receivers answer requests with unsupported and ignore notifications (§1).",
+      "type": "string",
+      "not": {
+        "enum": [
+          "activity",
+          "auth",
+          "command",
+          "history",
+          "me",
+          "message",
+          "ping",
+          "pong",
+          "push_register",
+          "push_unregister",
+          "reactions",
+          "room_join",
+          "room_leave",
+          "room_list",
+          "room_set",
+          "room_update",
+          "server",
+          "status",
+          "user"
+        ]
+      }
+    },
+    "PushPayload": {
+      "description": "§4.9: the payload every push kind delivers",
+      "type": "object",
+      "properties": {
+        "push_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{1,64}$"
+        },
+        "unread": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "message": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/Message"
+            },
+            {
+              "type": "object",
+              "properties": {
+                "log_id": false
+              },
+              "required": [
+                "message_id",
+                "room_id",
+                "from"
+              ]
+            }
+          ]
+        }
+      }
+    },
+    "StatusParams": {
+      "description": "§4.5",
+      "type": "object",
+      "dependentRequired": {
+        "room_id": [
+          "mute"
+        ]
+      },
+      "properties": {
+        "room_id": {
+          "$ref": "#/$defs/RoomId"
+        },
+        "idle": {
+          "description": "false, or the seconds since nobody attended the connection (§4.5)",
+          "anyOf": [
+            {
+              "const": false
+            },
+            {
+              "type": "integer",
+              "minimum": 0
+            }
+          ]
+        },
+        "mute": {
+          "description": "true, false, or a positive number of seconds (§4.5)",
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "integer",
+              "minimum": 1
+            }
+          ]
+        }
+      }
+    },
+    "StatusEvent": {
+      "description": "§4.5: a mute of the user's, from the server",
+      "type": "object",
+      "properties": {
+        "room_id": {
+          "$ref": "#/$defs/RoomId"
+        },
+        "mute": {
+          "description": "true, false, or a positive number of seconds (§4.5)",
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "integer",
+              "minimum": 1
+            }
+          ]
+        },
+        "idle": false
+      },
+      "required": [
+        "mute"
+      ]
+    }
+  }
+}

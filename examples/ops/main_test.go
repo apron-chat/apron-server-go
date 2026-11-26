@@ -5,21 +5,21 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json/v2"
 	"net/http"
 	"strings"
 	"testing"
-	"time"
 
-	"github.com/apron-chat/apron-server-go/apron"
-	"github.com/apron-chat/apron-server-go/internal/wstest"
+	"github.com/apron-chat/apron-server-go/aprond"
+	"github.com/apron-chat/apron-server-go/aprond/aprondtest"
 )
 
 func TestOps(t *testing.T) {
 	o := &Ops{}
-	o.Settings.Room, o.Settings.WebhookSecret, o.Settings.Timeout = "general", "s3cret", time.Minute
+	o.Settings.WebhookSecret = "s3cret"
 	o.Settings.Services = []string{"api=echo deployed the api"}
-	_, server := wstest.Serve(t, apron.DefaultConfig(), o)
-	ada := wstest.Guest(t, server, "Ada")
+	server := aprondtest.Serve(t, aprond.DefaultConfig(), o)
+	ada := server.Guest("Ada")
 
 	body := []byte(`{"action":"opened","repository":{"full_name":"acme/app"},"sender":{"login":"octocat"},
 		"pull_request":{"number":7,"title":"Fix it","html_url":"https://github.com/acme/app/pull/7"}}`)
@@ -42,9 +42,9 @@ func TestOps(t *testing.T) {
 	if status := post("sha256=" + hex.EncodeToString(mac.Sum(nil))); status != http.StatusNoContent {
 		t.Fatalf("signed webhook = %d", status)
 	}
-	got := ada.Message(func(p map[string]any) bool { return wstest.From(p) == "ops" })
-	if text := wstest.Text(got); !strings.Contains(text, "**octocat** opened [acme/app#7 Fix it]") {
-		t.Fatalf("webhook message = %q", text)
+	got := ada.Message(func(m aprond.Message) bool { return m.From.UserID == "ops" })
+	if !strings.Contains(got.Text, "**octocat** opened [acme/app#7 Fix it]") {
+		t.Fatalf("webhook message = %q", got.Text)
 	}
 
 	// Guests may not deploy.
@@ -53,43 +53,29 @@ func TestOps(t *testing.T) {
 	}
 }
 
-// lead is a test extension whose bot holds the deployer role.
-type lead struct{ session *apron.Bot }
-
-func (*lead) Name() string { return "lead" }
-func (l *lead) Init(r *apron.Registrar) (err error) {
-	l.session, err = r.Bot("lead", apron.BotOptions{})
-	return err
-}
-
 func TestDeploy(t *testing.T) {
 	o := &Ops{}
-	o.Settings.Room, o.Settings.Timeout = "general", time.Minute
 	o.Settings.Services = []string{"api=echo deployed the api"}
-	config := apron.DefaultConfig()
-	config.Roles = map[string][]string{RoleDeployer: {"lead"}}
-	l := &lead{}
-	_, server := wstest.Serve(t, config, o, l)
-	ada := wstest.Guest(t, server, "Ada")
+	server := aprondtest.Serve(t, aprond.DefaultConfig(), o)
+	ada, lead := server.Guest("Ada"), server.Member("lead", RoleDeployer)
 
-	_, err := l.session.Call(t.Context(), "command", map[string]any{"room_id": "general", "body": map[string]any{"text": "/deploy api"}})
-	if err != nil {
+	if _, err := lead.Command("general", "/deploy api"); err != nil {
 		t.Fatal(err)
 	}
-	ada.Message(func(p map[string]any) bool {
-		body, _ := p["body"].(map[string]any)
-		embeds, _ := body["embeds"].([]any)
-		if len(embeds) != 1 {
-			return false
+	ada.Message(func(m aprond.Message) bool {
+		// The terminal embed shows the program's output.
+		var terminal struct {
+			Output string `json:"output"`
 		}
-		output, _ := embeds[0].(map[string]any)["output"].(string)
-		return strings.Contains(output, "deployed the api")
+		body := m.Apron().Body
+		return body != nil && len(body.Embeds) == 1 && json.Unmarshal(body.Embeds[0], &terminal) == nil &&
+			strings.Contains(terminal.Output, "deployed the api")
 	})
-	done := ada.Message(func(p map[string]any) bool { return strings.HasPrefix(wstest.Text(p), "✅") })
-	if wstest.Text(done) != "✅ deployed api" {
-		t.Fatalf("outcome = %q", wstest.Text(done))
+	done := ada.Message(func(m aprond.Message) bool { return strings.HasPrefix(m.Text, "✅") })
+	if done.Text != "✅ deployed api" {
+		t.Fatalf("outcome = %q", done.Text)
 	}
-	if _, err := l.session.Call(t.Context(), "command", map[string]any{"room_id": "general", "body": map[string]any{"text": "/deploy web"}}); err == nil {
+	if _, err := lead.Command("general", "/deploy web"); err == nil {
 		t.Fatal("deployed an unknown service")
 	}
 }

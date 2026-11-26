@@ -28,8 +28,8 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/apron-chat/apron-server-go/apron"
 	"github.com/apron-chat/apron-server-go/aproncmd"
+	"github.com/apron-chat/apron-server-go/aprond"
 )
 
 func main() { aproncmd.Main(&Private{}) }
@@ -40,9 +40,9 @@ type Private struct {
 	Settings struct {
 		Allow []string `long:"allow" description:"Who may sign in: an email address, user:<user_id>, or external:<subject>; repeat for more"`
 	}
-	host      *apron.Host
-	allowlist *apron.Allowlist
-	flagged   map[apron.Principal]bool
+	host      *aprond.Host
+	allowlist *aprond.Allowlist
+	flagged   map[aprond.Principal]bool
 	// mu keeps each change to the list and its stored copy together.
 	mu sync.Mutex
 }
@@ -53,13 +53,13 @@ func (p *Private) Flags() any { return &p.Settings }
 // allowedKeys keep the entries admins add: allowed/<principal>.
 const allowedKeys = "allowed/"
 
-func (p *Private) Init(r *apron.Registrar) error {
+func (p *Private) Init(r *aprond.Registrar) error {
 	p.host = r.Host
 	p.allowlist = r.RestrictSignIn()
-	p.flagged = make(map[apron.Principal]bool)
-	var principals []apron.Principal
+	p.flagged = make(map[aprond.Principal]bool)
+	var principals []aprond.Principal
 	for _, entry := range p.Settings.Allow {
-		principal, err := apron.ParsePrincipal(entry)
+		principal, err := aprond.ParsePrincipal(entry)
 		if err != nil {
 			return fmt.Errorf("--private.allow: %w", err)
 		}
@@ -67,7 +67,7 @@ func (p *Private) Init(r *apron.Registrar) error {
 		principals = append(principals, principal)
 	}
 	for _, key := range r.Store().Keys(allowedKeys) {
-		principal, err := apron.ParsePrincipal(strings.TrimPrefix(key, allowedKeys))
+		principal, err := aprond.ParsePrincipal(strings.TrimPrefix(key, allowedKeys))
 		if err != nil {
 			return fmt.Errorf("stored entry %q: %w", key, err)
 		}
@@ -80,30 +80,30 @@ func (p *Private) Init(r *apron.Registrar) error {
 		r.Logger().Warn("nobody may sign in; add someone with --private.allow")
 	}
 
-	admin := func(u apron.User, _ apron.Room) bool { return u.HasRole(apron.RoleAdmin) }
-	r.Command(apron.Command{
+	admin := func(u aprond.User, _ aprond.Room) bool { return u.HasRole(aprond.RoleAdmin) }
+	r.Command(aprond.Command{
 		Name: "allow", Usage: "/allow <address|user:id|external:subject>", Help: "let someone sign in",
-		Group: "admin", Available: admin, Run: p.allow,
+		Group: aprond.GroupAdmin, Available: admin, Run: p.allow,
 	})
-	r.Command(apron.Command{
+	r.Command(aprond.Command{
 		Name: "disallow", Usage: "/disallow <address|user:id|external:subject>", Help: "sign someone out, and keep them out",
-		Group: "admin", Available: admin, Run: p.disallow,
+		Group: aprond.GroupAdmin, Available: admin, Run: p.disallow,
 	})
-	r.Command(apron.Command{
+	r.Command(aprond.Command{
 		Name: "allowed", Help: "list who may sign in",
-		Group: "admin", Available: admin, Run: p.list,
+		Group: aprond.GroupAdmin, Available: admin, Run: p.list,
 	})
-	r.Command(apron.Command{
+	r.Command(aprond.Command{
 		Name: "invite", Usage: "/invite [<user_id>]", Help: "invite one person to make an account with a passkey",
-		Group: "admin", Available: admin, Run: p.invite,
+		Group: aprond.GroupAdmin, Available: admin, Run: p.invite,
 	})
 	return nil
 }
 
-func (p *Private) allow(_ context.Context, call *apron.CommandCall) (map[string]any, error) {
-	principal, err := apron.ParsePrincipal(call.Args)
+func (p *Private) allow(_ context.Context, call *aprond.CommandCall) (map[string]any, error) {
+	principal, err := aprond.ParsePrincipal(call.Args)
 	if err != nil {
-		return nil, apron.InvalidParams("Usage: /allow <address|user:id|external:subject>")
+		return nil, call.UsageError("")
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -117,13 +117,13 @@ func (p *Private) allow(_ context.Context, call *apron.CommandCall) (map[string]
 	return nil, nil
 }
 
-func (p *Private) disallow(_ context.Context, call *apron.CommandCall) (map[string]any, error) {
-	principal, err := apron.ParsePrincipal(call.Args)
+func (p *Private) disallow(_ context.Context, call *aprond.CommandCall) (map[string]any, error) {
+	principal, err := aprond.ParsePrincipal(call.Args)
 	if err != nil {
-		return nil, apron.InvalidParams("Usage: /disallow <address|user:id|external:subject>")
+		return nil, call.UsageError("")
 	}
 	if p.flagged[principal] {
-		return nil, apron.Denied(fmt.Sprintf("`%s` is allowed by --private.allow; remove it there, and restart", principal))
+		return nil, aprond.Denied(fmt.Sprintf("`%s` is allowed by --private.allow; remove it there, and restart", principal))
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -135,7 +135,7 @@ func (p *Private) disallow(_ context.Context, call *apron.CommandCall) (map[stri
 	return nil, nil
 }
 
-func (p *Private) list(_ context.Context, call *apron.CommandCall) (map[string]any, error) {
+func (p *Private) list(_ context.Context, call *aprond.CommandCall) (map[string]any, error) {
 	var b strings.Builder
 	b.WriteString("May sign in:\n")
 	for _, principal := range p.allowlist.Principals() {
@@ -149,11 +149,11 @@ func (p *Private) list(_ context.Context, call *apron.CommandCall) (map[string]a
 	return nil, nil
 }
 
-func (p *Private) invite(ctx context.Context, call *apron.CommandCall) (map[string]any, error) {
-	userID := strings.TrimSpace(call.Args)
-	invitation, err := p.host.Invite(ctx, apron.InvitationOptions{UserID: userID})
+func (p *Private) invite(ctx context.Context, call *aprond.CommandCall) (map[string]any, error) {
+	userID := call.Args
+	invitation, err := p.host.Invite(ctx, aprond.InvitationOptions{UserID: userID})
 	if err != nil && userID != "" {
-		return nil, apron.InvalidParams("Usage: /invite [<user_id>]")
+		return nil, call.UsageError("")
 	}
 	if err != nil {
 		return nil, err

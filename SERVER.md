@@ -375,6 +375,15 @@ accepted with any scheme and not used. A scheme the server does not offer is
 `unsupported` (§3.2): one it does not know, and `webauthn`, `email`, and
 `token` while their sign-in is not configured.
 
+Removing every sign-in scheme (passkeys, email, external) does not lock
+out the sessions the server already issued: a server with no schemes still
+accepts `token` for a session token it holds, and for a bot's service
+token, so that accounts made in process, and those made before the schemes
+were taken away, still sign in (device tokens do not). To lock accounts
+out, revoke their sessions explicitly too: `Server.SignOut` (or
+`Host.SignOut`) for an account, which ends its session and device tokens,
+or the account's own `account.sign_out` ([Passkeys](#managing-passkeys)).
+
 `auth` with scheme `guest` assigns `guest_<n>` from a server-wide counter
 (`guest_1`, `guest_2`, …) and honors an optional requested `name`. A
 `user_id` is never empty and has no whitespace or control characters
@@ -1810,7 +1819,7 @@ arrived on.
 Each email gives this server's WebSocket URL with the code, as in "Your
 sign-in code for wss://chat.example/ws is 418092", and says to type the
 code only in an app connected to it (§4.11.2). A sender of its own
-(`apron.EmailSender`) finds it in `SignInEmail.Server`, and
+(`aprond.EmailSender`) finds it in `SignInEmail.Server`, and
 `SignInEmail.Text` writes both.
 
 - **Signing in**, proposed on a connection not signed in. The email carries
@@ -1904,7 +1913,7 @@ aprond --public-url https://chat.example.com \
 The SMTP sender requires STARTTLS unless `--email.smtp-insecure` is set, for
 a relay on the same host, or speaks TLS from the start to a relay on port
 465, and bounds each delivery, connection included, to 30 seconds. Embedding applications provide any other delivery by
-implementing `apron.EmailSender`.
+implementing `aprond.EmailSender`.
 
 Invitation tokens that sign up several people
 ([PROTOCOL.md Appendix B](https://github.com/shazow/apron/blob/main/PROTOCOL.md#appendix-b--valid-scenarios-informative))
@@ -2133,8 +2142,8 @@ another client, whose consent names its host.
 
 ## Extensions
 
-Package `apron` is the server as a library, and `aproncmd.Main` runs it with
-extensions of your own (`apron.Extension`), as the servers in
+Package `aprond` is the server as a library, and `aproncmd.Main` runs it with
+extensions of your own (`aprond.Extension`), as the servers in
 [`examples`](examples) do. What extensions add follows the protocol as the
 rest of the server does:
 

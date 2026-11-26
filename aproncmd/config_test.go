@@ -11,7 +11,7 @@ import (
 
 	flags "github.com/jessevdk/go-flags"
 
-	"github.com/apron-chat/apron-server-go/apron"
+	"github.com/apron-chat/apron-server-go/aprond"
 )
 
 func parse(t *testing.T, args ...string) (*Options, *flags.Parser) {
@@ -185,7 +185,7 @@ func TestEmailSenders(t *testing.T) {
 		}
 	}
 	options, _ := parse(t, "--email.enable", "--email.sender", "log")
-	if config, err := serverConfig(*options); err != nil || config.EmailSender != (apron.LogEmailSender{}) || config.EmailLinkURL != "" {
+	if config, err := serverConfig(*options); err != nil || config.EmailSender != (aprond.LogEmailSender{}) || config.EmailLinkURL != "" {
 		t.Fatalf("log sender %T, link %q, error %v", config.EmailSender, config.EmailLinkURL, err)
 	}
 	// The log sender is for development: a public server refuses it.
@@ -271,18 +271,20 @@ type weatherExtension struct {
 	settings struct {
 		Key   string   `long:"key" description:"The weather service's key"`
 		Hosts []string `long:"host" default:"a.example" description:"Hosts to ask"`
+		Days  int      `long:"days" default:"3" description:"Days to forecast; 0 is today only"`
+		Hours *int     `long:"hours" default:"12" description:"Hours to forecast; 0 is none"`
 	}
 }
 
-func (*weatherExtension) Name() string                { return "weather" }
-func (*weatherExtension) Init(*apron.Registrar) error { return nil }
-func (w *weatherExtension) Flags() any                { return &w.settings }
+func (*weatherExtension) Name() string                 { return "weather" }
+func (*weatherExtension) Init(*aprond.Registrar) error { return nil }
+func (w *weatherExtension) Flags() any                 { return &w.settings }
 
 func TestExtensionFlags(t *testing.T) {
 	weather := &weatherExtension{}
 	var options Options
 	parser := flags.NewParser(&options, flags.Default&^flags.PrintErrors)
-	targets, err := addExtensionFlags(parser, []apron.Extension{weather})
+	targets, err := addExtensionFlags(parser, []aprond.Extension{weather})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -304,3 +306,117 @@ func TestExtensionFlags(t *testing.T) {
 		t.Fatalf("printed config:\n%s", printed.String())
 	}
 }
+
+// aprond.Open gives an extension's settings their defaults however it is
+// opened, and keeps what is set: a list the config file empties included.
+func TestExtensionDefaultsWithoutMain(t *testing.T) {
+	open := func(weather *weatherExtension) {
+		t.Helper()
+		config := aprond.DefaultConfig()
+		config.Extensions = []aprond.Extension{weather}
+		server, err := aprond.Open(config)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := server.Shutdown(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	weather := &weatherExtension{}
+	weather.settings.Key = "k1"
+	open(weather)
+	if weather.settings.Key != "k1" || !reflect.DeepEqual(weather.settings.Hosts, []string{"a.example"}) {
+		t.Fatalf("settings in Go = %+v", weather.settings)
+	}
+
+	emptied := &weatherExtension{}
+	var options Options
+	parser := flags.NewParser(&options, flags.Default&^flags.PrintErrors)
+	targets, err := addExtensionFlags(parser, []aprond.Extension{emptied})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := parser.ParseArgs(nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := loadConfig(parser, &options, writeConfig(t, "[weather]\nhost = []\n"), targets...); err != nil {
+		t.Fatal(err)
+	}
+	open(emptied)
+	if emptied.settings.Hosts == nil || len(emptied.settings.Hosts) != 0 {
+		t.Fatalf("hosts emptied in the config file = %#v", emptied.settings.Hosts)
+	}
+
+	// A setting with a default is its default when zero in Go, but for a
+	// pointer to zero.
+	zero := 0
+	inGo := &weatherExtension{}
+	inGo.settings.Hours = &zero
+	open(inGo)
+	if inGo.settings.Days != 3 || *inGo.settings.Hours != 0 {
+		t.Fatalf("days %d, hours %d in Go", inGo.settings.Days, *inGo.settings.Hours)
+	}
+
+	bad := &badDefault{}
+	config := aprond.DefaultConfig()
+	config.Extensions = []aprond.Extension{bad}
+	if _, err := aprond.Open(config); err == nil || !strings.Contains(err.Error(), "extension bad") {
+		t.Fatalf("Open with a default that is not a duration = %v", err)
+	}
+}
+
+// Main keeps a setting given as zero, on the command line or in the config
+// file, and sets those it is not given to their defaults.
+func TestExtensionZeroSettings(t *testing.T) {
+	for _, test := range []struct {
+		args        []string
+		config      string
+		days, hours int
+	}{
+		{days: 3, hours: 12},
+		{args: []string{"--weather.days", "0", "--weather.hours", "0"}, days: 0, hours: 0},
+		{config: "[weather]\ndays = 0\nhours = 0\n", days: 0, hours: 0},
+		{args: []string{"--weather.days", "5"}, config: "[weather]\nhours = 1\n", days: 5, hours: 1},
+	} {
+		weather := &weatherExtension{}
+		options := Options{}
+		parser := flags.NewParser(&options, flags.Default&^flags.PrintErrors)
+		targets, err := addExtensionFlags(parser, []aprond.Extension{weather})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := parser.ParseArgs(test.args); err != nil {
+			t.Fatal(err)
+		}
+		if test.config != "" {
+			if err := loadConfig(parser, &options, writeConfig(t, test.config), targets...); err != nil {
+				t.Fatal(err)
+			}
+		}
+		markParsed(targets)
+		config := aprond.DefaultConfig()
+		config.Extensions = []aprond.Extension{weather}
+		server, err := aprond.Open(config)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := server.Shutdown(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+		if weather.settings.Days != test.days || *weather.settings.Hours != test.hours {
+			t.Errorf("%q and %q: days %d, hours %d, want %d and %d", test.args, test.config,
+				weather.settings.Days, *weather.settings.Hours, test.days, test.hours)
+		}
+	}
+}
+
+// badDefault is an extension whose setting's default is not its type's.
+type badDefault struct {
+	settings struct {
+		Every time.Duration `long:"every" default:"often" description:"How often"`
+	}
+}
+
+func (*badDefault) Name() string                 { return "bad" }
+func (*badDefault) Init(*aprond.Registrar) error { return nil }
+func (b *badDefault) Flags() any                 { return &b.settings }

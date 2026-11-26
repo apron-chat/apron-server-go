@@ -63,14 +63,14 @@ type Scheme struct {
 	// none has nor may yet have it, and its script ask the passkey
 	// provider to hide it (signalUnknownCredential). Off, such a login is
 	// the page's usual error. Set it before the server serves the page;
-	// apron.Config's SignalUnknownPasskeys says when it is safe.
+	// aprond.Config's SignalUnknownPasskeys says when it is safe.
 	SignalUnknown bool
 
 	// GuestFirst has a registration make an account only of a signed-in
 	// guest, or with an invitation, even where anyone may sign in as a
 	// guest: one on a connection that is not signed in, without an
 	// invitation, is refused, as on a server without guests. Set it before
-	// the server serves; apron.Config's GuestFirstPasskeys sets it, which
+	// the server serves; aprond.Config's GuestFirstPasskeys sets it, which
 	// also leaves webauthn out of server.signup (§3.2).
 	GuestFirst bool
 
@@ -353,7 +353,7 @@ func (s *Scheme) begin(r *authn.Request, action string, local bool) (authn.Resul
 			}
 			s.mu.Lock()
 			if existing := s.byHandle[string(handle)]; existing != nil {
-				h.Credentials = append([]webauthn.Credential(nil), existing.Credentials...)
+				h.Credentials = slices.Clone(existing.Credentials)
 			}
 			s.mu.Unlock()
 			h.Handle = handle
@@ -697,7 +697,7 @@ func (s *Scheme) verifyLogin(raw []byte, data *webauthn.SessionData) (handle []b
 			return nil, errors.New("credential of another user handle")
 		}
 		handle = h.Handle
-		return &holder{Handle: h.Handle, Credentials: append([]webauthn.Credential(nil), h.Credentials...)}, nil
+		return &holder{Handle: h.Handle, Credentials: slices.Clone(h.Credentials)}, nil
 	}, *data, parsed)
 	if verifyErr != nil || verified == nil || credential == nil || credential.Authenticator.CloneWarning {
 		if absent && s.forCeremony(parsed, data) {

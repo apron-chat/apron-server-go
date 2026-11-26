@@ -1,677 +1,214 @@
 package apron
 
 import (
-	"cmp"
+	"bytes"
 	"encoding/json/jsontext"
-	"fmt"
-	"maps"
-	"regexp"
+	"encoding/json/v2"
+	"errors"
 	"slices"
-	"strings"
-	"time"
-	"unicode"
-	"unicode/utf8"
 
-	"github.com/apron-chat/apron-server-go/internal/authn"
-	"golang.org/x/text/secure/precis"
-	"golang.org/x/time/rate"
+	"github.com/apron-chat/apron-server-go/apron/internal/core"
 )
 
-const (
-	maxNameRunes = 64
-	// maxAvatarDataURLBytes bounds an avatar given inline as a data: URL;
-	// larger images go through a /avatar upload (§4.8.6).
-	maxAvatarDataURLBytes = 64 << 10
-	maxDedupEntries       = 1024
-	// maxProfileExtBytes bounds a profile's ext, which is sent to everyone
-	// who shares a room with the user.
-	maxProfileExtBytes = 16 << 10
-)
-
-// userState is everything the server keeps for one user_id across its
-// connections: the profile (§3.3), joined rooms (§4.2.2), request
-// deduplication (§1.2), and push registrations (§4.9). Guest users
-// are retired when their last connection closes; accounts (passkey users)
-// persist.
-type userState struct {
-	id     string
-	name   string
-	avatar string
-	ext    extObject
-	// identities are what prove the account, by scheme (auth.go): its
-	// email address, its passkeys' user handle, its external sign-in. A
-	// guest has none. records are what each scheme keeps with the account,
-	// such as passkey credentials.
-	identities map[string]string
-	records    map[string]jsontext.Value
-	// roles are the server roles (§3.3) the account holds, sorted; guests
-	// have none. They are derived from Config.Roles, granted, and bot
-	// (grantRolesLocked), and not stored themselves.
-	roles []string
-	// granted are the roles the account's identities grant it, by scheme,
-	// as of each identity's latest proof (authn.Proof.Roles), such as an
-	// external sign-in's (§4.12).
-	granted map[string][]string
-	// created is when the user was made; zero for users stored before it
-	// was kept.
-	created time.Time
-	// botOf names the Extension whose bot the account is (Registrar.Bot),
-	// which holds the "bot" role (§3.3.4).
-	botOf string
-	// avatarEmbed is the hosted /avatar upload behind avatar, if any.
-	avatarEmbed *embedState
-	// writes are the user's writes that have not finished (embedState.author).
-	writes map[*embedState]struct{}
-	// retired is set on a guest retired when its last connection closed,
-	// whose writes go on as they could when it left (writeAllowedLocked).
-	retired bool
-	// enrolled is what the invitation that made the account left with it,
-	// nil if none did (invitations.go).
-	enrolled *enrollment
-	// scope limits the rooms the account may see, nil for none (scope.go).
-	scope *roomScope
-	// consents are the https redirect URIs of apps the account allowed on
-	// the external sign-in page, with when, in Unix milliseconds
-	// (consents.go).
-	consents map[string]int64
-
-	// fromValue caches from(); it is cleared when the name changes.
-	fromValue map[string]any
-
-	clients map[*client]struct{}
-	joined  map[string]*roomState
-	// leftAt maps each room the user left, and has not rejoined, to the
-	// log_id of the leave, for room_list's `left` (§4.2.1).
-	leftAt map[string]int64
-	dedup  dedupCache
-	// posts limits the user's new messages, room_set requests, and /avatar
-	// commands to MessagesPerMinute; nil when unlimited.
-	posts *rate.Limiter
-	// actions limits the user's other changes that others receive
-	// (admitActionLocked).
-	actions *rate.Limiter
-
-	// chosen is the chosen status, set with `me` (§4.5.1), and mute and
-	// roomMutes their mutes; muteTimer ends a timed mute, and
-	// roomMuteTimers each timed room mute. shown is the shown status as
-	// last noted (noteShownLocked), and offlineAt the Unix milliseconds
-	// when it last became offline. status is the shown status published to
-	// others (publishLocked), the one every object they are sent carries,
-	// and seen the Unix milliseconds when it last became offline, 0 if
-	// unknown (§4.5.2); statusLimit and statusTimer coalesce a flapping
-	// user's changes. statusRequests limits the user's `status` requests.
-	chosen         string
-	mute           muteState
-	roomMutes      map[string]muteState
-	muteTimer      *time.Timer
-	roomMuteTimers map[string]*time.Timer
-	shown          string
-	offlineAt      int64
-	seen           int64
-	status         string
-	statusLimit    *rate.Limiter
-	statusTimer    *time.Timer
-	statusRequests *rate.Limiter
-	// pushes are the user's push registrations by url (§4.9), and pings the
-	// rooms they have not joined where a message mentioned or replied to
-	// them, from the first such message, for unread counts. unread holds
-	// the counts known per room while the user has registrations, and
-	// badgeTimer a pending badge push (unread.go).
-	pushes     map[string]*pushRegistration
-	pings      map[string]int64
-	unread     map[string]int
-	badgeTimer *time.Timer
-	// pushDay is the UTC day pushesToday counts the pushes delivered to the
-	// user on, against maxPushesPerUserDay.
-	pushDay     string
-	pushesToday int
+// CurrentUser is a current user object (§3.3.1), as a user notification,
+// or a me result, carries it: User, and the fields it clears. Each field
+// Cleared names is sent as its empty value ("" for a string, [] for roles,
+// {} for ext), in place of User's, so that a client that merges the object
+// into the one it keeps clears it; a decoded CurrentUser lists in Cleared
+// the fields of User it carried empty. A complete object, an auth or me
+// result's you, also names in Cleared the fields the server publishes that
+// User has empty (see AuthResult).
+//
+// A cleared ext key is not a cleared field: it is a key of Ext with an
+// empty value (§4.13), as Patch makes it. An empty ext clears nothing.
+type CurrentUser struct {
+	User
+	// Cleared names fields of User, by their JSON names, such as "avatar"
+	// and "roles".
+	Cleared []string
 }
 
-func newUserState(id, name string) *userState {
-	return &userState{
-		id:        id,
-		name:      name,
-		clients:   make(map[*client]struct{}),
-		joined:    make(map[string]*roomState),
-		leftAt:    make(map[string]int64),
-		roomMutes: make(map[string]muteState),
-		chosen:    statusOnline,
-		shown:     statusOffline,
-		status:    statusOffline,
-		pushes:    make(map[string]*pushRegistration),
-		pings:     make(map[string]int64),
-		created:   time.Now(),
+// userFields are the JSON names of User's fields that a current object may
+// clear, in User's order, with their empty values.
+var userFields = []struct{ name, empty string }{
+	{"name", `""`}, {"avatar", `""`}, {"roles", `[]`}, {"status", `""`}, {"seen", `""`}, {"ext", `{}`},
+}
+
+// MarshalJSONTo writes u as one object: User's fields, then each cleared
+// field as its empty value.
+func (u CurrentUser) MarshalJSONTo(enc *jsontext.Encoder) error {
+	if len(u.Cleared) == 0 {
+		return json.MarshalEncode(enc, u.User)
 	}
-}
-
-// from is the recorded user object carried in logged records (a message's
-// or reaction's from, a membership's user): user_id and name. Avatars and
-// ext travel only in current objects (§3.3, §4.8.6). Every
-// record by the user shares the returned map until the name changes, so it
-// must not be modified.
-func (u *userState) from() map[string]any {
-	if u.fromValue == nil {
-		u.fromValue = map[string]any{"user_id": u.id}
-		if u.name != "" {
-			u.fromValue["name"] = u.name
+	user := u.User
+	for _, name := range u.Cleared {
+		switch name {
+		case "user_id":
+			return errors.New("apron: a current user object cannot clear user_id")
+		case "name":
+			user.Name = ""
+		case "avatar":
+			user.Avatar = ""
+		case "roles":
+			user.Roles = nil
+		case "status":
+			user.Status = ""
+		case "seen":
+			user.Seen = ""
+		case "ext":
+			user.Ext = nil
 		}
 	}
-	return u.fromValue
-}
-
-// account reports whether the user signed in with a credential (a passkey,
-// an email address, or an external identity) or is an Extension's bot, so
-// it persists across connections and restarts, rather than being a guest.
-func (u *userState) account() bool {
-	return len(u.identities) > 0 || u.botOf != ""
-}
-
-// hasRole reports whether the user holds a server role.
-func (u *userState) hasRole(role string) bool {
-	return slices.Contains(u.roles, role)
-}
-
-// profile is the complete current user object for user and users (§3.3),
-// with the published shown status, and seen when it is offline (§4.5.2);
-// you has the chosen status instead.
-func (u *userState) profile() map[string]any {
-	value := maps.Clone(u.from())
-	value["status"] = u.status
-	u.addSeen(value)
-	if u.avatar != "" {
-		value["avatar"] = u.avatar
-	}
-	// An account's roles are always sent, [] when it has none, so a role
-	// taken away clears the one a client kept (§3.3); guests hold none.
-	if len(u.roles) > 0 || u.account() {
-		value["roles"] = append([]string{}, u.roles...)
-	}
-	if len(u.ext) > 0 {
-		value["ext"] = maps.Clone(u.ext)
-	}
-	return value
-}
-
-type dedupEntry struct {
-	// fingerprint is a hash of the request's method and canonical params.
-	fingerprint [32]byte
-	done        chan struct{}
-	result      any
-	err         *Error
-}
-
-// dedupCache keeps the most recent request IDs of one user. Guarded by s.mu.
-type dedupCache struct {
-	entries map[string]*dedupEntry
-	order   []string
-}
-
-func (d *dedupCache) get(id string) *dedupEntry {
-	return d.entries[id]
-}
-
-func (d *dedupCache) put(id string, entry *dedupEntry) {
-	if d.entries == nil {
-		d.entries = make(map[string]*dedupEntry)
-	}
-	d.entries[id] = entry
-	d.order = append(d.order, id)
-	for len(d.order) > maxDedupEntries {
-		oldest := d.order[0]
-		d.order = d.order[1:]
-		if e := d.entries[oldest]; e != nil && isClosed(e.done) {
-			delete(d.entries, oldest)
-		}
-	}
-}
-
-func (d *dedupCache) remove(id string, entry *dedupEntry) {
-	if d.entries[id] == entry {
-		delete(d.entries, id)
-	}
-}
-
-func isClosed(done chan struct{}) bool {
-	select {
-	case <-done:
-		return true
-	default:
-		return false
-	}
-}
-
-// normalizeName prepares a requested display name with the PRECIS
-// Nickname profile (RFC 8266): it maps compatibility characters, folds
-// runs of spaces, and trims. Invisible characters, such as controls and
-// bidirectional overrides, are dropped first rather than refused, and a
-// name that still cannot be a nickname becomes empty. The result is capped
-// at maxNameRunes. The server may alter names (§3.3) and `you.name` is the
-// answer.
-func normalizeName(name string) string {
-	name = prepareName(name)
-	if utf8.RuneCountInString(name) > maxNameRunes {
-		name = strings.TrimSpace(string([]rune(name)[:maxNameRunes]))
-	}
-	return name
-}
-
-// prepareName is normalizeName without the cap.
-func prepareName(name string) string {
-	name = strings.Map(func(r rune) rune {
-		if unicode.In(r, unicode.Cc, unicode.Cf, unicode.Co, unicode.Cs) {
-			return -1
-		}
-		return r
-	}, name)
-	name, err := precis.Nickname.String(name)
+	raw, err := json.Marshal(user, enc.Options())
 	if err != nil {
-		return ""
+		return err
 	}
-	return name
+	// raw is an object with user_id, so never {}.
+	raw = raw[:len(raw)-1]
+	for _, name := range u.Cleared {
+		empty := `""`
+		if i := slices.IndexFunc(userFields, func(f struct{ name, empty string }) bool { return f.name == name }); i >= 0 {
+			empty = userFields[i].empty
+		}
+		raw = append(raw, ',')
+		raw, err = jsontext.AppendQuote(raw, name)
+		if err != nil {
+			return err
+		}
+		raw = append(raw, ':')
+		raw = append(raw, empty...)
+	}
+	return enc.WriteValue(append(raw, '}'))
 }
 
-var avatarDataURL = regexp.MustCompile(`^data:image/(png|jpeg|gif|webp);base64,[A-Za-z0-9+/]+={0,2}$`)
-
-// validAvatar accepts https: URLs and small image data: URLs (§4.8.6).
-func validAvatar(value string) bool {
-	if strings.HasPrefix(value, "data:") {
-		return len(value) <= maxAvatarDataURLBytes && avatarDataURL.MatchString(value)
+// UnmarshalJSONFrom reads a current user object, noting in Cleared each of
+// User's fields it carries as an empty value.
+func (u *CurrentUser) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
+	raw, err := dec.ReadValue()
+	if err != nil {
+		return err
 	}
-	return strings.HasPrefix(value, "https://") && len(value) <= 2048 && !strings.ContainsAny(value, " \t\r\n\"'<>")
-}
-
-// requestableUserID is the shape of a user_id a guest may request: the
-// suggested convention for user-chosen IDs (Appendix A.3), letters, digits,
-// _, ., and -, starting with a letter, so it never looks like a system
-// identity or a log_id-derived room_id, and ending with a letter, digit, or
-// _, so a mention of it ends where it does.
-var requestableUserID = regexp.MustCompile(`^[A-Za-z](?:[A-Za-z0-9_.-]{0,62}[A-Za-z0-9_])?$`)
-
-// guestIDPrefix starts every counter-assigned guest ID. The guest_
-// namespace, ignoring case, belongs to the counter: requests in it are never
-// honored, so guest numbers are taken only in sequence and the latest one
-// counts the guests the server has admitted.
-const guestIDPrefix = "guest_"
-
-// requestable reports whether a user may request id: it has the requestable
-// shape and lies outside the counters' guest_ and user_ namespaces.
-func requestable(id string) bool {
-	for _, prefix := range []string{guestIDPrefix, accountIDPrefix} {
-		if len(id) >= len(prefix) && strings.EqualFold(id[:len(prefix)], prefix) {
-			return false
+	var user User
+	if err := json.Unmarshal(raw, &user, dec.Options()); err != nil {
+		return err
+	}
+	var fields map[string]jsontext.Value
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		return err
+	}
+	*u = CurrentUser{User: user}
+	for _, field := range userFields {
+		if value, ok := fields[field.name]; ok {
+			if value = slices.Clone(value); value.Compact() == nil && emptyJSON(value) {
+				u.Cleared = append(u.Cleared, field.name)
+			}
 		}
 	}
-	return requestableUserID.MatchString(id)
+	return nil
 }
 
-// assignUserIDLocked honors a requested user_id when it is requestable and
-// was never assigned, ignoring case, nor names a room; otherwise it assigns
-// the next unused guest_<n> (§3.2). Each call that does not honor a request
-// takes exactly one counter value: with guest_ requests refused, only the
-// counter assigns guest_<n>, so the skip over taken IDs is a safeguard.
-func (s *Server) assignUserIDLocked(requested string) string {
-	if requestable(requested) && s.claimUserIDLocked(requested) {
-		return requested
+// Patch returns the current object that brings a client that keeps old up
+// to date with u (§3.3.1): user_id and the fields that changed, a cleared
+// one as its empty value, such as roles taken away as "roles": [], and in
+// ext each key that changed, a removed one as its empty value (§4.13).
+// Unknown is carried whole when it changed. It reports false when nothing
+// did.
+//
+// When old is another user, or none (a zero User), the patch is all of u:
+// a client keeps nothing of the user yet.
+func (u User) Patch(old User) (CurrentUser, bool) {
+	if old.UserID != u.UserID {
+		return CurrentUser{User: u.clone()}, true
 	}
-	for {
-		s.guestNumber++
-		if id := fmt.Sprintf("%s%d", guestIDPrefix, s.guestNumber); s.claimUserIDLocked(id) {
-			return id
+	patch := CurrentUser{UserID: u.UserID}
+	changed := false
+	for _, f := range []struct {
+		name     string
+		cur, old string
+		to       *string
+	}{
+		{"name", u.Name, old.Name, &patch.Name},
+		{"avatar", u.Avatar, old.Avatar, &patch.Avatar},
+		{"status", u.Status, old.Status, &patch.Status},
+		{"seen", u.Seen, old.Seen, &patch.Seen},
+	} {
+		switch {
+		case f.cur == f.old:
+		case f.cur == "":
+			patch.Cleared, changed = append(patch.Cleared, f.name), true
+		default:
+			*f.to, changed = f.cur, true
 		}
 	}
-}
-
-// claimUserIDLocked marks id used and reports whether it was free: never
-// assigned, ignoring case, not a room's name, and not granted a role.
-func (s *Server) claimUserIDLocked(id string) bool {
-	key := strings.ToLower(id)
-	if s.usedIDs[key] || s.roomNamedLocked(id) || s.grantedIDs[key] {
-		return false
-	}
-	s.usedIDs[key] = true
-	s.touchUsedID(key)
-	return true
-}
-
-// roomNamedLocked reports whether id names a room, ignoring case, so a
-// user_id never passes for a room_id to a reader that folds case. Rooms
-// created by clients have numeric IDs; only the seeded room has letters.
-func (s *Server) roomNamedLocked(id string) bool {
-	return s.rooms[id] != nil || strings.EqualFold(id, defaultRoomID)
-}
-
-// switchUserLocked replies with user as `you` and extra fields beside it
-// (§3.2, §3.3), then makes user the connection's identity. Every
-// notification a sign-in causes on its connection follows the result
-// (§3.2): the departure of the identity it leaves, the join of a new
-// identity to the default room when joinDefault is set, and then what
-// follows a sign-in (§4.5). A sign-in signs the connection in as a user it
-// was not signed in as: an auth that adds a passkey or address, or that
-// signs in again as the same user, is not one, and is sent nothing after
-// its result. No room_update is sent for rooms the identity had already
-// joined: the client lists them with room_list.
-func (s *Server) switchUserLocked(c *client, req request, user *userState, extra map[string]any, signIn, joinDefault bool) map[string]any {
-	result := map[string]any{"you": user.you()}
-	maps.Copy(result, extra)
-	c.sendResult(req, result)
-	// A connection that got only what signing in needs gets the whole
-	// server frame now (§3.1).
-	if !s.revealedLocked(c) {
-		c.enqueue(notification("server", s.serverParams(c.baseURL, true)))
-	}
-	s.attachLocked(c, user)
-	if joinDefault {
-		s.joinDefaultRoomLocked(user)
-	}
-	if signIn {
-		s.sendAfterAuthLocked(c)
-	}
-	return result
-}
-
-// attachLocked makes user the connection's identity and announces the
-// status others see of it and of the identity the connection leaves
-// (§4.5). A guest identity left without connections is retired, logging
-// its leaves, as when its last connection closes: a sign-in to an existing
-// account is announced as the guest's departure, never as a `user` change
-// with `old` (§3.3), and the account appears to others through its own
-// status, so an invisible one, or one without a status, shows nothing new.
-// A guest that becomes a new account does so in place, keeping its user_id
-// (a passkey registration or an email addition), so this server has no
-// user_id change to announce with `old`.
-func (s *Server) attachLocked(c *client, user *userState) {
-	previous := c.user
-	if previous == user {
-		return
-	}
-	if previous != nil {
-		delete(previous.clients, c)
-	}
-	// A pending email proposal was made by the previous identity: it is
-	// dropped, so the connection cannot approve it as the next one
-	// (§4.11.3).
-	if c.proposal != nil {
-		s.dropProposalLocked(c.proposal)
-		c.proposal = nil
-	}
-	// So is what the schemes kept for it, such as a pending passkey
-	// ceremony.
-	c.authStates = nil
-	c.user = user
-	user.clients[c] = struct{}{}
-	// The previous identity's departure goes first, then the user's own
-	// status.
 	switch {
-	case previous == nil:
-	case len(previous.clients) == 0 && !previous.account():
-		s.retireLocked(previous)
+	case slices.Equal(u.Roles, old.Roles):
+	case len(u.Roles) == 0:
+		patch.Cleared, changed = append(patch.Cleared, "roles"), true
 	default:
-		s.announceStatusLocked(previous)
+		patch.Roles, changed = slices.Clone(u.Roles), true
 	}
-	s.announceStatusLocked(user)
-}
-
-// detachLocked forgets a closed connection, retiring its guest identity.
-func (s *Server) detachLocked(c *client) {
-	user := c.user
-	if user == nil {
-		return
+	setExt := func(key string, value jsontext.Value) {
+		if patch.Ext == nil {
+			patch.Ext = make(Ext)
+		}
+		patch.Ext[key], changed = core.CloneRaw(value), true
 	}
-	delete(user.clients, c)
-	c.user = nil
-	if len(user.clients) == 0 && !user.account() {
-		s.retireLocked(user)
-		return
-	}
-	s.announceStatusLocked(user)
-}
-
-// retireLocked removes a guest identity for good. It leaves every room it
-// joined, logging each leave as a membership for the remaining members
-// (§4.2.2). Its user_id is never reissued, so its records stay consistent
-// (§3.3).
-func (s *Server) retireLocked(u *userState) {
-	u.retired = true
-	rooms := slices.SortedFunc(maps.Values(u.joined), func(a, b *roomState) int {
-		return cmp.Compare(a.createdID, b.createdID)
-	})
-	// Its registrations go first, so its leaves send it no badge pushes.
-	for _, registration := range u.pushes {
-		s.removePushLocked(registration)
-	}
-	for _, r := range rooms {
-		s.leaveLocked(u, r)
-		delete(r.reads, u.id)
-	}
-	s.stopTimersLocked(u)
-	s.setAvatarEmbedLocked(u, nil)
-	delete(s.users, u.id)
-	s.touchUser(u.id)
-}
-
-// stopTimersLocked stops u's timers: the ends of its timed mutes, its
-// coalesced status, and its pending badge pushes.
-func (s *Server) stopTimersLocked(u *userState) {
-	if u.muteTimer != nil {
-		u.muteTimer.Stop()
-		u.muteTimer = nil
-	}
-	if u.statusTimer != nil {
-		u.statusTimer.Stop()
-		u.statusTimer = nil
-	}
-	for id, timer := range u.roomMuteTimers {
-		timer.Stop()
-		delete(u.roomMuteTimers, id)
-	}
-	s.stopBadgeLocked(u)
-}
-
-// send queues a frame to every connection of the user.
-func (u *userState) send(frames ...any) {
-	for c := range u.clients {
-		c.enqueueBatch(frames...)
-	}
-}
-
-// sharersLocked lists the other users who share a joined room with u.
-func (s *Server) sharersLocked(u *userState) []*userState {
-	seen := make(map[string]*userState)
-	for _, r := range u.joined {
-		for id, member := range r.members {
-			if id != u.id {
-				seen[id] = member
-			}
+	for key, value := range u.Ext {
+		if kept, ok := old.Ext[key]; !ok || !bytes.Equal(kept, value) {
+			setExt(key, value)
 		}
 	}
-	ids := slices.Sorted(maps.Keys(seen))
-	users := make([]*userState, len(ids))
-	for i, id := range ids {
-		users[i] = seen[id]
+	for key, kept := range old.Ext {
+		if _, ok := u.Ext[key]; !ok {
+			setExt(key, emptyOf(kept))
+		}
 	}
-	return users
+	if !bytes.Equal(u.Unknown, old.Unknown) {
+		patch.Unknown, changed = core.CloneRaw(u.Unknown), true
+	}
+	// Cleared in User's order, whatever the order above.
+	slices.SortFunc(patch.Cleared, func(a, b string) int { return fieldIndex(a) - fieldIndex(b) })
+	return patch, changed
 }
 
-// notifyProfileLocked sends a `user` notification after a profile change:
-// `you` to the user's connections other than except, and `new` to everyone
-// who shares a room with them (§3.3). Each carries the complete profile, so
-// at least the fields that changed. removed lists fields the change
-// removed, and cleared the ext keys it removed, both announced as empty
-// values, since clients merge a notification into the object they keep.
-func (s *Server) notifyProfileLocked(u *userState, except *client, cleared extObject, removed ...string) {
-	// The profile goes to every sharer, so it publishes the shown status,
-	// one held back to coalesce included.
-	s.publishLocked(u)
-	profile := withCleared(withRemoved(u.profile(), removed), cleared)
-	you := notification("user", map[string]any{"you": withCleared(withRemoved(u.you(), removed), cleared)})
-	for c := range u.clients {
-		if c != except {
-			c.enqueue(you)
-		}
-	}
-	others := notification("user", map[string]any{"new": profile})
-	for _, other := range s.sharersLocked(u) {
-		other.send(others)
-	}
+// Complete returns u as a complete current object (§3.3.1) for a client
+// that keeps old, as a me result carries it (§3.3.2): all of u, with
+// Cleared naming each field old had and u has not, which it carries as its
+// empty value, as u.Patch(old) does. A field the server publishes that
+// neither has, such as a status of "" with capability status (§4.5.2), a
+// complete object carries too: the caller adds it to Cleared. For a
+// client that keeps nothing of the user, as one signing in, old is the
+// zero User (see AuthResult).
+func (u User) Complete(old User) CurrentUser {
+	patch, _ := u.Patch(old)
+	return CurrentUser{User: u, Cleared: patch.Cleared}
 }
 
-// withRemoved adds each removed field to a profile as its empty value.
-func withRemoved(profile map[string]any, removed []string) map[string]any {
-	for _, field := range removed {
-		profile[field] = ""
-	}
-	return profile
+// fieldIndex is the place of a field among userFields.
+func fieldIndex(name string) int {
+	return slices.IndexFunc(userFields, func(f struct{ name, empty string }) bool { return f.name == name })
 }
 
-// withCleared adds each cleared ext key to a profile's ext as its empty
-// value (§4.12).
-func withCleared(profile map[string]any, cleared extObject) map[string]any {
-	if len(cleared) == 0 {
-		return profile
+// emptyOf is the empty value of a kept ext value's kind, which clears it:
+// [] for an array, {} for an object, and "" for anything else.
+func emptyOf(kept jsontext.Value) jsontext.Value {
+	switch kept.Kind() {
+	case '[':
+		return jsontext.Value(`[]`)
+	case '{':
+		return jsontext.Value(`{}`)
 	}
-	ext := maps.Clone(extOf(profile["ext"]))
-	if ext == nil {
-		ext = make(extObject, len(cleared))
-	}
-	maps.Copy(ext, cleared)
-	profile["ext"] = ext
-	return profile
+	return jsontext.Value(`""`)
 }
 
-// updateProfile applies a `me` request (§3.3): a given field replaces the
-// current value, an omitted one stays, and an empty value ("" or {}) removes
-// the field, which the result and notifications carry as that empty value.
-// Names are trimmed and capped; avatars must be https: URLs or small image
-// data: URLs, or the current avatar unchanged. status is the chosen status
-// (§4.5.1), "" for a value the server does not support, and is kept
-// across connections and restarts; a change to it counts against the
-// user's limit on status changes (admitStatusLocked), beyond which the
-// request is retry_after and changes nothing. roles are not settable, and
-// like other unknown fields are ignored.
-func (s *Server) updateProfile(c *client, req request) (any, bool, *Error) {
-	name, err := parseString(req.params, "name", false)
-	if err != nil {
-		return nil, false, err
-	}
-	avatar, err := parseString(req.params, "avatar", false)
-	if err != nil {
-		return nil, false, err
-	}
-	extWrite, hasExt, err := parseExt(req.params, "ext")
-	if err != nil {
-		return nil, false, err
-	}
-	status, err := parseString(req.params, "status", false)
-	if err != nil {
-		return nil, false, err
-	}
-	_, hasName := req.params["name"]
-	_, hasAvatar := req.params["avatar"]
-	_, hasStatus := req.params["status"]
-
-	s.mu.Lock()
-	defer s.unlock()
-	u := c.user
-	if hasAvatar && avatar != "" && avatar != u.avatar && !validAvatar(avatar) {
-		if strings.HasPrefix(avatar, "data:") && len(avatar) > maxAvatarDataURLBytes {
-			return nil, false, &Error{Code: CodeTooLarge, Message: fmt.Sprintf("An avatar data: URL is at most %d bytes; upload larger images with /avatar", maxAvatarDataURLBytes)}
-		}
-		return nil, false, invalidParams("avatar must be an https: URL or a data:image URL of at most %d bytes; upload larger images with /avatar", maxAvatarDataURLBytes)
-	}
-	if hasStatus && !settableStatus(status) {
-		status = statusNone
-	}
-	// ext merges into the kept one (§4.12), and the limit applies to the
-	// result.
-	ext := u.ext
-	if hasExt {
-		ext = mergeExt(u.ext, extWrite)
-		if encodedSize(ext) > maxProfileExtBytes {
-			return nil, false, &Error{Code: CodeTooLarge, Message: fmt.Sprintf("Your profile's ext would be over %d bytes", maxProfileExtBytes)}
-		}
-	}
-	// A status change counts against the user's limit on status changes,
-	// as a `status` request does (§4.5), so `me` flipping it in a loop
-	// cannot make the server announce it to every sharer without end.
-	if hasStatus && status != u.chosen {
-		if err := admitStatusLocked(u); err != nil {
-			return nil, false, err
-		}
-	}
-	// A change of name, avatar, or ext goes to everyone who shares a room
-	// with the user.
-	if (hasName && normalizeName(name) != u.name) || (hasAvatar && avatar != u.avatar) || (hasExt && !jsonEqual(ext, u.ext)) {
-		if err := admitActionLocked(u); err != nil {
-			return nil, false, err
-		}
-	}
-	before, beforeYou := u.profile(), u.you()
-	s.touchUser(u.id)
-	var removed []string
-	if hasName {
-		u.name = normalizeName(name)
-		u.fromValue = nil
-		if u.name == "" {
-			removed = append(removed, "name")
-		}
-	}
-	if hasAvatar && avatar != u.avatar {
-		s.setAvatarEmbedLocked(u, nil)
-		u.avatar = avatar
-	}
-	if hasAvatar && avatar == "" {
-		removed = append(removed, "avatar")
-	}
-	cleared := clearedExt(u.ext, extWrite)
-	u.ext = ext
-	if hasStatus {
-		// A change of the chosen status is sent at once, with the profile.
-		u.chosen = status
-		s.publishLocked(u)
-	}
-	result := map[string]any{"you": withRemoved(u.you(), removed)}
-	if !jsonEqual(before, u.profile()) || !jsonEqual(beforeYou, u.you()) {
-		s.notifyProfileLocked(u, c, cleared, removed...)
-	}
-	c.sendResult(req, result)
-	return result, true, nil
+// UserUpdate is a user notification (§3.3.3): You to the user's own
+// connections, New to others who share a room with the user, and Old with
+// New when the account's user_id changed.
+type UserUpdate struct {
+	You *CurrentUser `json:"you,omitzero"`
+	New *CurrentUser `json:"new,omitzero"`
+	Old *CurrentUser `json:"old,omitzero"`
 }
 
-func jsonEqual(a, b any) bool {
-	left, right := encodeJSON(a), encodeJSON(b)
-	return left != nil && right != nil && string(left) == string(right)
-}
-
-// grantRolesLocked sets the roles an account holds: those Config.Roles
-// grants it, by its user_id or an identity, those its identities grant it
-// (authn.Proof.Roles), and "bot" for a bot, and reports whether they
-// changed. Guests hold no roles, so a granted user_id taken by a guest
-// grants nothing until it is an account; assignUserIDLocked never hands out
-// a granted user_id that was never used.
-func (s *Server) grantRolesLocked(u *userState) bool {
-	var roles []string
-	if u.account() {
-		holders := []Principal{UserID(u.id)}
-		for scheme, subject := range u.identities {
-			holders = append(holders, principalOf(authn.Identity{Scheme: scheme, Subject: subject}))
-		}
-		for role, granted := range s.roleHolders {
-			if slices.ContainsFunc(granted, func(p Principal) bool { return slices.Contains(holders, p) }) {
-				roles = append(roles, role)
-			}
-		}
-		for _, granted := range u.granted {
-			roles = append(roles, granted...)
-		}
-		if u.botOf != "" {
-			roles = append(roles, "bot")
-		}
-		slices.Sort(roles)
-		roles = slices.Compact(roles)
-	}
-	if slices.Equal(roles, u.roles) {
-		return false
-	}
-	u.roles = roles
-	return true
-}
+// Method makes a UserUpdate a Notification.
+func (UserUpdate) Method() string { return "user" }

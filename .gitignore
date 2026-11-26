@@ -12,3 +12,6 @@ test-results/
 .direnv/
 devenv.local.nix
 devenv.local.yaml
+
+# made by any go command in the workspace
+go.work.sum

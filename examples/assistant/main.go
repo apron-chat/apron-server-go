@@ -18,8 +18,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/apron-chat/apron-server-go/apron"
 	"github.com/apron-chat/apron-server-go/aproncmd"
+	"github.com/apron-chat/apron-server-go/aprond"
 )
 
 func main() { aproncmd.Main(&Assistant{}) }
@@ -33,31 +33,17 @@ type Assistant struct {
 		Context int           `long:"context" default:"20" description:"How many earlier messages the command reads"`
 		Timeout time.Duration `long:"timeout" default:"2m" description:"How long one reply may take"`
 	}
-	host *apron.Host
-	bot  *apron.Bot
+	host *aprond.Host
+	bot  *aprond.Bot
 }
 
 func (*Assistant) Name() string { return "assistant" }
 func (a *Assistant) Flags() any { return &a.Settings }
 
-func (a *Assistant) Init(r *apron.Registrar) error {
+func (a *Assistant) Init(r *aprond.Registrar) error {
 	a.host = r.Host
-	// Settings left at zero, as when the extension is used without
-	// aproncmd's flags, take the flags' defaults.
-	if a.Settings.UserID == "" {
-		a.Settings.UserID = "assistant"
-	}
-	if a.Settings.Name == "" {
-		a.Settings.Name = "Assistant"
-	}
-	if a.Settings.Context <= 0 {
-		a.Settings.Context = 20
-	}
-	if a.Settings.Timeout <= 0 {
-		a.Settings.Timeout = 2 * time.Minute
-	}
 	var err error
-	if a.bot, err = r.Bot(a.Settings.UserID, apron.BotOptions{Name: a.Settings.Name}); err != nil {
+	if a.bot, err = r.Bot(a.Settings.UserID, aprond.BotOptions{Name: a.Settings.Name}); err != nil {
 		return err
 	}
 	// The bot joins every room that is not restricted, so that it sees its
@@ -67,14 +53,14 @@ func (a *Assistant) Init(r *apron.Registrar) error {
 			_ = a.bot.Join(r.Context(), room.ID)
 		}
 	}
-	r.OnEvent(func(ctx context.Context, e apron.Event) {
-		if e.Kind == apron.EventRoom {
+	r.OnEvent(func(ctx context.Context, e aprond.Event) {
+		if e.Kind == aprond.EventRoom {
 			if room, ok := a.host.Room(e.Rooms[0]); ok && !room.Restricted {
 				_ = a.bot.Join(ctx, room.ID)
 			}
 			return
 		}
-		m, ok := apron.DecodeMessage(e)
+		m, ok := aprond.DecodeMessage(e)
 		if !ok || !m.New() || m.Deleted || m.From.UserID == a.bot.UserID() || !m.MentionsUser(a.bot.UserID()) {
 			return
 		}
@@ -91,21 +77,21 @@ func (a *Assistant) Init(r *apron.Registrar) error {
 	return nil
 }
 
-func (a *Assistant) answer(ctx context.Context, question apron.Message) {
+func (a *Assistant) answer(ctx context.Context, question aprond.Message) {
 	ctx, cancel := context.WithTimeout(ctx, a.Settings.Timeout)
 	defer cancel()
-	earlier, err := a.bot.History(ctx, question.RoomID, apron.HistoryOptions{Before: question.LogID, Limit: a.Settings.Context})
+	earlier, err := a.bot.History(ctx, question.RoomID, aprond.HistoryOptions{Before: question.LogID, Limit: a.Settings.Context})
 	if err != nil {
 		a.host.Logger().Error("reading the conversation", "error", err)
 		return
 	}
-	w, err := a.bot.StreamAppend(ctx, question.RoomID, "", apron.ReplyTo(question.ID))
+	w, err := a.bot.StreamAppend(ctx, question.RoomID, "", aprond.ReplyTo(question.ID))
 	if err != nil {
 		a.host.Logger().Error("starting a reply", "error", err)
 		return
 	}
 	defer w.Close()
-	if err := a.reply(ctx, transcript(append(earlier, question)), w); err != nil && !errors.Is(err, apron.ErrLiveTextEnded) {
+	if err := a.reply(ctx, transcript(append(earlier, question)), w); err != nil && !errors.Is(err, aprond.ErrLiveTextEnded) {
 		a.host.Logger().Error("replying", "error", err)
 		fmt.Fprintf(w, "\n\n_(I could not finish: %s)_", err)
 	}
@@ -113,7 +99,7 @@ func (a *Assistant) answer(ctx context.Context, question apron.Message) {
 
 // transcript renders the conversation as the command reads it: one
 // "name: text" paragraph per message, the question last.
-func transcript(messages []apron.Message) string {
+func transcript(messages []aprond.Message) string {
 	var b strings.Builder
 	for _, m := range messages {
 		if m.Deleted || strings.HasPrefix(m.From.UserID, "~") {

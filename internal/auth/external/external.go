@@ -91,6 +91,9 @@ type flow struct {
 	// (oauth.Request.RememberedRedirect).
 	known bool
 	done  bool
+	// denied is why the extension refused the person it last signed in
+	// (Deny), which a cancel tells the client; "" for none.
+	denied string
 }
 
 // New is external sign-in whose page hands people to start.
@@ -247,7 +250,7 @@ func (s *Scheme) signInLocked(w http.ResponseWriter, r *http.Request, f *flow) {
 	if f.signIn != "" {
 		s.signIns.Delete(f.signIn)
 	}
-	f.proof, f.known = nil, false
+	f.proof, f.known, f.denied = nil, false, ""
 	signIn, err := s.signIns.Put(f, oauth.FlowLifetime, time.Now())
 	if err != nil {
 		f.mu.Unlock()
@@ -291,8 +294,9 @@ func (s *Scheme) decide(w http.ResponseWriter, r *http.Request) {
 		return
 	case "cancel":
 		s.finishLocked(f)
+		denied := f.denied
 		f.mu.Unlock()
-		f.req.Deny(w, r)
+		f.req.Deny(w, r, denied)
 		return
 	}
 	f.mu.Unlock()
@@ -404,7 +408,43 @@ func (s *Scheme) Cancel(w http.ResponseWriter, r *http.Request, id string) error
 		return ErrUnknownSignIn
 	}
 	s.finishLocked(f)
-	f.req.Deny(w, r)
+	f.req.Deny(w, r, "")
+	return nil
+}
+
+// Deny refuses the sign-in named id as the extension's policy, such as a
+// person who is not a member of the organization it admits, and answers
+// the person's browser with a page that says so, with reason, and offers
+// to sign in as someone else, or to cancel, which returns to the client
+// with error=access_denied and reason as its error_description. For a
+// sign-in that is no longer open, it answers with a page that says so, and
+// returns ErrUnknownSignIn.
+func (s *Scheme) Deny(w http.ResponseWriter, r *http.Request, id, reason string) error {
+	f, ok := s.signIns.Take(id, time.Now())
+	if !ok {
+		oauth.Expired(w)
+		return ErrUnknownSignIn
+	}
+	f.mu.Lock()
+	if f.done || f.signIn != id {
+		f.mu.Unlock()
+		oauth.Expired(w)
+		return ErrUnknownSignIn
+	}
+	f.signIn, f.denied = "", reason
+	f.mu.Unlock()
+	host := hostOf(f.req.Issuer)
+	page := oauth.Page{
+		Title:   "Sign in to " + cmp.Or(s.core.Title(), host),
+		Lines:   []template.HTML{oauth.Line("You can't sign in to ", oauth.Strong(host), " with this account.")},
+		Action:  AuthorizePath,
+		Fields:  map[string]string{"flow": f.id},
+		Buttons: []oauth.Button{{Op: "restart", Label: "Sign in as someone else", Primary: true}, {Op: "cancel", Label: "Cancel"}},
+	}
+	if reason != "" {
+		page.Lines = append(page.Lines, oauth.Line(reason))
+	}
+	oauth.Render(w, http.StatusForbidden, page)
 	return nil
 }
 

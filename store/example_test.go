@@ -8,7 +8,7 @@ import (
 )
 
 // Open names a backend as aprond's --store flag does. A store is given to the
-// server as apron.Config.Store, which closes it on Shutdown.
+// server as aprond.Config.Store, which closes it on Shutdown.
 func ExampleOpen() {
 	s, err := store.Open("memory")
 	if err != nil {

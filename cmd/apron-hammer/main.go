@@ -94,7 +94,7 @@ func main() {
 	if *selected == "all" {
 		run = scenarios
 	} else {
-		for _, name := range strings.Split(*selected, ",") {
+		for name := range strings.SplitSeq(*selected, ",") {
 			i := slices.IndexFunc(scenarios, func(s scenario) bool { return s.name == strings.TrimSpace(name) })
 			if i < 0 {
 				fmt.Fprintf(os.Stderr, "unknown scenario %q (use -list)\n", name)

@@ -399,7 +399,7 @@ func (s *Scheme) pagePost(w http.ResponseWriter, r *http.Request) {
 		s.pageVerify(w, r, f)
 	case "cancel":
 		s.finishFlowLocked(f)
-		f.req.Deny(w, r)
+		f.req.Deny(w, r, "")
 	default:
 		http.Error(w, "Unknown action", http.StatusBadRequest)
 	}
@@ -431,7 +431,7 @@ func (s *Scheme) pageOptions(w http.ResponseWriter, f *pageFlow) {
 			h.Handle, h.name = a.Handle, cmp.Or(a.Requested, a.Name, a.UserID)
 			s.mu.Lock()
 			if existing := s.byHandle[string(a.Handle)]; existing != nil {
-				h.Credentials = append([]webauthn.Credential(nil), existing.Credentials...)
+				h.Credentials = slices.Clone(existing.Credentials)
 			}
 			s.mu.Unlock()
 		} else {

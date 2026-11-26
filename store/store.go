@@ -6,7 +6,7 @@
 // atomically after that ([Store]). This package has two backends, [SQLite]
 // and [Memory], and [Open] picks one by name, as aprond's --store flag does.
 // Give one, or any other implementation of Store, to the server as
-// apron.Config.Store.
+// aprond.Config.Store.
 package store
 
 import (

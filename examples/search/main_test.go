@@ -5,24 +5,22 @@ import (
 	"net/http"
 	"strings"
 	"testing"
-	"time"
 
-	"github.com/apron-chat/apron-server-go/apron"
-	"github.com/apron-chat/apron-server-go/internal/wstest"
+	"github.com/apron-chat/apron-server-go/aprond"
+	"github.com/apron-chat/apron-server-go/aprond/aprondtest"
 )
 
 func TestSearch(t *testing.T) {
-	s := &Search{}
-	_, server := wstest.Serve(t, apron.DefaultConfig(), s)
-	ada, bob := wstest.Guest(t, server, "Ada"), wstest.Guest(t, server, "Bob")
+	server := aprondtest.Serve(t, aprond.DefaultConfig(), &Search{})
+	ada, bob := server.Guest("Ada"), server.Guest("Bob")
 	if _, err := ada.Post("general", "The deploy failed again <script>"); err != nil {
 		t.Fatal(err)
 	}
-	room, err := ada.Call("room_set", map[string]any{"title": "Secret", "private": true})
+	room, err := ada.CreateRoom("Secret", true)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ada.Post(room["room_id"].(string), "the secret deploy plan"); err != nil {
+	if _, err := ada.Post(room, "the secret deploy plan"); err != nil {
 		t.Fatal(err)
 	}
 	edited, err := ada.Post("general", "edit me")
@@ -31,30 +29,24 @@ func TestSearch(t *testing.T) {
 	}
 
 	// The index follows the log on its own goroutine: wait for it.
-	expect := func(c *wstest.Client, q string, want int) {
+	expect := func(c *aprondtest.Client, q string, want int) {
 		t.Helper()
-		var n int
-		for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); time.Sleep(5 * time.Millisecond) {
-			result, err := c.Call("search.query", map[string]any{"q": q})
-			if err != nil {
-				t.Fatal(err)
-			}
-			if n = len(result["results"].([]any)); n == want {
-				return
-			}
+		server.Settle()
+		var result struct{ Results []any }
+		if err := c.Call("search.query", map[string]any{"q": q}, &result); err != nil || len(result.Results) != want {
+			t.Fatalf("%s finds %d for %q, want %d: %v", c.UserID, len(result.Results), q, want, err)
 		}
-		t.Fatalf("%s finds %d for %q, want %d", c.UserID, n, q, want)
 	}
 	expect(ada, "deploy", 2)
 	// Bob is not in the private room.
 	expect(bob, "deploy", 1)
 	// An edit replaces what is indexed, and a deletion removes it.
-	if _, err := ada.Call("message", map[string]any{"room_id": "general", "message_id": edited, "body": map[string]any{"text": "edited deploy"}}); err != nil {
+	if err := ada.Edit("general", edited, "edited deploy"); err != nil {
 		t.Fatal(err)
 	}
 	expect(bob, "deploy", 2)
 	expect(bob, "edit me", 0)
-	if _, err := ada.Call("message", map[string]any{"room_id": "general", "message_id": edited, "deleted": true}); err != nil {
+	if err := ada.Delete("general", edited); err != nil {
 		t.Fatal(err)
 	}
 	expect(bob, "deploy", 1)
@@ -72,7 +64,7 @@ func TestSearch(t *testing.T) {
 	if !strings.Contains(string(page), "The deploy failed again &lt;script&gt;") || strings.Contains(string(page), "secret") {
 		t.Fatalf("archive page:\n%s", page)
 	}
-	response, err = http.Get(server.URL + "/search/archive/" + room["room_id"].(string))
+	response, err = http.Get(server.URL + "/search/archive/" + room)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -83,10 +75,10 @@ func TestSearch(t *testing.T) {
 }
 
 func TestNoArchiveWithoutGuests(t *testing.T) {
-	config := apron.DefaultConfig()
+	config := aprond.DefaultConfig()
 	config.DisableGuests = true
-	config.EmailSender = apron.LogEmailSender{}
-	_, server := wstest.Serve(t, config, &Search{})
+	config.EmailSender = aprond.LogEmailSender{}
+	server := aprondtest.Serve(t, config, &Search{})
 	response, err := http.Get(server.URL + "/search/archive/general")
 	if err != nil {
 		t.Fatal(err)

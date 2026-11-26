@@ -3,6 +3,7 @@ package oauth
 import (
 	"crypto/sha256"
 	"encoding/base64"
+	"maps"
 	"net/url"
 	"strings"
 	"testing"
@@ -56,9 +57,7 @@ func TestParse(t *testing.T) {
 	}
 	// A loopback development server takes its https:// spelling too.
 	dev := url.Values{}
-	for k, v := range good {
-		dev[k] = v
-	}
+	maps.Copy(dev, good)
 	dev.Set("resource", "https://127.0.0.1:8080")
 	if _, problem := Parse(dev, "http://127.0.0.1:8080"); problem != nil {
 		t.Fatalf("dev resource: %#v", problem)
@@ -142,6 +141,19 @@ func TestClientNames(t *testing.T) {
 		r := &Request{RedirectURI: redirect}
 		if got := [4]string{r.Client(), r.ClientInline(), r.Started(), r.RememberedRedirect()}; got != want {
 			t.Errorf("%s: %q, want %q", redirect, got, want)
+		}
+	}
+}
+
+func TestErrorDescription(t *testing.T) {
+	for text, want := range map[string]string{
+		"octocat is not a member of acme": "octocat is not a member of acme",
+		"  two\n lines\t ":                "two lines",
+		`a "quoted" \ path`:               `a 'quoted' / path`,
+		"Ada’s account für dich":          "Ada's account f?r dich",
+	} {
+		if got := errorDescription(text); got != want {
+			t.Errorf("errorDescription(%q) = %q, want %q", text, got, want)
 		}
 	}
 }
