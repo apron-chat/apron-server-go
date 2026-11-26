@@ -291,6 +291,38 @@ func TestLocalFellBehind(t *testing.T) {
 	}
 }
 
+// The frames queued for OnFrame before a Local connection ends, an error
+// about the connection last, still reach it.
+func TestLocalFramesBeforeEnd(t *testing.T) {
+	s := wired(&backend{}, server.Config{})
+	release := make(chan struct{})
+	frames := make(chan string, 64)
+	l, err := s.Local(server.LocalOptions{User: apron.User{UserID: "bot"}, OnFrame: func(f apron.Frame) {
+		<-release
+		frames <- string(f)
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range 20 {
+		l.Conn().NotifyRaw("tick", map[string]any{"n": i})
+	}
+	l.Conn().CloseWithError(apron.RetryAfter("Going away", 7*time.Second))
+	<-l.Done()
+	close(release)
+	var last string
+	for n := 0; n < 22; n++ { // the server frame, 20 ticks, the error
+		select {
+		case last = <-frames:
+		case <-wait(t).Done():
+			t.Fatalf("OnFrame got %d frames, want 22", n)
+		}
+	}
+	if !strings.Contains(last, `"retry_after"`) {
+		t.Fatalf("last frame %s, want the error", last)
+	}
+}
+
 // A Local connection opens as a network one does: OnConnect, signed in
 // already, then Hello, whose server frame goes before anything sent to it
 // meanwhile. An error of OnConnect is Local's, and OnDisconnect follows it

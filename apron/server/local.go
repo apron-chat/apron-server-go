@@ -147,6 +147,18 @@ func (s *Server) Local(options LocalOptions) (*Local, error) {
 				case frame := <-l.frames:
 					options.OnFrame(frame)
 				case <-l.closed:
+					// What was queued before the end, such as an error
+					// about the connection, is still OnFrame's, but for
+					// an OnFrame that fell behind.
+					for !errors.Is(l.Err(), ErrFellBehind) {
+						select {
+						case frame := <-l.frames:
+							options.OnFrame(frame)
+							continue
+						default:
+						}
+						break
+					}
 					return
 				}
 			}
