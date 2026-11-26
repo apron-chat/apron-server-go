@@ -45,6 +45,13 @@ type chat struct {
 	lists  []apron.RoomListParams
 	joins  []apron.RoomJoinParams
 	leaves []apron.RoomLeaveParams
+	// refuse is how many more messages to refuse with retry_after, of
+	// refusal's delay and category; posts and joined are when each
+	// message attempt and join arrived.
+	refuse  int
+	refusal *apron.Error
+	posts   []time.Time
+	joined  []time.Time
 }
 
 func newChat(config server.Config) *chat {
@@ -152,6 +159,11 @@ func (c *chat) Auth(_ context.Context, _ *server.Conn, p apron.AuthParams, reply
 func (c *chat) Message(_ context.Context, conn *server.Conn, p apron.MessageParams, reply server.Reply[apron.MessageResult]) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.posts = append(c.posts, time.Now())
+	if c.refuse > 0 {
+		c.refuse--
+		return c.refusal
+	}
 	id := c.clock.Next()
 	m := apron.Message{MessageID: id, LogID: id, RoomID: "general", From: *conn.User(), Body: p.Body, ReplyTo: p.ReplyTo}
 	frame, err := apron.Encode(m)
@@ -195,6 +207,7 @@ func (r rooms) RoomJoin(_ context.Context, _ *server.Conn, p apron.RoomJoinParam
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.joins = append(r.joins, p)
+	r.joined = append(r.joined, time.Now())
 	return reply.Send(apron.OK{})
 }
 

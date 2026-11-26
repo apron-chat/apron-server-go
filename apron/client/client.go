@@ -31,7 +31,9 @@
 //
 //   - request ids (§1.1) of its own, unique across connections, so that a
 //     server that deduplicates by user_id and id (§1.2) never takes a new
-//     request for an earlier connection's; Call does not retry;
+//     request for an earlier connection's; Call does not retry, unless
+//     HoldBack has it wait out a server's rate limits (§1.1, ext:limits),
+//     which retries with the same id;
 //   - the replies: each goes straight to its Call, which never waits behind
 //     the frames OnFrame has yet to take, so OnFrame may make calls and
 //     wait for them;
@@ -89,6 +91,7 @@ type options struct {
 	onFrame    func(apron.Frame)
 	header     http.Header
 	httpClient *http.Client
+	holdBack   time.Duration
 }
 
 // OnFrame has f get each frame the server sends the connection but the
@@ -139,6 +142,9 @@ type Conn struct {
 	greeted chan struct{}
 	// done is closed once the connection ends, with err set.
 	done chan struct{}
+
+	// limits are the holds of HoldBack, or nil without it.
+	limits *limits
 
 	mu     sync.Mutex
 	hello  apron.ServerInfo
@@ -216,6 +222,9 @@ func Connect(ctx context.Context, url string, opts ...Option) (*Conn, error) {
 		greeted: make(chan struct{}),
 		done:    make(chan struct{}),
 		calls:   map[string]*pending{},
+	}
+	if o.holdBack > 0 {
+		c.limits = &limits{max: o.holdBack}
 	}
 	if o.onFrame != nil {
 		c.frames = make(chan apron.Frame, queue)
@@ -489,20 +498,37 @@ func mergeUnknown(kept, carried jsontext.Value) jsontext.Value {
 
 // Call sends a request with params, any value that encodes as a JSON
 // object, or nil for none, and returns its result, or its error reply as
-// an *apron.Error. Once the connection has ended, its error wraps
+// an *apron.Error; with HoldBack, it waits out error/retry_after first. Once the connection has ended, its error wraps
 // apron.ErrClosed, and tells why it ended. When ctx is done before the
 // reply, it returns ctx's error; the server may still carry out the
 // request.
 func (c *Conn) Call(ctx context.Context, method string, params any) (jsontext.Value, error) {
 	id := c.prefix + strconv.FormatUint(c.nextID.Add(1), 10)
 	frame := map[string]any{"method": method, "id": id}
+	var raw jsontext.Value
 	if params != nil {
-		frame["params"] = params
+		encoded, err := apron.Marshal(params)
+		if err != nil {
+			return nil, err
+		}
+		raw = encoded
+		frame["params"] = raw
 	}
 	payload, err := apron.Marshal(frame)
 	if err != nil {
 		return nil, err
 	}
+	once := func() (jsontext.Value, error) { return c.roundTrip(ctx, id, method, payload) }
+	if c.limits == nil {
+		return once()
+	}
+	// A retry keeps the request's id, so that a server that carried out
+	// the first does not carry it out again (§1.2).
+	return c.limits.send(ctx, method, raw, once)
+}
+
+// roundTrip sends a request's frame, and waits for its reply.
+func (c *Conn) roundTrip(ctx context.Context, id, method string, payload []byte) (jsontext.Value, error) {
 	waiting := &pending{method: method, reply: make(chan reply, 1)}
 	c.mu.Lock()
 	if c.err != nil {
