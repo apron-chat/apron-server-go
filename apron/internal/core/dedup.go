@@ -1,9 +1,6 @@
 package core
 
-import (
-	"container/list"
-	"sync/atomic"
-)
+import "sync/atomic"
 
 // DedupEntryBytes is what a kept request costs besides its key and its
 // outcome, for a Dedup's byte bound: its entry, its place in the order, and
@@ -21,16 +18,21 @@ type Dedup[K comparable, V any] struct {
 	// Claim and Finish count them: a request's key and outcome, and
 	// DedupEntryBytes.
 	MaxBytes int
-	entries  map[K]*list.Element // of *dedupNode[K, V]
-	order    list.List           // oldest first
-	bytes    int
+	entries  map[K]*dedupNode[K, V]
+	// oldest and newest are the ends of the order the requests are kept
+	// in, of len of them.
+	oldest, newest *dedupNode[K, V]
+	len            int
+	bytes          int
 }
 
-// dedupNode is a kept request, in its place in the order.
+// dedupNode is a kept request, in its place in the order: one allocation,
+// its entry and its links.
 type dedupNode[K comparable, V any] struct {
-	key   K
-	entry *DedupEntry[V]
-	bytes int
+	key          K
+	entry        DedupEntry[V]
+	bytes        int
+	older, newer *dedupNode[K, V]
 }
 
 // DedupEntry is one request's outcome: Value, once Done is closed.
@@ -55,23 +57,30 @@ func (d *Dedup[K, V]) Claim(key K, fingerprint [32]byte, keyBytes int) (entry, p
 	if d.Size < 0 {
 		return nil, nil
 	}
-	if element := d.entries[key]; element != nil {
-		return nil, element.Value.(*dedupNode[K, V]).entry
+	if node := d.entries[key]; node != nil {
+		return nil, &node.entry
 	}
 	if d.entries == nil {
-		d.entries = make(map[K]*list.Element)
+		d.entries = make(map[K]*dedupNode[K, V])
 	}
-	entry = &DedupEntry[V]{Fingerprint: fingerprint, done: make(chan struct{})}
-	node := &dedupNode[K, V]{key: key, entry: entry, bytes: keyBytes + DedupEntryBytes}
-	d.entries[key] = d.order.PushBack(node)
+	node := &dedupNode[K, V]{key: key, entry: DedupEntry[V]{Fingerprint: fingerprint, done: make(chan struct{})}, bytes: keyBytes + DedupEntryBytes}
+	d.entries[key] = node
+	node.older = d.newest
+	if d.newest != nil {
+		d.newest.newer = node
+	} else {
+		d.oldest = node
+	}
+	d.newest = node
+	d.len++
 	d.bytes += node.bytes
 	d.trim()
-	return entry, nil
+	return &node.entry, nil
 }
 
 // over reports whether the requests kept are over Size or MaxBytes.
 func (d *Dedup[K, V]) over() bool {
-	return d.order.Len() > d.Size || d.MaxBytes > 0 && d.bytes > d.MaxBytes
+	return d.len > d.Size || d.MaxBytes > 0 && d.bytes > d.MaxBytes
 }
 
 // trim forgets the oldest requests that finished while the requests kept
@@ -86,20 +95,30 @@ func (d *Dedup[K, V]) trim() {
 // that its duplicates find it, and it is forgotten once it is the oldest
 // finished.
 func (d *Dedup[K, V]) EvictOldest() bool {
-	for element := d.order.Front(); element != nil; element = element.Next() {
-		node := element.Value.(*dedupNode[K, V])
+	for node := d.oldest; node != nil; node = node.newer {
 		if !isClosed(node.entry.done) {
 			continue
 		}
-		d.remove(element)
+		d.remove(node)
 		return true
 	}
 	return false
 }
 
 // remove forgets a kept request.
-func (d *Dedup[K, V]) remove(element *list.Element) {
-	node := d.order.Remove(element).(*dedupNode[K, V])
+func (d *Dedup[K, V]) remove(node *dedupNode[K, V]) {
+	if node.older != nil {
+		node.older.newer = node.newer
+	} else {
+		d.oldest = node.newer
+	}
+	if node.newer != nil {
+		node.newer.older = node.older
+	} else {
+		d.newest = node.older
+	}
+	node.older, node.newer = nil, nil
+	d.len--
 	delete(d.entries, node.key)
 	d.bytes -= node.bytes
 }
@@ -112,8 +131,8 @@ func (d *Dedup[K, V]) Finish(key K, entry *DedupEntry[V], value V, valueBytes in
 	entry.Value = value
 	if forget {
 		d.Forget(key, entry)
-	} else if element := d.entries[key]; element != nil && element.Value.(*dedupNode[K, V]).entry == entry {
-		element.Value.(*dedupNode[K, V]).bytes += valueBytes
+	} else if node := d.entries[key]; node != nil && &node.entry == entry {
+		node.bytes += valueBytes
 		d.bytes += valueBytes
 	}
 	close(entry.done)
@@ -124,8 +143,8 @@ func (d *Dedup[K, V]) Finish(key K, entry *DedupEntry[V], value V, valueBytes in
 // with its key claimed after it runs again; the requests already waiting
 // on it still get its outcome, once it finishes.
 func (d *Dedup[K, V]) Forget(key K, entry *DedupEntry[V]) {
-	if element := d.entries[key]; element != nil && element.Value.(*dedupNode[K, V]).entry == entry {
-		d.remove(element)
+	if node := d.entries[key]; node != nil && &node.entry == entry {
+		d.remove(node)
 	}
 }
 
@@ -134,7 +153,7 @@ func (d *Dedup[K, V]) Forget(key K, entry *DedupEntry[V]) {
 func (d *Dedup[K, V]) Kept(key K) bool { return d.entries[key] != nil }
 
 // Len is how many requests are kept, and Bytes what they cost.
-func (d *Dedup[K, V]) Len() int   { return d.order.Len() }
+func (d *Dedup[K, V]) Len() int   { return d.len }
 func (d *Dedup[K, V]) Bytes() int { return d.bytes }
 
 func isClosed(done chan struct{}) bool {

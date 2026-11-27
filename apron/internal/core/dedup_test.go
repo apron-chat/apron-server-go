@@ -68,8 +68,8 @@ func TestDedupMaxBytes(t *testing.T) {
 	d.Finish("f", again, 0, 1, false)
 	total := 0
 	for _, key := range []string{"a", "b", "c", "d", "e", "f"} {
-		if element := d.entries[key]; element != nil {
-			total += element.Value.(*dedupNode[string, int]).bytes
+		if node := d.entries[key]; node != nil {
+			total += node.bytes
 		}
 	}
 	if total != d.Bytes() {
