@@ -207,7 +207,11 @@ func (s *Server) joinLocked(u *userState, r *roomState) bool {
 	if !added {
 		return false
 	}
-	u.send(s.joinedUpdateLocked(r, membership))
+	// The room_update lists the room's members: one with no connection to
+	// send it to, such as an account an invitation makes, is not rendered.
+	if len(u.clients) > 0 {
+		u.send(s.joinedUpdateLocked(r, membership))
+	}
 	return true
 }
 
