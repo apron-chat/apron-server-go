@@ -214,7 +214,18 @@ func (r *Replay) Message(messageID LogID) (Message, bool) {
 // any room for "", tombstones too, in the order of their message_ids,
 // which is the order they were posted in.
 func (r *Replay) Messages(roomID string) []Message {
-	var list []Message
+	// The list is made once, of its size: a room's whole history may be
+	// millions of messages.
+	n := 0
+	for _, m := range r.messages {
+		if roomID == "" || m.RoomID == roomID {
+			n++
+		}
+	}
+	if n == 0 {
+		return nil
+	}
+	list := make([]Message, 0, n)
 	for _, m := range r.messages {
 		if roomID == "" || m.RoomID == roomID {
 			list = append(list, m)
@@ -265,6 +276,9 @@ func (r *Replay) Members(roomID string) []User {
 // leave the same state: they are a compacted log (§4.3.4).
 func (r *Replay) Records() []Record {
 	var records []Record
+	if n := len(r.rooms) + len(r.messages); n > 0 {
+		records = make([]Record, 0, n)
+	}
 	for _, room := range r.rooms {
 		records = append(records, Record{LogID: room.LogID, Room: &room})
 	}
