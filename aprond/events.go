@@ -3,6 +3,7 @@ package aprond
 import (
 	"context"
 	"encoding/json/jsontext"
+	"encoding/json/v2"
 	"errors"
 	"fmt"
 	"slices"
@@ -324,13 +325,28 @@ func DecodeMessage(e Event) (Message, bool) {
 }
 
 // decodeMessageRecord decodes a message record, as history and broadcasts
-// carry it.
-func decodeMessageRecord(raw []byte) (Message, bool) {
-	snapshot := roomlog.DecodeMessage(raw)
-	if snapshot == nil {
+// carry it. Records are the server's own, so their body is decoded once,
+// as a map, and its text, format, and mentions read from it.
+func decodeMessageRecord(record []byte) (Message, bool) {
+	var snapshot struct {
+		Body       map[string]any `json:"body"`
+		Deleted    bool           `json:"deleted"`
+		Ext        apron.Ext      `json:"ext"`
+		From       roomlog.Author `json:"from"`
+		LogID      string         `json:"log_id"`
+		MessageID  string         `json:"message_id"`
+		PrevLogID  string         `json:"prev_log_id"`
+		PrevRoomID string         `json:"prev_room_id"`
+		ReplyTo    *roomlog.Ref   `json:"reply_to"`
+		RoomID     string         `json:"room_id"`
+	}
+	if json.Unmarshal(record, &snapshot) != nil || snapshot.MessageID == "" {
 		return Message{}, false
 	}
 	id := func(value string) int64 {
+		if value == "" {
+			return 0
+		}
 		n, _ := strconv.ParseInt(value, 10, 64)
 		return n
 	}
@@ -338,15 +354,19 @@ func decodeMessageRecord(raw []byte) (Message, bool) {
 		ID: snapshot.MessageID, LogID: id(snapshot.LogID), RoomID: snapshot.RoomID,
 		PrevLogID: id(snapshot.PrevLogID), PrevRoomID: snapshot.PrevRoomID,
 		From:    Sender{UserID: snapshot.From.UserID, Name: snapshot.From.Name},
-		Deleted: snapshot.Deleted, ReplyTo: snapshot.ReplyID(), Ext: snapshot.Ext,
+		Deleted: snapshot.Deleted, Ext: snapshot.Ext,
+	}
+	if snapshot.ReplyTo != nil {
+		m.ReplyTo = snapshot.ReplyTo.MessageID
 	}
 	if body := snapshot.Body; body != nil {
-		m.Body = bodyObject(&body.Body)
-		m.Text, m.Format = body.Text, body.Format
+		m.Body = body
+		m.Text, _ = body["text"].(string)
+		m.Format, _ = body["format"].(string)
 		if m.Format == "" {
 			m.Format = apron.Plain
 		}
-		m.Mentions = body.Mentions
+		m.Mentions = mentions(body)
 	}
 	return m, true
 }
