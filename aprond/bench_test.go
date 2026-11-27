@@ -22,6 +22,8 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -30,6 +32,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/apron-chat/apron-server-go/aprond/internal/presence"
 	"github.com/apron-chat/apron-server-go/store"
 )
 
@@ -281,10 +284,29 @@ func benchStores(b *testing.B, run func(b *testing.B, st store.Store)) {
 // recipients. The members are accounts made while nobody is connected, so
 // that setting up costs O(n) rather than every join told to every member.
 func bigRoom(b *testing.B, config Config, n int) (*benchServer, *benchClient, []*benchClient) {
+	return room(b, config, n, false)
+}
+
+// quietRoom is bigRoom with members who are invisible, so that their
+// sign-ins tell nobody of them and they are told of nobody's status: a
+// room of thousands set up in O(n) frames, for what does not concern
+// status.
+func quietRoom(b *testing.B, config Config, n int) (*benchServer, *benchClient, []*benchClient) {
+	return room(b, config, n, true)
+}
+
+func room(b *testing.B, config Config, n int, quiet bool) (*benchServer, *benchClient, []*benchClient) {
 	bs := newBenchServer(b, config)
 	tokens := make([]string, n)
 	for i := range n {
-		_, tokens[i] = bs.member(i)
+		var id string
+		id, tokens[i] = bs.member(i)
+		if quiet {
+			bs.s.mu.Lock()
+			bs.s.users.Get(id).Presence.Chosen = presence.Invisible
+			bs.s.users.Touch(id)
+			bs.s.unlock()
+		}
 	}
 	_, posterToken := bs.member(n)
 	recipients := make([]*benchClient, n)
@@ -309,7 +331,7 @@ func BenchmarkRoomFanout(b *testing.B) {
 				if n == 5000 && testing.Short() {
 					b.Skip("short")
 				}
-				bs, poster, recipients := bigRoom(b, Config{Store: st, OutgoingQueue: 1024}, n)
+				bs, poster, recipients := quietRoom(b, Config{Store: st, OutgoingQueue: 1024}, n)
 				delivered := countFrames(`{"method":"message"`, recipients...)
 				params := map[string]any{"room_id": defaultRoomID, "body": map[string]any{"text": "hello, everyone in the room"}}
 				// Each batch waits for its frames, so that no member falls
@@ -329,6 +351,42 @@ func BenchmarkRoomFanout(b *testing.B) {
 				b.ReportMetric(float64(n), "frames/op")
 				_ = bs
 			})
+		})
+	}
+}
+
+// BenchmarkRoomFanoutPush is RoomFanout with some of the members
+// registered for push, with relays that answer every push at once: each
+// message is checked against what wakes whom (§4.9.4), and moves the
+// unread counts of those who push.
+func BenchmarkRoomFanoutPush(b *testing.B) {
+	const n = 1000
+	for _, pushers := range []int{10, 100} {
+		b.Run(fmt.Sprintf("members=%d/pushers=%d", n, pushers), func(b *testing.B) {
+			relay := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(http.StatusCreated)
+			}))
+			defer relay.Close()
+			bs, poster, recipients := quietRoom(b, Config{OutgoingQueue: 1024, AllowInsecurePush: true}, n)
+			for i, r := range recipients[:pushers] {
+				r.t.replies = make(chan []byte, 64)
+				r.call(b, "push_register", map[string]any{"kind": "relay", "url": fmt.Sprintf("%s/%d", relay.URL, i), "token": "t", "wake": []string{"joined"}})
+			}
+			delivered := countFrames(`{"method":"message"`, recipients...)
+			params := map[string]any{"room_id": defaultRoomID, "body": map[string]any{"text": "hello, everyone in the room"}}
+			const window = 64
+			runtime.GC()
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := range b.N {
+				poster.call(b, "message", params)
+				if i%window == window-1 {
+					waitCount(b, delivered, int64(i+1)*n)
+				}
+			}
+			waitCount(b, delivered, int64(b.N)*n)
+			b.StopTimer()
+			_ = bs
 		})
 	}
 }
@@ -536,13 +594,22 @@ func BenchmarkStatusFlapBystanders(b *testing.B) {
 // record carries every reaction of the message to every member.
 func BenchmarkReactionStorm(b *testing.B) {
 	const n = 300
-	_, poster, recipients := bigRoom(b, Config{OutgoingQueue: 4096}, n)
+	st := &countingStore{Store: store.NewMemory()}
+	bs, poster, recipients := bigRoom(b, Config{Store: st, OutgoingQueue: 4096}, n)
 	for _, r := range recipients {
 		r.t.replies = make(chan []byte, 64)
 	}
 	hot := stringField(poster.call(b, "message", map[string]any{"body": map[string]any{"text": "react to me"}}), "message_id")
+	// Everyone has reacted already: the message is hot.
+	for _, r := range recipients {
+		r.call(b, "reactions", map[string]any{"message_id": hot, "emojis": []string{"👍", "🎉"}})
+	}
 	delivered := countFrames(`{"method":"reactions"`, recipients...)
 	emojis := [][]string{{"👍"}, {"👍", "🎉"}}
+	if err := bs.s.Sync(bs.ctx); err != nil {
+		b.Fatal(err)
+	}
+	st.reset()
 	runtime.GC()
 	b.ReportAllocs()
 	b.ResetTimer()
@@ -553,8 +620,12 @@ func BenchmarkReactionStorm(b *testing.B) {
 		r.call(b, "reactions", map[string]any{"message_id": hot, "emojis": emojis[(i/n)%2]})
 	}
 	waitCount(b, delivered, int64(b.N)*n)
+	if err := bs.s.Sync(bs.ctx); err != nil {
+		b.Fatal(err)
+	}
 	b.StopTimer()
 	b.ReportMetric(n, "frames/op")
+	st.report(b)
 }
 
 // BenchmarkRoomListMembers lists the rooms a member joined, with their members,
