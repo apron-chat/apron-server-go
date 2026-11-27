@@ -311,16 +311,34 @@ func BenchmarkRequestParallel(b *testing.B) {
 // to it.
 func BenchmarkRequestLocal(b *testing.B) {
 	chat := benchchat.New(server.Config{})
-	l, err := chat.Server.Local(server.LocalOptions{User: apron.User{UserID: "bot", Name: "Bot"}, OnFrame: func(apron.Frame) {}})
+	// The connection's OnFrame gets each message's notification; the
+	// benchmark lets it catch up now and then, as a client that reads what
+	// it is sent does, rather than fall behind its queue of 1024 on a busy
+	// machine.
+	var got atomic.Int64
+	caught := make(chan struct{}, 1)
+	l, err := chat.Server.Local(server.LocalOptions{User: apron.User{UserID: "bot", Name: "Bot"}, OnFrame: func(apron.Frame) {
+		got.Add(1)
+		select {
+		case caught <- struct{}{}:
+		default:
+		}
+	}})
 	if err != nil {
 		b.Fatal(err)
 	}
 	defer l.Close()
 	p := apron.MessageParams{Body: &apron.Body{Text: "Hello, everyone: this is a line of chat of a usual length."}}
 	ctx := context.Background()
+	sent := int64(1) // the server frame
 	for b.Loop() {
 		if _, err := l.Call(ctx, "message", p); err != nil {
 			b.Fatal(err)
+		}
+		if sent++; sent%256 == 0 {
+			for got.Load() < sent {
+				<-caught
+			}
 		}
 	}
 }
