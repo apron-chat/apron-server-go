@@ -114,7 +114,8 @@ func (s *Server) PublishUser(change UserChange, shares func(*Conn) bool) bool {
 		s.logger().Error("apron: encoding a user notification", "user_id", cur.UserID, "error", err)
 		you, others = nil, nil
 	}
-	w := newWaker()
+	var w waker
+	defer w.wake()
 	for _, c := range s.openConns() {
 		switch id := c.UserID(); {
 		case id == "", c == change.Except:
@@ -129,6 +130,5 @@ func (s *Server) PublishUser(change UserChange, shares func(*Conn) bool) bool {
 			w.add(c.sendDeferred(others))
 		}
 	}
-	w.wake()
 	return true
 }

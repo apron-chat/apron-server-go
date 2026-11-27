@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -88,12 +89,23 @@ func BenchmarkFanoutBroadcast(b *testing.B) {
 	}
 }
 
-// BenchmarkFanoutSend sends one encoded message to every connection with
-// Conn.Send, from the backend's own list, as a backend that keeps each
-// room's members does.
+// BenchmarkFanoutSend sends one encoded message to every connection
+// from the backend's own list, as a backend that keeps each room's
+// members does: with Conn.Send to each (send), or with SendAll (sendall),
+// which wakes their writers once it has queued them all. send-ns is the
+// time the sending itself takes for each recipient, which a backend
+// holds its lock for.
 func BenchmarkFanoutSend(b *testing.B) {
-	for _, n := range []int{10, 1000} {
-		b.Run("conns="+strconv.Itoa(n), func(b *testing.B) {
+	for _, run := range []struct {
+		n   int
+		all bool
+	}{{10, false}, {10, true}, {1000, false}, {1000, true}, {10000, false}, {10000, true}} {
+		n := run.n
+		how := "send"
+		if run.all {
+			how = "sendall"
+		}
+		b.Run(fmt.Sprintf("conns=%d/%s", n, how), func(b *testing.B) {
 			chat := benchchat.New(server.Config{})
 			sink := benchchat.NewSink()
 			ts := chat.Open(n, sink, nil)
@@ -103,15 +115,23 @@ func BenchmarkFanoutSend(b *testing.B) {
 			target := sink.Total()
 			before := memStats()
 			b.ResetTimer()
+			var sending time.Duration
 			for b.Loop() {
 				target += int64(n)
-				for _, c := range conns {
-					c.Send(frame)
+				start := time.Now()
+				if run.all {
+					server.SendAll(frame, slices.Values(conns))
+				} else {
+					for _, c := range conns {
+						c.Send(frame)
+					}
 				}
+				sending += time.Since(start)
 				sink.Wait(target)
 			}
 			b.StopTimer()
 			perRecipient(b, n, before)
+			b.ReportMetric(float64(sending.Nanoseconds())/float64(b.N*n), "send-ns/recipient")
 		})
 	}
 }

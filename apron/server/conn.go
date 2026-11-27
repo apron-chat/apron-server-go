@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"iter"
 	"net"
 	"net/http"
 	"slices"
@@ -229,6 +230,22 @@ func (c *Conn) Send(frames ...apron.Frame) bool {
 	}
 	c.mu.Unlock()
 	return c.enqueue(frames)
+}
+
+// SendAll sends one frame to each connection of conns, as Send does to
+// each, such as a room's members from the backend's own lists, as
+// Broadcast sends one to those its filter picks: it queues the frame to
+// every connection before it wakes their writers, which costs more than
+// queuing, so that a backend that sends while it holds its lock holds it
+// for less. Like Send, it never blocks.
+//
+//	server.SendAll(frame, maps.Keys(room.members))
+func SendAll(frame apron.Frame, conns iter.Seq[*Conn]) {
+	var w waker
+	defer w.wake()
+	for c := range conns {
+		w.add(c.sendDeferred(frame))
+	}
 }
 
 // sendDeferred queues a frame as Send does, but leaves its writer to be

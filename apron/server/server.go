@@ -549,13 +549,13 @@ func (s *Server) forgetConn(c *Conn) {
 // frames in the order of the changes. to is called in the caller's
 // goroutine, so it may read what that lock guards.
 func (s *Server) Broadcast(frame apron.Frame, to func(*Conn) bool) {
-	w := newWaker()
+	var w waker
+	defer w.wake()
 	for _, c := range s.openConns() {
 		if c.UserID() != "" && (to == nil || to(c)) {
 			w.add(c.sendDeferred(frame))
 		}
 	}
-	w.wake()
 }
 
 // A waker wakes the writers of the connections a broadcast queued frames
@@ -572,8 +572,6 @@ const wakeInline = 8
 
 var wakeLists = sync.Pool{New: func() any { return new([]*core.Conn) }}
 
-func newWaker() waker { return waker{} }
-
 func (w *waker) add(c *core.Conn) {
 	if c == nil {
 		return
@@ -584,19 +582,23 @@ func (w *waker) add(c *core.Conn) {
 	*w.conns = append(*w.conns, c)
 }
 
-func (w waker) wake() {
-	if w.conns == nil {
+// wake wakes the writers, also when what queued the frames panicked, as a
+// filter may: a writer left waiting would never write them.
+func (w *waker) wake() {
+	conns := w.conns
+	if conns == nil {
 		return
 	}
+	w.conns = nil
 	wakeAll := func() {
-		for i, c := range *w.conns {
+		for i, c := range *conns {
 			c.Wake()
-			(*w.conns)[i] = nil
+			(*conns)[i] = nil
 		}
-		*w.conns = (*w.conns)[:0]
-		wakeLists.Put(w.conns)
+		*conns = (*conns)[:0]
+		wakeLists.Put(conns)
 	}
-	if len(*w.conns) <= wakeInline {
+	if len(*conns) <= wakeInline {
 		wakeAll()
 		return
 	}
