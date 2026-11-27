@@ -162,3 +162,25 @@ func TestBodyUnmarshal(t *testing.T) {
 		t.Errorf("body null: %+v, %v", m.Body, err)
 	}
 }
+
+// A body split in place has the members decoding a bodyMembers gives it.
+func TestSplitBody(t *testing.T) {
+	for _, raw := range []string{
+		`{}`, `{"text":null}`, ` { "x" : [ 1 , 2 ] , "text" : "a" , "z" : null , "Text" : 1 } `,
+		`{"\u0074ext":"e","mentions":["a"],"embeds":[{"kind":"image"}],"format":"plain","y":{"a":"\u00e9"}}`,
+	} {
+		got, ok := splitBody(jsontext.Value(raw))
+		var want bodyMembers
+		if err := json.Unmarshal([]byte(raw), &want); err != nil || !ok {
+			t.Fatalf("%s: %v, %v", raw, ok, err)
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("%s:\n got %#v\nwant %#v", raw, got, want)
+		}
+	}
+	for _, raw := range []string{`null`, `[]`, `"x"`, `{"a":1,"a":2}`} {
+		if _, ok := splitBody(jsontext.Value(raw)); ok {
+			t.Errorf("%s split", raw)
+		}
+	}
+}

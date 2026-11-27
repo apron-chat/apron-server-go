@@ -6,6 +6,7 @@ import (
 	"encoding/json/v2"
 	"fmt"
 	"slices"
+	"sync"
 
 	"github.com/apron-chat/apron-server-go/apron/internal/core"
 )
@@ -312,9 +313,81 @@ func parseBody(in bodyMembers) (*Body, error) {
 // rewrote, as apron/server checks a client's. Its error is always an *Error,
 // error/invalid_params.
 func ParseBody(raw jsontext.Value) (*Body, error) {
-	var in bodyMembers
-	if raw.Kind() != '{' || json.Unmarshal(raw, &in) != nil {
+	in, ok := splitBody(raw)
+	if !ok {
 		return nil, InvalidParams("body must be an object")
 	}
 	return parseBody(in)
+}
+
+// bodyDecoders are the decoders splitBody reads a body with, in place.
+var bodyDecoders = sync.Pool{New: func() any { return new(bodyDecoder) }}
+
+type bodyDecoder struct {
+	jsontext.Decoder
+	body bytes.Buffer
+}
+
+var noBody = new(bytes.Buffer)
+
+// splitBody reads a body's members as decoding a bodyMembers does, with
+// the members this package knows parts of raw rather than copies: each
+// present when not nil, null too, and the others an object of their own,
+// as they arrived. It reports false for a body that is not an object, or
+// not valid JSON.
+func splitBody(raw jsontext.Value) (in bodyMembers, ok bool) {
+	if raw.Kind() != '{' {
+		return bodyMembers{}, false
+	}
+	bd := bodyDecoders.Get().(*bodyDecoder)
+	defer func() {
+		bd.Reset(noBody)
+		bd.body = bytes.Buffer{}
+		bodyDecoders.Put(bd)
+	}()
+	bd.body = *bytes.NewBuffer(raw)
+	bd.Reset(&bd.body)
+	dec := &bd.Decoder
+	if _, err := dec.ReadToken(); err != nil {
+		return bodyMembers{}, false
+	}
+	for dec.PeekKind() != '}' {
+		quoted, err := dec.ReadValue()
+		if err != nil {
+			return bodyMembers{}, false
+		}
+		name := bodyMember(quoted)
+		if name == "" {
+			// quoted is the decoder's until its next read.
+			if in.Unknown == nil {
+				in.Unknown = append(jsontext.Value{'{'}, quoted...)
+			} else {
+				in.Unknown = append(append(in.Unknown[:len(in.Unknown)-1], ','), quoted...)
+			}
+			in.Unknown = append(in.Unknown, ':')
+		}
+		value, err := dec.ReadValue()
+		if err != nil {
+			return bodyMembers{}, false
+		}
+		// The decoder reads raw in place, so the value is part of it.
+		end := dec.InputOffset()
+		value = jsontext.Value(raw[end-int64(len(value)) : end : end])
+		switch name {
+		case "text":
+			in.Text = value
+		case "format":
+			in.Format = value
+		case "mentions":
+			in.Mentions = value
+		case "embeds":
+			in.Embeds = value
+		default:
+			in.Unknown = append(append(in.Unknown, value...), '}')
+		}
+	}
+	if _, err := dec.ReadToken(); err != nil {
+		return bodyMembers{}, false
+	}
+	return in, true
 }
