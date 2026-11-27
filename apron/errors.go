@@ -1,8 +1,11 @@
 package apron
 
 import (
+	"encoding/json/jsontext"
+	"encoding/json/v2"
 	"errors"
 	"fmt"
+	"math"
 	"time"
 )
 
@@ -55,6 +58,50 @@ func Unsupported(message string) *Error { return &Error{Code: CodeUnsupported, M
 func RetryAfter(message string, wait time.Duration) *Error {
 	seconds := max(1, int64((wait+time.Second-1)/time.Second))
 	return &Error{Code: CodeRetryAfter, Message: message, Data: map[string]any{"retry_after": seconds}}
+}
+
+// The categories of limit that extension ext:limits adds to a retry_after
+// error, as its data.ext.limits: which requests the same limit counts, and
+// so which a client holds back until the delay ends.
+const (
+	// LimitRead counts history and room_list; a client holds back the
+	// refused method.
+	LimitRead = "read"
+	// LimitWrite counts message, reactions, room_join, room_leave, and
+	// room_set, all of which a client holds back.
+	LimitWrite = "write"
+	// LimitUpload counts message and command requests with a new upload
+	// embed, all of which a client holds back.
+	LimitUpload = "upload"
+)
+
+// RetryDelay returns how long a retry_after error (§1.1), which err is or
+// wraps, asks the client to wait: its data.retry_after, in seconds, and the
+// category of the limit, its data.ext.limits (ext:limits), or "" without
+// one. It reports false for any other error, and for one without a
+// positive retry_after.
+func RetryDelay(err error) (delay time.Duration, category string, ok bool) {
+	e, ok := asError(err)
+	if !ok || e.Code != CodeRetryAfter || e.Data == nil {
+		return 0, "", false
+	}
+	raw, err := marshal(e.Data)
+	if err != nil {
+		return 0, "", false
+	}
+	// Each member is read on its own, so that one of the wrong type, which a
+	// client ignores, leaves the others.
+	var data, ext map[string]jsontext.Value
+	var seconds float64
+	if json.Unmarshal(raw, &data) != nil || json.Unmarshal(data["retry_after"], &seconds) != nil || !(seconds > 0) {
+		return 0, "", false
+	}
+	if json.Unmarshal(data["ext"], &ext) == nil {
+		_ = json.Unmarshal(ext["limits"], &category)
+	}
+	// A day is longer than any wait a client would sit out.
+	seconds = math.Min(seconds, 24*60*60)
+	return time.Duration(seconds * float64(time.Second)), category, true
 }
 
 // Missing is the error of a request that lacks a required param.

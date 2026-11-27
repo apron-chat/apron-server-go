@@ -159,3 +159,33 @@ func TestPatch(t *testing.T) {
 		t.Fatalf("from nothing: %+v", patch)
 	}
 }
+
+func TestServerInfoChecks(t *testing.T) {
+	info := apron.ServerInfo{Auth: []string{"token"}, Signup: []string{"guest"}, Capabilities: []string{"history", "rooms"}}
+	if !info.Has("history") || info.Has("edit") {
+		t.Error("Has")
+	}
+	if !info.Offers("token") || !info.Offers("guest") || info.Offers("email") {
+		t.Error("Offers")
+	}
+}
+
+// The params a client sends encode as the protocol names them.
+func TestClientParams(t *testing.T) {
+	latest := apron.LogID(42)
+	for _, c := range []struct {
+		params any
+		want   string
+	}{
+		{apron.RoomListParams{}, `{}`},
+		{apron.RoomListParams{Filter: apron.RoomsJoined, Members: true, LatestLogID: &latest}, `{"filter":"joined","members":true,"latest_log_id":"42"}`},
+		{apron.RoomListParams{RoomID: "general", ParentRoomID: "p", UserID: "ada"}, `{"parent_room_id":"p","room_id":"general","user_id":"ada"}`},
+		{apron.RoomLeaveParams{RoomID: "general"}, `{"room_id":"general"}`},
+		{apron.RoomJoinParams{RoomID: "general", UserID: "bob"}, `{"room_id":"general","user_id":"bob"}`},
+	} {
+		got, err := apron.Marshal(c.params)
+		if err != nil || string(got) != c.want {
+			t.Errorf("%+v: %s, %v; want %s", c.params, got, err, c.want)
+		}
+	}
+}

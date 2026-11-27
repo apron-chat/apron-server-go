@@ -46,3 +46,4 @@ has a test that runs it against a reference server
 | [`notify`](notify) | Post one message to a room and exit, such as a notice from CI, its text from the arguments or stdin: `Dial`, `Post`. |
 | [`tail`](tail) | A room's recent history, then its new messages as they come, without gaps or repeats, until interrupted: `OnFrame`, `History`, `Done`. |
 | [`remote-bot`](remote-bot) | An echo bot on package [`apron/bot`](../apron/bot), whose Dialer is `client.Dial`, which the bot calls again whenever the server ends its connection. |
+| [`aproncli`](aproncli) | A command-line client: `info`, `message` (markdown, replies, stdin), `rooms`, `join`, `leave`, `history` and `tail` (recovering the gap per §4.3.5), `export` of rooms as an archive (ARCHIVE.md) with `--resume`, and raw `call`: `Connect` and `Auth`, `HistoryPages`, `RoomList`, `HoldBack`, `apron.Replay`, [`apron/archive`](../apron/archive). |

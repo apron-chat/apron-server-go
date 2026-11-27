@@ -40,6 +40,18 @@ type chat struct {
 	mu      sync.Mutex
 	guests  int
 	records []apron.Record
+	// lists, joins, and leaves are the room requests' params, as the
+	// server read them.
+	lists  []apron.RoomListParams
+	joins  []apron.RoomJoinParams
+	leaves []apron.RoomLeaveParams
+	// refuse is how many more messages to refuse with retry_after, of
+	// refusal's delay and category; posts and joined are when each
+	// message attempt and join arrived.
+	refuse  int
+	refusal *apron.Error
+	posts   []time.Time
+	joined  []time.Time
 }
 
 func newChat(config server.Config) *chat {
@@ -57,7 +69,7 @@ func newChat(config server.Config) *chat {
 		<-c.release
 		return call.Done()
 	}})
-	config.Messages, config.Profiles, config.History, config.Commands = c, c, c, &c.commands
+	config.Messages, config.Profiles, config.History, config.Commands, config.Rooms = c, c, c, &c.commands, rooms{c}
 	c.server = server.New(c, config)
 	return c
 }
@@ -147,6 +159,11 @@ func (c *chat) Auth(_ context.Context, _ *server.Conn, p apron.AuthParams, reply
 func (c *chat) Message(_ context.Context, conn *server.Conn, p apron.MessageParams, reply server.Reply[apron.MessageResult]) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.posts = append(c.posts, time.Now())
+	if c.refuse > 0 {
+		c.refuse--
+		return c.refusal
+	}
 	id := c.clock.Next()
 	m := apron.Message{MessageID: id, LogID: id, RoomID: "general", From: *conn.User(), Body: p.Body, ReplyTo: p.ReplyTo}
 	frame, err := apron.Encode(m)
@@ -166,6 +183,43 @@ func (c *chat) History(_ context.Context, _ *server.Conn, p apron.HistoryParams,
 		log.Lower = c.records[0].LogID
 	}
 	return reply.Send(server.Page(log, p, 50))
+}
+
+// rooms is the chat's room handler: one room, general, which everyone
+// has joined, and joins and leaves that change nothing.
+type rooms struct {
+	*chat
+}
+
+func (r rooms) RoomList(_ context.Context, _ *server.Conn, p apron.RoomListParams, reply server.Reply[apron.RoomListResult]) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.lists = append(r.lists, p)
+	lower := apron.LogID(0)
+	if len(r.records) > 0 {
+		lower = r.records[0].LogID
+	}
+	general := apron.RoomView{Room: apron.Room{RoomID: "general", Title: "General"}, LatestLogID: r.clock.Last(), HistoryLogID: &lower}
+	return reply.Send(apron.RoomListResult{Joined: []apron.RoomView{general}})
+}
+
+func (r rooms) RoomJoin(_ context.Context, _ *server.Conn, p apron.RoomJoinParams, reply server.Reply[apron.OK]) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.joins = append(r.joins, p)
+	r.joined = append(r.joined, time.Now())
+	return reply.Send(apron.OK{})
+}
+
+func (r rooms) RoomLeave(_ context.Context, _ *server.Conn, p apron.RoomLeaveParams, reply server.Reply[apron.OK]) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.leaves = append(r.leaves, p)
+	return reply.Send(apron.OK{})
+}
+
+func (rooms) RoomSet(context.Context, *server.Conn, apron.RoomSetParams, server.Reply[apron.RoomSetResult]) error {
+	return apron.Unsupported("No new rooms")
 }
 
 func (c *chat) Me(_ context.Context, conn *server.Conn, p apron.MeParams, reply server.Reply[apron.CurrentUser]) error {

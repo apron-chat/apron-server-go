@@ -84,15 +84,16 @@ const (
 )
 
 // RoomListParams are the params of room_list (§4.2.1). Filter is RoomsAll
-// when the client sent none; an empty ID was not sent.
+// when the client sent none; an empty ID was not sent. They encode as a
+// client sends them, an empty Filter left out, which is RoomsAll.
 type RoomListParams struct {
-	Filter       RoomFilter
-	ParentRoomID string
-	RoomID       string
-	Members      bool
-	UserID       string
+	Filter       RoomFilter `json:"filter,omitempty"`
+	ParentRoomID string     `json:"parent_room_id,omitempty"`
+	RoomID       string     `json:"room_id,omitempty"`
+	Members      bool       `json:"members,omitzero"`
+	UserID       string     `json:"user_id,omitempty"`
 	// LatestLogID, if set, lists only the rooms that changed after it.
-	LatestLogID *LogID
+	LatestLogID *LogID `json:"latest_log_id,omitzero"`
 }
 
 // RoomListResult is the result of room_list. A server.Server sends the
@@ -138,8 +139,9 @@ type RoomJoinParams struct {
 }
 
 // RoomLeaveParams are the params of room_leave (§4.2.2): the room, a valid
-// ID, and the user to remove, or "" for the sender.
+// ID, and the user to remove, or "" for the sender. They encode as a client
+// sends them.
 type RoomLeaveParams struct {
-	RoomID string
-	UserID string
+	RoomID string `json:"room_id"`
+	UserID string `json:"user_id,omitempty"`
 }
