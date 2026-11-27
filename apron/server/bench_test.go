@@ -59,7 +59,9 @@ func message(b *testing.B, text string) apron.Frame {
 }
 
 // BenchmarkFanoutBroadcast sends one encoded message to every connection
-// (Server.Broadcast), and waits until each was written it.
+// (Server.Broadcast), and waits until each was written it. send-ns is
+// the time Broadcast itself takes for each recipient: what a backend that
+// sends while it holds its lock holds it for.
 func BenchmarkFanoutBroadcast(b *testing.B) {
 	for _, n := range []int{10, 100, 1000, 10000} {
 		b.Run("conns="+strconv.Itoa(n), func(b *testing.B) {
@@ -71,13 +73,17 @@ func BenchmarkFanoutBroadcast(b *testing.B) {
 			target := sink.Total()
 			before := memStats()
 			b.ResetTimer()
+			var sending time.Duration
 			for b.Loop() {
 				target += int64(n)
+				start := time.Now()
 				chat.Server.Broadcast(frame, nil)
+				sending += time.Since(start)
 				sink.Wait(target)
 			}
 			b.StopTimer()
 			perRecipient(b, n, before)
+			b.ReportMetric(float64(sending.Nanoseconds())/float64(b.N*n), "send-ns/recipient")
 		})
 	}
 }

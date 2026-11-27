@@ -114,6 +114,7 @@ func (s *Server) PublishUser(change UserChange, shares func(*Conn) bool) bool {
 		s.logger().Error("apron: encoding a user notification", "user_id", cur.UserID, "error", err)
 		you, others = nil, nil
 	}
+	w := newWaker()
 	for _, c := range s.openConns() {
 		switch id := c.UserID(); {
 		case id == "", c == change.Except:
@@ -121,12 +122,13 @@ func (s *Server) PublishUser(change UserChange, shares func(*Conn) bool) bool {
 			if youChanged {
 				c.SetUser(cur)
 				if you != nil {
-					c.Send(you)
+					w.add(c.sendDeferred(you))
 				}
 			}
 		case others != nil && (shares == nil || shares(c)):
-			c.Send(others)
+			w.add(c.sendDeferred(others))
 		}
 	}
+	w.wake()
 	return true
 }

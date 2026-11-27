@@ -549,11 +549,58 @@ func (s *Server) forgetConn(c *Conn) {
 // frames in the order of the changes. to is called in the caller's
 // goroutine, so it may read what that lock guards.
 func (s *Server) Broadcast(frame apron.Frame, to func(*Conn) bool) {
+	w := newWaker()
 	for _, c := range s.openConns() {
 		if c.UserID() != "" && (to == nil || to(c)) {
-			c.Send(frame)
+			w.add(c.sendDeferred(frame))
 		}
 	}
+	w.wake()
+}
+
+// A waker wakes the writers of the connections a broadcast queued frames
+// to (core.Conn.SendFrameDeferred), once it has queued them all, and on a
+// goroutine of its own when they are many: so that what a broadcast does
+// while its caller holds its lock, as a backend's does, is queue the
+// frames, and not wake each writer too, which costs more than queuing.
+// The order of each connection's frames is fixed as they are queued.
+type waker struct{ conns *[]*core.Conn }
+
+// wakeInline is the most writers a waker wakes itself, rather than on a
+// goroutine of its own, which costs about as much as waking a few.
+const wakeInline = 8
+
+var wakeLists = sync.Pool{New: func() any { return new([]*core.Conn) }}
+
+func newWaker() waker { return waker{} }
+
+func (w *waker) add(c *core.Conn) {
+	if c == nil {
+		return
+	}
+	if w.conns == nil {
+		w.conns = wakeLists.Get().(*[]*core.Conn)
+	}
+	*w.conns = append(*w.conns, c)
+}
+
+func (w waker) wake() {
+	if w.conns == nil {
+		return
+	}
+	wakeAll := func() {
+		for i, c := range *w.conns {
+			c.Wake()
+			(*w.conns)[i] = nil
+		}
+		*w.conns = (*w.conns)[:0]
+		wakeLists.Put(w.conns)
+	}
+	if len(*w.conns) <= wakeInline {
+		wakeAll()
+		return
+	}
+	go wakeAll()
 }
 
 // ForgetUser forgets the requests kept for a user's deduplication (§1.2),

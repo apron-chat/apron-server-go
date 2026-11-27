@@ -231,6 +231,23 @@ func (c *Conn) Send(frames ...apron.Frame) bool {
 	return c.enqueue(frames)
 }
 
+// sendDeferred queues a frame as Send does, but leaves its writer to be
+// woken (core.Conn.SendFrameDeferred): it returns the connection's
+// runtime when it is, else nil.
+func (c *Conn) sendDeferred(frame apron.Frame) *core.Conn {
+	c.mu.Lock()
+	if c.holding {
+		c.held = append(c.held, []apron.Frame{frame})
+		c.mu.Unlock()
+		return nil
+	}
+	c.mu.Unlock()
+	if _, wake := c.rt.SendFrameDeferred(frame); wake {
+		return c.rt
+	}
+	return nil
+}
+
 // enqueue queues frames as one batch.
 func (c *Conn) enqueue(frames []apron.Frame) bool {
 	if len(frames) == 1 {
