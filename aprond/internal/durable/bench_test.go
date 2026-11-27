@@ -9,11 +9,11 @@ import (
 	"github.com/apron-chat/apron-server-go/store"
 )
 
-// BenchmarkWriter queues small batches, as a server does as it releases
+// BenchmarkWriterBacklog queues small batches, as a server does as it releases
 // its lock after each change, as fast as they come, to a SQLite store, and
 // waits for the last: what one change costs the writer when changes come
 // faster than the store applies them.
-func BenchmarkWriter(b *testing.B) {
+func BenchmarkWriterBacklog(b *testing.B) {
 	st, err := store.OpenSQLite(filepath.Join(b.TempDir(), "bench.db"))
 	if err != nil {
 		b.Fatal(err)

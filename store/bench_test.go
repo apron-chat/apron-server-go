@@ -7,10 +7,10 @@ import (
 	"testing"
 )
 
-// BenchmarkApply applies batches the size of a new message's (its record,
+// BenchmarkSQLiteApply applies batches the size of a new message's (its record,
 // its message, its room, and the counters), as the server's store writer
 // does, one transaction each.
-func BenchmarkApply(b *testing.B) {
+func BenchmarkSQLiteApply(b *testing.B) {
 	value := []byte(`{"kind":1,"raw":{"body":{"text":"hello, everyone in the room"},"from":{"user_id":"guest_1"},"log_id":"1795817355191","message_id":"1795817355191","room_id":"general"},"rooms":["general"]}`)
 	for _, size := range []int{4, 64} {
 		b.Run(fmt.Sprintf("entries=%d", size), func(b *testing.B) {

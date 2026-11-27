@@ -11,7 +11,7 @@ package aprond
 // Run them with, for example,
 //
 //	go test ./aprond -run '^$' -bench . -benchmem
-//	go test ./aprond -run '^$' -bench 'Fanout/members=1000' -benchmem -cpuprofile cpu.out -memprofile mem.out
+//	go test ./aprond -run '^$' -bench 'RoomFanout/members=1000' -benchmem -cpuprofile cpu.out -memprofile mem.out
 //
 // Each reports allocs/op and B/op per operation, and where an operation
 // fans out, frames/op and allocs per delivered frame.
@@ -293,10 +293,10 @@ func bigRoom(b *testing.B, config Config, n int) (*benchServer, *benchClient, []
 	return bs, poster, recipients
 }
 
-// BenchmarkFanout posts to general, one request in flight, with members
+// BenchmarkRoomFanout posts to general, one request in flight, with members
 // connected: the cost of one message as the room grows, from saving it to
 // its frame written to every member.
-func BenchmarkFanout(b *testing.B) {
+func BenchmarkRoomFanout(b *testing.B) {
 	for _, n := range []int{10, 100, 1000, 5000} {
 		b.Run(fmt.Sprintf("members=%d", n), func(b *testing.B) {
 			benchStores(b, func(b *testing.B, st store.Store) {
@@ -327,10 +327,10 @@ func BenchmarkFanout(b *testing.B) {
 	}
 }
 
-// BenchmarkManyRooms posts to many small rooms at once, a poster and
+// BenchmarkRoomManySmall posts to many small rooms at once, a poster and
 // members in each, one request in flight per poster: what one lock costs
 // rooms that share nothing.
-func BenchmarkManyRooms(b *testing.B) {
+func BenchmarkRoomManySmall(b *testing.B) {
 	const rooms, membersPerRoom = 32, 8
 	benchStores(b, func(b *testing.B, st store.Store) {
 		bs := newBenchServer(b, Config{Store: st, OutgoingQueue: 1024})
@@ -404,10 +404,10 @@ func (c *countingStore) reset() {
 	c.bytes.Store(0)
 }
 
-// BenchmarkReadStorm advances read cursors in a large room with activity
+// BenchmarkActivityReadStorm advances read cursors in a large room with activity
 // read_message_id, the notification every client sends as it reads: each is
 // a change to the room the store keeps.
-func BenchmarkReadStorm(b *testing.B) {
+func BenchmarkActivityReadStorm(b *testing.B) {
 	for _, n := range []int{100, 1000} {
 		b.Run(fmt.Sprintf("members=%d", n), func(b *testing.B) {
 			st := &countingStore{Store: store.NewMemory()}
@@ -445,9 +445,9 @@ func BenchmarkReadStorm(b *testing.B) {
 	}
 }
 
-// BenchmarkTypingStorm sends typing activity from every member of a room,
+// BenchmarkActivityTypingStorm sends typing activity from every member of a room,
 // each a notification that goes to every other member and is never logged.
-func BenchmarkTypingStorm(b *testing.B) {
+func BenchmarkActivityTypingStorm(b *testing.B) {
 	const n = 200
 	bs, poster, recipients := bigRoom(b, Config{OutgoingQueue: 4096}, n)
 	_ = bs
@@ -522,9 +522,9 @@ func BenchmarkReactionStorm(b *testing.B) {
 	b.ReportMetric(n, "frames/op")
 }
 
-// BenchmarkRoomList lists the rooms a member joined, with their members,
+// BenchmarkRoomListMembers lists the rooms a member joined, with their members,
 // as clients do as they sign in: rooms × members.
-func BenchmarkRoomList(b *testing.B) {
+func BenchmarkRoomListMembers(b *testing.B) {
 	for _, shape := range []struct{ rooms, members int }{{32, 30}, {10, 1000}} {
 		b.Run(fmt.Sprintf("rooms=%d/members=%d", shape.rooms, shape.members), func(b *testing.B) {
 			bs := newBenchServer(b, Config{OutgoingQueue: 1024})
@@ -549,9 +549,9 @@ func BenchmarkRoomList(b *testing.B) {
 	}
 }
 
-// BenchmarkJoinLeave has members join and leave a room of n members, each
+// BenchmarkRoomJoinLeave has members join and leave a room of n members, each
 // change a logged membership told to every member.
-func BenchmarkJoinLeave(b *testing.B) {
+func BenchmarkRoomJoinLeave(b *testing.B) {
 	for _, n := range []int{100, 1000} {
 		b.Run(fmt.Sprintf("members=%d", n), func(b *testing.B) {
 			st := &countingStore{Store: store.NewMemory()}
@@ -589,9 +589,9 @@ func BenchmarkJoinLeave(b *testing.B) {
 	}
 }
 
-// BenchmarkHistory pages a room's history of 20,000 messages while
+// BenchmarkHistoryPageUnderWrites pages a room's history of 20,000 messages while
 // writers post to it.
-func BenchmarkHistory(b *testing.B) {
+func BenchmarkHistoryPageUnderWrites(b *testing.B) {
 	benchStores(b, func(b *testing.B, st store.Store) {
 		bs := newBenchServer(b, Config{Store: st, OutgoingQueue: 1024})
 		writer := bs.guest()
@@ -651,10 +651,10 @@ func BenchmarkHistory(b *testing.B) {
 	})
 }
 
-// BenchmarkSignIn signs members in with session tokens and out again, in a
+// BenchmarkSignInToken signs members in with session tokens and out again, in a
 // room of n members who stay connected: each sign-in is told to them, and
 // each is sent their statuses.
-func BenchmarkSignIn(b *testing.B) {
+func BenchmarkSignInToken(b *testing.B) {
 	for _, n := range []int{100, 1000} {
 		b.Run(fmt.Sprintf("members=%d", n), func(b *testing.B) {
 			bs, _, _ := bigRoom(b, Config{OutgoingQueue: 4096}, n)
@@ -692,10 +692,10 @@ func waitGone(tb testing.TB, s *Server, c *benchClient) {
 	}
 }
 
-// BenchmarkSlowConsumers posts to a room of n members, a tenth of whom
+// BenchmarkRoomSlowConsumers posts to a room of n members, a tenth of whom
 // stopped reading: they are disconnected as their queues fill, and nobody
 // else waits for them.
-func BenchmarkSlowConsumers(b *testing.B) {
+func BenchmarkRoomSlowConsumers(b *testing.B) {
 	const n = 1000
 	_, poster, recipients := bigRoom(b, Config{OutgoingQueue: 256}, n)
 	for i, r := range recipients {
@@ -744,9 +744,9 @@ func (x *indexer) Init(r *Registrar) error {
 	return nil
 }
 
-// BenchmarkFollowers posts with extensions that follow every event, and
+// BenchmarkEventFollowers posts with extensions that follow every event, and
 // waits for them to handle each.
-func BenchmarkFollowers(b *testing.B) {
+func BenchmarkEventFollowers(b *testing.B) {
 	for _, followers := range []int{0, 1, 4} {
 		b.Run(fmt.Sprintf("followers=%d", followers), func(b *testing.B) {
 			var extensions []Extension
@@ -777,9 +777,9 @@ type namedIndexer struct {
 
 func (x *namedIndexer) Name() string { return x.name }
 
-// BenchmarkDecodeMessage decodes a message record as each follower of the
+// BenchmarkEventDecodeMessage decodes a message record as each follower of the
 // log that reads messages does (DecodeMessage).
-func BenchmarkDecodeMessage(b *testing.B) {
+func BenchmarkEventDecodeMessage(b *testing.B) {
 	record := Event{Kind: EventMessage, LogID: 1, Record: []byte(`{"body":{"format":"markdown","mentions":["bob"],"text":"the quick brown fox jumps over the lazy dog"},"ext":{"x":1},"from":{"name":"Ada","user_id":"ada"},"log_id":"1795817355191","message_id":"1795817355191","room_id":"general"}`)}
 	b.ReportAllocs()
 	for range b.N {
