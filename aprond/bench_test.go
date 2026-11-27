@@ -27,6 +27,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -894,3 +895,39 @@ func BenchmarkEventDecodeMessage(b *testing.B) {
 		}
 	}
 }
+
+// BenchmarkLogRetained posts messages, pipelined, and reports what the
+// server keeps of each once they are posted (retainedB/op): the log, and
+// what it keeps of each message, which it never lets go of. Run it with a
+// fixed count, such as -benchtime=20000x.
+func BenchmarkLogRetained(b *testing.B) {
+	bs := newBenchServer(b, Config{OutgoingQueue: 4096})
+	poster := bs.guest()
+	params := map[string]any{"body": map[string]any{"text": text200}}
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for done := 0; done < b.N; {
+		batch := min(100, b.N-done)
+		ids := make([]string, batch)
+		for i := range ids {
+			ids[i] = poster.send("message", params)
+		}
+		for _, id := range ids {
+			poster.wait(b, id)
+		}
+		done += batch
+	}
+	b.StopTimer()
+	if err := bs.s.Sync(bs.ctx); err != nil {
+		b.Fatal(err)
+	}
+	runtime.GC()
+	runtime.ReadMemStats(&after)
+	b.ReportMetric(float64(int64(after.HeapAlloc)-int64(before.HeapAlloc))/float64(b.N), "retainedB/op")
+}
+
+// text200 is a message text of 200 bytes, as apron-hammer's flood posts.
+var text200 = strings.Repeat("lorem ipsum dolor sit amet consectetur adipiscing elit sed do eiusmod tempor ", 3)[:200]
