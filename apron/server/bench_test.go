@@ -222,12 +222,22 @@ func BenchmarkRequest(b *testing.B) {
 
 // BenchmarkRequestParallel makes requests on many connections at once,
 // each alone in its room, so that what they share is the Server and the
-// backend's lock: run with -cpu=1,2,4 to see how it scales.
+// backend's lock: run with -cpu=1,2,4 to see how it scales. ext:noop is a
+// method whose handler takes no lock of its own, so that what its
+// requests share is the Server's alone, deduplication and all.
 func BenchmarkRequestParallel(b *testing.B) {
-	for _, method := range []string{"message", "history"} {
+	for _, method := range []string{"message", "history", "ext:noop", "ext:noop/nodedup"} {
 		b.Run(method, func(b *testing.B) {
-			chat := benchchat.New(server.Config{})
+			config := server.Config{}
+			if strings.HasSuffix(method, "/nodedup") {
+				config.DedupSize = -1
+				method = strings.TrimSuffix(method, "/nodedup")
+			}
+			chat := benchchat.New(config)
 			chat.MemberLists = true
+			chat.Server.Handle("ext:noop", server.Handler{Serve: func(_ context.Context, _ *server.Conn, _ *server.Request, reply server.Reply[any]) error {
+				return reply.Send(apron.OK{})
+			}})
 			var mu sync.Mutex
 			var opened []*roundTrip
 			defer func() {
@@ -248,6 +258,8 @@ func BenchmarkRequestParallel(b *testing.B) {
 						r.call("message", `{"body":{"text":"Hello, everyone: this is a line of chat of a usual length."}}`, 2)
 					case "history":
 						r.call("history", `{"limit":10}`, 1)
+					default:
+						r.call(method, `{"n":1}`, 1)
 					}
 				}
 			})
