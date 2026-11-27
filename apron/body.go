@@ -1,6 +1,7 @@
 package apron
 
 import (
+	"bytes"
 	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"fmt"
@@ -151,31 +152,102 @@ func (b Body) marshalAll(enc *jsontext.Encoder) error {
 // UnmarshalJSONFrom reads a body, and notes which of its fields it
 // carried, so that it encodes as it arrived.
 func (b *Body) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
-	// Each known member is read raw first, so that a null one is present.
-	var in bodyMembers
-	if err := json.UnmarshalDecode(dec, &in); err != nil {
+	// Read token by token, each member once: a member this package knows
+	// is present even when null, and the others are kept as they arrived,
+	// as decoding a bodyMembers keeps them.
+	tok, err := dec.ReadToken()
+	if err != nil {
 		return err
 	}
-	body := Body{Unknown: in.Unknown, sent: bodyDecoded}
-	for _, field := range []struct {
-		raw  jsontext.Value
-		into any
-		bit  bodyFields
-	}{
-		{in.Text, &body.Text, bodyText},
-		{in.Format, &body.Format, bodyFormat},
-		{in.Mentions, &body.Mentions, bodyMentions},
-		{in.Embeds, &body.Embeds, bodyEmbeds},
-	} {
-		if field.raw == nil {
-			continue
+	switch tok.Kind() {
+	case 'n':
+		*b = Body{sent: bodyDecoded}
+		return nil
+	case '{':
+	default:
+		return fmt.Errorf("apron: a body is a JSON object, not %v", tok.Kind())
+	}
+	body := Body{sent: bodyDecoded}
+	for dec.PeekKind() != '}' {
+		quoted, err := dec.ReadValue()
+		if err != nil {
+			return err
 		}
-		body.sent |= field.bit
-		if err := json.Unmarshal(field.raw, field.into, dec.Options()); err != nil {
+		switch bodyMember(quoted) {
+		case "text":
+			body.sent |= bodyText
+			err = readString(dec, &body.Text)
+		case "format":
+			body.sent |= bodyFormat
+			err = readString(dec, &body.Format)
+		case "mentions":
+			body.sent |= bodyMentions
+			err = json.UnmarshalDecode(dec, &body.Mentions)
+		case "embeds":
+			body.sent |= bodyEmbeds
+			err = json.UnmarshalDecode(dec, &body.Embeds)
+		default:
+			// quoted is the decoder's until its next read.
+			if body.Unknown == nil {
+				body.Unknown = append(jsontext.Value{'{'}, quoted...)
+			} else {
+				body.Unknown = append(append(body.Unknown[:len(body.Unknown)-1], ','), quoted...)
+			}
+			body.Unknown = append(body.Unknown, ':')
+			var value jsontext.Value
+			if value, err = dec.ReadValue(); err == nil {
+				body.Unknown = append(append(body.Unknown, value...), '}')
+			}
+		}
+		if err != nil {
 			return err
 		}
 	}
+	if _, err := dec.ReadToken(); err != nil {
+		return err
+	}
 	*b = body
+	return nil
+}
+
+// bodyMember returns the name of a body's member, quoted as it arrived,
+// when it is one this package knows, and else "".
+func bodyMember(quoted jsontext.Value) string {
+	name := quoted
+	if bytes.IndexByte(quoted, '\\') >= 0 {
+		unquoted, err := jsontext.AppendUnquote(nil, quoted)
+		if err != nil {
+			return ""
+		}
+		name = unquoted
+	}
+	switch string(name) {
+	case `"text"`, "text":
+		return "text"
+	case `"format"`, "format":
+		return "format"
+	case `"mentions"`, "mentions":
+		return "mentions"
+	case `"embeds"`, "embeds":
+		return "embeds"
+	}
+	return ""
+}
+
+// readString reads a string, or null as "", as decoding a string does.
+func readString(dec *jsontext.Decoder, into *string) error {
+	tok, err := dec.ReadToken()
+	if err != nil {
+		return err
+	}
+	switch tok.Kind() {
+	case 'n':
+		*into = ""
+	case '"':
+		*into = tok.String()
+	default:
+		return fmt.Errorf("apron: a body's text and format are strings, not %v", tok.Kind())
+	}
 	return nil
 }
 

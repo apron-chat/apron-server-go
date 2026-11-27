@@ -92,3 +92,73 @@ func TestHistoryResultRaw(t *testing.T) {
 		t.Errorf("empty: %s", empty)
 	}
 }
+
+// decodeMembers decodes a body as Body.UnmarshalJSONFrom did before it
+// read tokens: its members raw, then each it knows.
+func decodeMembers(raw []byte) (Body, error) {
+	var in bodyMembers
+	if err := json.Unmarshal(raw, &in); err != nil {
+		return Body{}, err
+	}
+	body := Body{Unknown: in.Unknown, sent: bodyDecoded}
+	for _, field := range []struct {
+		raw  jsontext.Value
+		into any
+		bit  bodyFields
+	}{
+		{in.Text, &body.Text, bodyText},
+		{in.Format, &body.Format, bodyFormat},
+		{in.Mentions, &body.Mentions, bodyMentions},
+		{in.Embeds, &body.Embeds, bodyEmbeds},
+	} {
+		if field.raw == nil {
+			continue
+		}
+		body.sent |= field.bit
+		if err := json.Unmarshal(field.raw, field.into); err != nil {
+			return Body{}, err
+		}
+	}
+	return body, nil
+}
+
+// A body read token by token is the body its members decode as: present
+// when null, unknown members kept as they arrived, escaped names known,
+// and the same values refused.
+func TestBodyUnmarshal(t *testing.T) {
+	for _, raw := range []string{
+		`{}`, `null`, `{"text":"hi"}`, `{"text":null}`, `{"text":null,"format":null,"mentions":null,"embeds":null}`,
+		`{"text":"","mentions":[],"embeds":[]}`,
+		` { "x" : { "y" : [ 1 , 2 ] } , "text" : "a" , "z" : null } `,
+		`{"\u0074ext":"escaped name","t\u0065xt2":1}`,
+		`{"text":"\u00e9\ud83d\ude00\n\"","format":"markdown","mentions":["a","b"],"embeds":[{"kind":"image"},{ "kind" : "x" }]}`,
+		`{"a":1,"b":2,"c":3}`,
+	} {
+		var got Body
+		gotErr := json.Unmarshal([]byte(raw), &got)
+		want, wantErr := decodeMembers([]byte(raw))
+		if gotErr != nil || wantErr != nil {
+			t.Errorf("%s: %v, want %v", raw, gotErr, wantErr)
+			continue
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("%s:\n got %#v\nwant %#v", raw, got, want)
+		}
+	}
+	for _, raw := range []string{
+		`"x"`, `[]`, `{"text":5}`, `{"format":true}`, `{"mentions":"a"}`, `{"embeds":{}}`,
+		"{\"text\":\"\xff\"}", "{\"x\":\"\xff\"}", `{"text":"a","text":"b"}`,
+	} {
+		var got Body
+		gotErr := json.Unmarshal([]byte(raw), &got)
+		_, wantErr := decodeMembers([]byte(raw))
+		if (gotErr == nil) != (wantErr == nil) {
+			t.Errorf("%s: error %v, want %v", raw, gotErr, wantErr)
+		}
+	}
+	// A message's body null is no body, as before.
+	var m Message
+	if err := json.Unmarshal([]byte(`{"from":{"user_id":"a"},"body":null}`), &m); err != nil || m.Body != nil {
+		t.Errorf("body null: %+v, %v", m.Body, err)
+	}
+}
