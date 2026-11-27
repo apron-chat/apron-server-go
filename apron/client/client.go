@@ -81,9 +81,10 @@ const (
 	// readLimit bounds a frame from the server: well above the 256 KiB a
 	// request may be (§1), for results such as a page of history.
 	readLimit = 32 << 20
-	// writeTimeout bounds writing one frame.
-	writeTimeout = 10 * time.Second
 )
+
+// writeTimeout bounds writing one frame; a test shortens it.
+var writeTimeout = 10 * time.Second
 
 // An Option configures Dial.
 type Option func(*options)
