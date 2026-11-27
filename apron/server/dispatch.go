@@ -127,23 +127,35 @@ func (r *Request) fail(e *apron.Error) {
 
 // encodeReply renders the reply to r: its result, or e.
 func (r *Request) encodeReply(result any, e *apron.Error) (frame apron.Frame, encoded jsontext.Value, _ *apron.Error) {
+	// canonical is set when encoded is as Marshal writes it, which
+	// encoding it again within the reply leaves as it is.
+	canonical := false
 	if e == nil {
 		switch v := result.(type) {
 		case jsontext.Value:
 			encoded = v
 		case nil:
-			encoded = jsontext.Value("{}")
+			encoded, canonical = jsontext.Value("{}"), true
 		default:
 			raw, err := core.Marshal(v)
 			if err == nil && string(raw) == "null" {
 				raw = []byte("{}") // A typed nil, such as a nil map.
 			}
-			if err != nil || !jsontext.Value(raw).IsValid() || raw[0] != '{' {
+			// What Marshal writes is valid JSON.
+			if err != nil || raw[0] != '{' {
 				r.logger().Error("apron: a result is not a JSON object", "method", r.Method, "error", err)
 				e = internalError()
 			} else {
-				encoded = raw
+				encoded, canonical = raw, true
 			}
+		}
+	}
+	if e == nil && canonical {
+		// The reply is written around the result, rather than the result
+		// encoded again in it, which would copy it as it is: a page of
+		// history is tens of kilobytes.
+		if payload, ok := r.resultFrame(encoded); ok {
+			return payload, encoded, nil
 		}
 	}
 	var reply core.ReplyFrame
@@ -161,6 +173,25 @@ func (r *Request) encodeReply(result any, e *apron.Error) (frame apron.Frame, en
 		return nil, nil, e
 	}
 	return payload, encoded, e
+}
+
+// resultFrame writes the reply of a result as Marshal writes it, as
+// encoding a ReplyFrame of it does: {"id":...,"result":...}, the members in
+// the order of their names. It reports false for an id Marshal refuses,
+// which is not valid UTF-8.
+func (r *Request) resultFrame(result jsontext.Value) (apron.Frame, bool) {
+	frame := make([]byte, 0, len(`{"id":,"result":}`)+len(r.ID)+2+len(result))
+	frame = append(frame, '{')
+	if r.hasID {
+		var err error
+		frame, err = jsontext.AppendQuote(append(frame, `"id":`...), r.ID)
+		if err != nil {
+			return nil, false
+		}
+		frame = append(frame, ',')
+	}
+	frame = append(append(append(frame, `"result":`...), result...), '}')
+	return frame, true
 }
 
 // logger is the logger of the request's Server.

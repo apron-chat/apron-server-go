@@ -59,6 +59,24 @@ func Page(log Log, p apron.HistoryParams, limit int) apron.HistoryResult {
 	}
 	result.FirstLogID = window[0].LogID
 	result.LastLogID = window[len(window)-1].LogID
+	// Each array is made once, of the size it takes.
+	var rooms, messages, memberships, reactions int
+	for _, r := range window {
+		switch {
+		case r.Room != nil:
+			rooms++
+		case r.Message != nil:
+			messages++
+		case r.Membership != nil:
+			memberships++
+		case r.Reactions != nil:
+			reactions++
+		}
+	}
+	result.Rooms = sized[apron.Room](rooms)
+	result.Messages = sized[apron.Message](messages)
+	result.Memberships = sized[apron.Membership](memberships)
+	result.Reactions = sized[apron.Reactions](reactions)
 	for _, r := range window {
 		switch {
 		case r.Room != nil:
@@ -72,4 +90,12 @@ func Page(log Log, p apron.HistoryParams, limit int) apron.HistoryResult {
 		}
 	}
 	return result
+}
+
+// sized returns an empty slice with room for n, or nil for none.
+func sized[T any](n int) []T {
+	if n == 0 {
+		return nil
+	}
+	return make([]T, 0, n)
 }
