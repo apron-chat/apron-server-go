@@ -119,7 +119,13 @@ func (l *Log) Append(record *Record, rooms ...*Timeline) {
 	for _, t := range rooms {
 		t.records = append(t.records, record)
 		t.latest = record.ID
-		record.Rooms = append(record.Rooms, t.room)
+		if record.Rooms == nil {
+			// Most records are one room's: they share its list of one,
+			// which a second room's append copies, as its capacity is one.
+			record.Rooms = t.only
+		} else {
+			record.Rooms = append(record.Rooms, t.room)
+		}
 	}
 	l.dirty[record] = struct{}{}
 }
@@ -162,7 +168,9 @@ func compareID(record *Record, id int64) int {
 
 // Timeline is one room's log: the records it holds, in log_id order.
 type Timeline struct {
-	room    string
+	room string
+	// only is the Rooms of a record of this room alone.
+	only    []string
 	records []*Record
 	created int64
 	latest  int64
@@ -171,7 +179,7 @@ type Timeline struct {
 // NewTimeline returns the log of a room created at the log_id created,
 // whose latest record is latest.
 func NewTimeline(room string, created, latest int64) *Timeline {
-	return &Timeline{room: room, created: created, latest: latest}
+	return &Timeline{room: room, only: []string{room}, created: created, latest: latest}
 }
 
 // Created is the log_id of the room's creation record, where its retained

@@ -25,8 +25,9 @@ type Message struct {
 	owner string
 	// room is the room_id of the room it is in, and logID its current
 	// snapshot's log_id; both are empty before its first snapshot.
-	room      string
-	logID     int64
+	room  string
+	logID int64
+	// reactions is nil until the first reaction: most messages have none.
 	reactions map[string]roomlog.Reaction
 	// records are every logged snapshot, for redaction; the last is current.
 	records []*roomlog.Record
@@ -45,7 +46,7 @@ type MessageHolder interface {
 func (m *Message) Kept() *Message { return m }
 
 func newMessage(id string, from roomlog.Author, owner string) *Message {
-	return &Message{id: id, from: from, owner: owner, reactions: make(map[string]roomlog.Reaction)}
+	return &Message{id: id, from: from, owner: owner}
 }
 
 // NewMessage keeps a new message named id, which owner sends as from,
@@ -136,10 +137,18 @@ func (t *Table[U, M]) React(m *Message, from roomlog.Author, emojis []string) (*
 	if len(emojis) == 0 {
 		delete(m.reactions, from.UserID)
 	} else {
-		m.reactions[from.UserID] = roomlog.Reaction{From: from, Emojis: emojis}
+		m.react(roomlog.Reaction{From: from, Emojis: emojis})
 	}
 	t.touchMessageLater(m)
 	return t.LogReactions(m, []roomlog.Reaction{{From: from, Emojis: slices.Clone(emojis)}})
+}
+
+// react keeps set as its user's.
+func (m *Message) react(set roomlog.Reaction) {
+	if m.reactions == nil {
+		m.reactions = make(map[string]roomlog.Reaction)
+	}
+	m.reactions[set.From.UserID] = set
 }
 
 // LaterReactions is the count of reaction sets from which a message's
@@ -284,8 +293,8 @@ func restoreMessage(id string, raw jsontext.Value, records map[int64]*roomlog.Re
 	}
 	m := newMessage(id, s.From, s.Owner)
 	m.logID, m.room = s.LogID, s.RoomID
-	for userID, set := range s.Reactions {
-		m.reactions[userID] = roomlog.Reaction{From: set.From, Emojis: set.Emojis}
+	for _, set := range s.Reactions {
+		m.react(roomlog.Reaction{From: set.From, Emojis: set.Emojis})
 	}
 	// The entry may lag behind the message's reactions records
 	// (touchMessageLater), so they are applied over it, in order, each set
@@ -297,7 +306,7 @@ func restoreMessage(id string, raw jsontext.Value, records map[int64]*roomlog.Re
 			if len(set.Emojis) == 0 {
 				delete(m.reactions, set.From.UserID)
 			} else {
-				m.reactions[set.From.UserID] = set
+				m.react(set)
 			}
 		}
 	}
