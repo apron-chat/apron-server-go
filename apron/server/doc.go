@@ -189,8 +189,9 @@
 // # Sending never blocks
 //
 // Sending never blocks, and calls nothing of the backend's but
-// Broadcast's and PublishUser's filters: [Conn.Notify], [Conn.Send],
-// [Server.Broadcast], [Server.PublishUser], and [Reply.Send] queue frames,
+// Broadcast's and PublishUser's filters, and SendAll's iterator:
+// [Conn.Notify], [Conn.Send], [SendAll], [Server.Broadcast],
+// [Server.PublishUser], and [Reply.Send] queue frames,
 // and disconnect a client too slow to take them. So a backend sends while
 // it holds the lock of the change a frame describes, which keeps every
 // connection's frames in the order of the changes, such as messages in
@@ -199,8 +200,12 @@
 //
 // There is one way for each: Notify sends one notification to one
 // connection; a notification for many is encoded once ([apron.Encode]) and its
-// Frame sent to each with Broadcast, or with Send, which also sends
-// frames that go together, such as a reply's then frames do. An
+// Frame sent to each with Broadcast, to the connections its filter picks,
+// or with [SendAll], to those of the backend's own lists, such as a room's
+// members, each of which queues the frame to every connection before it
+// wakes their writers, which costs more than queuing, so that the lock is
+// held for less; or with Send, which also sends frames that go together,
+// such as a reply's then frames do. An
 // extension's own notification is a type with a Method ([apron.Notification]).
 //
 // # Ordering for asynchronous hosts
