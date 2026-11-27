@@ -2,6 +2,7 @@ package server_test
 
 import (
 	"context"
+	"iter"
 	"reflect"
 	"slices"
 	"strings"
@@ -258,4 +259,52 @@ type profiles struct{}
 
 func (profiles) Me(_ context.Context, c *server.Conn, p apron.MeParams, reply server.Reply[apron.CurrentUser]) error {
 	return reply.Send(apron.CurrentUser{User: *c.User()})
+}
+
+// PublishUserTo sends the connections the backend names, as PublishUser
+// sends those its filter picks: the user's own its view, and others the
+// shown one, whichever list names them, but Except.
+func TestPublishUserTo(t *testing.T) {
+	s := server.New(helloBackend{}, server.Config{})
+	old := apron.User{UserID: "ada", Name: "Ada"}
+	ada := openViewer(t, s, old)
+	ada2 := openViewer(t, s, old)
+	ada3 := openViewer(t, s, old)
+	bob := openViewer(t, s, apron.User{UserID: "bob"})
+	eve := openViewer(t, s, apron.User{UserID: "eve"})
+	renamed := apron.User{UserID: "ada", Name: "Ada L."}
+	conns := func(vs ...viewer) iter.Seq[*server.Conn] {
+		return func(yield func(*server.Conn) bool) {
+			for _, v := range vs {
+				if !yield(v.l.Conn()) {
+					return
+				}
+			}
+		}
+	}
+	// bob among own, and ada among others, are where they belong.
+	if !s.PublishUserTo(server.UserChange{Old: old, New: renamed, Except: ada3.l.Conn()}, conns(ada, ada2, ada3, bob), conns(bob, ada)) {
+		t.Fatal("no change")
+	}
+	for _, v := range []viewer{ada, ada2} {
+		v.expect(t, `{"method":"user","params":{"you":{"user_id":"ada","name":"Ada L."}}}`)
+		if got := v.l.User(); got.Name != "Ada L." {
+			t.Errorf("identity %+v", got)
+		}
+	}
+	bob.expect(t, `{"method":"user","params":{"new":{"user_id":"ada","name":"Ada L."}}}`)
+	if got := ada3.l.User(); got.Name != "Ada" {
+		t.Errorf("Except's identity %+v", got)
+	}
+	if s.PublishUserTo(server.UserChange{Old: renamed, New: renamed}, conns(ada), conns(bob)) {
+		t.Fatal("a change that changes nothing")
+	}
+	// Nothing more was sent to anyone.
+	for _, v := range []viewer{ada, ada2, ada3, bob, eve} {
+		select {
+		case f := <-v.frames:
+			t.Errorf("%s got %s", v.l.Conn().UserID(), f)
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
 }

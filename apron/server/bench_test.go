@@ -317,14 +317,15 @@ func BenchmarkRequestLocal(b *testing.B) {
 // message walks every connection; with the backend's member lists and
 // Conn.Send, only the room's. status changes the sender's shown status
 // instead, which PublishUser tells those who share the room, walking every
-// connection, whatever the backend keeps.
+// connection, and PublishUserTo (status-memberlists) the room's members
+// from the backend's list.
 func BenchmarkFanoutRooms(b *testing.B) {
 	const conns = 1000
 	for _, members := range []int{10, 1000} {
-		for _, how := range []string{"broadcast", "memberlists", "status"} {
+		for _, how := range []string{"broadcast", "memberlists", "status", "status-memberlists"} {
 			b.Run(fmt.Sprintf("members=%d/%s", members, how), func(b *testing.B) {
 				chat := benchchat.New(server.Config{})
-				chat.MemberLists = how == "memberlists"
+				chat.MemberLists = strings.HasSuffix(how, "memberlists")
 				sink := benchchat.NewSink()
 				rooms := conns / members
 				ts := chat.Open(conns-1, sink, func(i int) string { return "room" + strconv.Itoa(i%rooms) })
@@ -336,7 +337,7 @@ func BenchmarkFanoutRooms(b *testing.B) {
 				idle := []string{`{"idle":60}`, `{"idle":false}`}
 				for b.Loop() {
 					others := sink.Total() + int64(members-1)
-					if how == "status" {
+					if strings.HasPrefix(how, "status") {
 						r.call("status", idle[r.next%2], 1)
 					} else {
 						r.call("message", `{"body":{"text":"hi"}}`, 2)

@@ -11,6 +11,7 @@ import (
 	"encoding/json/jsontext"
 	"io"
 	"log/slog"
+	"slices"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -183,8 +184,24 @@ func (c *Chat) Me(_ context.Context, conn *server.Conn, p apron.MeParams, reply 
 	old := m.user
 	you := server.ApplyMe(old, p)
 	m.user = you
-	c.Server.PublishUser(server.UserChange{Old: old, New: you, Except: conn}, c.shares(m.room))
+	c.publish(server.UserChange{Old: old, New: you, Except: conn}, m.room)
 	return reply.Send(you.Complete(old))
+}
+
+// publish tells a change of a user to those who share its room, with
+// c.mu held: from the room's member list with MemberLists, and else with a
+// filter of every connection. The user has one connection, whose own view
+// a status change leaves as it is, and a rename's Except is.
+func (c *Chat) publish(change server.UserChange, roomID string) {
+	if c.MemberLists {
+		var members []*server.Conn
+		if r := c.rooms[roomID]; r != nil {
+			members = r.list
+		}
+		c.Server.PublishUserTo(change, nil, slices.Values(members))
+		return
+	}
+	c.Server.PublishUser(change, c.shares(roomID))
 }
 
 func (c *Chat) shares(roomID string) func(*server.Conn) bool {
@@ -210,7 +227,7 @@ func (c *Chat) Status(_ context.Context, conn *server.Conn, p apron.StatusParams
 	old, cur := m.user, m.user
 	old.Status = otherStatus(shown)
 	cur.Status = shown
-	c.Server.PublishUser(server.UserChange{Old: m.user, New: m.user, OldShown: old, NewShown: cur}, c.shares(m.room))
+	c.publish(server.UserChange{Old: m.user, New: m.user, OldShown: old, NewShown: cur}, m.room)
 	return nil
 }
 
