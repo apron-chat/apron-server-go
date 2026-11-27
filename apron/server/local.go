@@ -208,8 +208,8 @@ func (s *Server) openLocal(ctx context.Context, c *Conn, asked apron.User) error
 			return fail(err)
 		}
 	}
-	user := c.User()
-	if user == nil || !apron.ValidID(user.UserID) {
+	user, signedIn := c.Identity()
+	if !signedIn || !apron.ValidID(user.UserID) {
 		return fail(errors.New("apron: OnConnect left a Local connection without a user"))
 	}
 	info := s.complete(s.backend.Hello(ctx, c))

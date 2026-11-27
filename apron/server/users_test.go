@@ -308,3 +308,28 @@ func TestPublishUserTo(t *testing.T) {
 		}
 	}
 }
+
+// Identity is the connection's identity without a copy: what User copies,
+// nothing before sign-in, and a new value after SetUser, which the one
+// read before does not see.
+func TestIdentity(t *testing.T) {
+	s := server.New(helloBackend{}, server.Config{})
+	ada := apron.User{UserID: "ada", Name: "Ada", Roles: []string{"admin"}}
+	v := openViewer(t, s, ada)
+	c := v.l.Conn()
+	before, ok := c.Identity()
+	if !ok || !reflect.DeepEqual(before, *c.User()) || !reflect.DeepEqual(before, ada) {
+		t.Fatalf("Identity %+v, %v; User %+v", before, ok, c.User())
+	}
+	if allocs := testing.AllocsPerRun(100, func() { _, _ = c.Identity() }); allocs != 0 {
+		t.Errorf("Identity allocates %v times", allocs)
+	}
+	c.SetUser(apron.User{UserID: "ada", Name: "Ada L."})
+	if after, _ := c.Identity(); after.Name != "Ada L." || before.Name != "Ada" || before.Roles[0] != "admin" {
+		t.Errorf("after SetUser: %+v, before %+v", after, before)
+	}
+	c.SignOut()
+	if u, ok := c.Identity(); ok || u.UserID != "" {
+		t.Errorf("signed out: %+v, %v", u, ok)
+	}
+}

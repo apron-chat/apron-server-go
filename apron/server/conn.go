@@ -52,8 +52,22 @@ type Pending interface {
 	Err() error
 }
 
+// Identity returns the connection's identity as the connection keeps it,
+// without copying it, and whether it is signed in: what User returns a
+// copy of, for a handler that reads it, such as a message's sender, on
+// every request. The identity is never changed once set (SetUser keeps a
+// copy of its own), but its Roles, Ext, and Unknown are shared with the
+// connection's: the caller does not change them, and uses User for a
+// copy it may change.
+func (c *Conn) Identity() (apron.User, bool) {
+	if user := c.user.Load(); user != nil {
+		return *user, true
+	}
+	return apron.User{}, false
+}
+
 // User returns a copy of the connection's identity, its roles and ext
-// included, or nil before it signs in.
+// included, or nil before it signs in. Identity reads it without a copy.
 func (c *Conn) User() *apron.User {
 	user := c.user.Load()
 	if user == nil {
