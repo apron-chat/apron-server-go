@@ -91,3 +91,21 @@ func BenchmarkClientFrames(b *testing.B) {
 	}
 	wait(sent)
 }
+
+// BenchmarkClientPost posts a message over a WebSocket and waits for its
+// result, one at a time: a request's round trip, both ends.
+func BenchmarkClientPost(b *testing.B) {
+	_, url := benchServer(b)
+	ctx := context.Background()
+	conn, err := client.Dial(ctx, url, apron.AuthParams{Scheme: "guest", Name: "Ada"})
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer conn.Close()
+	p := apron.MessageParams{Body: &apron.Body{Text: "Hello, everyone: this is a line of chat of a usual length."}}
+	for b.Loop() {
+		if _, err := conn.Post(ctx, p); err != nil {
+			b.Fatal(err)
+		}
+	}
+}

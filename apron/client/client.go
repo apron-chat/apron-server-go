@@ -147,6 +147,13 @@ type Conn struct {
 	// limits are the holds of HoldBack, or nil without it.
 	limits *limits
 
+	// wmu is held while a frame is written, which writeTimer bounds:
+	// writeDeadline is when the write under way must be done, in Unix
+	// nanoseconds, or 0 between writes.
+	wmu           sync.Mutex
+	writeTimer    *time.Timer
+	writeDeadline atomic.Int64
+
 	mu     sync.Mutex
 	hello  apron.ServerInfo
 	user   apron.User
@@ -224,6 +231,8 @@ func Connect(ctx context.Context, url string, opts ...Option) (*Conn, error) {
 		done:    make(chan struct{}),
 		calls:   map[string]*pending{},
 	}
+	c.writeTimer = time.AfterFunc(writeTimeout, c.writeExpired)
+	c.writeTimer.Stop()
 	if o.holdBack > 0 {
 		c.limits = &limits{max: o.holdBack}
 	}
@@ -586,9 +595,17 @@ func (c *Conn) write(ctx context.Context, payload []byte) error {
 	if err := c.Err(); err != nil {
 		return err
 	}
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), writeTimeout)
-	defer cancel()
-	if err := c.ws.Write(ctx, websocket.MessageText, payload); err != nil {
+	// One write at a time, bounded by the connection's write timer rather
+	// than a context with a deadline for each, which the WebSocket would
+	// also watch with one more timer of its own.
+	c.wmu.Lock()
+	c.writeDeadline.Store(time.Now().Add(writeTimeout).UnixNano())
+	c.writeTimer.Reset(writeTimeout)
+	err := c.ws.Write(context.Background(), websocket.MessageText, payload)
+	c.writeDeadline.Store(0)
+	c.writeTimer.Stop()
+	c.wmu.Unlock()
+	if err != nil {
 		// A write that fails ends the connection, whose reader then ends
 		// too and says why, such as with the error the server sent before
 		// it closed (one at capacity, §1.1): that tells more than the
@@ -601,6 +618,15 @@ func (c *Conn) write(ctx context.Context, payload []byte) error {
 		}
 	}
 	return nil
+}
+
+// writeExpired runs when the write timer fires: a write still under way
+// past its deadline ends the connection, which ends the write; the timer
+// firing late, after the write, or as the next one begins, does nothing.
+func (c *Conn) writeExpired() {
+	if deadline := c.writeDeadline.Load(); deadline != 0 && time.Now().UnixNano() >= deadline {
+		c.ws.CloseNow()
+	}
 }
 
 // call sends a request on c, and decodes its result.
