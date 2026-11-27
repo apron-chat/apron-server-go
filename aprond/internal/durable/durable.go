@@ -221,7 +221,7 @@ func (w *Writer) merge(b batch) batch {
 func latest(entries []store.Entry) []store.Entry {
 	type key struct{ kind, id string }
 	seen := make(map[key]bool, len(entries))
-	kept := entries[:len(entries)]
+	kept := entries
 	n := len(entries)
 	for i := len(entries) - 1; i >= 0; i-- {
 		k := key{entries[i].Kind, entries[i].ID}
