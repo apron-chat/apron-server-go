@@ -307,6 +307,17 @@ func (u *userState) send(frames ...any) {
 	}
 }
 
+// sendFrame queues one encoded frame, such as one rendered once for a
+// room's members, to every connection of the user: as send does, without
+// the copies a list of frames of any kind takes for each connection.
+func (u *userState) sendFrame(frame apron.Frame) {
+	for c := range u.clients {
+		if !c.conn.Closing() {
+			c.conn.Send(frame)
+		}
+	}
+}
+
 // sharersLocked lists the other users who share a joined room with u.
 func (s *Server) sharersLocked(u *userState) []*userState {
 	seen := make(map[string]*userState)

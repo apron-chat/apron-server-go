@@ -105,13 +105,20 @@ func decodeRecord[T any](raw jsontext.Value) T {
 // deliverLocked sends a frame to every connection of every member of the
 // given rooms, once per connection. The frame is encoded once for all of them.
 func (s *Server) deliverLocked(frame any, rooms ...*roomState) {
-	frame = render(frame)
+	payload := apron.Frame(render(frame))
+	if len(rooms) == 1 {
+		// One room's members are each one member: nothing to tell apart.
+		for _, member := range rooms[0].Members() {
+			member.sendFrame(payload)
+		}
+		return
+	}
 	seen := make(map[string]bool)
 	for _, r := range rooms {
 		for id, member := range r.Members() {
 			if !seen[id] {
 				seen[id] = true
-				member.send(frame)
+				member.sendFrame(payload)
 			}
 		}
 	}
@@ -136,10 +143,10 @@ func encodeNotification(n apron.Notification) jsontext.Value {
 // but u, as room_update memberships (§4.2.3); u's connections receive it
 // with the room_update that tells them of the change.
 func (s *Server) deliverMembershipLocked(membership apron.Membership, r *roomState, u *userState) {
-	frame := encodeNotification(apron.RoomUpdate{Memberships: []apron.Membership{membership}})
+	frame := apron.Frame(encodeNotification(apron.RoomUpdate{Memberships: []apron.Membership{membership}}))
 	for id, member := range r.Members() {
 		if id != u.id {
-			member.send(frame)
+			member.sendFrame(frame)
 		}
 	}
 }
