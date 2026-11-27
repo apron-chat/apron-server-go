@@ -901,7 +901,8 @@ func BenchmarkEventDecodeMessage(b *testing.B) {
 // what it keeps of each message, which it never lets go of. Run it with a
 // fixed count, such as -benchtime=20000x.
 func BenchmarkLogRetained(b *testing.B) {
-	bs := newBenchServer(b, Config{OutgoingQueue: 4096})
+	// A store that keeps nothing, so that what is measured is the server's.
+	bs := newBenchServer(b, Config{Store: discardStore{}, OutgoingQueue: 4096})
 	poster := bs.guest()
 	params := map[string]any{"body": map[string]any{"text": text200}}
 	var before, after runtime.MemStats
@@ -931,3 +932,10 @@ func BenchmarkLogRetained(b *testing.B) {
 
 // text200 is a message text of 200 bytes, as apron-hammer's flood posts.
 var text200 = strings.Repeat("lorem ipsum dolor sit amet consectetur adipiscing elit sed do eiusmod tempor ", 3)[:200]
+
+// discardStore is a store that keeps nothing.
+type discardStore struct{}
+
+func (discardStore) Load(func(store.Entry) error) error { return nil }
+func (discardStore) Apply([]store.Entry) error          { return nil }
+func (discardStore) Close() error                       { return nil }
