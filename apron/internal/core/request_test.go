@@ -119,3 +119,29 @@ func TestParseInPlace(t *testing.T) {
 		t.Fatalf("an append wrote over the frame: %s", payload)
 	}
 }
+
+// ParseReply reads the replies a Server writes, in place, and leaves any
+// other frame to be decoded whole.
+func TestParseReply(t *testing.T) {
+	for _, tc := range []struct {
+		frame, id, result, err string
+	}{
+		{`{"id":"a-1","result":{"message_id":"5"}}`, "a-1", `{"message_id":"5"}`, ""},
+		{`{"error":{"code":"denied","message":"no"},"id":"a-2"}`, "a-2", "", `{"code":"denied","message":"no"}`},
+		{` { "id" : "a-3" , "result" : { } } `, "a-3", `{ }`, ""},
+	} {
+		id, result, rawError, ok := ParseReply([]byte(tc.frame))
+		if !ok || string(id) != tc.id || string(result) != tc.result || string(rawError) != tc.err {
+			t.Errorf("%s: %q %s %s %v", tc.frame, id, result, rawError, ok)
+		}
+	}
+	for _, frame := range []string{
+		`{"method":"message","params":{}}`, `{"id":"\u0061","result":{}}`, `{"id":7,"result":{}}`,
+		`{"id":null,"result":{}}`, `{"result":{}}`, `{"id":"a","result":{},"jsonrpc":"2.0"}`,
+		`{"error":"x","id":"a"}`, `{"id":"a","id":"b"}`, `{`, `[]`,
+	} {
+		if _, _, _, ok := ParseReply([]byte(frame)); ok {
+			t.Errorf("%s read as a reply", frame)
+		}
+	}
+}
