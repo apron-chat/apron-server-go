@@ -708,16 +708,23 @@ func (s *Server) history(c *client, p apron.HistoryParams, reply server.Reply[ap
 	if len(matching) > 0 {
 		result.FirstLogID, result.LastLogID = apron.LogID(matching[0].ID), apron.LogID(matching[len(matching)-1].ID)
 	}
+	// The records go as the log keeps them, as their broadcasts did, without
+	// decoding them for the result's typed arrays to encode again: their
+	// members are in the order of their names, as every frame of a record
+	// carries them, which a typed record's encoding is not (JSON equal).
+	if len(matching) > 0 {
+		result.Raw = new(apron.RawRecords)
+	}
 	for _, record := range matching {
 		switch record.Kind {
 		case roomlog.KindRoom:
-			result.Rooms = append(result.Rooms, decodeRecord[apron.Room](record.Raw))
+			result.Raw.Rooms = append(result.Raw.Rooms, record.Raw)
 		case roomlog.KindMessage:
-			result.Messages = append(result.Messages, decodeRecord[apron.Message](record.Raw))
+			result.Raw.Messages = append(result.Raw.Messages, record.Raw)
 		case roomlog.KindReactions:
-			result.Reactions = append(result.Reactions, decodeRecord[apron.Reactions](record.Raw))
+			result.Raw.Reactions = append(result.Raw.Reactions, record.Raw)
 		case roomlog.KindMembership:
-			result.Memberships = append(result.Memberships, decodeRecord[apron.Membership](record.Raw))
+			result.Raw.Memberships = append(result.Raw.Memberships, record.Raw)
 		}
 	}
 	_ = reply.Send(result)
