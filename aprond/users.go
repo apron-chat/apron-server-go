@@ -2,6 +2,7 @@ package aprond
 
 import (
 	"cmp"
+	"encoding/json/jsontext"
 	"fmt"
 	"maps"
 	"regexp"
@@ -69,6 +70,18 @@ type userState struct {
 	// to the user today, against maxPushesPerUserDay.
 	unread  map[string]int
 	pushDay push.Day
+
+	// shownFrame is the latest statusFrame, rendered for the status and
+	// seen it holds, which a sign-in sends to the user's sharers' new
+	// connections, each of them.
+	shownFrame shownFrame
+}
+
+// shownFrame is a statusFrame rendered for a shown status and seen.
+type shownFrame struct {
+	status string
+	seen   int64
+	frame  jsontext.Value
 }
 
 // newUserState returns a new user named name.

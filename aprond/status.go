@@ -401,17 +401,25 @@ func (s *Server) statusDue(u *userState) {
 // status, such as those of a room u just joined, who share it with u for
 // the first time.
 func (s *Server) sendStatusLocked(u *userState, users []*userState) {
-	frame := statusFrame(u)
+	frame := apron.Frame(statusFrame(u))
 	for _, other := range users {
-		other.send(frame)
+		other.sendFrame(frame)
 	}
 }
 
 // statusFrame is the `user` notification of u's published shown status:
-// `{new: {user_id, status}}`, with seen when it is offline (§4.5.2).
+// `{new: {user_id, status}}`, with seen when it is offline (§4.5.2). It is
+// rendered once for each status and seen, as every sign-in sends it of
+// each member listed in the user's rooms. Called holding s.mu.
 func statusFrame(u *userState) jsontext.Value {
+	status, seen := u.Presence.Status, u.Presence.Seen
+	if cached := u.shownFrame; cached.frame != nil && cached.status == status && cached.seen == seen {
+		return cached.frame
+	}
 	shown := u.shownObject()
-	return notification("user", apron.UserUpdate{New: &shown})
+	frame := notification("user", apron.UserUpdate{New: &shown})
+	u.shownFrame = shownFrame{status: status, seen: seen, frame: frame}
+	return frame
 }
 
 // announceJoinStatusLocked tells the other members of r the published
