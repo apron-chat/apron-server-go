@@ -673,10 +673,8 @@ func writeLive(ctx context.Context, p *peer, messages chan []byte, kind string, 
 	if err != nil {
 		return err
 	}
-	liveURL, err := awaitLiveURL(ctx, messages, written.MessageID)
-	if err != nil {
-		return err
-	}
+	// The live text's url is published once its write starts (§4.8.5), so
+	// the write starts first.
 	body, writer := io.Pipe()
 	request, _ := http.NewRequestWithContext(ctx, http.MethodPut, written.Embeds[0].WriteURL, body)
 	request.Header.Set("Content-Type", "text/plain")
@@ -691,6 +689,12 @@ func writeLive(ctx context.Context, p *peer, messages chan []byte, kind string, 
 		}
 		posted <- err
 	}()
+	liveURL, err := awaitLiveURL(ctx, messages, written.MessageID)
+	if err != nil {
+		writer.CloseWithError(err)
+		<-posted
+		return err
+	}
 	chunk := []byte(text(size))
 	sent := 0
 	var readErr error
