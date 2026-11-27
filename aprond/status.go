@@ -232,23 +232,19 @@ func (s *Server) sendAfterAuthLocked(c *client) {
 			frames = append(frames, muteFrame(id, mute, now))
 		}
 	}
-	listed := make(map[string]*userState)
+	// Only the members shown other than offline or "" are sent, so only
+	// they are told apart and sorted: in a large room, often a few.
+	shown := make(map[string]*userState)
 	for _, r := range u.joined {
 		ids, _ := r.ListedMemberIDs(s.config.MaxListedMembers)
 		for _, id := range ids {
-			if id != u.id {
-				listed[id] = r.Member(id)
+			if other := r.Member(id); id != u.id && other.Presence.Status != statusOffline && other.Presence.Status != statusNone {
+				shown[id] = other
 			}
 		}
 	}
-	var shown []*userState
-	for _, id := range slices.Sorted(maps.Keys(listed)) {
-		if other := listed[id]; other.Presence.Status != statusOffline && other.Presence.Status != statusNone {
-			shown = append(shown, other)
-		}
-	}
-	for _, other := range shown {
-		frames = append(frames, statusFrame(other))
+	for _, id := range slices.Sorted(maps.Keys(shown)) {
+		frames = append(frames, statusFrame(shown[id]))
 	}
 	if len(frames) > 0 {
 		c.enqueueBatch(frames...)

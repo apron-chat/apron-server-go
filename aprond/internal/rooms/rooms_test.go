@@ -288,3 +288,32 @@ func TestLargeRoomEntryLags(t *testing.T) {
 		t.Fatalf("Entries stored %v, want the big room", got)
 	}
 }
+
+// A room's listed members are kept until its members change, or, when
+// the listing is truncated, their activity does.
+func TestListedMembersKept(t *testing.T) {
+	table := newTable()
+	r := table.Create("r", nil, false, "", roomlog.RoomRecord{})
+	ada, bob, cy := &user{id: "ada"}, &user{id: "bob"}, &user{id: "cy"}
+	join(t, table, r, ada, bob)
+	first, _ := r.ListedMemberIDs(0)
+	if again, _ := r.ListedMemberIDs(0); &again[0] != &first[0] {
+		t.Error("the listing was not kept")
+	}
+	join(t, table, r, cy)
+	if ids, _ := r.ListedMemberIDs(0); !slices.Equal(ids, []string{"ada", "bob", "cy"}) {
+		t.Fatalf("after a join, listed %v", ids)
+	}
+	table.Posted(r, "ada", r.Log().Latest()+1)
+	if ids, truncated := r.ListedMemberIDs(1); !truncated || !slices.Equal(ids, []string{"ada"}) {
+		t.Fatalf("listed %v %v, want the most recently active", ids, truncated)
+	}
+	table.Posted(r, "cy", r.Log().Latest()+2)
+	if ids, _ := r.ListedMemberIDs(1); !slices.Equal(ids, []string{"cy"}) {
+		t.Fatalf("after a post, listed %v, want cy", ids)
+	}
+	table.Leave(r, cy, cy.from())
+	if ids, _ := r.ListedMemberIDs(0); !slices.Equal(ids, []string{"ada", "bob"}) {
+		t.Fatalf("after a leave, listed %v", ids)
+	}
+}

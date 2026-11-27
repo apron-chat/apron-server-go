@@ -26,6 +26,7 @@ import (
 	"maps"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/apron-chat/apron-server-go/apron"
@@ -69,6 +70,8 @@ type Room[U Member] struct {
 	creator string
 	// reads holds each user's latest read cursor (§4.6).
 	reads map[string]Cursor
+	// listed is the latest ListedMemberIDs, nil once it may have changed.
+	listed atomic.Pointer[listing]
 }
 
 // Cursor is a user's read cursor in a room (§4.6): the message they read
@@ -206,8 +209,13 @@ func (r *Room[U]) RevealsTo(to *Room[U]) bool {
 
 // ListedMemberIDs returns the user_ids of the members that r lists
 // (§4.2.1), ordered by user_id: all of them, or, past limit when it is
-// positive, the most recently active, and then truncated is set.
+// positive, the most recently active, and then truncated is set. The
+// caller does not modify them: they are kept until the members, or, when
+// truncated, their activity, change, as every sign-in lists them.
 func (r *Room[U]) ListedMemberIDs(limit int) (ids []string, truncated bool) {
+	if l := r.listed.Load(); l != nil && l.limit == limit {
+		return l.ids, l.truncated
+	}
 	ids = slices.Collect(maps.Keys(r.members))
 	if limit > 0 && len(ids) > limit {
 		slices.SortFunc(ids, func(a, b string) int {
@@ -216,7 +224,17 @@ func (r *Room[U]) ListedMemberIDs(limit int) (ids []string, truncated bool) {
 		ids, truncated = ids[:limit], true
 	}
 	slices.Sort(ids)
+	// Listings run holding the server's lock for reading, so several may
+	// keep one at once: each is the same.
+	r.listed.Store(&listing{limit: limit, ids: slices.Clip(ids), truncated: truncated})
 	return ids, truncated
+}
+
+// listing is a ListedMemberIDs result kept.
+type listing struct {
+	limit     int
+	ids       []string
+	truncated bool
 }
 
 // Listing selects what room_list lists of some rooms to a user (§4.2.1).
@@ -495,6 +513,7 @@ func (t *Table[U, M]) Join(r *Room[U], u U, from roomlog.Author) (*roomlog.Recor
 		return nil, false
 	}
 	r.members[id] = u
+	r.listed.Store(nil)
 	record := t.logMembership(r, from, true)
 	r.active[id] = record.ID
 	return record, true
@@ -510,6 +529,7 @@ func (t *Table[U, M]) Leave(r *Room[U], u U, from roomlog.Author) (*roomlog.Reco
 	}
 	record := t.logMembership(r, from, false)
 	delete(r.members, id)
+	r.listed.Store(nil)
 	delete(r.active, id)
 	return record, true
 }
@@ -528,6 +548,9 @@ func (t *Table[U, M]) logMembership(r *Room[U], from roomlog.Author, joined bool
 func (t *Table[U, M]) Posted(r *Room[U], id string, logID int64) {
 	if _, member := r.members[id]; member {
 		r.active[id] = logID
+		if l := r.listed.Load(); l != nil && l.truncated {
+			r.listed.Store(nil)
+		}
 		t.touchLater(r)
 	}
 }
@@ -710,6 +733,7 @@ func (t *Table[U, M]) RestoreMembers(member func(r *Room[U], id string) (U, bool
 		for _, id := range t.restoring[r.id] {
 			if u, ok := member(r, id); ok {
 				r.members[id] = u
+				r.listed.Store(nil)
 			}
 		}
 	}
