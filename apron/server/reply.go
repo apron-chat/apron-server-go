@@ -152,7 +152,7 @@ func (r *Request) send(sent any, value func() (any, error), apply func(), then [
 		r.c.Close()
 		return apron.ErrClosed
 	case e != nil:
-		r.c.enqueue([]apron.Frame{frame})
+		r.c.rt.SendFrame(frame)
 		return e
 	}
 	if apply != nil {
@@ -160,7 +160,18 @@ func (r *Request) send(sent any, value func() (any, error), apply func(), then [
 	}
 	// A reply is never held back by auth (§3.2.2): what is held is what
 	// comes after it.
-	if !r.c.enqueue(append([]apron.Frame{frame}, then...)) {
+	queued := false
+	if len(then) == 0 {
+		queued = r.c.rt.SendFrame(frame)
+	} else {
+		raw := make([][]byte, 1, 1+len(then))
+		raw[0] = frame
+		for _, f := range then {
+			raw = append(raw, f)
+		}
+		queued = r.c.rt.Send(raw...)
+	}
+	if !queued {
 		return apron.ErrClosed
 	}
 	return nil
@@ -178,7 +189,7 @@ func (r *Request) failLocked(e *apron.Error) bool {
 		return true
 	}
 	frame, _, _ := r.encodeReply(nil, e)
-	return frame != nil && r.c.enqueue([]apron.Frame{frame})
+	return frame != nil && r.c.rt.SendFrame(frame)
 }
 
 // forgetUnkeptLocked, with r.mu held, drops the request's deduplication

@@ -4,6 +4,7 @@ import (
 	"context"
 	"net"
 	"net/http"
+	"slices"
 	"sync"
 
 	"github.com/apron-chat/apron-server-go/apron"
@@ -223,7 +224,9 @@ func (c *Conn) Send(frames ...apron.Frame) bool {
 	}
 	c.mu.Lock()
 	if c.holding {
-		c.held = append(c.held, frames)
+		// A copy, so that frames, the caller's, stays the caller's: Send
+		// of one frame allocates nothing.
+		c.held = append(c.held, slices.Clone(frames))
 		c.mu.Unlock()
 		return true
 	}
@@ -231,7 +234,11 @@ func (c *Conn) Send(frames ...apron.Frame) bool {
 	return c.enqueue(frames)
 }
 
+// enqueue queues frames as one batch.
 func (c *Conn) enqueue(frames []apron.Frame) bool {
+	if len(frames) == 1 {
+		return c.rt.SendFrame(frames[0])
+	}
 	return c.rt.Send(framesOf(frames)...)
 }
 

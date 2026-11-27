@@ -53,8 +53,10 @@ type Options struct {
 }
 
 // batch is one place in the queue: frames written one after another, with
-// nothing between them, or a fence.
+// nothing between them, or a fence. A batch of one frame, the most of
+// them, is that frame, one, without a slice of frames to allocate.
 type batch struct {
+	one    []byte
 	frames [][]byte
 	// last closes the connection once the frames are written.
 	last  bool
@@ -77,12 +79,27 @@ type Conn struct {
 	// latest frame arrived, in Unix nanoseconds.
 	pinged    atomic.Bool
 	lastFrame atomic.Int64
+	// ctx is the writer's context, canceled as the connection stops.
+	ctx    context.Context
+	cancel context.CancelFunc
+	// timer bounds each write (Options.WriteTimeout), once for the
+	// connection rather than a context with a deadline for each frame:
+	// deadline is when the write under way must be done, in Unix
+	// nanoseconds, or 0 between writes, and armed is set while timer is.
+	timer    *time.Timer
+	deadline atomic.Int64
+	armed    atomic.Bool
 }
 
 // NewConn returns the runtime of a connection on t. Start starts it.
 func NewConn(t Writer, options Options) *Conn {
 	c := &Conn{t: t, options: options, out: make(chan batch, max(options.Queue, 1)), done: make(chan struct{})}
+	c.ctx, c.cancel = context.WithCancel(context.Background())
 	c.lastFrame.Store(time.Now().UnixNano())
+	if options.WriteTimeout > 0 {
+		c.timer = time.AfterFunc(options.WriteTimeout, c.writeExpired)
+		c.timer.Stop()
+	}
 	return c
 }
 
@@ -109,11 +126,17 @@ func (c *Conn) Queued() int { return len(c.out) }
 // the connection. It reports false when the connection is closing or
 // stopped, or fell behind.
 func (c *Conn) Send(frames ...[]byte) bool {
-	if len(frames) == 0 {
+	switch len(frames) {
+	case 0:
 		return true
+	case 1:
+		return c.enqueue(batch{one: frames[0]})
 	}
 	return c.enqueue(batch{frames: frames})
 }
+
+// SendFrame queues one frame, as Send does, without a slice of frames.
+func (c *Conn) SendFrame(frame []byte) bool { return c.enqueue(batch{one: frame}) }
 
 // Fence holds the writer, and so every frame queued after it, until f is
 // done; see Fence.
@@ -153,7 +176,7 @@ func (c *Conn) SendLast(frame []byte) bool {
 		return false
 	}
 	select {
-	case c.out <- batch{frames: [][]byte{frame}, last: true}:
+	case c.out <- batch{one: frame, last: true}:
 		return true
 	default:
 		c.Stop()
@@ -165,6 +188,10 @@ func (c *Conn) SendLast(frame []byte) bool {
 func (c *Conn) Stop() {
 	c.stop.Do(func() {
 		close(c.done)
+		c.cancel()
+		if c.timer != nil {
+			c.timer.Stop()
+		}
 		if c.options.OnStop != nil {
 			c.options.OnStop()
 		}
@@ -175,13 +202,47 @@ func (c *Conn) Stop() {
 // Pong answers a liveness ping (§1), before sign-in too.
 func (c *Conn) Pong() {
 	c.pinged.Store(true)
-	c.Send(PongFrame)
+	c.SendFrame(PongFrame)
 }
 
+// write writes one frame, within Options.WriteTimeout: a write still under
+// way then stops the connection, which cancels the context the writer
+// has, and closes the transport.
 func (c *Conn) write(frame []byte) error {
-	ctx, cancel := context.WithTimeout(context.Background(), c.options.WriteTimeout)
-	defer cancel()
-	return c.t.Write(ctx, frame)
+	if c.timer == nil {
+		return c.t.Write(c.ctx, frame)
+	}
+	c.deadline.Store(time.Now().Add(c.options.WriteTimeout).UnixNano())
+	// The timer, once armed, stays armed while writes follow each other,
+	// and writeExpired arms it again for the write under way.
+	if c.armed.CompareAndSwap(false, true) {
+		c.timer.Reset(c.options.WriteTimeout)
+	}
+	err := c.t.Write(c.ctx, frame)
+	c.deadline.Store(0)
+	return err
+}
+
+// writeExpired runs when the write timer fires: it stops the connection
+// if the write under way is past its deadline, arms the timer again for
+// one that is not, and else leaves it unarmed until the next write.
+func (c *Conn) writeExpired() {
+	for {
+		if deadline := c.deadline.Load(); deadline != 0 {
+			if left := time.Until(time.Unix(0, deadline)); left > 0 {
+				c.timer.Reset(left)
+				return
+			}
+			c.Stop()
+			return
+		}
+		c.armed.Store(false)
+		// A write that began before armed was cleared found the timer
+		// armed, and left it to this.
+		if c.deadline.Load() == 0 || !c.armed.CompareAndSwap(false, true) {
+			return
+		}
+	}
 }
 
 func (c *Conn) writeLoop() {
@@ -204,6 +265,12 @@ func (c *Conn) writeLoop() {
 					return
 				}
 				continue
+			}
+			if b.frames == nil {
+				if err := c.write(b.one); err != nil {
+					c.Stop()
+					return
+				}
 			}
 			for _, frame := range b.frames {
 				select {

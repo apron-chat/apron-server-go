@@ -183,7 +183,7 @@ func (s *Server) Local(options LocalOptions) (*Local, error) {
 		<-c.Done()
 		l.shut(apron.ErrClosed)
 		s.mu.Lock()
-		delete(s.conns, c)
+		s.forgetConn(c)
 		s.mu.Unlock()
 		s.disconnected(c)
 	}()
@@ -233,7 +233,7 @@ func (s *Server) openLocal(ctx context.Context, c *Conn, asked apron.User) error
 		s.mu.Unlock()
 		return fail(err)
 	}
-	s.conns[c] = struct{}{}
+	s.addConn(c)
 	s.mu.Unlock()
 	c.opened(info)
 	c.enqueue(frames)

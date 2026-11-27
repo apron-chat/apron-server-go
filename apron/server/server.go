@@ -37,11 +37,15 @@ type Server struct {
 	registered map[string]method
 	methods    map[string]method
 	conns      map[*Conn]struct{}
-	network    int
-	closed     bool
-	dedup      *dedup
-	serving    sync.WaitGroup
-	shutdown   chan struct{}
+	// connList is conns as a slice, for Broadcast and PublishUser to walk,
+	// made again after conns changes (nil then), rather than for each
+	// broadcast; it is never changed once made.
+	connList []*Conn
+	network  int
+	closed   bool
+	dedup    *dedup
+	serving  sync.WaitGroup
+	shutdown chan struct{}
 }
 
 // Config is what a Server serves with besides its Backend: the handlers
@@ -356,7 +360,7 @@ func (s *Server) ServeTransport(ctx context.Context, t Transport, remote net.Add
 		info := s.complete(s.backend.Hello(ctx, c))
 		c.opened(info)
 		if frame, err := apron.Encode(info); err == nil {
-			c.rt.Send(frame)
+			c.rt.SendFrame(frame)
 		}
 		// An error about the connection as a whole omits id (§1.1).
 		c.CloseWithError(apron.RetryAfter("Server at capacity; try again shortly", 30*time.Second))
@@ -382,7 +386,7 @@ func (s *Server) ServeTransport(ctx context.Context, t Transport, remote net.Add
 				info := s.complete(s.backend.Hello(ctx, c))
 				c.opened(info)
 				if frame, err := apron.Encode(info); err == nil {
-					c.rt.Send(frame)
+					c.rt.SendFrame(frame)
 				}
 				c.CloseWithError(e)
 				s.waitClosed(c)
@@ -411,12 +415,12 @@ func (s *Server) ServeTransport(ctx context.Context, t Transport, remote net.Add
 		s.disconnected(c)
 		return
 	}
-	s.conns[c] = struct{}{}
+	s.addConn(c)
 	s.mu.Unlock()
 	defer func() {
 		c.Close()
 		s.mu.Lock()
-		delete(s.conns, c)
+		s.forgetConn(c)
 		s.mu.Unlock()
 		s.disconnected(c)
 	}()
@@ -424,7 +428,7 @@ func (s *Server) ServeTransport(ctx context.Context, t Transport, remote net.Add
 	// The server frame goes first, before any frame is read (§3.1), then
 	// what the backend sent meanwhile.
 	c.opened(info)
-	c.rt.Send(frame)
+	c.rt.SendFrame(frame)
 	c.release(false)
 	// Frames are processed in order, each to completion before the next,
 	// which makes auth a barrier (§3.2.2), by a worker of the connection's
@@ -502,15 +506,30 @@ func (s *Server) capabilities() []string {
 	return capabilities
 }
 
-// openConns returns the open connections, Local ones included.
+// openConns returns the open connections, Local ones included, which the
+// caller does not change.
 func (s *Server) openConns() []*Conn {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	conns := make([]*Conn, 0, len(s.conns))
-	for c := range s.conns {
-		conns = append(conns, c)
+	if s.connList == nil && len(s.conns) > 0 {
+		s.connList = make([]*Conn, 0, len(s.conns))
+		for c := range s.conns {
+			s.connList = append(s.connList, c)
+		}
 	}
-	return conns
+	return s.connList
+}
+
+// addConn adds an open connection, with s.mu held.
+func (s *Server) addConn(c *Conn) {
+	s.conns[c] = struct{}{}
+	s.connList = nil
+}
+
+// forgetConn forgets a connection that ended, with s.mu held.
+func (s *Server) forgetConn(c *Conn) {
+	delete(s.conns, c)
+	s.connList = nil
 }
 
 // Broadcast sends a frame to every signed-in connection for which to
