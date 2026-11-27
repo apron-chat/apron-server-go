@@ -51,9 +51,10 @@ bench:
 	mkdir -p build/bench
 	go test -run '^$$' -bench '$(BENCH)' -benchmem -count $(BENCH_COUNT) $(BENCH_FLAGS) $(BENCH_PKGS) | tee build/bench/head.txt
 
-# Every benchmark once, so that they keep building and running (CI).
+# Every benchmark once, so that they keep building and running (CI). -short skips the largest cases, such as a room of
+# 5,000 members, whose setup alone takes minutes.
 bench-smoke:
-	go test -run '^$$' -bench . -benchtime 1x $(BENCH_PKGS) > /dev/null
+	go test -short -run '^$$' -bench . -benchtime 1x $(BENCH_PKGS) > /dev/null
 
 # The same benchmarks on BASE (origin/main by default) and on the working tree, compared with benchstat.
 BASE ?= origin/main
