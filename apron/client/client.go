@@ -45,6 +45,7 @@
 package client
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/json/jsontext"
@@ -311,6 +312,19 @@ func (c *Conn) read() {
 // any other to OnFrame, once the Conn has noted what it says of the
 // connection.
 func (c *Conn) receive(payload []byte) {
+	// A reply as servers write one is read in place, its result part of
+	// the frame, which is the reply's own (ReadMessage), rather than
+	// copied out of it.
+	// A notification as servers write one, method first, is not tried.
+	if !bytes.HasPrefix(payload, []byte(`{"method":`)) {
+		if id, result, rawError, ok := core.ParseReply(payload); ok {
+			var e *apron.Error
+			if rawError == nil || json.Unmarshal(rawError, &e) == nil {
+				c.answer(string(id), result, e)
+				return
+			}
+		}
+	}
 	var f struct {
 		ID     *string        `json:"id"`
 		Method string         `json:"method"`
@@ -323,23 +337,7 @@ func (c *Conn) receive(payload []byte) {
 	}
 	switch {
 	case f.ID != nil && f.Method == "":
-		c.mu.Lock()
-		waiting := c.calls[*f.ID]
-		delete(c.calls, *f.ID)
-		if waiting != nil && f.Error == nil && (waiting.method == "auth" || waiting.method == "me") {
-			// A complete you replaces the user (§3.3.1), before any
-			// user notification after it is merged.
-			var result struct {
-				You *apron.CurrentUser `json:"you"`
-			}
-			if json.Unmarshal(f.Result, &result) == nil && result.You != nil {
-				c.user = result.You.User
-			}
-		}
-		c.mu.Unlock()
-		if waiting != nil {
-			waiting.reply <- reply{f.Result, f.Error}
-		}
+		c.answer(*f.ID, f.Result, f.Error)
 		return
 	case f.Method == "pong":
 		return
@@ -377,6 +375,28 @@ func (c *Conn) receive(payload []byte) {
 		c.discard.Store(true)
 		c.shut(ErrFellBehind)
 		c.ws.CloseNow()
+	}
+}
+
+// answer hands a reply to the call waiting for it, if one is, once the
+// Conn has noted who an auth or me result makes it.
+func (c *Conn) answer(id string, result jsontext.Value, e *apron.Error) {
+	c.mu.Lock()
+	waiting := c.calls[id]
+	delete(c.calls, id)
+	if waiting != nil && e == nil && (waiting.method == "auth" || waiting.method == "me") {
+		// A complete you replaces the user (§3.3.1), before any user
+		// notification after it is merged.
+		var you struct {
+			You *apron.CurrentUser `json:"you"`
+		}
+		if json.Unmarshal(result, &you) == nil && you.You != nil {
+			c.user = you.You.User
+		}
+	}
+	c.mu.Unlock()
+	if waiting != nil {
+		waiting.reply <- reply{result, e}
 	}
 }
 

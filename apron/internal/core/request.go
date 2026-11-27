@@ -316,3 +316,46 @@ func methodName(quoted jsontext.Value) string {
 	}
 	return name
 }
+
+// ParseReply reads a reply as a Server writes one, in place, without
+// decoding it whole: {"id":...,"result":...}, or {"error":...,"id":...},
+// with an id of plain characters, which it returns unquoted, and its
+// result or error, an object, as parts of payload. It reports false for
+// any other frame, which its caller decodes whole, to tell what it is.
+func ParseReply(payload []byte) (id []byte, result, rawError jsontext.Value, ok bool) {
+	ok = DecodeInPlace(payload, func(dec *jsontext.Decoder) bool {
+		if tok, err := dec.ReadToken(); err != nil || tok.Kind() != '{' {
+			return false
+		}
+		var rawID jsontext.Value
+		for dec.PeekKind() != '}' {
+			name, err := dec.ReadValue()
+			if err != nil {
+				return false
+			}
+			value, err := dec.ReadValue()
+			if err != nil {
+				return false
+			}
+			switch string(name) {
+			case `"id"`:
+				rawID = value
+			case `"result"`:
+				result = Part(dec, payload, value)
+			case `"error"`:
+				rawError = Part(dec, payload, value)
+			default:
+				return false
+			}
+		}
+		if rawID.Kind() != '"' || bytes.IndexByte(rawID, '\\') >= 0 || rawError != nil && rawError.Kind() != '{' {
+			return false
+		}
+		id = rawID[1 : len(rawID)-1]
+		return true
+	})
+	if !ok {
+		return nil, nil, nil, false
+	}
+	return id, result, rawError, true
+}

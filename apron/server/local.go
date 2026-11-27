@@ -460,49 +460,20 @@ func (l *Local) answer(id []byte, r localReply) {
 	}
 }
 
-// parseReply reads a reply as the Server writes one, in place, without
-// decoding it whole: {"id":...,"result":...}, or {"error":...,"id":...},
-// with an id of plain characters. It reports false for any other frame,
-// which receive decodes as before. The result is part of the reply,
-// which is the request's own.
+// parseReply reads a reply as the Server writes one, in place
+// (core.ParseReply), its result part of the reply, which is the request's
+// own; it reports false for any other frame, which receive decodes as
+// before.
 func (l *Local) parseReply(payload []byte) (id []byte, r localReply, ok bool) {
-	ok = core.DecodeInPlace(payload, func(dec *jsontext.Decoder) bool {
-		if tok, err := dec.ReadToken(); err != nil || tok.Kind() != '{' {
-			return false
-		}
-		var rawID, rawError jsontext.Value
-		for dec.PeekKind() != '}' {
-			name, err := dec.ReadValue()
-			if err != nil {
-				return false
-			}
-			value, err := dec.ReadValue()
-			if err != nil {
-				return false
-			}
-			switch string(name) {
-			case `"id"`:
-				rawID = value
-			case `"result"`:
-				r.result = core.Part(dec, payload, value)
-			case `"error"`:
-				rawError = core.Part(dec, payload, value)
-			default:
-				return false
-			}
-		}
-		if rawID.Kind() != '"' || bytes.IndexByte(rawID, '\\') >= 0 {
-			return false
-		}
-		id = rawID[1 : len(rawID)-1]
-		if rawError != nil {
-			if rawError.Kind() != '{' || json.Unmarshal(rawError, &r.err) != nil {
-				return false
-			}
-		}
-		return true
-	})
-	return id, r, ok
+	id, result, rawError, ok := core.ParseReply(payload)
+	if !ok {
+		return nil, localReply{}, false
+	}
+	r.result = result
+	if rawError != nil && json.Unmarshal(rawError, &r.err) != nil {
+		return nil, localReply{}, false
+	}
+	return id, r, true
 }
 
 // toOnFrame queues a frame that is no reply for OnFrame, if there is one.
