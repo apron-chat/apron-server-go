@@ -372,6 +372,9 @@ func (l *Local) process(ctx context.Context, method, id string, params any) erro
 // receive takes a frame written to the connection: a reply goes to its
 // Call, and anything else to OnFrame.
 func (l *Local) receive(payload []byte) error {
+	if isNotification(payload) {
+		return l.toOnFrame(payload)
+	}
 	var frame struct {
 		ID     *string        `json:"id"`
 		Method string         `json:"method"`
@@ -387,6 +390,11 @@ func (l *Local) receive(payload []byte) error {
 		}
 		return nil
 	}
+	return l.toOnFrame(payload)
+}
+
+// toOnFrame queues a frame that is no reply for OnFrame, if there is one.
+func (l *Local) toOnFrame(payload []byte) error {
 	if l.frames == nil {
 		return nil
 	}
@@ -397,6 +405,19 @@ func (l *Local) receive(payload []byte) error {
 		l.shut(ErrFellBehind)
 		return ErrFellBehind
 	}
+}
+
+// notificationPrefix begins every notification the Server encodes
+// (apron.Encode), whose members are in the order of their names.
+const notificationPrefix = `{"method":"`
+
+// isNotification reports, without decoding it, whether a frame is valid
+// JSON whose first member is a method that is not empty, as every
+// notification the Server encodes is: no reply, which has no method, as
+// decoding it would tell.
+func isNotification(payload []byte) bool {
+	return len(payload) > len(notificationPrefix) && string(payload[:len(notificationPrefix)]) == notificationPrefix &&
+		payload[len(notificationPrefix)] != '"' && jsontext.Value(payload).IsValid()
 }
 
 // localWriter is a Local connection's transport.
