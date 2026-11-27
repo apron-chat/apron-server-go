@@ -41,3 +41,26 @@ func TestUnknownEnvelopeKeysAreIgnored(t *testing.T) {
 		}
 	}
 }
+
+// A request's fingerprint is the same however its params are written,
+// and differs for other params, or another method.
+func TestFingerprint(t *testing.T) {
+	same := []string{
+		`{"room_id":"general","body":{"text":"é","mentions":["a"]},"n":100}`,
+		`{ "body" : { "mentions" : [ "a" ], "text" : "é" }, "n": 1e2, "room_id": "general" }`,
+	}
+	for _, params := range same[1:] {
+		if Fingerprint("message", []byte(params)) != Fingerprint("message", []byte(same[0])) {
+			t.Errorf("%s has another fingerprint than %s", params, same[0])
+		}
+	}
+	for _, other := range []struct{ method, params string }{
+		{"message", `{"room_id":"general","body":{"text":"e","mentions":["a"]},"n":100}`},
+		{"message", `{"room_id":"general","body":{"text":"é","mentions":["a"]},"n":101}`},
+		{"command", same[0]},
+	} {
+		if Fingerprint(other.method, []byte(other.params)) == Fingerprint("message", []byte(same[0])) {
+			t.Errorf("%s %s has the fingerprint of message %s", other.method, other.params, same[0])
+		}
+	}
+}

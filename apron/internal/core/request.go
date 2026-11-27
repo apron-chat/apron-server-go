@@ -91,14 +91,16 @@ func ParseRequest(payload []byte) (Request, *ParseError) {
 }
 
 // Fingerprint identifies a request for deduplication (§1.2): a hash of its
-// method and params, whatever the order of their object keys.
+// method and params, whatever the order of their object keys, and however
+// their strings and numbers are written, as RFC 8785 canonicalizes them.
 func Fingerprint(method string, params jsontext.Value) [32]byte {
-	canonical := []byte(params)
-	var value any
-	if json.Unmarshal(params, &value) == nil {
-		if encoded, err := Marshal(value); err == nil {
-			canonical = encoded
-		}
+	// One buffer holds the method, a NUL, and the params, canonicalized
+	// in place.
+	buf := make([]byte, 0, len(method)+1+len(params))
+	buf = append(append(buf, method...), 0)
+	canonical := jsontext.Value(append(buf[len(buf):], params...))
+	if canonical.Canonicalize() != nil {
+		canonical = append(canonical[:0], params...)
 	}
-	return sha256.Sum256(append([]byte(method+"\x00"), canonical...))
+	return sha256.Sum256(append(buf, canonical...))
 }
