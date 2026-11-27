@@ -352,8 +352,11 @@ type Table[U Member, M MessageHolder] struct {
 	dirtyMessages map[string]*Message
 	// later are the large rooms changed since Entries last took them only
 	// in what their entry may lag behind (touchLater), since laterSince.
-	later      map[string]struct{}
-	laterSince time.Time
+	// laterMessages are the messages with many reactions changed since
+	// then only in their reactions (touchMessageLater).
+	later         map[string]struct{}
+	laterMessages map[string]*Message
+	laterSince    time.Time
 	// restoring are the stored members of each room, from Restore until
 	// RestoreMembers.
 	restoring map[string][]string
@@ -365,7 +368,7 @@ func NewTable[U Member, M MessageHolder](log *roomlog.Log, hold func(*Message) M
 	return &Table[U, M]{
 		log: log, rooms: make(map[string]*Room[U]), messages: make(map[string]M), hold: hold,
 		dirty: make(map[string]struct{}), dirtyMessages: make(map[string]*Message),
-		later: make(map[string]struct{}),
+		later: make(map[string]struct{}), laterMessages: make(map[string]*Message),
 	}
 }
 
@@ -607,16 +610,19 @@ func (t *Table[U, M]) Entries() []store.Entry {
 // their entries may lag behind (touchLater), which it leaves out until
 // EntryDelay has passed since the first of them changed, as of now.
 func (t *Table[U, M]) EntriesDue(now time.Time) []store.Entry {
-	if len(t.later) > 0 && t.laterSince.IsZero() {
+	lagging := t.lagging()
+	if lagging && t.laterSince.IsZero() {
 		t.laterSince = now
 	}
-	return t.entries(len(t.later) > 0 && now.Sub(t.laterSince) >= EntryDelay)
+	return t.entries(lagging && now.Sub(t.laterSince) >= EntryDelay)
 }
+
+func (t *Table[U, M]) lagging() bool { return len(t.later) > 0 || len(t.laterMessages) > 0 }
 
 // Lagging reports when the entries EntriesDue leaves out are due, and
 // whether there are any.
 func (t *Table[U, M]) Lagging() (time.Time, bool) {
-	if len(t.later) == 0 {
+	if !t.lagging() {
 		return time.Time{}, false
 	}
 	return t.laterSince.Add(EntryDelay), true
@@ -627,13 +633,18 @@ func (t *Table[U, M]) entries(withLater bool) []store.Entry {
 		for id := range t.later {
 			t.dirty[id] = struct{}{}
 		}
+		maps.Copy(t.dirtyMessages, t.laterMessages)
 		clear(t.later)
+		clear(t.laterMessages)
 		t.laterSince = time.Time{}
 	} else {
 		for id := range t.dirty {
 			delete(t.later, id)
 		}
-		if len(t.later) == 0 {
+		for id := range t.dirtyMessages {
+			delete(t.laterMessages, id)
+		}
+		if !t.lagging() {
 			t.laterSince = time.Time{}
 		}
 	}

@@ -39,7 +39,9 @@ import (
 // room's entry, which lists every member, their activity, and their read
 // cursors, is the one exception: what changes with each message and read
 // is rendered at most once every rooms.EntryDelay, and at once when a fence
-// waits (Sync) or the store closes, while its records go at once (rooms).
+// waits (Sync) or the store closes, while its records go at once (rooms);
+// so is the entry of a message with many reactions, whose reactions
+// records restoring applies over it.
 // At start, Open rebuilds the state from the store.
 //
 // Entry kinds and IDs:

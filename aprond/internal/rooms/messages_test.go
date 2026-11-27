@@ -3,9 +3,11 @@ package rooms
 import (
 	"bytes"
 	"encoding/json/jsontext"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/apron-chat/apron-server-go/aprond/internal/roomlog"
 	"github.com/apron-chat/apron-server-go/store"
@@ -108,5 +110,55 @@ func TestReactions(t *testing.T) {
 	gone := newTable()
 	if err := gone.RestoreMessages(map[string]jsontext.Value{m.ID(): entry.Value}, nil); err != nil || gone.Message(m.ID()) != nil {
 		t.Error("a message without its records was restored")
+	}
+}
+
+// A message with many reaction sets stores its entry for reactions at most
+// once every EntryDelay; restored from an entry that lags behind, it has
+// the reactions its records logged since.
+func TestManyReactionsLag(t *testing.T) {
+	table := newTable()
+	general := table.Create("general", nil, false, "", roomlog.RoomRecord{})
+	ada := &user{id: "ada"}
+	m := table.NewMessage("1", ada.from(), "ada")
+	snapshot(table, m, general.ID(), "hot")
+	var reactors []*user
+	for i := range LaterReactions + 2 {
+		reactors = append(reactors, &user{id: "u" + strings.Repeat("x", i)})
+	}
+	for _, u := range reactors[:LaterReactions] {
+		table.React(m, u.from(), []string{"👍"})
+	}
+	messages := func(entries []store.Entry) []store.Entry {
+		return slices.DeleteFunc(entries, func(e store.Entry) bool { return e.Kind != MessageEntryKind })
+	}
+	start := time.Now()
+	// Up to LaterReactions sets, each reaction stores the entry at once.
+	if got := messages(table.EntriesDue(start)); len(got) != 1 {
+		t.Fatalf("stored %d message entries, want 1", len(got))
+	}
+	stale := MessageEntry(m)
+	table.React(m, reactors[LaterReactions].from(), []string{"🎉"})
+	table.React(m, reactors[0].from(), nil)
+	table.React(m, reactors[1].from(), []string{"❤️"})
+	if got := messages(table.EntriesDue(start)); len(got) != 0 {
+		t.Fatalf("stored %d message entries at once, want none", len(got))
+	}
+	if got := messages(table.EntriesDue(start.Add(EntryDelay))); len(got) != 1 {
+		t.Fatalf("stored %d message entries after the delay, want 1", len(got))
+	}
+	want := m.Reactions()
+	records := map[int64]*roomlog.Record{}
+	for _, r := range general.Log().Since(0, 1<<30) {
+		records[r.ID] = r
+	}
+	for name, entry := range map[string]jsontext.Value{"lagging": stale.Value, "current": MessageEntry(m).Value} {
+		restored := newTable()
+		if err := restored.RestoreMessages(map[string]jsontext.Value{"1": entry}, records); err != nil {
+			t.Fatal(err)
+		}
+		if got := restored.Message("1").Reactions(); !reflect.DeepEqual(got, want) {
+			t.Errorf("restored from the %s entry: %d sets, want %d", name, len(got), len(want))
+		}
 	}
 }
