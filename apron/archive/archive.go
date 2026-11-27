@@ -307,9 +307,9 @@ func decode[T any](r *Reader, array jsontext.Value, list *[]T, valid func(*T, js
 		return
 	}
 	// The records are read in place, one at a time, rather than copied
-	// out of the array first; the array is valid JSON, a member of a line
-	// that decoded.
-	dec := jsontext.NewDecoder(bytes.NewReader(array))
+	// out of the array first (a decoder of a bytes.Buffer reads it where
+	// it is); the array is valid JSON, a member of a line that decoded.
+	dec := jsontext.NewDecoder(bytes.NewBuffer(array))
 	if _, err := dec.ReadToken(); err != nil {
 		r.skipped++
 		return
@@ -338,7 +338,7 @@ func decode[T any](r *Reader, array jsontext.Value, list *[]T, valid func(*T, js
 // count returns how many values a JSON array has, or 0 for one that is
 // not valid.
 func count(array jsontext.Value) int {
-	dec := jsontext.NewDecoder(bytes.NewReader(array))
+	dec := jsontext.NewDecoder(bytes.NewBuffer(array))
 	if _, err := dec.ReadToken(); err != nil {
 		return 0
 	}
