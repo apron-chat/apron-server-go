@@ -65,6 +65,8 @@ var scenarios = []scenario{
 	{"embeds", "upload files, and write live terminal and append text with readers", []string{"embed:upload", "embed:terminal", "embed:append"}, runEmbeds},
 	{"ext", "save messages through the ext merge's edge cases, pipelined saves of different keys included", []string{"edit", "ext"}, runExt},
 	{"signin", "sign guests in and check that nothing about the new identity precedes the auth result", nil, runSignIn},
+	{"bigroom", "a few clients post to general while many more only read it", nil, runBigRoom},
+	{"reactions", "every client reacts to one hot message again and again", []string{"reactions"}, runReactions},
 }
 
 func main() {

@@ -20,7 +20,7 @@ Restart the server between runs you want to compare. A scenario that needs a
 capability the server's `server` frame does not list is skipped: `activity`
 needs `activity`, `history` needs `history` and `rooms`, `threads` needs
 `rooms`, `edits` needs `edit` and `reactions`, `embeds` needs
-`embed:upload`, `embed:terminal`, and `embed:append`, and `ext` needs `edit` and `ext`.
+`embed:upload`, `embed:terminal`, and `embed:append`, `ext` needs `edit` and `ext`, and `reactions` needs `reactions`.
 
 | Scenario   | Load |
 |------------|------|
@@ -34,6 +34,8 @@ needs `activity`, `history` needs `history` and `rooms`, `threads` needs
 | `embeds`   | 64 KiB uploads read back from their file URLs, and two-second live `terminal` (1 KiB chunks) and `append` (64-byte chunks) text read while it is written |
 | `ext`      | saves messages through the `ext` merge's edge cases and checks each snapshot: empty values dropped, an integer beyond 2^53 kept exactly, two saves of different keys sent back to back both kept, `"ext": {}` and a save without `ext` changing nothing, `null` kept, and no `ext` on a tombstone |
 | `signin`   | signs guests in over and over and checks that only the `server` frame and transient notices arrive before the `auth` result |
+| `bigroom`  | a fifth of the clients post to `general` while four times `-clients` more (at least 200) only read it: one room past the 64 members from which `aprond` stores its entry at most every 200 ms, where every post fans out to every reader |
+| `reactions` | every client, and at least 100, changes its reaction set on one hot message every 400 ms, about the server's refill of changes after its burst: each change is a reactions record for everyone in `general`, on a message with as many sets as clients, past the 64 from which `aprond` stores the message's entry at most every 200 ms |
 
 Flags:
 
