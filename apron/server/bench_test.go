@@ -195,7 +195,8 @@ func (r *roundTrip) call(method, params string, writes int) {
 
 // BenchmarkRequestRoundTrip makes one request at a time on one connection, alone
 // in its room: message (its notification and its result), history (a page
-// of 100 of 1000 messages), me (a rename), status (idle, which others see
+// of 100 of 1000 messages), history-raw (the same page, of records the
+// backend keeps encoded, HistoryResult.Raw), me (a rename), status (idle, which others see
 // as away), reactions, and a request that fails (unsupported).
 func BenchmarkRequestRoundTrip(b *testing.B) {
 	b.Run("message", func(b *testing.B) {
@@ -208,6 +209,18 @@ func BenchmarkRequestRoundTrip(b *testing.B) {
 	})
 	b.Run("history", func(b *testing.B) {
 		chat := benchchat.New(server.Config{})
+		r := newRoundTrip(chat, "solo")
+		defer chat.CloseAll([]*benchchat.Transport{r.t})
+		for range 1000 {
+			r.call("message", `{"body":{"text":"Hello, everyone: this is a line of chat of a usual length."}}`, 2)
+		}
+		for b.Loop() {
+			r.call("history", `{"limit":100}`, 1)
+		}
+	})
+	b.Run("history-raw", func(b *testing.B) {
+		chat := benchchat.New(server.Config{})
+		chat.RawHistory = true
 		r := newRoundTrip(chat, "solo")
 		defer chat.CloseAll([]*benchchat.Transport{r.t})
 		for range 1000 {

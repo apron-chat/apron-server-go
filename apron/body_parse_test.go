@@ -62,3 +62,33 @@ func TestBodyMarshal(t *testing.T) {
 		}
 	}
 }
+
+// A history result with its records raw is the result with them decoded
+// into its arrays.
+func TestHistoryResultRaw(t *testing.T) {
+	typed := HistoryResult{
+		Rooms:      []Room{{RoomID: "general", LogID: 5}},
+		Messages:   []Message{{MessageID: 6, LogID: 7, RoomID: "general", From: User{UserID: "a", Name: "é"}, Body: &Body{Text: "hi"}}},
+		FirstLogID: 5, LastLogID: 7, More: true, LatestLogID: 9, HistoryLogID: 1,
+	}
+	raw := HistoryResult{FirstLogID: 5, LastLogID: 7, More: true, LatestLogID: 9, HistoryLogID: 1, Raw: &RawRecords{}}
+	for _, r := range typed.Rooms {
+		encoded, _ := Marshal(r)
+		raw.Raw.Rooms = append(raw.Raw.Rooms, encoded)
+	}
+	for _, m := range typed.Messages {
+		encoded, _ := Marshal(m)
+		raw.Raw.Messages = append(raw.Raw.Messages, encoded)
+	}
+	want, err := Marshal(typed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := Marshal(raw)
+	if err != nil || string(got) != string(want) {
+		t.Errorf("raw: %s, %v; want %s", got, err, want)
+	}
+	if empty, _ := Marshal(HistoryResult{Raw: &RawRecords{}}); string(empty) != `{"more":false,"history_log_id":null}` {
+		t.Errorf("empty: %s", empty)
+	}
+}

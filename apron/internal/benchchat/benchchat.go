@@ -7,6 +7,7 @@
 package benchchat
 
 import (
+	"cmp"
 	"context"
 	"encoding/json/jsontext"
 	"io"
@@ -28,6 +29,10 @@ type Chat struct {
 	// room's members from its own lists, with Conn.Send, rather than with
 	// Server.Broadcast and a filter, which walks every connection.
 	MemberLists bool
+	// RawHistory, if set, has the backend keep each logged record encoded
+	// too, and answer history with them as they are (HistoryResult.Raw),
+	// as a backend that stores its log encoded does.
+	RawHistory bool
 
 	clock server.Clock
 
@@ -35,7 +40,11 @@ type Chat struct {
 	guests int
 	rooms  map[string]*room
 	log    []apron.Record
-	lower  apron.LogID
+	// bare is log with only the log_ids of its records, and raw their
+	// encodings, for RawHistory.
+	bare  []apron.Record
+	raw   []jsontext.Value
+	lower apron.LogID
 }
 
 type room struct {
@@ -161,10 +170,7 @@ func (c *Chat) Message(_ context.Context, conn *server.Conn, p apron.MessagePara
 	if err != nil {
 		return err
 	}
-	c.log = append(c.log, apron.Record{LogID: id, Message: &message})
-	if c.lower == 0 {
-		c.lower = id
-	}
+	c.logMessage(message)
 	c.deliver(m.room, frame, nil)
 	return reply.Send(apron.MessageResult{MessageID: id})
 }
@@ -173,7 +179,19 @@ func (c *Chat) Message(_ context.Context, conn *server.Conn, p apron.MessagePara
 func (c *Chat) History(_ context.Context, _ *server.Conn, p apron.HistoryParams, reply server.Reply[apron.HistoryResult]) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return reply.Send(server.Page(server.Log{Records: c.log, Lower: c.lower, Latest: c.clock.Last()}, p, 100))
+	if !c.RawHistory {
+		return reply.Send(server.Page(server.Log{Records: c.log, Lower: c.lower, Latest: c.clock.Last()}, p, 100))
+	}
+	// Page picks the window of the bare log, and its records are the raw
+	// ones of that window.
+	result := server.Page(server.Log{Records: c.bare, Lower: c.lower, Latest: c.clock.Last()}, p, 100)
+	result.Raw = &apron.RawRecords{}
+	if result.FirstLogID != 0 {
+		start, _ := slices.BinarySearchFunc(c.bare, result.FirstLogID, func(r apron.Record, id apron.LogID) int { return cmp.Compare(r.LogID, id) })
+		end, _ := slices.BinarySearchFunc(c.bare, result.LastLogID, func(r apron.Record, id apron.LogID) int { return cmp.Compare(r.LogID, id) })
+		result.Raw.Messages = c.raw[start : end+1]
+	}
+	return reply.Send(result)
 }
 
 // Me renames the user, and tells the room.
@@ -416,9 +434,22 @@ func (c *Chat) Seed(roomID string, n int) {
 		if c.lower == 0 {
 			c.lower = id
 		}
-		m := Message(id, roomID, i)
-		c.log = append(c.log, apron.Record{LogID: id, Message: &m})
+		c.logMessage(Message(id, roomID, i))
 	}
+}
+
+// logMessage logs a message, with c.mu held.
+func (c *Chat) logMessage(m apron.Message) {
+	if c.lower == 0 {
+		c.lower = m.LogID
+	}
+	c.log = append(c.log, apron.Record{LogID: m.LogID, Message: &m})
+	raw, err := apron.Marshal(m)
+	if err != nil {
+		panic(err)
+	}
+	c.bare = append(c.bare, apron.Record{LogID: m.LogID})
+	c.raw = append(c.raw, raw)
 }
 
 // Message is the i-th message of a seeded log, with message_id and
