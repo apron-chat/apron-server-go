@@ -289,18 +289,16 @@ func BenchmarkRequestLocal(b *testing.B) {
 // BenchmarkFanoutRooms posts a message to one room of many: 1000
 // connections in rooms of size members. With Broadcast and a filter, every
 // message walks every connection; with the backend's member lists and
-// Conn.Send, only the room's.
+// Conn.Send, only the room's. status changes the sender's shown status
+// instead, which PublishUser tells those who share the room, walking every
+// connection, whatever the backend keeps.
 func BenchmarkFanoutRooms(b *testing.B) {
 	const conns = 1000
 	for _, members := range []int{10, 1000} {
-		for _, lists := range []bool{false, true} {
-			how := "broadcast"
-			if lists {
-				how = "memberlists"
-			}
+		for _, how := range []string{"broadcast", "memberlists", "status"} {
 			b.Run(fmt.Sprintf("members=%d/%s", members, how), func(b *testing.B) {
 				chat := benchchat.New(server.Config{})
-				chat.MemberLists = lists
+				chat.MemberLists = how == "memberlists"
 				sink := benchchat.NewSink()
 				rooms := conns / members
 				ts := chat.Open(conns-1, sink, func(i int) string { return "room" + strconv.Itoa(i%rooms) })
@@ -309,12 +307,14 @@ func BenchmarkFanoutRooms(b *testing.B) {
 				// The sender's room has members connections, the sender's
 				// among them, which share its sink's count but for the
 				// sender's own: wait on the shared sink for the others.
+				idle := []string{`{"idle":60}`, `{"idle":false}`}
 				for b.Loop() {
-					r.next++
-					r.target += 2
 					others := sink.Total() + int64(members-1)
-					r.t.Send(benchchat.Request("message", strconv.Itoa(r.next), apron.MessageParams{Body: &apron.Body{Text: "hi"}}))
-					r.sink.Wait(r.target)
+					if how == "status" {
+						r.call("status", idle[r.next%2], 1)
+					} else {
+						r.call("message", `{"body":{"text":"hi"}}`, 2)
+					}
 					sink.Wait(others)
 				}
 			})
