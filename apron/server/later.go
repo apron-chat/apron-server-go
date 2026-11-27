@@ -43,6 +43,13 @@ func (r *Request) answerLater() error {
 	if r.replied || r.notification || r.later != nil {
 		return nil
 	}
+	r.answerLaterLocked()
+	return nil
+}
+
+// answerLaterLocked marks the request, with r.mu held, as answered after
+// its handler returns.
+func (r *Request) answerLaterLocked() {
 	r.later = &later{}
 	if r.entry != nil {
 		r.entry.Later.Store(true)
@@ -50,7 +57,46 @@ func (r *Request) answerLater() error {
 	if r.c != nil {
 		r.later.stop = context.AfterFunc(r.c.ctx, r.abandon)
 	}
+}
+
+// reserve fixes the place of the request's reply among its connection's
+// frames (Reply.Reserve), and marks it answered later, unless it has its
+// reply, or is a notification; a place reserved already stays.
+func (r *Request) reserve() error {
+	if r.Method == "auth" {
+		return errLaterAuth
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.replied || r.notification || r.slot != nil {
+		return nil
+	}
+	if r.later == nil {
+		r.answerLaterLocked()
+	}
+	if r.c != nil {
+		// Nil when the connection is closing: the reply then is not
+		// queued, as it would not be without a place.
+		r.slot = r.c.rt.Reserve()
+		r.reserved = true
+	}
 	return nil
+}
+
+// queue queues the request's reply, with r.mu held: in its reserved place,
+// if it has one, or else after what is queued.
+func (r *Request) queue(frames ...[]byte) bool {
+	switch {
+	case r.slot != nil:
+		// A slot of a connection that stopped is written by no one.
+		r.slot.Fill(frames...)
+		return !r.c.rt.Stopped()
+	case r.reserved:
+		return false
+	case len(frames) == 1:
+		return r.c.rt.SendFrame(frames[0])
+	}
+	return r.c.rt.Send(frames...)
 }
 
 // abandon ends a request answered later whose connection ended before its

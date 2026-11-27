@@ -93,6 +93,44 @@ func (p Reply[T]) Later() error {
 	return p.r.answerLater()
 }
 
+// Reserve fixes the place of the request's result among the frames of its
+// connection now, as Send would queue it, and leaves the result to be sent
+// in that place later, by Send or Fail, as Later does: the frames queued
+// to the connection before Reserve go before the result, and those after,
+// after it. A backend that keeps its state under a lock reserves while it
+// holds it, where it would Send, so that the result reflects every
+// notification sent before it on the connection, and none after (§1);
+// it lets go of the lock, and only then makes and sends the result,
+// which, when it is large, such as a page of history, is encoded outside
+// the lock:
+//
+//	b.mu.Lock()
+//	page := b.page(p) // what the result holds, read under the lock
+//	if err := reply.Reserve(); err != nil {
+//		b.mu.Unlock()
+//		return err
+//	}
+//	b.mu.Unlock()
+//	return reply.Send(page)
+//
+// Reserve is O(1), and never blocks. Until the result is sent, the frames
+// queued after it wait: the connection's writer waits in the result's
+// place for as long as a write may take (Config.WriteTimeout), then ends
+// the connection, as it does a write that takes longer; a handler sends
+// soon after it reserves. Otherwise the request is one answered later:
+// its handler may return before it sends, its connection goes on to its
+// next frame, a duplicate (§1.2) waits for its outcome, and when the
+// connection ends first, the request fails and is not kept. Reserve
+// returns nil, and does nothing, for a request that has its reply, or a
+// place already; auth is a barrier, and its Reserve returns an error, as
+// its Later does.
+func (p Reply[T]) Reserve() error {
+	if p.r == nil {
+		return errors.New("apron: Reserve on a zero Reply")
+	}
+	return p.r.reserve()
+}
+
 // Fail sends the request's error reply now: err when it is an *Error, and
 // else error/internal_error, which is logged, as an error a handler
 // returns is. It is how a request answered later (Later) fails, and
@@ -152,7 +190,7 @@ func (r *Request) send(sent any, value func() (any, error), apply func(), then [
 		r.c.Close()
 		return apron.ErrClosed
 	case e != nil:
-		r.c.rt.SendFrame(frame)
+		r.queue(frame)
 		return e
 	}
 	if apply != nil {
@@ -162,14 +200,14 @@ func (r *Request) send(sent any, value func() (any, error), apply func(), then [
 	// comes after it.
 	queued := false
 	if len(then) == 0 {
-		queued = r.c.rt.SendFrame(frame)
+		queued = r.queue(frame)
 	} else {
 		raw := make([][]byte, 1, 1+len(then))
 		raw[0] = frame
 		for _, f := range then {
 			raw = append(raw, f)
 		}
-		queued = r.c.rt.Send(raw...)
+		queued = r.queue(raw...)
 	}
 	if !queued {
 		return apron.ErrClosed
@@ -189,7 +227,7 @@ func (r *Request) failLocked(e *apron.Error) bool {
 		return true
 	}
 	frame, _, _ := r.encodeReply(nil, e)
-	return frame != nil && r.c.rt.SendFrame(frame)
+	return frame != nil && r.queue(frame)
 }
 
 // forgetUnkeptLocked, with r.mu held, drops the request's deduplication

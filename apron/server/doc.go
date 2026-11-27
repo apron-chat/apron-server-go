@@ -186,6 +186,12 @@
 // queuing them first. Where that takes more than a lock, see Ordering for
 // asynchronous hosts.
 //
+// A result that is large to encode, such as a page of history, need not
+// be encoded while the backend holds its lock: [Reply.Reserve] fixes the
+// result's place among the connection's frames under the lock, where
+// Send would queue it, and the handler sends it in that place once it has
+// let go of the lock, so that §1's order is the same as Send's.
+//
 // # Sending never blocks
 //
 // Sending never blocks, and calls nothing of the backend's but

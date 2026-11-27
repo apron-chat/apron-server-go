@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/apron-chat/apron-server-go/apron"
 	"github.com/apron-chat/apron-server-go/apron/server"
@@ -33,6 +34,13 @@ type Chat struct {
 	// too, and answer history with them as they are (HistoryResult.Raw),
 	// as a backend that stores its log encoded does.
 	RawHistory bool
+	// ReserveHistory, if set, has the backend answer history in a place
+	// it reserves under its lock (Reply.Reserve), encoding the page once
+	// it lets go of it.
+	ReserveHistory bool
+	// LockHeld is how long, in nanoseconds, history requests held the
+	// backend's lock, in all.
+	LockHeld atomic.Int64
 
 	clock server.Clock
 
@@ -178,7 +186,22 @@ func (c *Chat) Message(_ context.Context, conn *server.Conn, p apron.MessagePara
 // History pages through the log, every room's.
 func (c *Chat) History(_ context.Context, _ *server.Conn, p apron.HistoryParams, reply server.Reply[apron.HistoryResult]) error {
 	c.mu.Lock()
+	locked := time.Now()
+	held := func() { c.LockHeld.Add(int64(time.Since(locked))) }
+	if c.ReserveHistory {
+		// The page is read under the lock, and its place fixed, and it is
+		// encoded and sent once the lock is let go.
+		page := server.Page(server.Log{Records: c.log, Lower: c.lower, Latest: c.clock.Last()}, p, 100)
+		err := reply.Reserve()
+		held()
+		c.mu.Unlock()
+		if err != nil {
+			return err
+		}
+		return reply.Send(page)
+	}
 	defer c.mu.Unlock()
+	defer held()
 	if !c.RawHistory {
 		return reply.Send(server.Page(server.Log{Records: c.log, Lower: c.lower, Latest: c.clock.Last()}, p, 100))
 	}

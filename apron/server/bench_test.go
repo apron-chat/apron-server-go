@@ -513,3 +513,50 @@ func BenchmarkConnUser(b *testing.B) {
 		}
 	})
 }
+
+// BenchmarkRequestReserve answers history, a page of 100 of 1000
+// messages, with the backend's lock held as the result is encoded and
+// queued (send), or held only to read the page and reserve the result's
+// place (reserve, Reply.Reserve), the page encoded after: lock-ns is how
+// long each request held the lock. parallel-* make the requests on many
+// connections at once, which contend for the lock.
+func BenchmarkRequestReserve(b *testing.B) {
+	for _, how := range []string{"send", "reserve", "parallel-send", "parallel-reserve"} {
+		b.Run(how, func(b *testing.B) {
+			chat := benchchat.New(server.Config{})
+			chat.MemberLists = true
+			chat.ReserveHistory = strings.HasSuffix(how, "reserve")
+			chat.Seed("general", 1000)
+			var mu sync.Mutex
+			var opened []*roundTrip
+			defer func() {
+				for _, r := range opened {
+					_ = r.t.Close()
+				}
+				_ = chat.Server.Shutdown(context.Background())
+			}()
+			open := func(n int64) *roundTrip {
+				r := newRoundTrip(chat, "room"+strconv.FormatInt(n, 10))
+				mu.Lock()
+				opened = append(opened, r)
+				mu.Unlock()
+				return r
+			}
+			if strings.HasPrefix(how, "parallel") {
+				var rooms atomic.Int64
+				b.RunParallel(func(pb *testing.PB) {
+					r := open(rooms.Add(1))
+					for pb.Next() {
+						r.call("history", `{"limit":100}`, 1)
+					}
+				})
+			} else {
+				r := open(0)
+				for b.Loop() {
+					r.call("history", `{"limit":100}`, 1)
+				}
+			}
+			b.ReportMetric(float64(chat.LockHeld.Load())/float64(b.N), "lock-ns/op")
+		})
+	}
+}

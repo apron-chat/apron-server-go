@@ -61,6 +61,38 @@ type batch struct {
 	// last closes the connection once the frames are written.
 	last  bool
 	fence Fence
+	// slot, if set, is a place for frames to come (Reserve).
+	slot *Slot
+}
+
+// A Slot is a place in a connection's queue, kept for frames that are not
+// made yet, such as a result still being encoded: the writer waits there
+// until they are given (Fill), and writes them, then the frames queued
+// after the slot. A slot not filled within Options.WriteTimeout stops the
+// connection, as a write that takes longer does.
+type Slot struct {
+	frames [][]byte
+	once   sync.Once
+	filled chan struct{}
+}
+
+// Fill gives the slot its frames, written one after another, with nothing
+// between them; only the first Fill gives any.
+func (s *Slot) Fill(frames ...[]byte) {
+	s.once.Do(func() {
+		s.frames = frames
+		close(s.filled)
+	})
+}
+
+// Reserve queues a slot for frames to come, and returns it, or nil when
+// the connection is closing or stopped, or fell behind.
+func (c *Conn) Reserve() *Slot {
+	s := &Slot{filled: make(chan struct{})}
+	if !c.enqueue(batch{slot: s}) {
+		return nil
+	}
+	return s
 }
 
 // Conn is a connection's runtime: its bounded write queue, the writer and
@@ -125,6 +157,9 @@ func (c *Conn) Start(ping bool) {
 
 // Done is closed once the connection stops.
 func (c *Conn) Done() <-chan struct{} { return c.done }
+
+// Stopped reports whether the connection stopped.
+func (c *Conn) Stopped() bool { return c.stopped.Load() }
 
 // Closing reports whether the connection's last batch is queued, or it
 // stopped.
@@ -299,6 +334,24 @@ func (c *Conn) write(frame []byte) error {
 	return err
 }
 
+// waitSlot waits for a slot to be filled, as long as a write may take,
+// and reports whether it was: else the write timer stops the connection.
+func (c *Conn) waitSlot(s *Slot) bool {
+	if c.timer != nil {
+		c.deadline.Store(time.Now().Add(c.options.WriteTimeout).UnixNano())
+		if c.armed.CompareAndSwap(false, true) {
+			c.timer.Reset(c.options.WriteTimeout)
+		}
+		defer c.deadline.Store(0)
+	}
+	select {
+	case <-c.done:
+		return false
+	case <-s.filled:
+		return true
+	}
+}
+
 // writeExpired runs when the write timer fires: it stops the connection
 // if the write under way is past its deadline, arms the timer again for
 // one that is not, and else leaves it unarmed until the next write.
@@ -326,6 +379,15 @@ func (c *Conn) writeLoop() {
 		b, ok := c.next()
 		if !ok {
 			return
+		}
+		if b.slot != nil {
+			if !c.waitSlot(b.slot) {
+				return
+			}
+			b.frames = b.slot.frames
+			if b.frames == nil {
+				continue
+			}
 		}
 		if b.fence != nil {
 			select {

@@ -92,7 +92,11 @@ type Request struct {
 
 	mu      sync.Mutex
 	replied bool
-	outcome dedupOutcome
+	// slot, once reserved is set, is the reply's place in its connection's
+	// queue (Reply.Reserve), nil when the connection was closing.
+	slot     *core.Slot
+	reserved bool
+	outcome  dedupOutcome
 	// later is set once the request is to be answered after its handler
 	// returns (Reply.Later).
 	later *later
