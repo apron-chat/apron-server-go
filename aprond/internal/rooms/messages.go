@@ -147,7 +147,7 @@ func (t *Table[U, M]) React(m *Message, from roomlog.Author, emojis []string) (*
 func (t *Table[U, M]) LogReactions(m *Message, reactions []roomlog.Reaction) (*roomlog.Record, *Room[U]) {
 	r := t.rooms[m.room]
 	record := roomlog.NewReactions(t.log.NextID(), m.id, m.room, reactions)
-	t.Append(record, r)
+	t.appendLater(record, r)
 	return record, r
 }
 
@@ -182,7 +182,7 @@ func (t *Table[U, M]) Snapshot(m *Message, snapshot *roomlog.Message, logID int6
 	t.dirtyMessages[m.id] = m
 	record = roomlog.NewMessage(logID, snapshot)
 	m.records = append(m.records, record)
-	t.Append(record, rooms...)
+	t.appendLater(record, rooms...)
 	return record, rooms, moved
 }
 

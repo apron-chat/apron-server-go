@@ -199,8 +199,13 @@ type Server struct {
 
 	// store writes the changes made under mu, in batches, in the
 	// background (persist.go); storedMeta are the counters it last wrote.
-	store      *durable.Writer
-	storedMeta storedMeta
+	// roomEntryTimer writes the entries of large rooms that lag behind
+	// once they are due, and closingStore makes the last batch write them
+	// all (flushLocked).
+	store          *durable.Writer
+	storedMeta     storedMeta
+	roomEntryTimer *time.Timer
+	closingStore   bool
 	// pushes are the users' push registrations (push.go).
 	pushes   *push.Table
 	closed   bool

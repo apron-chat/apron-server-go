@@ -378,3 +378,71 @@ func (s *Server) dumpLocked() []store.Entry {
 	records = append(records, s.profile.Snapshot()...)
 	return append(records, store.Entry{Kind: entryMeta, ID: "counters", Value: encodeJSON(meta)})
 }
+
+// A large room's entry, which lists every member, is not stored again for
+// every message: it lags behind its latest_log_id, activity, and read
+// cursors for a moment (rooms.EntryDelay), and is stored once that passes,
+// at Sync, and at shutdown; a restart in between restores the latest_log_id
+// from the records.
+func TestLargeRoomEntryLags(t *testing.T) {
+	st := store.NewMemory()
+	bs := newBenchServer(t, Config{Store: st})
+	for i := range rooms.LaterMembers {
+		bs.member(i)
+	}
+	poster := bs.guest()
+	storedLatest := func() string {
+		var latest string
+		_ = st.Load(func(e store.Entry) error {
+			if e.Kind == entryRoom && e.ID == defaultRoomID {
+				var room struct {
+					LatestID int64 `json:"latest_id"`
+				}
+				_ = json.Unmarshal(e.Value, &room)
+				latest = formatID(room.LatestID)
+			}
+			return nil
+		})
+		return latest
+	}
+	post := func() string {
+		return stringField(poster.call(t, "message", map[string]any{"body": map[string]any{"text": "hi"}}), "message_id")
+	}
+	first := post()
+	if err := bs.s.Sync(bs.ctx); err != nil {
+		t.Fatal(err)
+	}
+	if got := storedLatest(); got != first {
+		t.Fatalf("stored latest_id %s at Sync, want %s", got, first)
+	}
+	second := post()
+	deadline := time.Now().Add(10 * time.Second)
+	for storedLatest() != second {
+		if time.Now().After(deadline) {
+			t.Fatalf("stored latest_id %s, never %s", storedLatest(), second)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	// A server restored from records newer than its room's entry.
+	third := post()
+	snapshot := store.NewMemory()
+	var entries []store.Entry
+	_ = st.Load(func(e store.Entry) error { entries = append(entries, e); return nil })
+	if storedLatest() == third {
+		t.Skip("the room's entry was stored before it could be seen lagging")
+	}
+	_ = snapshot.Apply(entries)
+	restored, err := Open(Config{Store: snapshot})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer restored.Shutdown(context.Background())
+	// The restart retires the guest, whose leave is the latest record.
+	restored.mu.RLock()
+	log := restored.rooms.Get(defaultRoomID).Log()
+	latest, last := log.Latest(), log.Since(0, 1)
+	restored.mu.RUnlock()
+	if len(last) != 1 || latest != last[0].ID || formatID(latest) < third {
+		t.Fatalf("restored latest_log_id %d, want the latest record's, at least %s", latest, third)
+	}
+}

@@ -1,6 +1,7 @@
 package roomlog
 
 import (
+	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"slices"
 	"testing"
@@ -127,5 +128,30 @@ func TestShapesKeepUnknownMembers(t *testing.T) {
 	m := NewMembership(9, "a", Author{UserID: "ada"}, false)
 	if string(m.Raw) != `{"log_id":"9","members":[{"joined":false,"user":{"user_id":"ada"}}],"room_id":"a"}` {
 		t.Fatalf("membership %s", m.Raw)
+	}
+}
+
+// A room whose entry lags behind its records is restored with the
+// latest_log_id of its latest record.
+func TestRestoreLatest(t *testing.T) {
+	l, _, _ := twoRooms()
+	entries := make(map[string][]byte)
+	for _, e := range l.Entries() {
+		entries[e.ID] = e.Value
+	}
+	restored := NewLog()
+	// a's entry was stored at its record 3, b's at its latest.
+	a, b := NewTimeline("a", 1, 3), NewTimeline("b", 2, 5)
+	values := make(map[string]jsontext.Value, len(entries))
+	for id, v := range entries {
+		values[id] = v
+	}
+	if _, err := restored.Restore(values, func(id string) *Timeline {
+		return map[string]*Timeline{"a": a, "b": b}[id]
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if a.Latest() != 6 || b.Latest() != 5 {
+		t.Fatalf("restored latest %d %d, want 6 5", a.Latest(), b.Latest())
 	}
 }

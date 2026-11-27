@@ -106,6 +106,10 @@ func (w *Writer) Fence() *Fence {
 	return f
 }
 
+// Fenced reports whether a fence waits for the next Queue. Called holding
+// the server's lock.
+func (w *Writer) Fenced() bool { return len(w.fences) > 0 }
+
 // Stopped reports whether Stop was called: nothing more is written.
 // Called holding the server's lock.
 func (w *Writer) Stopped() bool { return w.stopped }

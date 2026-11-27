@@ -35,8 +35,12 @@ import (
 // VAPID key the server made (webpush), and the server's profile (profile).
 // When the lock is released, unlock has each render what it marked, and
 // the counters if they moved, into one batch, and the store writer
-// (durable) applies batches to the store in order, off the lock. At start,
-// Open rebuilds the state from the store.
+// (durable) applies batches to the store in order, off the lock. A large
+// room's entry, which lists every member, their activity, and their read
+// cursors, is the one exception: what changes with each message and read
+// is rendered at most once every rooms.EntryDelay, and at once when a fence
+// waits (Sync) or the store closes, while its records go at once (rooms).
+// At start, Open rebuilds the state from the store.
 //
 // Entry kinds and IDs:
 //
@@ -100,10 +104,22 @@ func userID(u *userState) string { return u.id }
 // with the fences waiting for it. Once the writer is stopped, the batch is
 // dropped (durable.Writer.Queue), but the changes are still taken.
 func (s *Server) flushLocked() {
+	// A large room's entry, which lists every member, lags behind what
+	// changes with each message for a moment (rooms.EntryDelay), unless a
+	// fence waits for every change so far, or the store is closing.
+	var roomEntries []store.Entry
+	if s.store.Fenced() || s.closingStore {
+		roomEntries = s.rooms.Entries()
+	} else {
+		roomEntries = s.rooms.EntriesDue(time.Now())
+		if due, lagging := s.rooms.Lagging(); lagging && s.roomEntryTimer == nil && !s.closed {
+			s.roomEntryTimer = time.AfterFunc(time.Until(due), s.flushRoomEntries)
+		}
+	}
 	batch := slices.Concat(
 		s.ids.Entries(),
 		s.log.Entries(),
-		s.rooms.Entries(),
+		roomEntries,
 		s.users.Entries(avatarEmbedID),
 		s.pushes.Entries(),
 		s.extData.Entries(),
@@ -123,6 +139,14 @@ func (s *Server) flushLocked() {
 	s.store.Queue(batch)
 }
 
+// flushRoomEntries writes the entries of the large rooms that lag behind,
+// once they are due (rooms.Table.EntriesDue).
+func (s *Server) flushRoomEntries() {
+	s.mu.Lock()
+	s.roomEntryTimer = nil
+	s.unlock()
+}
+
 // avatarEmbedID names the hosted embed behind a user's avatar in what the
 // store keeps, "" for none.
 func avatarEmbedID(u *userState) string {
@@ -137,6 +161,11 @@ func avatarEmbedID(u *userState) string {
 func (s *Server) closeStoreLocked() {
 	if s.store.Stopped() {
 		return
+	}
+	s.closingStore = true
+	if s.roomEntryTimer != nil {
+		s.roomEntryTimer.Stop()
+		s.roomEntryTimer = nil
 	}
 	s.flushLocked()
 	s.store.Stop()

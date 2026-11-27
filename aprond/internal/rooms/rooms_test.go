@@ -6,8 +6,10 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/apron-chat/apron-server-go/aprond/internal/roomlog"
+	"github.com/apron-chat/apron-server-go/store"
 )
 
 type user struct {
@@ -223,5 +225,66 @@ func TestThreadTitle(t *testing.T) {
 		if got := ThreadTitle(description); got != want {
 			t.Errorf("ThreadTitle(%q) = %q, want %q", description, got, want)
 		}
+	}
+}
+
+// A large room's entry lags behind its latest_log_id, activity, and read
+// cursors for EntryDelay, but never behind its members or its record, and
+// Entries takes it at once.
+func TestLargeRoomEntryLags(t *testing.T) {
+	table := newTable()
+	big := table.Create("big", nil, false, "", roomlog.RoomRecord{})
+	small := table.Create("small", nil, false, "", roomlog.RoomRecord{})
+	var members []*user
+	for i := range LaterMembers {
+		members = append(members, &user{id: "u" + strings.Repeat("x", i)})
+	}
+	join(t, table, big, members...)
+	join(t, table, small, members[0])
+	ids := func(entries []store.Entry) []string {
+		var ids []string
+		for _, e := range entries {
+			if e.Kind == EntryKind {
+				ids = append(ids, e.ID)
+			}
+		}
+		slices.Sort(ids)
+		return ids
+	}
+	start := time.Now()
+	if got := ids(table.EntriesDue(start)); !slices.Equal(got, []string{"big", "small"}) {
+		t.Fatalf("joins stored %v at once, want both rooms", got)
+	}
+	post := func(r *Room[*user], logID int64) {
+		m := table.NewMessage(roomlog.FormatID(logID), members[0].from(), members[0].id)
+		table.Snapshot(m, &roomlog.Message{MessageID: roomlog.FormatID(logID), LogID: roomlog.FormatID(logID), RoomID: r.ID()}, logID)
+	}
+	post(big, table.log.NextID())
+	post(small, table.log.NextID())
+	table.Read(big, members[1].id, Cursor{MessageID: "1", ID: 1})
+	if got := ids(table.EntriesDue(start)); !slices.Equal(got, []string{"small"}) {
+		t.Fatalf("posts stored %v at once, want only the small room", got)
+	}
+	if due, lagging := table.Lagging(); !lagging || due.Before(start.Add(EntryDelay)) {
+		t.Fatalf("lagging until %v (%v), want at least %v", due, lagging, EntryDelay)
+	}
+	if got := ids(table.EntriesDue(start.Add(EntryDelay / 2))); got != nil {
+		t.Fatalf("stored %v before the delay", got)
+	}
+	if got := ids(table.EntriesDue(start.Add(EntryDelay))); !slices.Equal(got, []string{"big"}) {
+		t.Fatalf("stored %v after the delay, want the big room", got)
+	}
+	if _, lagging := table.Lagging(); lagging {
+		t.Fatal("still lagging")
+	}
+	// A join renders a lagging room at once; so does Entries.
+	post(big, table.log.NextID())
+	join(t, table, big, &user{id: "late"})
+	if got := ids(table.EntriesDue(start)); !slices.Equal(got, []string{"big"}) {
+		t.Fatalf("a join stored %v, want the big room", got)
+	}
+	post(big, table.log.NextID())
+	if got := ids(table.Entries()); !slices.Equal(got, []string{"big"}) {
+		t.Fatalf("Entries stored %v, want the big room", got)
 	}
 }

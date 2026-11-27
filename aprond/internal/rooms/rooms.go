@@ -26,6 +26,7 @@ import (
 	"maps"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/apron-chat/apron-server-go/apron"
 	"github.com/apron-chat/apron-server-go/aprond/internal/roomlog"
@@ -349,6 +350,10 @@ type Table[U Member, M MessageHolder] struct {
 	// Entries last took them.
 	dirty         map[string]struct{}
 	dirtyMessages map[string]*Message
+	// later are the large rooms changed since Entries last took them only
+	// in what their entry may lag behind (touchLater), since laterSince.
+	later      map[string]struct{}
+	laterSince time.Time
 	// restoring are the stored members of each room, from Restore until
 	// RestoreMembers.
 	restoring map[string][]string
@@ -360,6 +365,7 @@ func NewTable[U Member, M MessageHolder](log *roomlog.Log, hold func(*Message) M
 	return &Table[U, M]{
 		log: log, rooms: make(map[string]*Room[U]), messages: make(map[string]M), hold: hold,
 		dirty: make(map[string]struct{}), dirtyMessages: make(map[string]*Message),
+		later: make(map[string]struct{}),
 	}
 }
 
@@ -383,6 +389,34 @@ func (t *Table[U, M]) All() []*Room[U] {
 
 // Touch marks r as changed, for a change the table does not make itself.
 func (t *Table[U, M]) Touch(r *Room[U]) { t.dirty[r.id] = struct{}{} }
+
+// LaterMembers is the size, in members and read cursors, from which a
+// room's entry is rendered at most once every EntryDelay for what it may
+// lag behind (EntriesDue): the entry lists every member, their activity,
+// and their read cursors, so rendering it for each message in a large room
+// costs as much as the room is large, and the server's lock is held while
+// it is rendered.
+const LaterMembers = 64
+
+// EntryDelay is how long a large room's entry may lag behind its
+// latest_log_id, its members' activity, and their read cursors.
+const EntryDelay = 200 * time.Millisecond
+
+// touchLater marks r as changed in its latest_log_id, a member's activity
+// (§4.2.1), or a read cursor (§4.6): what its entry may lag behind for a
+// while when the room is large, since the records that changed them are
+// stored at once. A room that lags so is restored with the latest_log_id
+// of its latest stored record (roomlog.Log.Restore), and with the activity
+// and cursors its entry last kept, as after a restart a moment earlier.
+func (t *Table[U, M]) touchLater(r *Room[U]) {
+	if len(r.members)+len(r.reads) < LaterMembers {
+		t.Touch(r)
+		return
+	}
+	if _, now := t.dirty[r.id]; !now {
+		t.later[r.id] = struct{}{}
+	}
+}
 
 // Create logs the creation record of a room holding the client fields of
 // fields: title, description, and ext. The room is named id, or by its
@@ -430,10 +464,21 @@ func (t *Table[U, M]) commit(r *Room[U], logID int64, fields roomlog.RoomRecord)
 // Append adds a committed record to the log of each room it belongs to,
 // whose latest_log_id it becomes.
 func (t *Table[U, M]) Append(record *roomlog.Record, rooms ...*Room[U]) {
+	t.appendRecord(record, t.Touch, rooms)
+}
+
+// appendLater is Append for a record that changes nothing of its rooms'
+// entries but their latest_log_id, such as a message snapshot or a
+// reactions record (touchLater).
+func (t *Table[U, M]) appendLater(record *roomlog.Record, rooms ...*Room[U]) {
+	t.appendRecord(record, t.touchLater, rooms)
+}
+
+func (t *Table[U, M]) appendRecord(record *roomlog.Record, touch func(*Room[U]), rooms []*Room[U]) {
 	logs := make([]*roomlog.Timeline, len(rooms))
 	for i, r := range rooms {
 		logs[i] = r.log
-		t.Touch(r)
+		touch(r)
 	}
 	t.log.Append(record, logs...)
 }
@@ -480,7 +525,7 @@ func (t *Table[U, M]) logMembership(r *Room[U], from roomlog.Author, joined bool
 func (t *Table[U, M]) Posted(r *Room[U], id string, logID int64) {
 	if _, member := r.members[id]; member {
 		r.active[id] = logID
-		t.Touch(r)
+		t.touchLater(r)
 	}
 }
 
@@ -491,7 +536,7 @@ func (t *Table[U, M]) Read(r *Room[U], id string, cursor Cursor) bool {
 		return false
 	}
 	r.reads[id] = cursor
-	t.Touch(r)
+	t.touchLater(r)
 	return true
 }
 
@@ -555,6 +600,43 @@ func Entry[U Member](r *Room[U]) store.Entry {
 // Entries returns the entries of the rooms and messages changed since it
 // was last called.
 func (t *Table[U, M]) Entries() []store.Entry {
+	return t.entries(true)
+}
+
+// EntriesDue is Entries but for the large rooms that changed only in what
+// their entries may lag behind (touchLater), which it leaves out until
+// EntryDelay has passed since the first of them changed, as of now.
+func (t *Table[U, M]) EntriesDue(now time.Time) []store.Entry {
+	if len(t.later) > 0 && t.laterSince.IsZero() {
+		t.laterSince = now
+	}
+	return t.entries(len(t.later) > 0 && now.Sub(t.laterSince) >= EntryDelay)
+}
+
+// Lagging reports when the entries EntriesDue leaves out are due, and
+// whether there are any.
+func (t *Table[U, M]) Lagging() (time.Time, bool) {
+	if len(t.later) == 0 {
+		return time.Time{}, false
+	}
+	return t.laterSince.Add(EntryDelay), true
+}
+
+func (t *Table[U, M]) entries(withLater bool) []store.Entry {
+	if withLater {
+		for id := range t.later {
+			t.dirty[id] = struct{}{}
+		}
+		clear(t.later)
+		t.laterSince = time.Time{}
+	} else {
+		for id := range t.dirty {
+			delete(t.later, id)
+		}
+		if len(t.later) == 0 {
+			t.laterSince = time.Time{}
+		}
+	}
 	if len(t.dirty) == 0 && len(t.dirtyMessages) == 0 {
 		return nil
 	}

@@ -339,6 +339,9 @@ func (l *Log) Restore(entries map[string]jsontext.Value, room func(id string) *T
 		for _, id := range record.Rooms {
 			if t := room(id); t != nil {
 				t.records = append(t.records, record)
+				// A large room's entry may lag behind its latest record
+				// (rooms.Table.EntriesDue).
+				t.latest = max(t.latest, record.ID)
 			}
 		}
 	}
