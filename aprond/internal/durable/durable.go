@@ -3,11 +3,13 @@
 //
 // The server collects what it changed while it holds its lock and hands the
 // Writer one batch of entries as it releases the lock (Writer.Queue). A
-// single goroutine applies the batches in order, off the lock. A Fence waits
-// for the batch that holds a change, and every batch before it. A store that
-// fails stays failed: nothing more is written, so the store keeps a
-// consistent state as of the batch before the failure, and every fence after
-// it fails.
+// single goroutine applies the batches in order, off the lock: those that
+// wait while it applies one are applied together next, as one, so that a
+// store that applies a batch as a transaction keeps up with changes that
+// come faster than it commits. A Fence waits for the batch that holds a
+// change, and every batch before it. A store that fails stays failed:
+// nothing more is written, so the store keeps a consistent state as of the
+// batches it applied before the failure, and every fence after them fails.
 //
 // The Writer knows nothing of what the entries hold. Its methods but Err are
 // called holding the server's lock, which orders the batches.
@@ -17,6 +19,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"slices"
 	"sync/atomic"
 
 	"github.com/apron-chat/apron-server-go/store"
@@ -25,6 +28,10 @@ import (
 // queueLength bounds the batches waiting for the writer; beyond it, Queue
 // waits for the store.
 const queueLength = 1024
+
+// mergeEntries bounds the entries of the batches waiting that the writer
+// applies as one.
+const mergeEntries = 4096
 
 // batch is what one Queue hands the writer: the entries to apply as one,
 // and the fences that wait for them.
@@ -158,6 +165,7 @@ func (w *Writer) Err() error {
 func (w *Writer) run() {
 	defer close(w.done)
 	for b := range w.batches {
+		b = w.merge(b)
 		err := w.Err()
 		if err == nil && len(b.entries) > 0 {
 			if applyErr := w.store.Apply(b.entries); applyErr != nil {
@@ -175,4 +183,53 @@ func (w *Writer) run() {
 			f.release(err)
 		}
 	}
+}
+
+// merge appends the batches already waiting after b to it, in order, up to
+// mergeEntries entries, so that they are applied as one, with all their
+// fences released after it.
+func (w *Writer) merge(b batch) batch {
+	merged := false
+	for len(b.entries) < mergeEntries {
+		var next batch
+		var ok bool
+		select {
+		case next, ok = <-w.batches:
+		default:
+		}
+		if !ok {
+			// None waits, or the queue is closed.
+			break
+		}
+		if !merged {
+			// The first batch's slice is the server's; a copy is appended to.
+			b.entries = slices.Clip(b.entries)
+			merged = true
+		}
+		b.entries = append(b.entries, next.entries...)
+		b.fences = append(b.fences, next.fences...)
+	}
+	if merged {
+		b.entries = latest(b.entries)
+	}
+	return b
+}
+
+// latest keeps the last of the entries with each kind and ID, in order: a
+// merged batch applies as one, so an entry that a later one replaces, such
+// as a room's for each message posted in it, need not be written.
+func latest(entries []store.Entry) []store.Entry {
+	type key struct{ kind, id string }
+	seen := make(map[key]bool, len(entries))
+	kept := entries[:len(entries)]
+	n := len(entries)
+	for i := len(entries) - 1; i >= 0; i-- {
+		k := key{entries[i].Kind, entries[i].ID}
+		if !seen[k] {
+			seen[k] = true
+			n--
+			kept[n] = entries[i]
+		}
+	}
+	return kept[n:]
 }
