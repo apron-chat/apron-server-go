@@ -11,6 +11,7 @@ import (
 	"slices"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/coder/websocket"
@@ -32,10 +33,14 @@ type Server struct {
 	checkOnce sync.Once
 	mu        sync.Mutex
 	// registered are the methods registered with Handle and
-	// HandleNotification, and methods every method the Server serves: its
-	// handlers', with those registered in their place.
+	// HandleNotification, under mu, and methods every method the Server
+	// serves, its handlers', with those registered in their place, and
+	// their capabilities: a table replaced, not changed, as a method is
+	// registered, which a request reads without a lock.
 	registered map[string]method
-	methods    map[string]method
+	methods    atomic.Pointer[methodTable]
+	// holdFailed is the frame of Config.HoldFailed.
+	holdFailed []byte
 	conns      map[*Conn]struct{}
 	// connList is conns as a slice, for Broadcast and PublishUser to walk,
 	// made again after conns changes (nil then), rather than for each
@@ -183,8 +188,30 @@ func New(backend Backend, config Config) *Server {
 		dedup:      dedup,
 		shutdown:   make(chan struct{}),
 	}
-	s.methods = s.builtins()
+	s.methods.Store(newMethodTable(s.builtins()))
+	e := config.HoldFailed
+	if e == nil {
+		e = internalError()
+	}
+	s.holdFailed, _ = core.Marshal(&core.ReplyFrame{Error: e})
 	return s
+}
+
+// methodTable is every method a Server serves, and their capabilities, by
+// the methods' names.
+type methodTable struct {
+	methods      map[string]method
+	capabilities []string
+}
+
+func newMethodTable(methods map[string]method) *methodTable {
+	t := &methodTable{methods: methods}
+	for _, name := range slices.Sorted(maps.Keys(methods)) {
+		if capability := methods[name].capability; capability != "" && !slices.Contains(t.capabilities, capability) {
+			t.capabilities = append(t.capabilities, capability)
+		}
+	}
+	return t
 }
 
 // made panics for a Server that New did not make, such as a zero
@@ -247,7 +274,9 @@ func (s *Server) register(name string, m method) {
 		panic("apron: method " + strconv.Quote(name) + " registered twice")
 	}
 	s.registered[name] = m
-	s.methods[name] = m
+	methods := maps.Clone(s.methods.Load().methods)
+	methods[name] = m
+	s.methods.Store(newMethodTable(methods))
 }
 
 func (s *Server) logger() *slog.Logger {
@@ -277,15 +306,6 @@ func (s *Server) pingInterval() time.Duration {
 	return orDefault(s.config.PingInterval, 30*time.Second)
 }
 func (s *Server) pingTimeout() time.Duration { return orDefault(s.config.PingTimeout, 10*time.Second) }
-
-func (s *Server) holdFailed() []byte {
-	e := s.config.HoldFailed
-	if e == nil {
-		e = internalError()
-	}
-	frame, _ := core.Marshal(&core.ReplyFrame{Error: e})
-	return frame
-}
 
 // ServeHTTP accepts a WebSocket and serves it until it closes.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -446,7 +466,7 @@ func (s *Server) newConn(ctx context.Context, cancel context.CancelFunc, w core.
 		WriteTimeout: s.writeTimeout(),
 		PingInterval: s.pingInterval(),
 		PingTimeout:  s.pingTimeout(),
-		FenceFailed:  s.holdFailed(),
+		FenceFailed:  s.holdFailed,
 		OnStop:       cancel,
 		OnFellBehind: func() {
 			if fellBehind != nil {
@@ -493,18 +513,8 @@ func (s *Server) complete(info apron.ServerInfo) apron.ServerInfo {
 }
 
 // capabilities are those of the methods the Server handles, by the methods'
-// names.
-func (s *Server) capabilities() []string {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	var capabilities []string
-	for _, name := range slices.Sorted(maps.Keys(s.methods)) {
-		if capability := s.methods[name].capability; capability != "" && !slices.Contains(capabilities, capability) {
-			capabilities = append(capabilities, capability)
-		}
-	}
-	return capabilities
-}
+// names, which the caller does not change.
+func (s *Server) capabilities() []string { return s.methods.Load().capabilities }
 
 // openConns returns the open connections, Local ones included, which the
 // caller does not change.

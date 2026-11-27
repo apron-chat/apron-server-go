@@ -437,9 +437,7 @@ func (s *Server) finish(ctx context.Context, r *Request, strict bool, err error)
 // method returns the handler of a method: one registered with Handle or
 // HandleNotification, or one of the Server's Config handlers.
 func (s *Server) method(name string) (method, bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	m, ok := s.methods[name]
+	m, ok := s.methods.Load().methods[name]
 	return m, ok
 }
 
