@@ -23,6 +23,7 @@ require (
 )
 
 require (
+	github.com/aclements/go-moremath v0.0.0-20210112150236-f10218a38794 // indirect
 	github.com/dustin/go-humanize v1.1.0 // indirect
 	github.com/go-viper/mapstructure/v2 v2.5.0 // indirect
 	github.com/go-webauthn/x v0.4.1 // indirect
@@ -37,6 +38,7 @@ require (
 	github.com/x448/float16 v0.8.4 // indirect
 	golang.org/x/exp/typeparams v0.0.0-20231108232855-2478ac86f678 // indirect
 	golang.org/x/mod v0.42.0 // indirect
+	golang.org/x/perf v0.0.0-20261117185222-4febdb082b2c // indirect
 	golang.org/x/sys v0.50.0 // indirect
 	golang.org/x/tools v0.52.0 // indirect
 	honnef.co/go/tools v0.8.2 // indirect
@@ -45,4 +47,7 @@ require (
 	modernc.org/memory v1.13.1 // indirect
 )
 
-tool honnef.co/go/tools/cmd/staticcheck
+tool (
+	golang.org/x/perf/cmd/benchstat
+	honnef.co/go/tools/cmd/staticcheck
+)

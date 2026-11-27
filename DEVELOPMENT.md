@@ -300,6 +300,10 @@ make test
 configured by `staticcheck.conf`); `make vuln` runs govulncheck, which
 reports the known vulnerabilities that the code reaches.
 
+`make bench`, `make bench-compare`, and `make profile` run the Go benchmarks,
+compare them with another commit, and profile them; [PROFILING.md](PROFILING.md)
+says how to measure with them. CI runs each benchmark once (`make bench-smoke`).
+
 `make test` runs the Go tests and the session fixtures over real loopback
 WebSockets against the web client's `ChatClient`. Run the latter alone with
 `make test-wire`; it needs Node.js and Go, but no browser or running dev server.

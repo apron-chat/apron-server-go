@@ -1,4 +1,4 @@
-.PHONY: install dev-web dev-server check vuln test test-go test-wire test-conformance test-interop test-perf build build-web serve run
+.PHONY: install dev-web dev-server check vuln test test-go test-wire test-conformance test-interop test-perf bench bench-smoke bench-compare profile build build-web serve run
 
 # The web client lives in apron-chat/apron-web, pinned as a submodule. The
 # browser tests, dev-web, and run use it; check out another commit in it to
@@ -40,6 +40,38 @@ test: test-go test-wire
 
 test-go:
 	go test -race ./... ./apron/...
+
+# Go benchmarks (PROFILING.md). BENCH is a -bench pattern, BENCH_PKGS the packages, BENCH_COUNT the runs of each (6
+# or more for benchstat), BENCH_FLAGS more go test flags, such as -cpu=1,2,4. Results go to build/bench/head.txt.
+BENCH ?= .
+BENCH_PKGS ?= ./... ./apron/...
+BENCH_COUNT ?= 6
+BENCH_FLAGS ?=
+bench:
+	mkdir -p build/bench
+	go test -run '^$$' -bench '$(BENCH)' -benchmem -count $(BENCH_COUNT) $(BENCH_FLAGS) $(BENCH_PKGS) | tee build/bench/head.txt
+
+# Every benchmark once, so that they keep building and running (CI).
+bench-smoke:
+	go test -run '^$$' -bench . -benchtime 1x $(BENCH_PKGS) > /dev/null
+
+# The same benchmarks on BASE (origin/main by default) and on the working tree, compared with benchstat.
+BASE ?= origin/main
+bench-compare:
+	BASE='$(BASE)' BENCH='$(BENCH)' PKGS='$(BENCH_PKGS)' COUNT='$(BENCH_COUNT)' BENCHFLAGS='$(BENCH_FLAGS)' \
+		scripts/bench-compare.sh
+
+# CPU, allocation, mutex, and block profiles of the benchmarks BENCH matches in one package PKG, in build/profile,
+# with the top of each. Read one further with go tool pprof, such as -list or -http.
+PKG ?= ./apron/server
+profile:
+	mkdir -p build/profile
+	go test -run '^$$' -bench '$(BENCH)' -benchmem $(BENCH_FLAGS) -o $(CURDIR)/build/profile/bench.test -outputdir $(CURDIR)/build/profile \
+		-cpuprofile cpu.pprof -memprofile mem.pprof -mutexprofile mutex.pprof -blockprofile block.pprof $(PKG)
+	go tool pprof -top -nodecount=20 build/profile/cpu.pprof
+	go tool pprof -top -nodecount=20 -sample_index=alloc_space build/profile/mem.pprof
+	go tool pprof -top -nodecount=10 build/profile/mutex.pprof
+	go tool pprof -top -nodecount=10 build/profile/block.pprof
 
 # Rendering benchmarks on the production build; fails when a count rises above perf-ceilings.json.
 test-perf: build-web
