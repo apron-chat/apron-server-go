@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"slices"
 	"sync"
+	"sync/atomic"
 
 	"github.com/apron-chat/apron-server-go/apron"
 	"github.com/apron-chat/apron-server-go/apron/internal/core"
@@ -21,8 +22,13 @@ type Conn struct {
 	ctx     context.Context
 	cancel  context.CancelFunc
 
-	mu   sync.Mutex
-	user *apron.User
+	// user is the connection's identity, nil before it signs in, and data
+	// the backend's value: each replaced, never changed, and read without
+	// a lock, as Broadcast and PublishUser read every connection's.
+	user atomic.Pointer[apron.User]
+	data atomic.Pointer[any]
+
+	mu sync.Mutex
 	// info is the last server frame the connection was sent, or is about
 	// to be; announced is set once Announce has replaced it, so that the
 	// frame a connection opens with, made before, does not (opened).
@@ -35,7 +41,6 @@ type Conn struct {
 	// or auth's result, is queued (§3.1, §3.2.2).
 	holding bool
 	held    [][]apron.Frame
-	data    any
 }
 
 // Pending is an outcome not decided yet, such as a change being stored,
@@ -49,23 +54,20 @@ type Pending interface {
 // User returns a copy of the connection's identity, its roles and ext
 // included, or nil before it signs in.
 func (c *Conn) User() *apron.User {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.user == nil {
+	user := c.user.Load()
+	if user == nil {
 		return nil
 	}
-	u := cloneUser(*c.user)
+	u := cloneUser(*user)
 	return &u
 }
 
 // UserID returns the connection's user_id, or "" before it signs in.
 func (c *Conn) UserID() string {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.user == nil {
-		return ""
+	if user := c.user.Load(); user != nil {
+		return user.UserID
 	}
-	return c.user.UserID
+	return ""
 }
 
 // SetUser changes the connection's identity, as after a sign-in or a
@@ -74,9 +76,7 @@ func (c *Conn) UserID() string {
 // changed in OnConnect, which the Server tells it of (Server.Local).
 func (c *Conn) SetUser(u apron.User) {
 	u = cloneUser(u)
-	c.mu.Lock()
-	c.user = &u
-	c.mu.Unlock()
+	c.user.Store(&u)
 }
 
 // SignOut leaves the connection without an identity: its requests are
@@ -84,7 +84,8 @@ func (c *Conn) SetUser(u apron.User) {
 // (SetDedupScope).
 func (c *Conn) SignOut() {
 	c.mu.Lock()
-	c.user, c.scope = nil, ""
+	c.user.Store(nil)
+	c.scope = ""
 	c.mu.Unlock()
 }
 
@@ -109,26 +110,22 @@ func (c *Conn) SetDedupScope(scope string) {
 func (c *Conn) dedupScope() (userID, scope string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.user == nil {
-		return "", c.scope
-	}
-	return c.user.UserID, c.scope
+	return c.UserID(), c.scope
 }
 
 // Data returns the value the backend keeps with the connection, which it
 // reads with a type assertion, such as c.Data().(*session).
 func (c *Conn) Data() any {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.data
+	if data := c.data.Load(); data != nil {
+		return *data
+	}
+	return nil
 }
 
 // SetData keeps a value with the connection, such as the backend's own
 // object for its user.
 func (c *Conn) SetData(v any) {
-	c.mu.Lock()
-	c.data = v
-	c.mu.Unlock()
+	c.data.Store(&v)
 }
 
 // ServerInfo returns the server frame the connection was last sent.
