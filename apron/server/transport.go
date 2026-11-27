@@ -11,7 +11,12 @@ import (
 // Transport carries whole frames both ways (§1): a WebSocket, a line of
 // newline-delimited JSON on a byte stream, or anything else.
 type Transport interface {
-	// Read returns the next frame from the client.
+	// Read returns the next frame from the client, which the Server keeps:
+	// a request's params, as a handler reads them (Request.Fields), are
+	// parts of it rather than copies, so a Transport returns a slice of
+	// its own for each frame, and never changes it after, as LineTransport
+	// and the Server's WebSocket do. One that reuses a buffer, such as a
+	// bufio.Scanner's, returns a copy of the frame in it.
 	Read(ctx context.Context) ([]byte, error)
 	// Write sends one frame to the client.
 	Write(ctx context.Context, frame []byte) error

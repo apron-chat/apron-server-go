@@ -1,6 +1,7 @@
 package core
 
 import (
+	"bytes"
 	"reflect"
 	"testing"
 )
@@ -92,5 +93,29 @@ func TestParseWellFormed(t *testing.T) {
 		if _, ok := parseWellFormed([]byte(frame)); ok {
 			t.Errorf("%s is well formed", frame)
 		}
+	}
+}
+
+// A well-formed request's params and their values are the frame's own
+// bytes, not copies, which an append to one does not write over.
+func TestParseInPlace(t *testing.T) {
+	payload := []byte(`{"id":"1","method":"message","params":{"room_id":"general","body":{"text":"hi"}},"z":1}`)
+	req, perr := ParseRequest(payload)
+	if perr != nil {
+		t.Fatal(perr)
+	}
+	within := func(v []byte) bool {
+		return len(v) > 0 && &v[0] == &payload[bytes.Index(payload, v)]
+	}
+	if !within(req.Params) || !within(req.Fields["body"]) || !within(req.Fields["room_id"]) {
+		t.Fatalf("params %s, fields %v: not the frame's own bytes", req.Params, req.Fields)
+	}
+	if string(req.Fields["room_id"]) != `"general"` || string(req.Params) != `{"room_id":"general","body":{"text":"hi"}}` {
+		t.Fatalf("params %s, fields %v", req.Params, req.Fields)
+	}
+	_ = append(req.Fields["room_id"], 'x')
+	_ = append(req.Params, 'x')
+	if string(payload) != `{"id":"1","method":"message","params":{"room_id":"general","body":{"text":"hi"}},"z":1}` {
+		t.Fatalf("an append wrote over the frame: %s", payload)
 	}
 }

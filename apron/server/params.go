@@ -26,7 +26,9 @@ type Fields map[string]jsontext.Value
 
 // Fields returns the request's params, by name, as they were decoded once
 // when the frame was read: the escape hatch for a param no Decoder method
-// reads. They are shared: a handler reads them, and does not change them.
+// reads. They are shared, parts of the frame as it arrived: a handler
+// reads them, and does not change them, and one that keeps a value past
+// the request, which keeps the whole frame, keeps a copy.
 func (r *Request) Fields() Fields { return r.fields }
 
 // stringParam reads a string param.
