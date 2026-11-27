@@ -72,6 +72,60 @@ type bodyJSON struct {
 // MarshalJSONTo writes the body: each field that is not empty, or that
 // the decoded body carried, and text for a body built in Go.
 func (b Body) MarshalJSONTo(enc *jsontext.Encoder) error {
+	if len(b.Unknown) > 0 {
+		return b.marshalAll(enc)
+	}
+	// Written token by token, as encoding a bodyJSON writes it, without
+	// what that allocates: every message has a body.
+	text := b.Text != "" || b.sent&bodyText != 0 || b.sent&bodyDecoded == 0
+	format := b.Format != "" || b.sent&bodyFormat != 0
+	mentions := len(b.Mentions) > 0 || b.sent&bodyMentions != 0
+	embeds := len(b.Embeds) > 0 || b.sent&bodyEmbeds != 0
+	err := enc.WriteToken(jsontext.BeginObject)
+	if text && err == nil {
+		err = writeMember(enc, "text", jsontext.String(b.Text))
+	}
+	if format && err == nil {
+		err = writeMember(enc, "format", jsontext.String(b.Format))
+	}
+	if mentions && err == nil {
+		err = writeMember(enc, "mentions", jsontext.BeginArray)
+		for _, id := range b.Mentions {
+			if err == nil {
+				err = enc.WriteToken(jsontext.String(id))
+			}
+		}
+		if err == nil {
+			err = enc.WriteToken(jsontext.EndArray)
+		}
+	}
+	if embeds && err == nil {
+		err = writeMember(enc, "embeds", jsontext.BeginArray)
+		for _, embed := range b.Embeds {
+			if err == nil {
+				err = enc.WriteValue(embed)
+			}
+		}
+		if err == nil {
+			err = enc.WriteToken(jsontext.EndArray)
+		}
+	}
+	if err != nil {
+		return err
+	}
+	return enc.WriteToken(jsontext.EndObject)
+}
+
+// writeMember writes a member's name, and its value, a token.
+func writeMember(enc *jsontext.Encoder, name string, value jsontext.Token) error {
+	if err := enc.WriteToken(jsontext.String(name)); err != nil {
+		return err
+	}
+	return enc.WriteToken(value)
+}
+
+// marshalAll writes the body as a bodyJSON, its unknown members and all.
+func (b Body) marshalAll(enc *jsontext.Encoder) error {
 	out := bodyJSON{Unknown: b.Unknown}
 	if b.Text != "" || b.sent&bodyText != 0 || b.sent&bodyDecoded == 0 {
 		out.Text = &b.Text
