@@ -17,9 +17,10 @@ type later struct {
 	stop func() bool
 	// closed is set when the connection ended before the reply.
 	closed bool
-	// finish, once the handler has returned, finishes the request's
-	// deduplication entry with its outcome, as its reply is queued.
-	finish func(dedupOutcome)
+	// finish is set once the handler has returned, for the request's
+	// deduplication entry to be finished with its outcome as its reply is
+	// queued.
+	finish bool
 }
 
 // state reports whether the request has its reply, and whether it is to
@@ -78,21 +79,21 @@ func (r *Request) settleLocked() {
 	if l.stop != nil {
 		l.stop()
 	}
-	if finish := l.finish; finish != nil {
-		l.finish = nil
-		finish(r.outcome)
+	if l.finish {
+		l.finish = false
+		r.finishDedup(r.outcome)
 	}
 }
 
 // finishOrDefer returns the request's outcome, for its deduplication entry
 // to be finished with, once its handler has returned; for a request still
-// to be answered later, done is false, and finish runs as its reply is
-// queued, or its connection ends.
-func (r *Request) finishOrDefer(finish func(dedupOutcome)) (outcome dedupOutcome, done bool) {
+// to be answered later, done is false, and the entry is finished as its
+// reply is queued, or its connection ends.
+func (r *Request) finishOrDefer() (outcome dedupOutcome, done bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.later != nil && !r.replied {
-		r.later.finish = finish
+		r.later.finish = true
 		return dedupOutcome{}, false
 	}
 	return r.outcome, true

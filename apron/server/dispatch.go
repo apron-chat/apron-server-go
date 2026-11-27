@@ -82,11 +82,13 @@ type Request struct {
 	// rec, for a request on no connection, made by package aprontest, gets
 	// its reply.
 	rec testhook.Recorder
-	// entry is the request's deduplication entry (§1.2), or nil, and
-	// unkept, for an entry, drops it as the reply is queued when its
-	// outcome is not to be kept.
-	entry  *dedupEntry
-	unkept func(dedupOutcome)
+	// entry is the request's deduplication entry (§1.2), or nil, kept
+	// for userID by key; noDedup is set when its outcome is not to be
+	// kept even when it succeeds (Handler.NoDedup).
+	entry   *dedupEntry
+	userID  string
+	key     dedupKey
+	noDedup bool
 
 	mu      sync.Mutex
 	replied bool
@@ -320,25 +322,24 @@ func (s *Server) processFrame(ctx context.Context, c *Conn, payload []byte) {
 	// again. Concurrent duplicates still share the outcome. Such a request
 	// is forgotten before its reply is queued, as the client may retry as
 	// soon as it has the reply, while the handler may still be returning.
-	kept := func(outcome dedupOutcome) bool { return outcome.err == nil && !m.noDedup }
-	r.entry = entry
-	if entry != nil {
-		r.unkept = func(outcome dedupOutcome) {
-			if !kept(outcome) {
-				s.dedup.forget(userID, key, entry)
-			}
-		}
-	}
+	r.entry, r.userID, r.key, r.noDedup = entry, userID, key, m.noDedup
 	s.serve(ctx, c, r, m)
 	if entry != nil {
-		finish := func(outcome dedupOutcome) {
-			s.dedup.finish(userID, key, entry, outcome, !kept(outcome))
-		}
 		// A request answered later finishes as its reply is queued.
-		if outcome, done := r.finishOrDefer(finish); done {
-			finish(outcome)
+		if outcome, done := r.finishOrDefer(); done {
+			r.finishDedup(outcome)
 		}
 	}
+}
+
+// kept reports whether a request's outcome is kept for deduplication: it
+// succeeded, and its method's outcomes are kept.
+func (r *Request) kept(outcome dedupOutcome) bool { return outcome.err == nil && !r.noDedup }
+
+// finishDedup finishes the request's deduplication entry with its
+// outcome, which its duplicates then get.
+func (r *Request) finishDedup(outcome dedupOutcome) {
+	r.c.server.dedup.finish(r.userID, r.key, r.entry, outcome, !r.kept(outcome))
 }
 
 // duplicate answers a duplicate with its original's outcome (§1.2), brought

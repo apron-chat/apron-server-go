@@ -196,8 +196,8 @@ func (r *Request) failLocked(e *apron.Error) bool {
 // entry once it has its outcome, when the outcome is not to be kept,
 // before its reply is queued (§1.2).
 func (r *Request) forgetUnkeptLocked() {
-	if r.unkept != nil {
-		r.unkept(r.outcome)
+	if r.entry != nil && !r.kept(r.outcome) {
+		r.c.server.dedup.forget(r.userID, r.key, r.entry)
 	}
 }
 
