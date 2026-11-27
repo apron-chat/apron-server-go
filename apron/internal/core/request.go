@@ -54,6 +54,14 @@ func ParseRequest(payload []byte) (Request, *ParseError) {
 	if !jsontext.Value(payload).IsValid() {
 		return Request{}, &ParseError{codeParseError, "Parse error"}
 	}
+	if req, ok := parseWellFormed(payload); ok {
+		return req, nil
+	}
+	return parseAny(payload)
+}
+
+// parseAny parses a valid frame, whatever it holds.
+func parseAny(payload []byte) (Request, *ParseError) {
 	var object map[string]jsontext.Value
 	if err := json.Unmarshal(payload, &object); err != nil || object == nil {
 		return Request{}, &ParseError{codeInvalidRequest, "Invalid request"}
@@ -103,4 +111,39 @@ func Fingerprint(method string, params jsontext.Value) [32]byte {
 		canonical = append(canonical[:0], params...)
 	}
 	return sha256.Sum256(append(buf, canonical...))
+}
+
+// envelope is a frame's members that a request has, as they arrived.
+type envelope struct {
+	ID     jsontext.Value `json:"id"`
+	Method string         `json:"method"`
+	Params jsontext.Value `json:"params"`
+}
+
+// parseWellFormed parses a valid frame that is a well-formed request, or
+// notification, as ParseRequest does, but in one pass, as most frames
+// are: a JSON object with a method, an id that is a string, if any, and
+// params that are an object, if any. For any other frame it reports
+// false, and ParseRequest tells what is wrong with it.
+func parseWellFormed(payload []byte) (Request, bool) {
+	var env envelope
+	if jsontext.Value(payload).Kind() != '{' || json.Unmarshal(payload, &env) != nil || env.Method == "" {
+		return Request{}, false
+	}
+	req := Request{Method: env.Method, Params: jsontext.Value("{}")}
+	if env.ID != nil && !NotificationOnly[req.Method] {
+		if env.ID.Kind() != '"' || json.Unmarshal(env.ID, &req.ID) != nil {
+			return Request{}, false
+		}
+		req.HasID = true
+	}
+	if env.Params != nil {
+		if env.Params.Kind() != '{' || json.Unmarshal(env.Params, &req.Fields) != nil {
+			return Request{}, false
+		}
+		req.Params = env.Params
+	} else {
+		req.Fields = make(map[string]jsontext.Value)
+	}
+	return req, true
 }

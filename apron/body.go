@@ -98,13 +98,7 @@ func (b Body) MarshalJSONTo(enc *jsontext.Encoder) error {
 // carried, so that it encodes as it arrived.
 func (b *Body) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
 	// Each known member is read raw first, so that a null one is present.
-	var in struct {
-		Text     jsontext.Value `json:"text,omitzero"`
-		Format   jsontext.Value `json:"format,omitzero"`
-		Mentions jsontext.Value `json:"mentions,omitzero"`
-		Embeds   jsontext.Value `json:"embeds,omitzero"`
-		Unknown  jsontext.Value `json:",embed"`
-	}
+	var in bodyMembers
 	if err := json.UnmarshalDecode(dec, &in); err != nil {
 		return err
 	}
@@ -131,24 +125,41 @@ func (b *Body) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
 	return nil
 }
 
-// parseBody reads a message body (§3.5), raw and by its fields: each field
-// this package knows is checked, and the others are kept in Unknown.
-func parseBody(raw jsontext.Value, fields map[string]jsontext.Value) (*Body, error) {
-	body := &Body{}
-	if raw, ok := fields["text"]; ok && (core.IsNull(raw) || json.Unmarshal(raw, &body.Text) != nil) {
-		return nil, InvalidParams("body.text must be a string")
+// bodyMembers are a body's members as they arrived: those this package
+// knows raw, each present when not nil, null too, and the others.
+type bodyMembers struct {
+	Text     jsontext.Value `json:"text,omitzero"`
+	Format   jsontext.Value `json:"format,omitzero"`
+	Mentions jsontext.Value `json:"mentions,omitzero"`
+	Embeds   jsontext.Value `json:"embeds,omitzero"`
+	Unknown  jsontext.Value `json:",embed"`
+}
+
+// parseBody reads a message body (§3.5) by its members: each this package
+// knows is checked, and the others are kept in Unknown. The Body is what
+// decoding the body makes of it (UnmarshalJSONFrom), once every member is
+// checked.
+func parseBody(in bodyMembers) (*Body, error) {
+	body := &Body{Unknown: in.Unknown, sent: bodyDecoded}
+	if raw := in.Text; raw != nil {
+		if core.IsNull(raw) || json.Unmarshal(raw, &body.Text) != nil {
+			return nil, InvalidParams("body.text must be a string")
+		}
+		body.sent |= bodyText
 	}
-	if raw, ok := fields["format"]; ok {
+	if raw := in.Format; raw != nil {
 		if core.IsNull(raw) || json.Unmarshal(raw, &body.Format) != nil || (body.Format != Plain && body.Format != Markdown) {
 			return nil, InvalidParams("body.format must be plain or markdown")
 		}
+		body.sent |= bodyFormat
 	}
-	if raw, ok := fields["mentions"]; ok {
+	if raw := in.Mentions; raw != nil {
 		if core.IsNull(raw) || json.Unmarshal(raw, &body.Mentions) != nil || slices.ContainsFunc(body.Mentions, func(id string) bool { return !ValidID(id) }) {
 			return nil, InvalidParams("body.mentions must be an array of user_id strings")
 		}
+		body.sent |= bodyMentions
 	}
-	if raw, ok := fields["embeds"]; ok {
+	if raw := in.Embeds; raw != nil {
 		if core.IsNull(raw) || json.Unmarshal(raw, &body.Embeds) != nil {
 			return nil, InvalidParams("body.embeds must be an array")
 		}
@@ -162,11 +173,7 @@ func parseBody(raw jsontext.Value, fields map[string]jsontext.Value) (*Body, err
 				return nil, InvalidParams(fmt.Sprintf("body.embeds[%d].kind must be a non-empty string", i))
 			}
 		}
-	}
-	// Every field it knows is well formed, so the body decodes, and keeps
-	// the fields it does not know as they arrived.
-	if err := json.Unmarshal(raw, body); err != nil {
-		return nil, InvalidParams("body must be an object")
+		body.sent |= bodyEmbeds
 	}
 	return body, nil
 }
@@ -179,9 +186,9 @@ func parseBody(raw jsontext.Value, fields map[string]jsontext.Value) (*Body, err
 // rewrote, as apron/server checks a client's. Its error is always an *Error,
 // error/invalid_params.
 func ParseBody(raw jsontext.Value) (*Body, error) {
-	var fields map[string]jsontext.Value
-	if json.Unmarshal(raw, &fields) != nil || fields == nil {
+	var in bodyMembers
+	if raw.Kind() != '{' || json.Unmarshal(raw, &in) != nil {
 		return nil, InvalidParams("body must be an object")
 	}
-	return parseBody(raw, fields)
+	return parseBody(in)
 }

@@ -45,8 +45,10 @@ func parseMessageFields(r *Request) (messageFields, error) {
 		// A deletion leaves no body (§4.4): what it sends is ignored.
 		return parsed(m, d)
 	}
-	if d.Object("body", Optional) != nil {
-		body, err := apron.ParseBody(r.fields["body"])
+	// ParseBody refuses a body that is no object as the Decoder's Object
+	// does, without decoding it twice.
+	if raw, ok := r.fields["body"]; ok && d.Err() == nil {
+		body, err := apron.ParseBody(raw)
 		d.Fail(err)
 		m.body = body
 	}

@@ -1,6 +1,9 @@
 package core
 
-import "testing"
+import (
+	"reflect"
+	"testing"
+)
 
 func TestMalformedFrames(t *testing.T) {
 	for _, tc := range []struct {
@@ -61,6 +64,33 @@ func TestFingerprint(t *testing.T) {
 	} {
 		if Fingerprint(other.method, []byte(other.params)) == Fingerprint("message", []byte(same[0])) {
 			t.Errorf("%s %s has the fingerprint of message %s", other.method, other.params, same[0])
+		}
+	}
+}
+
+// A well-formed frame parses in one pass as it does member by member.
+func TestParseWellFormed(t *testing.T) {
+	for _, frame := range []string{
+		`{"method":"message","id":"x","params":{"body":{"text":"hi"},"room_id":"general"}}`,
+		` { "params" : { } , "method" : "me" , "id" : "" , "jsonrpc": "2.0" } `,
+		`{"method":"history","id":"1"}`,
+		`{"method":"activity","id":7,"params":{"typing":5}}`,
+		`{"method":"ping"}`,
+		`{"id":"x","method":"nonesuch","params":{"a":[1,{"b":null}]}}`,
+	} {
+		fast, ok := parseWellFormed([]byte(frame))
+		if !ok {
+			t.Errorf("%s is not well formed", frame)
+			continue
+		}
+		slow, err := parseAny([]byte(frame))
+		if err != nil || !reflect.DeepEqual(fast, slow) {
+			t.Errorf("%s parses as %#v, and member by member as %#v, %v", frame, fast, slow, err)
+		}
+	}
+	for _, frame := range []string{`null`, `[]`, `{"id":"x"}`, `{"method":""}`, `{"method":1}`, `{"method":"m","id":null}`, `{"method":"m","id":1}`, `{"method":"m","params":null}`, `{"method":"m","params":[]}`} {
+		if _, ok := parseWellFormed([]byte(frame)); ok {
+			t.Errorf("%s is well formed", frame)
 		}
 	}
 }
