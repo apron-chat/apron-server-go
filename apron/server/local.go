@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/json/jsontext"
@@ -88,8 +89,15 @@ type Local struct {
 	nextID atomic.Uint64
 	// turn holds a token while a call is processed: a connection's frames
 	// are processed one at a time.
-	turn    chan struct{}
-	pending sync.Map // request id → chan localReply
+	turn chan struct{}
+	// pending are the calls waiting for their replies, by the number of
+	// their ids.
+	pendingMu sync.Mutex
+	pending   map[uint64]chan localReply
+	// replies are the channels Call waits for its reply on, which one that
+	// took its reply gives back: the connection's own, as a channel is of
+	// the goroutines that made it (testing/synctest).
+	replies sync.Pool
 	frames  chan apron.Frame
 
 	closed    chan struct{}
@@ -108,8 +116,25 @@ type localReply struct {
 }
 
 // inFlight is the context key of a call being handled on a Local
-// connection, whose value is set while its handler runs.
+// connection, whose value is its callContext.
 type inFlight struct{ l *Local }
+
+// callContext is the context of a call being handled on a Local
+// connection, its caller's with the call in it: running is set while its
+// handler runs. It is one allocation, where context.WithValue and the
+// flag were two.
+type callContext struct {
+	context.Context
+	l       *Local
+	running atomic.Bool
+}
+
+func (c *callContext) Value(key any) any {
+	if key == (inFlight{c.l}) {
+		return c
+	}
+	return c.Context.Value(key)
+}
 
 // Local opens an in-process connection, and returns once its server frame
 // is queued. An error of OnConnect is returned as it is, and apron.ErrClosed when
@@ -120,7 +145,7 @@ func (s *Server) Local(options LocalOptions) (*Local, error) {
 		return nil, errors.New("apron: a Local connection needs a user")
 	}
 	queue := orDefault(options.Queue, 1024)
-	l := &Local{s: s, prefix: rand.Text()[:12] + "-", turn: make(chan struct{}, 1), closed: make(chan struct{})}
+	l := &Local{s: s, prefix: rand.Text()[:12] + "-", turn: make(chan struct{}, 1), pending: map[uint64]chan localReply{}, closed: make(chan struct{})}
 	if options.OnFrame != nil {
 		l.frames = make(chan apron.Frame, queue)
 	}
@@ -295,23 +320,46 @@ func (l *Local) Call(ctx context.Context, method string, params any) (jsontext.V
 	if l.notificationOnly(method) {
 		return nil, ErrNotRequest
 	}
-	id := l.prefix + strconv.FormatUint(l.nextID.Add(1), 10)
-	reply := make(chan localReply, 1)
-	l.pending.Store(id, reply)
-	defer l.pending.Delete(id)
+	n := l.nextID.Add(1)
+	id := l.prefix + strconv.FormatUint(n, 10)
+	reply, _ := l.replies.Get().(chan localReply)
+	if reply == nil {
+		reply = make(chan localReply, 1)
+	}
+	l.pendingMu.Lock()
+	l.pending[n] = reply
+	l.pendingMu.Unlock()
 	if err := l.process(ctx, method, id, params); err != nil {
+		l.abandonCall(n, reply)
 		return nil, err
 	}
 	select {
 	case r := <-reply:
+		// receive took the call from pending before it sent the reply.
+		l.replies.Put(reply)
 		if r.err != nil {
 			return nil, r.err
 		}
 		return r.result, nil
 	case <-l.closed:
+		l.abandonCall(n, reply)
 		return nil, l.Err()
 	case <-ctx.Done():
+		l.abandonCall(n, reply)
 		return nil, ctx.Err()
+	}
+}
+
+// abandonCall forgets a call that does not wait for its reply. Its channel
+// goes back to the pool only when no reply can come on it: receive took
+// it from pending, and sends on it, unless abandonCall took it first.
+func (l *Local) abandonCall(n uint64, reply chan localReply) {
+	l.pendingMu.Lock()
+	_, waiting := l.pending[n]
+	delete(l.pending, n)
+	l.pendingMu.Unlock()
+	if waiting {
+		l.replies.Put(reply)
 	}
 }
 
@@ -336,7 +384,7 @@ func (l *Local) notificationOnly(method string) bool {
 // process sends a frame, a request with id or else a notification, and
 // handles it once the connection's frame before it is done.
 func (l *Local) process(ctx context.Context, method, id string, params any) error {
-	if running, _ := ctx.Value(inFlight{l}).(*atomic.Bool); running != nil && running.Load() {
+	if call, _ := ctx.Value(inFlight{l}).(*callContext); call != nil && call.running.Load() {
 		return ErrReentrant
 	}
 	frame := core.RequestFrame{Method: method, Params: params}
@@ -362,10 +410,10 @@ func (l *Local) process(ctx context.Context, method, id string, params any) erro
 	}
 	// A call from the work of a reply answered later, once the handler
 	// has returned, is no reentrant one.
-	running := new(atomic.Bool)
-	running.Store(true)
-	defer running.Store(false)
-	l.s.processFrame(context.WithValue(ctx, inFlight{l}, running), l.c, payload)
+	call := &callContext{Context: ctx, l: l}
+	call.running.Store(true)
+	defer call.running.Store(false)
+	l.s.processFrame(call, l.c, payload)
 	return nil
 }
 
@@ -374,6 +422,10 @@ func (l *Local) process(ctx context.Context, method, id string, params any) erro
 func (l *Local) receive(payload []byte) error {
 	if isNotification(payload) {
 		return l.toOnFrame(payload)
+	}
+	if id, r, ok := l.parseReply(payload); ok {
+		l.answer(id, r)
+		return nil
 	}
 	var frame struct {
 		ID     *string        `json:"id"`
@@ -385,12 +437,72 @@ func (l *Local) receive(payload []byte) error {
 		return err
 	}
 	if frame.ID != nil && frame.Method == "" {
-		if waiting, ok := l.pending.LoadAndDelete(*frame.ID); ok {
-			waiting.(chan localReply) <- localReply{frame.Result, frame.Error}
-		}
+		l.answer([]byte(*frame.ID), localReply{frame.Result, frame.Error})
 		return nil
 	}
 	return l.toOnFrame(payload)
+}
+
+// answer hands a reply to the call waiting for it, if one is: a call of
+// the connection's, whose id is its prefix and a number.
+func (l *Local) answer(id []byte, r localReply) {
+	digits, ours := bytes.CutPrefix(id, []byte(l.prefix))
+	n, err := strconv.ParseUint(string(digits), 10, 64)
+	if !ours || err != nil {
+		return
+	}
+	l.pendingMu.Lock()
+	waiting := l.pending[n]
+	delete(l.pending, n)
+	l.pendingMu.Unlock()
+	if waiting != nil {
+		waiting <- r
+	}
+}
+
+// parseReply reads a reply as the Server writes one, in place, without
+// decoding it whole: {"id":...,"result":...}, or {"error":...,"id":...},
+// with an id of plain characters. It reports false for any other frame,
+// which receive decodes as before. The result is part of the reply,
+// which is the request's own.
+func (l *Local) parseReply(payload []byte) (id []byte, r localReply, ok bool) {
+	ok = core.DecodeInPlace(payload, func(dec *jsontext.Decoder) bool {
+		if tok, err := dec.ReadToken(); err != nil || tok.Kind() != '{' {
+			return false
+		}
+		var rawID, rawError jsontext.Value
+		for dec.PeekKind() != '}' {
+			name, err := dec.ReadValue()
+			if err != nil {
+				return false
+			}
+			value, err := dec.ReadValue()
+			if err != nil {
+				return false
+			}
+			switch string(name) {
+			case `"id"`:
+				rawID = value
+			case `"result"`:
+				r.result = core.Part(dec, payload, value)
+			case `"error"`:
+				rawError = core.Part(dec, payload, value)
+			default:
+				return false
+			}
+		}
+		if rawID.Kind() != '"' || bytes.IndexByte(rawID, '\\') >= 0 {
+			return false
+		}
+		id = rawID[1 : len(rawID)-1]
+		if rawError != nil {
+			if rawError.Kind() != '{' || json.Unmarshal(rawError, &r.err) != nil {
+				return false
+			}
+		}
+		return true
+	})
+	return id, r, ok
 }
 
 // toOnFrame queues a frame that is no reply for OnFrame, if there is one.

@@ -508,3 +508,52 @@ func TestLocalUserFromOnConnect(t *testing.T) {
 		t.Fatalf("%d disconnects of the connection OnConnect signed out, want 1", n)
 	}
 }
+
+// A Call that stops waiting, as its context ends, leaves its reply, when
+// it comes, to no other Call: each gets its own, whatever the calls before
+// it abandoned, and those answered later once released get theirs.
+func TestLocalAbandonedCalls(t *testing.T) {
+	release := make(chan struct{})
+	s := server.New(helloBackend{}, server.Config{})
+	s.Handle("ext:echo", server.Handler{Serve: func(_ context.Context, _ *server.Conn, r *server.Request, reply server.Reply[any]) error {
+		n := r.Decoder().Count("n", server.Required)
+		if n%2 == 0 {
+			return reply.Send(map[string]int{"n": n})
+		}
+		// Odd ones are answered later, once the test lets them.
+		if err := reply.Later(); err != nil {
+			return err
+		}
+		go func() {
+			<-release
+			_ = reply.Send(map[string]int{"n": n})
+		}()
+		return nil
+	}})
+	l, err := s.Local(server.LocalOptions{User: apron.User{UserID: "ada"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	for n := 1; n <= 40; n++ {
+		ctx := context.Background()
+		var cancel context.CancelFunc = func() {}
+		abandoned := n%2 == 1 && n < 20
+		if abandoned {
+			ctx, cancel = context.WithTimeout(ctx, time.Millisecond)
+		}
+		result, err := l.Call(ctx, "ext:echo", map[string]int{"n": n})
+		cancel()
+		switch {
+		case abandoned && !errors.Is(err, context.DeadlineExceeded):
+			t.Fatalf("call %d, answered later: %s, %v", n, result, err)
+		case !abandoned && (err != nil || string(result) != fmt.Sprintf(`{"n":%d}`, n)):
+			t.Fatalf("call %d: %s, %v", n, result, err)
+		}
+		if n == 20 {
+			// The abandoned calls' replies come now, to nobody.
+			close(release)
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+}

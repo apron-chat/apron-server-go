@@ -128,6 +128,38 @@ type frameDecoder struct {
 // noInput is what a decoder in the pool reads, so that it keeps no frame.
 var noInput = new(bytes.Buffer)
 
+// inPlace returns a pooled decoder of payload, which reads it in place,
+// for release once done.
+func inPlace(payload []byte) *frameDecoder {
+	fd := decoders.Get().(*frameDecoder)
+	fd.frame = *bytes.NewBuffer(payload)
+	fd.Reset(&fd.frame)
+	return fd
+}
+
+func release(fd *frameDecoder) {
+	fd.Reset(noInput)
+	fd.frame = bytes.Buffer{}
+	decoders.Put(fd)
+}
+
+// DecodeInPlace runs read with a pooled decoder of payload, which reads it
+// in place: what it returns of payload (ReadValue) are parts of it, valid
+// as long as payload is, and the decoder is not kept past read. It
+// returns what read does.
+func DecodeInPlace(payload []byte, read func(dec *jsontext.Decoder) bool) bool {
+	fd := inPlace(payload)
+	defer release(fd)
+	return read(&fd.Decoder)
+}
+
+// Part returns the value dec read last (ReadValue) as the part of
+// payload it is, its capacity clipped, for a decoder of DecodeInPlace.
+func Part(dec *jsontext.Decoder, payload []byte, value jsontext.Value) jsontext.Value {
+	end := dec.InputOffset()
+	return jsontext.Value(payload[end-int64(len(value)) : end : end])
+}
+
 // parseWellFormed parses a valid frame that is a well-formed request, or
 // notification, as ParseRequest does, but in one pass, as most frames
 // are: a JSON object with a method, an id that is a string, if any, and
@@ -140,14 +172,8 @@ func parseWellFormed(payload []byte) (req Request, ok bool) {
 	if jsontext.Value(payload).Kind() != '{' {
 		return Request{}, false
 	}
-	fd := decoders.Get().(*frameDecoder)
-	defer func() {
-		fd.Reset(noInput)
-		fd.frame = bytes.Buffer{}
-		decoders.Put(fd)
-	}()
-	fd.frame = *bytes.NewBuffer(payload)
-	fd.Reset(&fd.frame)
+	fd := inPlace(payload)
+	defer release(fd)
 	dec := &fd.Decoder
 	if _, err := dec.ReadToken(); err != nil {
 		return Request{}, false
