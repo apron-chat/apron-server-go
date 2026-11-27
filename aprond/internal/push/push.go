@@ -20,6 +20,7 @@ import (
 	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"fmt"
+	"iter"
 	"log/slog"
 	"maps"
 	"slices"
@@ -222,6 +223,12 @@ func (t *Table) Len() int { return len(t.byKey) }
 
 // Get returns userID's registration of url, or nil.
 func (t *Table) Get(userID, url string) *Registration { return t.byUser[userID][url] }
+
+// Users counts the users with registrations.
+func (t *Table) Users() int { return len(t.byUser) }
+
+// UserIDs yields the user_id of each user with registrations, in no order.
+func (t *Table) UserIDs() iter.Seq[string] { return maps.Keys(t.byUser) }
 
 // Count counts userID's registrations.
 func (t *Table) Count(userID string) int { return len(t.byUser[userID]) }
