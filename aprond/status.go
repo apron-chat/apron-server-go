@@ -401,10 +401,7 @@ func (s *Server) statusDue(u *userState) {
 // status, such as those of a room u just joined, who share it with u for
 // the first time.
 func (s *Server) sendStatusLocked(u *userState, users []*userState) {
-	frame := apron.Frame(statusFrame(u))
-	for _, other := range users {
-		other.sendFrame(frame)
-	}
+	server.SendAll(apron.Frame(statusFrame(u)), usersConns(slices.Values(users)))
 }
 
 // statusFrame is the `user` notification of u's published shown status:

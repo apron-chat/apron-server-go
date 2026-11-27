@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"encoding/json/jsontext"
 	"fmt"
+	"iter"
 	"maps"
 	"regexp"
 	"slices"
@@ -320,33 +321,23 @@ func (u *userState) send(frames ...any) {
 	}
 }
 
-// sendFrame queues one encoded frame, such as one rendered once for a
-// room's members, to every connection of the user: as send does, without
-// the copies a list of frames of any kind takes for each connection.
-func (u *userState) sendFrame(frame apron.Frame) {
-	for c := range u.clients {
-		if !c.conn.Closing() {
-			c.conn.Send(frame)
+// usersConns yields the connections of users, which yields each once.
+func usersConns(users iter.Seq[*userState]) iter.Seq[*server.Conn] {
+	return func(yield func(*server.Conn) bool) {
+		for u := range users {
+			for c := range u.clients {
+				if !yield(c.conn) {
+					return
+				}
+			}
 		}
 	}
 }
 
-// sharersLocked lists the other users who share a joined room with u.
-func (s *Server) sharersLocked(u *userState) []*userState {
-	seen := make(map[string]*userState)
-	for _, r := range u.joined {
-		for id, member := range r.Members() {
-			if id != u.id {
-				seen[id] = member
-			}
-		}
-	}
-	ids := slices.Sorted(maps.Keys(seen))
-	users := make([]*userState, len(ids))
-	for i, id := range ids {
-		users[i] = seen[id]
-	}
-	return users
+// sharersConnsLocked yields the connections of the other users who share a
+// joined room with u, each user's once (membersConns).
+func (s *Server) sharersConnsLocked(u *userState) iter.Seq[*server.Conn] {
+	return membersConns(slices.Collect(maps.Values(u.joined)), u)
 }
 
 // userViews are a user as its two audiences see it (server.UserChange): its
@@ -387,19 +378,15 @@ func (s *Server) notifyProfileLocked(u *userState, except *client, before userVi
 // publishUserLocked tells of a change to u since before (notifyProfileLocked),
 // without publishing its shown status.
 func (s *Server) publishUserLocked(u *userState, except *client, before userViews) {
-	sharers := make(map[*userState]bool)
-	for _, other := range s.sharersLocked(u) {
-		sharers[other] = true
-	}
 	now := u.views()
 	change := server.UserChange{Old: before.you, New: now.you, OldShown: before.shown, NewShown: now.shown}
 	if except != nil {
 		change.Except = except.conn
 	}
-	s.srv.PublishUser(change, func(wc *server.Conn) bool {
-		c, ok := wc.Data().(*client)
-		return ok && c.user != nil && sharers[c.user]
-	})
+	// The change goes to the user's connections and its sharers', from the
+	// rooms' lists, rather than to every connection the filter of
+	// PublishUser would pick from.
+	s.srv.PublishUserTo(change, usersConns(func(yield func(*userState) bool) { yield(u) }), s.sharersConnsLocked(u))
 }
 
 // withRemoved clears each removed field of a profile, which sends it as

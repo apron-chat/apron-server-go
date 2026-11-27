@@ -4,6 +4,7 @@ import (
 	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"fmt"
+	"iter"
 	"maps"
 	"slices"
 
@@ -105,20 +106,34 @@ func decodeRecord[T any](raw jsontext.Value) T {
 // deliverLocked sends a frame to every connection of every member of the
 // given rooms, once per connection. The frame is encoded once for all of them.
 func (s *Server) deliverLocked(frame any, rooms ...*roomState) {
-	payload := apron.Frame(render(frame))
-	if len(rooms) == 1 {
-		// One room's members are each one member: nothing to tell apart.
-		for _, member := range rooms[0].Members() {
-			member.sendFrame(payload)
+	server.SendAll(apron.Frame(render(frame)), membersConns(rooms, nil))
+}
+
+// membersConns yields the connections of the members of rooms but except,
+// each member's once: those of one room are each one member, and only
+// several rooms' are told apart.
+func membersConns(rooms []*roomState, except *userState) iter.Seq[*server.Conn] {
+	return func(yield func(*server.Conn) bool) {
+		var seen map[string]bool
+		if len(rooms) > 1 {
+			seen = make(map[string]bool)
 		}
-		return
-	}
-	seen := make(map[string]bool)
-	for _, r := range rooms {
-		for id, member := range r.Members() {
-			if !seen[id] {
-				seen[id] = true
-				member.sendFrame(payload)
+		for _, r := range rooms {
+			for id, member := range r.Members() {
+				if member == except {
+					continue
+				}
+				if seen != nil {
+					if seen[id] {
+						continue
+					}
+					seen[id] = true
+				}
+				for c := range member.clients {
+					if !yield(c.conn) {
+						return
+					}
+				}
 			}
 		}
 	}
@@ -144,11 +159,7 @@ func encodeNotification(n apron.Notification) jsontext.Value {
 // with the room_update that tells them of the change.
 func (s *Server) deliverMembershipLocked(membership apron.Membership, r *roomState, u *userState) {
 	frame := apron.Frame(encodeNotification(apron.RoomUpdate{Memberships: []apron.Membership{membership}}))
-	for id, member := range r.Members() {
-		if id != u.id {
-			member.sendFrame(frame)
-		}
-	}
+	server.SendAll(frame, membersConns([]*roomState{r}, u))
 }
 
 // joinedLocked makes u a member of r and logs the membership
