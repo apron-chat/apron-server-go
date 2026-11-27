@@ -278,7 +278,7 @@ func (c *Conn) Close() { c.rt.Stop() }
 // CloseWithError sends an error about the connection as a whole, after the
 // frames already queued, then closes it (§1.1).
 func (c *Conn) CloseWithError(e *apron.Error) {
-	payload, err := core.Marshal(map[string]any{"error": e})
+	payload, err := core.Marshal(&core.ReplyFrame{Error: e})
 	if err != nil {
 		return
 	}

@@ -144,17 +144,17 @@ func (r *Request) encodeReply(result any, e *apron.Error) (frame apron.Frame, en
 			}
 		}
 	}
-	reply := map[string]any{}
+	var reply core.ReplyFrame
 	if e != nil {
-		reply["error"] = e
+		reply.Error = e
 		encoded = nil
 	} else {
-		reply["result"] = encoded
+		reply.Result = encoded
 	}
 	if r.hasID {
-		reply["id"] = r.ID
+		reply.ID = &r.ID
 	}
-	payload, err := core.Marshal(reply)
+	payload, err := core.Marshal(&reply)
 	if err != nil {
 		return nil, nil, e
 	}

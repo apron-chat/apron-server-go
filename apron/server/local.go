@@ -339,14 +339,11 @@ func (l *Local) process(ctx context.Context, method, id string, params any) erro
 	if running, _ := ctx.Value(inFlight{l}).(*atomic.Bool); running != nil && running.Load() {
 		return ErrReentrant
 	}
-	frame := map[string]any{"method": method}
+	frame := core.RequestFrame{Method: method, Params: params}
 	if id != "" {
-		frame["id"] = id
+		frame.ID = &id
 	}
-	if params != nil {
-		frame["params"] = params
-	}
-	payload, err := core.Marshal(frame)
+	payload, err := core.Marshal(&frame)
 	if err != nil {
 		return err
 	}

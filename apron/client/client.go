@@ -62,6 +62,7 @@ import (
 	"github.com/coder/websocket"
 
 	"github.com/apron-chat/apron-server-go/apron"
+	"github.com/apron-chat/apron-server-go/apron/internal/core"
 )
 
 // Errors that end a connection, which its Err then wraps.
@@ -504,7 +505,7 @@ func mergeUnknown(kept, carried jsontext.Value) jsontext.Value {
 // request.
 func (c *Conn) Call(ctx context.Context, method string, params any) (jsontext.Value, error) {
 	id := c.prefix + strconv.FormatUint(c.nextID.Add(1), 10)
-	frame := map[string]any{"method": method, "id": id}
+	frame := core.RequestFrame{ID: &id, Method: method}
 	var raw jsontext.Value
 	if params != nil {
 		encoded, err := apron.Marshal(params)
@@ -512,9 +513,9 @@ func (c *Conn) Call(ctx context.Context, method string, params any) (jsontext.Va
 			return nil, err
 		}
 		raw = encoded
-		frame["params"] = raw
+		frame.Params = raw
 	}
-	payload, err := apron.Marshal(frame)
+	payload, err := apron.Marshal(&frame)
 	if err != nil {
 		return nil, err
 	}
@@ -572,11 +573,7 @@ func (r reply) unwrap() error {
 // Notify sends a notification, such as activity (§4.6), which gets no
 // reply.
 func (c *Conn) Notify(ctx context.Context, method string, params any) error {
-	frame := map[string]any{"method": method}
-	if params != nil {
-		frame["params"] = params
-	}
-	payload, err := apron.Marshal(frame)
+	payload, err := apron.Marshal(&core.RequestFrame{Method: method, Params: params})
 	if err != nil {
 		return err
 	}

@@ -276,7 +276,7 @@ func Encode(n Notification) (Frame, error) {
 
 // encodeRaw renders a notification frame of any method and params.
 func encodeRaw(method string, params any) (Frame, error) {
-	return marshal(map[string]any{"method": method, "params": params})
+	return marshal(&core.NotificationFrame{Method: method, Params: params})
 }
 
 // Marshal encodes a value as JSON as every frame is encoded:

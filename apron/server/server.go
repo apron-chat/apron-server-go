@@ -283,7 +283,7 @@ func (s *Server) holdFailed() []byte {
 	if e == nil {
 		e = internalError()
 	}
-	frame, _ := core.Marshal(map[string]any{"error": e})
+	frame, _ := core.Marshal(&core.ReplyFrame{Error: e})
 	return frame
 }
 
