@@ -21,6 +21,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log/slog"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -123,6 +124,11 @@ type benchServer struct {
 
 func newBenchServer(tb testing.TB, config Config) *benchServer {
 	tb.Helper()
+	if config.Logger == nil {
+		// Warnings, such as of the slow consumers dropped, would break up
+		// the benchmarks' lines.
+		config.Logger = slog.New(slog.DiscardHandler)
+	}
 	s, err := Open(config)
 	if err != nil {
 		tb.Fatal(err)
