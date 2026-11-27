@@ -167,7 +167,6 @@ type roundTrip struct {
 	sink   *benchchat.Sink
 	target int64
 	next   int
-	buf    []byte
 }
 
 func newRoundTrip(chat *benchchat.Chat, room string) *roundTrip {
