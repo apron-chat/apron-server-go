@@ -280,7 +280,7 @@ func (c *Conn) dialError() error {
 // read reads frames until the connection ends.
 func (c *Conn) read() {
 	for {
-		_, payload, err := c.ws.Read(context.Background())
+		_, payload, err := core.ReadMessage(context.Background(), c.ws)
 		if err != nil {
 			c.mu.Lock()
 			if c.failed != nil {

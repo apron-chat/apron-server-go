@@ -378,7 +378,7 @@ var errBinaryFrame = errors.New("text frames required")
 
 // Read returns the next frame. A binary frame closes the WebSocket.
 func (t WebSocket) Read(ctx context.Context) ([]byte, error) {
-	kind, payload, err := t.Conn.Read(ctx)
+	kind, payload, err := ReadMessage(ctx, t.Conn)
 	if err != nil {
 		return nil, err
 	}
@@ -399,3 +399,29 @@ func (t WebSocket) Ping(ctx context.Context) error { return t.Conn.Ping(ctx) }
 
 // Close closes the WebSocket without a handshake.
 func (t WebSocket) Close() error { return t.Conn.CloseNow() }
+
+// readBuffers are the buffers ReadMessage reads into.
+var readBuffers = sync.Pool{New: func() any { return new(bytes.Buffer) }}
+
+// ReadMessage reads the next message of a WebSocket, as Conn.Read does, into
+// a buffer of a pool, and returns a copy of the size it has: Conn.Read
+// grows a new buffer for each message, which for one of tens of kilobytes,
+// such as a page of history, allocates it several times over.
+func ReadMessage(ctx context.Context, ws *websocket.Conn) (websocket.MessageType, []byte, error) {
+	kind, r, err := ws.Reader(ctx)
+	if err != nil {
+		return 0, nil, err
+	}
+	buf := readBuffers.Get().(*bytes.Buffer)
+	defer func() {
+		// A buffer grown for a large message is not kept.
+		if buf.Cap() <= 1<<20 {
+			buf.Reset()
+			readBuffers.Put(buf)
+		}
+	}()
+	if _, err := buf.ReadFrom(r); err != nil {
+		return 0, nil, err
+	}
+	return kind, bytes.Clone(buf.Bytes()), nil
+}
