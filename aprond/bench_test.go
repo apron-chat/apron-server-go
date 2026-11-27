@@ -496,6 +496,35 @@ func BenchmarkStatusFlap(b *testing.B) {
 	}
 }
 
+// BenchmarkStatusFlapBystanders flips the status of members of a small
+// room while many others are connected who share no room with them: what a
+// change costs that nobody else is told of.
+func BenchmarkStatusFlapBystanders(b *testing.B) {
+	for _, n := range []int{0, 1000} {
+		b.Run(fmt.Sprintf("bystanders=%d", n), func(b *testing.B) {
+			bs, poster, _ := bigRoom(b, Config{OutgoingQueue: 4096}, n)
+			room := stringField(poster.call(b, "room_set", map[string]any{"title": "small"}), "room_id")
+			flappers := make([]*benchClient, 100)
+			for i := range flappers {
+				_, token := bs.member(n+1+i, room)
+				flappers[i] = bs.resume(token, true)
+				flappers[i].call(b, "room_leave", map[string]any{"room_id": defaultRoomID})
+			}
+			if b.N > len(flappers)*statusRequestBurst/2 {
+				b.Skipf("b.N %d is beyond the members' limits on status changes", b.N)
+			}
+			statuses := []string{"dnd", "online"}
+			runtime.GC()
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := range b.N {
+				flappers[i%len(flappers)].call(b, "me", map[string]any{"status": statuses[(i/len(flappers))%2]})
+			}
+			b.StopTimer()
+		})
+	}
+}
+
 // BenchmarkReactionStorm has every member of a room react to one hot
 // message, one after another, each changing their set: each reaction
 // record carries every reaction of the message to every member.
