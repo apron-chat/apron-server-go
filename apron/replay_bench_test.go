@@ -24,10 +24,10 @@ func benchMessages(n int) []apron.Message {
 	return ms
 }
 
-// BenchmarkReplay applies a million message snapshots, a page of 100 at a
+// BenchmarkReplayHistory applies a million message snapshots, a page of 100 at a
 // time, as a client that loads a room's whole history does, and reports
 // what each costs and what the Replay keeps of it.
-func BenchmarkReplay(b *testing.B) {
+func BenchmarkReplayHistory(b *testing.B) {
 	const records = 1_000_000
 	ms := benchMessages(records)
 	var kept uint64

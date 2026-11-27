@@ -24,10 +24,10 @@ func benchServer(b *testing.B) (*benchchat.Chat, string) {
 	return chat, "ws" + strings.TrimPrefix(ts.URL, "http")
 }
 
-// BenchmarkHistoryPages pages back through a log of 100,000 messages, 100
+// BenchmarkClientHistoryPages pages back through a log of 100,000 messages, 100
 // a page, over a WebSocket: an op is the whole log, and each record's
 // cost is reported.
-func BenchmarkHistoryPages(b *testing.B) {
+func BenchmarkClientHistoryPages(b *testing.B) {
 	const records = 100_000
 	chat, url := benchServer(b)
 	chat.Seed("general", records)

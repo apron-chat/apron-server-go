@@ -58,9 +58,9 @@ func message(b *testing.B, text string) apron.Frame {
 	return frame
 }
 
-// BenchmarkBroadcast sends one encoded message to every connection
+// BenchmarkFanoutBroadcast sends one encoded message to every connection
 // (Server.Broadcast), and waits until each was written it.
-func BenchmarkBroadcast(b *testing.B) {
+func BenchmarkFanoutBroadcast(b *testing.B) {
 	for _, n := range []int{10, 100, 1000, 10000} {
 		b.Run("conns="+strconv.Itoa(n), func(b *testing.B) {
 			chat := benchchat.New(server.Config{})
@@ -82,10 +82,10 @@ func BenchmarkBroadcast(b *testing.B) {
 	}
 }
 
-// BenchmarkSend sends one encoded message to every connection with
+// BenchmarkFanoutSend sends one encoded message to every connection with
 // Conn.Send, from the backend's own list, as a backend that keeps each
 // room's members does.
-func BenchmarkSend(b *testing.B) {
+func BenchmarkFanoutSend(b *testing.B) {
 	for _, n := range []int{10, 1000} {
 		b.Run("conns="+strconv.Itoa(n), func(b *testing.B) {
 			chat := benchchat.New(server.Config{})
@@ -110,9 +110,9 @@ func BenchmarkSend(b *testing.B) {
 	}
 }
 
-// BenchmarkNotify sends one message to every connection with Conn.Notify,
+// BenchmarkFanoutNotify sends one message to every connection with Conn.Notify,
 // which encodes it for each: what encoding once saves.
-func BenchmarkNotify(b *testing.B) {
+func BenchmarkFanoutNotify(b *testing.B) {
 	const n = 1000
 	chat := benchchat.New(server.Config{})
 	sink := benchchat.NewSink()
@@ -167,11 +167,11 @@ func (r *roundTrip) call(method, params string, writes int) {
 	r.sink.Wait(r.target)
 }
 
-// BenchmarkRequest makes one request at a time on one connection, alone
+// BenchmarkRequestRoundTrip makes one request at a time on one connection, alone
 // in its room: message (its notification and its result), history (a page
 // of 100 of 1000 messages), me (a rename), status (idle, which others see
 // as away), reactions, and a request that fails (unsupported).
-func BenchmarkRequest(b *testing.B) {
+func BenchmarkRequestRoundTrip(b *testing.B) {
 	b.Run("message", func(b *testing.B) {
 		chat := benchchat.New(server.Config{})
 		r := newRoundTrip(chat, "solo")
@@ -267,10 +267,10 @@ func BenchmarkRequestParallel(b *testing.B) {
 	}
 }
 
-// BenchmarkLocalCall makes one request at a time on a Local connection,
+// BenchmarkRequestLocal makes one request at a time on a Local connection,
 // as a bot does: Local.Call encodes the request, and the reply goes back
 // to it.
-func BenchmarkLocalCall(b *testing.B) {
+func BenchmarkRequestLocal(b *testing.B) {
 	chat := benchchat.New(server.Config{})
 	l, err := chat.Server.Local(server.LocalOptions{User: apron.User{UserID: "bot", Name: "Bot"}, OnFrame: func(apron.Frame) {}})
 	if err != nil {
@@ -286,11 +286,11 @@ func BenchmarkLocalCall(b *testing.B) {
 	}
 }
 
-// BenchmarkRoomFanOut posts a message to one room of many: 1000
+// BenchmarkFanoutRooms posts a message to one room of many: 1000
 // connections in rooms of size members. With Broadcast and a filter, every
 // message walks every connection; with the backend's member lists and
 // Conn.Send, only the room's.
-func BenchmarkRoomFanOut(b *testing.B) {
+func BenchmarkFanoutRooms(b *testing.B) {
 	const conns = 1000
 	for _, members := range []int{10, 1000} {
 		for _, lists := range []bool{false, true} {
@@ -322,10 +322,10 @@ func BenchmarkRoomFanOut(b *testing.B) {
 	}
 }
 
-// BenchmarkLargeMessage posts a message of 200 KB, near the 256 KiB a
+// BenchmarkRequestLarge posts a message of 200 KB, near the 256 KiB a
 // frame may have, to a room of 100: what the request path copies of it,
 // and that its notification is encoded once for all of them.
-func BenchmarkLargeMessage(b *testing.B) {
+func BenchmarkRequestLarge(b *testing.B) {
 	const members = 100
 	chat := benchchat.New(server.Config{})
 	chat.MemberLists = true
@@ -342,11 +342,11 @@ func BenchmarkLargeMessage(b *testing.B) {
 	}
 }
 
-// BenchmarkStorm sends the tiny frames of busy rooms, each fanned out to
+// BenchmarkFanoutStorm sends the tiny frames of busy rooms, each fanned out to
 // a room of 100: reactions (a request and a reactions record), activity
 // (typing, a notification, relayed to everyone else), and status (idle
 // and back, which others see as away and online, PublishUser's patches).
-func BenchmarkStorm(b *testing.B) {
+func BenchmarkFanoutStorm(b *testing.B) {
 	const members = 100
 	for _, kind := range []string{"reactions", "activity", "status"} {
 		b.Run(kind, func(b *testing.B) {
@@ -382,10 +382,10 @@ func BenchmarkStorm(b *testing.B) {
 	}
 }
 
-// BenchmarkSlowConsumer broadcasts to 100 connections, one of which stops
+// BenchmarkFanoutSlowConsumer broadcasts to 100 connections, one of which stops
 // reading: its queue fills, and it is disconnected, without holding up
 // the others, or the broadcaster.
-func BenchmarkSlowConsumer(b *testing.B) {
+func BenchmarkFanoutSlowConsumer(b *testing.B) {
 	for _, stalled := range []int{0, 1, 10} {
 		b.Run("stalled="+strconv.Itoa(stalled), func(b *testing.B) {
 			const fast = 100
@@ -420,9 +420,9 @@ func BenchmarkSlowConsumer(b *testing.B) {
 	}
 }
 
-// BenchmarkChurn opens a connection, signs it in, and closes it: what a
+// BenchmarkConnChurn opens a connection, signs it in, and closes it: what a
 // connection costs the Server for its life.
-func BenchmarkChurn(b *testing.B) {
+func BenchmarkConnChurn(b *testing.B) {
 	chat := benchchat.New(server.Config{})
 	sink := benchchat.NewSink()
 	// Others stay connected, so that what churns is not the whole server.

@@ -6,10 +6,10 @@ import (
 	"github.com/apron-chat/apron-server-go/apron"
 )
 
-// BenchmarkReceive is what the client does with each frame it reads, but
+// BenchmarkClientReceive is what the client does with each frame it reads, but
 // the read: tell a reply from a notification, note what it says of the
 // connection, and queue it for OnFrame.
-func BenchmarkReceive(b *testing.B) {
+func BenchmarkClientReceive(b *testing.B) {
 	frames := map[string][]byte{}
 	message, _ := apron.Encode(apron.Message{
 		MessageID: 1_700_000_000_000, LogID: 1_700_000_000_000, RoomID: "general",

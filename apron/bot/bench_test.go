@@ -11,11 +11,11 @@ import (
 	"github.com/apron-chat/apron-server-go/apron/server"
 )
 
-// BenchmarkEchoStorm posts messages on a Local connection, as a busy room
+// BenchmarkBotEchoStorm posts messages on a Local connection, as a busy room
 // does, to a bot on another: every message reaches the bot, which decodes
 // it, and every tenth names it, which it answers. An op is one message,
 // handled by the bot.
-func BenchmarkEchoStorm(b *testing.B) {
+func BenchmarkBotEchoStorm(b *testing.B) {
 	chat := benchchat.New(server.Config{})
 	defer chat.Server.Shutdown(context.Background())
 	var seen, echoed atomic.Int64
