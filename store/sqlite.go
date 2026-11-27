@@ -13,6 +13,8 @@ import (
 // reads do not block the single writer.
 type SQLite struct {
 	db *sql.DB
+	// put and del are prepared once, for every Apply's transaction.
+	put, del *sql.Stmt
 }
 
 const sqliteSchema = `
@@ -48,7 +50,16 @@ func OpenSQLite(path string) (*SQLite, error) {
 		db.Close()
 		return nil, err
 	}
-	return &SQLite{db: db}, nil
+	s := &SQLite{db: db}
+	if s.put, err = db.Prepare(`INSERT INTO entries (kind, id, value) VALUES (?, ?, ?)
+		ON CONFLICT (kind, id) DO UPDATE SET value = excluded.value`); err == nil {
+		s.del, err = db.Prepare(`DELETE FROM entries WHERE kind = ? AND id = ?`)
+	}
+	if err != nil {
+		db.Close()
+		return nil, err
+	}
+	return s, nil
 }
 
 // Load implements Store.
@@ -77,17 +88,9 @@ func (s *SQLite) Apply(batch []Entry) error {
 		return err
 	}
 	defer tx.Rollback()
-	put, err := tx.Prepare(`INSERT INTO entries (kind, id, value) VALUES (?, ?, ?)
-		ON CONFLICT (kind, id) DO UPDATE SET value = excluded.value`)
-	if err != nil {
-		return err
-	}
-	defer put.Close()
-	del, err := tx.Prepare(`DELETE FROM entries WHERE kind = ? AND id = ?`)
-	if err != nil {
-		return err
-	}
-	defer del.Close()
+	// The statements were prepared on the one connection, which the
+	// transaction uses too.
+	put, del := tx.Stmt(s.put), tx.Stmt(s.del)
 	for _, entry := range batch {
 		if entry.Value == nil {
 			_, err = del.Exec(entry.Kind, entry.ID)
