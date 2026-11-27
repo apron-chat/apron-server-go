@@ -69,9 +69,21 @@ type batch struct {
 type Conn struct {
 	t       Writer
 	options Options
-	out     chan batch
-	done    chan struct{}
-	stop    sync.Once
+	// queue is the batches waiting to be written, a ring of
+	// Options.Queue, from head, of n of them, under qmu. idle is set while
+	// the writer waits for a batch, which whoever queues the next wakes
+	// it for, with a token on wake.
+	qmu   sync.Mutex
+	queue []batch
+	head  int
+	n     int
+	idle  bool
+	wake  chan struct{}
+	done  chan struct{}
+	stop  sync.Once
+	// stopped is set as done is closed, for enqueue to tell without a
+	// channel operation.
+	stopped atomic.Bool
 	// closing is set once the last batch is queued; nothing more is queued,
 	// and Serve's worker drops the frames still waiting.
 	closing atomic.Bool
@@ -93,7 +105,7 @@ type Conn struct {
 
 // NewConn returns the runtime of a connection on t. Start starts it.
 func NewConn(t Writer, options Options) *Conn {
-	c := &Conn{t: t, options: options, out: make(chan batch, max(options.Queue, 1)), done: make(chan struct{})}
+	c := &Conn{t: t, options: options, queue: make([]batch, max(options.Queue, 1)), wake: make(chan struct{}, 1), done: make(chan struct{})}
 	c.ctx, c.cancel = context.WithCancel(context.Background())
 	c.lastFrame.Store(time.Now().UnixNano())
 	if options.WriteTimeout > 0 {
@@ -119,7 +131,11 @@ func (c *Conn) Done() <-chan struct{} { return c.done }
 func (c *Conn) Closing() bool { return c.closing.Load() }
 
 // Queued is the number of batches waiting to be written.
-func (c *Conn) Queued() int { return len(c.out) }
+func (c *Conn) Queued() int {
+	c.qmu.Lock()
+	defer c.qmu.Unlock()
+	return c.n
+}
 
 // Send queues frames as one batch: written one after another, with no
 // other frame between them, in one place in the queue. A full queue stops
@@ -143,26 +159,84 @@ func (c *Conn) SendFrame(frame []byte) bool { return c.enqueue(batch{one: frame}
 func (c *Conn) Fence(f Fence) bool { return c.enqueue(batch{fence: f}) }
 
 func (c *Conn) enqueue(b batch) bool {
-	if c.closing.Load() {
-		return false
+	queued, wake := c.enqueueDeferred(b)
+	if wake {
+		c.Wake()
 	}
-	// A stopped connection queues nothing, even when its queue has room: a
-	// select with both cases ready picks either.
+	return queued
+}
+
+// SendFrameDeferred queues one frame as SendFrame does, but leaves the
+// writer waiting for it, if it is: it reports whether the frame was
+// queued, and whether the writer is to be woken for it with Wake, which
+// the caller does once it has queued what else it queues, such as a
+// broadcast's frame to every connection: so that waking the writers is
+// not part of what it does while it holds a lock.
+func (c *Conn) SendFrameDeferred(frame []byte) (queued, wake bool) {
+	return c.enqueueDeferred(batch{one: frame})
+}
+
+// Wake wakes the writer for what SendFrameDeferred queued.
+func (c *Conn) Wake() {
 	select {
-	case <-c.done:
-		return false
+	case c.wake <- struct{}{}:
 	default:
 	}
-	select {
-	case c.out <- b:
-		return true
-	default:
+}
+
+func (c *Conn) enqueueDeferred(b batch) (queued, wake bool) {
+	// A connection closing or stopped queues nothing, even when its
+	// queue has room.
+	if c.closing.Load() || c.stopped.Load() {
+		return false, false
+	}
+	return c.push(b, c.options.OnFellBehind)
+}
+
+// push queues a batch, and reports whether the writer waits for it; a
+// full queue stops the connection, once fellBehind, if set, has run.
+func (c *Conn) push(b batch, fellBehind func()) (queued, wake bool) {
+	c.qmu.Lock()
+	if c.n == len(c.queue) {
+		c.qmu.Unlock()
 		// A slow client holds up neither its sender nor anyone else's.
-		if c.options.OnFellBehind != nil {
-			c.options.OnFellBehind()
+		if fellBehind != nil {
+			fellBehind()
 		}
 		c.Stop()
-		return false
+		return false, false
+	}
+	c.queue[(c.head+c.n)%len(c.queue)] = b
+	c.n++
+	wake = c.idle
+	c.idle = false
+	c.qmu.Unlock()
+	return true, wake
+}
+
+// next returns the next batch to write, waiting for one, or reports false
+// once the connection stopped.
+func (c *Conn) next() (batch, bool) {
+	for {
+		if c.stopped.Load() {
+			return batch{}, false
+		}
+		c.qmu.Lock()
+		if c.n > 0 {
+			b := c.queue[c.head]
+			c.queue[c.head] = batch{}
+			c.head = (c.head + 1) % len(c.queue)
+			c.n--
+			c.qmu.Unlock()
+			return b, true
+		}
+		c.idle = true
+		c.qmu.Unlock()
+		select {
+		case <-c.done:
+			return batch{}, false
+		case <-c.wake:
+		}
 	}
 }
 
@@ -175,18 +249,20 @@ func (c *Conn) SendLast(frame []byte) bool {
 	if !c.closing.CompareAndSwap(false, true) {
 		return false
 	}
-	select {
-	case c.out <- batch{one: frame, last: true}:
-		return true
-	default:
-		c.Stop()
+	if c.stopped.Load() {
 		return false
 	}
+	queued, wake := c.push(batch{one: frame, last: true}, nil)
+	if wake {
+		c.Wake()
+	}
+	return queued
 }
 
 // Stop ends the connection at once.
 func (c *Conn) Stop() {
 	c.stop.Do(func() {
+		c.stopped.Store(true)
 		close(c.done)
 		c.cancel()
 		if c.timer != nil {
@@ -247,48 +323,47 @@ func (c *Conn) writeExpired() {
 
 func (c *Conn) writeLoop() {
 	for {
-		select {
-		case <-c.done:
+		b, ok := c.next()
+		if !ok {
 			return
-		case b := <-c.out:
-			if b.fence != nil {
-				select {
-				case <-c.done:
-					return
-				case <-b.fence.Done():
-				}
-				if b.fence.Err() != nil {
-					// What the frames behind it acknowledge did not happen:
-					// the connection closes rather than send them.
-					_ = c.write(c.options.FenceFailed)
-					c.Stop()
-					return
-				}
-				continue
+		}
+		if b.fence != nil {
+			select {
+			case <-c.done:
+				return
+			case <-b.fence.Done():
 			}
-			if b.frames == nil {
-				if err := c.write(b.one); err != nil {
-					c.Stop()
-					return
-				}
-			}
-			for _, frame := range b.frames {
-				select {
-				case <-c.done:
-					return
-				default:
-				}
-				if err := c.write(frame); err != nil {
-					c.Stop()
-					return
-				}
-			}
-			if b.last {
-				// The last frame explains the close; a close handshake
-				// would wait on a peer that may not be reading.
+			if b.fence.Err() != nil {
+				// What the frames behind it acknowledge did not happen:
+				// the connection closes rather than send them.
+				_ = c.write(c.options.FenceFailed)
 				c.Stop()
 				return
 			}
+			continue
+		}
+		if b.frames == nil {
+			if err := c.write(b.one); err != nil {
+				c.Stop()
+				return
+			}
+		}
+		for _, frame := range b.frames {
+			select {
+			case <-c.done:
+				return
+			default:
+			}
+			if err := c.write(frame); err != nil {
+				c.Stop()
+				return
+			}
+		}
+		if b.last {
+			// The last frame explains the close; a close handshake
+			// would wait on a peer that may not be reading.
+			c.Stop()
+			return
 		}
 	}
 }

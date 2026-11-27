@@ -69,3 +69,62 @@ func TestWriteTimeout(t *testing.T) {
 		c.Stop()
 	})
 }
+
+// countingWriter counts the frames written, and signals each.
+type countingWriter struct {
+	written atomic.Int64
+	wrote   chan struct{}
+}
+
+func (w *countingWriter) Write(context.Context, []byte) error {
+	w.written.Add(1)
+	select {
+	case w.wrote <- struct{}{}:
+	default:
+	}
+	return nil
+}
+
+func (*countingWriter) Ping(context.Context) error { return nil }
+func (*countingWriter) Close() error               { return nil }
+
+// Every frame queued is written, whether its sender woke the writer at
+// once or later (SendFrameDeferred), however senders interleave.
+func TestQueueWakes(t *testing.T) {
+	w := &countingWriter{wrote: make(chan struct{}, 1)}
+	c := NewConn(w, Options{Queue: 1 << 16, WriteTimeout: time.Minute})
+	c.Start(false)
+	defer c.Stop()
+	const senders, frames = 8, 2000
+	done := make(chan struct{})
+	for s := range senders {
+		go func() {
+			defer func() { done <- struct{}{} }()
+			for i := range frames {
+				if (s+i)%3 == 0 {
+					c.SendFrame([]byte(`{}`))
+					continue
+				}
+				if _, wake := c.SendFrameDeferred([]byte(`{}`)); wake {
+					if i%2 == 0 {
+						go c.Wake()
+					} else {
+						c.Wake()
+					}
+				}
+			}
+		}()
+	}
+	for range senders {
+		<-done
+	}
+	deadline := time.After(10 * time.Second)
+	for w.written.Load() < senders*frames {
+		select {
+		case <-w.wrote:
+		case <-time.After(10 * time.Millisecond):
+		case <-deadline:
+			t.Fatalf("%d of %d frames written", w.written.Load(), senders*frames)
+		}
+	}
+}
