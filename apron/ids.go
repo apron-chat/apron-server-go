@@ -1,6 +1,8 @@
 package apron
 
 import (
+	"bytes"
+	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"errors"
 	"strconv"
@@ -56,6 +58,41 @@ func (id LogID) MarshalJSON() ([]byte, error) {
 		return nil, errors.New("apron: a log_id is below 2^53: " + id.String())
 	}
 	return strconv.AppendQuote(nil, id.String()), nil
+}
+
+// MarshalJSONTo writes the log_id as MarshalJSON does, without allocating:
+// a message has several, and a page of history hundreds.
+func (id LogID) MarshalJSONTo(enc *jsontext.Encoder) error {
+	if id <= 0 || id > MaxLogID {
+		if id == 0 {
+			return enc.WriteToken(jsontext.Null)
+		}
+		_, err := id.MarshalJSON()
+		return err
+	}
+	var buf [20]byte
+	quoted := strconv.AppendInt(append(buf[:0], '"'), int64(id), 10)
+	return enc.WriteValue(append(quoted, '"'))
+}
+
+// UnmarshalJSONFrom reads a log_id as UnmarshalJSON does, without
+// allocating for one written plainly, as servers write them.
+func (id *LogID) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
+	raw, err := dec.ReadValue()
+	if err != nil {
+		return err
+	}
+	if raw.Kind() != '"' || bytes.IndexByte(raw, '\\') >= 0 {
+		return id.UnmarshalJSON(raw)
+	}
+	parsed, err := core.ParseLogID([]byte(raw[1 : len(raw)-1]))
+	if err != nil {
+		// Worded as ParseLogID words it.
+		_, err = ParseLogID(string(raw[1 : len(raw)-1]))
+		return err
+	}
+	*id = LogID(parsed)
+	return nil
 }
 
 // UnmarshalJSON reads a log_id from a decimal string, as ParseLogID does,
