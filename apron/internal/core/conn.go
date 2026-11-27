@@ -464,9 +464,12 @@ func (t WebSocket) Read(ctx context.Context) ([]byte, error) {
 	return payload, nil
 }
 
-// Write sends one text frame.
-func (t WebSocket) Write(ctx context.Context, frame []byte) error {
-	return t.Conn.Write(ctx, websocket.MessageText, frame)
+// Write sends one text frame. It writes without ctx, which websocket.Conn
+// would watch with a context.AfterFunc of each write: a Conn's own timer
+// bounds the write (Options.WriteTimeout), and closing the WebSocket, as
+// a Conn that stops does, ends a write under way.
+func (t WebSocket) Write(_ context.Context, frame []byte) error {
+	return t.Conn.Write(context.Background(), websocket.MessageText, frame)
 }
 
 // Ping pings at the WebSocket level.
