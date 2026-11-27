@@ -3,6 +3,7 @@ package roomlog
 import (
 	"encoding/json/jsontext"
 	"encoding/json/v2"
+	"github.com/apron-chat/apron-server-go/apron"
 	"slices"
 	"testing"
 )
@@ -153,5 +154,67 @@ func TestRestoreLatest(t *testing.T) {
 	}
 	if a.Latest() != 6 || b.Latest() != 5 {
 		t.Fatalf("restored latest %d %d, want 6 5", a.Latest(), b.Latest())
+	}
+}
+
+// bodyByMap is how a Body encoded before it read its members back without
+// a map, which it must still encode as.
+func bodyByMap(t *testing.T, b Body) []byte {
+	t.Helper()
+	raw, err := json.Marshal(b.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var members map[string]jsontext.Value
+	if err := json.Unmarshal(raw, &members); err != nil {
+		t.Fatal(err)
+	}
+	out, err := apron.Marshal(members)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
+
+// A body encodes its members sorted by name, those it has no field for
+// among them, and leaves out those it left out, as a map of them did.
+func TestBodyEncoding(t *testing.T) {
+	for _, raw := range []string{
+		`{"text":"hi"}`,
+		`{}`,
+		`{"text":"","mentions":[],"embeds":[]}`,
+		`{"format":"markdown","mentions":["bob"],"text":"**hi** <&>"}`,
+		`{"zeta":1,"text":"x","alpha":{"b":[1,2]},"embeds":[{"type":"upload","url":"https://e.com/f"}],"mid":null}`,
+		`{"text":"a é \"q\" \\ \n","é":"x","format":""}`,
+	} {
+		var b Body
+		if err := json.Unmarshal([]byte(raw), &b); err != nil {
+			t.Fatal(err)
+		}
+		got, err := apron.Marshal(b)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if want := bodyByMap(t, b); string(got) != string(want) {
+			t.Errorf("%s encodes as\n%s\nwant\n%s", raw, got, want)
+		}
+	}
+	built, err := apron.Marshal(Body{apron.Body{Text: "go", Mentions: []string{"a"}}})
+	if err != nil || string(built) != `{"mentions":["a"],"text":"go"}` {
+		t.Errorf("a body built in Go encodes as %s, %v", built, err)
+	}
+}
+
+// BenchmarkMessageRecord encodes a message snapshot's record, as each save
+// does.
+func BenchmarkMessageRecord(b *testing.B) {
+	snapshot := &Message{
+		Body:  &Body{apron.Body{Text: "the quick brown fox jumps over the lazy dog", Format: "markdown", Mentions: []string{"bob"}}},
+		From:  Author{UserID: "ada", Name: "Ada"},
+		LogID: "1795817355191", MessageID: "1795817355191", RoomID: "general",
+	}
+	b.ReportAllocs()
+	for range b.N {
+		NewMessage(1795817355191, snapshot)
 	}
 }
