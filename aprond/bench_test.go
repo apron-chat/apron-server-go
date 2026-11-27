@@ -34,6 +34,8 @@ import (
 	"time"
 
 	"github.com/apron-chat/apron-server-go/aprond/internal/presence"
+	"github.com/apron-chat/apron-server-go/internal/auth/email"
+	"github.com/apron-chat/apron-server-go/internal/authn"
 	"github.com/apron-chat/apron-server-go/store"
 )
 
@@ -179,6 +181,41 @@ func (bs *benchServer) member(n int, rooms ...string) (string, string) {
 	return id, token
 }
 
+// quietMembers makes n invisible accounts, as member makes each, but in
+// one change, so that the room's entry, which lists every member, is
+// stored once rather than for each, and returns their session tokens.
+func (bs *benchServer) quietMembers(n int) []string {
+	s := bs.s
+	var tokens []string
+	// At most so many invitations are outstanding at once.
+	for len(tokens) < n {
+		invited := make([]Invitation, min(500, n-len(tokens)))
+		for i := range invited {
+			var err error
+			if invited[i], err = s.invite(bs.ctx, "", InvitationOptions{}); err != nil {
+				bs.tb.Fatal(err)
+			}
+		}
+		now := time.Now()
+		s.mu.Lock()
+		for _, inv := range invited {
+			presented := s.invitations.Presented(inv.Token, now)
+			id := authn.Identity{Scheme: email.Name, Subject: fmt.Sprintf("quiet%d@example.com", len(tokens))}
+			u := s.enrollAccountLocked(presented, inv.Token, id, nil, authn.Proof{}, now)
+			u.Presence.Chosen = presence.Invisible
+			s.joinDefaultRoomLocked(u)
+			token, _ := s.sessions.Issue(u, "", true, now)
+			tokens = append(tokens, token)
+		}
+		f := s.newFenceLocked()
+		s.unlock()
+		if err := f.Wait(bs.ctx); err != nil {
+			bs.tb.Fatal(err)
+		}
+	}
+	return tokens
+}
+
 // resume opens a connection signed in with a session token.
 func (bs *benchServer) resume(token string, replies bool) *benchClient {
 	c := bs.connect(true)
@@ -298,15 +335,13 @@ func quietRoom(b *testing.B, config Config, n int) (*benchServer, *benchClient, 
 
 func room(b *testing.B, config Config, n int, quiet bool) (*benchServer, *benchClient, []*benchClient) {
 	bs := newBenchServer(b, config)
-	tokens := make([]string, n)
-	for i := range n {
-		var id string
-		id, tokens[i] = bs.member(i)
-		if quiet {
-			bs.s.mu.Lock()
-			bs.s.users.Get(id).Presence.Chosen = presence.Invisible
-			bs.s.users.Touch(id)
-			bs.s.unlock()
+	var tokens []string
+	if quiet {
+		tokens = bs.quietMembers(n)
+	} else {
+		tokens = make([]string, n)
+		for i := range n {
+			_, tokens[i] = bs.member(i)
 		}
 	}
 	_, posterToken := bs.member(n)
