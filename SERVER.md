@@ -2399,8 +2399,8 @@ rest of the server does:
 ### Room scopes
 
 An account may be limited to some rooms: `Host.SetScope(ctx, userID,
-&RoomScope{Rooms: [...], Threads: bool})`, or `BotOptions.Scope` for a bot
-from its start. It then sees only the rooms its scope lists, and, with
+RoomScope{Rooms: [...], Threads: bool})`, or `BotOptions.Scope` for a bot
+from its start, and `Host.ClearScope` lifts the limit. It then sees only the rooms its scope lists, and, with
 `Threads`, their threads at any depth. Seeing is the one check the server
 makes of who may read or write a room, so the scope holds for every way in:
 the account's connections, its bot's in-process ones, and those its

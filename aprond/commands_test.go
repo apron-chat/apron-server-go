@@ -343,7 +343,7 @@ func TestCommandListAsksAvailable(t *testing.T) {
 	// A user who sees no room can run no command, so none is listed.
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if err := app.SetScope(ctx, user.userID, &RoomScope{Rooms: []string{"nowhere"}}); err != nil {
+	if err := app.SetScope(ctx, user.userID, RoomScope{Rooms: []string{"nowhere"}}); err != nil {
 		t.Fatal(err)
 	}
 	user.drain(t)

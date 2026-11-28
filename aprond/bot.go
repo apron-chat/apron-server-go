@@ -58,7 +58,7 @@ type BotOptions struct {
 	// Scope, if set, limits the bot to some rooms (Server.SetScope), from
 	// this start on: it sees no other, and leaves those it was in. A new
 	// bot joins the default room only if the scope lists it. Nil keeps the
-	// scope the bot had, if any; lift it with Host.SetScope.
+	// scope the bot had, if any; lift it with Host.ClearScope.
 	Scope *RoomScope
 }
 
