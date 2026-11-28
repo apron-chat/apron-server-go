@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"reflect"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -325,6 +326,13 @@ func TestEmailAdditions(t *testing.T) {
 	propose(t, victim, "mallory@evil.example")
 	approveOwned := pendingCode(t, app, victim.userID)
 	victim.expectError(t, "auth", "owned", map[string]any{"scheme": "email", "token": approveOwned}, CodeDenied)
+	app.mu.RLock()
+	owner := app.users.ByIdentity(authn.Identity{Scheme: "email", Subject: "mallory@evil.example"})
+	identities := slices.Collect(maps.Keys(owner.Identities))
+	app.mu.RUnlock()
+	if owner.id != result["you"].(map[string]any)["user_id"] || !slices.Equal(identities, []string{"email"}) {
+		t.Fatalf("owner %s with %v, want %v with its address alone", owner.id, identities, result["you"])
+	}
 
 	// The victim proposes adding their own address.
 	propose(t, victim, "victim@example.com")
@@ -707,25 +715,43 @@ func TestEmailCodesWorkElsewhereWithTheirState(t *testing.T) {
 	}
 }
 
-// Without a public URL, a link carries the WebSocket URL its proposal's
-// connection reached, so a page such as link.apron.chat knows where to sign in.
-func TestEmailLinksNameTheServerWithoutAPublicURL(t *testing.T) {
-	_, mailbox, httpServer := emailTestServer(t, func(config *Config) { config.EmailLinkURL = "https://link.apron.chat/" })
-	c, _ := dialRaw(t, httpServer)
-	propose(t, c, "ada@example.com")
-	message := mailbox.receive(t)
-	if server := linkFragment(t, message).Get("server"); server != wsURL(httpServer) || !strings.HasPrefix(message.Link, "https://link.apron.chat/#token=") {
-		t.Fatalf("link %q, want server %q", message.Link, wsURL(httpServer))
-	}
-	if message.Server != wsURL(httpServer) || !strings.Contains(message.Text(), "Your sign-in code for "+wsURL(httpServer)) {
-		t.Fatalf("server %q, text %q", message.Server, message.Text())
-	}
+// Without a public URL, an email names the WebSocket URL its proposal's
+// connection reached: in its link, so a page such as link.apron.chat knows
+// where to sign in, and, without a link page, beside the code (§4.11.2).
+func TestEmailsNameTheServerWithoutAPublicURL(t *testing.T) {
+	t.Run("link page", func(t *testing.T) {
+		_, mailbox, httpServer := emailTestServer(t, func(config *Config) { config.EmailLinkURL = "https://link.apron.chat/" })
+		c, _ := dialRaw(t, httpServer)
+		propose(t, c, "ada@example.com")
+		message := mailbox.receive(t)
+		if server := linkFragment(t, message).Get("server"); server != wsURL(httpServer) || !strings.HasPrefix(message.Link, "https://link.apron.chat/#token=") {
+			t.Fatalf("link %q, want server %q", message.Link, wsURL(httpServer))
+		}
+		if message.Server != wsURL(httpServer) || !strings.Contains(message.Text(), "Your sign-in code for "+wsURL(httpServer)) {
+			t.Fatalf("server %q, text %q", message.Server, message.Text())
+		}
+	})
+	t.Run("no link page", func(t *testing.T) {
+		_, mailbox, httpServer := emailTestServer(t, func(config *Config) { config.EmailLinkURL = "" })
+		c, _ := dialRaw(t, httpServer)
+		propose(t, c, "ada@example.com")
+		message := mailbox.receive(t)
+		if message.Link != "" || message.Server != wsURL(httpServer) {
+			t.Fatalf("link %q, server %q", message.Link, message.Server)
+		}
+		if text := message.Text(); !strings.Contains(text, "Your sign-in code for "+wsURL(httpServer)+" is "+message.Code+".") ||
+			!strings.Contains(text, "Type it only in an app that is connected to "+wsURL(httpServer)+".") {
+			t.Fatalf("text: %q", text)
+		}
+	})
 }
 
 // A link leaves `:` and `/` in server as they are (PROTOCOL.md Appendix
 // A.4) and percent-encodes the rest of what form decoding would misread, so
-// a client decodes the server it names either way.
-func TestSignInLinkSpellsServerAsALink(t *testing.T) {
+// a client decodes the server it names either way. A message without the
+// server's address, from a sender that builds its own, still gives the
+// code.
+func TestSignInEmailText(t *testing.T) {
 	link := signInLink("https://chat.example/login#old", "t", "", "wss://chat.example/a b?x=1&y+z/ws")
 	if want := "https://chat.example/login#token=t&server=wss://chat.example/a%20b%3Fx%3D1%26y%2Bz/ws"; link != want {
 		t.Fatalf("link %q, want %q", link, want)
@@ -734,27 +760,6 @@ func TestSignInLinkSpellsServerAsALink(t *testing.T) {
 	if values, err := url.ParseQuery(fragment); err != nil || values.Get("server") != "wss://chat.example/a b?x=1&y+z/ws" {
 		t.Fatalf("fragment %q: %v, %v", fragment, values, err)
 	}
-}
-
-// Without a link page, the email still gives the server's address with
-// the code (§4.11.2).
-func TestEmailCodesNameTheServerWithoutALink(t *testing.T) {
-	_, mailbox, httpServer := emailTestServer(t, func(config *Config) { config.EmailLinkURL = "" })
-	c, _ := dialRaw(t, httpServer)
-	propose(t, c, "ada@example.com")
-	message := mailbox.receive(t)
-	if message.Link != "" || message.Server != wsURL(httpServer) {
-		t.Fatalf("link %q, server %q", message.Link, message.Server)
-	}
-	if text := message.Text(); !strings.Contains(text, "Your sign-in code for "+wsURL(httpServer)+" is "+message.Code+".") ||
-		!strings.Contains(text, "Type it only in an app that is connected to "+wsURL(httpServer)+".") {
-		t.Fatalf("text: %q", text)
-	}
-}
-
-// A message without the server's address, from a sender that builds its
-// own, still gives the code.
-func TestSignInEmailTextWithoutAServer(t *testing.T) {
 	text := SignInEmail{To: "ada@example.com", Code: "418092", Expires: time.Now().Add(10 * time.Minute)}.Text()
 	if !strings.HasPrefix(text, "Your sign-in code is 418092.\n") || strings.Contains(text, "Type it only") {
 		t.Fatalf("text: %q", text)
@@ -806,9 +811,9 @@ func TestEmailApprovesWithTheTokenScheme(t *testing.T) {
 	}
 }
 
-// Emails are limited per address and per client, deliveries in progress
-// are bounded, refused proposals leave nothing behind, and a full table
-// forgets only entries whose limits have lapsed.
+// Emails are limited per address and per client, refused proposals leave
+// nothing behind, and a full table forgets only entries whose limits have
+// lapsed. TestEmailDeliveriesAreBounded bounds the deliveries in progress.
 func TestEmailSendLimits(t *testing.T) {
 	app, _, httpServer := emailTestServer(t, func(config *Config) { config.ClientIPHeader = "X-Forwarded-For" })
 	// At most email.MaxSendsPerWindow emails an hour to one address.

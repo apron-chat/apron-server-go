@@ -3,6 +3,7 @@ package aprond
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 )
@@ -131,52 +132,43 @@ func TestManagingPasskeys(t *testing.T) {
 	guest.expectError(t, "account.credentials", "guest", nil, CodeDenied)
 }
 
-func TestAddingAPasskeyCanNeedReauthentication(t *testing.T) {
-	config := DefaultConfig()
-	config.WebAuthn = testWebAuthn(t)
-	app, httpServer := newTestServer(t, config)
-	a, b := newTestAuthenticator(t), newTestAuthenticator(t)
-	first, _ := dialOrigin(t, httpServer, testPasskeyOrigin)
-	registered := registerTestPasskey(t, first, a)
-	token, userID := registered["token"].(string), registered["you"].(map[string]any)["user_id"].(string)
-
-	resumed, _ := dialOrigin(t, httpServer, testPasskeyOrigin)
-	passkeyResult(t, passkeyCall(t, resumed, "resume", "token", "", map[string]any{"token": token}))
-	resumed.drain(t)
-	passkeyDenied(t, addTestPasskey(t, resumed, b))
-	loginTestPasskey(t, resumed, a)
-	resumed.drain(t)
-	passkeyResult(t, addTestPasskey(t, resumed, b))
-	if n := len(app.Credentials(userID)); n != 2 {
-		t.Fatalf("credentials: %d", n)
-	}
-}
-
 // A stolen session token cannot take an account over: adding a passkey
-// takes a recent sign-in, and one added where that is not asked counts as
-// no reauthentication, so it cannot remove the owner's.
+// takes a recent sign-in, which a sign-in with the account's passkey
+// gives, and one added where that is not asked counts as no
+// reauthentication, so it cannot remove the owner's.
 func TestAStolenSessionCannotTakeTheAccountOver(t *testing.T) {
 	for _, without := range []bool{false, true} {
-		config := DefaultConfig()
-		config.WebAuthn = testWebAuthn(t)
-		config.AddCredentialWithoutReauth = without
-		_, httpServer := newTestServer(t, config)
-		owner := newTestAuthenticator(t)
-		first, _ := dialOrigin(t, httpServer, testPasskeyOrigin)
-		token := registerTestPasskey(t, first, owner)["token"].(string)
+		t.Run(fmt.Sprintf("AddCredentialWithoutReauth %v", without), func(t *testing.T) {
+			config := DefaultConfig()
+			config.WebAuthn = testWebAuthn(t)
+			config.AddCredentialWithoutReauth = without
+			app, httpServer := newTestServer(t, config)
+			owner := newTestAuthenticator(t)
+			first, _ := dialOrigin(t, httpServer, testPasskeyOrigin)
+			registered := registerTestPasskey(t, first, owner)
+			token, userID := registered["token"].(string), registered["you"].(map[string]any)["user_id"].(string)
 
-		stolen, _ := dialOrigin(t, httpServer, testPasskeyOrigin)
-		passkeyResult(t, passkeyCall(t, stolen, "resume", "token", "", map[string]any{"token": token}))
-		stolen.drain(t)
-		added := addTestPasskey(t, stolen, newTestAuthenticator(t))
-		if !without {
-			passkeyDenied(t, added)
-			continue
-		}
-		passkeyResult(t, added)
-		stolen.drain(t)
-		stolen.expectError(t, "account.credential_remove", "remove", map[string]any{"id": b64(owner.id)}, CodeDenied)
-		stolen.expectError(t, "account.sign_out", "others", map[string]any{"others": true}, CodeDenied)
+			stolen, _ := dialOrigin(t, httpServer, testPasskeyOrigin)
+			passkeyResult(t, passkeyCall(t, stolen, "resume", "token", "", map[string]any{"token": token}))
+			stolen.drain(t)
+			another := newTestAuthenticator(t)
+			added := addTestPasskey(t, stolen, another)
+			if !without {
+				passkeyDenied(t, added)
+				// A sign-in with the account's passkey is a recent one.
+				loginTestPasskey(t, stolen, owner)
+				stolen.drain(t)
+				passkeyResult(t, addTestPasskey(t, stolen, another))
+				if n := len(app.Credentials(userID)); n != 2 {
+					t.Fatalf("credentials after reauthenticating: %d, want 2", n)
+				}
+				return
+			}
+			passkeyResult(t, added)
+			stolen.drain(t)
+			stolen.expectError(t, "account.credential_remove", "remove", map[string]any{"id": b64(owner.id)}, CodeDenied)
+			stolen.expectError(t, "account.sign_out", "others", map[string]any{"others": true}, CodeDenied)
+		})
 	}
 }
 
