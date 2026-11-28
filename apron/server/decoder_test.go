@@ -181,3 +181,24 @@ func TestFieldsShared(t *testing.T) {
 	}
 	wg.Wait()
 }
+
+// Object is nil for an object left out, and not for an empty one.
+func TestDecoderObject(t *testing.T) {
+	f, _ := ParseFields(jsontext.Value(`{"empty":{},"full":{"a":1},"bad":[]}`))
+	d := f.Decoder()
+	if d.Object("missing", Optional) != nil {
+		t.Error("an object left out is not nil")
+	}
+	if empty := d.Object("empty", Optional); empty == nil || empty.Len() != 0 {
+		t.Errorf("empty: %v", empty)
+	}
+	if full := d.Object("full", Optional); full == nil || full.Len() != 1 {
+		t.Errorf("full: %v", full)
+	}
+	if d.Object("bad", Optional) != nil || d.Err() == nil {
+		t.Error("an array is an object")
+	}
+	if f.Decoder().Object("missing", Required) != nil {
+		t.Error("a required object left out is not nil")
+	}
+}

@@ -157,14 +157,14 @@ func parseKeysParam(r *server.Request) (*webpush.Keys, *Error) {
 	if d.Err() != nil {
 		return nil, invalidParams("keys must be an object with p256dh and auth")
 	}
-	if !d.Has("keys") {
+	if raw == nil {
 		return nil, nil
 	}
-	p256dh, err := parseString(raw, "p256dh", required)
+	p256dh, err := parseString(*raw, "p256dh", required)
 	if err != nil {
 		return nil, invalidParams("keys.p256dh must be a string")
 	}
-	auth, err := parseString(raw, "auth", required)
+	auth, err := parseString(*raw, "auth", required)
 	if err != nil {
 		return nil, invalidParams("keys.auth must be a string")
 	}
