@@ -46,17 +46,24 @@ type Event struct {
 	// LogID orders the events (§2.1): each is greater than the last.
 	LogID int64
 	// Rooms are the rooms whose logs hold the record: one, or both rooms
-	// of a move (§4.3.1).
+	// of a move (§4.3.1). They are the log's own, shared with every
+	// follower: read them, and copy them to change them (slices.Clone).
 	Rooms []string
 	// Record is the record as clients receive it, in history and as it is
 	// broadcast, which PROTOCOL.md defines. A deletion redacts the
 	// message's earlier records (§4.4): an event read after it carries the
 	// redacted record.
+	//
+	// Record is the log's own bytes, shared with every follower and with
+	// the frames sent of it, which are never changed: read it, and copy it
+	// to change it (slices.Clone).
 	Record jsontext.Value
 }
 
+// eventOf is the event of a record, which shares its rooms and bytes: a
+// record's are replaced, never changed (roomlog).
 func eventOf(r *roomlog.Record) Event {
-	return Event{Kind: eventKinds[r.Kind], LogID: r.ID, Rooms: slices.Clone(r.Rooms), Record: slices.Clone(r.Raw)}
+	return Event{Kind: eventKinds[r.Kind], LogID: r.ID, Rooms: r.Rooms, Record: r.Raw}
 }
 
 // LastLogID is the log_id of the latest record, 0 for none.
