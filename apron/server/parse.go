@@ -251,7 +251,7 @@ func parseActivity(r *Request) (apron.ActivityParams, error) {
 		}
 		p.Typing = &typing
 	}
-	p.ReadMessageID = IfPresent(d, "read_message_id", d.MessageID)
+	p.ReadMessageID = d.MessageID("read_message_id", Optional)
 	return parsed(p, d)
 }
 

@@ -35,14 +35,15 @@ type Reaction struct {
 }
 
 // ActivityParams are an activity notification's (§4.6): typing, and how far
-// the user has read. A nil field was left out.
+// the user has read. A nil Typing, and a zero ReadMessageID, were left out.
 type ActivityParams struct {
 	// RoomID is the room, or "" for the default room.
 	RoomID string
 	// Typing is the seconds to show the user as typing, 0 to stop.
 	Typing *int
-	// ReadMessageID is the message the user has read up to.
-	ReadMessageID *LogID
+	// ReadMessageID is the message the user has read up to, 0 when the
+	// notification has none, as no message's message_id is 0.
+	ReadMessageID LogID
 }
 
 // Activity is an activity notification a server sends (§4.6): a change

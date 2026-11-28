@@ -137,7 +137,7 @@ func TestLogIDParams(t *testing.T) {
 	if _, err := parseReact(req(`{"message_id":"x","emojis":[]}`)); apron.CodeOf(err) != apron.CodeInvalidParams {
 		t.Errorf("reactions with a bad message_id: %v", err)
 	}
-	if p, err := parseActivity(req(`{"read_message_id":"11"}`)); err != nil || p.ReadMessageID == nil || *p.ReadMessageID != 11 {
+	if p, err := parseActivity(req(`{"read_message_id":"11"}`)); err != nil || p.ReadMessageID != 11 {
 		t.Errorf("activity: %+v %v", p, err)
 	}
 	if _, err := parseActivity(req(`{"read_message_id":""}`)); err == nil {

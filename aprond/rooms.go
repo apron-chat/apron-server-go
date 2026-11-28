@@ -796,7 +796,7 @@ func (s *Server) activity(c *client, p apron.ActivityParams) *Error {
 		roomID = defaultRoomID
 	}
 	typing := p.Typing
-	readID, hasRead := "", p.ReadMessageID != nil
+	readID, hasRead := "", p.ReadMessageID != 0
 	if hasRead {
 		readID = p.ReadMessageID.String()
 	}
@@ -826,19 +826,19 @@ func (s *Server) activity(c *client, p apron.ActivityParams) *Error {
 	}
 	relay := apron.Activity{RoomID: roomID, From: u.from().User(), Typing: typing}
 	if hasRead {
-		id := int64(*p.ReadMessageID)
+		id := int64(p.ReadMessageID)
 		if s.rooms.Read(r, u.id, rooms.Cursor{From: u.from(), MessageID: readID, ID: id}) {
 			if u.joined[r.ID()] == nil {
 				// A cursor for a room the user has not joined still syncs
 				// across their own connections.
-				u.send(encodeNotification(apron.Activity{RoomID: roomID, From: u.from().User(), ReadMessageID: *p.ReadMessageID}))
+				u.send(encodeNotification(apron.Activity{RoomID: roomID, From: u.from().User(), ReadMessageID: p.ReadMessageID}))
 				if id >= r.Log().Latest() {
 					// Read to the end: no earlier mention there counts.
 					delete(u.Pings, r.ID())
 					s.users.Touch(u.id)
 				}
 			}
-			relay.ReadMessageID = *p.ReadMessageID
+			relay.ReadMessageID = p.ReadMessageID
 		}
 	}
 	read := relay.ReadMessageID != 0
