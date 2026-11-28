@@ -273,7 +273,7 @@ func (s *Server) authenticateGuestLocked(c *client, reply server.Reply[apron.Aut
 		// has. It signs the connection in as no other user, so it is no
 		// sign-in and sends nothing after its result (§4.5).
 		you := c.user.you()
-		result := apron.AuthResult{You: &you}
+		result := apron.AuthResult{You: you}
 		_ = reply.Send(result)
 		return nil
 	}
@@ -406,7 +406,7 @@ func (s *Server) addProvenLocked(c *client, reply server.Reply[apron.AuthResult]
 	}
 	s.provedLocked(c, scheme, proof, time.Now(), wasGuest)
 	you := account.you()
-	_ = reply.Send(apron.AuthResult{You: &you})
+	_ = reply.Send(apron.AuthResult{You: you})
 	return nil
 }
 

@@ -129,7 +129,7 @@ type scoped struct{ oneUser }
 
 func (*scoped) Auth(_ context.Context, c *server.Conn, p apron.AuthParams, reply server.Reply[apron.AuthResult]) error {
 	c.SetDedupScope(p.Name)
-	return reply.Send(apron.AuthResult{You: &apron.CurrentUser{UserID: "same"}})
+	return reply.Send(apron.AuthResult{You: apron.CurrentUser{UserID: "same"}})
 }
 
 // A request's duplicate gets its outcome only on a connection of the same

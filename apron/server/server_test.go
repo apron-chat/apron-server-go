@@ -47,7 +47,7 @@ func (b *backend) Auth(_ context.Context, c *server.Conn, p apron.AuthParams, re
 	if err != nil {
 		return err
 	}
-	return reply.Send(apron.AuthResult{You: you})
+	return reply.Send(apron.AuthResult{You: *you})
 }
 
 // guest is who Auth signs a connection in as.
@@ -178,7 +178,7 @@ func quiet(t *testing.T, c *aprontest.Client) {
 func signIn(t *testing.T, c *aprontest.Client) string {
 	t.Helper()
 	result, err := c.Auth(wait(t), map[string]any{"scheme": "guest", "name": "Ada"})
-	if err != nil || result.You == nil {
+	if err != nil || result.You.UserID == "" {
 		t.Fatalf("auth: %+v %v", result, err)
 	}
 	if f := next(t, c); f.Method != "message" {
@@ -830,7 +830,7 @@ func (b *fencingBackend) Auth(_ context.Context, c *server.Conn, p apron.AuthPar
 		return err
 	}
 	c.HoldUntil(b.fence)
-	return reply.Send(apron.AuthResult{You: you})
+	return reply.Send(apron.AuthResult{You: *you})
 }
 
 func TestMaxConnections(t *testing.T) {

@@ -74,7 +74,7 @@ func (c *chat) Auth(_ context.Context, _ *server.Conn, _ apron.AuthParams, reply
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.guests++
-	return reply.Send(apron.AuthResult{You: &apron.CurrentUser{UserID: fmt.Sprintf("guest_%d", c.guests)}})
+	return reply.Send(apron.AuthResult{You: apron.CurrentUser{UserID: fmt.Sprintf("guest_%d", c.guests)}})
 }
 
 func (c *chat) Message(_ context.Context, conn *server.Conn, p apron.MessageParams, reply server.Reply[apron.MessageResult]) error {
@@ -365,7 +365,7 @@ func TestUserFromBackend(t *testing.T) {
 					Method string           `json:"method"`
 					Params apron.UserUpdate `json:"params"`
 				}
-				if json.Unmarshal(f, &n) == nil && n.Method == "user" && n.Params.You != nil {
+				if json.Unmarshal(f, &n) == nil && n.Method == "user" && n.Params.You.UserID != "" {
 					you <- n.Params.You.UserID + " " + n.Params.You.Name
 				}
 			},

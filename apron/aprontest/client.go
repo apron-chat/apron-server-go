@@ -113,10 +113,10 @@ func SignIn(t testing.TB, s *server.Server, params any) (*Client, apron.CurrentU
 	ctx, cancel := context.WithTimeout(t.Context(), signInWait)
 	defer cancel()
 	result, err := c.Auth(ctx, params)
-	if err != nil || result.You == nil {
+	if err != nil || result.You.UserID == "" {
 		t.Fatalf("aprontest: signing in with %v: result %+v, error %v", params, result, err)
 	}
-	return c, *result.You
+	return c, result.You
 }
 
 // Dial connects to a Server over a WebSocket at url, such as that of an

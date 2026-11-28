@@ -146,7 +146,7 @@ func TestNewReply(t *testing.T) {
 		t.Fatalf("another method: %s", rec.raw)
 	}
 	rec = send("auth", `{"scheme":"guest"}`, func(r *Request) {
-		if err := replyFor[apron.AuthResult](r, nil).Send(apron.AuthResult{You: &apron.CurrentUser{UserID: "a b"}}); apron.CodeOf(err) != apron.CodeInternalError {
+		if err := replyFor[apron.AuthResult](r, nil).Send(apron.AuthResult{You: apron.CurrentUser{UserID: "a b"}}); apron.CodeOf(err) != apron.CodeInternalError {
 			t.Errorf("an invalid user_id: %v", err)
 		}
 	})

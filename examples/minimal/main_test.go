@@ -64,7 +64,7 @@ func TestChat(t *testing.T) {
 	if err != nil || you.UserID != bobUser.UserID || !slices.Equal(you.Cleared, []string{"name"}) {
 		t.Fatalf("me: %+v %v", you, err)
 	}
-	update, err := aprontest.Expect(ctx, ada, func(u apron.UserUpdate) bool { return u.New != nil })
+	update, err := aprontest.Expect(ctx, ada, func(u apron.UserUpdate) bool { return u.New.UserID != "" })
 	if err != nil || update.New.UserID != bobUser.UserID || !slices.Equal(update.New.Cleared, []string{"name"}) {
 		t.Fatalf("ada's user frame: %+v %v", update, err)
 	}
@@ -89,10 +89,10 @@ func TestChat(t *testing.T) {
 	// /nick renames, as me does: the user update comes before the result.
 	_, before, err := ada.CallFrames(ctx, "command", apron.CommandParams{Body: apron.Body{Text: "/nick Ada L."}})
 	var renamed apron.UserUpdate
-	if err != nil || len(before) != 1 || before[0].Decode(&renamed) != nil || renamed.You == nil || renamed.You.Name != "Ada L." {
+	if err != nil || len(before) != 1 || before[0].Decode(&renamed) != nil || renamed.You.UserID == "" || renamed.You.Name != "Ada L." {
 		t.Fatalf("/nick: %v %v", before, err)
 	}
-	if update, err := aprontest.Expect[apron.UserUpdate](ctx, bob, nil); err != nil || update.New == nil || update.New.Name != "Ada L." {
+	if update, err := aprontest.Expect[apron.UserUpdate](ctx, bob, nil); err != nil || update.New.UserID == "" || update.New.Name != "Ada L." {
 		t.Fatalf("bob's user frame: %+v %v", update, err)
 	}
 	if raw, err := ada.Call(ctx, "ext:command_list", nil); err != nil || string(raw) != `{"commands":[{"description":"list the commands you can use here","group":"all","name":"help"},{"description":"change your name","hint":"<name>","name":"nick"}]}` {

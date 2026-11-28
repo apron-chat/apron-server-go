@@ -24,7 +24,7 @@ func TestReadExample(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if a.Header.Server != "wss://chat.example/" || a.Header.You == nil || a.Header.You.UserID != "ada" || len(a.Header.Media) != 1 || a.Skipped != 0 {
+	if a.Header.Server != "wss://chat.example/" || a.Header.You.UserID == "" || a.Header.You.UserID != "ada" || len(a.Header.Media) != 1 || a.Skipped != 0 {
 		t.Fatalf("header %+v, skipped %d", a.Header, a.Skipped)
 	}
 	if l := a.Rooms["general"]; !l.Joined || l.Title != "General" || len(l.Members) != 2 {
@@ -47,7 +47,7 @@ func TestReadExample(t *testing.T) {
 func TestRoundTrip(t *testing.T) {
 	var buf bytes.Buffer
 	you := apron.User{UserID: "ada", Name: "Ada", Status: "online", Seen: "1724800000000"}
-	w, err := archive.NewWriter(&buf, archive.Header{Server: "wss://chat.example/ws", ExportedAt: archive.FormatTime(time.Unix(1724803500, 0)), You: &you, Media: []string{"https://chat.example"}})
+	w, err := archive.NewWriter(&buf, archive.Header{Server: "wss://chat.example/ws", ExportedAt: archive.FormatTime(time.Unix(1724803500, 0)), You: you, Media: []string{"https://chat.example"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -149,7 +149,7 @@ func TestReadSkips(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if a.Header.Server != "" || a.Header.You != nil {
+	if a.Header.Server != "" || a.Header.You.UserID != "" {
 		t.Fatalf("header %+v", a.Header)
 	}
 	// not json, the array, "not an array", two messages, the reactions,

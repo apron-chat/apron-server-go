@@ -33,7 +33,7 @@ func (b *backend) Auth(_ context.Context, _ *server.Conn, _ apron.AuthParams, re
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.guests++
-	return reply.Send(apron.AuthResult{You: &apron.CurrentUser{UserID: fmt.Sprintf("guest_%d", b.guests)}})
+	return reply.Send(apron.AuthResult{You: apron.CurrentUser{UserID: fmt.Sprintf("guest_%d", b.guests)}})
 }
 
 // admin lets guest_1 use a form.

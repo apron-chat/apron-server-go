@@ -159,7 +159,7 @@ func (c *chat) Auth(_ context.Context, _ *server.Conn, p apron.AuthParams, reply
 	case p.Token != "ada":
 		return apron.Denied("Unknown token")
 	}
-	return reply.Send(apron.AuthResult{You: &apron.CurrentUser{User: you}})
+	return reply.Send(apron.AuthResult{You: apron.CurrentUser{User: you}})
 }
 
 func (c *chat) Message(_ context.Context, conn *server.Conn, p apron.MessageParams, reply server.Reply[apron.MessageResult]) error {
@@ -361,7 +361,7 @@ func TestUser(t *testing.T) {
 	if _, err := ada.Command(ctx, apron.CommandParams{Body: apron.Body{Text: "/rename Ada L"}}); err != nil {
 		t.Fatal(err)
 	}
-	update := next(t, got, func(u apron.UserUpdate) bool { return u.You != nil })
+	update := next(t, got, func(u apron.UserUpdate) bool { return u.You.UserID != "" })
 	if update.You.Avatar != "" {
 		t.Fatalf("patch %+v carries the avatar", update.You)
 	}

@@ -283,11 +283,13 @@ func emptyOf(kept jsontext.Value) jsontext.Value {
 
 // UserUpdate is a user notification (§3.3.3): You to the user's own
 // connections, New to others who share a room with the user, and Old with
-// New when the account's user_id changed.
+// New when the account's user_id changed. Each is the zero CurrentUser,
+// which is left out, when the notification does not carry it: one with a
+// user_id is one that does.
 type UserUpdate struct {
-	You *CurrentUser `json:"you,omitzero"`
-	New *CurrentUser `json:"new,omitzero"`
-	Old *CurrentUser `json:"old,omitzero"`
+	You CurrentUser `json:"you,omitzero"`
+	New CurrentUser `json:"new,omitzero"`
+	Old CurrentUser `json:"old,omitzero"`
 }
 
 // Method makes a UserUpdate a Notification.

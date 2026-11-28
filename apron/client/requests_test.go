@@ -34,7 +34,7 @@ func TestConnectThenAuth(t *testing.T) {
 		t.Fatalf("bad token: %v", err)
 	}
 	result, err := conn.Auth(ctx, apron.AuthParams{Scheme: "token", Token: "ada"})
-	if err != nil || result.You == nil || result.You.UserID != "ada" || conn.User().UserID != "ada" {
+	if err != nil || result.You.UserID == "" || result.You.UserID != "ada" || conn.User().UserID != "ada" {
 		t.Fatalf("auth: %+v, %v; user %+v", result, err, conn.User())
 	}
 	if _, err := conn.Post(ctx, text("hi")); err != nil {

@@ -245,7 +245,7 @@ func (s *Server) openLocal(ctx context.Context, c *Conn, asked apron.User) error
 	}
 	frames[0] = frame
 	if you, changed := user.Patch(asked); changed && err == nil {
-		if frame, err = apron.Encode(apron.UserUpdate{You: &you}); err != nil {
+		if frame, err = apron.Encode(apron.UserUpdate{You: you}); err != nil {
 			s.logger().Error("apron: encoding a Local connection's user", "error", err)
 		}
 		frames = append(frames, frame)

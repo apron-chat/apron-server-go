@@ -410,7 +410,7 @@ func statusFrame(u *userState) jsontext.Value {
 		return cached.frame
 	}
 	shown := u.shownObject()
-	frame := notification("user", apron.UserUpdate{New: &shown})
+	frame := notification("user", apron.UserUpdate{New: shown})
 	u.shownFrame = shownFrame{status: status, seen: seen, frame: frame}
 	return frame
 }

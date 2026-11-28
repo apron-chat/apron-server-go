@@ -180,12 +180,12 @@ func (s *Server) publication(change UserChange) (publication, bool) {
 	p := publication{change: change, youChanged: youChanged}
 	var err error
 	if youChanged {
-		p.you, err = apron.Encode(apron.UserUpdate{You: &yours})
+		p.you, err = apron.Encode(apron.UserUpdate{You: yours})
 	}
 	if othersChanged && err == nil {
-		update := apron.UserUpdate{New: &theirs}
+		update := apron.UserUpdate{New: theirs}
 		if old.UserID != "" && old.UserID != cur.UserID {
-			update.Old = &apron.CurrentUser{User: cloneUser(oldShown)}
+			update.Old = apron.CurrentUser{User: cloneUser(oldShown)}
 		}
 		p.others, err = apron.Encode(update)
 	}

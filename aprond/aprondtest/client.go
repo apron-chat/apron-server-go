@@ -63,7 +63,7 @@ func (c *Client) Auth(params any) (apron.AuthResult, error) {
 	if err != nil {
 		return result, c.refusal("auth", err)
 	}
-	if result.You != nil {
+	if result.You.UserID != "" {
 		c.UserID, c.Token = result.You.UserID, result.Token
 	}
 	return result, nil
@@ -74,7 +74,7 @@ func (c *Client) Auth(params any) (apron.AuthResult, error) {
 func (c *Client) signIn(params any) error {
 	c.t.Helper()
 	result, err := c.Auth(params)
-	if err == nil && result.You == nil {
+	if err == nil && result.You.UserID == "" {
 		err = errors.New("aprondtest: the auth result signed nobody in")
 	}
 	return err

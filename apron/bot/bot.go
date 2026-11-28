@@ -299,11 +299,11 @@ func (r *receiver) receive(frame apron.Frame) {
 	switch head.Method {
 	case "user":
 		var update struct {
-			You *struct {
+			You struct {
 				UserID string `json:"user_id"`
 			} `json:"you"`
 		}
-		if json.Unmarshal(head.Params, &update) == nil && update.You != nil && update.You.UserID != "" {
+		if json.Unmarshal(head.Params, &update) == nil && update.You.UserID != "" {
 			r.self = update.You.UserID
 		}
 	case "message":

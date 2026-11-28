@@ -267,7 +267,7 @@ func (s *Server) roomNamedLocked(id string) bool {
 // joined: the client lists them with room_list.
 func (s *Server) switchUserLocked(c *client, reply server.Reply[apron.AuthResult], user *userState, token string, signIn, joinDefault bool) {
 	you := user.you()
-	_ = reply.Send(apron.AuthResult{You: &you, Token: token})
+	_ = reply.Send(apron.AuthResult{You: you, Token: token})
 	// A connection that got only what signing in needs gets the whole
 	// server frame now (§3.1).
 	if !s.revealedLocked(c) {

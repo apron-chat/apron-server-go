@@ -196,7 +196,7 @@ func Dial(ctx context.Context, url string, auth apron.AuthParams, opts ...Option
 		return nil, err
 	}
 	result, err := c.Auth(ctx, auth)
-	if err == nil && result.You == nil {
+	if err == nil && result.You.UserID == "" {
 		err = errors.New("client: auth signed nobody in")
 	}
 	if err != nil {
@@ -370,9 +370,9 @@ func (c *Conn) receive(payload []byte) {
 		}
 	case f.Method == "user":
 		var update apron.UserUpdate
-		if json.Unmarshal(f.Params, &update) == nil && update.You != nil {
+		if json.Unmarshal(f.Params, &update) == nil && update.You.UserID != "" {
 			c.mu.Lock()
-			c.user = merge(c.user, *update.You)
+			c.user = merge(c.user, update.You)
 			c.mu.Unlock()
 		}
 	case f.Method == "" && !f.HasID && f.Error != nil:
@@ -402,9 +402,9 @@ func (c *Conn) answer(id string, result jsontext.Value, e *apron.Error) {
 		// A complete you replaces the user (§3.3.1), before any user
 		// notification after it is merged.
 		var you struct {
-			You *apron.CurrentUser `json:"you"`
+			You apron.CurrentUser `json:"you"`
 		}
-		if json.Unmarshal(result, &you) == nil && you.You != nil {
+		if json.Unmarshal(result, &you) == nil && you.You.UserID != "" {
 			c.user = you.You.User
 		}
 	}

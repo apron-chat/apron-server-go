@@ -191,7 +191,7 @@ func (b *broadcasting) Auth(_ context.Context, c *server.Conn, p apron.AuthParam
 	if p.UserID == "bad id" {
 		you.UserID = p.UserID
 	}
-	if err := reply.Send(apron.AuthResult{You: &apron.CurrentUser{User: you}}); err != nil {
+	if err := reply.Send(apron.AuthResult{You: apron.CurrentUser{User: you}}); err != nil {
 		return err
 	}
 	if c.UserID() != "ada" {
@@ -218,7 +218,7 @@ func TestAuthSendSignsIn(t *testing.T) {
 		t.Fatalf("got %s, want the broadcast after the result", f.Raw)
 	}
 	var update apron.UserUpdate
-	if f := next(t, c); f.Method != "user" || f.Decode(&update) != nil || update.You == nil || update.You.Name != "Ada L" {
+	if f := next(t, c); f.Method != "user" || f.Decode(&update) != nil || update.You.UserID == "" || update.You.Name != "Ada L" {
 		t.Fatalf("got %s, want the published user", f.Raw)
 	}
 	if u := userOf(onlyConn(t, b.s)); u == nil || u.Name != "Ada L" {

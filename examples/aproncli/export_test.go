@@ -101,7 +101,7 @@ func TestExport(t *testing.T) {
 		t.Fatal(err)
 	}
 	a := readFile(t, path)
-	if a.Header.Server != server.WebSocketURL() || a.Header.You == nil || a.Header.You.UserID != "ada" || a.Header.ExportedAt == "" ||
+	if a.Header.Server != server.WebSocketURL() || a.Header.You.UserID == "" || a.Header.You.UserID != "ada" || a.Header.ExportedAt == "" ||
 		len(a.Header.Media) != 1 || a.Header.Media[0] != server.URL {
 		t.Fatalf("header %+v", a.Header)
 	}

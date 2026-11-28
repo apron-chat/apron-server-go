@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json/v2"
 	"fmt"
+	"reflect"
 	"slices"
 
 	"github.com/apron-chat/apron-server-go/apron"
@@ -283,7 +284,7 @@ func replyFor[T any](r *Request, params any) Reply[T] {
 		if r.Method == "auth" {
 			p.check = checkAuth
 			p.apply = func(result *apron.AuthResult) {
-				if result.You != nil {
+				if result.You.UserID != "" {
 					r.c.SetUser(result.You.User)
 				}
 			}
@@ -295,7 +296,8 @@ func replyFor[T any](r *Request, params any) Reply[T] {
 // checkAuth checks an auth result: one that signs in has a valid user_id,
 // and Extra names no field of its own.
 func checkAuth(result *apron.AuthResult) (any, error) {
-	if result.You != nil && !apron.ValidID(result.You.UserID) {
+	// A You with anything in it signs in, and so has a user_id.
+	if !reflect.ValueOf(result.You).IsZero() && !apron.ValidID(result.You.UserID) {
 		return nil, fmt.Errorf("auth assigned an invalid user_id %q", result.You.UserID)
 	}
 	for _, name := range []string{"you", "token"} {

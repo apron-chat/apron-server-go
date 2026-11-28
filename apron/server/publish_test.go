@@ -93,7 +93,7 @@ func (b *typed) Auth(_ context.Context, c *server.Conn, p apron.AuthParams, repl
 	if err != nil {
 		return err
 	}
-	return reply.Send(apron.AuthResult{You: you, Extra: b.extra})
+	return reply.Send(apron.AuthResult{You: *you, Extra: b.extra})
 }
 
 func (b *typed) Message(_ context.Context, _ *server.Conn, p apron.MessageParams, reply server.Reply[apron.MessageResult]) error {

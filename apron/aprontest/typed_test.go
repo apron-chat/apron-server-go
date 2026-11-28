@@ -91,7 +91,7 @@ func TestTyped(t *testing.T) {
 	if err != nil || you.Name != "Ada" || string(you.Ext["tz"]) != `"UTC"` || len(you.Cleared) != 0 {
 		t.Fatalf("Me: %+v %v", you, err)
 	}
-	update, err := aprontest.Expect(ctx, bob, func(u apron.UserUpdate) bool { return u.New != nil && u.New.UserID == you.UserID })
+	update, err := aprontest.Expect(ctx, bob, func(u apron.UserUpdate) bool { return u.New.UserID != "" && u.New.UserID == you.UserID })
 	if err != nil || update.New.Name != "Ada" {
 		t.Fatalf("Expect[UserUpdate]: %+v %v", update, err)
 	}

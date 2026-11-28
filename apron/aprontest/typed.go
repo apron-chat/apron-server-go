@@ -30,7 +30,7 @@ func Call[T any](ctx context.Context, c *Client, method string, params any) (T, 
 // in order. T is a notification type, such as apron.Message or
 // apron.UserUpdate:
 //
-//	update, err := aprontest.Expect(ctx, c, func(u apron.UserUpdate) bool { return u.New != nil })
+//	update, err := aprontest.Expect(ctx, c, func(u apron.UserUpdate) bool { return u.New.UserID != "" })
 //
 // A frame of T's method that does not decode as a T does not match.
 func Expect[T apron.Notification](ctx context.Context, c *Client, match func(T) bool) (T, error) {

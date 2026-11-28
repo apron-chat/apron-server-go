@@ -157,7 +157,7 @@ func TestCheckScheme(t *testing.T) {
 	if _, err := c.Auth(wait(t), map[string]any{"scheme": "guest"}); apron.CodeOf(err) != apron.CodeDenied {
 		t.Fatalf("got %v", err)
 	}
-	if result, err := c.Auth(wait(t), map[string]any{"scheme": "secret"}); err != nil || result.You == nil {
+	if result, err := c.Auth(wait(t), map[string]any{"scheme": "secret"}); err != nil || result.You.UserID == "" {
 		t.Fatalf("got %+v %v", result, err)
 	}
 }

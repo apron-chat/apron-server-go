@@ -89,7 +89,7 @@ func TestEncode(t *testing.T) {
 		{apron.StatusUpdate{Mute: apron.Mute{On: true, Seconds: 3600}}, `{"method":"status","params":{"mute":3600}}`},
 		{apron.Reactions{LogID: 11, MessageID: 3, RoomID: "r", Reactions: []apron.Reaction{{From: apron.User{UserID: "carol"}, Emojis: []string{"👍"}}}},
 			`{"method":"reactions","params":{"log_id":"11","message_id":"3","room_id":"r","reactions":[{"from":{"user_id":"carol"},"emojis":["👍"]}]}}`},
-		{apron.UserUpdate{New: &apron.CurrentUser{UserID: "ada", Cleared: []string{"roles"}}}, `{"method":"user","params":{"new":{"user_id":"ada","roles":[]}}}`},
+		{apron.UserUpdate{New: apron.CurrentUser{UserID: "ada", Cleared: []string{"roles"}}}, `{"method":"user","params":{"new":{"user_id":"ada","roles":[]}}}`},
 		{apron.RoomUpdate{Left: []apron.RoomRef{{RoomID: "r"}}}, `{"method":"room_update","params":{"left":[{"room_id":"r"}]}}`},
 		{apron.Notice("", "hi"), `{"method":"message","params":{"from":{"user_id":"~private","name":"Only you"},"body":{"text":"hi"}}}`},
 		{apron.Activity{RoomID: "general", From: apron.User{UserID: "alice"}, Typing: new(8), ReadMessageID: 1724803312050},

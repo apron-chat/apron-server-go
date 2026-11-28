@@ -110,7 +110,7 @@ func (c *Chat) Auth(_ context.Context, conn *server.Conn, p apron.AuthParams, re
 		roomID = "general"
 	}
 	c.join(conn, roomID, user)
-	return reply.Send(apron.AuthResult{You: &apron.CurrentUser{User: user, Cleared: []string{"status"}}})
+	return reply.Send(apron.AuthResult{You: apron.CurrentUser{User: user, Cleared: []string{"status"}}})
 }
 
 func (c *Chat) join(conn *server.Conn, roomID string, user apron.User) {

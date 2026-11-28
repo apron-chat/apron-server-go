@@ -58,8 +58,9 @@ type Header struct {
 	// ExportedAt is when the archive was written, in ISO 8601, as
 	// FormatTime writes it.
 	ExportedAt string `json:"exported_at,omitempty"`
-	// You is who the archive was written as, or nil, signed out.
-	You *apron.User `json:"you,omitzero"`
+	// You is who the archive was written as, or the zero User, which is
+	// left out, signed out.
+	You apron.User `json:"you,omitzero"`
 	// Media are the origins that the archive's media loads from (§5), such
 	// as https://chat.example: the server's own, and its ext:media origins.
 	Media []string `json:"media,omitempty"`
@@ -138,9 +139,8 @@ func NewWriter(w io.Writer, h Header) (*Writer, error) {
 	if h.Archive == 0 {
 		h.Archive = Version
 	}
-	if h.You != nil {
-		you := moment(*h.You)
-		h.You = &you
+	if h.You.UserID != "" {
+		h.You = moment(h.You)
 	}
 	aw := &Writer{w}
 	return aw, aw.line(h)
@@ -223,7 +223,7 @@ func NewReader(r io.Reader) (*Reader, error) {
 	_ = json.Unmarshal(members["exported_at"], &ar.Header.ExportedAt)
 	var you apron.User
 	if json.Unmarshal(members["you"], &you) == nil && apron.ValidID(you.UserID) {
-		ar.Header.You = &you
+		ar.Header.You = you
 	}
 	_ = json.Unmarshal(members["media"], &ar.Header.Media)
 	for _, name := range []string{"apron_archive", "server", "exported_at", "you", "media"} {
