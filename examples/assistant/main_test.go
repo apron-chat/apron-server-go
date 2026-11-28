@@ -18,7 +18,7 @@ func TestAssistantAnswersMentions(t *testing.T) {
 	// The reply grows as an append embed, then its final snapshot has the
 	// whole text.
 	reply := ada.Message(func(m aprond.Message) bool {
-		return m.From.UserID == "assistant" && m.ReplyTo == question && m.Body["embeds"] == nil
+		return m.From.UserID == "assistant" && m.ReplyTo == question && m.Body()["embeds"] == nil
 	})
 	if reply.Text != "You asked: @assistant what is up?" {
 		t.Fatalf("reply = %q", reply.Text)

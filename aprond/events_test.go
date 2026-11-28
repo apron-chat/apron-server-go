@@ -24,8 +24,8 @@ func TestDecodeMessageBody(t *testing.T) {
 		if snapshot := roomlog.DecodeMessage([]byte(raw)); snapshot.Body != nil {
 			want = bodyObject(&snapshot.Body.Body)
 		}
-		if !reflect.DeepEqual(m.Body, want) {
-			t.Errorf("%s: Body %#v, want %#v", raw, m.Body, want)
+		if !reflect.DeepEqual(m.Body(), want) {
+			t.Errorf("%s: Body %#v, want %#v", raw, m.Body(), want)
 		}
 	}
 }

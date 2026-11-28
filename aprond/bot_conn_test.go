@@ -83,7 +83,7 @@ func TestMessageOfAndApron(t *testing.T) {
 	}
 	m := MessageOf(reply)
 	if m.ID != "7" || m.LogID != 9 || m.PrevLogID != 8 || m.PrevRoomID != "random" || m.ReplyTo != "3" ||
-		m.Text != "yes" || m.Format != apron.Plain || m.Body["x"] != float64(1) || m.From.Name != "Ada" || m.New() {
+		m.Text != "yes" || m.Format != apron.Plain || m.Body()["x"] != float64(1) || m.From.Name != "Ada" || m.New() {
 		t.Fatalf("MessageOf = %#v", m)
 	}
 	back := m.Apron()
@@ -96,7 +96,7 @@ func TestMessageOfAndApron(t *testing.T) {
 	}
 
 	tombstone := MessageOf(apron.Message{MessageID: 7, LogID: 10, PrevLogID: 9, RoomID: "general", From: apron.User{UserID: "ada"}, Deleted: true})
-	if !tombstone.Deleted || tombstone.Body != nil || tombstone.Apron().Body != nil {
+	if !tombstone.Deleted || tombstone.Body() != nil || tombstone.Apron().Body != nil {
 		t.Fatalf("tombstone = %#v", tombstone)
 	}
 	notice := MessageOf(apron.Notice("general", "hello"))

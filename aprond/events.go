@@ -1,6 +1,7 @@
 package aprond
 
 import (
+	"cmp"
 	"context"
 	"encoding/json/jsontext"
 	"encoding/json/v2"
@@ -306,9 +307,53 @@ type Message struct {
 	ReplyTo string
 	// Mentions are the user_ids its body mentions (§3.5.5).
 	Mentions []string
-	// Body is the whole body, and Ext the message's ext (§4.12).
-	Body map[string]any
-	Ext  map[string]jsontext.Value
+	// Ext is the message's ext (§4.12).
+	Ext map[string]jsontext.Value
+	// body is the whole body as it was encoded, which Body decodes, nil
+	// for none.
+	body jsontext.Value
+}
+
+// Body is the whole body decoded, those of its members that Message has
+// no field for too, nil for a tombstone or a Message made without one: a
+// new map each time, which the caller may change. Most code reads Text,
+// Format, and Mentions, which need no decoding.
+func (m Message) Body() map[string]any {
+	if m.body == nil {
+		return nil
+	}
+	var body map[string]any
+	if json.Unmarshal(m.body, &body) != nil {
+		return nil
+	}
+	return body
+}
+
+// recordBody is a record's body as decodeMessageRecord reads it: kept as
+// it was encoded, with its text, format, and mentions read from it.
+type recordBody struct {
+	raw      jsontext.Value
+	text     string
+	format   string
+	mentions []string
+}
+
+func (b *recordBody) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
+	raw, err := dec.ReadValue()
+	if err != nil {
+		return err
+	}
+	b.raw = slices.Clone(raw)
+	var fields struct {
+		Text     string   `json:"text"`
+		Format   string   `json:"format"`
+		Mentions []string `json:"mentions"`
+	}
+	if err := json.Unmarshal(b.raw, &fields); err != nil {
+		return err
+	}
+	b.text, b.format, b.mentions = fields.Text, fields.Format, fields.Mentions
+	return nil
 }
 
 // Sender is who a record is from.
@@ -332,11 +377,11 @@ func DecodeMessage(e Event) (Message, bool) {
 }
 
 // decodeMessageRecord decodes a message record, as history and broadcasts
-// carry it. Records are the server's own, so their body is decoded once,
-// as a map, and its text, format, and mentions read from it.
+// carry it: its body's text, format, and mentions, and the body kept as it
+// is, for Body to decode only when asked.
 func decodeMessageRecord(record []byte) (Message, bool) {
 	var snapshot struct {
-		Body       map[string]any `json:"body"`
+		Body       *recordBody    `json:"body"`
 		Deleted    bool           `json:"deleted"`
 		Ext        apron.Ext      `json:"ext"`
 		From       roomlog.Author `json:"from"`
@@ -367,13 +412,8 @@ func decodeMessageRecord(record []byte) (Message, bool) {
 		m.ReplyTo = snapshot.ReplyTo.MessageID
 	}
 	if body := snapshot.Body; body != nil {
-		m.Body = body
-		m.Text, _ = body["text"].(string)
-		m.Format, _ = body["format"].(string)
-		if m.Format == "" {
-			m.Format = apron.Plain
-		}
-		m.Mentions = mentions(body)
+		m.body = body.raw
+		m.Text, m.Format, m.Mentions = body.text, cmp.Or(body.format, apron.Plain), body.mentions
 	}
 	return m, true
 }

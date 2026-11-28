@@ -572,7 +572,7 @@ func (b *Session) History(ctx context.Context, roomID string, options HistoryOpt
 // as a history page that Conn reads: the same snapshot, with its IDs as
 // Message has them, its body's text, format, and mentions in their own
 // fields, and the whole body, those of its members apron has no field for
-// too, decoded into Body. Host, Bot, Session, and DecodeMessage give
+// too, which Body decodes. Host, Bot, Session, and DecodeMessage give
 // Messages already.
 func MessageOf(m apron.Message) Message {
 	message := Message{
@@ -586,7 +586,7 @@ func MessageOf(m apron.Message) Message {
 		message.ReplyTo = m.ReplyTo.MessageID.String()
 	}
 	if body := m.Body; body != nil {
-		message.Body = bodyObject(body)
+		message.body = encodeJSON(body)
 		message.Text, message.Format = body.Text, cmp.Or(body.Format, apron.Plain)
 		message.Mentions = slices.Clone(body.Mentions)
 	}
@@ -607,9 +607,9 @@ func (m Message) Apron() apron.Message {
 		message.ReplyTo = &apron.MessageRef{MessageID: id}
 	}
 	switch {
-	case m.Body != nil:
+	case m.body != nil:
 		var body apron.Body
-		if json.Unmarshal(encodeJSON(m.Body), &body) == nil {
+		if json.Unmarshal(m.body, &body) == nil {
 			message.Body = &body
 		}
 	case !m.Deleted:
