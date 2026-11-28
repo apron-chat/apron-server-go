@@ -212,8 +212,10 @@ type Server struct {
 	// discarded, 0 before.
 	flushAll bool
 	logFloor int64
+	// formatDue is set until the store's format is stored (format.go);
 	// retention is what history retention did, and sweeping its sweep,
 	// which Shutdown waits for (retention.go).
+	formatDue bool
 	retention RetentionStatus
 	sweeping  sync.WaitGroup
 	// pushes are the users' push registrations (push.go).

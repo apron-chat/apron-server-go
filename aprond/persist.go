@@ -47,6 +47,7 @@ import (
 //
 // Entry kinds and IDs:
 //
+//	meta     "format"     the store's format version (format.go)
 //	meta     "counters"   log_id, guest, embed, and upload sequences
 //	meta     "vapid"      the webpush VAPID private key the server made
 //	                      (§4.9, webpush)
@@ -121,6 +122,7 @@ func (s *Server) flushLocked() {
 		}
 	}
 	batch := slices.Concat(
+		s.formatEntryLocked(),
 		s.ids.Entries(),
 		s.log.Entries(),
 		roomEntries,
@@ -190,6 +192,9 @@ func (s *Server) restoreLocked() (map[string]bool, error) {
 		return nil
 	})
 	if err != nil {
+		return nil, err
+	}
+	if err := s.checkFormatLocked(entries); err != nil {
 		return nil, err
 	}
 	if raw, ok := entries[entryMeta]["counters"]; ok {

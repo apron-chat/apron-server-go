@@ -376,6 +376,7 @@ func (s *Server) dumpLocked() []store.Entry {
 		records = append(records, s.emoji.Snapshot()...)
 	}
 	records = append(records, s.profile.Snapshot()...)
+	records = append(records, store.Entry{Kind: entryMeta, ID: entryFormat, Value: encodeJSON(storedFormat{Version: storeFormat})})
 	return append(records, store.Entry{Kind: entryMeta, ID: "counters", Value: encodeJSON(meta)})
 }
 
