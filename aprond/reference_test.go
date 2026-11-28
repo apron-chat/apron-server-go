@@ -476,28 +476,51 @@ func TestThreadMessagesReachOnlyThreadMembers(t *testing.T) {
 	}
 }
 
-func TestPrevLogIDLinksRecords(t *testing.T) {
+// The log_ids of every room and kind of record form one ascending
+// sequence, and a room's room_id is its creation's log_id (§2.1). A
+// message snapshot or room record names the one it replaces in
+// prev_log_id, and no other record carries it (§4.3.1).
+func TestRecordLogIDs(t *testing.T) {
 	_, httpServer := newTestServer(t, DefaultConfig())
 	c := dialTestClient(t, httpServer)
+	last := parseID(t, listRooms(t, c, map[string]any{"room_id": "general"})["joined"].([]any)[0].(map[string]any)["log_id"])
+	follows := func(label string, record map[string]any) {
+		t.Helper()
+		id := parseID(t, record["log_id"])
+		if id <= last {
+			t.Fatalf("%s log_id %d does not follow %d", label, id, last)
+		}
+		last = id
+	}
 	id, creation := save(t, c, "create", map[string]any{"body": map[string]any{"text": "one"}})
+	follows("message", creation)
 	if _, has := creation["prev_log_id"]; has {
 		t.Fatalf("creation has prev_log_id: %#v", creation)
 	}
 	_, edit := save(t, c, "edit", map[string]any{"message_id": id, "body": map[string]any{"text": "two"}})
+	follows("edit", edit)
 	if edit["prev_log_id"] != id {
 		t.Fatalf("edit prev_log_id: %#v", edit)
 	}
 	room, record := saveRoom(t, c, "room", map[string]any{"title": "A"})
+	follows("room", record)
+	if room != record["log_id"] {
+		t.Fatalf("room_id %q should be its creation log_id %q", room, record["log_id"])
+	}
 	_, updated := saveRoom(t, c, "update", map[string]any{"room_id": room, "title": "B"})
+	follows("room update", updated)
 	if _, has := record["prev_log_id"]; has || updated["prev_log_id"] != record["log_id"] {
 		t.Fatalf("room prev_log_id: %#v then %#v", record, updated)
 	}
-	// Only room records and message snapshots carry prev_log_id (§4.3.1).
 	first := react(t, c, "r1", id, "👍")
+	follows("reactions", first)
 	second := react(t, c, "r2", id, "🎉")
 	if first["prev_log_id"] != nil || second["prev_log_id"] != nil {
 		t.Fatalf("reactions prev_log_id: %#v then %#v", first, second)
 	}
+	follows("reactions again", second)
+	_, other := save(t, c, "elsewhere", map[string]any{"room_id": room, "body": map[string]any{"text": "b"}})
+	follows("message in another room", other)
 	leaveRoom(t, c, room)
 	for _, value := range records(t, historyPage(t, c, room, map[string]any{}), "memberships") {
 		if _, has := value.(map[string]any)["prev_log_id"]; has {

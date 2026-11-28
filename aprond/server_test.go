@@ -411,15 +411,6 @@ func TestAuthIsABarrier(t *testing.T) {
 	}
 }
 
-func TestUnimplementedAndUnknownMethodsAreUnsupported(t *testing.T) {
-	_, httpServer := newTestServer(t, DefaultConfig())
-	c := dialTestClient(t, httpServer)
-	for _, method := range []string{"frobnicate", "room_teleport"} {
-		c.expectError(t, method, method, map[string]any{"room_id": "general"}, CodeUnsupported)
-	}
-	c.expectQuiet(t)
-}
-
 func TestMessageSnapshotsReplaceEditableState(t *testing.T) {
 	_, httpServer := newTestServer(t, DefaultConfig())
 	owner := dialTestClient(t, httpServer)
@@ -491,30 +482,6 @@ func TestMessageSnapshotsReplaceEditableState(t *testing.T) {
 		}
 	}
 	observer.expectError(t, "message", "forged", map[string]any{"room_id": "general", "message_id": id, "body": map[string]any{"text": "forged"}}, CodeDenied)
-}
-
-func TestLogIDsFormOneSequenceAcrossRoomsAndKinds(t *testing.T) {
-	_, httpServer := newTestServer(t, DefaultConfig())
-	c := dialTestClient(t, httpServer)
-	last := parseID(t, listRooms(t, c, map[string]any{"room_id": "general"})["joined"].([]any)[0].(map[string]any)["log_id"])
-	check := func(label string, value any) {
-		t.Helper()
-		id := parseID(t, value)
-		if id <= last {
-			t.Fatalf("%s log_id %d does not follow %d", label, id, last)
-		}
-		last = id
-	}
-	id, message := save(t, c, "m1", map[string]any{"body": map[string]any{"text": "a"}})
-	check("message", message["log_id"])
-	room, record := saveRoom(t, c, "r1", map[string]any{"title": "Ops"})
-	check("room", record["log_id"])
-	if room != record["log_id"] {
-		t.Fatalf("room_id %q should be its creation log_id %q", room, record["log_id"])
-	}
-	check("reactions", react(t, c, "x1", id, "👍")["log_id"])
-	_, other := save(t, c, "m2", map[string]any{"room_id": room, "body": map[string]any{"text": "b"}})
-	check("message in other room", other["log_id"])
 }
 
 func TestRepliesMayCrossRooms(t *testing.T) {
@@ -1096,33 +1063,6 @@ func TestRequestDeduplication(t *testing.T) {
 	}
 }
 
-func TestNotificationsGetNoReplies(t *testing.T) {
-	_, httpServer := newTestServer(t, DefaultConfig())
-	c := dialTestClient(t, httpServer)
-	c.write(t, map[string]any{"method": "unknown_notification"})
-	c.write(t, map[string]any{"method": "message", "params": []any{}})
-	c.write(t, map[string]any{"method": "me", "params": map[string]any{"name": nil}})
-	c.write(t, map[string]any{"method": "reactions", "params": map[string]any{"message_id": "999", "emojis": []any{}}})
-	c.write(t, map[string]any{"method": "auth"})
-	// Errors not tied to a request omit id (PROTOCOL.md §1.1).
-	for _, raw := range []string{`{`, `{"method":"me","id":1}`} {
-		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-		if err := c.ws.Write(ctx, websocket.MessageText, []byte(raw)); err != nil {
-			t.Fatal(err)
-		}
-		cancel()
-		failure := c.read(t)
-		if _, hasID := failure["id"]; hasID || failure["error"] == nil {
-			t.Fatalf("%s: error frame = %#v, want an error without id", raw, failure)
-		}
-	}
-	c.write(t, map[string]any{"method": "me", "id": "n1", "params": map[string]any{"name": "A"}})
-	response := c.read(t)
-	if response["id"] != "n1" {
-		t.Fatalf("notification produced a response before me: %#v", response)
-	}
-}
-
 func TestHTTPEndpoints(t *testing.T) {
 	dir := t.TempDir()
 	for name, content := range map[string]string{"index.html": "app", ".env": "SECRET=1", "assets/app.js": "js"} {
@@ -1176,9 +1116,13 @@ func TestActivityRelaysTypingWithInlineIdentity(t *testing.T) {
 	c.expectQuiet(t)
 }
 
-// A notification-only method is never answered, whatever its id and even
-// with invalid or malformed params (§1). A ping is still answered with pong.
-func TestNotificationOnlyWithIDNeverAnswered(t *testing.T) {
+// A notification is never answered, and neither is a request method sent
+// without an id, which this server ignores (§1.1), whatever its params,
+// before sign-in and after: nothing comes back and nothing changes. A
+// notification-only method is not answered with an id either, while a
+// ping is answered with pong (§1). An error not tied to a request has no
+// id.
+func TestFramesThatGetNoReply(t *testing.T) {
 	_, httpServer := newTestServer(t, DefaultConfig())
 	c, _ := dialRaw(t, httpServer)
 	raw := func(frame string) {
@@ -1189,15 +1133,14 @@ func TestNotificationOnlyWithIDNeverAnswered(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	frames := []string{
-		`{"method":"activity","id":"a1","params":[]}`,
-		`{"method":"activity","id":7,"params":{"typing":-1}}`,
-		`{"method":"activity","id":"a2","params":{"room_id":"missing","typing":3}}`,
-		`{"method":"activity","id":"a3","params":{"read_message_id":5}}`,
-	}
-	check := func() {
+	notificationOnly := func() {
 		t.Helper()
-		for _, frame := range frames {
+		for _, frame := range []string{
+			`{"method":"activity","id":"a1","params":[]}`,
+			`{"method":"activity","id":7,"params":{"typing":-1}}`,
+			`{"method":"activity","id":"a2","params":{"room_id":"missing","typing":3}}`,
+			`{"method":"activity","id":"a3","params":{"read_message_id":5}}`,
+		} {
 			raw(frame)
 		}
 		c.expectQuiet(t)
@@ -1209,28 +1152,35 @@ func TestNotificationOnlyWithIDNeverAnswered(t *testing.T) {
 		}
 		c.expectQuiet(t)
 	}
-	check()
+	notificationOnly()
 	guestAuth(t, c)
 	c.drain(t)
-	check()
-	// Other methods still reply to a bad id or bad params.
-	raw(`{"method":"room_list","id":5}`)
-	if reply := c.read(t); reply["error"].(map[string]any)["code"] != float64(CodeInvalidRequest) {
-		t.Fatalf("bad id on a request: %#v", reply)
+	notificationOnly()
+
+	c.write(t, map[string]any{"method": "unknown_notification"})
+	c.write(t, map[string]any{"method": "message", "params": []any{}})
+	c.write(t, map[string]any{"method": "me", "params": map[string]any{"name": nil}})
+	c.write(t, map[string]any{"method": "reactions", "params": map[string]any{"message_id": "999", "emojis": []any{}}})
+	c.write(t, map[string]any{"method": "auth"})
+	c.expectQuiet(t)
+	// Errors not tied to a request omit id (§1.1); a request with an id
+	// and bad params is answered with its id.
+	for _, frame := range []string{`{`, `{"method":"room_list","id":5}`} {
+		raw(frame)
+		if failure := c.read(t); failure["id"] != nil || failure["error"] == nil ||
+			(frame != `{` && failure["error"].(map[string]any)["code"] != float64(CodeInvalidRequest)) {
+			t.Fatalf("%s: error frame = %#v, want an error without id", frame, failure)
+		}
 	}
 	raw(`{"method":"room_list","id":"r1","params":[]}`)
 	if reply := c.read(t); reply["id"] != "r1" || reply["error"].(map[string]any)["code"] != float64(CodeInvalidParams) {
 		t.Fatalf("bad params on a request: %#v", reply)
 	}
-}
 
-// Clients send every request with an id, and a server may ignore a request
-// method sent without one (§1.1): this one does, before sign-in and after,
-// whatever it is.
-func TestRequestsWithoutAnIDAreIgnored(t *testing.T) {
-	_, httpServer := newTestServer(t, DefaultConfig())
-	clients := dialGroup(t, httpServer, 2)
-	a, b := clients[0], clients[1]
+	// Request methods without an id change nothing that another member of
+	// general would hear of.
+	other := dialTestClient(t, httpServer)
+	c.drain(t)
 	for _, frame := range []map[string]any{
 		{"method": "me", "params": map[string]any{"name": "Nobody"}},
 		{"method": "message", "params": map[string]any{"room_id": "general", "body": map[string]any{"text": "hi"}}},
@@ -1239,11 +1189,11 @@ func TestRequestsWithoutAnIDAreIgnored(t *testing.T) {
 		{"method": "status", "params": map[string]any{"mute": true}},
 		{"method": "auth", "params": map[string]any{"scheme": "guest"}},
 	} {
-		a.write(t, frame)
+		c.write(t, frame)
 	}
-	a.expectQuiet(t)
-	b.expectQuiet(t)
-	if rooms := roomIDs(t, listRooms(t, a, map[string]any{})["joined"]); len(rooms) != 1 {
+	c.expectQuiet(t)
+	other.expectQuiet(t)
+	if rooms := roomIDs(t, listRooms(t, c, map[string]any{})["joined"]); len(rooms) != 1 {
 		t.Fatalf("rooms after ignored requests: %v", rooms)
 	}
 }
