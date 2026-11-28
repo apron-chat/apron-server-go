@@ -480,7 +480,12 @@ func (s *Server) listRooms(c *client, p apron.RoomListParams, reply server.Reply
 	}
 
 	s.mu.RLock()
-	defer s.mu.RUnlock()
+	locked := true
+	defer func() {
+		if locked {
+			s.mu.RUnlock()
+		}
+	}()
 	u := c.user
 	var candidates []*roomState
 	switch {
@@ -538,6 +543,12 @@ func (s *Server) listRooms(c *client, p apron.RoomListParams, reply server.Reply
 	for _, r := range slices.Concat(joined, others) {
 		cursors = append(cursors, s.cursorFramesLocked(u, r)...)
 	}
+	// The result shares nothing with the server's state: its place among
+	// the connection's frames is fixed now, and it is encoded, which a
+	// listing with members spends most of its time on, without the lock.
+	_ = reply.Reserve()
+	s.mu.RUnlock()
+	locked = false
 	_ = reply.Send(result, cursors...)
 	return nil
 }
@@ -668,7 +679,12 @@ func (s *Server) history(c *client, p apron.HistoryParams, reply server.Reply[ap
 	}
 
 	s.mu.RLock()
-	defer s.mu.RUnlock()
+	locked := true
+	defer func() {
+		if locked {
+			s.mu.RUnlock()
+		}
+	}()
 	var rooms []*roomState
 	if hasRoom {
 		r := s.visibleRoomLocked(c.user, roomID)
@@ -731,6 +747,12 @@ func (s *Server) history(c *client, p apron.HistoryParams, reply server.Reply[ap
 			result.Raw.Memberships = append(result.Raw.Memberships, record.Raw)
 		}
 	}
+	// A record's Raw is replaced, never modified (roomlog): the page's
+	// bytes stay as they are, and are encoded without the lock, in the
+	// place its result has among the connection's frames now.
+	_ = reply.Reserve()
+	s.mu.RUnlock()
+	locked = false
 	_ = reply.Send(result)
 	return nil
 }
