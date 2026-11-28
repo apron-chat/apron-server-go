@@ -256,6 +256,25 @@ type MeParams struct {
 // being encoded again.
 type Frame []byte
 
+// FrameHead is what a frame says of itself (§1.1): its method, "" for a
+// reply, and its id, params, result, and error, raw, each nil when the
+// frame has none, and "null" when it is null. The values are parts of the
+// frame, not copies: they are valid while it is, and are not changed.
+type FrameHead struct {
+	Method                    string
+	ID, Params, Result, Error jsontext.Value
+}
+
+// Head reads the frame's head, without decoding or copying its values: a
+// client that handles every frame it receives, such as a bot, reads the
+// method of each, and decodes only the params of those it handles. Its
+// error is that of a frame that is not a JSON object, or whose method is
+// not a string, which decoding it into a FrameHead would refuse too.
+func (f Frame) Head() (FrameHead, error) {
+	h, err := core.ReadHead(f)
+	return FrameHead{Method: h.Method, ID: h.ID, Params: h.Params, Result: h.Result, Error: h.Error}, err
+}
+
 // Notification is the params of a notification the server sends, which
 // names its method, such as a Message ("message"), a UserUpdate ("user"),
 // or a RoomUpdate ("room_update"). An extension's own notification is a

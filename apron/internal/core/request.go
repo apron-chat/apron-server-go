@@ -5,6 +5,8 @@ import (
 	"crypto/sha256"
 	"encoding/json/jsontext"
 	"encoding/json/v2"
+	"errors"
+	"io"
 	"sync"
 )
 
@@ -306,6 +308,14 @@ func methodName(quoted jsontext.Value) string {
 			return "room_leave"
 		case "room_set":
 			return "room_set"
+		case "user":
+			return "user"
+		case "server":
+			return "server"
+		case "room_update":
+			return "room_update"
+		case "pong":
+			return "pong"
 		default:
 			return string(name)
 		}
@@ -358,4 +368,105 @@ func ParseReply(payload []byte) (id []byte, result, rawError jsontext.Value, ok 
 		return nil, nil, nil, false
 	}
 	return id, result, rawError, true
+}
+
+// Head is what a frame's members say of it, as decoding them into a
+// struct of a string Method and raw values would: a member present is
+// not nil, null too; each value is part of the frame.
+type Head struct {
+	Method                    string
+	ID, Params, Result, Error jsontext.Value
+}
+
+// errNotObject is the error of a frame that is not a JSON object.
+var errNotObject = errors.New("apron: a frame is a JSON object")
+
+// ReadHead reads a frame's head in place, without copying its values: an
+// error for a frame that is not valid JSON, not an object, or whose method
+// is neither a string nor null, as decoding it would refuse.
+func ReadHead(payload []byte) (h Head, err error) {
+	ok := DecodeInPlace(payload, func(dec *jsontext.Decoder) bool {
+		tok, e := dec.ReadToken()
+		if e != nil || tok.Kind() != '{' {
+			if e == nil {
+				e = errNotObject
+			}
+			err = e
+			return false
+		}
+		for dec.PeekKind() != '}' {
+			name, e := dec.ReadValue()
+			if e != nil {
+				err = e
+				return false
+			}
+			value, e := dec.ReadValue()
+			if e != nil {
+				err = e
+				return false
+			}
+			value = Part(dec, payload, value)
+			switch headMember(name) {
+			case "method":
+				switch value.Kind() {
+				case 'n':
+					h.Method = ""
+				case '"':
+					h.Method = methodName(value)
+				default:
+					err = errors.New("apron: a frame's method is a string")
+					return false
+				}
+			case "id":
+				h.ID = value
+			case "params":
+				h.Params = value
+			case "result":
+				h.Result = value
+			case "error":
+				h.Error = value
+			}
+		}
+		if _, e := dec.ReadToken(); e != nil {
+			err = e
+			return false
+		}
+		if _, e := dec.ReadToken(); e != io.EOF {
+			err = errors.New("apron: a frame is one JSON value")
+			return false
+		}
+		return true
+	})
+	if !ok {
+		if err == nil {
+			err = errNotObject
+		}
+		return Head{}, err
+	}
+	return h, nil
+}
+
+// headMember returns a frame member's name, quoted as it arrived,
+// unquoted when it is one Head has, and else "".
+func headMember(quoted jsontext.Value) string {
+	switch string(quoted) {
+	case `"method"`:
+		return "method"
+	case `"id"`:
+		return "id"
+	case `"params"`:
+		return "params"
+	case `"result"`:
+		return "result"
+	case `"error"`:
+		return "error"
+	}
+	if bytes.IndexByte(quoted, '\\') < 0 {
+		return ""
+	}
+	name, err := jsontext.AppendUnquote(nil, quoted)
+	if err != nil {
+		return ""
+	}
+	return headMember(jsontext.Value(`"` + string(name) + `"`))
 }

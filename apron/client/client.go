@@ -312,32 +312,46 @@ func (c *Conn) read() {
 // any other to OnFrame, once the Conn has noted what it says of the
 // connection.
 func (c *Conn) receive(payload []byte) {
-	// A reply as servers write one is read in place, its result part of
-	// the frame, which is the reply's own (ReadMessage), rather than
-	// copied out of it.
-	// A notification as servers write one, method first, is not tried.
-	if !bytes.HasPrefix(payload, []byte(`{"method":`)) {
-		if id, result, rawError, ok := core.ParseReply(payload); ok {
-			var e *apron.Error
-			if rawError == nil || json.Unmarshal(rawError, &e) == nil {
-				c.answer(string(id), result, e)
-				return
-			}
-		}
-	}
-	var f struct {
-		ID     *string        `json:"id"`
-		Method string         `json:"method"`
-		Params jsontext.Value `json:"params"`
-		Result jsontext.Value `json:"result"`
-		Error  *apron.Error   `json:"error"`
-	}
-	if json.Unmarshal(payload, &f) != nil {
+	// The frame is read in one pass, in place, its values parts of it,
+	// which is the frame's own (ReadMessage), rather than copied out of it.
+	head, err := apron.Frame(payload).Head()
+	if err != nil {
 		return
 	}
+	var f struct {
+		ID     string
+		HasID  bool
+		Method string
+		Params jsontext.Value
+		Result jsontext.Value
+		Error  *apron.Error
+	}
+	f.Method, f.Params, f.Result = head.Method, head.Params, head.Result
+	// As decoding the frame into a *string and an *apron.Error does: null
+	// is none, and anything else but a string, or an object, refuses the
+	// frame.
+	if head.ID != nil && head.ID.Kind() != 'n' {
+		if raw := head.ID; raw.Kind() == '"' && bytes.IndexByte(raw, '\\') < 0 {
+			f.ID = string(raw[1 : len(raw)-1])
+		} else {
+			var id string
+			if json.Unmarshal(raw, &id) != nil {
+				return
+			}
+			f.ID = id
+		}
+		f.HasID = true
+	}
+	if head.Error != nil {
+		var e *apron.Error
+		if json.Unmarshal(head.Error, &e) != nil {
+			return
+		}
+		f.Error = e
+	}
 	switch {
-	case f.ID != nil && f.Method == "":
-		c.answer(*f.ID, f.Result, f.Error)
+	case f.HasID && f.Method == "":
+		c.answer(f.ID, f.Result, f.Error)
 		return
 	case f.Method == "pong":
 		return
@@ -361,7 +375,7 @@ func (c *Conn) receive(payload []byte) {
 			c.user = merge(c.user, *update.You)
 			c.mu.Unlock()
 		}
-	case f.Method == "" && f.ID == nil && f.Error != nil:
+	case f.Method == "" && !f.HasID && f.Error != nil:
 		c.mu.Lock()
 		c.failed = f.Error
 		c.mu.Unlock()

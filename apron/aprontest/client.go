@@ -167,20 +167,20 @@ func (c *Client) readAll() {
 }
 
 func parseFrame(payload []byte) Frame {
-	var envelope struct {
-		ID     *string        `json:"id"`
-		Method string         `json:"method"`
-		Params jsontext.Value `json:"params"`
-		Result jsontext.Value `json:"result"`
-		Error  *apron.Error   `json:"error"`
-	}
 	f := Frame{Raw: jsontext.Value(payload)}
-	if json.Unmarshal(payload, &envelope) == nil {
-		f.Method, f.Params, f.Result, f.Error = envelope.Method, envelope.Params, envelope.Result, envelope.Error
-		if envelope.ID != nil {
-			f.ID = *envelope.ID
-		}
+	// The head is read in place, its values parts of the frame, which is
+	// the Client's own; a frame decoding refuses, with an id or error of
+	// another type, has none of them, as before.
+	head, err := apron.Frame(payload).Head()
+	if err != nil {
+		return f
 	}
+	var id string
+	var e *apron.Error
+	if head.ID != nil && json.Unmarshal(head.ID, &id) != nil || head.Error != nil && json.Unmarshal(head.Error, &e) != nil {
+		return f
+	}
+	f.Method, f.Params, f.Result, f.Error, f.ID = head.Method, head.Params, head.Result, e, id
 	return f
 }
 

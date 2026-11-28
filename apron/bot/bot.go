@@ -286,12 +286,10 @@ func (r *receiver) receive(frame apron.Frame) {
 		// The Dialer failed: the connection is not the bot's.
 		return
 	}
-	var head struct {
-		Method string         `json:"method"`
-		ID     jsontext.Value `json:"id"`
-		Params jsontext.Value `json:"params"`
-	}
-	if json.Unmarshal(frame, &head) != nil || head.ID != nil {
+	// Only the head is read of every frame, and the params only of those
+	// the bot handles, in place.
+	head, err := frame.Head()
+	if err != nil || head.ID != nil {
 		head.Method = ""
 	}
 	switch head.Method {
