@@ -130,8 +130,9 @@ func (c *Chat) Message(_ context.Context, conn *server.Conn, p apron.MessagePara
 	if p.ReplyTo != nil && !c.messages[p.ReplyTo.MessageID] {
 		return apron.InvalidParams("reply_to names no message")
 	}
-	from, _ := conn.Identity()
 	id := c.clock.Next()
+	// The sender as its connection keeps it, which is only read.
+	from, _ := conn.Identity()
 	frame, err := apron.Encode(apron.Message{
 		MessageID: id, LogID: id, RoomID: room, From: from, Body: p.Body, ReplyTo: p.ReplyTo,
 	})
@@ -152,6 +153,7 @@ func (c *Chat) Message(_ context.Context, conn *server.Conn, p apron.MessagePara
 func (c *Chat) Me(_ context.Context, conn *server.Conn, p apron.MeParams, reply server.Reply[apron.CurrentUser]) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	// ApplyMe changes a copy of the identity.
 	old, _ := conn.Identity()
 	you := server.ApplyMe(old, p)
 	you.Name = strings.TrimSpace(you.Name)
@@ -167,6 +169,8 @@ func (c *Chat) nick(_ context.Context, call *commands.Call) error {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	// The new identity shares the old's roles and ext, which neither
+	// changes.
 	old, _ := call.Conn.Identity()
 	you := old
 	you.Name = call.Args
