@@ -86,11 +86,19 @@ func (s *Server) cursorFramesLocked(u *userState, r *roomState) []apron.Frame {
 // roomViewOfLocked is a room's current record with its delivery fields
 // (§4.2): its log head, and the inclusive lower bound of retained history.
 // The Go server retains every record, so history always starts at the
-// room's creation record. The view shares nothing with the room, so it may
-// be encoded after s.mu is released.
+// room's creation record. The record is the room's, encoded as an
+// apron.Room, kept while it is the same (rooms.Room.EncodedRecord), and
+// sent as it is (RoomView.Raw); it is never changed, so the view may be
+// encoded after s.mu is released.
 func (s *Server) roomViewOfLocked(r *roomState) apron.RoomView {
 	created := apron.LogID(r.Log().Created())
-	return apron.RoomView{Room: decodeRecord[apron.Room](encodeJSON(r.Record())), LatestLogID: apron.LogID(r.Log().Latest()), HistoryLogID: &created}
+	return apron.RoomView{Raw: r.EncodedRecord(encodeRoom), LatestLogID: apron.LogID(r.Log().Latest()), HistoryLogID: &created}
+}
+
+// encodeRoom encodes a room record as an apron.Room, which keeps any
+// member it has no field for (Unknown), so that it encodes as the record.
+func encodeRoom(record roomlog.RoomRecord) jsontext.Value {
+	return encodeJSON(decodeRecord[apron.Room](encodeJSON(record)))
 }
 
 // decodeRecord decodes a logged record, which the server encoded, as the
@@ -236,11 +244,11 @@ func (s *Server) addMembersLocked(view *apron.RoomView, r *roomState) map[string
 		view.MemberCount = r.MemberCount()
 	}
 	listed := make(map[string]*userState, len(ids))
-	view.Members = make([]apron.CurrentUser, len(ids))
+	view.MembersRaw = make([]jsontext.Value, len(ids))
 	for i, id := range ids {
 		member := r.Member(id)
 		listed[id] = member
-		view.Members[i] = member.shownObject()
+		view.MembersRaw[i] = member.shownRaw()
 	}
 	return listed
 }
@@ -516,9 +524,9 @@ func (s *Server) listRooms(c *client, p apron.RoomListParams, reply server.Reply
 			view := s.roomViewOfLocked(r)
 			switch {
 			case withMembers && hasUser:
-				view.Members = []apron.CurrentUser{}
+				view.MembersRaw = []jsontext.Value{}
 				if m := r.Member(onlyUser); m != nil {
-					view.Members = append(view.Members, m.shownObject())
+					view.MembersRaw = append(view.MembersRaw, m.shownRaw())
 					users[onlyUser] = m
 				}
 			case withMembers:
@@ -537,7 +545,7 @@ func (s *Server) listRooms(c *client, p apron.RoomListParams, reply server.Reply
 		}
 	}
 	if withMembers {
-		result.Users = profiles(users)
+		result.UsersRaw = profilesRaw(users)
 	}
 	var cursors []apron.Frame
 	for _, r := range slices.Concat(joined, others) {
@@ -559,6 +567,16 @@ func profiles(users map[string]*userState) []apron.CurrentUser {
 	list := make([]apron.CurrentUser, 0, len(users))
 	for _, id := range slices.Sorted(maps.Keys(users)) {
 		list = append(list, users[id].profile())
+	}
+	return list
+}
+
+// profilesRaw is profiles encoded, each kept while the user is the same
+// (userState.profileRaw), for a room_list's users (RoomListResult.UsersRaw).
+func profilesRaw(users map[string]*userState) []jsontext.Value {
+	list := make([]jsontext.Value, 0, len(users))
+	for _, id := range slices.Sorted(maps.Keys(users)) {
+		list = append(list, users[id].profileRaw())
 	}
 	return list
 }

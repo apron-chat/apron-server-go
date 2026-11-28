@@ -59,6 +59,10 @@ type Room[U Member] struct {
 	// record holds the latest logged room record.
 	record      roomlog.RoomRecord
 	recordLogID int64
+	// encoded is the latest record as EncodedRecord last encoded it, for
+	// the record of its log_id: replaced, never changed, so that readers
+	// under a read lock share it.
+	encoded atomic.Pointer[encodedRecord]
 	// log is the room's log, from its creation record.
 	log     *roomlog.Timeline
 	members map[string]U
@@ -98,6 +102,26 @@ func (r *Room[U]) Private() bool { return r.private }
 
 // Record is r's latest room record.
 func (r *Room[U]) Record() roomlog.RoomRecord { return r.record }
+
+// encodedRecord is a room record as encode made it, of the record of
+// logID.
+type encodedRecord struct {
+	logID int64
+	raw   jsontext.Value
+}
+
+// EncodedRecord returns r's latest room record as encode makes it, kept
+// from the last call while the record is the same, for a listing that
+// sends it as it is (apron.RoomView.Raw). The caller does not change it.
+// It may be called while the caller holds a read lock, as others do.
+func (r *Room[U]) EncodedRecord(encode func(roomlog.RoomRecord) jsontext.Value) jsontext.Value {
+	if e := r.encoded.Load(); e != nil && e.logID == r.recordLogID {
+		return e.raw
+	}
+	raw := encode(r.record)
+	r.encoded.Store(&encodedRecord{r.recordLogID, raw})
+	return raw
+}
 
 // Log is r's log.
 func (r *Room[U]) Log() *roomlog.Timeline { return r.log }
