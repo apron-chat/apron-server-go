@@ -445,7 +445,7 @@ func Request(method, id string, params any) []byte {
 
 // Text is a message body's params, raw, for a request frame built by hand.
 func Text(s string) jsontext.Value {
-	raw, _ := apron.Marshal(apron.MessageParams{Body: &apron.Body{Text: s}})
+	raw, _ := apron.Marshal(apron.MessageParams{Body: apron.Body{Text: s}})
 	return raw
 }
 
@@ -483,6 +483,6 @@ func Message(id apron.LogID, roomID string, i int) apron.Message {
 	return apron.Message{
 		MessageID: id, LogID: id, RoomID: roomID,
 		From: apron.User{UserID: user, Name: user},
-		Body: &apron.Body{Text: "Hello, everyone: this is line " + strconv.Itoa(i) + " of chat, of a usual length."},
+		Body: apron.Body{Text: "Hello, everyone: this is line " + strconv.Itoa(i) + " of chat, of a usual length."},
 	}
 }

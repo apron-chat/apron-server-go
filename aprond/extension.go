@@ -498,7 +498,7 @@ func commandResult(name string, result map[string]any) (apron.CommandResult, err
 // commandCall is the run of an extension's command as aprond sees it, in
 // the room the Router's Before checked, unless it has gone since.
 func (s *Server) commandCall(c *client, call *commands.Call) (*CommandCall, *Error) {
-	body := bodyObject(call.Params.Body)
+	body := bodyObject(&call.Params.Body)
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	r := s.visibleRoomLocked(c.user, call.Params.RoomID)

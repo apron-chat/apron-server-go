@@ -97,7 +97,7 @@ func tail(ctx context.Context, url string, auth apron.AuthParams, room string, l
 // deletions are left out. Without a room, the line starts with the
 // message's.
 func printMessage(out io.Writer, room string, m apron.Message) {
-	if m.Body == nil || m.Deleted || m.PrevLogID != 0 {
+	if m.Body.Empty() || m.Deleted || m.PrevLogID != 0 {
 		return
 	}
 	line := m.From.Name

@@ -99,11 +99,13 @@ type MessageRef struct {
 // Message is a message snapshot, or a transient notice when MessageID is
 // 0 (§3.5).
 type Message struct {
-	MessageID  LogID       `json:"message_id,omitzero"`
-	LogID      LogID       `json:"log_id,omitzero"`
-	RoomID     string      `json:"room_id,omitempty"`
-	From       User        `json:"from"`
-	Body       *Body       `json:"body,omitzero"`
+	MessageID LogID  `json:"message_id,omitzero"`
+	LogID     LogID  `json:"log_id,omitzero"`
+	RoomID    string `json:"room_id,omitempty"`
+	From      User   `json:"from"`
+	// Body is the zero Body for a message without one, such as a
+	// tombstone (§4.4), which is left out.
+	Body       Body        `json:"body,omitzero"`
 	ReplyTo    *MessageRef `json:"reply_to,omitempty"`
 	PrevLogID  LogID       `json:"prev_log_id,omitzero"`
 	PrevRoomID string      `json:"prev_room_id,omitempty"`
@@ -121,7 +123,7 @@ func (Message) Method() string { return "message" }
 // Notice is a transient ~private notice with text, shown in roomID, or
 // wherever the client likes when roomID is empty.
 func Notice(roomID, text string) Message {
-	return Message{RoomID: roomID, From: PrivateNotice, Body: &Body{Text: text}}
+	return Message{RoomID: roomID, From: PrivateNotice, Body: Body{Text: text}}
 }
 
 // AuthParams are the params of auth (§3.2). A scheme whose fields are not
@@ -165,9 +167,9 @@ type AuthResult struct {
 type MessageParams struct {
 	// RoomID is the room, or "" for the default room.
 	RoomID string `json:"room_id,omitempty"`
-	// Body is never nil. Its Unknown holds the fields this package does
-	// not know, for a backend that keeps them.
-	Body    *Body       `json:"body,omitzero"`
+	// Body is the message's, which a request has: its Unknown holds the
+	// fields this package does not know, for a backend that keeps them.
+	Body    Body        `json:"body,omitzero"`
 	ReplyTo *MessageRef `json:"reply_to,omitempty"`
 	// Ext is the message's ext (§4.13); nil when left out.
 	Ext Ext `json:"ext,omitempty"`
@@ -199,8 +201,8 @@ type CommandParams struct {
 	// which the backend names (§3.6.3): with package apron/server/commands, in its
 	// Router.Before.
 	RoomID string `json:"room_id,omitempty"`
-	// Body is never nil.
-	Body    *Body       `json:"body,omitzero"`
+	// Body is the command's, whose text is the command line.
+	Body    Body        `json:"body,omitzero"`
 	ReplyTo *MessageRef `json:"reply_to,omitempty"`
 	Ext     Ext         `json:"ext,omitempty"`
 }

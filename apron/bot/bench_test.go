@@ -45,8 +45,8 @@ func BenchmarkBotEchoStorm(b *testing.B) {
 		b.Fatal(err)
 	}
 	defer user.Close()
-	plain := apron.MessageParams{Body: &apron.Body{Text: "Hello, everyone: this is a line of chat of a usual length."}}
-	addressed := apron.MessageParams{Body: &apron.Body{Text: "echo: are you there?"}}
+	plain := apron.MessageParams{Body: apron.Body{Text: "Hello, everyone: this is a line of chat of a usual length."}}
+	addressed := apron.MessageParams{Body: apron.Body{Text: "echo: are you there?"}}
 	ctx := context.Background()
 	i := 0
 	for b.Loop() {
@@ -86,7 +86,7 @@ func BenchmarkBotMentioned(b *testing.B) {
 		b.Fatal(err)
 	}
 	defer echo.Close()
-	m := apron.Message{MessageID: 1, LogID: 1, From: apron.User{UserID: "ada"}, Body: &apron.Body{Text: "echo: hi", Mentions: []string{"bob"}}}
+	m := apron.Message{MessageID: 1, LogID: 1, From: apron.User{UserID: "ada"}, Body: apron.Body{Text: "echo: hi", Mentions: []string{"bob"}}}
 	for b.Loop() {
 		if echo.Mentioned(m) || !echo.Addressed(m) {
 			b.Fatal("not addressed")

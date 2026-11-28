@@ -27,8 +27,8 @@ func TestParseBodyDecodes(t *testing.T) {
 		if err := json.Unmarshal([]byte(raw), &want); err != nil {
 			t.Fatal(err)
 		}
-		if !reflect.DeepEqual(*got, want) {
-			t.Errorf("%s: parsed %#v, decodes as %#v", raw, *got, want)
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("%s: parsed %#v, decodes as %#v", raw, got, want)
 		}
 	}
 }
@@ -68,7 +68,7 @@ func TestBodyMarshal(t *testing.T) {
 func TestHistoryResultRaw(t *testing.T) {
 	typed := HistoryResult{
 		Rooms:      []Room{{RoomID: "general", LogID: 5}},
-		Messages:   []Message{{MessageID: 6, LogID: 7, RoomID: "general", From: User{UserID: "a", Name: "é"}, Body: &Body{Text: "hi"}}},
+		Messages:   []Message{{MessageID: 6, LogID: 7, RoomID: "general", From: User{UserID: "a", Name: "é"}, Body: Body{Text: "hi"}}},
 		FirstLogID: 5, LastLogID: 7, More: true, LatestLogID: 9, HistoryLogID: 1,
 	}
 	raw := HistoryResult{FirstLogID: 5, LastLogID: 7, More: true, LatestLogID: 9, HistoryLogID: 1, Raw: &RawRecords{}}
@@ -122,8 +122,8 @@ func decodeMembers(raw []byte) (Body, error) {
 	return body, nil
 }
 
-// A body read token by token is the body its members decode as: present
-// when null, unknown members kept as they arrived, escaped names known,
+// A body read token by token is the body its members decode as, or none
+// when null, with unknown members kept as they arrived, escaped names known,
 // and the same values refused.
 func TestBodyUnmarshal(t *testing.T) {
 	for _, raw := range []string{
@@ -137,6 +137,9 @@ func TestBodyUnmarshal(t *testing.T) {
 		var got Body
 		gotErr := json.Unmarshal([]byte(raw), &got)
 		want, wantErr := decodeMembers([]byte(raw))
+		if raw == `null` {
+			want = Body{} // none, as a message's body left out is
+		}
 		if gotErr != nil || wantErr != nil {
 			t.Errorf("%s: %v, want %v", raw, gotErr, wantErr)
 			continue
@@ -158,7 +161,7 @@ func TestBodyUnmarshal(t *testing.T) {
 	}
 	// A message's body null is no body, as before.
 	var m Message
-	if err := json.Unmarshal([]byte(`{"from":{"user_id":"a"},"body":null}`), &m); err != nil || m.Body != nil {
+	if err := json.Unmarshal([]byte(`{"from":{"user_id":"a"},"body":null}`), &m); err != nil || !m.Body.IsZero() {
 		t.Errorf("body null: %+v, %v", m.Body, err)
 	}
 }
@@ -182,5 +185,33 @@ func TestSplitBody(t *testing.T) {
 		if _, ok := splitBody(jsontext.Value(raw)); ok {
 			t.Errorf("%s split", raw)
 		}
+	}
+}
+
+// A message without a body has the zero Body, which is left out; one
+// decoded with a body, {} too, keeps it, and null is none.
+func TestMessageBodyValue(t *testing.T) {
+	tombstone := Message{MessageID: 7, LogID: 9, RoomID: "general", From: User{UserID: "a"}, Deleted: true}
+	if raw, _ := Marshal(tombstone); string(raw) != `{"deleted":true,"from":{"user_id":"a"},"log_id":"9","message_id":"7","room_id":"general"}` && bytes.Contains(raw, []byte("body")) {
+		t.Errorf("a tombstone: %s", raw)
+	}
+	for raw, zero := range map[string]bool{
+		`{"from":{"user_id":"a"}}`:                      true,
+		`{"from":{"user_id":"a"},"body":null}`:          true,
+		`{"from":{"user_id":"a"},"body":{}}`:            false,
+		`{"from":{"user_id":"a"},"body":{"text":"hi"}}`: false,
+		`{"from":{"user_id":"a"},"body":{"x":[1]}}`:     false,
+	} {
+		var m Message
+		if err := json.Unmarshal([]byte(raw), &m); err != nil || m.Body.IsZero() != zero {
+			t.Errorf("%s: zero %v, %v", raw, m.Body.IsZero(), err)
+		}
+		again, _ := Marshal(m)
+		if zero == bytes.Contains(again, []byte(`"body"`)) {
+			t.Errorf("%s encodes as %s", raw, again)
+		}
+	}
+	if (&Body{}).Empty() != true || (*Body)(nil).Empty() != true {
+		t.Error("an empty body is not Empty")
 	}
 }

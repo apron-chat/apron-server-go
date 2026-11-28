@@ -12,7 +12,7 @@ import (
 func TestResultFrame(t *testing.T) {
 	results := []any{
 		apron.MessageResult{MessageID: 1724803200042},
-		apron.HistoryResult{Messages: []apron.Message{{MessageID: 1, LogID: 2, From: apron.User{UserID: "a", Name: "é <&>"}, Body: &apron.Body{Text: "\"hi\"\n"}}}, More: true},
+		apron.HistoryResult{Messages: []apron.Message{{MessageID: 1, LogID: 2, From: apron.User{UserID: "a", Name: "é <&>"}, Body: apron.Body{Text: "\"hi\"\n"}}}, More: true},
 		map[string]any{"z": []int{1}, "a": nil},
 		nil,
 	}

@@ -99,7 +99,7 @@ func (b *typed) Auth(_ context.Context, c *server.Conn, p apron.AuthParams, repl
 func (b *typed) Message(_ context.Context, _ *server.Conn, p apron.MessageParams, reply server.Reply[apron.MessageResult]) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	b.bodies = append(b.bodies, *p.Body)
+	b.bodies = append(b.bodies, p.Body)
 	return reply.Send(apron.MessageResult{MessageID: 1})
 }
 

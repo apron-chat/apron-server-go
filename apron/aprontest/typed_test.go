@@ -36,7 +36,7 @@ func (c *typedChat) Command(_ context.Context, conn *server.Conn, p apron.Comman
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	conn.Notify(apron.Notice(p.RoomID, "one"))
-	frame, err := apron.Encode(apron.Message{From: identity(conn), Body: &apron.Body{Text: p.Body.Text}})
+	frame, err := apron.Encode(apron.Message{From: identity(conn), Body: apron.Body{Text: p.Body.Text}})
 	if err != nil {
 		return err
 	}
@@ -64,7 +64,7 @@ func TestTyped(t *testing.T) {
 		}
 	}
 
-	sent, err := ada.Post(ctx, apron.MessageParams{Body: &apron.Body{Text: "hi"}})
+	sent, err := ada.Post(ctx, apron.MessageParams{Body: apron.Body{Text: "hi"}})
 	if err != nil || sent.MessageID == 0 {
 		t.Fatalf("Post: %+v %v", sent, err)
 	}

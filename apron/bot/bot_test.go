@@ -145,10 +145,10 @@ func TestMentions(t *testing.T) {
 		t.Cleanup(func() { echo.Close() })
 		ctx := timeout(t)
 		client, _ := aprontest.SignIn(t, c.server, map[string]any{"scheme": "guest"})
-		if _, err := client.Post(ctx, apron.MessageParams{Body: &apron.Body{Text: "hi all"}}); err != nil {
+		if _, err := client.Post(ctx, apron.MessageParams{Body: apron.Body{Text: "hi all"}}); err != nil {
 			t.Fatal(err)
 		}
-		asked, err := client.Post(ctx, apron.MessageParams{Body: &apron.Body{Text: "@echo hello", Mentions: []string{"echo"}}})
+		asked, err := client.Post(ctx, apron.MessageParams{Body: apron.Body{Text: "@echo hello", Mentions: []string{"echo"}}})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -186,14 +186,14 @@ func TestRequests(t *testing.T) {
 	if conn.UserID() != "helper" {
 		t.Errorf("UserID %q", conn.UserID())
 	}
-	posted, err := conn.Post(ctx, apron.MessageParams{Body: &apron.Body{Text: "one", Format: apron.Markdown}})
+	posted, err := conn.Post(ctx, apron.MessageParams{Body: apron.Body{Text: "one", Format: apron.Markdown}})
 	if err != nil || posted.MessageID == 0 {
 		t.Fatalf("Post: %+v %v", posted, err)
 	}
-	if _, err := conn.Command(ctx, apron.CommandParams{Body: &apron.Body{Text: "/ping"}}); err != nil {
+	if _, err := conn.Command(ctx, apron.CommandParams{Body: apron.Body{Text: "/ping"}}); err != nil {
 		t.Fatalf("Command: %v", err)
 	}
-	if _, err := conn.Command(ctx, apron.CommandParams{Body: &apron.Body{Text: "/pong"}}); apron.CodeOf(err) != apron.CodeInvalidParams {
+	if _, err := conn.Command(ctx, apron.CommandParams{Body: apron.Body{Text: "/pong"}}); apron.CodeOf(err) != apron.CodeInvalidParams {
 		t.Fatalf("an unknown command: %v", err)
 	}
 	if err := conn.Join(ctx, "general"); apron.CodeOf(err) != apron.CodeUnsupported {
@@ -205,7 +205,7 @@ func TestRequests(t *testing.T) {
 		t.Fatalf("History: %+v %v", page, err)
 	}
 	conn.Close()
-	if _, err := conn.Post(ctx, apron.MessageParams{Body: &apron.Body{Text: "two"}}); !errors.Is(err, apron.ErrClosed) {
+	if _, err := conn.Post(ctx, apron.MessageParams{Body: apron.Body{Text: "two"}}); !errors.Is(err, apron.ErrClosed) {
 		t.Fatalf("Post after Close: %v", err)
 	}
 }
@@ -223,7 +223,7 @@ func TestReopen(t *testing.T) {
 		first, _ := quiet.Conn()
 		first.(*server.Local).Conn().Close()
 		<-first.Done()
-		if _, err := quiet.Post(ctx, apron.MessageParams{Body: &apron.Body{Text: "back"}}); err != nil {
+		if _, err := quiet.Post(ctx, apron.MessageParams{Body: apron.Body{Text: "back"}}); err != nil {
 			t.Fatalf("Post after the server closed the connection: %v", err)
 		}
 		if second, _ := quiet.Conn(); second == first {
@@ -243,7 +243,7 @@ func TestReopen(t *testing.T) {
 		// It opens again after a second (minReopen), by the bubble's clock:
 		// not before.
 		time.Sleep(time.Second - time.Nanosecond)
-		if _, err := quiet.Post(ctx, apron.MessageParams{Body: &apron.Body{Text: "early"}}); err != nil {
+		if _, err := quiet.Post(ctx, apron.MessageParams{Body: apron.Body{Text: "early"}}); err != nil {
 			t.Fatal(err)
 		}
 		synctest.Wait()
@@ -254,7 +254,7 @@ func TestReopen(t *testing.T) {
 		}
 		time.Sleep(time.Nanosecond)
 		synctest.Wait()
-		if _, err := quiet.Post(ctx, apron.MessageParams{Body: &apron.Body{Text: "anyone?"}}); err != nil {
+		if _, err := quiet.Post(ctx, apron.MessageParams{Body: apron.Body{Text: "anyone?"}}); err != nil {
 			t.Fatal(err)
 		}
 		synctest.Wait()
@@ -269,7 +269,7 @@ func TestReopen(t *testing.T) {
 
 		listener.Close()
 		quiet.Close()
-		if _, err := quiet.Post(ctx, apron.MessageParams{Body: &apron.Body{Text: "gone"}}); !errors.Is(err, apron.ErrClosed) {
+		if _, err := quiet.Post(ctx, apron.MessageParams{Body: apron.Body{Text: "gone"}}); !errors.Is(err, apron.ErrClosed) {
 			t.Fatalf("Post after Close: %v", err)
 		}
 		if err := c.server.Shutdown(ctx); err != nil {
@@ -333,7 +333,7 @@ func say(t *testing.T, c *chat, text string, mentions ...string) (*aprontest.Cli
 	t.Helper()
 	ctx := timeout(t)
 	client, _ := aprontest.SignIn(t, c.server, map[string]any{"scheme": "guest"})
-	result, err := client.Post(ctx, apron.MessageParams{Body: &apron.Body{Text: text, Mentions: mentions}})
+	result, err := client.Post(ctx, apron.MessageParams{Body: apron.Body{Text: text, Mentions: mentions}})
 	if err != nil {
 		t.Fatal(err)
 	}

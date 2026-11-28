@@ -27,7 +27,7 @@ func archived(b *testing.B, n int) []byte {
 			page[j] = apron.Message{
 				MessageID: id, LogID: id, RoomID: "general",
 				From: apron.User{UserID: user, Name: user},
-				Body: &apron.Body{Text: "Hello, everyone: this is line " + strconv.Itoa(i+j) + " of chat, of a usual length."},
+				Body: apron.Body{Text: "Hello, everyone: this is line " + strconv.Itoa(i+j) + " of chat, of a usual length."},
 			}
 		}
 		if err := w.WriteHistory(apron.HistoryResult{Messages: page}); err != nil {

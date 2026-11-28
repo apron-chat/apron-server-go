@@ -56,6 +56,14 @@ const (
 // with such a body is invalid_params (§3.5.1).
 func (b *Body) Empty() bool { return b == nil || b.Text == "" && len(b.Embeds) == 0 }
 
+// IsZero reports whether b is the zero Body: no body at all, as a
+// message without one, such as a tombstone (§4.4), has, which is left out
+// of the message it is in (omitzero). A body decoded, even {}, is not;
+// nil is. Its pointer receiver spares encoding a copy of b to call it.
+func (b *Body) IsZero() bool {
+	return b == nil || b.Text == "" && b.Format == "" && b.Mentions == nil && b.Embeds == nil && b.Unknown == nil && b.sent == 0
+}
+
 // Formats of a Body.
 const (
 	Plain    = "plain"
@@ -162,7 +170,8 @@ func (b *Body) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
 	}
 	switch tok.Kind() {
 	case 'n':
-		*b = Body{sent: bodyDecoded}
+		// A body of null is none, as one left out is.
+		*b = Body{}
 		return nil
 	case '{':
 	default:
@@ -266,38 +275,38 @@ type bodyMembers struct {
 // knows is checked, and the others are kept in Unknown. The Body is what
 // decoding the body makes of it (UnmarshalJSONFrom), once every member is
 // checked.
-func parseBody(in bodyMembers) (*Body, error) {
-	body := &Body{Unknown: in.Unknown, sent: bodyDecoded}
+func parseBody(in bodyMembers) (Body, error) {
+	body := Body{Unknown: in.Unknown, sent: bodyDecoded}
 	if raw := in.Text; raw != nil {
 		if core.IsNull(raw) || json.Unmarshal(raw, &body.Text) != nil {
-			return nil, InvalidParams("body.text must be a string")
+			return Body{}, InvalidParams("body.text must be a string")
 		}
 		body.sent |= bodyText
 	}
 	if raw := in.Format; raw != nil {
 		if core.IsNull(raw) || json.Unmarshal(raw, &body.Format) != nil || (body.Format != Plain && body.Format != Markdown) {
-			return nil, InvalidParams("body.format must be plain or markdown")
+			return Body{}, InvalidParams("body.format must be plain or markdown")
 		}
 		body.sent |= bodyFormat
 	}
 	if raw := in.Mentions; raw != nil {
 		if core.IsNull(raw) || json.Unmarshal(raw, &body.Mentions) != nil || slices.ContainsFunc(body.Mentions, func(id string) bool { return !ValidID(id) }) {
-			return nil, InvalidParams("body.mentions must be an array of user_id strings")
+			return Body{}, InvalidParams("body.mentions must be an array of user_id strings")
 		}
 		body.sent |= bodyMentions
 	}
 	if raw := in.Embeds; raw != nil {
 		if core.IsNull(raw) || json.Unmarshal(raw, &body.Embeds) != nil {
-			return nil, InvalidParams("body.embeds must be an array")
+			return Body{}, InvalidParams("body.embeds must be an array")
 		}
 		for i, embed := range body.Embeds {
 			var object map[string]jsontext.Value
 			if core.IsNull(embed) || json.Unmarshal(embed, &object) != nil {
-				return nil, InvalidParams(fmt.Sprintf("body.embeds[%d] must be an object", i))
+				return Body{}, InvalidParams(fmt.Sprintf("body.embeds[%d] must be an object", i))
 			}
 			var kind string
 			if raw, ok := object["kind"]; !ok || core.IsNull(raw) || json.Unmarshal(raw, &kind) != nil || kind == "" {
-				return nil, InvalidParams(fmt.Sprintf("body.embeds[%d].kind must be a non-empty string", i))
+				return Body{}, InvalidParams(fmt.Sprintf("body.embeds[%d].kind must be a non-empty string", i))
 			}
 		}
 		body.sent |= bodyEmbeds
@@ -312,10 +321,10 @@ func parseBody(in bodyMembers) (*Body, error) {
 // with it a body that came from elsewhere, such as one its filter
 // rewrote, as apron/server checks a client's. Its error is always an *Error,
 // error/invalid_params.
-func ParseBody(raw jsontext.Value) (*Body, error) {
+func ParseBody(raw jsontext.Value) (Body, error) {
 	in, ok := splitBody(raw)
 	if !ok {
-		return nil, InvalidParams("body must be an object")
+		return Body{}, InvalidParams("body must be an object")
 	}
 	return parseBody(in)
 }

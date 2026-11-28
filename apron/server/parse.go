@@ -50,7 +50,9 @@ func parseMessageFields(r *Request) (messageFields, error) {
 	if raw, ok := r.fields.Get("body"); ok && d.Err() == nil {
 		body, err := apron.ParseBody(raw)
 		d.Fail(err)
-		m.body = body
+		if err == nil {
+			m.body = &body
+		}
 	}
 	return parsed(m, d)
 }
@@ -74,7 +76,7 @@ func parseCommand(r *Request) (apron.CommandParams, error) {
 	if m.body == nil {
 		return apron.CommandParams{}, apron.InvalidParams("A command needs a body")
 	}
-	return apron.CommandParams{RoomID: m.roomID, Body: m.body, ReplyTo: m.replyTo, Ext: m.ext}, nil
+	return apron.CommandParams{RoomID: m.roomID, Body: *m.body, ReplyTo: m.replyTo, Ext: m.ext}, nil
 }
 
 // parseAuth reads auth's params (§3.2): scheme, a non-empty string, and the

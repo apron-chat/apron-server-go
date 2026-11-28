@@ -194,7 +194,7 @@ func (p printer) print(m apron.Message) error {
 	switch {
 	case m.Deleted:
 		line.WriteString("(deleted)")
-	case m.Body != nil:
+	case !m.Body.Empty():
 		line.WriteString(m.Body.Text)
 		for _, embed := range m.Body.Embeds {
 			var e struct {

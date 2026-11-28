@@ -77,7 +77,7 @@ func message(ctx context.Context, c *cli, args []string) error {
 		}
 		text = strings.TrimRight(string(read), "\r\n")
 	}
-	p := apron.MessageParams{RoomID: *room, Body: &apron.Body{Text: text}}
+	p := apron.MessageParams{RoomID: *room, Body: apron.Body{Text: text}}
 	if *format == apron.Markdown {
 		p.Body.Format = apron.Markdown
 	}

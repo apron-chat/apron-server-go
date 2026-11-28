@@ -55,14 +55,14 @@ func TestRoundTrip(t *testing.T) {
 	start, none := apron.LogID(10), apron.LogID(0)
 	page := apron.HistoryResult{
 		Rooms:       []apron.Room{{RoomID: "general", LogID: 10, Title: "General"}},
-		Messages:    []apron.Message{{MessageID: 11, LogID: 11, RoomID: "general", From: from, Body: &apron.Body{Text: "hi", Format: apron.Markdown}}},
+		Messages:    []apron.Message{{MessageID: 11, LogID: 11, RoomID: "general", From: from, Body: apron.Body{Text: "hi", Format: apron.Markdown}}},
 		Memberships: []apron.Membership{{LogID: 12, RoomID: "general", Members: []apron.Member{{User: apron.User{UserID: "ada"}, Joined: true}}}},
 		More:        true, FirstLogID: 10, LastLogID: 12,
 	}
 	for _, p := range []archive.Part{
 		archive.HistoryPart(page),
 		{}, // writes nothing
-		{Messages: []apron.Message{{MessageID: 5, LogID: 5, RoomID: "general", From: from, Body: &apron.Body{Text: "a reference"}}}},
+		{Messages: []apron.Message{{MessageID: 5, LogID: 5, RoomID: "general", From: from, Body: apron.Body{Text: "a reference"}}}},
 		{Joined: []apron.RoomView{{Room: page.Rooms[0], LatestLogID: 12, HistoryLogID: &start,
 			Members: []apron.CurrentUser{{User: apron.User{UserID: "ada", Status: "online"}, Cleared: []string{"seen"}}}}}},
 		{NotJoined: []apron.RoomView{{Room: apron.Room{RoomID: "random"}, LatestLogID: 3, HistoryLogID: &none}}},

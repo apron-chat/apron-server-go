@@ -13,7 +13,7 @@ func BenchmarkClientReceive(b *testing.B) {
 	frames := map[string][]byte{}
 	message, _ := apron.Encode(apron.Message{
 		MessageID: 1_700_000_000_000, LogID: 1_700_000_000_000, RoomID: "general",
-		From: apron.User{UserID: "guest_1", Name: "Ada"}, Body: &apron.Body{Text: "Hello, everyone: this is a line of chat of a usual length."},
+		From: apron.User{UserID: "guest_1", Name: "Ada"}, Body: apron.Body{Text: "Hello, everyone: this is a line of chat of a usual length."},
 	})
 	frames["message"] = message
 	frames["reply"] = []byte(`{"id":"k3J9xQ2mZ8aB-17","result":{"message_id":"1700000000000"}}`)

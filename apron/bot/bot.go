@@ -345,7 +345,7 @@ func (b *Bot) Addressed(m apron.Message) bool {
 // fresh reports whether m is a new message, with a body, from another
 // than self.
 func fresh(m apron.Message, self string) bool {
-	return m.MessageID != 0 && m.PrevLogID == 0 && !m.Deleted && m.From.UserID != self && m.Body != nil
+	return m.MessageID != 0 && m.PrevLogID == 0 && !m.Deleted && m.From.UserID != self && !m.Body.Empty()
 }
 
 // Addresses reports whether text addresses name as people do in plain
@@ -433,7 +433,7 @@ func (b *Bot) Post(ctx context.Context, p apron.MessageParams) (apron.MessageRes
 // Reply posts text in the room of the message to, as a reply to it
 // (§3.5.4), or, for a notice, which has no message_id, after it.
 func (b *Bot) Reply(ctx context.Context, to apron.Message, text string) (apron.MessageResult, error) {
-	p := apron.MessageParams{RoomID: to.RoomID, Body: &apron.Body{Text: text}}
+	p := apron.MessageParams{RoomID: to.RoomID, Body: apron.Body{Text: text}}
 	if to.MessageID != 0 {
 		p.ReplyTo = &apron.MessageRef{MessageID: to.MessageID}
 	}

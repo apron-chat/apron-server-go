@@ -61,7 +61,7 @@ func CheckRaw(raw jsontext.Value) *apron.Error {
 		}
 		return apron.InvalidParams(err.Error())
 	}
-	return CheckBody(body)
+	return CheckBody(&body)
 }
 
 // CheckExt checks a message's ext, merged, against MaxExtBytes: one over

@@ -68,7 +68,7 @@ func TestDeploy(t *testing.T) {
 			Output string `json:"output"`
 		}
 		body := m.Apron().Body
-		return body != nil && len(body.Embeds) == 1 && json.Unmarshal(body.Embeds[0], &terminal) == nil &&
+		return len(body.Embeds) == 1 && json.Unmarshal(body.Embeds[0], &terminal) == nil &&
 			strings.Contains(terminal.Output, "deployed the api")
 	})
 	done := ada.Message(func(m aprond.Message) bool { return strings.HasPrefix(m.Text, "✅") })

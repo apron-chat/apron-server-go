@@ -388,7 +388,7 @@ func TestCheckOrigin(t *testing.T) {
 type badLogIDs struct{ notified chan bool }
 
 func (h badLogIDs) serve(_ context.Context, c *server.Conn, _ *server.Request, reply server.Reply[any]) error {
-	h.notified <- c.Notify(apron.Message{LogID: apron.MaxLogID + 1, RoomID: "r", From: apron.User{UserID: "ada"}, Body: &apron.Body{Text: "x"}})
+	h.notified <- c.Notify(apron.Message{LogID: apron.MaxLogID + 1, RoomID: "r", From: apron.User{UserID: "ada"}, Body: apron.Body{Text: "x"}})
 	return reply.Send(map[string]any{"log_id": apron.LogID(-1)})
 }
 

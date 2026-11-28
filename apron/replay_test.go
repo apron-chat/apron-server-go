@@ -12,7 +12,7 @@ import (
 func user(id string) apron.User { return apron.User{UserID: id, Name: id} }
 
 func snapshot(messageID, logID apron.LogID, text string) apron.Message {
-	return apron.Message{MessageID: messageID, LogID: logID, RoomID: "general", From: user("ada"), Body: &apron.Body{Text: text}}
+	return apron.Message{MessageID: messageID, LogID: logID, RoomID: "general", From: user("ada"), Body: apron.Body{Text: text}}
 }
 
 // replayLog is a log with every kind of record, and keys that change.

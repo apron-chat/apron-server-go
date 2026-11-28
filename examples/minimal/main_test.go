@@ -26,7 +26,7 @@ func signIn(t *testing.T, ctx context.Context, chat *Chat, name string) (*apront
 
 // text is a message request's params with text.
 func text(s string) apron.MessageParams {
-	return apron.MessageParams{Body: &apron.Body{Text: s}}
+	return apron.MessageParams{Body: apron.Body{Text: s}}
 }
 
 func TestChat(t *testing.T) {
@@ -87,7 +87,7 @@ func TestChat(t *testing.T) {
 	}
 
 	// /nick renames, as me does: the user update comes before the result.
-	_, before, err := ada.CallFrames(ctx, "command", apron.CommandParams{Body: &apron.Body{Text: "/nick Ada L."}})
+	_, before, err := ada.CallFrames(ctx, "command", apron.CommandParams{Body: apron.Body{Text: "/nick Ada L."}})
 	var renamed apron.UserUpdate
 	if err != nil || len(before) != 1 || before[0].Decode(&renamed) != nil || renamed.You == nil || renamed.You.Name != "Ada L." {
 		t.Fatalf("/nick: %v %v", before, err)
@@ -112,7 +112,7 @@ func TestEcho(t *testing.T) {
 		{Text: "@echo hi", Mentions: []string{"echo"}},
 		{Text: "echo: hi"},
 	} {
-		asked, err := ada.Post(ctx, apron.MessageParams{Body: &body})
+		asked, err := ada.Post(ctx, apron.MessageParams{Body: body})
 		if err != nil {
 			t.Fatal(err)
 		}

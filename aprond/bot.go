@@ -526,7 +526,7 @@ func (b *Session) post(roomID, text string) *postRequest {
 // newPost starts a message with text to the room, whose WithExt writes
 // under extension's name.
 func newPost(roomID, text, extension string) *postRequest {
-	return &postRequest{params: apron.MessageParams{RoomID: roomID, Body: &apron.Body{Text: text}}, extension: extension}
+	return &postRequest{params: apron.MessageParams{RoomID: roomID, Body: apron.Body{Text: text}}, extension: extension}
 }
 
 // Join joins the room (§4.2.2).
@@ -585,7 +585,7 @@ func MessageOf(m apron.Message) Message {
 	if m.ReplyTo != nil {
 		message.ReplyTo = m.ReplyTo.MessageID.String()
 	}
-	if body := m.Body; body != nil {
+	if body := m.Body; !body.IsZero() {
 		message.body = encodeJSON(body)
 		message.Text, message.Format = body.Text, cmp.Or(body.Format, apron.Plain)
 		message.Mentions = slices.Clone(body.Mentions)
@@ -610,10 +610,10 @@ func (m Message) Apron() apron.Message {
 	case m.body != nil:
 		var body apron.Body
 		if json.Unmarshal(m.body, &body) == nil {
-			message.Body = &body
+			message.Body = body
 		}
 	case !m.Deleted:
-		message.Body = &apron.Body{Text: m.Text, Format: m.Format, Mentions: slices.Clone(m.Mentions)}
+		message.Body = apron.Body{Text: m.Text, Format: m.Format, Mentions: slices.Clone(m.Mentions)}
 	}
 	return message
 }

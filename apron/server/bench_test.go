@@ -51,7 +51,7 @@ func memStats() runtime.MemStats {
 func message(b *testing.B, text string) apron.Frame {
 	frame, err := apron.Encode(apron.Message{
 		MessageID: 1_700_000_000_000, LogID: 1_700_000_000_000, RoomID: "general",
-		From: apron.User{UserID: "guest_1", Name: "Ada"}, Body: &apron.Body{Text: text},
+		From: apron.User{UserID: "guest_1", Name: "Ada"}, Body: apron.Body{Text: text},
 	})
 	if err != nil {
 		b.Fatal(err)
@@ -145,7 +145,7 @@ func BenchmarkFanoutNotify(b *testing.B) {
 	ts := chat.Open(n, sink, nil)
 	defer chat.CloseAll(ts)
 	conns := chat.Server.Conns()
-	m := apron.Message{MessageID: 1, LogID: 1, RoomID: "general", From: apron.User{UserID: "guest_1", Name: "Ada"}, Body: &apron.Body{Text: "Hello, everyone: this is a line of chat of a usual length."}}
+	m := apron.Message{MessageID: 1, LogID: 1, RoomID: "general", From: apron.User{UserID: "guest_1", Name: "Ada"}, Body: apron.Body{Text: "Hello, everyone: this is a line of chat of a usual length."}}
 	target := sink.Total()
 	before := memStats()
 	b.ResetTimer()
@@ -327,7 +327,7 @@ func BenchmarkRequestLocal(b *testing.B) {
 		b.Fatal(err)
 	}
 	defer l.Close()
-	p := apron.MessageParams{Body: &apron.Body{Text: "Hello, everyone: this is a line of chat of a usual length."}}
+	p := apron.MessageParams{Body: apron.Body{Text: "Hello, everyone: this is a line of chat of a usual length."}}
 	ctx := context.Background()
 	sent := int64(1) // the server frame
 	for b.Loop() {

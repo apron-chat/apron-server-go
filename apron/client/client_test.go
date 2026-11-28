@@ -285,7 +285,7 @@ func dial(t *testing.T, url string, auth apron.AuthParams, opts ...client.Option
 }
 
 func text(s string) apron.MessageParams {
-	return apron.MessageParams{Body: &apron.Body{Text: s}}
+	return apron.MessageParams{Body: apron.Body{Text: s}}
 }
 
 func TestRequests(t *testing.T) {
@@ -325,7 +325,7 @@ func TestRequests(t *testing.T) {
 	if e, ok := errors.AsType[*apron.Error](err); !ok || e.Code != apron.CodeUnsupported {
 		t.Fatalf("unknown method: %v", err)
 	}
-	if _, err := ada.Command(ctx, apron.CommandParams{Body: &apron.Body{Text: "/nonsense"}}); err == nil {
+	if _, err := ada.Command(ctx, apron.CommandParams{Body: apron.Body{Text: "/nonsense"}}); err == nil {
 		t.Fatal("unknown command: no error")
 	}
 
@@ -358,7 +358,7 @@ func TestUser(t *testing.T) {
 		t.Fatalf("me: %+v %v; user %+v", you, err, ada.User())
 	}
 	// A change the server makes is a patch, which merges.
-	if _, err := ada.Command(ctx, apron.CommandParams{Body: &apron.Body{Text: "/rename Ada L"}}); err != nil {
+	if _, err := ada.Command(ctx, apron.CommandParams{Body: apron.Body{Text: "/rename Ada L"}}); err != nil {
 		t.Fatal(err)
 	}
 	update := next(t, got, func(u apron.UserUpdate) bool { return u.You != nil })
@@ -454,7 +454,7 @@ func TestServerEnds(t *testing.T) {
 		conn := dial(t, url, apron.AuthParams{Scheme: "guest"}, memory)
 		failed := make(chan error, 1)
 		go func() {
-			_, err := conn.Command(ctx, apron.CommandParams{Body: &apron.Body{Text: "/wait"}})
+			_, err := conn.Command(ctx, apron.CommandParams{Body: apron.Body{Text: "/wait"}})
 			failed <- err
 		}()
 		synctest.Wait() // The command waits.
@@ -484,7 +484,7 @@ func TestCallContext(t *testing.T) {
 		conn := dial(t, url, apron.AuthParams{Scheme: "guest"}, memory)
 		short, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 		defer cancel()
-		if _, err := conn.Command(short, apron.CommandParams{Body: &apron.Body{Text: "/wait"}}); !errors.Is(err, context.DeadlineExceeded) {
+		if _, err := conn.Command(short, apron.CommandParams{Body: apron.Body{Text: "/wait"}}); !errors.Is(err, context.DeadlineExceeded) {
 			t.Fatalf("call: %v", err)
 		}
 		close(c.release)
@@ -508,7 +508,7 @@ func TestCallFromOnFrame(t *testing.T) {
 		var m struct {
 			Params apron.Message `json:"params"`
 		}
-		if json.Unmarshal(frame, &m) != nil || m.Params.Body == nil || m.Params.From.UserID == echo.User().UserID {
+		if json.Unmarshal(frame, &m) != nil || m.Params.Body.IsZero() || m.Params.From.UserID == echo.User().UserID {
 			return
 		}
 		_, err := echo.Post(ctx, text("echo: "+m.Params.Body.Text))

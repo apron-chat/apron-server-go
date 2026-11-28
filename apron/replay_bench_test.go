@@ -21,7 +21,7 @@ func benchMessages(n int) []apron.Message {
 		ms[i] = apron.Message{
 			MessageID: id, LogID: id, RoomID: "general",
 			From: apron.User{UserID: user, Name: user},
-			Body: &apron.Body{Text: "Hello, everyone: this is line " + strconv.Itoa(i) + " of chat, of a usual length."},
+			Body: apron.Body{Text: "Hello, everyone: this is line " + strconv.Itoa(i) + " of chat, of a usual length."},
 		}
 	}
 	return ms

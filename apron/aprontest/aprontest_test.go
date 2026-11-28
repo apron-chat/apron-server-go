@@ -411,7 +411,7 @@ func TestLater(t *testing.T) {
 	ctx := timeout(t)
 	s := newSlow()
 	reply, sent := aprontest.NewReply[apron.CommandResult](aprontest.NewRequest("command", nil))
-	if err := s.Command(ctx, nil, apron.CommandParams{Body: &apron.Body{Text: "/slow"}}, reply); err != nil || sent.Sent() {
+	if err := s.Command(ctx, nil, apron.CommandParams{Body: apron.Body{Text: "/slow"}}, reply); err != nil || sent.Sent() {
 		t.Fatalf("command: %v, sent %v; want it answered later", err, sent.Sent())
 	}
 	waiting, cancel := context.WithTimeout(ctx, 10*time.Millisecond)

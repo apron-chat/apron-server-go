@@ -191,7 +191,7 @@ func (c *Client) Edit(roomID, messageID, text string, options ...aprond.PostOpti
 	if err != nil {
 		return err
 	}
-	return c.Call("message", edit{RoomID: roomID, MessageID: messageID, Body: params.Body, ReplyTo: params.ReplyTo, Ext: params.Ext}, nil)
+	return c.Call("message", edit{RoomID: roomID, MessageID: messageID, Body: &params.Body, ReplyTo: params.ReplyTo, Ext: params.Ext}, nil)
 }
 
 // Delete deletes the message messageID in a room (§4.4), which leaves a

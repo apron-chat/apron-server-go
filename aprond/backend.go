@@ -270,7 +270,7 @@ func (b backend) React(ctx context.Context, wc *server.Conn, p apron.ReactParams
 
 // Message saves a new message, as a save without a message_id.
 func (b backend) Message(ctx context.Context, wc *server.Conn, p apron.MessageParams, reply server.Reply[apron.MessageResult]) error {
-	return b.Edit(ctx, wc, apron.EditParams{RoomID: p.RoomID, Body: p.Body, ReplyTo: p.ReplyTo, Ext: p.Ext}, reply)
+	return b.Edit(ctx, wc, apron.EditParams{RoomID: p.RoomID, Body: &p.Body, ReplyTo: p.ReplyTo, Ext: p.Ext}, reply)
 }
 
 // Edit saves an existing message: an edit, a move, or a deletion, as

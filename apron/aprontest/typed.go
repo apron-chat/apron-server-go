@@ -79,14 +79,14 @@ func (c *Client) Me(ctx context.Context, p apron.MeParams) (apron.CurrentUser, e
 // A test that needs the command's result, the embeds it made, calls
 // Call[apron.CommandResult].
 func (c *Client) Command(ctx context.Context, roomID, line string) (notices []string, err error) {
-	p := apron.CommandParams{RoomID: roomID, Body: &apron.Body{Text: line}}
+	p := apron.CommandParams{RoomID: roomID, Body: apron.Body{Text: line}}
 	_, frames, err := c.call(ctx, "command", p, func(f Frame) bool {
 		var m apron.Message
 		return f.Method == "message" && f.Decode(&m) == nil && m.From.UserID == apron.PrivateNotice.UserID
 	})
 	for _, f := range frames {
 		var m apron.Message
-		if f.Decode(&m) == nil && m.Body != nil {
+		if f.Decode(&m) == nil && !m.Body.IsZero() {
 			notices = append(notices, m.Body.Text)
 		}
 	}

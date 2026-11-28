@@ -16,7 +16,7 @@
 //		return err
 //	}
 //	defer conn.Close()
-//	_, err = conn.Post(ctx, apron.MessageParams{RoomID: "general", Body: &apron.Body{Text: "Deployed"}})
+//	_, err = conn.Post(ctx, apron.MessageParams{RoomID: "general", Body: apron.Body{Text: "Deployed"}})
 //
 // A Conn is one connection, and it is not opened again: when it ends, Done
 // is closed, and its calls fail with an error that wraps apron.ErrClosed.
