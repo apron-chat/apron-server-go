@@ -24,7 +24,7 @@ func newTypedChat() *typedChat {
 func (c *typedChat) Me(_ context.Context, conn *server.Conn, p apron.MeParams, reply server.Reply[apron.CurrentUser]) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	old := *conn.User()
+	old, _ := conn.Identity()
 	cur := server.ApplyMe(old, p)
 	c.server.PublishUser(server.UserChange{Old: old, New: cur, Except: conn}, nil)
 	return reply.Send(cur.Complete(old))
@@ -36,7 +36,7 @@ func (c *typedChat) Command(_ context.Context, conn *server.Conn, p apron.Comman
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	conn.Notify(apron.Notice(p.RoomID, "one"))
-	frame, err := apron.Encode(apron.Message{From: *conn.User(), Body: &apron.Body{Text: p.Body.Text}})
+	frame, err := apron.Encode(apron.Message{From: identity(conn), Body: &apron.Body{Text: p.Body.Text}})
 	if err != nil {
 		return err
 	}
@@ -127,4 +127,10 @@ func TestTyped(t *testing.T) {
 	if pending := ada.Pending(); len(pending) != 1 || !strings.Contains(string(pending[0].Raw), "/fail") {
 		t.Fatalf("after a failed Command: %v", pending)
 	}
+}
+
+// identity is a connection's identity, its user once signed in.
+func identity(c *server.Conn) apron.User {
+	u, _ := c.Identity()
+	return u
 }

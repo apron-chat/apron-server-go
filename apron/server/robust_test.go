@@ -243,7 +243,8 @@ func TestMaxConnectionsFirst(t *testing.T) {
 	}
 }
 
-// Conn.User and SetUser copy the user, roles and ext included.
+// SetUser, and Local.User, copy the user, roles and ext included; Identity
+// is what SetUser kept.
 func TestUserCopies(t *testing.T) {
 	s := wired(&backend{}, server.Config{})
 	roles := []string{"op"}
@@ -253,10 +254,10 @@ func TestUserCopies(t *testing.T) {
 	}
 	defer l.Close()
 	roles[0] = "changed"
-	u := l.Conn().User()
+	u := l.User()
 	u.Roles[0] = "mutated"
 	u.Ext["x"][5] = '2'
-	again := l.Conn().User()
+	again := userOf(l.Conn())
 	if again.Roles[0] != "op" || string(again.Ext["x"]) != `{"y":1}` {
 		t.Fatalf("the connection's user changed: %+v", again)
 	}

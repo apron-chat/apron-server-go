@@ -91,7 +91,8 @@ func (c *Chat) connect(_ context.Context, conn *server.Conn) error {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.join(conn, "general", *conn.User())
+	u, _ := conn.Identity()
+	c.join(conn, "general", u)
 	return nil
 }
 

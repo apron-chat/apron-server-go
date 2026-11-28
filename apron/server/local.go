@@ -80,7 +80,7 @@ type LocalOptions struct {
 // connection is then sent a user notification right after its server
 // frame, before anything else, {"you": patch}, the patch of the user it
 // asked for (User.Patch, §3.3.3), as a network client learns who it is
-// from its auth result; and Conn().User() is who it is. OnConnect may not
+// from its auth result; and Conn().Identity() is who it is. OnConnect may not
 // sign it out: a Local connection opens signed in.
 type Local struct {
 	s      *Server
@@ -273,8 +273,8 @@ func (l *Local) Conn() *Conn { return l.c }
 // asked for, or the one OnConnect made it, or since, such as by a rename;
 // the zero User once the backend signed it out.
 func (l *Local) User() apron.User {
-	if u := l.c.User(); u != nil {
-		return *u
+	if u, ok := l.c.Identity(); ok {
+		return cloneUser(u)
 	}
 	return apron.User{}
 }

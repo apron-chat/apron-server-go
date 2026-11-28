@@ -492,8 +492,7 @@ func BenchmarkConnChurn(b *testing.B) {
 }
 
 // BenchmarkConnUser reads a connection's identity, as a handler does for
-// every message's sender: a copy (Conn.User), or as it is kept
-// (Conn.Identity).
+// every message's sender, as the connection keeps it (Conn.Identity).
 func BenchmarkConnUser(b *testing.B) {
 	chat := benchchat.New(server.Config{})
 	l, err := chat.Server.Local(server.LocalOptions{User: apron.User{UserID: "ada", Name: "Ada", Roles: []string{"admin"}, Ext: apron.Ext{"tz": []byte(`"UTC"`)}}})
@@ -502,11 +501,6 @@ func BenchmarkConnUser(b *testing.B) {
 	}
 	defer l.Close()
 	c := l.Conn()
-	b.Run("user", func(b *testing.B) {
-		for b.Loop() {
-			_ = *c.User()
-		}
-	})
 	b.Run("identity", func(b *testing.B) {
 		for b.Loop() {
 			_, _ = c.Identity()

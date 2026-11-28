@@ -14,6 +14,14 @@ import (
 	"github.com/apron-chat/apron-server-go/apron/server"
 )
 
+// userOf is a connection's identity, or nil before it signs in.
+func userOf(c *server.Conn) *apron.User {
+	if u, ok := c.Identity(); ok {
+		return &u
+	}
+	return nil
+}
+
 // helloBackend is a Backend of Local connections only.
 type helloBackend struct{}
 
@@ -101,7 +109,7 @@ func TestPublishUserViews(t *testing.T) {
 	ada.expect(t, `{"method":"user","params":{"you":{"user_id":"ada","status":"invisible"}}}`)
 	ada2.expect(t, `{"method":"user","params":{"you":{"user_id":"ada","status":"invisible"}}}`)
 	bob.expect(t, `{"method":"user","params":{"new":{"user_id":"ada","status":"offline","seen":"1724803600000"}}}`)
-	if u := ada2.l.Conn().User(); u.Status != "invisible" || u.Seen != "" {
+	if u := userOf(ada2.l.Conn()); u.Status != "invisible" || u.Seen != "" {
 		t.Fatalf("ada's identity is %+v, want the chosen object", u)
 	}
 	marker("2")
@@ -116,7 +124,7 @@ func TestPublishUserViews(t *testing.T) {
 		t.Fatal("idle: no change")
 	}
 	bob.expect(t, `{"method":"user","params":{"new":{"user_id":"ada","status":"idle"}}}`)
-	if u := ada.l.Conn().User(); u.Name != "Stale" {
+	if u := userOf(ada.l.Conn()); u.Name != "Stale" {
 		t.Fatalf("a change of others' view set ada's identity: %+v", u)
 	}
 	marker("3")
@@ -132,7 +140,7 @@ func TestPublishUserViews(t *testing.T) {
 	}
 	ada.expect(t, `{"method":"user","params":{"you":{"user_id":"ada","name":"Ada L"}}}`)
 	ada2.expect(t, `{"method":"user","params":{"you":{"user_id":"ada","name":"Ada L"}}}`)
-	if u := ada.l.Conn().User(); u.Name != "Ada L" {
+	if u := userOf(ada.l.Conn()); u.Name != "Ada L" {
 		t.Fatalf("ada's identity is %+v", u)
 	}
 	marker("4")
@@ -153,7 +161,7 @@ func TestPublishUserViews(t *testing.T) {
 	ada.expect(t, `{"method":"user","params":{"you":{"user_id":"ada_l","name":"Ada L","status":"invisible"}}}`)
 	ada2.expect(t, `{"method":"user","params":{"you":{"user_id":"ada_l","name":"Ada L","status":"invisible"}}}`)
 	bob.expect(t, `{"method":"user","params":{"new":{"user_id":"ada_l","name":"Ada L","status":"offline"},"old":{"user_id":"ada","name":"Ada","status":"offline","seen":"1724803600000"}}}`)
-	if u := ada2.l.Conn().User(); u.UserID != "ada_l" {
+	if u := userOf(ada2.l.Conn()); u.UserID != "ada_l" {
 		t.Fatalf("ada's identity is %+v", u)
 	}
 	marker("6")
@@ -180,7 +188,7 @@ func TestPublishUserViews(t *testing.T) {
 	ada2.expect(t, `{"method":"user","params":{"you":{"user_id":"ada_l","name":"Ada"}}}`)
 	bob.expect(t, `{"method":"user","params":{"new":{"user_id":"ada_l","name":"Ada"}}}`)
 	eve.expect(t, `{"method":"user","params":{"new":{"user_id":"ada_l","name":"Ada"}}}`)
-	if u := ada.l.Conn().User(); u.Name != "Ada L" {
+	if u := userOf(ada.l.Conn()); u.Name != "Ada L" {
 		t.Fatalf("the excepted connection's identity is %+v", u)
 	}
 	marker("8")
@@ -258,7 +266,7 @@ func TestNoMeWarning(t *testing.T) {
 type profiles struct{}
 
 func (profiles) Me(_ context.Context, c *server.Conn, p apron.MeParams, reply server.Reply[apron.CurrentUser]) error {
-	return reply.Send(apron.CurrentUser{User: *c.User()})
+	return reply.Send(apron.CurrentUser{User: *userOf(c)})
 }
 
 // PublishUserTo sends the connections the backend names, as PublishUser
@@ -318,8 +326,8 @@ func TestIdentity(t *testing.T) {
 	v := openViewer(t, s, ada)
 	c := v.l.Conn()
 	before, ok := c.Identity()
-	if !ok || !reflect.DeepEqual(before, *c.User()) || !reflect.DeepEqual(before, ada) {
-		t.Fatalf("Identity %+v, %v; User %+v", before, ok, c.User())
+	if !ok || !reflect.DeepEqual(before, ada) {
+		t.Fatalf("Identity %+v, %v", before, ok)
 	}
 	if allocs := testing.AllocsPerRun(100, func() { _, _ = c.Identity() }); allocs != 0 {
 		t.Errorf("Identity allocates %v times", allocs)

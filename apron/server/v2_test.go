@@ -95,12 +95,12 @@ func (b *refreshing) Refresh(_ context.Context, c *server.Conn, method string, _
 	case b.wrong:
 		return map[string]any{"you": map[string]any{"name": "wrong"}}
 	}
-	return &apron.CurrentUser{UserID: c.User().UserID, Name: fmt.Sprintf("v%d", b.version)}
+	return &apron.CurrentUser{UserID: userOf(c).UserID, Name: fmt.Sprintf("v%d", b.version)}
 }
 
 func (b *refreshing) Me(_ context.Context, c *server.Conn, _ apron.MeParams, reply server.Reply[apron.CurrentUser]) error {
 	b.version++
-	return reply.Send(apron.CurrentUser{User: *c.User()})
+	return reply.Send(apron.CurrentUser{User: *userOf(c)})
 }
 
 // A duplicate's result brought up to date is sent as its method's result:
@@ -450,12 +450,12 @@ func TestLocalUserFromOnConnect(t *testing.T) {
 	var config server.Config
 	var signedOut atomic.Int64
 	config.OnDisconnect = func(c *server.Conn) {
-		if c.User() == nil {
+		if userOf(c) == nil {
 			signedOut.Add(1)
 		}
 	}
 	config.OnConnect = func(_ context.Context, c *server.Conn) error {
-		u := c.User()
+		u := userOf(c)
 		switch u.UserID {
 		case "echo":
 			// A user_id of the backend's own.

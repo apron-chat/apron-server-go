@@ -311,8 +311,8 @@ func TestAuthBarrier(t *testing.T) {
 		if f := next(t, c); f.ID != "m" || fields(f)["message_id"] == nil {
 			t.Fatalf("got %s, want the message result", f.Raw)
 		}
-		if conn.UserID() != "guest_1" || conn.User().Name != "Ada" {
-			t.Fatalf("conn user = %v", conn.User())
+		if conn.UserID() != "guest_1" || userOf(conn).Name != "Ada" {
+			t.Fatalf("conn user = %v", userOf(conn))
 		}
 	})
 }

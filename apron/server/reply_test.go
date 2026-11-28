@@ -221,7 +221,7 @@ func TestAuthSendSignsIn(t *testing.T) {
 	if f := next(t, c); f.Method != "user" || f.Decode(&update) != nil || update.You == nil || update.You.Name != "Ada L" {
 		t.Fatalf("got %s, want the published user", f.Raw)
 	}
-	if u := onlyConn(t, b.s).User(); u == nil || u.Name != "Ada L" {
+	if u := userOf(onlyConn(t, b.s)); u == nil || u.Name != "Ada L" {
 		t.Fatalf("the connection's user is %+v", u)
 	}
 }

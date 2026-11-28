@@ -20,6 +20,12 @@ import (
 	"github.com/apron-chat/apron-server-go/apron/server/commands"
 )
 
+// identity is a connection's identity, its user once signed in.
+func identity(c *server.Conn) apron.User {
+	u, _ := c.Identity()
+	return u
+}
+
 // chat is a test backend: guests, one room whose messages everyone gets,
 // history, a /ping command, and no room requests.
 type chat struct {
@@ -52,7 +58,7 @@ func newChat() *chat {
 				c.connected = append(c.connected, data)
 			}
 			if c.rename != nil && conn.Local() {
-				conn.SetUser(c.rename(*conn.User()))
+				conn.SetUser(c.rename(identity(conn)))
 			}
 			return nil
 		},
@@ -75,7 +81,7 @@ func (c *chat) Message(_ context.Context, conn *server.Conn, p apron.MessagePara
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	id := c.clock.Next()
-	m := apron.Message{MessageID: id, LogID: id, RoomID: "general", From: *conn.User(), Body: p.Body, ReplyTo: p.ReplyTo}
+	m := apron.Message{MessageID: id, LogID: id, RoomID: "general", From: identity(conn), Body: p.Body, ReplyTo: p.ReplyTo}
 	frame, err := apron.Encode(m)
 	if err != nil {
 		return err

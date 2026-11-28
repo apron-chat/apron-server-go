@@ -66,7 +66,8 @@ func (c *chat) Message(_ context.Context, conn *server.Conn, p apron.MessagePara
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	id := c.clock.Next()
-	m := apron.Message{MessageID: id, LogID: id, From: *conn.User(), Body: p.Body}
+	from, _ := conn.Identity()
+	m := apron.Message{MessageID: id, LogID: id, From: from, Body: p.Body}
 	frame, err := apron.Encode(m)
 	if err != nil {
 		return err

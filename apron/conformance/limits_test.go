@@ -94,7 +94,8 @@ func (l *limited) Message(_ context.Context, c *server.Conn, p apron.MessagePara
 		return apron.InvalidParams("reply_to names no message")
 	}
 	id := l.clock.Next()
-	m := apron.Message{MessageID: id, LogID: id, RoomID: "general", From: *c.User(), Body: p.Body, ReplyTo: p.ReplyTo}
+	from, _ := c.Identity()
+	m := apron.Message{MessageID: id, LogID: id, RoomID: "general", From: from, Body: p.Body, ReplyTo: p.ReplyTo}
 	frame, err := apron.Encode(m)
 	if err != nil {
 		return err

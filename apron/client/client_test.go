@@ -24,6 +24,12 @@ import (
 	"github.com/apron-chat/apron-server-go/apron/server/commands"
 )
 
+// identity is a connection's identity, its user once signed in.
+func identity(c *server.Conn) apron.User {
+	u, _ := c.Identity()
+	return u
+}
+
 // *client.Conn is the network bot.Conn.
 var _ bot.Conn = (*client.Conn)(nil)
 
@@ -58,7 +64,7 @@ func newChat(config server.Config) *chat {
 	c := &chat{release: make(chan struct{})}
 	c.commands.MustAdd(commands.Command{Name: "rename", Run: func(_ context.Context, call *commands.Call) error {
 		c.mu.Lock()
-		old := *call.Conn.User()
+		old := identity(call.Conn)
 		renamed := old
 		renamed.Name = call.Args
 		c.server.PublishUser(server.UserChange{Old: old, New: renamed}, nil)
@@ -165,7 +171,7 @@ func (c *chat) Message(_ context.Context, conn *server.Conn, p apron.MessagePara
 		return c.refusal
 	}
 	id := c.clock.Next()
-	m := apron.Message{MessageID: id, LogID: id, RoomID: "general", From: *conn.User(), Body: p.Body, ReplyTo: p.ReplyTo}
+	m := apron.Message{MessageID: id, LogID: id, RoomID: "general", From: identity(conn), Body: p.Body, ReplyTo: p.ReplyTo}
 	frame, err := apron.Encode(m)
 	if err != nil {
 		return err
@@ -225,7 +231,7 @@ func (rooms) RoomSet(context.Context, *server.Conn, apron.RoomSetParams, server.
 func (c *chat) Me(_ context.Context, conn *server.Conn, p apron.MeParams, reply server.Reply[apron.CurrentUser]) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	old := *conn.User()
+	old := identity(conn)
 	cur := server.ApplyMe(old, p)
 	c.server.PublishUser(server.UserChange{Old: old, New: cur, Except: conn}, nil)
 	return reply.Send(cur.Complete(old))
