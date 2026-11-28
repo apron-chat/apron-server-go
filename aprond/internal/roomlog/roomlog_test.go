@@ -218,3 +218,30 @@ func BenchmarkMessageRecord(b *testing.B) {
 		NewMessage(1795817355191, snapshot)
 	}
 }
+
+// A move snapshot that one of its rooms discarded is restored only into
+// the other, which keeps it.
+func TestRestoreDiscardedMove(t *testing.T) {
+	l, a, b := twoRooms()
+	// a keeps from 5 on; 4, the move, is b's alone now.
+	a.Discard(5)
+	entries := make(map[string]jsontext.Value)
+	for _, e := range l.Entries() {
+		entries[e.ID] = e.Value
+	}
+	restored := NewLog()
+	ra, rb := NewTimeline("a", 1, 6), NewTimeline("b", 2, 5)
+	ra.RestoreRetained(a.Retained())
+	if _, err := restored.Restore(entries, func(id string) *Timeline {
+		return map[string]*Timeline{"a": ra, "b": rb}[id]
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got := ids(ra.Since(0, 10)); !slices.Equal(got, []int64{6}) {
+		t.Errorf("a restored %v, want [6]", got)
+	}
+	if got := ids(rb.Since(0, 10)); !slices.Equal(got, []int64{2, 4, 5}) {
+		t.Errorf("b restored %v, want [2 4 5]", got)
+	}
+	_ = b
+}

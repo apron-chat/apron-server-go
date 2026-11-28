@@ -422,7 +422,9 @@ func (l *Log) Restore(entries map[string]jsontext.Value, room func(id string) *T
 		record := records[logID]
 		l.records = append(l.records, record)
 		for _, id := range record.Rooms {
-			if t := room(id); t != nil {
+			// A move snapshot that one of its rooms discarded is kept for
+			// the other (Discard).
+			if t := room(id); t != nil && record.ID >= t.HistoryID() {
 				t.records = append(t.records, record)
 				// A large room's entry may lag behind its latest record
 				// (rooms.Table.EntriesDue).
