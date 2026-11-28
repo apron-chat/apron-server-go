@@ -51,6 +51,20 @@ func (s *Search) Init(r *aprond.Registrar) error {
 		}
 		return nil
 	})
+	// A server that retains only part of its history discards the rest:
+	// the index lets go of what history no longer has.
+	r.Host.Go(func(ctx context.Context) {
+		ticker := time.NewTicker(time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				s.prune()
+			}
+		}
+	})
 	r.Method("search.query", s.query)
 	r.Command(aprond.Command{
 		Name: "search", Usage: "/search <words>", Help: "find messages with these words",
@@ -79,15 +93,7 @@ func (s *Search) Init(r *aprond.Registrar) error {
 func (s *Search) index(m aprond.Message) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if old, ok := s.messages[m.ID]; ok {
-		for _, token := range tokens(old.Text) {
-			delete(s.postings[token], m.ID)
-			if len(s.postings[token]) == 0 {
-				delete(s.postings, token)
-			}
-		}
-		delete(s.messages, m.ID)
-	}
+	s.forgetLocked(m.ID)
 	if m.Deleted || strings.HasPrefix(m.From.UserID, "~") {
 		return
 	}
@@ -97,6 +103,44 @@ func (s *Search) index(m aprond.Message) {
 			s.postings[token] = make(map[string]bool)
 		}
 		s.postings[token][m.ID] = true
+	}
+}
+
+// forgetLocked takes a message out of the index.
+func (s *Search) forgetLocked(id string) {
+	old, ok := s.messages[id]
+	if !ok {
+		return
+	}
+	for _, token := range tokens(old.Text) {
+		delete(s.postings[token], id)
+		if len(s.postings[token]) == 0 {
+			delete(s.postings, token)
+		}
+	}
+	delete(s.messages, id)
+}
+
+// retained reports whether history still has the message: its room's
+// history_log_id is not past its latest snapshot (Host.HistoryLogID).
+func (s *Search) retained(m aprond.Message, floors map[string]int64) bool {
+	floor, seen := floors[m.RoomID]
+	if !seen {
+		floor, _ = s.host.HistoryLogID(m.RoomID)
+		floors[m.RoomID] = floor
+	}
+	return m.LogID >= floor
+}
+
+// prune lets go of the messages history no longer has.
+func (s *Search) prune() {
+	floors := make(map[string]int64)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for id, m := range s.messages {
+		if !s.retained(m, floors) {
+			s.forgetLocked(id)
+		}
 	}
 }
 
@@ -127,9 +171,14 @@ func (s *Search) search(u aprond.User, query, roomID string, limit int) []aprond
 	}
 	s.mu.RUnlock()
 	slices.SortFunc(hits, func(a, b aprond.Message) int { return cmp.Compare(b.LogID, a.LogID) })
-	// Only rooms the person may see: a private room's messages never show.
+	// Only rooms the person may see: a private room's messages never show;
+	// nor those history no longer has, which prune has not let go of yet.
 	visible := make(map[string]bool)
+	floors := make(map[string]int64)
 	hits = slices.DeleteFunc(hits, func(m aprond.Message) bool {
+		if !s.retained(m, floors) {
+			return true
+		}
 		ok, seen := visible[m.RoomID]
 		if !seen {
 			ok = s.host.Visible(u, m.RoomID)
@@ -203,10 +252,11 @@ func (s *Search) archiveRoom(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
+	floor, _ := s.host.HistoryLogID(room.ID)
 	s.mu.RLock()
 	var messages []aprond.Message
 	for _, m := range s.messages {
-		if m.RoomID == room.ID {
+		if m.RoomID == room.ID && m.LogID >= floor {
 			messages = append(messages, m)
 		}
 	}
