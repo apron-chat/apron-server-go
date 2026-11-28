@@ -446,3 +446,60 @@ func TestLargeRoomEntryLags(t *testing.T) {
 		t.Fatalf("restored latest_log_id %d, want the latest record's, at least %s", latest, third)
 	}
 }
+
+// A restart from a store whose large room's entry lags behind a leave and
+// a join restores the members the records left.
+func TestLargeRoomMembershipLags(t *testing.T) {
+	st := store.NewMemory()
+	bs := newBenchServer(t, Config{Store: st})
+	for i := range rooms.LaterMembers {
+		bs.member(i)
+	}
+	leaverID, leaverToken := bs.member(rooms.LaterMembers)
+	joinerID, joinerToken := bs.member(rooms.LaterMembers + 1)
+	leaver, joiner := bs.resume(leaverToken, true), bs.resume(joinerToken, true)
+	joiner.call(t, "room_leave", map[string]any{"room_id": defaultRoomID})
+	if err := bs.s.Sync(bs.ctx); err != nil {
+		t.Fatal(err)
+	}
+	leaver.call(t, "room_leave", map[string]any{"room_id": defaultRoomID})
+	joiner.call(t, "room_join", map[string]any{"room_id": defaultRoomID})
+	// Once the records are stored, before the room's entry is.
+	var entries []store.Entry
+	for deadline := time.Now().Add(10 * time.Second); ; {
+		entries = entries[:0]
+		bs.s.mu.RLock()
+		latest := bs.s.rooms.Get(defaultRoomID).Log().Latest()
+		bs.s.mu.RUnlock()
+		stored := false
+		_ = st.Load(func(e store.Entry) error {
+			entries = append(entries, e)
+			if e.Kind == roomlog.EntryKind && e.ID == formatID(latest) {
+				stored = true
+			}
+			return nil
+		})
+		if stored {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the records were not stored")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	snapshot := store.NewMemory()
+	_ = snapshot.Apply(entries)
+	restored, err := Open(Config{Store: snapshot})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer restored.Shutdown(context.Background())
+	restored.mu.RLock()
+	general := restored.rooms.Get(defaultRoomID)
+	left, joined := general.Member(leaverID) == nil, general.Member(joinerID) != nil
+	inJoined := restored.users.Get(joinerID).joined[defaultRoomID] != nil
+	restored.mu.RUnlock()
+	if !left || !joined || !inJoined {
+		t.Fatalf("restored: %s left %v, %s joined %v (in its rooms %v)", leaverID, left, joinerID, joined, inJoined)
+	}
+}

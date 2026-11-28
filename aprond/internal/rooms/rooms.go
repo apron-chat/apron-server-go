@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"iter"
 	"maps"
+	"math"
 	"slices"
 	"strings"
 	"sync/atomic"
@@ -539,7 +540,9 @@ func (t *Table[U, M]) Leave(r *Room[U], u U, from roomlog.Author) (*roomlog.Reco
 // recorded object: user_id and name.
 func (t *Table[U, M]) logMembership(r *Room[U], from roomlog.Author, joined bool) *roomlog.Record {
 	record := roomlog.NewMembership(t.log.NextID(), r.id, from, joined)
-	t.Append(record, r)
+	// Restoring applies memberships over the room's entry, which may lag
+	// behind them (RestoreMembers).
+	t.appendLater(record, r)
 	return record
 }
 
@@ -728,14 +731,45 @@ func (t *Table[U, M]) Restore(entries map[string]jsontext.Value) error {
 // RestoreMembers adds each room's stored members, oldest room first, as
 // member returns them; one it reports false for, such as a user who is
 // gone, is left out.
-func (t *Table[U, M]) RestoreMembers(member func(r *Room[U], id string) (U, bool)) {
+//
+// A large room's entry may lag behind its memberships (touchLater), so
+// its membership records are applied over the members its entry lists, in
+// order, each join or leave replacing its user's: each user ends as their
+// latest record left them, which an entry that is up to date lists
+// already.
+func (t *Table[U, M]) RestoreMembers(member func(r *Room[U], id string) (U, bool)) error {
 	for _, r := range t.All() {
+		ids := make(map[string]bool, len(t.restoring[r.id]))
 		for _, id := range t.restoring[r.id] {
-			if u, ok := member(r, id); ok {
-				r.members[id] = u
-				r.listed.Store(nil)
+			ids[id] = true
+		}
+		for _, record := range r.log.Since(0, math.MaxInt) {
+			if record.Kind != roomlog.KindMembership {
+				continue
+			}
+			var m roomlog.Membership
+			if err := json.Unmarshal(record.Raw, &m); err != nil {
+				return fmt.Errorf("stored membership record %d: %w", record.ID, err)
+			}
+			for _, change := range m.Members {
+				id := change.User.UserID
+				switch {
+				case change.Joined && !ids[id]:
+					ids[id] = true
+					r.active[id] = max(r.active[id], record.ID)
+				case !change.Joined && ids[id]:
+					delete(ids, id)
+					delete(r.active, id)
+				}
 			}
 		}
+		for _, id := range slices.Sorted(maps.Keys(ids)) {
+			if u, ok := member(r, id); ok {
+				r.members[id] = u
+			}
+		}
+		r.listed.Store(nil)
 	}
 	t.restoring = nil
+	return nil
 }

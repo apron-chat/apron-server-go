@@ -277,15 +277,57 @@ func TestLargeRoomEntryLags(t *testing.T) {
 	if _, lagging := table.Lagging(); lagging {
 		t.Fatal("still lagging")
 	}
-	// A join renders a lagging room at once; so does Entries.
+	// A join lags too; a room record does not, and Entries takes it all.
 	post(big, table.log.NextID())
 	join(t, table, big, &user{id: "late"})
+	if got := ids(table.EntriesDue(start)); got != nil {
+		t.Fatalf("a join stored %v at once", got)
+	}
+	table.Update(big, roomlog.RoomRecord{Title: "Big"})
 	if got := ids(table.EntriesDue(start)); !slices.Equal(got, []string{"big"}) {
-		t.Fatalf("a join stored %v, want the big room", got)
+		t.Fatalf("a room record stored %v, want the big room", got)
 	}
 	post(big, table.log.NextID())
 	if got := ids(table.Entries()); !slices.Equal(got, []string{"big"}) {
 		t.Fatalf("Entries stored %v, want the big room", got)
+	}
+}
+
+// A large room restored from an entry that lags behind its memberships
+// has the members its records joined and left since, with their activity.
+func TestLargeRoomMembersRestored(t *testing.T) {
+	table := newTable()
+	big := table.Create("big", nil, false, "", roomlog.RoomRecord{})
+	var members []*user
+	for i := range LaterMembers + 1 {
+		members = append(members, &user{id: "u" + strings.Repeat("x", i)})
+	}
+	join(t, table, big, members...)
+	stale := Entry(big)
+	late := &user{id: "late"}
+	join(t, table, big, late)
+	table.Leave(big, members[0], members[0].from())
+	table.Leave(big, members[1], members[1].from())
+	join(t, table, big, members[1])
+	want := Entry(big).Value
+	records := make(map[string]jsontext.Value)
+	for _, e := range table.log.Entries() {
+		records[e.ID] = e.Value
+	}
+	for name, entry := range map[string]jsontext.Value{"lagging": stale.Value, "current": want} {
+		restored := newTable()
+		if err := restored.Restore(map[string]jsontext.Value{"big": entry}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := restored.log.Restore(records, func(id string) *roomlog.Timeline { return restored.Get(id).Log() }); err != nil {
+			t.Fatal(err)
+		}
+		if err := restored.RestoreMembers(func(_ *Room[*user], id string) (*user, bool) { return &user{id: id}, true }); err != nil {
+			t.Fatal(err)
+		}
+		if got := Entry(restored.Get("big")).Value; !bytes.Equal(got, want) {
+			t.Errorf("restored from the %s entry as\n%s\nwant\n%s", name, got, want)
+		}
 	}
 }
 
