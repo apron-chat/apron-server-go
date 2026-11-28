@@ -177,13 +177,26 @@ func (l *Log) Forget(records map[*Record]bool) {
 	if len(records) == 0 {
 		return
 	}
-	l.records = slices.DeleteFunc(l.records, func(r *Record) bool { return records[r] })
+	// What goes is mostly the oldest: only the records up to the latest
+	// of them are looked at, and the rest moves down.
+	var last int64
+	for r := range records {
+		last = max(last, r.ID)
+	}
+	end, _ := slices.BinarySearchFunc(l.records, last+1, compareID)
+	kept := slices.DeleteFunc(l.records[:end], func(r *Record) bool { return records[r] })
+	l.records = append(kept, l.records[end:]...)
+	clear(l.records[len(l.records):cap(l.records)][:end-len(kept)])
 	for r := range records {
 		delete(l.dirty, r)
 		l.forgotten = append(l.forgotten, r.ID)
 		l.discarded = max(l.discarded, r.ID)
 	}
 }
+
+// Records lists the log's records in log_id order. The caller does not
+// modify them.
+func (l *Log) Records() []*Record { return l.records }
 
 // RestoreDiscarded restores Discarded as of before a restart.
 func (l *Log) RestoreDiscarded(id int64) { l.discarded = max(l.discarded, id) }
@@ -222,6 +235,12 @@ func (t *Timeline) HistoryID() int64 { return max(t.created, t.retained) }
 // Retained is the log_id from which the room's history is retained once a
 // part of it was discarded, 0 before, as the room's entry keeps it.
 func (t *Timeline) Retained() int64 { return t.retained }
+
+// Before counts the records of the room's log before the log_id id.
+func (t *Timeline) Before(id int64) int {
+	n, _ := slices.BinarySearchFunc(t.records, id, compareID)
+	return n
+}
 
 // Records counts the records the room's log holds.
 func (t *Timeline) Records() int { return len(t.records) }

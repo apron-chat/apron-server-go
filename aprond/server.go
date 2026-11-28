@@ -212,6 +212,10 @@ type Server struct {
 	// discarded, 0 before.
 	flushAll bool
 	logFloor int64
+	// retention is what history retention did, and sweeping its sweep,
+	// which Shutdown waits for (retention.go).
+	retention RetentionStatus
+	sweeping  sync.WaitGroup
 	// pushes are the users' push registrations (push.go).
 	pushes   *push.Table
 	closed   bool
@@ -419,9 +423,10 @@ func Open(config Config) (*Server, error) {
 	go s.sweepPushes()
 	if s.retaining() {
 		s.mu.Lock()
-		s.retainLocked(time.Now())
+		backlog := s.retainLocked(time.Now())
 		s.unlock()
-		go s.sweepHistory()
+		s.sweeping.Add(1)
+		go s.sweepHistory(nextPass(backlog))
 	}
 	err = s.initExtensions(config.Extensions)
 	if err == nil {
@@ -564,6 +569,7 @@ func (s *Server) Shutdown(ctx context.Context) error {
 			_ = s.srv.Shutdown(ctx)
 		}
 		s.pushes.Wait()
+		s.sweeping.Wait()
 		s.push.Wait()
 		s.schemeWork.Wait()
 		// Extensions may keep values as they stop, so the store closes

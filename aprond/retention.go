@@ -1,6 +1,7 @@
 package aprond
 
 import (
+	"bytes"
 	"time"
 
 	"github.com/apron-chat/apron-server-go/aprond/internal/roomlog"
@@ -24,41 +25,100 @@ import (
 // histories that discarded anything starts, so that every room's records
 // after it are there.
 
-// retentionInterval is how often the sweep discards history; a variable
-// for tests.
-var retentionInterval = time.Minute
+// retentionInterval is how often the sweep discards history; passBudget
+// bounds the records one pass discards, which it does holding the
+// server's lock, in one batch of the store; and backlogPause is how soon
+// the next pass comes while more is due, letting go of the lock between
+// them. Variables for tests and benchmarks.
+var (
+	retentionInterval = time.Minute
+	passBudget        = 5000
+	backlogPause      = 10 * time.Millisecond
+)
 
 // retaining reports whether the server retains history at all.
 func (s *Server) retaining() bool {
 	return s.config.HistoryRecords > 0 || s.config.HistoryMaxAge > 0
 }
 
-// sweepHistory discards history every retentionInterval until Shutdown.
-func (s *Server) sweepHistory() {
-	ticker := time.NewTicker(retentionInterval)
-	defer ticker.Stop()
+// sweepHistory discards history every retentionInterval until Shutdown,
+// and while a pass leaves records due, again after backlogPause, first
+// after wait.
+func (s *Server) sweepHistory(wait time.Duration) {
+	defer s.sweeping.Done()
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
 	for {
 		select {
 		case <-s.stopped:
 			return
-		case now := <-ticker.C:
+		case now := <-timer.C:
 			s.mu.Lock()
+			backlog := 0
 			if !s.closed {
-				s.retainLocked(now)
+				backlog = s.retainLocked(now)
 			}
 			s.unlock()
+			timer.Reset(nextPass(backlog))
 		}
 	}
 }
 
-// retainLocked discards the history that retention lets go of as of now
-// (§4.3.3).
-func (s *Server) retainLocked(now time.Time) {
-	if !s.retaining() {
-		return
+// nextPass is how soon the next pass comes after one that left backlog
+// records due.
+func nextPass(backlog int) time.Duration {
+	if backlog > 0 {
+		return backlogPause
 	}
+	return retentionInterval
+}
+
+// RetentionStatus is what history retention did (Server.RetentionStatus),
+// as aprond's --debug-addr shows it in expvar, aprond.retention.
+type RetentionStatus struct {
+	// On reports whether the server retains history (Config.HistoryRecords,
+	// Config.HistoryMaxAge).
+	On bool `json:"on"`
+	// Floor is where history without room_id starts once a part of a
+	// room's was discarded, 0 before.
+	Floor int64 `json:"floor"`
+	// LastPass is when the latest pass ran, and Took how long it held
+	// the server's lock; Passes count them.
+	LastPass time.Time     `json:"last_pass,omitzero"`
+	Took     time.Duration `json:"took_ns"`
+	Passes   int64         `json:"passes"`
+	// Records and Messages count the records and messages discarded
+	// since the server started.
+	Records  int64 `json:"records"`
+	Messages int64 `json:"messages"`
+	// Backlog counts the records due that the latest pass left for the
+	// next, past what one pass discards.
+	Backlog int `json:"backlog"`
+}
+
+// RetentionStatus reports what history retention did.
+func (s *Server) RetentionStatus() RetentionStatus {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	status := s.retention
+	status.On, status.Floor = s.retaining(), s.logFloor
+	return status
+}
+
+// retainLocked runs one pass of history retention as of now (§4.3.3): it
+// discards at most passBudget records, the oldest rooms' first, and
+// returns how many more are due. Each pass leaves the state, and the
+// store with its batch, as retention left it: the rooms' history_log_ids,
+// the records and messages that went, and every entry that lagged
+// behind them.
+func (s *Server) retainLocked(now time.Time) int {
+	if !s.retaining() {
+		return 0
+	}
+	start := time.Now()
 	writing := s.writingFloorsLocked()
 	var discarded []*roomlog.Record
+	budget, backlog := passBudget, 0
 	for _, r := range s.rooms.All() {
 		log := r.Log()
 		var before int64
@@ -71,16 +131,36 @@ func (s *Server) retainLocked(now time.Time) {
 		if floor, ok := writing[r.ID()]; ok {
 			before = min(before, floor)
 		}
-		if before > log.HistoryID() {
-			discarded = append(discarded, s.rooms.Retain(r, before)...)
+		// A room's latest record stays (rooms.Table.Retain).
+		before = min(before, log.Latest())
+		due := log.Before(before)
+		switch {
+		case due == 0:
+			continue
+		case budget == 0:
+			backlog += due
+			continue
+		case due > budget:
+			// The rest goes in the next pass.
+			before = log.At(budget)
+			backlog += due - budget
+			due = budget
 		}
+		budget -= due
+		discarded = append(discarded, s.rooms.Retain(r, before)...)
 	}
+	s.retention.Backlog = backlog
 	if len(discarded) == 0 {
-		return
+		return backlog
 	}
-	for _, m := range s.rooms.Forget(discarded) {
-		// Its uploads are released, as a deletion's are (§4.4).
-		s.releaseEmbedsLocked(m.Current(), nil)
+	gone := s.rooms.Forget(discarded)
+	for _, m := range gone {
+		// Its uploads are released, as a deletion's are (§4.4): only one
+		// with embeds needs its snapshot decoded.
+		records := m.Records()
+		if bytes.Contains(records[len(records)-1].Raw, []byte(`"embeds"`)) {
+			s.releaseEmbedsLocked(m.Current(), nil)
+		}
 	}
 	s.logFloor = s.logFloorLocked()
 	// The unread counts kept counted discarded messages: they are counted
@@ -94,6 +174,11 @@ func (s *Server) retainLocked(now time.Time) {
 	// message's (rooms.EntryDelay), go with this batch, as the records
 	// they would be restored from go.
 	s.flushAll = true
+	s.retention.Passes++
+	s.retention.Records += int64(len(discarded))
+	s.retention.Messages += int64(len(gone))
+	s.retention.LastPass, s.retention.Took = now, time.Since(start)
+	return backlog
 }
 
 // writingFloorsLocked returns, by room_id, the log_id of the oldest record

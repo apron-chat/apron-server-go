@@ -22,11 +22,13 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -1109,4 +1111,108 @@ func BenchmarkLogRetention(b *testing.B) {
 			b.ReportMetric(float64(size)/1024, "storeKB")
 		})
 	}
+}
+
+// BenchmarkRetentionCatchUp opens a SQLite store of a long history,
+// 200,000 messages in general, with retention to 1,000 records, and
+// catches up in passes of at most budget records while writers post:
+// what one pass holds the lock for (pass-max-ms, pass-p99-ms), the
+// largest batch the store applies (batch-max), how long catching up takes
+// (catchup-ms), and how long a post took meanwhile (writer-ns/post). Run
+// it once, -benchtime=1x; budget=all is a single pass, as before passes
+// were bounded.
+func BenchmarkRetentionCatchUp(b *testing.B) {
+	const messages = 200_000
+	history := longHistory(b, messages)
+	for _, budget := range []int{1000, 5000, 10000, math.MaxInt} {
+		name := strconv.Itoa(budget)
+		if budget == math.MaxInt {
+			name = "all"
+		}
+		b.Run("budget="+name, func(b *testing.B) {
+			saved, interval, pause := passBudget, retentionInterval, backlogPause
+			// The benchmark runs the passes; the server's sweep waits.
+			passBudget, retentionInterval, backlogPause = budget, time.Hour, time.Hour
+			b.Cleanup(func() { passBudget, retentionInterval, backlogPause = saved, interval, pause })
+			path := filepath.Join(b.TempDir(), "history.db")
+			sqlite, err := store.OpenSQLite(path)
+			if err != nil {
+				b.Fatal(err)
+			}
+			for start := 0; start < len(history); start += 10_000 {
+				if err := sqlite.Apply(history[start:min(start+10_000, len(history))]); err != nil {
+					b.Fatal(err)
+				}
+			}
+			st := &batchStore{countingStore: countingStore{Store: sqlite}}
+			began := time.Now()
+			bs := newBenchServer(b, Config{Store: st, OutgoingQueue: 4096, HistoryRecords: 1000})
+			// The pass Open ran, then those the benchmark runs, each from
+			// taking the lock to letting go of it, its batch rendered.
+			passes := []time.Duration{bs.s.RetentionStatus().Took}
+			pass := func() int {
+				bs.s.mu.Lock()
+				start := time.Now()
+				backlog := bs.s.retainLocked(time.Now())
+				bs.s.unlock()
+				passes = append(passes, time.Since(start))
+				return backlog
+			}
+			writers := []*benchClient{bs.guest(), bs.guest()}
+			underWrites(b, writers, func() {
+				for pass() > 0 {
+					// What the server's sweep waits between passes.
+					time.Sleep(pause)
+				}
+				if err := bs.s.Sync(bs.ctx); err != nil {
+					b.Fatal(err)
+				}
+			})
+			catchUp := time.Since(began)
+			slices.Sort(passes)
+			b.ReportMetric(float64(passes[len(passes)-1])/1e6, "pass-max-ms")
+			b.ReportMetric(float64(passes[len(passes)*99/100])/1e6, "pass-p99-ms")
+			b.ReportMetric(float64(len(passes)), "passes")
+			b.ReportMetric(float64(catchUp)/1e6, "catchup-ms")
+			b.ReportMetric(float64(st.max.Load()), "batch-max")
+		})
+	}
+}
+
+// batchStore is a countingStore that keeps the largest batch it applied.
+type batchStore struct {
+	countingStore
+	max atomic.Int64
+}
+
+func (s *batchStore) Apply(batch []store.Entry) error {
+	if n := int64(len(batch)); n > s.max.Load() {
+		s.max.Store(n)
+	}
+	return s.countingStore.Apply(batch)
+}
+
+// longHistory is the entries of a store that holds n messages in general,
+// made once for the benchmarks that open it.
+func longHistory(b *testing.B, n int) []store.Entry {
+	b.Helper()
+	st := store.NewMemory()
+	bs := newBenchServer(b, Config{Store: st, OutgoingQueue: 4096})
+	poster := bs.guest()
+	params := map[string]any{"body": map[string]any{"text": "a message of a long history"}}
+	for done := 0; done < n; done += 100 {
+		ids := make([]string, 100)
+		for i := range ids {
+			ids[i] = poster.send("message", params)
+		}
+		for _, id := range ids {
+			poster.wait(b, id)
+		}
+	}
+	if err := bs.s.Sync(bs.ctx); err != nil {
+		b.Fatal(err)
+	}
+	var entries []store.Entry
+	_ = st.Load(func(e store.Entry) error { entries = append(entries, e); return nil })
+	return entries
 }

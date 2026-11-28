@@ -79,6 +79,9 @@ type Room[U Member] struct {
 	reads map[string]Cursor
 	// listed is the latest ListedMemberIDs, nil once it may have changed.
 	listed atomic.Pointer[listing]
+	// membersRecord is the record of every member that Retain logged
+	// last, 0 for none since the server started.
+	membersRecord int64
 }
 
 // Cursor is a user's read cursor in a room (§4.6): the message they read
@@ -832,13 +835,18 @@ func (t *Table[U, M]) Retain(r *Room[U], before int64) []*roomlog.Record {
 		return nil
 	}
 	t.Touch(r)
-	if len(r.members) > 0 && slices.ContainsFunc(discarded, func(record *roomlog.Record) bool { return record.Kind == roomlog.KindMembership }) {
+	// A record of the members logged by an earlier Retain that the log
+	// still holds serves for this part too: from it on, the log has every
+	// change of who is in the room, as when retention discards in passes.
+	if len(r.members) > 0 && r.membersRecord < r.log.HistoryID() && slices.ContainsFunc(discarded, func(record *roomlog.Record) bool { return record.Kind == roomlog.KindMembership }) {
 		ids := slices.Sorted(maps.Keys(r.members))
 		users := make([]roomlog.Author, len(ids))
 		for i, id := range ids {
 			users[i] = r.members[id].MemberFrom()
 		}
-		t.Append(roomlog.NewMembers(t.log.NextID(), r.id, users), r)
+		record := roomlog.NewMembers(t.log.NextID(), r.id, users)
+		t.Append(record, r)
+		r.membersRecord = record.ID
 	}
 	return discarded
 }
@@ -872,9 +880,14 @@ func (t *Table[U, M]) Forget(discarded []*roomlog.Record) []M {
 			continue
 		}
 		m := holder.Kept()
-		left := slices.DeleteFunc(slices.Clone(m.records), func(r *roomlog.Record) bool { return gone[r] })
+		goneOf := 0
+		for _, r := range m.records {
+			if gone[r] {
+				goneOf++
+			}
+		}
 		switch {
-		case len(left) == 0:
+		case goneOf == len(m.records):
 			// The message keeps its snapshots, for what the server lets
 			// go of with it, such as its uploads.
 			delete(t.messages, m.id)
@@ -882,8 +895,8 @@ func (t *Table[U, M]) Forget(discarded []*roomlog.Record) []M {
 			delete(t.laterMessages, m.id)
 			t.forgottenMessages = append(t.forgottenMessages, m.id)
 			forgotten = append(forgotten, holder)
-		case len(left) != len(m.records):
-			m.records = left
+		case goneOf > 0:
+			m.records = slices.DeleteFunc(m.records, func(r *roomlog.Record) bool { return gone[r] })
 			t.dirtyMessages[m.id] = m
 		}
 	}

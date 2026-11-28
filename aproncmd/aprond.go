@@ -446,6 +446,10 @@ func Run(logger *slog.Logger, options Options, extensions ...aprond.Extension) e
 		if err != nil {
 			return err
 		}
+		// What history retention did, beside the runtime's (SERVER.md,
+		// "History retention"); expvar names are the process's, and Main
+		// opens one server.
+		expvar.Publish("aprond.retention", expvar.Func(func() any { return app.RetentionStatus() }))
 		serve("debug server", newServer(debugHandler()), listener)
 	}
 	logger.Info("serving", "store", options.Store, "static_dir", options.StaticDir, "upload_dir", options.Upload.Dir)

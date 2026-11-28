@@ -53,6 +53,7 @@ func TestHistoryRetention(t *testing.T) {
 	st := store.NewMemory()
 	bs := newBenchServer(t, Config{Store: st, HistoryRecords: 5, PublicURL: "http://aprond.test", UploadDir: t.TempDir()})
 	s := bs.s
+	var iv invariants
 	g := bs.guest()
 	first := stringField(g.call(t, "message", map[string]any{"body": map[string]any{"text": "the first"}}), "message_id")
 	upload := g.call(t, "message", map[string]any{"body": map[string]any{"text": "a file", "embeds": []any{map[string]any{"kind": "upload"}}}})
@@ -62,6 +63,7 @@ func TestHistoryRetention(t *testing.T) {
 	}
 	created := historyLogID(t, s, defaultRoomID)
 	retainNow(s, time.Now())
+	iv.check(t, s)
 	// The upload is not written yet: it and what follows stay.
 	s.mu.RLock()
 	pending := s.rooms.Message(uploadID)
@@ -81,6 +83,7 @@ func TestHistoryRetention(t *testing.T) {
 		g.call(t, "message", map[string]any{"body": map[string]any{"text": "after"}})
 	}
 	retainNow(s, time.Now())
+	iv.check(t, s)
 	s.mu.RLock()
 	uploadGone, embedGone, firstGone := s.rooms.Message(uploadID) == nil, s.embeds.Get(embedID) == nil, s.rooms.Message(first) == nil
 	records := s.rooms.Get(defaultRoomID).Log().Records()
@@ -127,6 +130,8 @@ func TestHistoryRetention(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer restored.Shutdown(context.Background())
+	var restoredIV invariants
+	restoredIV.check(t, restored)
 	if got := historyLogID(t, restored, defaultRoomID); got != floor {
 		t.Errorf("restored history_log_id %d, want %d", got, floor)
 	}
@@ -142,13 +147,16 @@ func TestHistoryRetention(t *testing.T) {
 // room's latest record; a server that retains nothing discards nothing.
 func TestHistoryMaxAge(t *testing.T) {
 	bs := newBenchServer(t, Config{HistoryMaxAge: time.Hour})
+	var iv invariants
 	g := bs.guest()
 	for range 3 {
 		g.call(t, "message", map[string]any{"body": map[string]any{"text": "old"}})
 	}
 	retainNow(bs.s, time.Now())
+	iv.check(t, bs.s)
 	created := historyLogID(t, bs.s, defaultRoomID)
 	retainNow(bs.s, time.Now().Add(2*time.Hour))
+	iv.check(t, bs.s)
 	bs.s.mu.RLock()
 	log := bs.s.rooms.Get(defaultRoomID).Log()
 	latest, records := log.Since(0, 1)[0], log.Records()
@@ -166,5 +174,61 @@ func TestHistoryMaxAge(t *testing.T) {
 	retainNow(off.s, time.Now().Add(1000*time.Hour))
 	if historyLogID(t, off.s, defaultRoomID) != before {
 		t.Fatal("a server without retention discarded history")
+	}
+}
+
+// A pass discards at most passBudget records, leaving the rest due for
+// the next, which comes after backlogPause, not retentionInterval: a
+// server that starts with retention on a long history catches up in
+// passes that each hold the lock briefly, with one record of the members
+// for a part with memberships while it holds.
+func TestRetentionPasses(t *testing.T) {
+	budget, interval, pause := passBudget, retentionInterval, backlogPause
+	passBudget, retentionInterval, backlogPause = 10, time.Hour, time.Millisecond
+	t.Cleanup(func() { passBudget, retentionInterval, backlogPause = budget, interval, pause })
+	st := store.NewMemory()
+	before := newBenchServer(t, Config{Store: st})
+	for i := range 20 {
+		before.member(i)
+	}
+	g := before.guest()
+	for range 100 {
+		g.call(t, "message", map[string]any{"body": map[string]any{"text": "kept until retention"}})
+	}
+	if err := before.s.Shutdown(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	// The restart retires the guest; then retention starts.
+	s, err := Open(Config{Store: st, HistoryRecords: 5})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Shutdown(context.Background())
+	first := s.RetentionStatus()
+	if !first.On || first.Passes != 1 || first.Records != 10 || first.Backlog == 0 {
+		t.Fatalf("after the first pass: %+v", first)
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for s.RetentionStatus().Backlog > 0 {
+		if time.Now().After(deadline) {
+			t.Fatalf("still due: %+v", s.RetentionStatus())
+		}
+		time.Sleep(time.Millisecond)
+	}
+	status := s.RetentionStatus()
+	var iv invariants
+	iv.check(t, s)
+	s.mu.RLock()
+	log := s.rooms.Get(defaultRoomID).Log()
+	members := 0
+	for _, record := range log.Since(0, 1<<30) {
+		if record.Kind == roomlog.KindMembership && bytes.Count(record.Raw, []byte(`"joined":true`)) == 20 {
+			members++
+		}
+	}
+	records := log.Records()
+	s.mu.RUnlock()
+	if status.Passes < 10 || status.Floor == 0 || records > 7 || members != 1 {
+		t.Fatalf("after catching up: %+v, %d records, %d records of the members", status, records, members)
 	}
 }
