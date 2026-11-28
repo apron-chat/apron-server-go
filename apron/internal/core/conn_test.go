@@ -128,3 +128,64 @@ func TestQueueWakes(t *testing.T) {
 		}
 	}
 }
+
+// pingWriter counts its pings, and fails them once fail is set.
+type pingWriter struct {
+	countingWriter
+	pings atomic.Int64
+	fail  atomic.Bool
+}
+
+func (w *pingWriter) Ping(context.Context) error {
+	w.pings.Add(1)
+	if w.fail.Load() {
+		return context.DeadlineExceeded
+	}
+	return nil
+}
+
+// The transport is pinged at each interval, and a failed ping stops the
+// connection; a client that sent liveness pings (§1) and then fell silent
+// for three intervals and the timeout is closed, and one that goes on
+// sending frames is not.
+func TestPings(t *testing.T) {
+	options := Options{Queue: 8, WriteTimeout: time.Second, PingInterval: 30 * time.Second, PingTimeout: 10 * time.Second}
+	synctest.Test(t, func(t *testing.T) {
+		w := &pingWriter{}
+		c := NewConn(w, options)
+		c.Start(true)
+		time.Sleep(95 * time.Second)
+		if n := w.pings.Load(); n != 3 {
+			t.Fatalf("%d pings in 95 seconds, want 3", n)
+		}
+		w.fail.Store(true)
+		time.Sleep(30 * time.Second)
+		synctest.Wait()
+		if !c.Stopped() {
+			t.Fatal("a failed ping left the connection open")
+		}
+		n := w.pings.Load()
+		time.Sleep(time.Minute)
+		if w.pings.Load() != n {
+			t.Fatal("a stopped connection was pinged")
+		}
+	})
+	synctest.Test(t, func(t *testing.T) {
+		silent := NewConn(&pingWriter{}, options)
+		silent.Start(true)
+		talking := NewConn(&pingWriter{}, options)
+		talking.Start(true)
+		silent.Pong()
+		talking.Pong()
+		for range 12 {
+			time.Sleep(10 * time.Second)
+			talking.lastFrame.Store(time.Now().UnixNano())
+		}
+		synctest.Wait()
+		// 120 seconds of silence, past 3×30+10 = 100.
+		if !silent.Stopped() || talking.Stopped() {
+			t.Fatalf("after 120 s, the silent connection stopped %v, the talking one %v", silent.Stopped(), talking.Stopped())
+		}
+		talking.Stop()
+	})
+}

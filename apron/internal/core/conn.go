@@ -101,7 +101,7 @@ func (c *Conn) Reserve() *Slot {
 type Conn struct {
 	t       Writer
 	options Options
-	// queue is the batches waiting to be written, a ring of
+	// queue is the batches waiting to be written, a ring that grows to
 	// Options.Queue, from head, of n of them, under qmu. idle is set while
 	// the writer waits for a batch, which whoever queues the next wakes
 	// it for, with a token on wake.
@@ -133,11 +133,14 @@ type Conn struct {
 	timer    *time.Timer
 	deadline atomic.Int64
 	armed    atomic.Bool
+	// pinger fires each ping (Start), under pingMu.
+	pingMu sync.Mutex
+	pinger *time.Timer
 }
 
 // NewConn returns the runtime of a connection on t. Start starts it.
 func NewConn(t Writer, options Options) *Conn {
-	c := &Conn{t: t, options: options, queue: make([]batch, max(options.Queue, 1)), wake: make(chan struct{}, 1), done: make(chan struct{})}
+	c := &Conn{t: t, options: options, wake: make(chan struct{}, 1), done: make(chan struct{})}
 	c.ctx, c.cancel = context.WithCancel(context.Background())
 	c.lastFrame.Store(time.Now().UnixNano())
 	if options.WriteTimeout > 0 {
@@ -151,7 +154,14 @@ func NewConn(t Writer, options Options) *Conn {
 func (c *Conn) Start(ping bool) {
 	go c.writeLoop()
 	if ping && c.options.PingInterval > 0 {
-		go c.pingLoop()
+		// A timer, not a goroutine, waits for each ping: an idle
+		// connection keeps no goroutine for its pings.
+		t := time.AfterFunc(time.Hour, c.ping)
+		t.Stop()
+		c.pingMu.Lock()
+		c.pinger = t
+		c.pingMu.Unlock()
+		t.Reset(c.options.PingInterval)
 	}
 }
 
@@ -232,7 +242,7 @@ func (c *Conn) enqueueDeferred(b batch) (queued, wake bool) {
 // full queue stops the connection, once fellBehind, if set, has run.
 func (c *Conn) push(b batch, fellBehind func()) (queued, wake bool) {
 	c.qmu.Lock()
-	if c.n == len(c.queue) {
+	if c.n == len(c.queue) && !c.grow() {
 		c.qmu.Unlock()
 		// A slow client holds up neither its sender nor anyone else's.
 		if fellBehind != nil {
@@ -247,6 +257,26 @@ func (c *Conn) push(b batch, fellBehind func()) (queued, wake bool) {
 	c.idle = false
 	c.qmu.Unlock()
 	return true, wake
+}
+
+// initialQueue is the room a queue starts with: it grows, as batches pile
+// up, to Options.Queue, so that an idle connection, as most are, keeps
+// little.
+const initialQueue = 4
+
+// grow makes the queue's ring larger, with qmu held, up to Options.Queue,
+// and reports whether it did.
+func (c *Conn) grow() bool {
+	bound := max(c.options.Queue, 1)
+	if len(c.queue) >= bound {
+		return false
+	}
+	ring := make([]batch, min(max(2*len(c.queue), initialQueue), bound))
+	for i := range c.n {
+		ring[i] = c.queue[(c.head+i)%len(c.queue)]
+	}
+	c.queue, c.head = ring, 0
+	return true
 }
 
 // next returns the next batch to write, waiting for one, or reports false
@@ -299,6 +329,11 @@ func (c *Conn) Stop() {
 	c.stop.Do(func() {
 		c.stopped.Store(true)
 		close(c.done)
+		c.pingMu.Lock()
+		if c.pinger != nil {
+			c.pinger.Stop()
+		}
+		c.pingMu.Unlock()
 		c.cancel()
 		if c.timer != nil {
 			c.timer.Stop()
@@ -430,33 +465,35 @@ func (c *Conn) writeLoop() {
 	}
 }
 
-// pingLoop pings the transport, which finds dead ones, and closes a
-// connection whose client sent liveness pings (§1) and then fell silent
-// for three intervals: its page is frozen or gone even if the transport is
-// not. Three intervals leave room for background timer throttling.
-func (c *Conn) pingLoop() {
-	interval, timeout := c.options.PingInterval, c.options.PingTimeout
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-	silence := 3*interval + timeout
-	for {
-		select {
-		case <-c.done:
-			return
-		case <-ticker.C:
-			if c.pinged.Load() && time.Since(time.Unix(0, c.lastFrame.Load())) > silence {
-				c.Stop()
-				return
-			}
-			ctx, cancel := context.WithTimeout(context.Background(), timeout)
-			err := c.t.Ping(ctx)
-			cancel()
-			if err != nil {
-				c.Stop()
-				return
-			}
-		}
+// ping pings the transport, which finds dead ones, at each interval, and
+// closes a connection whose client sent liveness pings (§1) and then fell
+// silent for three intervals: its page is frozen or gone even if the
+// transport is not. Three intervals leave room for background timer
+// throttling. It runs on the pinger's own goroutine, as a ticker's
+// receiver did, and the next ping is an interval after this one began,
+// or at once when this one took longer.
+func (c *Conn) ping() {
+	if c.stopped.Load() {
+		return
 	}
+	interval, timeout := c.options.PingInterval, c.options.PingTimeout
+	start := time.Now()
+	if c.pinged.Load() && start.Sub(time.Unix(0, c.lastFrame.Load())) > 3*interval+timeout {
+		c.Stop()
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	err := c.t.Ping(ctx)
+	cancel()
+	if err != nil {
+		c.Stop()
+		return
+	}
+	c.pingMu.Lock()
+	if !c.stopped.Load() {
+		c.pinger.Reset(max(0, interval-time.Since(start)))
+	}
+	c.pingMu.Unlock()
 }
 
 // InboundQueue bounds the frames read from a connection and waiting for

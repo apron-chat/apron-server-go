@@ -560,3 +560,27 @@ func BenchmarkRequestReserve(b *testing.B) {
 		})
 	}
 }
+
+// BenchmarkConnIdle opens 10,000 signed-in connections that then stay
+// idle, as most of a chat server's do, and reports what each costs while
+// it waits: its goroutines, and the memory they and its state take.
+func BenchmarkConnIdle(b *testing.B) {
+	const n = 10_000
+	if testing.Short() {
+		b.Skip("opens 10,000 connections")
+	}
+	var goroutines, bytes float64
+	for b.Loop() {
+		chat := benchchat.New(server.Config{})
+		runtime.GC()
+		before, g := memStats(), runtime.NumGoroutine()
+		ts := chat.Open(n, benchchat.NewSink(), nil)
+		runtime.GC()
+		after := memStats()
+		goroutines = float64(runtime.NumGoroutine()-g) / n
+		bytes = float64(after.HeapInuse+after.StackInuse-before.HeapInuse-before.StackInuse) / n
+		chat.CloseAll(ts)
+	}
+	b.ReportMetric(goroutines, "goroutines/conn")
+	b.ReportMetric(bytes, "B-inuse/conn")
+}
