@@ -1,12 +1,14 @@
 package server_test
 
 import (
+	"context"
 	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"maps"
 	"testing"
 
 	"github.com/apron-chat/apron-server-go/apron"
+	"github.com/apron-chat/apron-server-go/apron/aprontest"
 	"github.com/apron-chat/apron-server-go/apron/server"
 )
 
@@ -56,5 +58,24 @@ func TestFields(t *testing.T) {
 	var zero server.Fields
 	if zero.Len() != 0 {
 		t.Error("the zero Fields are not empty")
+	}
+}
+
+// A request's Params are its params object as it was sent, {} without.
+func TestRequestParams(t *testing.T) {
+	s := wired(&backend{}, server.Config{})
+	got := make(chan string, 2)
+	s.Handle("ext:params", server.Handler{Serve: func(_ context.Context, _ *server.Conn, r *server.Request, _ server.Reply[any]) error {
+		got <- string(r.Params())
+		return nil
+	}})
+	c := aprontest.Connect(t, s)
+	signIn(t, c)
+	send(t, c, `{"method":"ext:params","id":"1","params":{ "b" : [1, 2], "a":"é" }}`)
+	send(t, c, `{"method":"ext:params","id":"2"}`)
+	for _, want := range []string{`{ "b" : [1, 2], "a":"é" }`, `{}`} {
+		if params := <-got; params != want {
+			t.Errorf("Params %s, want %s", params, want)
+		}
 	}
 }

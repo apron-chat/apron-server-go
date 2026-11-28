@@ -1032,3 +1032,25 @@ type discardStore struct{}
 func (discardStore) Load(func(store.Entry) error) error { return nil }
 func (discardStore) Apply([]store.Entry) error          { return nil }
 func (discardStore) Close() error                       { return nil }
+
+// BenchmarkExtensionMethod calls an extension's method, which decodes
+// its params (MethodCall.Decode), one request in flight: what an
+// extension's request costs besides its own work.
+func BenchmarkExtensionMethod(b *testing.B) {
+	bs := newBenchServer(b, extensionConfig(testExtension{"calc", func(r *Registrar) error {
+		r.Method("calc.add", func(_ context.Context, call *MethodCall) (any, error) {
+			var params struct{ A, B int }
+			if err := call.Decode(&params); err != nil {
+				return nil, err
+			}
+			return map[string]int{"sum": params.A + params.B}, nil
+		})
+		return nil
+	}}))
+	c := bs.guest()
+	params := map[string]any{"a": 2, "b": 3, "note": "a request of an extension's own, with a few params"}
+	b.ReportAllocs()
+	for b.Loop() {
+		c.call(b, "calc.add", params)
+	}
+}

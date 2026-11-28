@@ -118,6 +118,13 @@ func (f *Fields) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
 // the request, which keeps the whole frame, keeps a copy.
 func (r *Request) Fields() Fields { return r.fields }
 
+// Params returns the request's params object as it was sent, {} when it
+// had none: part of the frame, shared, valid for the request, and not
+// changed; one kept past the request is kept as a copy. It is for a
+// handler that decodes the params whole, such as into a struct of its
+// own, rather than one at a time (Decoder).
+func (r *Request) Params() jsontext.Value { return r.params }
+
 // stringParam reads a string param.
 func (f Fields) stringParam(name string) (value string, present bool, _ error) {
 	raw, ok := f.Get(name)
