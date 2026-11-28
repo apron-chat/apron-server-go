@@ -163,12 +163,15 @@ uses the forms meant for its shape:
 - **Big results outside your lock.** `Reply.Reserve` fixes a reply's place
   in the connection's queue under the lock; the result is encoded and sent
   after it, in the same order as `Send` would have kept.
-- **Stored records, sent as stored.** `HistoryResult.Raw` and
-  `RoomView.Raw` send records a backend keeps encoded without decoding and
-  encoding them again.
+- **Stored records, sent as stored.** `HistoryResult.Raw`, `RoomView.Raw`,
+  `RoomView.MembersRaw`, and `RoomListResult.UsersRaw` send what a backend
+  keeps encoded, such as its log's records or its users' objects, without
+  decoding and encoding them again.
 - **Users who share rooms.** `PublishUserTo` tells only the connections a
   backend names of a user's change; `PublishUser`'s filter visits every
   connection.
-- **Read without copies.** `Conn.Identity`, `Request.Fields`, and
-  `apron.Frame.Head` read what the connection or the frame holds; what they
-  return is shared and only valid as documented.
+- **Read without copies.** `Conn.Identity`, `bot.Conn.Identity`,
+  `Request.Fields`, `Request.Params`, and `apron.Frame.Head` read what the
+  connection or the frame holds; what they return is shared, must not be
+  changed, and is only valid as documented (a request's params for the
+  request: copy what you keep).
