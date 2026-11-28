@@ -209,7 +209,7 @@ func (c *Chat) History(_ context.Context, _ *server.Conn, p apron.HistoryParams,
 	// Page picks the window of the bare log, and its records are the raw
 	// ones of that window.
 	result := server.Page(server.Log{Records: c.bare, Lower: c.lower, Latest: c.clock.Last()}, p, 100)
-	result.Raw = &apron.RawRecords{}
+	result.Raw = apron.RawRecords{Messages: []jsontext.Value{}}
 	if result.FirstLogID != 0 {
 		start, _ := slices.BinarySearchFunc(c.bare, result.FirstLogID, func(r apron.Record, id apron.LogID) int { return cmp.Compare(r.LogID, id) })
 		end, _ := slices.BinarySearchFunc(c.bare, result.LastLogID, func(r apron.Record, id apron.LogID) int { return cmp.Compare(r.LogID, id) })

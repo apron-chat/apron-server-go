@@ -759,9 +759,6 @@ func (s *Server) history(c *client, p apron.HistoryParams, reply server.Reply[ap
 	// decoding them for the result's typed arrays to encode again: their
 	// members are in the order of their names, as every frame of a record
 	// carries them, which a typed record's encoding is not (JSON equal).
-	if len(matching) > 0 {
-		result.Raw = new(apron.RawRecords)
-	}
 	for _, record := range matching {
 		switch record.Kind {
 		case roomlog.KindRoom:

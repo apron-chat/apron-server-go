@@ -61,12 +61,13 @@ type HistoryResult struct {
 	// HistoryLogID is the inclusive lower bound of what is retrievable, or
 	// 0 for nothing, which is sent as null: every result has it (§4.3.3).
 	HistoryLogID LogID `json:"history_log_id"`
-	// Raw, if set, holds the result's records encoded, which take the place
-	// of Rooms, Messages, Reactions, and Memberships as it is sent: for a
-	// server that keeps its log encoded, which then sends its records as
-	// they are rather than decode each to have it encoded again. A result
-	// decoded has none: its records are in their arrays.
-	Raw *RawRecords `json:"-"`
+	// Raw, unless it is the zero RawRecords, holds the result's records
+	// encoded, which take the place of Rooms, Messages, Reactions, and
+	// Memberships as it is sent: for a server that keeps its log encoded,
+	// which then sends its records as they are rather than decode each to
+	// have it encoded again. A result decoded has none: its records are in
+	// their arrays.
+	Raw RawRecords `json:"-"`
 }
 
 // RawRecords are the records of a history result (HistoryResult.Raw)
@@ -79,6 +80,13 @@ type HistoryResult struct {
 // changed: a server shares them with the log it keeps them in.
 type RawRecords struct {
 	Rooms, Messages, Reactions, Memberships []jsontext.Value
+}
+
+// IsZero reports whether r holds no arrays at all, as a result's Raw
+// that is not used; one with an array, empty too, is used, and nil is not.
+// Its pointer receiver spares encoding a copy of r to call it.
+func (r *RawRecords) IsZero() bool {
+	return r == nil || r.Rooms == nil && r.Messages == nil && r.Reactions == nil && r.Memberships == nil
 }
 
 // historyResultJSON is a HistoryResult as encoding/json encodes one,
@@ -101,7 +109,7 @@ type rawHistoryJSON struct {
 // MarshalJSONTo writes the result, with Raw's records in place of its
 // arrays' when it has them.
 func (h *HistoryResult) MarshalJSONTo(enc *jsontext.Encoder) error {
-	if h.Raw == nil {
+	if h.Raw.IsZero() {
 		return json.MarshalEncode(enc, (*historyResultJSON)(h))
 	}
 	return json.MarshalEncode(enc, &rawHistoryJSON{
