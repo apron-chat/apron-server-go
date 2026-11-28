@@ -30,7 +30,12 @@ func TestLimits(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			chat := &limited{maxText: test.maxText, keep: test.keep}
-			chat.server = server.New(chat, server.Config{Messages: chat, History: chat, Logger: slog.New(slog.DiscardHandler)})
+			// The burst's poster gets each of its 512 messages back, and its
+			// reply: this backend, which only appends them, posts them faster
+			// than the check reads them, so the default queue of 128 would
+			// drop the poster as a reader that fell behind, about one run in
+			// two. The queue holds the whole burst.
+			chat.server = server.New(chat, server.Config{Messages: chat, History: chat, Logger: slog.New(slog.DiscardHandler), OutgoingQueue: 2 * slowBurst})
 			r := &run{config: Config{Server: chat.server}, order: map[orderKey]int64{}, violations: map[string]map[string]bool{}}
 			for _, item := range checks {
 				if !slices.Contains(reported, item.id) {
