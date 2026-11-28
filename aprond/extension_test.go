@@ -552,11 +552,13 @@ func TestSessionRefusesReentrantCalls(t *testing.T) {
 	}
 }
 
+// A command that runs past several of the server's ping timeouts keeps
+// its connection, whose client answers the pings meanwhile.
 func TestSlowCommandKeepsItsConnection(t *testing.T) {
 	config := extensionConfig(testExtension{"slow", func(r *Registrar) error {
 		r.Command(Command{Name: "slow", Run: func(ctx context.Context, call *CommandCall) (map[string]any, error) {
 			select {
-			case <-time.After(time.Second):
+			case <-time.After(500 * time.Millisecond):
 			case <-ctx.Done():
 				return nil, ctx.Err()
 			}

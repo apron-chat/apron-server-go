@@ -177,31 +177,34 @@ func TestInviteDeviceLinkUsesThePublicURL(t *testing.T) {
 	}
 }
 
+// A device's name is checked, an account holds three, and a name again
+// replaces its token, which moves it last; a guest may not invite a
+// device, and is not told of /invite-device.
 func TestInviteDeviceNames(t *testing.T) {
 	_, httpServer := passkeyTestServer(t)
 	ada, adaID := passkeyAccount(t, httpServer)
+	link := wsURL(httpServer)
 	for _, args := range []string{"", "phone tablet"} {
 		expectFailure(t, commandError(t, ada, "/invite-device "+args), CodeInvalidParams, "Usage: /invite-device <name>")
 	}
 	for _, name := range []string{"-phone", ".phone", "_phone", "ph/one", "phöne", strings.Repeat("a", 33)} {
 		expectFailure(t, commandError(t, ada, "/invite-device "+name), CodeInvalidParams, "A device name is 1 to 32 letters, digits, _, . or -, starting with a letter or digit")
 	}
-	inviteDevice(t, ada, adaID, strings.Repeat("a", 32), false, wsURL(httpServer))
-	inviteDevice(t, ada, adaID, "9", false, wsURL(httpServer))
-}
-
-func TestInviteDeviceHoldsThreeNames(t *testing.T) {
-	_, httpServer := passkeyTestServer(t)
-	ada, adaID := passkeyAccount(t, httpServer)
-	link := wsURL(httpServer)
-	for _, name := range []string{"phone", "tablet", "laptop"} {
+	long := strings.Repeat("a", 32)
+	for _, name := range []string{long, "9", "phone"} {
 		inviteDevice(t, ada, adaID, name, false, link)
 	}
 	expectFailure(t, commandError(t, ada, "/invite-device watch"), CodeDenied,
-		"You have 3 device tokens (`phone`, `tablet`, `laptop`); run /invite-device with one of those names to replace its token")
-	inviteDevice(t, ada, adaID, "tablet", true, link)
+		"You have 3 device tokens (`"+long+"`, `9`, `phone`); run /invite-device with one of those names to replace its token")
+	inviteDevice(t, ada, adaID, "9", true, link)
 	expectFailure(t, commandError(t, ada, "/invite-device watch"), CodeDenied,
-		"You have 3 device tokens (`phone`, `laptop`, `tablet`); run /invite-device with one of those names to replace its token")
+		"You have 3 device tokens (`"+long+"`, `phone`, `9`); run /invite-device with one of those names to replace its token")
+
+	guest := dialTestClient(t, httpServer)
+	expectFailure(t, commandError(t, guest, "/invite-device phone"), CodeDenied, "Sign in with an account to use /invite-device")
+	if text := privateReply(t, guest, "/help"); strings.Contains(text, "invite-device") {
+		t.Fatalf("a guest's /help: %q", text)
+	}
 }
 
 func TestInviteDeviceReplacesTheNamesToken(t *testing.T) {
@@ -260,15 +263,6 @@ func TestInviteDeviceClosesADeviceThatGotASessionToken(t *testing.T) {
 
 	inviteDevice(t, ada, adaID, "phone", true, link)
 	expectClosedWithError(t, phone, CodeDenied, "Device token replaced; sign in with the new one")
-}
-
-func TestInviteDeviceDeniesGuests(t *testing.T) {
-	_, httpServer := passkeyTestServer(t)
-	guest := dialTestClient(t, httpServer)
-	expectFailure(t, commandError(t, guest, "/invite-device phone"), CodeDenied, "Sign in with an account to use /invite-device")
-	if text := privateReply(t, guest, "/help"); strings.Contains(text, "invite-device") {
-		t.Fatalf("a guest's /help: %q", text)
-	}
 }
 
 func TestDeviceTokensSurviveRestart(t *testing.T) {
