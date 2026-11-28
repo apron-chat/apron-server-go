@@ -147,3 +147,49 @@ func TestReplayTombstoneWins(t *testing.T) {
 		t.Fatal("installed a notice")
 	}
 }
+
+// Snapshots applied raw, some or all, in any order with the rest, leave
+// the state they leave decoded, and decode as they were when read.
+func TestReplayRaw(t *testing.T) {
+	log := replayLog()
+	for i := range 40 {
+		var r apron.Replay
+		for _, j := range rand.Perm(len(log)) {
+			rec := log[j]
+			if rec.Message != nil && (i%2 == 0 || j%2 == 0) {
+				raw, err := apron.Marshal(rec.Message)
+				if err != nil {
+					t.Fatal(err)
+				}
+				r.ApplyRawMessage(raw)
+				continue
+			}
+			r.Apply(rec)
+		}
+		checkReplayed(t, &r)
+		for _, rec := range log {
+			if rec.Message == nil {
+				continue
+			}
+			raw, _ := apron.Marshal(rec.Message)
+			if r.ApplyRawMessage(raw) || r.Apply(rec) {
+				t.Fatalf("applied %+v again", rec.Message)
+			}
+		}
+		var typed apron.Replay
+		for _, rec := range log {
+			typed.Apply(rec)
+		}
+		got, _ := apron.Marshal(r.Records())
+		want, _ := apron.Marshal(typed.Records())
+		if string(got) != string(want) {
+			t.Fatalf("records\n got %s\nwant %s", got, want)
+		}
+	}
+	var r apron.Replay
+	for _, bad := range []string{`{`, `{"log_id":"5"}`, `{"message_id":"5"}`, `[]`} {
+		if r.ApplyRawMessage([]byte(bad)) {
+			t.Errorf("applied %s", bad)
+		}
+	}
+}
