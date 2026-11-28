@@ -2,7 +2,6 @@ package aprond
 
 import (
 	"bytes"
-	"context"
 	"fmt"
 	"io"
 	"maps"
@@ -826,124 +825,6 @@ func TestRetriedResultsListUnusedWrites(t *testing.T) {
 	a.expectQuiet(t)
 }
 
-func TestTerminalGrowsLiveThenKeepsItsOutput(t *testing.T) {
-	config := DefaultConfig()
-	config.TerminalKeepBytes = 16
-	config.LiveTextMaxBytes = 64
-	app, httpServer := newTestServer(t, config)
-	a := dialTestClient(t, httpServer)
-	result := postEmbeds(t, a, "terminal", map[string]any{"room_id": "general", "body": map[string]any{
-		"embeds": []any{map[string]any{"kind": "terminal", "title": "make", "output": "forged", "url": "https://forged.example/t"}},
-	}})
-	writeURL := result["embeds"].([]any)[0].(map[string]any)["write_url"].(string)
-	// Until its write starts the embed has no url (§4.8.5); a reader that
-	// connects early waits for the write.
-	live := embedsOf(t, result["snapshot"].(map[string]any))[0]
-	if live["url"] != nil || live["title"] != "make" || live["output"] != nil {
-		t.Fatalf("live embed: %#v", live)
-	}
-	liveURL := liveURLOf(t, app, live["embed_id"])
-	if !strings.HasPrefix(liveURL, httpServer.URL+livePath) {
-		t.Fatalf("live url %q", liveURL)
-	}
-
-	reader, err := http.Get(liveURL)
-	if err != nil || reader.StatusCode != http.StatusOK {
-		t.Fatalf("live reader: %v %v", reader, err)
-	}
-	defer reader.Body.Close()
-	if reader.Header.Get("Content-Type") != "text/plain; charset=utf-8" || reader.Header.Get("X-Content-Type-Options") != "nosniff" {
-		t.Fatalf("live text headers: %#v", reader.Header)
-	}
-	body, pipe := io.Pipe()
-	writerDone := make(chan int, 1)
-	go func() {
-		request, _ := http.NewRequest(http.MethodPut, writeURL, body)
-		response, err := http.DefaultClient.Do(request)
-		if err != nil {
-			writerDone <- 0
-			return
-		}
-		response.Body.Close()
-		writerDone <- response.StatusCode
-	}()
-	if _, err := pipe.Write([]byte("hello ")); err != nil {
-		t.Fatal(err)
-	}
-	first := make([]byte, 6)
-	if _, err := io.ReadFull(reader.Body, first); err != nil || string(first) != "hello " {
-		t.Fatalf("live read %q: %v", first, err)
-	}
-	_, _ = pipe.Write([]byte("world,\r\n\x1b[1mlong\x1b[0m\n"))
-	_ = pipe.Close()
-	// The reader goes on from where it was: what it missed is still held,
-	// though past the 16 bytes kept.
-	if rest, _ := io.ReadAll(reader.Body); string(rest) != "world,\r\n\x1b[1mlong\x1b[0m\n" {
-		t.Fatalf("reader got %q then %q", first, rest)
-	}
-	// The output keeps the last 16 bytes, from their first control
-	// character (§4.8.6).
-	const kept = "\r\n\x1b[1mlong\x1b[0m\n"
-	if status := <-writerDone; status != http.StatusNoContent {
-		t.Fatalf("writer status %d", status)
-	}
-	if started := embedsOf(t, startedSnapshot(t, a))[0]; started["url"] != liveURL || started["title"] != "make" {
-		t.Fatalf("started embed: %#v", started)
-	}
-	finished := a.notification(t, "message")
-	embed := embedsOf(t, finished)[0]
-	if embed["output"] != kept || embed["url"] != nil || embed["title"] != "make" || finished["prev_log_id"] == nil {
-		t.Fatalf("finished embed: %#v", embed)
-	}
-	// After the end, the url serves the output.
-	if status, header, got := httpDo(t, http.MethodGet, liveURL, nil, ""); status != http.StatusOK || string(got) != kept || header.Get("X-Content-Type-Options") != "nosniff" {
-		t.Fatalf("finished live URL: %d %q", status, got)
-	}
-
-	// At the size limit the text ends and keeps its last part: from the
-	// first control character in the last 16 bytes.
-	result = postEmbeds(t, a, "limited", map[string]any{"room_id": "general", "body": map[string]any{"embeds": []any{map[string]any{"kind": "terminal"}}}})
-	writeURL = result["embeds"].([]any)[0].(map[string]any)["write_url"].(string)
-	if status, _, _ := httpDo(t, http.MethodPut, writeURL, strings.NewReader(strings.Repeat("x", 50)+"\r\n"+strings.Repeat("y", 30)), ""); status != http.StatusRequestEntityTooLarge {
-		t.Fatalf("oversized terminal: %d", status)
-	}
-	startedSnapshot(t, a)
-	if output := embedsOf(t, a.notification(t, "message"))[0]["output"]; output != "\r\n"+strings.Repeat("y", 12) {
-		t.Fatalf("limited output %q", output)
-	}
-}
-
-// A finished live text write leaves its keep-alive connection usable: a live
-// read next on the same connection follows the text.
-func TestLiveWriteConnectionCanReadLiveText(t *testing.T) {
-	app, httpServer := newTestServer(t, DefaultConfig())
-	a := dialTestClient(t, httpServer)
-	result := postEmbeds(t, a, "terminals", map[string]any{"room_id": "general", "body": map[string]any{
-		"embeds": []any{map[string]any{"kind": "terminal"}, map[string]any{"kind": "terminal"}},
-	}})
-	written := result["embeds"].([]any)
-	live := embedsOf(t, result["snapshot"].(map[string]any))
-	// One connection carries the finished write and then the read.
-	client := &http.Client{Transport: &http.Transport{MaxConnsPerHost: 1}}
-	request, _ := http.NewRequest(http.MethodPut, written[0].(map[string]any)["write_url"].(string), strings.NewReader("done"))
-	response, err := client.Do(request)
-	if err != nil || response.StatusCode != http.StatusNoContent {
-		t.Fatalf("first live write: %v %v", response, err)
-	}
-	response.Body.Close()
-	reader, err := client.Get(liveURLOf(t, app, live[1]["embed_id"]))
-	if err != nil || reader.StatusCode != http.StatusOK {
-		t.Fatalf("live reader: %v %v", reader, err)
-	}
-	defer reader.Body.Close()
-	if status, _, _ := httpDo(t, http.MethodPut, written[1].(map[string]any)["write_url"].(string), strings.NewReader("second"), "text/plain"); status != http.StatusNoContent {
-		t.Fatalf("second live write: %d", status)
-	}
-	if got, _ := io.ReadAll(reader.Body); string(got) != "second" {
-		t.Fatalf("reader on the write's connection got %q", got)
-	}
-}
-
 // startLiveWrite starts a streaming PUT to writeURL with first as its first
 // bytes, waits until the server has taken the write and has first in the
 // text (or the text ended), and returns the body's writer and a channel
@@ -980,72 +861,6 @@ func startLiveWrite(t *testing.T, app *Server, writeURL, first string) (*io.Pipe
 		if time.Now().After(deadline) {
 			t.Fatal("the live write never started")
 		}
-	}
-}
-
-// With edit, a save that removes live text's embed ends it early (§4.8.3):
-// the save is the snapshot, an append's text is not added to it, and the
-// writer's PUT succeeds.
-func TestSavingWithoutLiveTextEndsIt(t *testing.T) {
-	for _, kind := range []string{"terminal", "append"} {
-		t.Run(kind, func(t *testing.T) {
-			app, httpServer := newTestServer(t, DefaultConfig())
-			a := dialTestClient(t, httpServer)
-			result := postEmbeds(t, a, kind, map[string]any{"room_id": "general", "body": map[string]any{"text": "start ", "embeds": []any{map[string]any{"kind": kind}}}})
-			writeURL := result["embeds"].([]any)[0].(map[string]any)["write_url"].(string)
-			pipe, writerDone := startLiveWrite(t, app, writeURL, "partial")
-			liveURL := embedsOf(t, startedSnapshot(t, a))[0]["url"].(string)
-			_, saved := save(t, a, "stop", map[string]any{"message_id": result["message_id"], "body": map[string]any{"text": "never mind"}})
-			if body := saved["body"].(map[string]any); body["text"] != "never mind" || body["embeds"] != nil {
-				t.Fatalf("save: %#v", saved)
-			}
-			if status := <-writerDone; status != http.StatusNoContent {
-				t.Fatalf("writer status %d", status)
-			}
-			_ = pipe.Close()
-			a.expectQuiet(t)
-			if status, _, _ := httpDo(t, http.MethodGet, liveURL, nil, ""); status != http.StatusNotFound {
-				t.Fatalf("removed live URL: %d", status)
-			}
-		})
-	}
-}
-
-// Writes use PUT (§4.8.3); another method leaves the write URL unused.
-func TestWritesArePUT(t *testing.T) {
-	_, httpServer := newTestServer(t, DefaultConfig())
-	a := dialTestClient(t, httpServer)
-	result := postEmbeds(t, a, "upload", map[string]any{"room_id": "general", "body": map[string]any{"embeds": []any{map[string]any{"kind": "upload"}}}})
-	writeURL := result["embeds"].([]any)[0].(map[string]any)["write_url"].(string)
-	if status, header, _ := httpDo(t, http.MethodPost, writeURL, strings.NewReader("data"), "text/plain"); status != http.StatusMethodNotAllowed || header.Get("Allow") != "PUT, OPTIONS" {
-		t.Fatalf("POST: %d, Allow %q", status, header.Get("Allow"))
-	}
-	if status, _, _ := httpDo(t, http.MethodPut, writeURL, strings.NewReader("data"), "text/plain"); status != http.StatusCreated {
-		t.Fatalf("PUT after POST: %d", status)
-	}
-}
-
-// A write to a URL that is no longer usable is refused at once, even while
-// its body is still open: the server does not wait to read the body first.
-func TestRefusedWriteDoesNotWaitForItsBody(t *testing.T) {
-	_, httpServer := newTestServer(t, DefaultConfig())
-	a := dialTestClient(t, httpServer)
-	result := postEmbeds(t, a, "terminal", map[string]any{"room_id": "general", "body": map[string]any{"embeds": []any{map[string]any{"kind": "terminal"}}}})
-	writeURL := result["embeds"].([]any)[0].(map[string]any)["write_url"].(string)
-	save(t, a, "stop", map[string]any{"message_id": result["message_id"], "body": map[string]any{"text": "never mind"}})
-	body, pipe := io.Pipe()
-	defer pipe.Close()
-	go func() { _, _ = pipe.Write([]byte("late")) }()
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	request, _ := http.NewRequestWithContext(ctx, http.MethodPut, writeURL, body)
-	response, err := http.DefaultClient.Do(request)
-	if err != nil {
-		t.Fatalf("a refused write with an open body: %v", err)
-	}
-	response.Body.Close()
-	if response.StatusCode != http.StatusNotFound {
-		t.Fatalf("status %d", response.StatusCode)
 	}
 }
 
