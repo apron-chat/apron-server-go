@@ -208,18 +208,36 @@ func testClient(t *testing.T, c *chat, client *aprontest.Client) {
 	}
 }
 
-func TestConnect(t *testing.T) {
-	c := newChat()
-	client := aprontest.Connect(t, c.server)
-	testClient(t, c, client)
-	if err := client.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if n := c.disconnected.Load(); n != 1 {
-		t.Fatalf("%d disconnected after Close", n)
-	}
-	if _, err := client.Next(timeout(t)); !errors.Is(err, apron.ErrClosed) {
-		t.Fatalf("Next after Close: %v", err)
+// A Client works the same in memory (Connect) and over a WebSocket (Dial),
+// and Close ends its connection.
+func TestConnectAndDial(t *testing.T) {
+	for _, way := range []string{"Connect", "Dial"} {
+		t.Run(way, func(t *testing.T) {
+			c := newChat()
+			var client *aprontest.Client
+			if way == "Connect" {
+				client = aprontest.Connect(t, c.server)
+			} else {
+				ts := httptest.NewServer(c.server)
+				defer ts.Close()
+				var err error
+				if client, err = aprontest.Dial(timeout(t), "ws"+strings.TrimPrefix(ts.URL, "http")); err != nil {
+					t.Fatal(err)
+				}
+			}
+			testClient(t, c, client)
+			if err := client.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := client.Next(timeout(t)); !errors.Is(err, apron.ErrClosed) {
+				t.Fatalf("Next after Close: %v", err)
+			}
+			if way == "Connect" {
+				if n := c.disconnected.Load(); n != 1 {
+					t.Fatalf("%d disconnected after Close", n)
+				}
+			}
+		})
 	}
 }
 
@@ -243,20 +261,6 @@ func TestSignIn(t *testing.T) {
 		if err != nil || f.Method == "" {
 			t.Fatalf("Next once the test ended: %+v %v", f, err)
 		}
-	}
-}
-
-func TestDial(t *testing.T) {
-	c := newChat()
-	ts := httptest.NewServer(c.server)
-	defer ts.Close()
-	client, err := aprontest.Dial(timeout(t), "ws"+strings.TrimPrefix(ts.URL, "http"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	testClient(t, c, client)
-	if err := client.Close(); err != nil {
-		t.Fatal(err)
 	}
 }
 
