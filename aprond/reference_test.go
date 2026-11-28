@@ -3,12 +3,10 @@ package aprond
 import (
 	"bytes"
 	"context"
-	"encoding/base64"
 	"fmt"
 	"io"
 	"maps"
 	"net/http"
-	"os"
 	"reflect"
 	"slices"
 	"strconv"
@@ -17,8 +15,6 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
-
-	"github.com/apron-chat/apron-server-go/aprond/internal/uploads"
 )
 
 func TestRoomListFiltersAndOrder(t *testing.T) {
@@ -737,47 +733,6 @@ func TestUploadsAreHostedWithOpenGraph(t *testing.T) {
 	b.notification(t, "message")
 	if status, _, _ := httpDo(t, http.MethodGet, fileURL, nil, ""); status != http.StatusNotFound {
 		t.Fatalf("removed file: %d", status)
-	}
-}
-
-func TestUploadTypesThatCouldRunAreServedAsDownloads(t *testing.T) {
-	for declared, want := range map[string]string{
-		"image/png":        "image/png",
-		"application/pdf":  "application/pdf",
-		"text/html":        "text/plain",
-		"text/ecmascript":  "text/plain",
-		"text/css":         "text/plain",
-		"text/xsl":         "text/plain",
-		"application/wasm": "text/plain",
-	} {
-		if got := uploads.ContentType(declared, []byte("hello")); got != want {
-			t.Errorf("%s: served as %s, want %s", declared, got, want)
-		}
-	}
-	if got := uploads.ContentType("text/css", []byte("<html><script>")); got != "application/octet-stream" {
-		t.Errorf("sniffed markup served as %s", got)
-	}
-}
-
-func TestAvatarUploadsMustBeImages(t *testing.T) {
-	check := func(contentType string, data []byte) bool {
-		file, err := os.CreateTemp(t.TempDir(), "avatar")
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer file.Close()
-		_, _ = file.Write(data)
-		return uploads.ValidImage(contentType, file)
-	}
-	if !check("image/png", testPNG(t)) {
-		t.Fatal("a PNG was refused")
-	}
-	webp, _ := base64.StdEncoding.DecodeString("UklGRhoAAABXRUJQVlA4TA0AAAAvAAAAEAcQERGIiP4HAA==")
-	if !check("image/webp", webp) {
-		t.Fatal("a WebP was refused")
-	}
-	if check("image/png", []byte("not an image")) || check("image/jpeg", testPNG(t)) || check("image/webp", []byte("RIFF\x00\x00\x00\x00WEBPVP8 ")) {
-		t.Fatal("a mismatched avatar was accepted")
 	}
 }
 

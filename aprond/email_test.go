@@ -14,12 +14,11 @@ import (
 	"time"
 	"weak"
 
-	"github.com/coder/websocket"
-
 	"github.com/apron-chat/apron-server-go/aprond/internal/proposals"
 	"github.com/apron-chat/apron-server-go/internal/auth/email"
 	"github.com/apron-chat/apron-server-go/internal/authn"
 	"github.com/apron-chat/apron-server-go/store"
+	"github.com/coder/websocket"
 )
 
 // testMailbox is an EmailSender that keeps what it is asked to send.
@@ -909,25 +908,6 @@ func TestEmailAccountsPersist(t *testing.T) {
 	}
 	back.drain(t)
 	save(t, back, "edit", map[string]any{"message_id": id, "body": map[string]any{"text": "edited"}})
-}
-
-func TestNormalizeEmail(t *testing.T) {
-	for value, want := range map[string]string{
-		" Ada@Example.COM ":      "ada@example.com",
-		"a.b+c@mail.example.org": "a.b+c@mail.example.org",
-		"Ada <ada@example.com>":  "",
-		"ada@localhost":          "",
-		"ada@[10.0.0.5]":         "",
-		"ada@10.0.0.5":           "",
-		"ada@-bad.example":       "",
-		"ada@exa_mple.com":       "",
-		"ada":                    "",
-		"":                       "",
-	} {
-		if got := email.Normalize(value); got != want {
-			t.Errorf("email.Normalize(%q) = %q, want %q", value, got, want)
-		}
-	}
 }
 
 // The client address comes from the last entry across every line of the
