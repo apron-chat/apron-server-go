@@ -60,10 +60,11 @@ type Conn interface {
 	// *apron.Error. Once the connection has ended, its error wraps
 	// apron.ErrClosed, or tells why it ended.
 	Call(ctx context.Context, method string, params any) (jsontext.Value, error)
-	// User is who the connection is signed in as: the user it asked for,
-	// or the one the server made it, such as by a rename since; the zero
-	// User once it is signed out.
-	User() apron.User
+	// Identity is who the connection is signed in as: the user it asked
+	// for, or the one the server made it, such as by a rename since, as
+	// the connection keeps it, without a copy, and whether it is signed
+	// in. Its Roles, Ext, and Unknown are shared, and not changed.
+	Identity() (apron.User, bool)
 	// Done is closed once the connection has ended.
 	Done() <-chan struct{}
 	// Close ends the connection.
@@ -172,10 +173,11 @@ func Start(dial Dialer, options Options) (*Bot, error) {
 	return b, nil
 }
 
-// User is who the bot is: its connection's user (Conn.User), which the
-// server may have made another than the Dialer asked for as it opened,
-// such as one with a user_id of its own, or the name normalized, and which
-// a rename changes.
+// User is who the bot is: its connection's user (Conn.Identity), which
+// the server may have made another than the Dialer asked for as it
+// opened, such as one with a user_id of its own, or the name normalized,
+// and which a rename changes. It is not copied: its Roles, Ext, and
+// Unknown are the connection's, and are not changed.
 func (b *Bot) User() apron.User {
 	b.mu.Lock()
 	conn := b.conn
@@ -183,7 +185,8 @@ func (b *Bot) User() apron.User {
 	if conn == nil {
 		return apron.User{}
 	}
-	return conn.User()
+	u, _ := conn.Identity()
+	return u
 }
 
 // UserID is the bot's user_id, its User's.
@@ -217,7 +220,8 @@ func (b *Bot) Conn() (Conn, error) {
 	conn, err := b.dial(b.ctx, onFrame)
 	if r != nil {
 		if err == nil {
-			r.self, r.open = conn.User().UserID, true
+			u, _ := conn.Identity()
+			r.self, r.open = u.UserID, true
 		}
 		close(r.opened)
 	}

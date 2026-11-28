@@ -72,3 +72,24 @@ func BenchmarkBotEchoStorm(b *testing.B) {
 		<-done
 	}
 }
+
+// BenchmarkBotMentioned tells whether a message mentions a bot whose user
+// has roles and ext, as every handler of a bot's that answers mentions
+// does for every message.
+func BenchmarkBotMentioned(b *testing.B) {
+	chat := benchchat.New(server.Config{})
+	defer chat.Server.Shutdown(context.Background())
+	echo, err := bot.Start(func(_ context.Context, onFrame func(apron.Frame)) (bot.Conn, error) {
+		return chat.Server.Local(server.LocalOptions{User: apron.User{UserID: "echo", Name: "echo", Roles: []string{"bot"}, Ext: apron.Ext{"owner": []byte(`"ada"`)}}, OnFrame: onFrame})
+	}, bot.Options{})
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer echo.Close()
+	m := apron.Message{MessageID: 1, LogID: 1, From: apron.User{UserID: "ada"}, Body: &apron.Body{Text: "echo: hi", Mentions: []string{"bob"}}}
+	for b.Loop() {
+		if echo.Mentioned(m) || !echo.Addressed(m) {
+			b.Fatal("not addressed")
+		}
+	}
+}

@@ -774,6 +774,16 @@ func (c *Conn) User() apron.User {
 	return c.user
 }
 
+// Identity is who the connection is signed in as, as User is, and whether
+// it is, once it has a user_id: a bot.Conn's. Its Roles, Ext, and Unknown
+// are the connection's, replaced, never changed, as the connection learns
+// who it is.
+func (c *Conn) Identity() (apron.User, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.user, c.user.UserID != ""
+}
+
 // Done is closed once the connection has ended, with Err set.
 func (c *Conn) Done() <-chan struct{} { return c.done }
 

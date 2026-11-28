@@ -269,9 +269,13 @@ func (s *Server) openLocal(ctx context.Context, c *Conn, asked apron.User) error
 // Conn is the connection, for the backend.
 func (l *Local) Conn() *Conn { return l.c }
 
-// User is who the connection is signed in as (Conn.User): the user it
-// asked for, or the one OnConnect made it, or since, such as by a rename;
-// the zero User once the backend signed it out.
+// Identity is who the connection is signed in as (Conn.Identity), without
+// a copy, and whether it is: a bot.Conn's.
+func (l *Local) Identity() (apron.User, bool) { return l.c.Identity() }
+
+// User is who the connection is signed in as, a copy (Conn.Identity): the
+// user it asked for, or the one OnConnect made it, or since, such as by a
+// rename; the zero User once the backend signed it out.
 func (l *Local) User() apron.User {
 	if u, ok := l.c.Identity(); ok {
 		return cloneUser(u)
