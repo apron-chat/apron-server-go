@@ -1,6 +1,10 @@
 package core
 
-import "sync/atomic"
+import (
+	"bytes"
+	"sync"
+	"sync/atomic"
+)
 
 // DedupEntryBytes is what a kept request costs besides its key and its
 // outcome, for a Dedup's byte bound: its entry, its place in the order, and
@@ -35,10 +39,39 @@ type dedupNode[K comparable, V any] struct {
 	older, newer *dedupNode[K, V]
 }
 
+// An Operation is what a request asks for, which a duplicate of it
+// (§1.2) asks for too: its method and params. Its fingerprint, which tells
+// the same params written another way (Fingerprint), is made only when a
+// request with its id has params written otherwise, rather than for every
+// request.
+type Operation struct {
+	Method string
+	// Params are the request's, as they arrived: a copy of the Operation's
+	// own.
+	Params []byte
+
+	once        sync.Once
+	fingerprint [32]byte
+}
+
+// Same reports whether a request of method and params asks for what o
+// does: the same params, written the same way or another (Fingerprint).
+func (o *Operation) Same(method string, params []byte) bool {
+	if method != o.Method {
+		return false
+	}
+	if bytes.Equal(params, o.Params) {
+		return true
+	}
+	o.once.Do(func() { o.fingerprint = Fingerprint(o.Method, o.Params) })
+	return Fingerprint(method, params) == o.fingerprint
+}
+
 // DedupEntry is one request's outcome: Value, once Done is closed.
 type DedupEntry[V any] struct {
-	Fingerprint [32]byte
-	Value       V
+	// Operation is what the request asked for.
+	Operation Operation
+	Value     V
 	// Later is set once the request is to be answered after its handler
 	// returns, so that its duplicates wait for it without holding up
 	// their own connections.
@@ -50,10 +83,12 @@ type DedupEntry[V any] struct {
 func (e *DedupEntry[V]) Done() <-chan struct{} { return e.done }
 
 // Claim returns a new entry for key, which the caller runs and finishes,
-// or the prior entry of a request with the same key, which the caller
-// waits for (without the lock) unless its fingerprint differs. keyBytes is
-// what key costs, for MaxBytes. With Size negative, both are nil.
-func (d *Dedup[K, V]) Claim(key K, fingerprint [32]byte, keyBytes int) (entry, prior *DedupEntry[V]) {
+// with a copy of the request's method and params as its Operation, or the
+// prior entry of a request with the same key, which the caller waits for
+// (without the lock) unless it asked for another Operation (Same).
+// keyBytes is what key costs, for MaxBytes, which counts the params too.
+// With Size negative, both are nil.
+func (d *Dedup[K, V]) Claim(key K, method string, params []byte, keyBytes int) (entry, prior *DedupEntry[V]) {
 	if d.Size < 0 {
 		return nil, nil
 	}
@@ -63,7 +98,7 @@ func (d *Dedup[K, V]) Claim(key K, fingerprint [32]byte, keyBytes int) (entry, p
 	if d.entries == nil {
 		d.entries = make(map[K]*dedupNode[K, V])
 	}
-	node := &dedupNode[K, V]{key: key, entry: DedupEntry[V]{Fingerprint: fingerprint, done: make(chan struct{})}, bytes: keyBytes + DedupEntryBytes}
+	node := &dedupNode[K, V]{key: key, entry: DedupEntry[V]{Operation: Operation{Method: method, Params: bytes.Clone(params)}, done: make(chan struct{})}, bytes: keyBytes + len(params) + DedupEntryBytes}
 	d.entries[key] = node
 	node.older = d.newest
 	if d.newest != nil {

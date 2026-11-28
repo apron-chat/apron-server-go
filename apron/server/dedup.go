@@ -98,7 +98,7 @@ func (d *dedup) drop(element *list.Element) {
 	d.bytes -= u.cache.Bytes()
 }
 
-func (d *dedup) claim(userID string, key dedupKey, fingerprint [32]byte) (entry, prior *dedupEntry) {
+func (d *dedup) claim(userID string, key dedupKey, method string, params []byte) (entry, prior *dedupEntry) {
 	if d.perUser < 0 {
 		return nil, nil
 	}
@@ -115,7 +115,7 @@ func (d *dedup) claim(userID string, key dedupKey, fingerprint [32]byte) (entry,
 		d.order.MoveToBack(element)
 	}
 	d.change(element, func(cache *core.Dedup[dedupKey, dedupOutcome]) {
-		entry, prior = cache.Claim(key, fingerprint, key.bytes())
+		entry, prior = cache.Claim(key, method, params, key.bytes())
 	})
 	return entry, prior
 }

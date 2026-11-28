@@ -39,7 +39,7 @@ func BenchmarkDedupCache(b *testing.B) {
 			for b.Loop() {
 				id := ids[i%len(ids)]
 				i++
-				entry, prior := d.Claim(id, [32]byte{}, len(id))
+				entry, prior := d.Claim(id, "m", nil, len(id))
 				if prior != nil {
 					continue
 				}

@@ -17,6 +17,7 @@ func BenchmarkDedupUsers(b *testing.B) {
 		b.Run("users="+strconv.Itoa(users), func(b *testing.B) {
 			d := newDedup(64, 1024, 1<<20, 64<<20)
 			outcome := dedupOutcome{result: jsontext.Value(`{"message_id":"1700000000000"}`)}
+			params := []byte(`{"room_id":"general","body":{"text":"Hello, everyone: this is a line of chat of a usual length."}}`)
 			userIDs := make([]string, users)
 			for i := range userIDs {
 				userIDs[i] = "guest_" + strconv.Itoa(i)
@@ -27,7 +28,7 @@ func BenchmarkDedupUsers(b *testing.B) {
 					n := next.Add(1)
 					userID := userIDs[n%int64(users)]
 					key := dedupKey{id: "k3J9xQ2mZ8aB-" + strconv.FormatInt(n, 10)}
-					entry, prior := d.claim(userID, key, [32]byte{})
+					entry, prior := d.claim(userID, key, "message", params)
 					if prior != nil {
 						continue
 					}

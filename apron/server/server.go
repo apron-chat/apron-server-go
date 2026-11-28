@@ -138,8 +138,8 @@ type Config struct {
 	DedupSize  int
 	DedupUsers int
 	// DedupBytes bounds what the requests kept for each user cost, and
-	// DedupTotalBytes what those of every user cost together: their ids
-	// and encoded results, and an estimate of the memory each takes
+	// DedupTotalBytes what those of every user cost together: their ids,
+	// params, and encoded results, and an estimate of the memory each takes
 	// besides; 1 MiB and 64 MiB by default. Over DedupBytes, the user's
 	// oldest requests are forgotten first, and over DedupTotalBytes, those
 	// of the users least recently active. A result too large to fit is not

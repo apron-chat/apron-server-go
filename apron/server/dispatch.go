@@ -323,11 +323,10 @@ func (s *Server) processFrame(ctx context.Context, c *Conn, payload []byte) {
 	// original, even on another connection, and gets its outcome, brought up
 	// to date. Only a connection of the same deduplication scope has it
 	// (Conn.SetDedupScope), as no handler runs for it.
-	fingerprint := core.Fingerprint(r.Method, r.params)
 	key := dedupKey{scope: scope, id: r.ID}
-	entry, prior := s.dedup.claim(userID, key, fingerprint)
+	entry, prior := s.dedup.claim(userID, key, r.Method, r.params)
 	if prior != nil {
-		if prior.Fingerprint != fingerprint {
+		if !prior.Operation.Same(r.Method, r.params) {
 			r.fail(apron.InvalidParams(fmt.Sprintf("Request id %q was already used for another operation", r.ID)))
 			return
 		}
