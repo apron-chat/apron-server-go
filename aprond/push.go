@@ -153,18 +153,18 @@ func (s *Server) registerPush(c *client, r *server.Request, reply server.Reply[a
 // parseKeysParam reads a registration's optional keys (§4.9).
 func parseKeysParam(r *server.Request) (*webpush.Keys, *Error) {
 	d := r.Decoder()
-	raw := d.Object("keys", optional)
+	raw, ok := d.Object("keys", optional)
 	if d.Err() != nil {
 		return nil, invalidParams("keys must be an object with p256dh and auth")
 	}
-	if raw == nil {
+	if !ok {
 		return nil, nil
 	}
-	p256dh, err := parseString(*raw, "p256dh", required)
+	p256dh, err := parseString(raw, "p256dh", required)
 	if err != nil {
 		return nil, invalidParams("keys.p256dh must be a string")
 	}
-	auth, err := parseString(*raw, "auth", required)
+	auth, err := parseString(raw, "auth", required)
 	if err != nil {
 		return nil, invalidParams("keys.auth must be a string")
 	}

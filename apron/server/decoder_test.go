@@ -182,23 +182,23 @@ func TestFieldsShared(t *testing.T) {
 	wg.Wait()
 }
 
-// Object is nil for an object left out, and not for an empty one.
+// Object reports an object left out as not there, and an empty one as there.
 func TestDecoderObject(t *testing.T) {
 	f, _ := ParseFields(jsontext.Value(`{"empty":{},"full":{"a":1},"bad":[]}`))
 	d := f.Decoder()
-	if d.Object("missing", Optional) != nil {
-		t.Error("an object left out is not nil")
+	if _, ok := d.Object("missing", Optional); ok {
+		t.Error("an object left out is there")
 	}
-	if empty := d.Object("empty", Optional); empty == nil || empty.Len() != 0 {
-		t.Errorf("empty: %v", empty)
+	if empty, ok := d.Object("empty", Optional); !ok || empty.Len() != 0 {
+		t.Errorf("empty: %v, %v", empty, ok)
 	}
-	if full := d.Object("full", Optional); full == nil || full.Len() != 1 {
-		t.Errorf("full: %v", full)
+	if full, ok := d.Object("full", Optional); !ok || full.Len() != 1 {
+		t.Errorf("full: %v, %v", full, ok)
 	}
-	if d.Object("bad", Optional) != nil || d.Err() == nil {
+	if _, ok := d.Object("bad", Optional); ok || d.Err() == nil {
 		t.Error("an array is an object")
 	}
-	if f.Decoder().Object("missing", Required) != nil {
-		t.Error("a required object left out is not nil")
+	if _, ok := f.Decoder().Object("missing", Required); ok {
+		t.Error("a required object left out is there")
 	}
 }
