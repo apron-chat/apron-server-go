@@ -70,9 +70,11 @@ type HistoryResult struct {
 }
 
 // RawRecords are the records of a history result (HistoryResult.Raw)
-// encoded, each as Marshal encodes the record of its type, such as a
-// Message, so that the result is what it would be with the records
-// decoded into its arrays: in the same order, ascending log_id (§4.3.2).
+// encoded, each a JSON object that a client decodes into the record of its
+// type, such as a Message, as it would decode the one Marshal encodes: the
+// same members and values, in any order, such as a log's stored bytes or
+// the frames a server sent live. They are in the order of the arrays they
+// stand for, ascending log_id (§4.3.2).
 // The values are sent as they are, checked to be valid JSON, and are not
 // changed: a server shares them with the log it keeps them in.
 type RawRecords struct {
