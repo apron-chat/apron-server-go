@@ -317,6 +317,27 @@ address, passkeys, and an external identity in fields of their own: those
 accounts are converted when they load, and every account is still stored with
 those fields too, so an older server can read what a newer one stored.
 
+A store says which format its entries are in, with one entry (meta
+`format`, `{"version": 1}`), written when the server first writes to a new
+store, or opens one without it: every server before format versions wrote
+format 1, today's. aprond opens a store of its format, or of an older one,
+which it upgrades as it loads, a step for each version, and refuses one of
+a newer format, naming both versions: run an aprond that knows it, as an
+older one could misread what a newer one stored. Upgrades are one way;
+roll forward, not back.
+
+For contributors, the rule is that an entry's field that is absent reads
+as its initial value, the zero value, as from a store an older server
+wrote: so a field added to an entry, which an older server ignores, needs
+no new version, as a room's `retained_id` (History retention) did not. A
+change that an older server would misread, or that makes it lose what a
+newer one keeps, takes one: the format version goes up (`storeFormat`), and
+the upgrade from the previous version goes in `storeUpgrades`, tested with
+a store of the previous version's shapes, as `testdata/stored-*.jsonl` are
+of format 1. Servers from before format versions read no version, so a
+change they would misread is to be avoided as long as they may open the
+store.
+
 ## Connections and liveness
 
 The server answers the liveness ping `{"method":"ping"}` with
@@ -386,7 +407,16 @@ retention bounds it, and is off unless one of these is set:
 
 With both, a record goes once either lets it go. The server discards as it
 starts and then once a minute (a sweep), so a room holds up to a minute's
-records past its limit. Memory is then bounded by the rooms and their
+records past its limit. A sweep discards in passes of at most 5,000
+records, the oldest rooms' first, each holding the server's lock and
+writing one batch of the store by itself, and leaving the state, and the
+store, consistent on its own; while records are still due, the next pass
+comes 10 ms later, so turning retention on for a long history catches up
+without holding up requests for long (`BenchmarkRetentionCatchUp`: a
+SQLite store of 200,000 messages retained to 1,000 catches up in about 3
+s, at most 21 to 37 ms a pass, while a post takes 0.3 ms; in one pass it
+held the lock for 350 to 460 ms, and wrote 398,000 entries in one
+transaction). Memory is then bounded by the rooms and their
 limits, about 700 bytes a message times `records` for each room, or times
 the messages a room gets in `max-age-days`; the largest rooms' are the
 bound, as a quiet room keeps its few records. With `records` 10,000 a
@@ -449,12 +479,77 @@ What retention discards, and what goes with it (PROTOCOL.md §4.3.3):
   An older aprond can read a store this one discarded from, but reports
   each room's `history_log_id` as its creation.
 
+`--debug-addr` shows what retention did in expvar, under
+`aprond.retention` (`Server.RetentionStatus`): whether it is on, the floor
+of the log without `room_id`, when the latest pass ran and how long it
+held the lock, the passes, the records and messages discarded since the
+server started, and the backlog, the records due past what a pass
+discards.
+
+What retention keeps true, which tests check after every pass (the
+`invariants` helper of package aprond, run by the retention tests and a
+randomized one of posts, edits, moves, deletions, reactions, joins,
+leaves, and passes):
+
+- each room's `history_log_id` never falls, and is at most its
+  `latest_log_id`;
+- the floor of the log without `room_id` never falls, and is the latest
+  `history_log_id` of a room that discarded;
+- no room's log holds a record before its `history_log_id`, nor is one
+  served before it or the floor, and `room_list` says the same bound;
+- the server's log is the rooms' logs together, in `log_id` order;
+- every message has a snapshot, every snapshot of it is in the log, and
+  every snapshot in the log is its message's;
+- no embed outlives its message;
+- a restart from the store restores the same rooms' logs, messages, and
+  floor.
+
 Retention does not compact (§4.3.4): the server keeps every record it
 retains as it was logged. Nor does it load discarded history from the
-store on demand: what is discarded is gone. A server that wants all of its
-history on disk but only the recent part in memory would keep the rest in
-the store and read old pages from it; that needs history to read the store
-outside the server's lock, and is not done.
+store on demand: what is discarded is gone, unless an archive (below)
+keeps it.
+
+### Design: an archive below retention (not implemented)
+
+A server that wants all of its history kept, but only the recent part in
+memory and in its store, would give retention somewhere to put what it
+discards: an archive sink, a tier of history below the hot log, which
+replaces loading old history from the store on demand.
+
+- **Layout.** Chunks of the whole log, every room's records over a stretch
+  of `log_id`s, about 10,000 records each, each one complete ARCHIVE.md v1
+  file written with `apron/archive` (a header, then its records as
+  history parts, with the rooms of a move's `log_id` in an extension line
+  other readers ignore), gzipped, named by its first `log_id`
+  zero-padded so that names sort as the log does:
+  `<first log_id, 20 digits>.jsonl.gz`, in a directory or a bucket.
+- **Copy before trim.** A pass copies what it would discard into the next
+  chunk, and discards only what the sink holds: the sink's copy marker,
+  the newest `log_id` it holds a copy of, kept in the store, bounds each
+  room's discard as live writes do now. A sink that fails stalls the
+  copy, and retention keeps the hot log as it is meanwhile (it grows past
+  its limit rather than lose history), with the stall, when it began,
+  and the step that failed in `RetentionStatus` and expvar, cleared by
+  the next copy that succeeds.
+- **Reads.** A history page whose window reaches below a room's hot floor
+  reads the hot log, then the chunks below it for the rest of the
+  window, outside the server's lock (with `Reply.Reserve`), and merges
+  them by `log_id`; the hot log wins where both hold a record. A room's
+  `history_log_id` is then the archive's floor, the oldest chunk's first
+  record, and the hot floor only says what is in memory.
+- **Interface.** A tier is append (a chunk of records, idempotent by its
+  first `log_id`), scan (the chunks over a stretch, for a page), read
+  (one record), floor (what it holds from), and trim (drop chunks below a
+  floor); a link between the hot log and the sink holds the copy marker
+  and the stall. Its invariants are the cloudflare server's I1 to I6:
+  floors ordered and never falling, copy before trim, nothing served
+  below a floor, every record at or above the published floor held by
+  some tier, steps idempotent, and the published floor the deepest
+  tier's.
+- **What to leave out** of that design until it is needed: a middle tier
+  (their D1), budgets for maintenance work, a single server-wide floor
+  (rooms keep their own here), and the queue of rewrites delivered down
+  the tiers, which only purging or renaming a user's records needs.
 
 ## Identity and profiles
 

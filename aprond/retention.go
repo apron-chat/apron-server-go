@@ -10,7 +10,8 @@ import (
 // History retention (§4.3.3, Config.HistoryRecords and HistoryMaxAge;
 // SERVER.md, "History retention"). The server keeps every record unless
 // either is set. With them, a sweep every retentionInterval, and one as
-// the server starts, discards the start of each room's log: the records
+// the server starts, discards the start of each room's log, in passes of
+// at most passBudget records while more are due: the records
 // past the newest HistoryRecords, and those older than HistoryMaxAge, by
 // their log_id, the time they were logged. It never discards a room's
 // latest record, nor a record of a message whose embeds are not finished,
