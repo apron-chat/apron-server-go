@@ -72,65 +72,65 @@ func messages(t *testing.T, c *client.Conn, room string) []apron.Message {
 	return state.Messages(room)
 }
 
-func TestHelp(t *testing.T) {
+// The command line's usage, info, and sign-in, on one server: --help for
+// each command, info signed out and in, and the errors that say how to
+// sign in. Without a token or a guest name, a command that needs a
+// sign-in says how; a scheme the server does not offer is named.
+func TestCommandLine(t *testing.T) {
 	server := aprondtest.Serve(t, aprond.DefaultConfig())
-	_, errOut, err := aproncli(t, server, "", "--help")
-	if !errors.Is(err, flag.ErrHelp) || !strings.Contains(errOut, "Usage: aproncli [flags] COMMAND") || !strings.Contains(errOut, "export") {
-		t.Fatalf("--help: %v\n%s", err, errOut)
-	}
-	for _, cmd := range commands {
-		_, errOut, _ := aproncli(t, server, "", cmd.name, "--help")
-		if !strings.HasPrefix(errOut, "Usage: aproncli "+cmd.name+" ") {
-			t.Errorf("%s --help:\n%s", cmd.name, errOut)
+	t.Run("help", func(t *testing.T) {
+		_, errOut, err := aproncli(t, server, "", "--help")
+		if !errors.Is(err, flag.ErrHelp) || !strings.Contains(errOut, "Usage: aproncli [flags] COMMAND") || !strings.Contains(errOut, "export") {
+			t.Fatalf("--help: %v\n%s", err, errOut)
 		}
-	}
-	if _, _, err := aproncli(t, server, "", "nonsense"); !errors.Is(err, errUsage) {
-		t.Fatalf("an unknown command: %v", err)
-	}
-	if _, _, err := aproncli(t, server, "", "join"); !errors.Is(err, errUsage) {
-		t.Fatalf("join without a room: %v", err)
-	}
-}
-
-func TestInfo(t *testing.T) {
-	server := aprondtest.Serve(t, aprond.DefaultConfig())
-	out := ok(t, server, "info")
-	if !strings.Contains(out, "you           not signed in") || !strings.Contains(out, "history") || !strings.Contains(out, "auth          ") {
-		t.Fatalf("info signed out:\n%s", out)
-	}
-	out = ok(t, server, "--guest", "Ada", "info")
-	if !strings.Contains(out, "you           Ada (@guest_") {
-		t.Fatalf("info as a guest:\n%s", out)
-	}
-	var got struct {
-		Server apron.ServerInfo `json:"server"`
-		You    apron.User       `json:"you"`
-	}
-	if err := json.Unmarshal([]byte(ok(t, server, "--guest", "Ada", "info", "--json")), &got); err != nil || got.Server.Apron != apron.Version || got.You.Name != "Ada" {
-		t.Fatalf("info --json: %+v, %v", got, err)
-	}
-}
-
-// Without a token or a guest name, a command that needs a sign-in says
-// how; a scheme the server does not offer is named.
-func TestSignIn(t *testing.T) {
-	server := aprondtest.Serve(t, aprond.DefaultConfig())
-	if _, _, err := aproncli(t, server, "", "message", "hi"); err == nil || !strings.Contains(err.Error(), "--guest NAME") {
-		t.Fatalf("no sign-in: %v", err)
-	}
-	if _, _, err := aproncli(t, server, "", "--token", "nonsense", "message", "hi"); err == nil || !strings.Contains(err.Error(), "token") {
-		t.Fatalf("a bad token: %v", err)
-	}
-	config := aprond.DefaultConfig()
-	config.DisableGuests, config.EmailSender = true, &aprondtest.Mailbox{}
-	closed := aprondtest.Serve(t, config)
-	_, _, err := aproncli(t, closed, "", "--guest", "Ada", "message", "hi")
-	if err == nil || !strings.Contains(err.Error(), "does not offer sign-in with guest") {
-		t.Fatalf("no guests: %v", err)
-	}
-	if _, _, err := aproncli(t, server, "", "--url", "", "info"); err == nil || !strings.Contains(err.Error(), "--url") {
-		t.Fatalf("no url: %v", err)
-	}
+		for _, cmd := range commands {
+			_, errOut, _ := aproncli(t, server, "", cmd.name, "--help")
+			if !strings.HasPrefix(errOut, "Usage: aproncli "+cmd.name+" ") {
+				t.Errorf("%s --help:\n%s", cmd.name, errOut)
+			}
+		}
+		if _, _, err := aproncli(t, server, "", "nonsense"); !errors.Is(err, errUsage) {
+			t.Fatalf("an unknown command: %v", err)
+		}
+		if _, _, err := aproncli(t, server, "", "join"); !errors.Is(err, errUsage) {
+			t.Fatalf("join without a room: %v", err)
+		}
+	})
+	t.Run("info", func(t *testing.T) {
+		out := ok(t, server, "info")
+		if !strings.Contains(out, "you           not signed in") || !strings.Contains(out, "history") || !strings.Contains(out, "auth          ") {
+			t.Fatalf("info signed out:\n%s", out)
+		}
+		out = ok(t, server, "--guest", "Ada", "info")
+		if !strings.Contains(out, "you           Ada (@guest_") {
+			t.Fatalf("info as a guest:\n%s", out)
+		}
+		var got struct {
+			Server apron.ServerInfo `json:"server"`
+			You    apron.User       `json:"you"`
+		}
+		if err := json.Unmarshal([]byte(ok(t, server, "--guest", "Ada", "info", "--json")), &got); err != nil || got.Server.Apron != apron.Version || got.You.Name != "Ada" {
+			t.Fatalf("info --json: %+v, %v", got, err)
+		}
+	})
+	t.Run("sign-in", func(t *testing.T) {
+		if _, _, err := aproncli(t, server, "", "message", "hi"); err == nil || !strings.Contains(err.Error(), "--guest NAME") {
+			t.Fatalf("no sign-in: %v", err)
+		}
+		if _, _, err := aproncli(t, server, "", "--token", "nonsense", "message", "hi"); err == nil || !strings.Contains(err.Error(), "token") {
+			t.Fatalf("a bad token: %v", err)
+		}
+		config := aprond.DefaultConfig()
+		config.DisableGuests, config.EmailSender = true, &aprondtest.Mailbox{}
+		closed := aprondtest.Serve(t, config)
+		_, _, err := aproncli(t, closed, "", "--guest", "Ada", "message", "hi")
+		if err == nil || !strings.Contains(err.Error(), "does not offer sign-in with guest") {
+			t.Fatalf("no guests: %v", err)
+		}
+		if _, _, err := aproncli(t, server, "", "--url", "", "info"); err == nil || !strings.Contains(err.Error(), "--url") {
+			t.Fatalf("no url: %v", err)
+		}
+	})
 }
 
 func TestMessage(t *testing.T) {
