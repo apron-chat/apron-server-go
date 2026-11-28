@@ -548,6 +548,11 @@ func (s *Server) forgetConn(c *Conn) {
 // the change the frame describes, so that every connection gets such
 // frames in the order of the changes. to is called in the caller's
 // goroutine, so it may read what that lock guards.
+//
+// Broadcast walks every open connection, and calls to on each: a frame
+// for a room's members, among many connections, costs every connection.
+// A backend that keeps each room's members sends to them with SendAll,
+// which walks only those.
 func (s *Server) Broadcast(frame apron.Frame, to func(*Conn) bool) {
 	var w waker
 	defer w.wake()

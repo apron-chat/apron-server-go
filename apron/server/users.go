@@ -88,6 +88,12 @@ type UserChange struct {
 // backend holds the lock of the change, so that every connection gets a
 // user's changes in the order they were made; shares is called in the
 // caller's goroutine, so it may read what that lock guards.
+//
+// PublishUser walks every open connection, and calls shares on each: a
+// change of a user in a room of few, among many connections, costs every
+// connection. A backend that keeps each room's members, and each user's
+// connections, tells the change to them with PublishUserTo, which walks
+// only those.
 func (s *Server) PublishUser(change UserChange, shares func(*Conn) bool) bool {
 	p, changed := s.publication(change)
 	if !changed {
