@@ -309,8 +309,12 @@ func (c *Conn) release(discard bool) {
 func (c *Conn) Close() { c.rt.Stop() }
 
 // CloseWithError sends an error about the connection as a whole, after the
-// frames already queued, then closes it (§1.1).
+// frames already queued, then closes it (§1.1). A nil e is sent as an
+// internal error, as the frame must carry one.
 func (c *Conn) CloseWithError(e *apron.Error) {
+	if e == nil {
+		e = internalError()
+	}
 	payload, err := core.Marshal(&core.ReplyFrame{Error: e})
 	if err != nil {
 		return

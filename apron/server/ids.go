@@ -77,6 +77,7 @@ func (c *Clock) Restore(last apron.LogID) {
 // them, and their log_ids follow that order.
 type MessageIDs[K comparable] struct {
 	// Clock issues the log_ids; share it with the server's other records.
+	// A nil Clock is replaced with one of MessageIDs' own at the first ID.
 	Clock *Clock
 	// Size bounds how many keys are kept; 4096 when zero.
 	Size int
@@ -96,6 +97,9 @@ func (ids *MessageIDs[K]) ID(key K, at time.Time) apron.LogID {
 	}
 	if ids.byKey == nil {
 		ids.byKey, ids.byID, ids.order = make(map[K]apron.LogID), make(map[apron.LogID]K), list.New()
+	}
+	if ids.Clock == nil {
+		ids.Clock = new(Clock)
 	}
 	id := ids.Clock.At(at)
 	ids.byKey[key], ids.byID[id] = id, key
