@@ -24,6 +24,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -1052,5 +1053,60 @@ func BenchmarkExtensionMethod(b *testing.B) {
 	b.ReportAllocs()
 	for b.Loop() {
 		c.call(b, "calc.add", params)
+	}
+}
+
+// BenchmarkLogRetention posts messages, pipelined, to a server on SQLite
+// that retains each room's newest records, or every record, sweeping
+// after every thousand, and reports the heap the server keeps
+// (heapKB) and the size of its store (storeKB) after them. Run it with a
+// fixed count, such as -benchtime=20000x.
+func BenchmarkLogRetention(b *testing.B) {
+	for _, records := range []int{0, 1000} {
+		b.Run(fmt.Sprintf("records=%d", records), func(b *testing.B) {
+			path := filepath.Join(b.TempDir(), "bench.db")
+			st, err := store.OpenSQLite(path)
+			if err != nil {
+				b.Fatal(err)
+			}
+			bs := newBenchServer(b, Config{Store: st, OutgoingQueue: 4096, HistoryRecords: records})
+			poster := bs.guest()
+			params := map[string]any{"body": map[string]any{"text": text200}}
+			var before, after runtime.MemStats
+			runtime.GC()
+			runtime.ReadMemStats(&before)
+			b.ReportAllocs()
+			b.ResetTimer()
+			for done := 0; done < b.N; {
+				batch := min(100, b.N-done)
+				ids := make([]string, batch)
+				for i := range ids {
+					ids[i] = poster.send("message", params)
+				}
+				for _, id := range ids {
+					poster.wait(b, id)
+				}
+				done += batch
+				if done%1000 == 0 {
+					bs.s.mu.Lock()
+					bs.s.retainLocked(time.Now())
+					bs.s.unlock()
+				}
+			}
+			b.StopTimer()
+			if err := bs.s.Sync(bs.ctx); err != nil {
+				b.Fatal(err)
+			}
+			runtime.GC()
+			runtime.ReadMemStats(&after)
+			b.ReportMetric(float64(int64(after.HeapAlloc)-int64(before.HeapAlloc))/1024, "heapKB")
+			size := int64(0)
+			for _, suffix := range []string{"", "-wal"} {
+				if info, err := os.Stat(path + suffix); err == nil {
+					size += info.Size()
+				}
+			}
+			b.ReportMetric(float64(size)/1024, "storeKB")
+		})
 	}
 }
