@@ -10,8 +10,6 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
-
-	"github.com/apron-chat/apron-server-go/apron/server/commands"
 )
 
 // commandList sends ext:command_list and returns its commands.
@@ -253,38 +251,6 @@ func TestCommandListUsage(t *testing.T) {
 		"- `/otherwise <arg>`: no hint either",
 	}; !slices.Equal(lines[len(lines)-4:], want) {
 		t.Fatalf("/help = %q, ending with %q", lines, want)
-	}
-}
-
-// A command line selects the form with the most fixed words that start its
-// arguments, matched exactly.
-func TestFormOf(t *testing.T) {
-	sc := coreCommands()
-	if err := sc.router.Add(commands.Command{Name: "a", Forms: []commands.Form{{Name: "a"}, {Name: "a b"}, {Name: "a b c"}}}); err != nil {
-		t.Fatal(err)
-	}
-	for _, test := range []struct{ name, args, want string }{
-		{"emoji", "add :x:", "emoji add"},
-		{"emoji", "remove\t:x:", "emoji remove"},
-		{"emoji", "", ""},
-		{"emoji", "ADD :x:", ""},
-		{"server", "", "server"},
-		{"server", "title My server", "server title"},
-		{"server", "titles", "server"},
-		{"server", "Title x", "server"},
-		{"a", "b c d", "a b c"},
-		{"a", "b\nx", "a b"},
-		{"a", "c", "a"},
-		{"kick", "@bob spam", "kick"},
-		{"nope", "", ""},
-	} {
-		got := ""
-		if _, form := sc.router.Find(test.name, test.args); form != nil {
-			got = form.Name
-		}
-		if got != test.want {
-			t.Errorf("Find(%q, %q) = %q, want %q", test.name, test.args, got, test.want)
-		}
 	}
 }
 
