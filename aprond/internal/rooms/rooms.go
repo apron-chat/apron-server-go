@@ -42,6 +42,8 @@ type Member interface {
 	MemberID() string
 	// MemberScope is the rooms the user is limited to, nil for none.
 	MemberScope() *Scope
+	// MemberFrom is the user as records carry it: user_id and name.
+	MemberFrom() roomlog.Author
 }
 
 // Room is a room's current record, its log, and its members. Every room,
@@ -393,6 +395,9 @@ type Table[U Member, M MessageHolder] struct {
 	// Entries last took them.
 	dirty         map[string]struct{}
 	dirtyMessages map[string]*Message
+	// forgottenMessages are the messages Forget let go of since Entries
+	// last took them, whose entries are deleted.
+	forgottenMessages []string
 	// later are the large rooms changed since Entries last took them only
 	// in what their entry may lag behind (touchLater), since laterSince.
 	// laterMessages are the messages with many reactions changed since
@@ -617,6 +622,9 @@ type stored struct {
 	Members     []string                `json:"members"`
 	Creator     string                  `json:"creator,omitzero"`
 	Reads       map[string]storedCursor `json:"reads,omitzero"`
+	// Retained is where the room's retained history starts once a part of
+	// its log was discarded (roomlog.Timeline.Discard).
+	Retained int64 `json:"retained_id,omitzero"`
 }
 
 type storedCursor struct {
@@ -637,6 +645,7 @@ func Entry[U Member](r *Room[U]) store.Entry {
 		Private:     r.private,
 		Active:      r.active,
 	}
+	s.Retained = r.log.Retained()
 	if r.parent != nil {
 		s.Parent = r.parent.id
 	}
@@ -698,10 +707,14 @@ func (t *Table[U, M]) entries(withLater bool) []store.Entry {
 			t.laterSince = time.Time{}
 		}
 	}
-	if len(t.dirty) == 0 && len(t.dirtyMessages) == 0 {
+	if len(t.dirty) == 0 && len(t.dirtyMessages) == 0 && len(t.forgottenMessages) == 0 {
 		return nil
 	}
-	entries := make([]store.Entry, 0, len(t.dirty)+len(t.dirtyMessages))
+	entries := make([]store.Entry, 0, len(t.dirty)+len(t.dirtyMessages)+len(t.forgottenMessages))
+	for _, id := range t.forgottenMessages {
+		entries = append(entries, store.Entry{Kind: MessageEntryKind, ID: id})
+	}
+	t.forgottenMessages = t.forgottenMessages[:0]
 	for id := range t.dirty {
 		if r := t.rooms[id]; r != nil {
 			entries = append(entries, Entry(r))
@@ -731,7 +744,7 @@ func (t *Table[U, M]) Restore(entries map[string]jsontext.Value) error {
 		}
 		r := &Room[U]{
 			id: id, record: s.Record, recordLogID: s.RecordLogID,
-			log:     roomlog.NewTimeline(id, s.CreatedID, s.LatestID),
+			log:     restoredTimeline(id, s),
 			creator: s.Creator, private: s.Private, active: s.Active,
 			members: make(map[string]U), reads: make(map[string]Cursor, len(s.Reads)),
 		}
@@ -796,4 +809,83 @@ func (t *Table[U, M]) RestoreMembers(member func(r *Room[U], id string) (U, bool
 	}
 	t.restoring = nil
 	return nil
+}
+
+// restoredTimeline is the log of a room as its entry keeps it, without
+// its records.
+func restoredTimeline(id string, s stored) *roomlog.Timeline {
+	t := roomlog.NewTimeline(id, s.CreatedID, s.LatestID)
+	t.RestoreRetained(s.Retained)
+	return t
+}
+
+// Retain discards the records of r's log before the log_id before, but
+// never its latest record (§4.3.3): r's history_log_id moves to before,
+// or to its latest record. When the part discarded holds memberships, one
+// membership record of every current member, each joined, is logged after
+// it, as it must be before such a part goes. It returns the records
+// discarded, which Forget takes out of the log once no room holds them.
+func (t *Table[U, M]) Retain(r *Room[U], before int64) []*roomlog.Record {
+	before = min(before, r.log.Latest())
+	discarded := r.log.Discard(before)
+	if len(discarded) == 0 {
+		return nil
+	}
+	t.Touch(r)
+	if len(r.members) > 0 && slices.ContainsFunc(discarded, func(record *roomlog.Record) bool { return record.Kind == roomlog.KindMembership }) {
+		ids := slices.Sorted(maps.Keys(r.members))
+		users := make([]roomlog.Author, len(ids))
+		for i, id := range ids {
+			users[i] = r.members[id].MemberFrom()
+		}
+		t.Append(roomlog.NewMembers(t.log.NextID(), r.id, users), r)
+	}
+	return discarded
+}
+
+// Forget takes the records discarded from rooms' logs (Retain) that no
+// room holds any more out of the server's log and the store, and with
+// them the messages none of whose snapshots is held any more, which it
+// returns: the server lets go of what it keeps of them.
+func (t *Table[U, M]) Forget(discarded []*roomlog.Record) []M {
+	gone := make(map[*roomlog.Record]bool)
+	for _, record := range discarded {
+		held := false
+		for _, id := range record.Rooms {
+			if r := t.rooms[id]; r != nil && r.log.HistoryID() <= record.ID {
+				held = true
+				break
+			}
+		}
+		if !held {
+			gone[record] = true
+		}
+	}
+	t.log.Forget(gone)
+	var forgotten []M
+	for record := range gone {
+		if record.Kind != roomlog.KindMessage {
+			continue
+		}
+		holder, ok := t.messages[record.Message]
+		if !ok {
+			continue
+		}
+		m := holder.Kept()
+		left := slices.DeleteFunc(slices.Clone(m.records), func(r *roomlog.Record) bool { return gone[r] })
+		switch {
+		case len(left) == 0:
+			// The message keeps its snapshots, for what the server lets
+			// go of with it, such as its uploads.
+			delete(t.messages, m.id)
+			delete(t.dirtyMessages, m.id)
+			delete(t.laterMessages, m.id)
+			t.forgottenMessages = append(t.forgottenMessages, m.id)
+			forgotten = append(forgotten, holder)
+		case len(left) != len(m.records):
+			m.records = left
+			t.dirtyMessages[m.id] = m
+		}
+	}
+	return forgotten
 }

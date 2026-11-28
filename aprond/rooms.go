@@ -30,6 +30,9 @@ func (u *userState) MemberID() string { return u.id }
 // MemberScope is the rooms u is limited to, nil for none (rooms.Member).
 func (u *userState) MemberScope() *rooms.Scope { return u.Scope }
 
+// MemberFrom is u as records carry it (rooms.Member).
+func (u *userState) MemberFrom() roomlog.Author { return u.from() }
+
 // privateRooms counts the top-level private rooms u is in, which
 // Config.MaxPrivateRooms bounds. Their threads are not counted: only their
 // members can be added to those.

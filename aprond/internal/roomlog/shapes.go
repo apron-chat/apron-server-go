@@ -49,6 +49,17 @@ type Member struct {
 }
 
 // NewMembership is the record of user joining or leaving room.
+// NewMembers is the membership record of every current member of room,
+// each joined (§4.3.3), which goes before a part of its log that holds
+// memberships is discarded.
+func NewMembers(id int64, room string, users []Author) *Record {
+	members := make([]Member, len(users))
+	for i, user := range users {
+		members[i] = Member{User: user, Joined: true}
+	}
+	return New(id, KindMembership, Membership{LogID: FormatID(id), RoomID: room, Members: members})
+}
+
 func NewMembership(id int64, room string, user Author, joined bool) *Record {
 	return New(id, KindMembership, Membership{
 		LogID: FormatID(id), RoomID: room, Members: []Member{{User: user, Joined: joined}},

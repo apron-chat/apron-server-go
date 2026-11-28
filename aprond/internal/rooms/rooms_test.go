@@ -17,9 +17,10 @@ type user struct {
 	scope *Scope
 }
 
-func (u *user) MemberID() string     { return u.id }
-func (u *user) MemberScope() *Scope  { return u.scope }
-func (u *user) from() roomlog.Author { return roomlog.Author{UserID: u.id} }
+func (u *user) MemberID() string           { return u.id }
+func (u *user) MemberScope() *Scope        { return u.scope }
+func (u *user) from() roomlog.Author       { return roomlog.Author{UserID: u.id} }
+func (u *user) MemberFrom() roomlog.Author { return u.from() }
 
 func newTable() *Table[*user, *Message] { return NewTable[*user](roomlog.NewLog(), (*Message).Kept) }
 
