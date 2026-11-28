@@ -2,6 +2,10 @@ package apron
 
 import (
 	"encoding/json/jsontext"
+	"encoding/json/v2"
+	"errors"
+
+	"github.com/apron-chat/apron-server-go/apron/internal/core"
 )
 
 // Room is a room record (§4.2): its server and client fields, as it is
@@ -36,6 +40,130 @@ type RoomView struct {
 	// field out, and an empty slice sends [].
 	Members     []CurrentUser `json:"members,omitzero"`
 	MemberCount int           `json:"member_count,omitzero"`
+	// Raw, if set, is Room encoded, as Marshal encodes a Room, which is
+	// sent in its place, as it is, once checked to be valid JSON, before
+	// the delivery fields: for a server that keeps its room records
+	// encoded, which then sends them as they are rather than decode each
+	// to have it encoded again. A RoomView decoded has none.
+	Raw jsontext.Value `json:"-"`
+}
+
+// roomViewJSON is a RoomView as encoding/json encodes one, without its
+// MarshalJSONTo.
+type roomViewJSON RoomView
+
+// MarshalJSONTo writes the view: its Room, or Raw in its place, then its
+// delivery fields.
+func (v *RoomView) MarshalJSONTo(enc *jsontext.Encoder) error {
+	if v.Raw == nil {
+		return json.MarshalEncode(enc, (*roomViewJSON)(v))
+	}
+	if v.Raw.Kind() != '{' {
+		return errors.New("apron: a RoomView's Raw is not a JSON object")
+	}
+	if err := enc.WriteToken(jsontext.BeginObject); err != nil {
+		return err
+	}
+	// The room's fields go first, and the members a Room has no field
+	// for last, after the delivery fields, as a RoomView encodes its
+	// Room's Unknown.
+	var unknown []core.Field
+	var err error
+	ok := core.DecodeInPlace(v.Raw, func(dec *jsontext.Decoder) bool {
+		if _, err = dec.ReadToken(); err != nil {
+			return false
+		}
+		for dec.PeekKind() != '}' {
+			var name, value jsontext.Value
+			if name, err = dec.ReadValue(); err != nil {
+				return false
+			}
+			if value, err = dec.ReadValue(); err != nil {
+				return false
+			}
+			value = core.Part(dec, v.Raw, value)
+			if !isRoomField(name) {
+				var unquoted string
+				if err = json.Unmarshal(name, &unquoted); err != nil {
+					return false
+				}
+				unknown = append(unknown, core.Field{Name: unquoted, Value: value})
+				continue
+			}
+			if err = enc.WriteValue(name); err != nil {
+				return false
+			}
+			if err = enc.WriteValue(value); err != nil {
+				return false
+			}
+		}
+		return true
+	})
+	if !ok {
+		if err == nil {
+			err = errors.New("apron: a RoomView's Raw is not a JSON object")
+		}
+		return err
+	}
+	if v.LatestLogID != 0 {
+		if err := enc.WriteToken(jsontext.String("latest_log_id")); err != nil {
+			return err
+		}
+		if err := v.LatestLogID.MarshalJSONTo(enc); err != nil {
+			return err
+		}
+	}
+	if v.HistoryLogID != nil {
+		if err := enc.WriteToken(jsontext.String("history_log_id")); err != nil {
+			return err
+		}
+		if err := v.HistoryLogID.MarshalJSONTo(enc); err != nil {
+			return err
+		}
+	}
+	if v.Members != nil {
+		if err := enc.WriteToken(jsontext.String("members")); err != nil {
+			return err
+		}
+		if err := enc.WriteToken(jsontext.BeginArray); err != nil {
+			return err
+		}
+		for i := range v.Members {
+			if err := v.Members[i].MarshalJSONTo(enc); err != nil {
+				return err
+			}
+		}
+		if err := enc.WriteToken(jsontext.EndArray); err != nil {
+			return err
+		}
+	}
+	if v.MemberCount != 0 {
+		if err := enc.WriteToken(jsontext.String("member_count")); err != nil {
+			return err
+		}
+		if err := enc.WriteToken(jsontext.Int(int64(v.MemberCount))); err != nil {
+			return err
+		}
+	}
+	for _, m := range unknown {
+		if err := enc.WriteToken(jsontext.String(m.Name)); err != nil {
+			return err
+		}
+		if err := enc.WriteValue(m.Value); err != nil {
+			return err
+		}
+	}
+	return enc.WriteToken(jsontext.EndObject)
+}
+
+// isRoomField reports whether a member's name, quoted as it arrived, is
+// one of a Room's fields; a name with escapes counts as another member's.
+func isRoomField(quoted jsontext.Value) bool {
+	switch string(quoted) {
+	case `"room_id"`, `"log_id"`, `"prev_log_id"`, `"parent_room_id"`, `"private"`, `"title"`, `"description"`, `"ext"`:
+		return true
+	}
+	return false
 }
 
 // RoomRef names a room, as in room_update's left.

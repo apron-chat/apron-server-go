@@ -1,6 +1,8 @@
 package apron_test
 
 import (
+	"encoding/json/jsontext"
+	"encoding/json/v2"
 	"strconv"
 	"testing"
 
@@ -27,7 +29,9 @@ func roomList(members bool) apron.RoomListResult {
 
 // BenchmarkRoomListEncode encodes a room_list result of 1,000 rooms,
 // without members (rooms) and with 10 each (members), as a server answers
-// room_list.
+// room_list: each room typed (typed), each decoded first from the record
+// the server keeps encoded (decoded), as a server that keeps its rooms so
+// does without RoomView.Raw, or each sent as kept (raw, RoomView.Raw).
 func BenchmarkRoomListEncode(b *testing.B) {
 	for _, members := range []bool{false, true} {
 		name := "rooms"
@@ -35,12 +39,36 @@ func BenchmarkRoomListEncode(b *testing.B) {
 			name = "members"
 		}
 		r := roomList(members)
-		b.Run(name, func(b *testing.B) {
-			for b.Loop() {
-				if _, err := apron.Marshal(&r); err != nil {
-					b.Fatal(err)
+		raws := make([]jsontext.Value, len(r.Joined))
+		for i, v := range r.Joined {
+			raws[i], _ = apron.Marshal(v.Room)
+		}
+		for _, how := range []string{"typed", "decoded", "raw"} {
+			b.Run(name+"/"+how, func(b *testing.B) {
+				for b.Loop() {
+					result := r
+					switch how {
+					case "decoded":
+						result.Joined = make([]apron.RoomView, len(r.Joined))
+						for i, v := range r.Joined {
+							v.Room = apron.Room{}
+							if err := json.Unmarshal(raws[i], &v.Room); err != nil {
+								b.Fatal(err)
+							}
+							result.Joined[i] = v
+						}
+					case "raw":
+						result.Joined = make([]apron.RoomView, len(r.Joined))
+						for i, v := range r.Joined {
+							v.Room, v.Raw = apron.Room{}, raws[i]
+							result.Joined[i] = v
+						}
+					}
+					if _, err := apron.Marshal(&result); err != nil {
+						b.Fatal(err)
+					}
 				}
-			}
-		})
+			})
+		}
 	}
 }

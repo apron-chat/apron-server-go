@@ -71,3 +71,29 @@ func TestCurrentUserMarshal(t *testing.T) {
 		t.Error("cleared user_id")
 	}
 }
+
+// A room view with its room raw is the view with it typed.
+func TestRoomViewRaw(t *testing.T) {
+	zero, h := LogID(0), LogID(1700000000000)
+	room := Room{RoomID: "general", LogID: 5, Title: "Général", Ext: Ext{"a": jsontext.Value(`1`)}, Unknown: jsontext.Value(`{"x":true}`)}
+	for _, v := range []RoomView{
+		{Room: room},
+		{Room: room, LatestLogID: 9, HistoryLogID: &h, MemberCount: 2, Members: []CurrentUser{{User: User{UserID: "a"}, Cleared: []string{"status"}}}},
+		{Room: room, HistoryLogID: &zero, Members: []CurrentUser{}},
+	} {
+		want, err := Marshal(RoomListResult{Joined: []RoomView{v}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		raw, _ := Marshal(v.Room)
+		rawView := v
+		rawView.Room, rawView.Raw = Room{}, raw
+		got, err := Marshal(RoomListResult{Joined: []RoomView{rawView}})
+		if err != nil || string(got) != string(want) {
+			t.Errorf("raw:\n got %s, %v\nwant %s", got, err, want)
+		}
+	}
+	if _, err := Marshal(&RoomView{Raw: jsontext.Value(`[]`)}); err == nil {
+		t.Error("a Raw that is no object")
+	}
+}
