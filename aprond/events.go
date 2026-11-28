@@ -105,7 +105,8 @@ func (r *Registrar) OnEventFrom(after int64, fn func(ctx context.Context, e Even
 // Follow calls fn with each record logged, in order, on one goroutine of
 // its own, and keeps the log_id of the last one it handled in the store, so
 // that it sees every event at least once across restarts, as a bridge
-// needs. It starts from the latest record the first time the extension
+// needs: every event history retention has not discarded before it was
+// handled (Config.HistoryRecords, HistoryMaxAge), which is logged. It starts from the latest record the first time the extension
 // follows the log. Errors are retried as with OnEventFrom. An extension
 // follows the log at most once.
 func (r *Registrar) Follow(fn func(ctx context.Context, e Event) error) {
@@ -155,9 +156,17 @@ func (r *Registrar) follow(what string, after int64, deliver func(ctx context.Co
 	position := s.followers.add(fmt.Sprintf("extension %s's %s", r.name, what), after)
 	h.Go(func(ctx context.Context) {
 		cursor := after
+		warned := false
 		for {
 			s.mu.RLock()
 			records, changed := s.log.After(cursor, eventBatch)
+			// A follower that keeps its place across restarts is told once
+			// when history retention discarded records it had not handled
+			// (Config.HistoryRecords, HistoryMaxAge).
+			if discarded := s.log.Discarded(); handled != nil && !warned && cursor > 0 && cursor < discarded {
+				warned = true
+				h.logger.Warn("history retention discarded events before this follower handled them", "after", cursor, "through", discarded)
+			}
 			batch := make([]Event, 0, len(records))
 			for _, r := range records {
 				batch = append(batch, eventOf(r))

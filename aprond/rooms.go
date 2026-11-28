@@ -94,7 +94,7 @@ func (s *Server) cursorFramesLocked(u *userState, r *roomState) []apron.Frame {
 // sent as it is (RoomView.Raw); it is never changed, so the view may be
 // encoded after s.mu is released.
 func (s *Server) roomViewOfLocked(r *roomState) apron.RoomView {
-	created := apron.LogID(r.Log().Created())
+	created := apron.LogID(r.Log().HistoryID())
 	return apron.RoomView{Raw: r.EncodedRecord(encodeRoom), LatestLogID: apron.LogID(r.Log().Latest()), HistoryLogID: &created}
 }
 
@@ -677,8 +677,8 @@ func (s *Server) leaveRoom(c *client, p apron.RoomLeaveParams, reply server.Repl
 // receive, as one log, so a client catches up on all its rooms with one
 // request. limit counts records of every kind; the slice is partitioned into
 // rooms, messages, reactions, and membership, each omitted when empty. The
-// server retains all records and does not compact, and it discards no
-// prefix, so it never appends a full-member record.
+// server does not compact; it retains every record unless history
+// retention discards the start of rooms' logs (retention.go).
 //
 // A move snapshot is in both rooms' logs and names the source room in
 // prev_room_id, so a window bounded to one log_id (after == before) in the
@@ -726,18 +726,24 @@ func (s *Server) history(c *client, p apron.HistoryParams, reply server.Reply[ap
 		logs[i] = r.Log()
 		latest = max(latest, r.Log().Latest())
 	}
+	// With room_id, the room's log starts at its history_log_id: its
+	// creation, or past what retention discarded of it. Without it, the
+	// log of the joined rooms starts where the server's does, whoever is in
+	// which room, so the lower bound never moves back (§4.3.3): at the
+	// default room's creation, or past what retention discarded of any room,
+	// and the records of rooms that kept more are left out; for a user in
+	// no rooms it is empty, ending just before.
+	created := max(s.rooms.Get(defaultRoomID).Log().Created(), s.logFloor)
+	var floor int64
+	if hasRoom {
+		created = rooms[0].Log().HistoryID()
+	} else if s.logFloor > 0 {
+		floor = created
+	}
 	matching, more := roomlog.Page(logs, roomlog.Query{
 		After: after, HasAfter: hasAfter, Before: before, HasBefore: hasBefore,
-		Limit: limit, MaxBytes: maxHistoryReplyBytes,
+		Limit: limit, MaxBytes: maxHistoryReplyBytes, Floor: floor,
 	})
-	// With room_id, the room's log starts at its creation. Without it, the
-	// log of the joined rooms starts where the server's does, at the default
-	// room's creation, whoever is in which room, so the lower bound never
-	// moves (§4.3.3); for a user in no rooms it is empty, ending just before.
-	created := s.rooms.Get(defaultRoomID).Log().Created()
-	if hasRoom {
-		created = rooms[0].Log().Created()
-	}
 	if len(rooms) == 0 {
 		latest = created - 1
 	}

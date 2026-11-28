@@ -866,6 +866,22 @@ func (h *Host) Visible(u User, roomID string) bool {
 	return r != nil && user != nil && r.VisibleTo(user)
 }
 
+// HistoryLogID is the room's history_log_id (§4.3.3): where its retained
+// history starts, its creation unless history retention discarded the
+// start of it (Config.HistoryRecords, HistoryMaxAge), and false when there
+// is no such room. An extension that keeps messages of its own, such as an
+// index of them, lets go of those of a room before it, which history no
+// longer has: a message whose LogID, its latest snapshot's, is before it.
+func (h *Host) HistoryLogID(roomID string) (int64, bool) {
+	h.s.mu.RLock()
+	defer h.s.mu.RUnlock()
+	r := h.s.rooms.Get(roomID)
+	if r == nil {
+		return 0, false
+	}
+	return r.Log().HistoryID(), true
+}
+
 // Public reports whether anyone may see the room, without an account: it
 // is not restricted, and the server lets guests in (Config.DisableGuests,
 // Registrar.RestrictSignIn), so that whoever is not signed in could see it

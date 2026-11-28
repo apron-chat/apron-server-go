@@ -206,6 +206,12 @@ type Server struct {
 	storedMeta     storedMeta
 	roomEntryTimer *time.Timer
 	closingStore   bool
+	// flushAll makes the next batch write every entry that lags behind
+	// (flushLocked), as one that discards history does (retention.go);
+	// logFloor is where the log of several rooms starts once history was
+	// discarded, 0 before.
+	flushAll bool
+	logFloor int64
 	// pushes are the users' push registrations (push.go).
 	pushes   *push.Table
 	closed   bool
@@ -400,6 +406,9 @@ func Open(config Config) (*Server, error) {
 		s.mu.Unlock()
 		return fail(fmt.Errorf("restoring the stored state: %w", err))
 	}
+	// What retention discarded before the restart (retention.go).
+	s.logFloor = s.logFloorLocked()
+	s.log.RestoreDiscarded(s.logFloor - 1)
 	if s.rooms.Get(defaultRoomID) == nil {
 		// The seeded default room has a logged creation record like any
 		// other room, so its history_log_id is never null.
@@ -408,6 +417,12 @@ func Open(config Config) (*Server, error) {
 	s.files.RemoveStale(files)
 	s.unlock()
 	go s.sweepPushes()
+	if s.retaining() {
+		s.mu.Lock()
+		s.retainLocked(time.Now())
+		s.unlock()
+		go s.sweepHistory()
+	}
 	err = s.initExtensions(config.Extensions)
 	if err == nil {
 		s.handler, err = s.buildHandler(s.routes)

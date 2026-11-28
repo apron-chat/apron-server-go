@@ -84,6 +84,10 @@ type Options struct {
 		AppendMaxKB    int    `long:"append-max-kb" default:"64" description:"How much text an append embed adds to its message, in KiB: its first part (at most 256, what a request may carry)"`
 		TerminalViewer string `long:"terminal-viewer" default:"https://terminal.apron.chat/" description:"A page that shows a terminal's live text, where a browser that opens a terminal's url goes (empty serves browsers the plain text)"`
 	} `group:"Live text" namespace:"live"`
+	History struct {
+		Records    int `long:"records" description:"Records each room's history keeps, its newest: older ones are discarded, and history_log_id moves past them (PROTOCOL.md §4.3.3). 0 keeps every record"`
+		MaxAgeDays int `long:"max-age-days" description:"Days each room's history keeps its records for: older ones are discarded, and history_log_id moves past them (§4.3.3). 0 keeps every record"`
+	} `group:"History retention" namespace:"history"`
 
 	Emoji struct {
 		MaxKB        int64 `long:"max-kb" default:"256" description:"Maximum size of one custom emoji image, in KiB"`
@@ -284,6 +288,11 @@ func serverConfig(options Options) (aprond.Config, error) {
 	config.MaxUploadBytes = options.Upload.MaxMB << 20
 	config.MaxMessageUploadBytes = options.Upload.MaxMessageMB << 20
 	config.MaxUploadStorageBytes = options.Upload.MaxStorageMB << 20
+	config.HistoryRecords = options.History.Records
+	config.HistoryMaxAge = time.Duration(options.History.MaxAgeDays) * 24 * time.Hour
+	if config.HistoryRecords < 0 || config.HistoryMaxAge < 0 {
+		return config, errors.New("--history.records and --history.max-age-days are 0 or more")
+	}
 	config.LiveTextMaxDuration = time.Duration(options.Live.MaxMinutes) * time.Minute
 	config.LiveTextMaxBytes = options.Live.MaxMB << 20
 	config.TerminalKeepBytes = options.Live.TerminalKeepKB << 10

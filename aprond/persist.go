@@ -111,7 +111,8 @@ func (s *Server) flushLocked() {
 	// changes with each message for a moment (rooms.EntryDelay), unless a
 	// fence waits for every change so far, or the store is closing.
 	var roomEntries []store.Entry
-	if s.store.Fenced() || s.closingStore {
+	if s.store.Fenced() || s.closingStore || s.flushAll {
+		s.flushAll = false
 		roomEntries = s.rooms.Entries()
 	} else {
 		roomEntries = s.rooms.EntriesDue(time.Now())

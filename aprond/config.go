@@ -74,6 +74,14 @@ type Config struct {
 	// HistoryPageSize is the records a history page holds when its request
 	// names no limit (§4.3).
 	HistoryPageSize int
+	// HistoryRecords and HistoryMaxAge retain a room's history (§4.3.3):
+	// its newest HistoryRecords records, and those of the last
+	// HistoryMaxAge; the older ones are discarded, from memory and the
+	// store, and the room's history_log_id moves past them. 0 keeps every
+	// record, which is the default. SERVER.md, "History retention", says
+	// what goes with them.
+	HistoryRecords int
+	HistoryMaxAge  time.Duration
 	// PingInterval is how often the server pings each connection, and the
 	// interval it asks clients to ping at (§1). A connection that does not
 	// answer within PingTimeout, or a frame that takes longer than
