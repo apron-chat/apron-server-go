@@ -435,7 +435,7 @@ func (b *Bot) Post(ctx context.Context, p apron.MessageParams) (apron.MessageRes
 func (b *Bot) Reply(ctx context.Context, to apron.Message, text string) (apron.MessageResult, error) {
 	p := apron.MessageParams{RoomID: to.RoomID, Body: apron.Body{Text: text}}
 	if to.MessageID != 0 {
-		p.ReplyTo = &apron.MessageRef{MessageID: to.MessageID}
+		p.ReplyTo = apron.MessageRef{MessageID: to.MessageID}
 	}
 	return b.Post(ctx, p)
 }

@@ -174,12 +174,12 @@ func (c *Client) Post(roomID, text string, options ...aprond.PostOption) (messag
 // edit is the params of a message request that saves an existing message
 // (§4.4).
 type edit struct {
-	RoomID    string            `json:"room_id"`
-	MessageID string            `json:"message_id"`
-	Deleted   bool              `json:"deleted,omitzero"`
-	Body      *apron.Body       `json:"body,omitempty"`
-	ReplyTo   *apron.MessageRef `json:"reply_to,omitempty"`
-	Ext       apron.Ext         `json:"ext,omitempty"`
+	RoomID    string           `json:"room_id"`
+	MessageID string           `json:"message_id"`
+	Deleted   bool             `json:"deleted,omitzero"`
+	Body      *apron.Body      `json:"body,omitempty"`
+	ReplyTo   apron.MessageRef `json:"reply_to,omitzero"`
+	Ext       apron.Ext        `json:"ext,omitempty"`
 }
 
 // Edit saves the message messageID in a room with text as its new body

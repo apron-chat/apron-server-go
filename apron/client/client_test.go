@@ -645,7 +645,7 @@ func TestBot(t *testing.T) {
 		t.Fatal(err)
 	}
 	reply := next(t, got, func(m apron.Message) bool { return m.From.UserID == echo.UserID() })
-	if reply.Body.Text != "You said: echo: hi" || reply.ReplyTo == nil || reply.ReplyTo.MessageID != sent.MessageID {
+	if reply.Body.Text != "You said: echo: hi" || reply.ReplyTo.MessageID == 0 || reply.ReplyTo.MessageID != sent.MessageID {
 		t.Fatalf("reply %+v", reply)
 	}
 }

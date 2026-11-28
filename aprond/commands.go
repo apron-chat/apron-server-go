@@ -59,7 +59,7 @@ func clientOf(wc *server.Conn) (*client, *Error) {
 
 // replyIDOf is the message_id a command replies to, or "".
 func replyIDOf(p apron.CommandParams) string {
-	if p.ReplyTo == nil {
+	if p.ReplyTo.MessageID == 0 {
 		return ""
 	}
 	return p.ReplyTo.MessageID.String()

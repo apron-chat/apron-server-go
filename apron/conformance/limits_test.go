@@ -90,7 +90,7 @@ func (l *limited) Message(_ context.Context, c *server.Conn, p apron.MessagePara
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if p.ReplyTo != nil && !slices.ContainsFunc(l.log, func(r apron.Record) bool { return r.LogID == p.ReplyTo.MessageID }) {
+	if p.ReplyTo.MessageID != 0 && !slices.ContainsFunc(l.log, func(r apron.Record) bool { return r.LogID == p.ReplyTo.MessageID }) {
 		return apron.InvalidParams("reply_to names no message")
 	}
 	id := l.clock.Next()

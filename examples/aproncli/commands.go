@@ -86,7 +86,7 @@ func message(ctx context.Context, c *cli, args []string) error {
 		if err != nil || id == 0 {
 			return fmt.Errorf("--reply-to is a message_id, not %q", *replyTo)
 		}
-		p.ReplyTo = &apron.MessageRef{MessageID: id}
+		p.ReplyTo = apron.MessageRef{MessageID: id}
 	}
 	conn, err := c.connect(ctx, true)
 	if err != nil {

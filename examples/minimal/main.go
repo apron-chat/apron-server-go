@@ -127,7 +127,7 @@ func (c *Chat) Message(_ context.Context, conn *server.Conn, p apron.MessagePara
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if p.ReplyTo != nil && !c.messages[p.ReplyTo.MessageID] {
+	if p.ReplyTo.MessageID != 0 && !c.messages[p.ReplyTo.MessageID] {
 		return apron.InvalidParams("reply_to names no message")
 	}
 	id := c.clock.Next()

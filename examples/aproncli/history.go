@@ -187,7 +187,7 @@ func (p printer) print(m apron.Message) error {
 		name = m.From.UserID
 	}
 	line.WriteString(name)
-	if m.ReplyTo != nil {
+	if m.ReplyTo.MessageID != 0 {
 		fmt.Fprintf(&line, " (reply to %s)", m.ReplyTo.MessageID)
 	}
 	line.WriteString(": ")

@@ -465,7 +465,7 @@ func (r replyTo) applyPost(p *postRequest) {
 		p.replyErr = InvalidParams("reply_to.message_id must be a positive decimal string")
 		return
 	}
-	p.params.ReplyTo = &apron.MessageRef{MessageID: id}
+	p.params.ReplyTo = apron.MessageRef{MessageID: id}
 }
 
 func (r replyTo) applyStream(p *postRequest) { r.applyPost(p) }
@@ -582,7 +582,7 @@ func MessageOf(m apron.Message) Message {
 	if m.MessageID != 0 {
 		message.ID = m.MessageID.String()
 	}
-	if m.ReplyTo != nil {
+	if m.ReplyTo.MessageID != 0 {
 		message.ReplyTo = m.ReplyTo.MessageID.String()
 	}
 	if body := m.Body; !body.IsZero() {
@@ -604,7 +604,7 @@ func (m Message) Apron() apron.Message {
 	}
 	message.MessageID, _ = apron.ParseLogID(m.ID)
 	if id, err := apron.ParseLogID(m.ReplyTo); err == nil && id != 0 {
-		message.ReplyTo = &apron.MessageRef{MessageID: id}
+		message.ReplyTo = apron.MessageRef{MessageID: id}
 	}
 	switch {
 	case m.body != nil:

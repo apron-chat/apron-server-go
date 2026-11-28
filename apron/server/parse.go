@@ -26,6 +26,14 @@ type messageFields struct {
 	ext       apron.Ext
 }
 
+// reply is the message the request replies to, or the zero MessageRef.
+func (m messageFields) reply() apron.MessageRef {
+	if m.replyTo == nil {
+		return apron.MessageRef{}
+	}
+	return *m.replyTo
+}
+
 // edit reports whether the request saves an existing message.
 func (m messageFields) edit() bool { return m.messageID != 0 || m.deleted }
 
@@ -76,7 +84,7 @@ func parseCommand(r *Request) (apron.CommandParams, error) {
 	if m.body == nil {
 		return apron.CommandParams{}, apron.InvalidParams("A command needs a body")
 	}
-	return apron.CommandParams{RoomID: m.roomID, Body: *m.body, ReplyTo: m.replyTo, Ext: m.ext}, nil
+	return apron.CommandParams{RoomID: m.roomID, Body: *m.body, ReplyTo: m.reply(), Ext: m.ext}, nil
 }
 
 // parseAuth reads auth's params (§3.2): scheme, a non-empty string, and the

@@ -52,7 +52,7 @@ func TestChat(t *testing.T) {
 		t.Fatalf("another room: %v", err)
 	}
 	toNothing := text("x")
-	toNothing.ReplyTo = &apron.MessageRef{MessageID: 999}
+	toNothing.ReplyTo = apron.MessageRef{MessageID: 999}
 	if _, err := ada.Post(ctx, toNothing); apron.CodeOf(err) != apron.CodeInvalidParams {
 		t.Fatalf("a reply to nothing: %v", err)
 	}
@@ -118,7 +118,7 @@ func TestEcho(t *testing.T) {
 		}
 		for _, c := range []*aprontest.Client{ada, bob} {
 			m, err := aprontest.Expect(ctx, c, func(m apron.Message) bool { return m.From.UserID == "echo" })
-			if err != nil || m.Body.Text != "Ada said: "+body.Text || m.ReplyTo == nil || m.ReplyTo.MessageID != asked.MessageID {
+			if err != nil || m.Body.Text != "Ada said: "+body.Text || m.ReplyTo.MessageID == 0 || m.ReplyTo.MessageID != asked.MessageID {
 				t.Fatalf("the bot's reply %+v: %v", m, err)
 			}
 		}

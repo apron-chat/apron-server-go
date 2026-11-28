@@ -105,12 +105,14 @@ type Message struct {
 	From      User   `json:"from"`
 	// Body is the zero Body for a message without one, such as a
 	// tombstone (§4.4), which is left out.
-	Body       Body        `json:"body,omitzero"`
-	ReplyTo    *MessageRef `json:"reply_to,omitempty"`
-	PrevLogID  LogID       `json:"prev_log_id,omitzero"`
-	PrevRoomID string      `json:"prev_room_id,omitempty"`
-	Deleted    bool        `json:"deleted,omitzero"`
-	Ext        Ext         `json:"ext,omitempty"`
+	Body Body `json:"body,omitzero"`
+	// ReplyTo is the message this one replies to, the zero MessageRef for
+	// none, which is left out.
+	ReplyTo    MessageRef `json:"reply_to,omitzero"`
+	PrevLogID  LogID      `json:"prev_log_id,omitzero"`
+	PrevRoomID string     `json:"prev_room_id,omitempty"`
+	Deleted    bool       `json:"deleted,omitzero"`
+	Ext        Ext        `json:"ext,omitempty"`
 	// Unknown holds the members this package has no field for, as they
 	// arrived, and is sent after the others.
 	Unknown jsontext.Value `json:",embed"`
@@ -169,8 +171,9 @@ type MessageParams struct {
 	RoomID string `json:"room_id,omitempty"`
 	// Body is the message's, which a request has: its Unknown holds the
 	// fields this package does not know, for a backend that keeps them.
-	Body    Body        `json:"body,omitzero"`
-	ReplyTo *MessageRef `json:"reply_to,omitempty"`
+	Body Body `json:"body,omitzero"`
+	// ReplyTo is the message this one replies to, or the zero MessageRef.
+	ReplyTo MessageRef `json:"reply_to,omitzero"`
 	// Ext is the message's ext (§4.13); nil when left out.
 	Ext Ext `json:"ext,omitempty"`
 }
@@ -202,9 +205,9 @@ type CommandParams struct {
 	// Router.Before.
 	RoomID string `json:"room_id,omitempty"`
 	// Body is the command's, whose text is the command line.
-	Body    Body        `json:"body,omitzero"`
-	ReplyTo *MessageRef `json:"reply_to,omitempty"`
-	Ext     Ext         `json:"ext,omitempty"`
+	Body    Body       `json:"body,omitzero"`
+	ReplyTo MessageRef `json:"reply_to,omitzero"`
+	Ext     Ext        `json:"ext,omitempty"`
 }
 
 // CommandResult is the result of a command (§4.1): empty, or the write

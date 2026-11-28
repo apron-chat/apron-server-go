@@ -526,7 +526,7 @@ func (s *Server) message(messages MessageHandler, edits EditHandler) func(contex
 		if messages == nil {
 			return apron.Unsupported("This server takes no new messages")
 		}
-		return messages.Message(ctx, c, apron.MessageParams{RoomID: m.roomID, Body: *m.body, ReplyTo: m.replyTo, Ext: m.ext}, reply)
+		return messages.Message(ctx, c, apron.MessageParams{RoomID: m.roomID, Body: *m.body, ReplyTo: m.reply(), Ext: m.ext}, reply)
 	}
 }
 

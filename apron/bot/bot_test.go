@@ -153,7 +153,7 @@ func TestMentions(t *testing.T) {
 			t.Fatal(err)
 		}
 		reply, err := aprontest.Expect(ctx, client, func(m apron.Message) bool { return m.From.UserID == "echo" })
-		if err != nil || reply.Body.Text != "You said: @echo hello" || reply.ReplyTo == nil || reply.ReplyTo.MessageID != asked.MessageID {
+		if err != nil || reply.Body.Text != "You said: @echo hello" || reply.ReplyTo.MessageID == 0 || reply.ReplyTo.MessageID != asked.MessageID {
 			t.Fatalf("reply %+v: %v", reply, err)
 		}
 		// The bot was told of the message that did not mention it, not of
@@ -388,7 +388,7 @@ func TestUserFromBackend(t *testing.T) {
 		client, asked := say(t, c, "@b1", "b1")
 		if _, err := client.Expect(timeout(t), func(f aprontest.Frame) bool {
 			var m apron.Message
-			return f.Method == "message" && f.Decode(&m) == nil && m.From.UserID == "b1" && m.ReplyTo != nil && m.ReplyTo.MessageID == asked
+			return f.Method == "message" && f.Decode(&m) == nil && m.From.UserID == "b1" && m.ReplyTo.MessageID == asked
 		}); err != nil {
 			t.Fatal(err)
 		}

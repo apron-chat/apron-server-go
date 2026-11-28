@@ -158,7 +158,7 @@ func TestMessage(t *testing.T) {
 	} {
 		m := got[i]
 		replyTo := ""
-		if m.ReplyTo != nil {
+		if m.ReplyTo.MessageID != 0 {
 			replyTo = m.ReplyTo.MessageID.String()
 		}
 		if m.MessageID.String() != want.id || m.Body.Text != want.text || m.Body.Format != want.format || replyTo != want.replyTo || m.From.UserID != "ada" {

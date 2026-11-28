@@ -78,7 +78,7 @@ func TestMessageOfAndApron(t *testing.T) {
 		MessageID: 7, LogID: 9, RoomID: "general", PrevLogID: 8, PrevRoomID: "random",
 		From:    apron.User{UserID: "ada", Name: "Ada"},
 		Body:    apron.Body{Text: "yes", Mentions: []string{"bob"}, Unknown: jsontext.Value(`{"x":1}`)},
-		ReplyTo: &apron.MessageRef{MessageID: 3},
+		ReplyTo: apron.MessageRef{MessageID: 3},
 		Ext:     apron.Ext{"irc": jsontext.Value(`{"nick":"ada_"}`)},
 	}
 	m := MessageOf(reply)

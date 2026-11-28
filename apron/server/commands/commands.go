@@ -619,7 +619,7 @@ func missing(f *Form, p apron.CommandParams) error {
 		var absent bool
 		switch field {
 		case FieldReplyTo:
-			absent = p.ReplyTo == nil
+			absent = p.ReplyTo.MessageID == 0
 		case FieldMentions:
 			absent = len(p.Body.Mentions) == 0
 		case FieldEmbeds:
