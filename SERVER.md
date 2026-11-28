@@ -288,7 +288,8 @@ backend only keeps entries and applies batches:
   mode `0600` because it holds passkey credentials and session hashes.
 - `memory` keeps them in the process; a new server starts empty.
 
-What survives a restart: rooms and threads with their complete logs, message
+What survives a restart: rooms and threads with their complete logs (or
+what [history retention](#history-retention) keeps of them), message
 state and reactions, read cursors, accounts (passkey, email, and external
 sign-in users) with their identities, passkey credentials, the roles
 their external sign-in granted, and the apps they allowed on the external
@@ -337,17 +338,18 @@ a client uses its creation `log_id` as its `room_id`. Room records and message
 snapshots after the first for their key carry `prev_log_id`: an edit names the
 previous snapshot and a room update the previous room record. A move snapshot
 also carries `prev_room_id`, the source room, whose log holds the earlier
-snapshots. Reaction sets and memberships carry neither. Nothing is compacted
-or discarded, so each room's `history_log_id` is the `log_id` of its creation
-record, `latest_log_id` is the newest record in that room's log, memberships
-included, and the server never needs the full-member record the spec asks for
-before discarding a prefix.
+snapshots. Reaction sets and memberships carry neither. Nothing is compacted,
+and unless [history retention](#history-retention) is on, nothing is
+discarded: each room's `history_log_id` is then the `log_id` of its creation
+record. `latest_log_id` is the newest record in that room's log, memberships
+included.
 
 `history` returns a window of one room's log, or without `room_id` of the
 log of every room the user joined, private rooms included, as one log: its
 `latest_log_id` is the newest of those rooms', and its `history_log_id` is
-where the server's log starts (the default room's creation) whichever rooms
-the user is in, so it never moves; a user in no rooms gets an empty log with
+where the server's log starts (the default room's creation, or, with
+history retention, past what it discarded) whichever rooms the user is in,
+so it never moves back; a user in no rooms gets an empty log with
 a null `history_log_id`, ending just before that. The rooms' windows merge by
 `log_id` until the page is full, and a move snapshot in two of them comes
 once. One request without `room_id` catches a client up on what its rooms
@@ -367,6 +369,92 @@ message's edits back through `prev_log_id`, asking the room in `prev_room_id`
 after a move. Any user may page the history of any room they can see,
 joined or not: every room but [private](#rooms-threads-and-membership) rooms
 they are not in.
+
+## History retention
+
+By default the server keeps every record, in memory and in the store, so a
+server's memory grows with its history: about 700 bytes for each message
+of 200 bytes of text, its record and what the server keeps of the message
+(`BenchmarkLogRetained`), and as much again in a SQLite store. History
+retention bounds it, and is off unless one of these is set:
+
+- `--history.records <n>` (TOML `[history] records`, `Config.HistoryRecords`)
+  keeps each room's newest `n` records, of every kind;
+- `--history.max-age-days <d>` (`[history] max-age-days`,
+  `Config.HistoryMaxAge`) keeps each room's records of the last `d` days, by
+  their `log_id`, the time they were logged.
+
+With both, a record goes once either lets it go. The server discards as it
+starts and then once a minute (a sweep), so a room holds up to a minute's
+records past its limit. Memory is then bounded by the rooms and their
+limits, about 700 bytes a message times `records` for each room, or times
+the messages a room gets in `max-age-days`; the largest rooms' are the
+bound, as a quiet room keeps its few records. With `records` 10,000 a
+server of 100 rooms keeps at most about 700 MB of history, and a SQLite
+store about as much.
+
+What retention discards, and what goes with it (PROTOCOL.md §4.3.3):
+
+- **The start of each room's log.** A sweep discards a room's records
+  before a `log_id`, and the room's `history_log_id` moves to that
+  `log_id`, which `room_list`, `room_update`, and `history` report: the
+  effective lower bound never moves back, and a client past it starts
+  again from it (§4.3.5). A room's latest record is never discarded, so
+  `history_log_id` is at most `latest_log_id` + 1, and an idle room older
+  than `max-age-days` keeps nothing but goes on listing its room record in
+  `room_list`, which comes from the room's state, not its log.
+- **Memberships.** When the part discarded holds memberships, the room's
+  log gets one membership record of every current member, each `joined:
+  true`, newer than what goes, so that a client that replays the room from
+  its `history_log_id` learns who is in it (§4.3.3). It is not sent live:
+  it changes nothing a live client knows, and in a room of thousands it
+  would be as large as the room for every member; a client that recovers
+  from `latest_log_id` pages to it.
+- **The log without `room_id`.** `history` without `room_id` pages the log
+  of the user's rooms, which starts at the latest `history_log_id` of the
+  rooms that discarded anything (the server's log), so that from there on
+  every one of the rooms' records is there; records of rooms that kept
+  more are left out of it, but are in their own rooms' history.
+- **Messages.** A record that no room's log holds any more, a move
+  snapshot only once both rooms let it go, is taken out of the server's
+  log and deleted from the store. A message none of whose snapshots is
+  left goes with them: its state, its store entry, and its reactions; its
+  uploads are released, as a deletion releases them, and their files are
+  removed. A message keeps its snapshots that are left, the current one
+  among them, and history no longer has its older ones, so walking its
+  edits back through `prev_log_id` stops at the first discarded one.
+- **What is being written.** The records of a message whose embeds are not
+  finished, an upload not yet written or live text still being written,
+  and everything after them in their rooms, are kept until they are.
+- **References.** A message that replied to a discarded one keeps its
+  `reply_to`, which names a message history no longer has; a new reply to
+  it is `invalid_params`, as to a message that never was, and it wakes
+  nobody (§4.9). A read cursor that names a discarded message keeps its
+  `log_id`, from which unread counts still count, and the unread counts
+  kept for push are counted again from what is left. Reaction records go
+  with their part of the log; a message's reactions stay with it.
+- **Extensions.** Followers of the log (`OnEvent`, `OnEventFrom`, `Follow`)
+  get the records that are left: one that starts from 0, such as
+  `examples/search`, rebuilds from them, and a `Follow` behind what was
+  discarded logs a warning once and goes on from what is left.
+  `Host.HistoryLogID` is a room's `history_log_id`, from which an extension
+  that keeps messages of its own lets go of older ones, as
+  `examples/search` does with its index, once a minute and as it searches.
+- **The store.** Discarded records' and messages' entries are deleted in
+  the sweep's batch, with the rooms' new `history_log_id`s (kept in each
+  room's entry as `retained_id`) and every entry that lagged behind its
+  records (see Storage): a restart restores what was retained, and nothing
+  else. SQLite reuses the space of deleted rows for new ones, but does not
+  shrink the file: `sqlite3 aprond.db VACUUM` does, with the server stopped.
+  An older aprond can read a store this one discarded from, but reports
+  each room's `history_log_id` as its creation.
+
+Retention does not compact (§4.3.4): the server keeps every record it
+retains as it was logged. Nor does it load discarded history from the
+store on demand: what is discarded is gone. A server that wants all of its
+history on disk but only the recent part in memory would keep the rest in
+the store and read old pages from it; that needs history to read the store
+outside the server's lock, and is not done.
 
 ## Identity and profiles
 
