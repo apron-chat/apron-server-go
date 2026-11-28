@@ -121,7 +121,7 @@ func (s *Server) registerPush(c *client, r *server.Request, reply server.Reply[a
 		token = ""
 	}
 	wake := defaultWake
-	if raw, has := r.Fields()["wake"]; has {
+	if raw, has := r.Fields().Get("wake"); has {
 		var names []string
 		if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) || json.Unmarshal(raw, &names) != nil || names == nil {
 			return invalidParams("wake must be an array of scope names")
@@ -157,7 +157,7 @@ func parseKeysParam(r *server.Request) (*webpush.Keys, *Error) {
 	if d.Err() != nil {
 		return nil, invalidParams("keys must be an object with p256dh and auth")
 	}
-	if raw == nil {
+	if !d.Has("keys") {
 		return nil, nil
 	}
 	p256dh, err := parseString(raw, "p256dh", required)

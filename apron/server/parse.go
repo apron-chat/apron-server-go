@@ -47,7 +47,7 @@ func parseMessageFields(r *Request) (messageFields, error) {
 	}
 	// ParseBody refuses a body that is no object as the Decoder's Object
 	// does, without decoding it twice.
-	if raw, ok := r.fields["body"]; ok && d.Err() == nil {
+	if raw, ok := r.fields.Get("body"); ok && d.Err() == nil {
 		body, err := apron.ParseBody(raw)
 		d.Fail(err)
 		m.body = body
@@ -63,7 +63,7 @@ func (m messageFields) editParams() apron.EditParams {
 // message_id and deleted, and with a body.
 func parseCommand(r *Request) (apron.CommandParams, error) {
 	for _, name := range []string{"message_id", "deleted"} {
-		if _, ok := r.fields[name]; ok {
+		if _, ok := r.fields.Get(name); ok {
 			return apron.CommandParams{}, apron.InvalidParams("A command has no " + name + "; send it as a message instead")
 		}
 	}
@@ -183,7 +183,7 @@ func parseStatus(r *Request) (apron.StatusParams, error) {
 	d := r.Decoder()
 	p := apron.StatusParams{RoomID: d.ID("room_id", Optional)}
 	scoped := d.Has("room_id")
-	if raw, ok := r.fields["idle"]; ok && d.Err() == nil {
+	if raw, ok := r.fields.Get("idle"); ok && d.Err() == nil {
 		var seconds int64
 		switch raw := bytes.TrimSpace(raw); {
 		case bytes.Equal(raw, []byte("false")):
@@ -194,7 +194,7 @@ func parseStatus(r *Request) (apron.StatusParams, error) {
 			d.Fail(apron.InvalidParams("idle must be false or a non-negative whole number of seconds"))
 		}
 	}
-	if raw, ok := r.fields["mute"]; ok && d.Err() == nil {
+	if raw, ok := r.fields.Get("mute"); ok && d.Err() == nil {
 		var mute apron.Mute
 		if mute.UnmarshalJSON(raw) != nil {
 			d.Fail(apron.InvalidParams("mute must be true, false, or a positive whole number of seconds"))
@@ -213,7 +213,7 @@ func parseStatus(r *Request) (apron.StatusParams, error) {
 func parseReact(r *Request) (apron.ReactParams, error) {
 	d := r.Decoder()
 	p := apron.ReactParams{MessageID: d.MessageID("message_id", Required)}
-	raw, ok := r.fields["emojis"]
+	raw, ok := r.fields.Get("emojis")
 	switch {
 	case d.Err() != nil:
 	case !ok:
@@ -233,7 +233,7 @@ func parseReact(r *Request) (apron.ReactParams, error) {
 func parseActivity(r *Request) (apron.ActivityParams, error) {
 	d := r.Decoder()
 	p := apron.ActivityParams{RoomID: d.ID("room_id", Optional)}
-	if raw, ok := r.fields["typing"]; ok && d.Err() == nil {
+	if raw, ok := r.fields.Get("typing"); ok && d.Err() == nil {
 		var typing int
 		if core.IsNull(raw) || json.Unmarshal(raw, &typing) != nil || typing < 0 {
 			d.Fail(apron.InvalidParams("typing must be a non-negative integer"))

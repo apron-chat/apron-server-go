@@ -14,8 +14,7 @@ import (
 // greater one as error/invalid_params, and a Clock never issues one.
 func TestLogIDBound(t *testing.T) {
 	const atMax, past = `"9007199254740991"`, `"9007199254740992"`
-	f := Fields{"max": jsontext.Value(atMax), "past": jsontext.Value(past), "huge": jsontext.Value(`"18446744073709551616"`),
-		"ref": jsontext.Value(`{"message_id":` + past + `}`)}
+	f, _ := ParseFields(jsontext.Value(`{"max":` + atMax + `,"past":` + past + `,"huge":"18446744073709551616","ref":{"message_id":` + past + `}}`))
 	for _, read := range []func(string) (apron.LogID, bool, error){f.logIDParam, f.messageIDParam} {
 		if id, _, err := read("max"); id != apron.MaxLogID || err != nil {
 			t.Errorf("max: %v, %v", id, err)
@@ -30,7 +29,8 @@ func TestLogIDBound(t *testing.T) {
 		t.Errorf("ref: %v", err)
 	}
 	for _, ref := range []string{`null`, `{}`, `{"message_id":"0"}`, `{"message_id":"x"}`, `{"message_id":5}`} {
-		if _, _, err := (Fields{"ref": jsontext.Value(ref)}).messageRefParam("ref"); err == nil || err.(*apron.Error).Message != "ref.message_id must be a positive decimal string" {
+		fields, _ := ParseFields(jsontext.Value(`{"ref":` + ref + `}`))
+		if _, _, err := fields.messageRefParam("ref"); err == nil || err.(*apron.Error).Message != "ref.message_id must be a positive decimal string" {
 			t.Errorf("ref %s: %v", ref, err)
 		}
 	}

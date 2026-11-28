@@ -29,7 +29,8 @@ func TestParamErrors(t *testing.T) {
 	if err := read(server.Fields{}, "x"); err != nil {
 		t.Fatalf("an absent field: %v", err)
 	}
-	err := read(server.Fields{"x": []byte("1")}, "x")
+	one, _ := server.ParseFields([]byte(`{"x":1}`))
+	err := read(one, "x")
 	if apron.CodeOf(err) != apron.CodeInvalidParams {
 		t.Fatalf("a number for a string: %v", err)
 	}
@@ -188,7 +189,7 @@ func TestLocalNotify(t *testing.T) {
 	s := wired(&backend{}, server.Config{})
 	got := make(chan string, 1)
 	s.HandleNotification("activity", server.NotificationHandler{Capability: "activity", Serve: func(_ context.Context, _ *server.Conn, r *server.Request) {
-		v := r.Fields()["typing"]
+		v, _ := r.Fields().Get("typing")
 		got <- string(v)
 	}})
 	l, err := s.Local(server.LocalOptions{User: apron.User{UserID: "bot"}})

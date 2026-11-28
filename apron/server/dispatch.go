@@ -250,10 +250,7 @@ func (s *Server) afterReply(ctx context.Context, method string, err error) {
 // error/internal_error when the frame is a request; the connection goes on.
 func (s *Server) processFrame(ctx context.Context, c *Conn, payload []byte) {
 	parsed, failed := core.ParseRequest(payload)
-	fields := Fields(parsed.Fields)
-	if fields == nil {
-		fields = Fields{}
-	}
+	fields := Fields{parsed.Fields}
 	r := &Request{Method: parsed.Method, ID: parsed.ID, params: parsed.Params, fields: fields, c: c, notification: !parsed.HasID, hasID: parsed.HasID}
 	defer s.recoverFrame(r)
 	if failed != nil {

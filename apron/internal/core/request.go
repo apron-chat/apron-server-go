@@ -8,6 +8,7 @@ import (
 	"errors"
 	"io"
 	"sync"
+	"unsafe"
 )
 
 // Error codes of a frame that is not a valid request (§1.1).
@@ -36,9 +37,9 @@ type Request struct {
 	ID    string
 	HasID bool
 	// Params are the params as they arrived, {} when absent; Fields are
-	// the same decoded, never nil once parsed.
+	// their members, in the order they arrived.
 	Params jsontext.Value
-	Fields map[string]jsontext.Value
+	Fields []Field
 }
 
 // NotificationOnly are the methods clients send only as notifications
@@ -90,13 +91,12 @@ func parseAny(payload []byte) (Request, *ParseError) {
 	}
 
 	req.Params = jsontext.Value("{}")
-	req.Fields = make(map[string]jsontext.Value)
 	if raw, ok := object["params"]; ok {
-		if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) || json.Unmarshal(raw, &req.Fields) != nil || req.Fields == nil {
-			req.Fields = nil
+		fields, isObject := Members(raw)
+		if !isObject {
 			return req, &ParseError{codeInvalidParams, "Params must be an object"}
 		}
-		req.Params = raw
+		req.Params, req.Fields = raw, fields
 	}
 	return req, nil
 }
@@ -222,38 +222,92 @@ func parseWellFormed(payload []byte) (req Request, ok bool) {
 		req.HasID = true
 	}
 	if req.Params == nil {
-		req.Params, req.Fields = jsontext.Value("{}"), make(map[string]jsontext.Value)
+		req.Params = jsontext.Value("{}")
 	}
 	return req, true
 }
 
 // members reads the object dec is at, a part of payload, and returns it,
-// and its members by name, each a part of payload too.
-func members(dec *jsontext.Decoder, payload []byte) (object jsontext.Value, fields map[string]jsontext.Value, ok bool) {
+// and its members, each a part of payload too.
+func members(dec *jsontext.Decoder, payload []byte) (object jsontext.Value, fields []Field, ok bool) {
 	if _, err := dec.ReadToken(); err != nil {
 		return nil, nil, false
 	}
 	start := dec.InputOffset() - 1
-	fields = make(map[string]jsontext.Value)
-	for dec.PeekKind() != '}' {
-		tok, err := dec.ReadToken()
-		if err != nil {
-			return nil, nil, false
-		}
-		name := tok.String()
-		value, err := dec.ReadValue()
-		if err != nil {
-			return nil, nil, false
-		}
-		// The decoder reads payload in place, so the value is part of it.
-		end := dec.InputOffset()
-		fields[name] = jsontext.Value(payload[end-int64(len(value)) : end : end])
-	}
-	if _, err := dec.ReadToken(); err != nil {
+	if fields, ok = readMembers(dec, payload); !ok {
 		return nil, nil, false
 	}
 	end := dec.InputOffset()
 	return jsontext.Value(payload[start:end:end]), fields, true
+}
+
+// A Field is a member of a JSON object, such as a request's params: its
+// name, unquoted, and its value, as it arrived.
+type Field struct {
+	Name  string
+	Value jsontext.Value
+}
+
+// Members returns the members of a JSON object, as parts of it, its names
+// too where they have no escapes: the object is kept as it is, and its
+// members read with it. It reports false for a value that is not an
+// object, null included, or not valid JSON.
+func Members(object jsontext.Value) ([]Field, bool) {
+	if object.Kind() != '{' {
+		return nil, false
+	}
+	var fields []Field
+	ok := DecodeInPlace(object, func(dec *jsontext.Decoder) bool {
+		if _, err := dec.ReadToken(); err != nil {
+			return false
+		}
+		var ok bool
+		if fields, ok = readMembers(dec, object); !ok {
+			return false
+		}
+		_, err := dec.ReadToken()
+		return err == io.EOF
+	})
+	return fields, ok
+}
+
+// readMembers reads the members of the object dec is in, after its '{',
+// to its '}', which it reads too, as parts of payload, the decoder's.
+func readMembers(dec *jsontext.Decoder, payload []byte) ([]Field, bool) {
+	fields := make([]Field, 0, 4)
+	for dec.PeekKind() != '}' {
+		name, err := dec.ReadValue()
+		if err != nil {
+			return nil, false
+		}
+		name = Part(dec, payload, name)
+		value, err := dec.ReadValue()
+		if err != nil {
+			return nil, false
+		}
+		fields = append(fields, Field{Name: memberName(name), Value: Part(dec, payload, value)})
+	}
+	if _, err := dec.ReadToken(); err != nil {
+		return nil, false
+	}
+	return fields, true
+}
+
+// memberName returns a member's name, quoted as it arrived, unquoted: a
+// string of the same bytes, which are never changed, for one without
+// escapes, and else a new string.
+func memberName(quoted jsontext.Value) string {
+	if bytes.IndexByte(quoted, '\\') < 0 {
+		if len(quoted) == 2 {
+			return ""
+		}
+		return unsafe.String(&quoted[1], len(quoted)-2)
+	}
+	name, err := jsontext.AppendUnquote(nil, quoted)
+	if err != nil {
+		return ""
+	}
+	return string(name)
 }
 
 // unquotedName returns a member's name of a request's envelope, quoted as

@@ -60,7 +60,7 @@ func (d *Decoder) Fail(err error) {
 
 // Has reports whether the params have the field, null included.
 func (d *Decoder) Has(name string) bool {
-	_, ok := d.fields[name]
+	_, ok := d.fields.Get(name)
 	return ok
 }
 

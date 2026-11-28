@@ -559,7 +559,7 @@ func (r *Registrar) Method(name string, fn MethodFunc) {
 			s.mu.RLock()
 			user := userViewOf(c.user)
 			s.mu.RUnlock()
-			result, err := fn(s.requestContext(c), &MethodCall{User: user, Params: r.Fields()})
+			result, err := fn(s.requestContext(c), &MethodCall{User: user, Params: r.Fields().Map()})
 			if err != nil {
 				return h.protocolError(err)
 			}

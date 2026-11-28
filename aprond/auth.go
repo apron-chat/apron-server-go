@@ -288,7 +288,7 @@ func (s *Server) authenticateGuestLocked(c *client, reply server.Reply[apron.Aut
 func (s *Server) authRequestLocked(c *client, reply server.Reply[apron.AuthResult], scheme authn.Scheme, name, requested string) *authn.Request {
 	now := time.Now()
 	r := &authn.Request{
-		Params: maps.Clone(authParams(reply)), Name: normalizeName(name), UserID: requested,
+		Params: authParams(reply).Map(), Name: normalizeName(name), UserID: requested,
 		Origin: c.origin, BaseURL: c.baseURL, ClientKey: c.clientKey, Now: now,
 		Conn:   &schemeConn{s: s, c: c, scheme: scheme, name: name, userID: requested, now: now},
 		Guests: s.guestsAllowedLocked(),

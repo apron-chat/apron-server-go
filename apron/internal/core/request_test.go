@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"reflect"
 	"testing"
+	"unsafe"
 )
 
 func TestMalformedFrames(t *testing.T) {
@@ -107,13 +108,17 @@ func TestParseInPlace(t *testing.T) {
 	within := func(v []byte) bool {
 		return len(v) > 0 && &v[0] == &payload[bytes.Index(payload, v)]
 	}
-	if !within(req.Params) || !within(req.Fields["body"]) || !within(req.Fields["room_id"]) {
+	if len(req.Fields) != 2 || req.Fields[0].Name != "room_id" || req.Fields[1].Name != "body" {
+		t.Fatalf("fields %v", req.Fields)
+	}
+	roomID, body := req.Fields[0].Value, req.Fields[1].Value
+	if !within(req.Params) || !within(body) || !within(roomID) || unsafe.StringData(req.Fields[0].Name) != &payload[bytes.Index(payload, []byte("room_id"))] {
 		t.Fatalf("params %s, fields %v: not the frame's own bytes", req.Params, req.Fields)
 	}
-	if string(req.Fields["room_id"]) != `"general"` || string(req.Params) != `{"room_id":"general","body":{"text":"hi"}}` {
+	if string(roomID) != `"general"` || string(req.Params) != `{"room_id":"general","body":{"text":"hi"}}` {
 		t.Fatalf("params %s, fields %v", req.Params, req.Fields)
 	}
-	_ = append(req.Fields["room_id"], 'x')
+	_ = append(roomID, 'x')
 	_ = append(req.Params, 'x')
 	if string(payload) != `{"id":"1","method":"message","params":{"room_id":"general","body":{"text":"hi"}},"z":1}` {
 		t.Fatalf("an append wrote over the frame: %s", payload)

@@ -60,7 +60,7 @@ func TestNotificationMethod(t *testing.T) {
 	s := wired(&backend{}, server.Config{})
 	got := make(chan string, 4)
 	s.HandleNotification("activity", server.NotificationHandler{Capability: "activity", Serve: func(_ context.Context, _ *server.Conn, r *server.Request) {
-		v := r.Fields()["typing"]
+		v, _ := r.Fields().Get("typing")
 		got <- string(v)
 	}})
 	c := aprontest.Connect(t, s)
