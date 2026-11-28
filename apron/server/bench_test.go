@@ -563,7 +563,7 @@ func BenchmarkConnIdle(b *testing.B) {
 	if testing.Short() {
 		b.Skip("opens 10,000 connections")
 	}
-	var goroutines, bytes float64
+	var goroutines, bytes, stack float64
 	for b.Loop() {
 		chat := benchchat.New(server.Config{})
 		runtime.GC()
@@ -573,8 +573,10 @@ func BenchmarkConnIdle(b *testing.B) {
 		after := memStats()
 		goroutines = float64(runtime.NumGoroutine()-g) / n
 		bytes = float64(after.HeapInuse+after.StackInuse-before.HeapInuse-before.StackInuse) / n
+		stack = float64(after.StackInuse-before.StackInuse) / n
 		chat.CloseAll(ts)
 	}
 	b.ReportMetric(goroutines, "goroutines/conn")
 	b.ReportMetric(bytes, "B-inuse/conn")
+	b.ReportMetric(stack, "stack-B/conn")
 }
