@@ -18,6 +18,8 @@ func TestParseBodyDecodes(t *testing.T) {
 		` { "text" : "", "format" : "markdown", "mentions": [], "x": {"y": [1, 2]} } `,
 		`{"mentions":["a","b"],"embeds":[{"kind":"image","url":"u"}],"z":null,"text":"é"}`,
 		`{"embeds":[],"format":"plain"}`,
+		`{"text":"a\"b\u00e9\n\ud83d\ude00 \\","format":"pl\u0061in"}`,
+		"{\"text\":\"\x7f tab\\t\"}",
 	} {
 		got, err := ParseBody(jsontext.Value(raw))
 		if err != nil {
@@ -29,6 +31,21 @@ func TestParseBodyDecodes(t *testing.T) {
 		}
 		if !reflect.DeepEqual(got, want) {
 			t.Errorf("%s: parsed %#v, decodes as %#v", raw, got, want)
+		}
+	}
+}
+
+// unquote reads a string as decoding it does, and refuses what it refuses.
+func TestUnquote(t *testing.T) {
+	for _, raw := range []string{
+		`""`, `"hi"`, `"é😀"`, `"a\"b"`, `"\u00e9\n"`, `"\ud83d\ude00"`, "\"\x7f\"",
+		"\"\xff\"", "\"a\tb\"", "\"a\nb\"", `"a"b"`, `"`, `null`, `5`, `["a"]`, `"\x"`,
+	} {
+		got, ok := unquote(jsontext.Value(raw))
+		var want string
+		wantOK := !bytes.Equal([]byte(raw), []byte("null")) && json.Unmarshal([]byte(raw), &want) == nil
+		if ok != wantOK || ok && got != want {
+			t.Errorf("%q: %q %v, want %q %v", raw, got, ok, want, wantOK)
 		}
 	}
 }

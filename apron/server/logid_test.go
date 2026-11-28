@@ -123,7 +123,7 @@ func TestLogIDParams(t *testing.T) {
 	}
 
 	p, err := parseMessageFields(req(`{"message_id":"7","body":{"text":"x"},"reply_to":{"message_id":"3"}}`))
-	if err != nil || p.messageID != 7 || p.replyTo == nil || p.replyTo.MessageID != 3 {
+	if err != nil || p.messageID != 7 || !p.hasReply || p.replyTo.MessageID != 3 || !p.hasBody || p.body.Text != "x" {
 		t.Errorf("message: %+v %v", p, err)
 	}
 	for _, bad := range []string{`{"message_id":"0"}`, `{"message_id":"07"}`, `{"message_id":7}`, `{"reply_to":{"message_id":"0"}}`, `{"reply_to":{}}`, `{"reply_to":"3"}`} {

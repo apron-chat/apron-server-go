@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"slices"
 	"sync"
+	"unicode/utf8"
 
 	"github.com/apron-chat/apron-server-go/apron/internal/core"
 )
@@ -275,30 +276,49 @@ type bodyMembers struct {
 // knows is checked, and the others are kept in Unknown. The Body is what
 // decoding the body makes of it (UnmarshalJSONFrom), once every member is
 // checked.
+//
+// Its members are read into locals, never by a pointer into body, so that
+// the Body it returns stays on its caller's stack.
 func parseBody(in bodyMembers) (Body, error) {
 	body := Body{Unknown: in.Unknown, sent: bodyDecoded}
 	if raw := in.Text; raw != nil {
-		if core.IsNull(raw) || json.Unmarshal(raw, &body.Text) != nil {
+		text, ok := unquote(raw)
+		if !ok {
 			return Body{}, InvalidParams("body.text must be a string")
 		}
+		body.Text = text
 		body.sent |= bodyText
 	}
 	if raw := in.Format; raw != nil {
-		if core.IsNull(raw) || json.Unmarshal(raw, &body.Format) != nil || (body.Format != Plain && body.Format != Markdown) {
-			return Body{}, InvalidParams("body.format must be plain or markdown")
+		switch string(raw) {
+		case `"` + Plain + `"`:
+			body.Format = Plain
+		case `"` + Markdown + `"`:
+			body.Format = Markdown
+		default:
+			// An escaped name, such as "pl\u0061in", is still the format.
+			format, _ := unquote(raw)
+			if format != Plain && format != Markdown {
+				return Body{}, InvalidParams("body.format must be plain or markdown")
+			}
+			body.Format = format
 		}
 		body.sent |= bodyFormat
 	}
 	if raw := in.Mentions; raw != nil {
-		if core.IsNull(raw) || json.Unmarshal(raw, &body.Mentions) != nil || slices.ContainsFunc(body.Mentions, func(id string) bool { return !ValidID(id) }) {
+		var mentions []string
+		if core.IsNull(raw) || json.Unmarshal(raw, &mentions) != nil || slices.ContainsFunc(mentions, func(id string) bool { return !ValidID(id) }) {
 			return Body{}, InvalidParams("body.mentions must be an array of user_id strings")
 		}
+		body.Mentions = mentions
 		body.sent |= bodyMentions
 	}
 	if raw := in.Embeds; raw != nil {
-		if core.IsNull(raw) || json.Unmarshal(raw, &body.Embeds) != nil {
+		var embeds []jsontext.Value
+		if core.IsNull(raw) || json.Unmarshal(raw, &embeds) != nil {
 			return Body{}, InvalidParams("body.embeds must be an array")
 		}
+		body.Embeds = embeds
 		for i, embed := range body.Embeds {
 			var object map[string]jsontext.Value
 			if core.IsNull(embed) || json.Unmarshal(embed, &object) != nil {
@@ -312,6 +332,32 @@ func parseBody(in bodyMembers) (Body, error) {
 		body.sent |= bodyEmbeds
 	}
 	return body, nil
+}
+
+// unquote returns the string raw holds, and false when raw is not a JSON
+// string. One with nothing escaped is copied as it is.
+func unquote(raw jsontext.Value) (string, bool) {
+	if len(raw) >= 2 && raw[0] == '"' && raw[len(raw)-1] == '"' {
+		if inner := raw[1 : len(raw)-1]; plainString(inner) {
+			return string(inner), true
+		}
+	}
+	var s string
+	if core.IsNull(raw) || json.Unmarshal(raw, &s) != nil {
+		return "", false
+	}
+	return s, true
+}
+
+// plainString reports whether b is a JSON string's contents as they are:
+// valid UTF-8 with no quote, backslash, or control character.
+func plainString(b []byte) bool {
+	for _, c := range b {
+		if c < 0x20 || c == '"' || c == '\\' {
+			return false
+		}
+	}
+	return utf8.Valid(b)
 }
 
 // ParseBody reads a message body (§3.5) as the message requests' parsers

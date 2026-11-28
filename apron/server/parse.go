@@ -22,17 +22,13 @@ type messageFields struct {
 	messageID apron.LogID
 	roomID    string
 	deleted   bool
-	body      *apron.Body
-	replyTo   *apron.MessageRef
-	ext       apron.Ext
-}
-
-// reply is the message the request replies to, or the zero MessageRef.
-func (m messageFields) reply() apron.MessageRef {
-	if m.replyTo == nil {
-		return apron.MessageRef{}
-	}
-	return *m.replyTo
+	// body and replyTo are values, with whether the request has each, so
+	// that parsing a message allocates neither.
+	body     apron.Body
+	hasBody  bool
+	replyTo  apron.MessageRef
+	hasReply bool
+	ext      apron.Ext
 }
 
 // edit reports whether the request saves an existing message.
@@ -46,7 +42,8 @@ func parseMessageFields(r *Request) (messageFields, error) {
 	m := messageFields{
 		roomID:    d.ID("room_id", Optional),
 		messageID: d.MessageID("message_id", Optional),
-		replyTo:   IfPresent(d, "reply_to", d.MessageRef),
+		replyTo:   d.MessageRef("reply_to", Optional),
+		hasReply:  d.Has("reply_to"),
 		deleted:   d.Bool("deleted", Optional),
 		ext:       d.Ext("ext", Optional),
 	}
@@ -59,15 +56,20 @@ func parseMessageFields(r *Request) (messageFields, error) {
 	if raw, ok := r.fields.Get("body"); ok && d.Err() == nil {
 		body, err := apron.ParseBody(raw)
 		d.Fail(err)
-		if err == nil {
-			m.body = &body
-		}
+		m.body, m.hasBody = body, err == nil
 	}
 	return parsed(m, d)
 }
 
 func (m messageFields) editParams() apron.EditParams {
-	return apron.EditParams{MessageID: m.messageID, RoomID: m.roomID, Deleted: m.deleted, Body: m.body, ReplyTo: m.replyTo, Ext: m.ext}
+	p := apron.EditParams{MessageID: m.messageID, RoomID: m.roomID, Deleted: m.deleted, Ext: m.ext}
+	if m.hasBody {
+		p.Body = new(m.body)
+	}
+	if m.hasReply {
+		p.ReplyTo = new(m.replyTo)
+	}
+	return p
 }
 
 // parseCommand reads a command's params (§4.1): a message's, but for
@@ -82,10 +84,10 @@ func parseCommand(r *Request) (apron.CommandParams, error) {
 	if err != nil {
 		return apron.CommandParams{}, err
 	}
-	if m.body == nil {
+	if !m.hasBody {
 		return apron.CommandParams{}, apron.InvalidParams("A command needs a body")
 	}
-	return apron.CommandParams{RoomID: m.roomID, Body: *m.body, ReplyTo: m.reply(), Ext: m.ext}, nil
+	return apron.CommandParams{RoomID: m.roomID, Body: m.body, ReplyTo: m.replyTo, Ext: m.ext}, nil
 }
 
 // parseAuth reads auth's params (§3.2): scheme, a non-empty string, and the
