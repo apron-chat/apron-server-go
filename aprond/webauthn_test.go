@@ -701,6 +701,10 @@ func TestNativeAppOrigin(t *testing.T) {
 	}
 }
 
+// A registration is refused for a proof of another origin, a ceremony
+// already used, a malformed credential, action or step, a challenge of
+// another action, or none, and its refusals keep no account, credential,
+// or session; a notification never runs a step of it.
 func TestPasskeyRejectsInvalidRegistration(t *testing.T) {
 	app, httpServer := passkeyTestServer(t)
 	c, _ := dialOrigin(t, httpServer, testPasskeyOrigin)
@@ -711,17 +715,78 @@ func TestPasskeyRejectsInvalidRegistration(t *testing.T) {
 	passkeyDenied(t, passkeyCall(t, c, "bad-origin", "register", "finish", map[string]any{"credential": proof}))
 	proof = a.registration(t, options, testPasskeyOrigin)
 	passkeyDenied(t, passkeyCall(t, c, "consumed", "register", "finish", map[string]any{"credential": proof}))
+	var failure map[string]any
 	for _, malformed := range []any{nil, "invalid", []any{}, map[string]any{}} {
 		passkeyResult(t, passkeyCall(t, c, "begin", "register", "begin", nil))
-		failure := passkeyCall(t, c, "malformed", "register", "finish", map[string]any{"credential": malformed})
+		failure = passkeyCall(t, c, "malformed", "register", "finish", map[string]any{"credential": malformed})
 		if failure["error"].(map[string]any)["code"] != float64(CodeInvalidParams) {
 			t.Fatalf("malformed credential: %#v", failure)
 		}
 	}
+
+	// Actions require a valid step and reject unknown action names.
+	for id, params := range map[string]map[string]any{
+		"unknown-action": {"scheme": "webauthn", "action": "other", "step": "begin"},
+		"no-step":        {"scheme": "webauthn", "action": "register"},
+		"bad-step":       {"scheme": "webauthn", "action": "register", "step": "middle"},
+	} {
+		c.write(t, map[string]any{"method": "auth", "id": id, "params": params})
+		frame := c.read(t)
+		if frame["error"].(map[string]any)["code"] != float64(CodeInvalidParams) {
+			t.Fatalf("%s: %#v", id, frame)
+		}
+	}
+
+	options = passkeyResult(t, passkeyCall(t, c, "begin", "register", "begin", nil))
+	proof = a.registration(t, options, testPasskeyOrigin)
+	// The opaque ID matches, but the action does not. The bound ceremony is
+	// consumed before this policy failure and cannot be retried as register.
+	passkeyDenied(t, passkeyCall(t, c, "wrong-action", "login", "finish", map[string]any{
+		"challenge_id": options["challenge_id"], "credential": proof,
+	}))
+	passkeyDenied(t, passkeyCall(t, c, "wrong-action-retry", "register", "finish", map[string]any{
+		"credential": proof,
+	}))
+	options = passkeyResult(t, passkeyCall(t, c, "begin-again", "register", "begin", nil))
+	proof = a.registration(t, options, testPasskeyOrigin)
+	// Missing challenge_id is malformed and leaves the pending challenge in
+	// place because no challenge can be matched.
+	c.write(t, map[string]any{"method": "auth", "id": "missing-challenge", "params": map[string]any{
+		"scheme": "webauthn", "action": "register", "step": "finish", "credential": proof,
+	}})
+	missing := c.read(t)
+	if missing["error"].(map[string]any)["code"] != float64(CodeInvalidParams) {
+		t.Fatalf("missing challenge_id: %#v", missing)
+	}
+	// A matching malformed credential is invalid_params and consumes the
+	// challenge, so its later retry is a denied missing challenge.
+	failure = passkeyCall(t, c, "malformed", "register", "finish", map[string]any{"credential": map[string]any{}})
+	if failure["error"].(map[string]any)["code"] != float64(CodeInvalidParams) {
+		t.Fatalf("malformed credential: %#v", failure)
+	}
+	passkeyDenied(t, passkeyCall(t, c, "retry", "register", "finish", map[string]any{"credential": proof}))
+
 	app.mu.RLock()
-	defer app.mu.RUnlock()
-	if app.schemeLocked(passkey.Name).(*passkey.Scheme).Count() != 0 || app.users.Identities() != 0 || app.sessions.Len() != 0 {
+	retained := app.schemeLocked(passkey.Name).(*passkey.Scheme).Count() != 0 || app.users.Identities() != 0 || app.sessions.Len() != 0
+	app.mu.RUnlock()
+	if retained {
 		t.Fatal("failed registration retained an account, credential, or session")
+	}
+
+	options = passkeyResult(t, passkeyCall(t, c, "begin", "register", "begin", nil))
+	proof = a.registration(t, options, testPasskeyOrigin)
+	challengeID := options["challenge_id"].(string)
+
+	// A notification is no step of a ceremony: one that carries the
+	// current challenge and a malformed proof does not consume it, and gets
+	// no response.
+	c.write(t, map[string]any{"method": "auth", "params": map[string]any{
+		"scheme": "webauthn", "action": "register", "step": "finish",
+		"challenge_id": challengeID, "credential": map[string]any{},
+	}})
+	result := passkeyResult(t, passkeyCall(t, c, "finish", "register", "finish", map[string]any{"credential": proof}))
+	if result["you"].(map[string]any)["user_id"] == "" {
+		t.Fatalf("registration result lost identity: %#v", result)
 	}
 }
 
@@ -749,76 +814,6 @@ func TestPasskeyBeginIsNoBarrierPass(t *testing.T) {
 	if listed := passkeyResult(t, c.read(t)); !reflect.DeepEqual(roomIDs(t, listed["joined"]), []string{"general"}) {
 		t.Fatalf("room_list behind a verified finish: %#v", listed)
 	}
-}
-
-func TestPasskeyNotificationsDoNotRunCeremonies(t *testing.T) {
-	_, httpServer := passkeyTestServer(t)
-	c, _ := dialOrigin(t, httpServer, testPasskeyOrigin)
-	guestAuth(t, c)
-	a := newTestAuthenticator(t)
-	options := passkeyResult(t, passkeyCall(t, c, "begin", "register", "begin", nil))
-	proof := a.registration(t, options, testPasskeyOrigin)
-	challengeID := options["challenge_id"].(string)
-
-	// This notification carries the current challenge and a malformed proof. It
-	// must not consume the ceremony or produce a response.
-	c.write(t, map[string]any{"method": "auth", "params": map[string]any{
-		"scheme": "webauthn", "action": "register", "step": "finish",
-		"challenge_id": challengeID, "credential": map[string]any{},
-	}})
-	result := passkeyResult(t, passkeyCall(t, c, "finish", "register", "finish", map[string]any{"credential": proof}))
-	if result["you"].(map[string]any)["user_id"] == "" {
-		t.Fatalf("registration result lost identity: %#v", result)
-	}
-}
-
-func TestPasskeyMalformedFields(t *testing.T) {
-	_, httpServer := passkeyTestServer(t)
-	c, _ := dialOrigin(t, httpServer, testPasskeyOrigin)
-	guestAuth(t, c)
-
-	// Actions require a valid step and reject unknown action names.
-	for id, params := range map[string]map[string]any{
-		"unknown-action": {"scheme": "webauthn", "action": "other", "step": "begin"},
-		"no-step":        {"scheme": "webauthn", "action": "register"},
-		"bad-step":       {"scheme": "webauthn", "action": "register", "step": "middle"},
-	} {
-		c.write(t, map[string]any{"method": "auth", "id": id, "params": params})
-		frame := c.read(t)
-		if frame["error"].(map[string]any)["code"] != float64(CodeInvalidParams) {
-			t.Fatalf("%s: %#v", id, frame)
-		}
-	}
-
-	a := newTestAuthenticator(t)
-	options := passkeyResult(t, passkeyCall(t, c, "begin", "register", "begin", nil))
-	proof := a.registration(t, options, testPasskeyOrigin)
-	// The opaque ID matches, but the action does not. The bound ceremony is
-	// consumed before this policy failure and cannot be retried as register.
-	passkeyDenied(t, passkeyCall(t, c, "wrong-action", "login", "finish", map[string]any{
-		"challenge_id": options["challenge_id"], "credential": proof,
-	}))
-	passkeyDenied(t, passkeyCall(t, c, "wrong-action-retry", "register", "finish", map[string]any{
-		"credential": proof,
-	}))
-	options = passkeyResult(t, passkeyCall(t, c, "begin-again", "register", "begin", nil))
-	proof = a.registration(t, options, testPasskeyOrigin)
-	// Missing challenge_id is malformed and leaves the pending challenge in
-	// place because no challenge can be matched.
-	c.write(t, map[string]any{"method": "auth", "id": "missing-challenge", "params": map[string]any{
-		"scheme": "webauthn", "action": "register", "step": "finish", "credential": proof,
-	}})
-	missing := c.read(t)
-	if missing["error"].(map[string]any)["code"] != float64(CodeInvalidParams) {
-		t.Fatalf("missing challenge_id: %#v", missing)
-	}
-	// A matching malformed credential is invalid_params and consumes the
-	// challenge, so its later retry is a denied missing challenge.
-	failure := passkeyCall(t, c, "malformed", "register", "finish", map[string]any{"credential": map[string]any{}})
-	if failure["error"].(map[string]any)["code"] != float64(CodeInvalidParams) {
-		t.Fatalf("malformed credential: %#v", failure)
-	}
-	passkeyDenied(t, passkeyCall(t, c, "retry", "register", "finish", map[string]any{"credential": proof}))
 }
 
 func TestSignInReplacesGuestAndDeduplicatesPerUser(t *testing.T) {

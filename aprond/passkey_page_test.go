@@ -414,8 +414,12 @@ func TestPasskeyPageFreshRegistration(t *testing.T) {
 	if signup := frame["params"].(map[string]any)["signup"]; !reflect.DeepEqual(signup, []any{"webauthn", "external", "guest"}) {
 		t.Fatalf("signup: %#v", signup)
 	}
-	begin := passkeyResult(t, passkeyCall(t, native, "b", "register", "begin", map[string]any{"name": "Ada"}))
-	if begin["external"].(map[string]any)["url"] != pageOrigin+"/passkey?action=register&name=Ada" || begin["public_key"] != nil {
+	// The page's URL writes a space as %20, not +, so a client that
+	// decodes its query and encodes it again keeps the name; a + is %2B.
+	begin := passkeyResult(t, passkeyCall(t, native, "b", "register", "begin", map[string]any{"name": "Ada Lovelace+1"}))
+	page := begin["external"].(map[string]any)["url"].(string)
+	if parsed, err := url.Parse(page); page != pageOrigin+"/passkey?action=register&name=Ada%20Lovelace%2B1" || begin["public_key"] != nil ||
+		err != nil || parsed.Query().Get("name") != "Ada Lovelace+1" {
 		t.Fatalf("begin = %#v", begin)
 	}
 	client := oauthtest.New(t, pageOrigin)
@@ -436,7 +440,7 @@ func TestPasskeyPageFreshRegistration(t *testing.T) {
 	fresh, _ := dialRaw(t, p.http)
 	_, result := fresh.request(t, "auth", "finish", finishWithCode(client, "register", returned(t, client, answer)))
 	you := result["you"].(map[string]any)
-	if you["name"] != "Ada" || !strings.HasPrefix(you["user_id"].(string), "user_") || result["token"] == nil {
+	if you["name"] != "Ada Lovelace+1" || !strings.HasPrefix(you["user_id"].(string), "user_") || result["token"] == nil {
 		t.Fatalf("registration = %#v", result)
 	}
 	expectJoinedDefault(t, fresh, you["user_id"].(string))
@@ -503,26 +507,6 @@ func testPasskeyPageInvitedRegistration(t *testing.T, configure func(*Config)) {
 	}
 	if len(p.app.Invitations()) != 0 {
 		t.Fatal("the invitation outlived its use")
-	}
-}
-
-// The page's URL writes a space as %20, not +, so a client that decodes
-// its query and encodes it again keeps the name; a + is %2B.
-func TestPasskeyPageURLEncoding(t *testing.T) {
-	p := passkeyPageServer(t)
-	invitation, err := p.host.Invite(context.Background(), InvitationOptions{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	native, _ := dialRaw(t, p.http)
-	begin := passkeyResult(t, passkeyCall(t, native, "b", "register", "begin", map[string]any{"invitation": invitation.Token, "name": "Sim Passkey+1"}))
-	page := begin["external"].(map[string]any)["url"].(string)
-	if page != pageOrigin+"/passkey?action=register&name=Sim%20Passkey%2B1" {
-		t.Fatalf("url = %s", page)
-	}
-	parsed, err := url.Parse(page)
-	if err != nil || parsed.Query().Get("name") != "Sim Passkey+1" {
-		t.Fatalf("url = %s: %v", page, err)
 	}
 }
 
