@@ -96,40 +96,41 @@ func TestUploadsAreStoredOnDiskWithinLimits(t *testing.T) {
 	}
 }
 
-func TestMessagesAreLimitedToMaxEmbeds(t *testing.T) {
-	_, httpServer := newTestServer(t, DefaultConfig())
+// A request past a bound on its size is too_large, and past a count the
+// server sets, denied (§1.1); a malformed value stays invalid_params.
+func TestRequestSizeLimits(t *testing.T) {
+	config := DefaultConfig()
+	config.AllowInsecurePush = true
+	_, httpServer := newTestServer(t, config)
 	a := dialTestClient(t, httpServer)
+	long := strings.Repeat("x", maxRequestIDBytes+1)
+	a.expectError(t, "me", long, map[string]any{}, CodeTooLarge)
+	a.result(t, "me", long[:maxRequestIDBytes], map[string]any{})
 	embeds := make([]any, messages.MaxEmbeds+1)
 	for i := range embeds {
 		embeds[i] = map[string]any{"kind": "upload"}
 	}
-	// A count limit the server sets is denied (§1.1).
-	a.expectError(t, "message", "many", map[string]any{"room_id": "general", "body": map[string]any{"embeds": embeds}}, CodeDenied)
 	mentions := make([]any, messages.MaxMentions+1)
 	for i := range mentions {
 		mentions[i] = fmt.Sprint("user", i)
 	}
-	a.expectError(t, "message", "mentions", map[string]any{"room_id": "general", "body": map[string]any{"text": "hi", "mentions": mentions}}, CodeDenied)
-	a.expectError(t, "command", "command-mentions", map[string]any{"room_id": "general", "body": map[string]any{"text": "/help", "mentions": mentions}}, CodeDenied)
-	// A malformed value stays invalid_params.
-	a.expectError(t, "message", "bad-mentions", map[string]any{"room_id": "general", "body": map[string]any{"text": "hi", "mentions": []any{""}}}, CodeInvalidParams)
+	for _, test := range []struct {
+		method, id string
+		params     map[string]any
+		code       int
+	}{
+		{"room_set", "long-title", map[string]any{"room_id": "general", "title": strings.Repeat("x", maxTitleBytes+1)}, CodeTooLarge},
+		{"room_set", "new-long-title", map[string]any{"title": strings.Repeat("x", maxTitleBytes+1)}, CodeTooLarge},
+		{"me", "ext", map[string]any{"ext": map[string]any{"x": strings.Repeat("y", maxProfileExtBytes)}}, CodeTooLarge},
+		{"push_register", "url", map[string]any{"kind": "relay", "url": "http://relay.example/" + strings.Repeat("p", maxPushURLBytes)}, CodeTooLarge},
+		{"message", "embeds", map[string]any{"room_id": "general", "body": map[string]any{"embeds": embeds}}, CodeDenied},
+		{"message", "mentions", map[string]any{"room_id": "general", "body": map[string]any{"text": "hi", "mentions": mentions}}, CodeDenied},
+		{"command", "command-mentions", map[string]any{"room_id": "general", "body": map[string]any{"text": "/help", "mentions": mentions}}, CodeDenied},
+		{"message", "bad-mentions", map[string]any{"room_id": "general", "body": map[string]any{"text": "hi", "mentions": []any{""}}}, CodeInvalidParams},
+	} {
+		a.expectError(t, test.method, test.id, test.params, test.code)
+	}
 	a.expectQuiet(t)
-}
-
-func TestRoomSetCountsTowardMessagesPerMinute(t *testing.T) {
-	config := DefaultConfig()
-	config.MessagesPerMinute = 1
-	_, httpServer := newTestServer(t, config)
-	a := dialTestClient(t, httpServer)
-	saveRoom(t, a, "create", map[string]any{"title": "Ops"})
-	frame := a.call(t, "room_set", "again", map[string]any{"title": "More"})
-	if failure, _ := frame["error"].(map[string]any); failure == nil || failure["code"] != float64(CodeRetryAfter) {
-		t.Fatalf("second room_set: %#v", frame)
-	}
-	frame = a.call(t, "message", "post", map[string]any{"room_id": "general", "body": map[string]any{"text": "hi"}})
-	if failure, _ := frame["error"].(map[string]any); failure == nil || failure["code"] != float64(CodeRetryAfter) {
-		t.Fatalf("message after room_set: %#v", frame)
-	}
 }
 
 func TestHistoryPagesAreBoundedAndRecordsUnescaped(t *testing.T) {
@@ -163,16 +164,6 @@ func TestHistoryPagesAreBoundedAndRecordsUnescaped(t *testing.T) {
 	}
 }
 
-func TestProfileAndPushSizeLimits(t *testing.T) {
-	config := DefaultConfig()
-	config.AllowInsecurePush = true
-	_, httpServer := newTestServer(t, config)
-	a := dialTestClient(t, httpServer)
-	// A value rejected for its size is too_large (§1.1).
-	a.expectError(t, "me", "ext", map[string]any{"ext": map[string]any{"x": strings.Repeat("y", maxProfileExtBytes)}}, CodeTooLarge)
-	a.expectError(t, "push_register", "url", map[string]any{"kind": "relay", "url": "http://relay.example/" + strings.Repeat("p", maxPushURLBytes)}, CodeTooLarge)
-}
-
 func TestConnectionAndRateLimits(t *testing.T) {
 	config := DefaultConfig()
 	config.MaxConnections = 1
@@ -188,11 +179,16 @@ func TestConnectionAndRateLimits(t *testing.T) {
 		t.Fatalf("capacity error: %#v", failure)
 	}
 
+	// A room_set counts toward MessagesPerMinute as a message does.
 	save(t, a, "one", map[string]any{"body": map[string]any{"text": "1"}})
-	save(t, a, "two", map[string]any{"body": map[string]any{"text": "2"}})
+	saveRoom(t, a, "room", map[string]any{"title": "Ops"})
 	frame := a.call(t, "message", "three", map[string]any{"room_id": "general", "body": map[string]any{"text": "3"}})
 	limited := frame["error"].(map[string]any)
 	if limited["code"] != float64(CodeRetryAfter) || limited["data"].(map[string]any)["retry_after"].(float64) < 1 {
 		t.Fatalf("rate limit: %#v", frame)
+	}
+	frame = a.call(t, "room_set", "again", map[string]any{"title": "More"})
+	if failure, _ := frame["error"].(map[string]any); failure == nil || failure["code"] != float64(CodeRetryAfter) {
+		t.Fatalf("room_set past the rate limit: %#v", frame)
 	}
 }
