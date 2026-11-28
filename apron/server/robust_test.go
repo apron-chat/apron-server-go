@@ -29,7 +29,8 @@ func TestParamErrors(t *testing.T) {
 	if err := read(server.Fields{}, "x"); err != nil {
 		t.Fatalf("an absent field: %v", err)
 	}
-	err := read(server.Fields{"x": []byte("1")}, "x")
+	one, _ := server.ParseFields([]byte(`{"x":1}`))
+	err := read(one, "x")
 	if apron.CodeOf(err) != apron.CodeInvalidParams {
 		t.Fatalf("a number for a string: %v", err)
 	}
@@ -143,7 +144,7 @@ type oneUser struct{ backend }
 
 func (*oneUser) Auth(_ context.Context, c *server.Conn, _ apron.AuthParams, reply server.Reply[apron.AuthResult]) error {
 	c.Notify(apron.Notice("", "welcome"))
-	return reply.Send(apron.AuthResult{You: &apron.CurrentUser{UserID: "same"}})
+	return reply.Send(apron.AuthResult{You: apron.CurrentUser{UserID: "same"}})
 }
 
 // A duplicate waiting for its original on another connection stops waiting
@@ -182,35 +183,6 @@ func TestDuplicateWaitEndsWithConnection(t *testing.T) {
 	})
 }
 
-// Local notifications are handled, and a Call of a notification-only method
-// returns at once.
-func TestLocalNotify(t *testing.T) {
-	s := wired(&backend{}, server.Config{})
-	got := make(chan string, 1)
-	s.HandleNotification("activity", server.NotificationHandler{Capability: "activity", Serve: func(_ context.Context, _ *server.Conn, r *server.Request) {
-		v := r.Fields()["typing"]
-		got <- string(v)
-	}})
-	l, err := s.Local(server.LocalOptions{User: apron.User{UserID: "bot"}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer l.Close()
-	if err := l.Notify(context.Background(), "activity", map[string]any{"typing": 4}); err != nil {
-		t.Fatal(err)
-	}
-	if v := <-got; v != "4" {
-		t.Fatalf("typing = %s", v)
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	for _, method := range []string{"ping", "activity"} {
-		if _, err := l.Call(ctx, method, nil); !errors.Is(err, server.ErrNotRequest) {
-			t.Errorf("Call(%s): %v, want ErrNotRequest", method, err)
-		}
-	}
-}
-
 // connecting is a backend that counts the connections it is told of.
 type connecting struct {
 	backend
@@ -228,8 +200,8 @@ func TestMaxConnectionsFirst(t *testing.T) {
 	b := &connecting{}
 	s := wired(b, server.Config{MaxConnections: 1, OnConnect: b.Connected})
 	c1, c2 := aprontest.Connect(t, s), aprontest.Connect(t, s)
-	if f := next(t, c2); code(f) != apron.CodeRetryAfter {
-		t.Fatalf("got %s, want retry_after", f.Raw)
+	if f := next(t, c2); code(f) != apron.CodeRetryAfter || f.ID != "" {
+		t.Fatalf("got %s, want retry_after about the connection", f.Raw)
 	}
 	expectClosed(t, c2)
 	if err := c1.Sync(wait(t)); err != nil {
@@ -243,7 +215,8 @@ func TestMaxConnectionsFirst(t *testing.T) {
 	}
 }
 
-// Conn.User and SetUser copy the user, roles and ext included.
+// SetUser, and Local.User, copy the user, roles and ext included; Identity
+// is what SetUser kept.
 func TestUserCopies(t *testing.T) {
 	s := wired(&backend{}, server.Config{})
 	roles := []string{"op"}
@@ -253,20 +226,11 @@ func TestUserCopies(t *testing.T) {
 	}
 	defer l.Close()
 	roles[0] = "changed"
-	u := l.Conn().User()
+	u := l.User()
 	u.Roles[0] = "mutated"
 	u.Ext["x"][5] = '2'
-	again := l.Conn().User()
+	again := userOf(l.Conn())
 	if again.Roles[0] != "op" || string(again.Ext["x"]) != `{"y":1}` {
 		t.Fatalf("the connection's user changed: %+v", again)
-	}
-}
-
-// Marshal encodes as frames are: keys sorted, nil as null, HTML characters
-// as they are.
-func TestMarshal(t *testing.T) {
-	got, err := apron.Marshal(map[string]any{"b": []string(nil), "a": "<&>"})
-	if err != nil || string(got) != `{"a":"<&>","b":null}` {
-		t.Fatalf("Marshal = %s, %v", got, err)
 	}
 }

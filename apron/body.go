@@ -1,10 +1,13 @@
 package apron
 
 import (
+	"bytes"
 	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"fmt"
 	"slices"
+	"sync"
+	"unicode/utf8"
 
 	"github.com/apron-chat/apron-server-go/apron/internal/core"
 )
@@ -54,6 +57,14 @@ const (
 // with such a body is invalid_params (§3.5.1).
 func (b *Body) Empty() bool { return b == nil || b.Text == "" && len(b.Embeds) == 0 }
 
+// IsZero reports whether b is the zero Body: no body at all, as a
+// message without one, such as a tombstone (§4.4), has, which is left out
+// of the message it is in (omitzero). A body decoded, even {}, is not;
+// nil is. Its pointer receiver spares encoding a copy of b to call it.
+func (b *Body) IsZero() bool {
+	return b == nil || b.Text == "" && b.Format == "" && b.Mentions == nil && b.Embeds == nil && b.Unknown == nil && b.sent == 0
+}
+
 // Formats of a Body.
 const (
 	Plain    = "plain"
@@ -72,6 +83,60 @@ type bodyJSON struct {
 // MarshalJSONTo writes the body: each field that is not empty, or that
 // the decoded body carried, and text for a body built in Go.
 func (b Body) MarshalJSONTo(enc *jsontext.Encoder) error {
+	if len(b.Unknown) > 0 {
+		return b.marshalAll(enc)
+	}
+	// Written token by token, as encoding a bodyJSON writes it, without
+	// what that allocates: every message has a body.
+	text := b.Text != "" || b.sent&bodyText != 0 || b.sent&bodyDecoded == 0
+	format := b.Format != "" || b.sent&bodyFormat != 0
+	mentions := len(b.Mentions) > 0 || b.sent&bodyMentions != 0
+	embeds := len(b.Embeds) > 0 || b.sent&bodyEmbeds != 0
+	err := enc.WriteToken(jsontext.BeginObject)
+	if text && err == nil {
+		err = writeMember(enc, "text", jsontext.String(b.Text))
+	}
+	if format && err == nil {
+		err = writeMember(enc, "format", jsontext.String(b.Format))
+	}
+	if mentions && err == nil {
+		err = writeMember(enc, "mentions", jsontext.BeginArray)
+		for _, id := range b.Mentions {
+			if err == nil {
+				err = enc.WriteToken(jsontext.String(id))
+			}
+		}
+		if err == nil {
+			err = enc.WriteToken(jsontext.EndArray)
+		}
+	}
+	if embeds && err == nil {
+		err = writeMember(enc, "embeds", jsontext.BeginArray)
+		for _, embed := range b.Embeds {
+			if err == nil {
+				err = enc.WriteValue(embed)
+			}
+		}
+		if err == nil {
+			err = enc.WriteToken(jsontext.EndArray)
+		}
+	}
+	if err != nil {
+		return err
+	}
+	return enc.WriteToken(jsontext.EndObject)
+}
+
+// writeMember writes a member's name, and its value, a token.
+func writeMember(enc *jsontext.Encoder, name string, value jsontext.Token) error {
+	if err := enc.WriteToken(jsontext.String(name)); err != nil {
+		return err
+	}
+	return enc.WriteToken(value)
+}
+
+// marshalAll writes the body as a bodyJSON, its unknown members and all.
+func (b Body) marshalAll(enc *jsontext.Encoder) error {
 	out := bodyJSON{Unknown: b.Unknown}
 	if b.Text != "" || b.sent&bodyText != 0 || b.sent&bodyDecoded == 0 {
 		out.Text = &b.Text
@@ -97,78 +162,202 @@ func (b Body) MarshalJSONTo(enc *jsontext.Encoder) error {
 // UnmarshalJSONFrom reads a body, and notes which of its fields it
 // carried, so that it encodes as it arrived.
 func (b *Body) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
-	// Each known member is read raw first, so that a null one is present.
-	var in struct {
-		Text     jsontext.Value `json:"text,omitzero"`
-		Format   jsontext.Value `json:"format,omitzero"`
-		Mentions jsontext.Value `json:"mentions,omitzero"`
-		Embeds   jsontext.Value `json:"embeds,omitzero"`
-		Unknown  jsontext.Value `json:",embed"`
-	}
-	if err := json.UnmarshalDecode(dec, &in); err != nil {
+	// Read token by token, each member once: a member this package knows
+	// is present even when null, and the others are kept as they arrived,
+	// as decoding a bodyMembers keeps them.
+	tok, err := dec.ReadToken()
+	if err != nil {
 		return err
 	}
-	body := Body{Unknown: in.Unknown, sent: bodyDecoded}
-	for _, field := range []struct {
-		raw  jsontext.Value
-		into any
-		bit  bodyFields
-	}{
-		{in.Text, &body.Text, bodyText},
-		{in.Format, &body.Format, bodyFormat},
-		{in.Mentions, &body.Mentions, bodyMentions},
-		{in.Embeds, &body.Embeds, bodyEmbeds},
-	} {
-		if field.raw == nil {
-			continue
-		}
-		body.sent |= field.bit
-		if err := json.Unmarshal(field.raw, field.into, dec.Options()); err != nil {
+	switch tok.Kind() {
+	case 'n':
+		// A body of null is none, as one left out is.
+		*b = Body{}
+		return nil
+	case '{':
+	default:
+		return fmt.Errorf("apron: a body is a JSON object, not %v", tok.Kind())
+	}
+	body := Body{sent: bodyDecoded}
+	for dec.PeekKind() != '}' {
+		quoted, err := dec.ReadValue()
+		if err != nil {
 			return err
 		}
+		switch bodyMember(quoted) {
+		case "text":
+			body.sent |= bodyText
+			err = readString(dec, &body.Text)
+		case "format":
+			body.sent |= bodyFormat
+			err = readString(dec, &body.Format)
+		case "mentions":
+			body.sent |= bodyMentions
+			err = json.UnmarshalDecode(dec, &body.Mentions)
+		case "embeds":
+			body.sent |= bodyEmbeds
+			err = json.UnmarshalDecode(dec, &body.Embeds)
+		default:
+			// quoted is the decoder's until its next read.
+			if body.Unknown == nil {
+				body.Unknown = append(jsontext.Value{'{'}, quoted...)
+			} else {
+				body.Unknown = append(append(body.Unknown[:len(body.Unknown)-1], ','), quoted...)
+			}
+			body.Unknown = append(body.Unknown, ':')
+			var value jsontext.Value
+			if value, err = dec.ReadValue(); err == nil {
+				body.Unknown = append(append(body.Unknown, value...), '}')
+			}
+		}
+		if err != nil {
+			return err
+		}
+	}
+	if _, err := dec.ReadToken(); err != nil {
+		return err
 	}
 	*b = body
 	return nil
 }
 
-// parseBody reads a message body (§3.5), raw and by its fields: each field
-// this package knows is checked, and the others are kept in Unknown.
-func parseBody(raw jsontext.Value, fields map[string]jsontext.Value) (*Body, error) {
-	body := &Body{}
-	if raw, ok := fields["text"]; ok && (core.IsNull(raw) || json.Unmarshal(raw, &body.Text) != nil) {
-		return nil, InvalidParams("body.text must be a string")
-	}
-	if raw, ok := fields["format"]; ok {
-		if core.IsNull(raw) || json.Unmarshal(raw, &body.Format) != nil || (body.Format != Plain && body.Format != Markdown) {
-			return nil, InvalidParams("body.format must be plain or markdown")
+// bodyMember returns the name of a body's member, quoted as it arrived,
+// when it is one this package knows, and else "".
+func bodyMember(quoted jsontext.Value) string {
+	name := quoted
+	if bytes.IndexByte(quoted, '\\') >= 0 {
+		unquoted, err := jsontext.AppendUnquote(nil, quoted)
+		if err != nil {
+			return ""
 		}
+		name = unquoted
 	}
-	if raw, ok := fields["mentions"]; ok {
-		if core.IsNull(raw) || json.Unmarshal(raw, &body.Mentions) != nil || slices.ContainsFunc(body.Mentions, func(id string) bool { return !ValidID(id) }) {
-			return nil, InvalidParams("body.mentions must be an array of user_id strings")
-		}
+	switch string(name) {
+	case `"text"`, "text":
+		return "text"
+	case `"format"`, "format":
+		return "format"
+	case `"mentions"`, "mentions":
+		return "mentions"
+	case `"embeds"`, "embeds":
+		return "embeds"
 	}
-	if raw, ok := fields["embeds"]; ok {
-		if core.IsNull(raw) || json.Unmarshal(raw, &body.Embeds) != nil {
-			return nil, InvalidParams("body.embeds must be an array")
+	return ""
+}
+
+// readString reads a string, or null as "", as decoding a string does.
+func readString(dec *jsontext.Decoder, into *string) error {
+	tok, err := dec.ReadToken()
+	if err != nil {
+		return err
+	}
+	switch tok.Kind() {
+	case 'n':
+		*into = ""
+	case '"':
+		*into = tok.String()
+	default:
+		return fmt.Errorf("apron: a body's text and format are strings, not %v", tok.Kind())
+	}
+	return nil
+}
+
+// bodyMembers are a body's members as they arrived: those this package
+// knows raw, each present when not nil, null too, and the others.
+type bodyMembers struct {
+	Text     jsontext.Value `json:"text,omitzero"`
+	Format   jsontext.Value `json:"format,omitzero"`
+	Mentions jsontext.Value `json:"mentions,omitzero"`
+	Embeds   jsontext.Value `json:"embeds,omitzero"`
+	Unknown  jsontext.Value `json:",embed"`
+}
+
+// parseBody reads a message body (§3.5) by its members: each this package
+// knows is checked, and the others are kept in Unknown. The Body is what
+// decoding the body makes of it (UnmarshalJSONFrom), once every member is
+// checked.
+//
+// Its members are read into locals, never by a pointer into body, so that
+// the Body it returns stays on its caller's stack.
+func parseBody(in bodyMembers) (Body, error) {
+	body := Body{Unknown: in.Unknown, sent: bodyDecoded}
+	if raw := in.Text; raw != nil {
+		text, ok := unquote(raw)
+		if !ok {
+			return Body{}, InvalidParams("body.text must be a string")
 		}
+		body.Text = text
+		body.sent |= bodyText
+	}
+	if raw := in.Format; raw != nil {
+		switch string(raw) {
+		case `"` + Plain + `"`:
+			body.Format = Plain
+		case `"` + Markdown + `"`:
+			body.Format = Markdown
+		default:
+			// An escaped name, such as "pl\u0061in", is still the format.
+			format, _ := unquote(raw)
+			if format != Plain && format != Markdown {
+				return Body{}, InvalidParams("body.format must be plain or markdown")
+			}
+			body.Format = format
+		}
+		body.sent |= bodyFormat
+	}
+	if raw := in.Mentions; raw != nil {
+		var mentions []string
+		if core.IsNull(raw) || json.Unmarshal(raw, &mentions) != nil || slices.ContainsFunc(mentions, func(id string) bool { return !ValidID(id) }) {
+			return Body{}, InvalidParams("body.mentions must be an array of user_id strings")
+		}
+		body.Mentions = mentions
+		body.sent |= bodyMentions
+	}
+	if raw := in.Embeds; raw != nil {
+		var embeds []jsontext.Value
+		if core.IsNull(raw) || json.Unmarshal(raw, &embeds) != nil {
+			return Body{}, InvalidParams("body.embeds must be an array")
+		}
+		body.Embeds = embeds
 		for i, embed := range body.Embeds {
 			var object map[string]jsontext.Value
 			if core.IsNull(embed) || json.Unmarshal(embed, &object) != nil {
-				return nil, InvalidParams(fmt.Sprintf("body.embeds[%d] must be an object", i))
+				return Body{}, InvalidParams(fmt.Sprintf("body.embeds[%d] must be an object", i))
 			}
 			var kind string
 			if raw, ok := object["kind"]; !ok || core.IsNull(raw) || json.Unmarshal(raw, &kind) != nil || kind == "" {
-				return nil, InvalidParams(fmt.Sprintf("body.embeds[%d].kind must be a non-empty string", i))
+				return Body{}, InvalidParams(fmt.Sprintf("body.embeds[%d].kind must be a non-empty string", i))
 			}
 		}
-	}
-	// Every field it knows is well formed, so the body decodes, and keeps
-	// the fields it does not know as they arrived.
-	if err := json.Unmarshal(raw, body); err != nil {
-		return nil, InvalidParams("body must be an object")
+		body.sent |= bodyEmbeds
 	}
 	return body, nil
+}
+
+// unquote returns the string raw holds, and false when raw is not a JSON
+// string. One with nothing escaped is copied as it is.
+func unquote(raw jsontext.Value) (string, bool) {
+	if len(raw) >= 2 && raw[0] == '"' && raw[len(raw)-1] == '"' {
+		if inner := raw[1 : len(raw)-1]; plainString(inner) {
+			return string(inner), true
+		}
+	}
+	var s string
+	if core.IsNull(raw) || json.Unmarshal(raw, &s) != nil {
+		return "", false
+	}
+	return s, true
+}
+
+// plainString reports whether b is a JSON string's contents as they are:
+// valid UTF-8 with no quote, backslash, or control character.
+func plainString(b []byte) bool {
+	for _, c := range b {
+		if c < 0x20 || c == '"' || c == '\\' {
+			return false
+		}
+	}
+	return utf8.Valid(b)
 }
 
 // ParseBody reads a message body (§3.5) as the message requests' parsers
@@ -178,10 +367,82 @@ func parseBody(raw jsontext.Value, fields map[string]jsontext.Value) (*Body, err
 // with it a body that came from elsewhere, such as one its filter
 // rewrote, as apron/server checks a client's. Its error is always an *Error,
 // error/invalid_params.
-func ParseBody(raw jsontext.Value) (*Body, error) {
-	var fields map[string]jsontext.Value
-	if json.Unmarshal(raw, &fields) != nil || fields == nil {
-		return nil, InvalidParams("body must be an object")
+func ParseBody(raw jsontext.Value) (Body, error) {
+	in, ok := splitBody(raw)
+	if !ok {
+		return Body{}, InvalidParams("body must be an object")
 	}
-	return parseBody(raw, fields)
+	return parseBody(in)
+}
+
+// bodyDecoders are the decoders splitBody reads a body with, in place.
+var bodyDecoders = sync.Pool{New: func() any { return new(bodyDecoder) }}
+
+type bodyDecoder struct {
+	jsontext.Decoder
+	body bytes.Buffer
+}
+
+var noBody = new(bytes.Buffer)
+
+// splitBody reads a body's members as decoding a bodyMembers does, with
+// the members this package knows parts of raw rather than copies: each
+// present when not nil, null too, and the others an object of their own,
+// as they arrived. It reports false for a body that is not an object, or
+// not valid JSON.
+func splitBody(raw jsontext.Value) (in bodyMembers, ok bool) {
+	if raw.Kind() != '{' {
+		return bodyMembers{}, false
+	}
+	bd := bodyDecoders.Get().(*bodyDecoder)
+	defer func() {
+		bd.Reset(noBody)
+		bd.body = bytes.Buffer{}
+		bodyDecoders.Put(bd)
+	}()
+	bd.body = *bytes.NewBuffer(raw)
+	bd.Reset(&bd.body)
+	dec := &bd.Decoder
+	if _, err := dec.ReadToken(); err != nil {
+		return bodyMembers{}, false
+	}
+	for dec.PeekKind() != '}' {
+		quoted, err := dec.ReadValue()
+		if err != nil {
+			return bodyMembers{}, false
+		}
+		name := bodyMember(quoted)
+		if name == "" {
+			// quoted is the decoder's until its next read.
+			if in.Unknown == nil {
+				in.Unknown = append(jsontext.Value{'{'}, quoted...)
+			} else {
+				in.Unknown = append(append(in.Unknown[:len(in.Unknown)-1], ','), quoted...)
+			}
+			in.Unknown = append(in.Unknown, ':')
+		}
+		value, err := dec.ReadValue()
+		if err != nil {
+			return bodyMembers{}, false
+		}
+		// The decoder reads raw in place, so the value is part of it.
+		end := dec.InputOffset()
+		value = jsontext.Value(raw[end-int64(len(value)) : end : end])
+		switch name {
+		case "text":
+			in.Text = value
+		case "format":
+			in.Format = value
+		case "mentions":
+			in.Mentions = value
+		case "embeds":
+			in.Embeds = value
+		default:
+			in.Unknown = append(append(in.Unknown, value...), '}')
+		}
+	}
+	if _, err := dec.ReadToken(); err != nil {
+		return bodyMembers{}, false
+	}
+	return in, true
 }

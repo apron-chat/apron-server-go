@@ -233,7 +233,7 @@ func TestApp(t *testing.T) {
 		t.Fatalf("sign-in page = %d %s", page.Status, page.Body)
 	}
 	result, err := app.Redeem(app.Press(page, "allow"))
-	if err != nil || result.You == nil || result.You.UserID != "octocat" || app.Conn.UserID != "octocat" {
+	if err != nil || result.You.UserID == "" || result.You.UserID != "octocat" || app.Conn.UserID != "octocat" {
 		t.Fatalf("redeemed: %+v, %v", result, err)
 	}
 	declined := server.App()

@@ -24,7 +24,7 @@ func TestReadExample(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if a.Header.Server != "wss://chat.example/" || a.Header.You == nil || a.Header.You.UserID != "ada" || len(a.Header.Media) != 1 || a.Skipped != 0 {
+	if a.Header.Server != "wss://chat.example/" || a.Header.You.UserID == "" || a.Header.You.UserID != "ada" || len(a.Header.Media) != 1 || a.Skipped != 0 {
 		t.Fatalf("header %+v, skipped %d", a.Header, a.Skipped)
 	}
 	if l := a.Rooms["general"]; !l.Joined || l.Title != "General" || len(l.Members) != 2 {
@@ -47,7 +47,7 @@ func TestReadExample(t *testing.T) {
 func TestRoundTrip(t *testing.T) {
 	var buf bytes.Buffer
 	you := apron.User{UserID: "ada", Name: "Ada", Status: "online", Seen: "1724800000000"}
-	w, err := archive.NewWriter(&buf, archive.Header{Server: "wss://chat.example/ws", ExportedAt: archive.FormatTime(time.Unix(1724803500, 0)), You: &you, Media: []string{"https://chat.example"}})
+	w, err := archive.NewWriter(&buf, archive.Header{Server: "wss://chat.example/ws", ExportedAt: archive.FormatTime(time.Unix(1724803500, 0)), You: you, Media: []string{"https://chat.example"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -55,14 +55,14 @@ func TestRoundTrip(t *testing.T) {
 	start, none := apron.LogID(10), apron.LogID(0)
 	page := apron.HistoryResult{
 		Rooms:       []apron.Room{{RoomID: "general", LogID: 10, Title: "General"}},
-		Messages:    []apron.Message{{MessageID: 11, LogID: 11, RoomID: "general", From: from, Body: &apron.Body{Text: "hi", Format: apron.Markdown}}},
+		Messages:    []apron.Message{{MessageID: 11, LogID: 11, RoomID: "general", From: from, Body: apron.Body{Text: "hi", Format: apron.Markdown}}},
 		Memberships: []apron.Membership{{LogID: 12, RoomID: "general", Members: []apron.Member{{User: apron.User{UserID: "ada"}, Joined: true}}}},
 		More:        true, FirstLogID: 10, LastLogID: 12,
 	}
 	for _, p := range []archive.Part{
 		archive.HistoryPart(page),
 		{}, // writes nothing
-		{Messages: []apron.Message{{MessageID: 5, LogID: 5, RoomID: "general", From: from, Body: &apron.Body{Text: "a reference"}}}},
+		{Messages: []apron.Message{{MessageID: 5, LogID: 5, RoomID: "general", From: from, Body: apron.Body{Text: "a reference"}}}},
 		{Joined: []apron.RoomView{{Room: page.Rooms[0], LatestLogID: 12, HistoryLogID: &start,
 			Members: []apron.CurrentUser{{User: apron.User{UserID: "ada", Status: "online"}, Cleared: []string{"seen"}}}}}},
 		{NotJoined: []apron.RoomView{{Room: apron.Room{RoomID: "random"}, LatestLogID: 3, HistoryLogID: &none}}},
@@ -149,7 +149,7 @@ func TestReadSkips(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if a.Header.Server != "" || a.Header.You != nil {
+	if a.Header.Server != "" || a.Header.You.UserID != "" {
 		t.Fatalf("header %+v", a.Header)
 	}
 	// not json, the array, "not an array", two messages, the reactions,

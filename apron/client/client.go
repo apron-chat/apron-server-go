@@ -16,7 +16,7 @@
 //		return err
 //	}
 //	defer conn.Close()
-//	_, err = conn.Post(ctx, apron.MessageParams{RoomID: "general", Body: &apron.Body{Text: "Deployed"}})
+//	_, err = conn.Post(ctx, apron.MessageParams{RoomID: "general", Body: apron.Body{Text: "Deployed"}})
 //
 // A Conn is one connection, and it is not opened again: when it ends, Done
 // is closed, and its calls fail with an error that wraps apron.ErrClosed.
@@ -45,6 +45,7 @@
 package client
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/json/jsontext"
@@ -62,6 +63,7 @@ import (
 	"github.com/coder/websocket"
 
 	"github.com/apron-chat/apron-server-go/apron"
+	"github.com/apron-chat/apron-server-go/apron/internal/core"
 )
 
 // Errors that end a connection, which its Err then wraps.
@@ -80,9 +82,10 @@ const (
 	// readLimit bounds a frame from the server: well above the 256 KiB a
 	// request may be (§1), for results such as a page of history.
 	readLimit = 32 << 20
-	// writeTimeout bounds writing one frame.
-	writeTimeout = 10 * time.Second
 )
+
+// writeTimeout bounds writing one frame; a test shortens it.
+var writeTimeout = 10 * time.Second
 
 // An Option configures Dial.
 type Option func(*options)
@@ -146,6 +149,13 @@ type Conn struct {
 	// limits are the holds of HoldBack, or nil without it.
 	limits *limits
 
+	// wmu is held while a frame is written, which writeTimer bounds:
+	// writeDeadline is when the write under way must be done, in Unix
+	// nanoseconds, or 0 between writes.
+	wmu           sync.Mutex
+	writeTimer    *time.Timer
+	writeDeadline atomic.Int64
+
 	mu     sync.Mutex
 	hello  apron.ServerInfo
 	user   apron.User
@@ -186,7 +196,7 @@ func Dial(ctx context.Context, url string, auth apron.AuthParams, opts ...Option
 		return nil, err
 	}
 	result, err := c.Auth(ctx, auth)
-	if err == nil && result.You == nil {
+	if err == nil && result.You.UserID == "" {
 		err = errors.New("client: auth signed nobody in")
 	}
 	if err != nil {
@@ -223,6 +233,8 @@ func Connect(ctx context.Context, url string, opts ...Option) (*Conn, error) {
 		done:    make(chan struct{}),
 		calls:   map[string]*pending{},
 	}
+	c.writeTimer = time.AfterFunc(writeTimeout, c.writeExpired)
+	c.writeTimer.Stop()
 	if o.holdBack > 0 {
 		c.limits = &limits{max: o.holdBack}
 	}
@@ -279,7 +291,7 @@ func (c *Conn) dialError() error {
 // read reads frames until the connection ends.
 func (c *Conn) read() {
 	for {
-		_, payload, err := c.ws.Read(context.Background())
+		_, payload, err := core.ReadMessage(context.Background(), c.ws)
 		if err != nil {
 			c.mu.Lock()
 			if c.failed != nil {
@@ -300,35 +312,46 @@ func (c *Conn) read() {
 // any other to OnFrame, once the Conn has noted what it says of the
 // connection.
 func (c *Conn) receive(payload []byte) {
-	var f struct {
-		ID     *string        `json:"id"`
-		Method string         `json:"method"`
-		Params jsontext.Value `json:"params"`
-		Result jsontext.Value `json:"result"`
-		Error  *apron.Error   `json:"error"`
-	}
-	if json.Unmarshal(payload, &f) != nil {
+	// The frame is read in one pass, in place, its values parts of it,
+	// which is the frame's own (ReadMessage), rather than copied out of it.
+	head, err := apron.Frame(payload).Head()
+	if err != nil {
 		return
 	}
+	var f struct {
+		ID     string
+		HasID  bool
+		Method string
+		Params jsontext.Value
+		Result jsontext.Value
+		Error  *apron.Error
+	}
+	f.Method, f.Params, f.Result = head.Method, head.Params, head.Result
+	// As decoding the frame into a *string and an *apron.Error does: null
+	// is none, and anything else but a string, or an object, refuses the
+	// frame.
+	if head.ID != nil && head.ID.Kind() != 'n' {
+		if raw := head.ID; raw.Kind() == '"' && bytes.IndexByte(raw, '\\') < 0 {
+			f.ID = string(raw[1 : len(raw)-1])
+		} else {
+			var id string
+			if json.Unmarshal(raw, &id) != nil {
+				return
+			}
+			f.ID = id
+		}
+		f.HasID = true
+	}
+	if head.Error != nil {
+		var e *apron.Error
+		if json.Unmarshal(head.Error, &e) != nil {
+			return
+		}
+		f.Error = e
+	}
 	switch {
-	case f.ID != nil && f.Method == "":
-		c.mu.Lock()
-		waiting := c.calls[*f.ID]
-		delete(c.calls, *f.ID)
-		if waiting != nil && f.Error == nil && (waiting.method == "auth" || waiting.method == "me") {
-			// A complete you replaces the user (§3.3.1), before any
-			// user notification after it is merged.
-			var result struct {
-				You *apron.CurrentUser `json:"you"`
-			}
-			if json.Unmarshal(f.Result, &result) == nil && result.You != nil {
-				c.user = result.You.User
-			}
-		}
-		c.mu.Unlock()
-		if waiting != nil {
-			waiting.reply <- reply{f.Result, f.Error}
-		}
+	case f.HasID && f.Method == "":
+		c.answer(f.ID, f.Result, f.Error)
 		return
 	case f.Method == "pong":
 		return
@@ -347,12 +370,12 @@ func (c *Conn) receive(payload []byte) {
 		}
 	case f.Method == "user":
 		var update apron.UserUpdate
-		if json.Unmarshal(f.Params, &update) == nil && update.You != nil {
+		if json.Unmarshal(f.Params, &update) == nil && update.You.UserID != "" {
 			c.mu.Lock()
-			c.user = merge(c.user, *update.You)
+			c.user = merge(c.user, update.You)
 			c.mu.Unlock()
 		}
-	case f.Method == "" && f.ID == nil && f.Error != nil:
+	case f.Method == "" && !f.HasID && f.Error != nil:
 		c.mu.Lock()
 		c.failed = f.Error
 		c.mu.Unlock()
@@ -366,6 +389,28 @@ func (c *Conn) receive(payload []byte) {
 		c.discard.Store(true)
 		c.shut(ErrFellBehind)
 		c.ws.CloseNow()
+	}
+}
+
+// answer hands a reply to the call waiting for it, if one is, once the
+// Conn has noted who an auth or me result makes it.
+func (c *Conn) answer(id string, result jsontext.Value, e *apron.Error) {
+	c.mu.Lock()
+	waiting := c.calls[id]
+	delete(c.calls, id)
+	if waiting != nil && e == nil && (waiting.method == "auth" || waiting.method == "me") {
+		// A complete you replaces the user (§3.3.1), before any user
+		// notification after it is merged.
+		var you struct {
+			You apron.CurrentUser `json:"you"`
+		}
+		if json.Unmarshal(result, &you) == nil && you.You.UserID != "" {
+			c.user = you.You.User
+		}
+	}
+	c.mu.Unlock()
+	if waiting != nil {
+		waiting.reply <- reply{result, e}
 	}
 }
 
@@ -504,7 +549,7 @@ func mergeUnknown(kept, carried jsontext.Value) jsontext.Value {
 // request.
 func (c *Conn) Call(ctx context.Context, method string, params any) (jsontext.Value, error) {
 	id := c.prefix + strconv.FormatUint(c.nextID.Add(1), 10)
-	frame := map[string]any{"method": method, "id": id}
+	frame := core.RequestFrame{ID: &id, Method: method}
 	var raw jsontext.Value
 	if params != nil {
 		encoded, err := apron.Marshal(params)
@@ -512,9 +557,9 @@ func (c *Conn) Call(ctx context.Context, method string, params any) (jsontext.Va
 			return nil, err
 		}
 		raw = encoded
-		frame["params"] = raw
+		frame.Params = raw
 	}
-	payload, err := apron.Marshal(frame)
+	payload, err := apron.Marshal(&frame)
 	if err != nil {
 		return nil, err
 	}
@@ -572,11 +617,7 @@ func (r reply) unwrap() error {
 // Notify sends a notification, such as activity (§4.6), which gets no
 // reply.
 func (c *Conn) Notify(ctx context.Context, method string, params any) error {
-	frame := map[string]any{"method": method}
-	if params != nil {
-		frame["params"] = params
-	}
-	payload, err := apron.Marshal(frame)
+	payload, err := apron.Marshal(&core.RequestFrame{Method: method, Params: params})
 	if err != nil {
 		return err
 	}
@@ -589,9 +630,17 @@ func (c *Conn) write(ctx context.Context, payload []byte) error {
 	if err := c.Err(); err != nil {
 		return err
 	}
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), writeTimeout)
-	defer cancel()
-	if err := c.ws.Write(ctx, websocket.MessageText, payload); err != nil {
+	// One write at a time, bounded by the connection's write timer rather
+	// than a context with a deadline for each, which the WebSocket would
+	// also watch with one more timer of its own.
+	c.wmu.Lock()
+	c.writeDeadline.Store(time.Now().Add(writeTimeout).UnixNano())
+	c.writeTimer.Reset(writeTimeout)
+	err := c.ws.Write(context.Background(), websocket.MessageText, payload)
+	c.writeDeadline.Store(0)
+	c.writeTimer.Stop()
+	c.wmu.Unlock()
+	if err != nil {
 		// A write that fails ends the connection, whose reader then ends
 		// too and says why, such as with the error the server sent before
 		// it closed (one at capacity, §1.1): that tells more than the
@@ -604,6 +653,15 @@ func (c *Conn) write(ctx context.Context, payload []byte) error {
 		}
 	}
 	return nil
+}
+
+// writeExpired runs when the write timer fires: a write still under way
+// past its deadline ends the connection, which ends the write; the timer
+// firing late, after the write, or as the next one begins, does nothing.
+func (c *Conn) writeExpired() {
+	if deadline := c.writeDeadline.Load(); deadline != 0 && time.Now().UnixNano() >= deadline {
+		c.ws.CloseNow()
+	}
 }
 
 // call sends a request on c, and decodes its result.
@@ -714,6 +772,16 @@ func (c *Conn) User() apron.User {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.user
+}
+
+// Identity is who the connection is signed in as, as User is, and whether
+// it is, once it has a user_id: a bot.Conn's. Its Roles, Ext, and Unknown
+// are the connection's, replaced, never changed, as the connection learns
+// who it is.
+func (c *Conn) Identity() (apron.User, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.user, c.user.UserID != ""
 }
 
 // Done is closed once the connection has ended, with Err set.

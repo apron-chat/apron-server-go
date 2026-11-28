@@ -2,12 +2,15 @@ package aprond
 
 import (
 	"cmp"
+	"encoding/json/jsontext"
 	"fmt"
+	"iter"
 	"maps"
 	"regexp"
 	"slices"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 	"unicode"
 	"unicode/utf8"
@@ -69,6 +72,69 @@ type userState struct {
 	// to the user today, against maxPushesPerUserDay.
 	unread  map[string]int
 	pushDay push.Day
+
+	// shownFrame is the latest statusFrame, rendered for the status and
+	// seen it holds, which a sign-in sends to the user's sharers' new
+	// connections, each of them.
+	shownFrame shownFrame
+
+	// shown and profiled are the user's shown object and complete one
+	// encoded (shownRaw, profileRaw), with what each was made of, which
+	// a listing under a read lock checks against the user as it is now
+	// before it sends one: replaced, never changed.
+	shown    atomic.Pointer[encodedShown]
+	profiled atomic.Pointer[encodedProfile]
+}
+
+// encodedShown is a user's shown object encoded, for a status and seen.
+type encodedShown struct {
+	status string
+	seen   int64
+	raw    jsontext.Value
+}
+
+// shownRaw is shownObject encoded, kept while the status and seen it was
+// made of are the user's: for a listing's members (RoomView.MembersRaw).
+func (u *userState) shownRaw() jsontext.Value {
+	status, seen := u.Presence.Status, u.Presence.Seen
+	if e := u.shown.Load(); e != nil && e.status == status && e.seen == seen {
+		return e.raw
+	}
+	raw := encodeJSON(u.shownObject())
+	u.shown.Store(&encodedShown{status, seen, raw})
+	return raw
+}
+
+// encodedProfile is a user's complete object encoded, with what it was
+// made of.
+type encodedProfile struct {
+	name, avatar, status string
+	seen                 int64
+	roles                []string
+	ext                  apron.Ext
+	account              bool
+	raw                  jsontext.Value
+}
+
+// profileRaw is profile encoded, kept while what it was made of is the
+// user's: its name, avatar, shown status and seen, roles, ext, and whether
+// it is an account's.
+func (u *userState) profileRaw() jsontext.Value {
+	status, seen, account := u.Presence.Status, u.Presence.Seen, u.Account()
+	if e := u.profiled.Load(); e != nil && e.name == u.Name && e.avatar == u.Avatar && e.status == status && e.seen == seen &&
+		e.account == account && slices.Equal(e.roles, u.roles) && maps.EqualFunc(e.ext, u.Ext, func(a, b jsontext.Value) bool { return string(a) == string(b) }) {
+		return e.raw
+	}
+	raw := encodeJSON(u.profile())
+	u.profiled.Store(&encodedProfile{u.Name, u.Avatar, status, seen, slices.Clone(u.roles), maps.Clone(u.Ext), account, raw})
+	return raw
+}
+
+// shownFrame is a statusFrame rendered for a shown status and seen.
+type shownFrame struct {
+	status string
+	seen   int64
+	frame  jsontext.Value
 }
 
 // newUserState returns a new user named name.
@@ -201,7 +267,7 @@ func (s *Server) roomNamedLocked(id string) bool {
 // joined: the client lists them with room_list.
 func (s *Server) switchUserLocked(c *client, reply server.Reply[apron.AuthResult], user *userState, token string, signIn, joinDefault bool) {
 	you := user.you()
-	_ = reply.Send(apron.AuthResult{You: &you, Token: token})
+	_ = reply.Send(apron.AuthResult{You: you, Token: token})
 	// A connection that got only what signing in needs gets the whole
 	// server frame now (§3.1).
 	if !s.revealedLocked(c) {
@@ -307,22 +373,23 @@ func (u *userState) send(frames ...any) {
 	}
 }
 
-// sharersLocked lists the other users who share a joined room with u.
-func (s *Server) sharersLocked(u *userState) []*userState {
-	seen := make(map[string]*userState)
-	for _, r := range u.joined {
-		for id, member := range r.Members() {
-			if id != u.id {
-				seen[id] = member
+// usersConns yields the connections of users, which yields each once.
+func usersConns(users iter.Seq[*userState]) iter.Seq[*server.Conn] {
+	return func(yield func(*server.Conn) bool) {
+		for u := range users {
+			for c := range u.clients {
+				if !yield(c.conn) {
+					return
+				}
 			}
 		}
 	}
-	ids := slices.Sorted(maps.Keys(seen))
-	users := make([]*userState, len(ids))
-	for i, id := range ids {
-		users[i] = seen[id]
-	}
-	return users
+}
+
+// sharersConnsLocked yields the connections of the other users who share a
+// joined room with u, each user's once (membersConns).
+func (s *Server) sharersConnsLocked(u *userState) iter.Seq[*server.Conn] {
+	return membersConns(slices.Collect(maps.Values(u.joined)), u)
 }
 
 // userViews are a user as its two audiences see it (server.UserChange): its
@@ -363,19 +430,15 @@ func (s *Server) notifyProfileLocked(u *userState, except *client, before userVi
 // publishUserLocked tells of a change to u since before (notifyProfileLocked),
 // without publishing its shown status.
 func (s *Server) publishUserLocked(u *userState, except *client, before userViews) {
-	sharers := make(map[*userState]bool)
-	for _, other := range s.sharersLocked(u) {
-		sharers[other] = true
-	}
 	now := u.views()
 	change := server.UserChange{Old: before.you, New: now.you, OldShown: before.shown, NewShown: now.shown}
 	if except != nil {
 		change.Except = except.conn
 	}
-	s.srv.PublishUser(change, func(wc *server.Conn) bool {
-		c, ok := wc.Data().(*client)
-		return ok && c.user != nil && sharers[c.user]
-	})
+	// The change goes to the user's connections and its sharers', from the
+	// rooms' lists, rather than to every connection the filter of
+	// PublishUser would pick from.
+	s.srv.PublishUserTo(change, usersConns(func(yield func(*userState) bool) { yield(u) }), s.sharersConnsLocked(u))
 }
 
 // withRemoved clears each removed field of a profile, which sends it as

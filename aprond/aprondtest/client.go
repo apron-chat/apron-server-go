@@ -63,7 +63,7 @@ func (c *Client) Auth(params any) (apron.AuthResult, error) {
 	if err != nil {
 		return result, c.refusal("auth", err)
 	}
-	if result.You != nil {
+	if result.You.UserID != "" {
 		c.UserID, c.Token = result.You.UserID, result.Token
 	}
 	return result, nil
@@ -74,7 +74,7 @@ func (c *Client) Auth(params any) (apron.AuthResult, error) {
 func (c *Client) signIn(params any) error {
 	c.t.Helper()
 	result, err := c.Auth(params)
-	if err == nil && result.You == nil {
+	if err == nil && result.You.UserID == "" {
 		err = errors.New("aprondtest: the auth result signed nobody in")
 	}
 	return err
@@ -174,12 +174,12 @@ func (c *Client) Post(roomID, text string, options ...aprond.PostOption) (messag
 // edit is the params of a message request that saves an existing message
 // (§4.4).
 type edit struct {
-	RoomID    string            `json:"room_id"`
-	MessageID string            `json:"message_id"`
-	Deleted   bool              `json:"deleted,omitzero"`
-	Body      *apron.Body       `json:"body,omitempty"`
-	ReplyTo   *apron.MessageRef `json:"reply_to,omitempty"`
-	Ext       apron.Ext         `json:"ext,omitempty"`
+	RoomID    string           `json:"room_id"`
+	MessageID string           `json:"message_id"`
+	Deleted   bool             `json:"deleted,omitzero"`
+	Body      *apron.Body      `json:"body,omitempty"`
+	ReplyTo   apron.MessageRef `json:"reply_to,omitzero"`
+	Ext       apron.Ext        `json:"ext,omitempty"`
 }
 
 // Edit saves the message messageID in a room with text as its new body
@@ -191,7 +191,7 @@ func (c *Client) Edit(roomID, messageID, text string, options ...aprond.PostOpti
 	if err != nil {
 		return err
 	}
-	return c.Call("message", edit{RoomID: roomID, MessageID: messageID, Body: params.Body, ReplyTo: params.ReplyTo, Ext: params.Ext}, nil)
+	return c.Call("message", edit{RoomID: roomID, MessageID: messageID, Body: &params.Body, ReplyTo: params.ReplyTo, Ext: params.Ext}, nil)
 }
 
 // Delete deletes the message messageID in a room (§4.4), which leaves a

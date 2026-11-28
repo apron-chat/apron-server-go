@@ -33,7 +33,7 @@ func TestBotConn(t *testing.T) {
 	}
 	posted, err := callAs[apron.MessageResult](ctx, conn, "message", apron.MessageParams{
 		RoomID: "general",
-		Body:   &apron.Body{Text: "**hi** @" + c.userID, Format: apron.Markdown, Mentions: []string{c.userID}},
+		Body:   apron.Body{Text: "**hi** @" + c.userID, Format: apron.Markdown, Mentions: []string{c.userID}},
 		Ext:    apron.Ext{}.With("helper", map[string]any{"n": 1}),
 	})
 	if err != nil || posted.MessageID == 0 {
@@ -42,13 +42,13 @@ func TestBotConn(t *testing.T) {
 	if got := notificationParams(t, c.read(t), "message"); got["message_id"] != posted.MessageID.String() {
 		t.Fatalf("guest got %#v", got)
 	}
-	if _, err := conn.Call(ctx, "message", apron.MessageParams{RoomID: "nowhere", Body: &apron.Body{Text: "x"}}); apron.CodeOf(err) != CodeInvalidParams {
+	if _, err := conn.Call(ctx, "message", apron.MessageParams{RoomID: "nowhere", Body: apron.Body{Text: "x"}}); apron.CodeOf(err) != CodeInvalidParams {
 		t.Fatalf("Post to no room: %v", err)
 	}
 	if _, err := conn.Call(ctx, "auth", map[string]any{"scheme": "guest"}); apron.CodeOf(err) != CodeDenied {
 		t.Fatalf("auth on a bot's connection: %v", err)
 	}
-	if _, err := conn.Call(ctx, "command", apron.CommandParams{RoomID: "general", Body: &apron.Body{Text: "/help"}}); err != nil {
+	if _, err := conn.Call(ctx, "command", apron.CommandParams{RoomID: "general", Body: apron.Body{Text: "/help"}}); err != nil {
 		t.Fatalf("/help: %v", err)
 	}
 
@@ -77,13 +77,13 @@ func TestMessageOfAndApron(t *testing.T) {
 	reply := apron.Message{
 		MessageID: 7, LogID: 9, RoomID: "general", PrevLogID: 8, PrevRoomID: "random",
 		From:    apron.User{UserID: "ada", Name: "Ada"},
-		Body:    &apron.Body{Text: "yes", Mentions: []string{"bob"}, Unknown: jsontext.Value(`{"x":1}`)},
-		ReplyTo: &apron.MessageRef{MessageID: 3},
+		Body:    apron.Body{Text: "yes", Mentions: []string{"bob"}, Unknown: jsontext.Value(`{"x":1}`)},
+		ReplyTo: apron.MessageRef{MessageID: 3},
 		Ext:     apron.Ext{"irc": jsontext.Value(`{"nick":"ada_"}`)},
 	}
 	m := MessageOf(reply)
 	if m.ID != "7" || m.LogID != 9 || m.PrevLogID != 8 || m.PrevRoomID != "random" || m.ReplyTo != "3" ||
-		m.Text != "yes" || m.Format != apron.Plain || m.Body["x"] != float64(1) || m.From.Name != "Ada" || m.New() {
+		m.Text != "yes" || m.Format != apron.Plain || m.Body()["x"] != float64(1) || m.From.Name != "Ada" || m.New() {
 		t.Fatalf("MessageOf = %#v", m)
 	}
 	back := m.Apron()
@@ -96,7 +96,7 @@ func TestMessageOfAndApron(t *testing.T) {
 	}
 
 	tombstone := MessageOf(apron.Message{MessageID: 7, LogID: 10, PrevLogID: 9, RoomID: "general", From: apron.User{UserID: "ada"}, Deleted: true})
-	if !tombstone.Deleted || tombstone.Body != nil || tombstone.Apron().Body != nil {
+	if back := tombstone.Apron(); !tombstone.Deleted || tombstone.Body() != nil || !back.Body.IsZero() {
 		t.Fatalf("tombstone = %#v", tombstone)
 	}
 	notice := MessageOf(apron.Notice("general", "hello"))
@@ -104,7 +104,7 @@ func TestMessageOfAndApron(t *testing.T) {
 		t.Fatalf("notice = %#v", notice)
 	}
 	made := Message{ID: "12", RoomID: "general", Text: "hand made", Format: apron.Markdown}.Apron()
-	if made.MessageID != 12 || made.Body == nil || made.Body.Text != "hand made" || made.Body.Format != apron.Markdown {
+	if made.MessageID != 12 || made.Body.IsZero() || made.Body.Text != "hand made" || made.Body.Format != apron.Markdown {
 		t.Fatalf("Apron of a Message without Body = %#v", made)
 	}
 }

@@ -3,13 +3,11 @@ package aprond
 import (
 	"context"
 	"encoding/json/v2"
-	"maps"
 	"slices"
 	"testing"
 	"time"
 
 	"github.com/apron-chat/apron-server-go/aprond/internal/users"
-	"github.com/apron-chat/apron-server-go/internal/auth/email"
 	"github.com/apron-chat/apron-server-go/internal/authn"
 	"github.com/apron-chat/apron-server-go/store"
 )
@@ -59,29 +57,6 @@ func TestStoredIdentitiesConvert(t *testing.T) {
 	// identities reads it too.
 	if stored.Identities["email"] != "ada@example.com" || stored.Email != "ada@example.com" {
 		t.Fatalf("stored = %#v, want the identity in both forms", stored)
-	}
-}
-
-// An identity has one account: adding it to another is refused, and an
-// account has one identity of each scheme.
-func TestIdentitiesBelongToOneAccount(t *testing.T) {
-	app, mailbox, httpServer := emailTestServer(t, nil)
-	first := dialTestClient(t, httpServer)
-	propose(t, first, "ada@example.com")
-	approve(t, first, mailbox.receive(t).Code, nil)
-	second := dialTestClient(t, httpServer)
-	ageSends(app, "ada@example.com", email.ResendInterval)
-	propose(t, second, "ada@example.com")
-	frame := second.call(t, "auth", "a2", map[string]any{"scheme": "email", "token": pendingCode(t, app, second.userID)})
-	if errorCode(frame) != CodeDenied {
-		t.Fatalf("adding another account's address = %#v", frame)
-	}
-	app.mu.RLock()
-	owner := app.users.ByIdentity(authn.Identity{Scheme: "email", Subject: "ada@example.com"})
-	identities := slices.Collect(maps.Keys(owner.Identities))
-	app.mu.RUnlock()
-	if owner.id != first.userID || !slices.Equal(identities, []string{"email"}) {
-		t.Fatalf("owner %s with %v, want %s with its address", owner.id, identities, first.userID)
 	}
 }
 

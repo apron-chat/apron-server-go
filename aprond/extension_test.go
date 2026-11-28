@@ -166,12 +166,33 @@ func TestExtensionRegistrationErrors(t *testing.T) {
 			r.Follow(follow)
 			return nil
 		},
-		"bad advertise": func(r *Registrar) error { return r.Advertise(map[string]any{"f": func() {}}) },
+		"bad advertise":    func(r *Registrar) error { return r.Advertise(map[string]any{"f": func() {}}) },
+		"capital name":     func(r *Registrar) error { r.Command(Command{Name: "Bad", Run: run}); return nil },
+		"form without Run": func(r *Registrar) error { r.Command(Command{Name: "x", Forms: []Form{{}}}); return nil },
+		"Run and Forms": func(r *Registrar) error {
+			r.Command(Command{Name: "x", Run: run, Forms: []Form{{Run: run}}})
+			return nil
+		},
+		"another's form": func(r *Registrar) error {
+			r.Command(Command{Name: "x", Forms: []Form{{Name: "y", Run: run}}})
+			return nil
+		},
+		"form twice": func(r *Registrar) error {
+			r.Command(Command{Name: "x", Forms: []Form{{Run: run}, {Name: "x", Run: run}}})
+			return nil
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
-			if app, err := Open(extensionConfig(testExtension{"demo", init})); err == nil {
+			// A failed Open closes the store it was given, once.
+			counted := &closeCounter{Store: store.NewMemory()}
+			config := extensionConfig(testExtension{"demo", init})
+			config.Store = counted
+			if app, err := Open(config); err == nil {
 				_ = app.Shutdown(context.Background())
 				t.Fatal("Open succeeded")
+			}
+			if n := counted.closes.Load(); n != 1 {
+				t.Fatalf("the store closed %d times, want once", n)
 			}
 		})
 	}
@@ -217,18 +238,6 @@ type closeCounter struct {
 func (c *closeCounter) Close() error {
 	c.closes.Add(1)
 	return c.Store.Close()
-}
-
-func TestOpenClosesTheStoreWhenItFails(t *testing.T) {
-	counted := &closeCounter{Store: store.NewMemory()}
-	config := extensionConfig(testExtension{"demo", func(*Registrar) error { return errors.New("broken") }})
-	config.Store = counted
-	if _, err := Open(config); err == nil {
-		t.Fatal("Open succeeded")
-	}
-	if n := counted.closes.Load(); n != 1 {
-		t.Fatalf("the store closed %d times, want once", n)
-	}
 }
 
 func TestExtensionMethodAdvertiseAndRoute(t *testing.T) {
@@ -474,10 +483,8 @@ func TestBotIDs(t *testing.T) {
 
 func TestSessionThatFallsBehindIsForgotten(t *testing.T) {
 	block := make(chan struct{})
-	var host *Host
 	var session *Session
 	app, httpServer := newTestServer(t, extensionConfig(testExtension{"slow", func(r *Registrar) error {
-		host = r.Host
 		bot, err := r.Bot("slow", BotOptions{})
 		if err != nil {
 			return err
@@ -514,7 +521,6 @@ func TestSessionThatFallsBehindIsForgotten(t *testing.T) {
 	if kept || sessions != 1 || connected != 1 {
 		t.Fatalf("kept %v, sessions %d, bot connections %d after the session closed", kept, sessions, connected)
 	}
-	_ = host
 }
 
 func TestSessionRefusesReentrantCalls(t *testing.T) {
@@ -546,11 +552,13 @@ func TestSessionRefusesReentrantCalls(t *testing.T) {
 	}
 }
 
+// A command that runs past several of the server's ping timeouts keeps
+// its connection, whose client answers the pings meanwhile.
 func TestSlowCommandKeepsItsConnection(t *testing.T) {
 	config := extensionConfig(testExtension{"slow", func(r *Registrar) error {
 		r.Command(Command{Name: "slow", Run: func(ctx context.Context, call *CommandCall) (map[string]any, error) {
 			select {
-			case <-time.After(time.Second):
+			case <-time.After(500 * time.Millisecond):
 			case <-ctx.Done():
 				return nil, ctx.Err()
 			}

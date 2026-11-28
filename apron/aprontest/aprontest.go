@@ -17,7 +17,7 @@
 // the request it waited for:
 //
 //	c, _ := aprontest.SignIn(t, srv, map[string]any{"scheme": "guest", "name": "Ada"})
-//	result, err := c.Post(ctx, apron.MessageParams{Body: &apron.Body{Text: "hi"}})
+//	result, err := c.Post(ctx, apron.MessageParams{Body: apron.Body{Text: "hi"}})
 //	...
 //	echo, err := aprontest.Expect(ctx, c, func(m apron.Message) bool { return m.From.UserID == "echo" })
 //

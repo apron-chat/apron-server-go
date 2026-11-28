@@ -2,6 +2,8 @@ package apron
 
 import (
 	"cmp"
+	"encoding/json/jsontext"
+	"encoding/json/v2"
 	"maps"
 	"slices"
 )
@@ -26,8 +28,11 @@ func (m Message) Replaces(kept Message) bool {
 // in any order, and ends in the same state (§4.3.5). The zero Replay is
 // empty and ready to use. It is not safe for concurrent use.
 type Replay struct {
-	rooms       map[string]Room
-	messages    map[LogID]Message
+	rooms    map[string]Room
+	messages map[LogID]Message
+	// raw are the snapshots applied raw (ApplyRawMessage), by message_id:
+	// a message is in messages or here, not both.
+	raw         map[LogID]rawMessage
 	reactions   map[reactionKey]reactionEntry
 	memberships map[memberKey]memberEntry
 	latest      LogID
@@ -82,15 +87,75 @@ func (r *Replay) ApplyMessage(m Message) bool {
 	if m.MessageID == 0 || m.LogID == 0 {
 		return false
 	}
-	if kept, ok := r.messages[m.MessageID]; ok && !m.Replaces(kept) {
+	if kept, ok := r.keptMessage(m.MessageID); ok && !m.Replaces(kept) {
 		return false
 	}
 	if r.messages == nil {
 		r.messages = map[LogID]Message{}
 	}
+	delete(r.raw, m.MessageID)
 	r.messages[m.MessageID] = m
 	r.saw(m.LogID)
 	return true
+}
+
+// rawMessage is a message snapshot kept raw (ApplyRawMessage), with what
+// replay and Messages read of it.
+type rawMessage struct {
+	logID   LogID
+	roomID  string
+	deleted bool
+	raw     jsontext.Value
+}
+
+// messageHead is what ApplyRawMessage decodes of a snapshot.
+type messageHead struct {
+	MessageID LogID  `json:"message_id"`
+	LogID     LogID  `json:"log_id"`
+	RoomID    string `json:"room_id"`
+	Deleted   bool   `json:"deleted"`
+}
+
+// ApplyRawMessage applies a message snapshot as it was encoded, as
+// ApplyMessage applies one decoded, and keeps it so, a copy, decoded only
+// when it is read (Message, Messages, Records): a client that keeps a
+// room's whole history, but shows a part of it, keeps less. It decodes the
+// snapshot's message_id, log_id, room_id, and deleted, and reports false
+// for one that is not valid JSON, or has no message_id or log_id. A
+// snapshot that does not decode as a Message when it is read is left out.
+func (r *Replay) ApplyRawMessage(raw jsontext.Value) bool {
+	var head messageHead
+	if json.Unmarshal(raw, &head) != nil || head.MessageID == 0 || head.LogID == 0 {
+		return false
+	}
+	if kept, ok := r.keptMessage(head.MessageID); ok && !(Message{LogID: head.LogID, Deleted: head.Deleted}).Replaces(kept) {
+		return false
+	}
+	if r.raw == nil {
+		r.raw = map[LogID]rawMessage{}
+	}
+	delete(r.messages, head.MessageID)
+	r.raw[head.MessageID] = rawMessage{head.LogID, head.RoomID, head.Deleted, slices.Clone(raw)}
+	r.saw(head.LogID)
+	return true
+}
+
+// keptMessage returns what replay compares of the snapshot kept of a
+// message, decoded or raw: its log_id, and whether it is a tombstone.
+func (r *Replay) keptMessage(messageID LogID) (Message, bool) {
+	if m, ok := r.messages[messageID]; ok {
+		return m, true
+	}
+	if m, ok := r.raw[messageID]; ok {
+		return Message{LogID: m.logID, Deleted: m.deleted}, true
+	}
+	return Message{}, false
+}
+
+// decode decodes a snapshot kept raw.
+func (m rawMessage) decode() (Message, bool) {
+	var decoded Message
+	return decoded, json.Unmarshal(m.raw, &decoded) == nil
 }
 
 // ApplyReactions applies a reactions record (§4.7): each of its sets
@@ -206,18 +271,46 @@ func (r *Replay) Rooms() []Room {
 // Message returns the snapshot kept of a message, which may be a
 // tombstone.
 func (r *Replay) Message(messageID LogID) (Message, bool) {
-	m, ok := r.messages[messageID]
-	return m, ok
+	if m, ok := r.messages[messageID]; ok {
+		return m, true
+	}
+	if m, ok := r.raw[messageID]; ok {
+		return m.decode()
+	}
+	return Message{}, false
 }
 
 // Messages returns the messages whose kept snapshot is in roomID, or in
 // any room for "", tombstones too, in the order of their message_ids,
 // which is the order they were posted in.
 func (r *Replay) Messages(roomID string) []Message {
-	var list []Message
+	// The list is made once, of its size: a room's whole history may be
+	// millions of messages.
+	n := 0
+	for _, m := range r.messages {
+		if roomID == "" || m.RoomID == roomID {
+			n++
+		}
+	}
+	for _, m := range r.raw {
+		if roomID == "" || m.roomID == roomID {
+			n++
+		}
+	}
+	if n == 0 {
+		return nil
+	}
+	list := make([]Message, 0, n)
 	for _, m := range r.messages {
 		if roomID == "" || m.RoomID == roomID {
 			list = append(list, m)
+		}
+	}
+	for _, kept := range r.raw {
+		if roomID == "" || kept.roomID == roomID {
+			if m, ok := kept.decode(); ok {
+				list = append(list, m)
+			}
 		}
 	}
 	slices.SortFunc(list, func(a, b Message) int { return cmp.Compare(a.MessageID, b.MessageID) })
@@ -265,11 +358,19 @@ func (r *Replay) Members(roomID string) []User {
 // leave the same state: they are a compacted log (§4.3.4).
 func (r *Replay) Records() []Record {
 	var records []Record
+	if n := len(r.rooms) + len(r.messages) + len(r.raw); n > 0 {
+		records = make([]Record, 0, n)
+	}
 	for _, room := range r.rooms {
 		records = append(records, Record{LogID: room.LogID, Room: &room})
 	}
 	for _, m := range r.messages {
 		records = append(records, Record{LogID: m.LogID, Message: &m})
+	}
+	for _, kept := range r.raw {
+		if m, ok := kept.decode(); ok {
+			records = append(records, Record{LogID: m.LogID, Message: &m})
+		}
 	}
 	type reactionsKey struct {
 		logID, messageID LogID

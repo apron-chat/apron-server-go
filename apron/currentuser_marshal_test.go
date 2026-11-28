@@ -1,0 +1,140 @@
+package apron
+
+import (
+	"encoding/json/jsontext"
+	"encoding/json/v2"
+	"slices"
+	"testing"
+)
+
+// marshalCurrentUser encodes a current user as CurrentUser.MarshalJSONTo
+// did before it wrote tokens: the User, cleared fields blanked, then each
+// cleared field as its empty value.
+func marshalCurrentUser(u CurrentUser) ([]byte, error) {
+	user := u.User
+	for _, name := range u.Cleared {
+		switch name {
+		case "name":
+			user.Name = ""
+		case "avatar":
+			user.Avatar = ""
+		case "roles":
+			user.Roles = nil
+		case "status":
+			user.Status = ""
+		case "seen":
+			user.Seen = ""
+		case "ext":
+			user.Ext = nil
+		}
+	}
+	raw, err := Marshal(user)
+	if err != nil || len(u.Cleared) == 0 {
+		return raw, err
+	}
+	raw = raw[:len(raw)-1]
+	for _, name := range u.Cleared {
+		empty := `""`
+		if i := slices.IndexFunc(userFields, func(f struct{ name, empty string }) bool { return f.name == name }); i >= 0 {
+			empty = userFields[i].empty
+		}
+		raw = append(raw, ',')
+		raw, _ = jsontext.AppendQuote(raw, name)
+		raw = append(append(raw, ':'), empty...)
+	}
+	return append(raw, '}'), nil
+}
+
+// A current user is written token by token as it was encoded.
+func TestCurrentUserMarshal(t *testing.T) {
+	full := User{UserID: "ada", Name: "Ada é", Avatar: "https://a/b.png", Roles: []string{"admin", "op"}, Status: "online", Seen: "2026-01-01T00:00:00Z",
+		Ext: Ext{"z": jsontext.Value(`1`), "a": jsontext.Value(`{ "b" : "\u00e9" }`)}, Unknown: jsontext.Value(`{"x":[1, 2],"y":null}`)}
+	for _, u := range []CurrentUser{
+		{User: User{UserID: "a"}},
+		{User: full},
+		{User: full, Cleared: []string{"status", "roles"}},
+		{User: User{UserID: "a", Name: "A"}, Cleared: []string{"avatar", "roles", "status", "seen", "ext", "name"}},
+		{User: User{UserID: "a", Roles: []string{}}, Cleared: []string{"other"}},
+		{User: User{UserID: "a", Unknown: jsontext.Value(`{"q":"\u0071"}`)}, Cleared: []string{"status"}},
+	} {
+		got, err := Marshal(u)
+		want, werr := marshalCurrentUser(u)
+		if err != nil || werr != nil || string(got) != string(want) {
+			t.Errorf("%+v:\n got %s, %v\nwant %s, %v", u, got, err, want, werr)
+		}
+		var back CurrentUser
+		if err := json.Unmarshal(got, &back); err != nil {
+			t.Errorf("%s does not decode: %v", got, err)
+		}
+	}
+	if _, err := Marshal(CurrentUser{User: User{UserID: "a"}, Cleared: []string{"user_id"}}); err == nil {
+		t.Error("cleared user_id")
+	}
+}
+
+// A room view with its room raw is the view with it typed.
+func TestRoomViewRaw(t *testing.T) {
+	zero, h := LogID(0), LogID(1700000000000)
+	room := Room{RoomID: "general", LogID: 5, Title: "Général", Ext: Ext{"a": jsontext.Value(`1`)}, Unknown: jsontext.Value(`{"x":true}`)}
+	for _, v := range []RoomView{
+		{Room: room},
+		{Room: room, LatestLogID: 9, HistoryLogID: &h, MemberCount: 2, Members: []CurrentUser{{User: User{UserID: "a"}, Cleared: []string{"status"}}}},
+		{Room: room, HistoryLogID: &zero, Members: []CurrentUser{}},
+	} {
+		want, err := Marshal(RoomListResult{Joined: []RoomView{v}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		raw, _ := Marshal(v.Room)
+		rawView := v
+		rawView.Room, rawView.Raw = Room{}, raw
+		got, err := Marshal(RoomListResult{Joined: []RoomView{rawView}})
+		if err != nil || string(got) != string(want) {
+			t.Errorf("raw:\n got %s, %v\nwant %s", got, err, want)
+		}
+	}
+	if _, err := Marshal(&RoomView{Raw: jsontext.Value(`[]`)}); err == nil {
+		t.Error("a Raw that is no object")
+	}
+}
+
+// A room_list result with its members and users raw is the result with
+// them typed, the room raw or typed.
+func TestRoomListRaw(t *testing.T) {
+	h := LogID(1700000000000)
+	members := []CurrentUser{{User: User{UserID: "a", Status: "online"}}, {User: User{UserID: "b"}, Cleared: []string{"status"}}}
+	users := []CurrentUser{{User: User{UserID: "a", Name: "Ada", Roles: []string{"op"}, Status: "online"}}, {User: User{UserID: "b", Name: "B"}, Cleared: []string{"status", "roles"}}}
+	encode := func(us []CurrentUser) []jsontext.Value {
+		raw := make([]jsontext.Value, len(us))
+		for i, u := range us {
+			raw[i], _ = Marshal(u)
+		}
+		return raw
+	}
+	room := Room{RoomID: "general", LogID: 5, Title: "General"}
+	for _, typed := range []RoomListResult{
+		{Joined: []RoomView{{Room: room, LatestLogID: 9, HistoryLogID: &h, Members: members, MemberCount: 2}}, Users: users},
+		{Joined: []RoomView{{Room: room, Members: []CurrentUser{}}}, NotJoined: []RoomView{}, Users: []CurrentUser{}},
+	} {
+		want, err := Marshal(typed)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, rawRoom := range []bool{false, true} {
+			raw := typed
+			raw.Joined = slices.Clone(typed.Joined)
+			for i := range raw.Joined {
+				raw.Joined[i].MembersRaw, raw.Joined[i].Members = encode(raw.Joined[i].Members), nil
+				if rawRoom {
+					raw.Joined[i].Raw, _ = Marshal(raw.Joined[i].Room)
+					raw.Joined[i].Room = Room{}
+				}
+			}
+			raw.UsersRaw, raw.Users = encode(typed.Users), nil
+			got, err := Marshal(raw)
+			if err != nil || string(got) != string(want) {
+				t.Errorf("raw (room raw %v):\n got %s, %v\nwant %s", rawRoom, got, err, want)
+			}
+		}
+	}
+}

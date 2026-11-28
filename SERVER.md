@@ -288,7 +288,8 @@ backend only keeps entries and applies batches:
   mode `0600` because it holds passkey credentials and session hashes.
 - `memory` keeps them in the process; a new server starts empty.
 
-What survives a restart: rooms and threads with their complete logs, message
+What survives a restart: rooms and threads with their complete logs (or
+what [history retention](#history-retention) keeps of them), message
 state and reactions, read cursors, accounts (passkey, email, and external
 sign-in users) with their identities, passkey credentials, the roles
 their external sign-in granted, and the apps they allowed on the external
@@ -316,6 +317,27 @@ address, passkeys, and an external identity in fields of their own: those
 accounts are converted when they load, and every account is still stored with
 those fields too, so an older server can read what a newer one stored.
 
+A store says which format its entries are in, with one entry (meta
+`format`, `{"version": 1}`), written when the server first writes to a new
+store, or opens one without it: every server before format versions wrote
+format 1, today's. aprond opens a store of its format, or of an older one,
+which it upgrades as it loads, a step for each version, and refuses one of
+a newer format, naming both versions: run an aprond that knows it, as an
+older one could misread what a newer one stored. Upgrades are one way;
+roll forward, not back.
+
+For contributors, the rule is that an entry's field that is absent reads
+as its initial value, the zero value, as from a store an older server
+wrote: so a field added to an entry, which an older server ignores, needs
+no new version, as a room's `retained_id` (History retention) did not. A
+change that an older server would misread, or that makes it lose what a
+newer one keeps, takes one: the format version goes up (`storeFormat`), and
+the upgrade from the previous version goes in `storeUpgrades`, tested with
+a store of the previous version's shapes, as `testdata/stored-*.jsonl` are
+of format 1. Servers from before format versions read no version, so a
+change they would misread is to be avoided as long as they may open the
+store.
+
 ## Connections and liveness
 
 The server answers the liveness ping `{"method":"ping"}` with
@@ -337,17 +359,18 @@ a client uses its creation `log_id` as its `room_id`. Room records and message
 snapshots after the first for their key carry `prev_log_id`: an edit names the
 previous snapshot and a room update the previous room record. A move snapshot
 also carries `prev_room_id`, the source room, whose log holds the earlier
-snapshots. Reaction sets and memberships carry neither. Nothing is compacted
-or discarded, so each room's `history_log_id` is the `log_id` of its creation
-record, `latest_log_id` is the newest record in that room's log, memberships
-included, and the server never needs the full-member record the spec asks for
-before discarding a prefix.
+snapshots. Reaction sets and memberships carry neither. Nothing is compacted,
+and unless [history retention](#history-retention) is on, nothing is
+discarded: each room's `history_log_id` is then the `log_id` of its creation
+record. `latest_log_id` is the newest record in that room's log, memberships
+included.
 
 `history` returns a window of one room's log, or without `room_id` of the
 log of every room the user joined, private rooms included, as one log: its
 `latest_log_id` is the newest of those rooms', and its `history_log_id` is
-where the server's log starts (the default room's creation) whichever rooms
-the user is in, so it never moves; a user in no rooms gets an empty log with
+where the server's log starts (the default room's creation, or, with
+history retention, past what it discarded) whichever rooms the user is in,
+so it never moves back; a user in no rooms gets an empty log with
 a null `history_log_id`, ending just before that. The rooms' windows merge by
 `log_id` until the page is full, and a move snapshot in two of them comes
 once. One request without `room_id` catches a client up on what its rooms
@@ -367,6 +390,166 @@ message's edits back through `prev_log_id`, asking the room in `prev_room_id`
 after a move. Any user may page the history of any room they can see,
 joined or not: every room but [private](#rooms-threads-and-membership) rooms
 they are not in.
+
+## History retention
+
+By default the server keeps every record, in memory and in the store, so a
+server's memory grows with its history: about 700 bytes for each message
+of 200 bytes of text, its record and what the server keeps of the message
+(`BenchmarkLogRetained`), and as much again in a SQLite store. History
+retention bounds it, and is off unless one of these is set:
+
+- `--history.records <n>` (TOML `[history] records`, `Config.HistoryRecords`)
+  keeps each room's newest `n` records, of every kind;
+- `--history.max-age-days <d>` (`[history] max-age-days`,
+  `Config.HistoryMaxAge`) keeps each room's records of the last `d` days, by
+  their `log_id`, the time they were logged.
+
+With both, a record goes once either lets it go. The server discards as it
+starts and then once a minute (a sweep), so a room holds up to a minute's
+records past its limit. A sweep discards in passes of at most 5,000
+records, the oldest rooms' first, each holding the server's lock and
+writing one batch of the store by itself, and leaving the state, and the
+store, consistent on its own; while records are still due, the next pass
+comes 10 ms later, so turning retention on for a long history catches up
+without holding up requests for long (`BenchmarkRetentionCatchUp`: a
+SQLite store of 200,000 messages retained to 1,000 catches up in about 3
+s, at most 21 to 37 ms a pass, while a post takes 0.3 ms; in one pass it
+held the lock for 350 to 460 ms, and wrote 398,000 entries in one
+transaction). Memory is then bounded by the rooms and their
+limits, about 700 bytes a message times `records` for each room, or times
+the messages a room gets in `max-age-days`; the largest rooms' are the
+bound, as a quiet room keeps its few records. With `records` 10,000 a
+server of 100 rooms keeps at most about 700 MB of history, and a SQLite
+store about as much.
+
+What retention discards, and what goes with it (PROTOCOL.md §4.3.3):
+
+- **The start of each room's log.** A sweep discards a room's records
+  before a `log_id`, and the room's `history_log_id` moves to that
+  `log_id`, which `room_list`, `room_update`, and `history` report: the
+  effective lower bound never moves back, and a client past it starts
+  again from it (§4.3.5). A room's latest record is never discarded, so
+  `history_log_id` is at most `latest_log_id` + 1, and an idle room older
+  than `max-age-days` keeps nothing but goes on listing its room record in
+  `room_list`, which comes from the room's state, not its log.
+- **Memberships.** When the part discarded holds memberships, the room's
+  log gets one membership record of every current member, each `joined:
+  true`, newer than what goes, so that a client that replays the room from
+  its `history_log_id` learns who is in it (§4.3.3). It is not sent live:
+  it changes nothing a live client knows, and in a room of thousands it
+  would be as large as the room for every member; a client that recovers
+  from `latest_log_id` pages to it.
+- **The log without `room_id`.** `history` without `room_id` pages the log
+  of the user's rooms, which starts at the latest `history_log_id` of the
+  rooms that discarded anything (the server's log), so that from there on
+  every one of the rooms' records is there; records of rooms that kept
+  more are left out of it, but are in their own rooms' history.
+- **Messages.** A record that no room's log holds any more, a move
+  snapshot only once both rooms let it go, is taken out of the server's
+  log and deleted from the store. A message none of whose snapshots is
+  left goes with them: its state, its store entry, and its reactions; its
+  uploads are released, as a deletion releases them, and their files are
+  removed. A message keeps its snapshots that are left, the current one
+  among them, and history no longer has its older ones, so walking its
+  edits back through `prev_log_id` stops at the first discarded one.
+- **What is being written.** The records of a message whose embeds are not
+  finished, an upload not yet written or live text still being written,
+  and everything after them in their rooms, are kept until they are.
+- **References.** A message that replied to a discarded one keeps its
+  `reply_to`, which names a message history no longer has; a new reply to
+  it is `invalid_params`, as to a message that never was, and it wakes
+  nobody (§4.9). A read cursor that names a discarded message keeps its
+  `log_id`, from which unread counts still count, and the unread counts
+  kept for push are counted again from what is left. Reaction records go
+  with their part of the log; a message's reactions stay with it.
+- **Extensions.** Followers of the log (`OnEvent`, `OnEventFrom`, `Follow`)
+  get the records that are left: one that starts from 0, such as
+  `examples/search`, rebuilds from them, and a `Follow` behind what was
+  discarded logs a warning once and goes on from what is left.
+  `Host.HistoryLogID` is a room's `history_log_id`, from which an extension
+  that keeps messages of its own lets go of older ones, as
+  `examples/search` does with its index, once a minute and as it searches.
+- **The store.** Discarded records' and messages' entries are deleted in
+  the sweep's batch, with the rooms' new `history_log_id`s (kept in each
+  room's entry as `retained_id`) and every entry that lagged behind its
+  records (see Storage): a restart restores what was retained, and nothing
+  else. SQLite reuses the space of deleted rows for new ones, but does not
+  shrink the file: `sqlite3 aprond.db VACUUM` does, with the server stopped.
+  An older aprond can read a store this one discarded from, but reports
+  each room's `history_log_id` as its creation.
+
+`--debug-addr` shows what retention did in expvar, under
+`aprond.retention` (`Server.RetentionStatus`): whether it is on, the floor
+of the log without `room_id`, when the latest pass ran and how long it
+held the lock, the passes, the records and messages discarded since the
+server started, and the backlog, the records due past what a pass
+discards.
+
+What retention keeps true, which tests check after every pass (the
+`invariants` helper of package aprond, run by the retention tests and a
+randomized one of posts, edits, moves, deletions, reactions, joins,
+leaves, and passes):
+
+- each room's `history_log_id` never falls, and is at most its
+  `latest_log_id`;
+- the floor of the log without `room_id` never falls, and is the latest
+  `history_log_id` of a room that discarded;
+- no room's log holds a record before its `history_log_id`, nor is one
+  served before it or the floor, and `room_list` says the same bound;
+- the server's log is the rooms' logs together, in `log_id` order;
+- every message has a snapshot, every snapshot of it is in the log, and
+  every snapshot in the log is its message's;
+- no embed outlives its message;
+- a restart from the store restores the same rooms' logs, messages, and
+  floor.
+
+Retention does not compact (§4.3.4): the server keeps every record it
+retains as it was logged. Nor does it load discarded history from the
+store on demand: what is discarded is gone, unless an archive (below)
+keeps it.
+
+### Design: an archive below retention (not implemented)
+
+A server that wants all of its history kept, but only the recent part in
+memory and in its store, would give retention somewhere to put what it
+discards: an archive sink, a tier of history below the hot log, which
+replaces loading old history from the store on demand.
+
+- **Layout.** Chunks of the whole log, every room's records over a stretch
+  of `log_id`s, about 10,000 records each, each one complete ARCHIVE.md v1
+  file written with `apron/archive` (a header, then its records as
+  history parts, with the rooms of a move's `log_id` in an extension line
+  other readers ignore), gzipped, named by its first `log_id`
+  zero-padded so that names sort as the log does:
+  `<first log_id, 20 digits>.jsonl.gz`, in a directory or a bucket.
+- **Copy before trim.** A pass copies what it would discard into the next
+  chunk, and discards only what the sink holds: the sink's copy marker,
+  the newest `log_id` it holds a copy of, kept in the store, bounds each
+  room's discard as live writes do now. A sink that fails stalls the
+  copy, and retention keeps the hot log as it is meanwhile (it grows past
+  its limit rather than lose history), with the stall, when it began,
+  and the step that failed in `RetentionStatus` and expvar, cleared by
+  the next copy that succeeds.
+- **Reads.** A history page whose window reaches below a room's hot floor
+  reads the hot log, then the chunks below it for the rest of the
+  window, outside the server's lock (with `Reply.Reserve`), and merges
+  them by `log_id`; the hot log wins where both hold a record. A room's
+  `history_log_id` is then the archive's floor, the oldest chunk's first
+  record, and the hot floor only says what is in memory.
+- **Interface.** A tier is append (a chunk of records, idempotent by its
+  first `log_id`), scan (the chunks over a stretch, for a page), read
+  (one record), floor (what it holds from), and trim (drop chunks below a
+  floor); a link between the hot log and the sink holds the copy marker
+  and the stall. Its invariants are the cloudflare server's I1 to I6:
+  floors ordered and never falling, copy before trim, nothing served
+  below a floor, every record at or above the published floor held by
+  some tier, steps idempotent, and the published floor the deepest
+  tier's.
+- **What to leave out** of that design until it is needed: a middle tier
+  (their D1), budgets for maintenance work, a single server-wide floor
+  (rooms keep their own here), and the queue of rewrites delivered down
+  the tiers, which only purging or renaming a user's records needs.
 
 ## Identity and profiles
 
@@ -2216,8 +2399,8 @@ rest of the server does:
 ### Room scopes
 
 An account may be limited to some rooms: `Host.SetScope(ctx, userID,
-&RoomScope{Rooms: [...], Threads: bool})`, or `BotOptions.Scope` for a bot
-from its start. It then sees only the rooms its scope lists, and, with
+RoomScope{Rooms: [...], Threads: bool})`, or `BotOptions.Scope` for a bot
+from its start, and `Host.ClearScope` lifts the limit. It then sees only the rooms its scope lists, and, with
 `Threads`, their threads at any depth. Seeing is the one check the server
 makes of who may read or write a room, so the scope holds for every way in:
 the account's connections, its bot's in-process ones, and those its

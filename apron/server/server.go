@@ -11,6 +11,7 @@ import (
 	"slices"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/coder/websocket"
@@ -32,16 +33,24 @@ type Server struct {
 	checkOnce sync.Once
 	mu        sync.Mutex
 	// registered are the methods registered with Handle and
-	// HandleNotification, and methods every method the Server serves: its
-	// handlers', with those registered in their place.
+	// HandleNotification, under mu, and methods every method the Server
+	// serves, its handlers', with those registered in their place, and
+	// their capabilities: a table replaced, not changed, as a method is
+	// registered, which a request reads without a lock.
 	registered map[string]method
-	methods    map[string]method
+	methods    atomic.Pointer[methodTable]
+	// holdFailed is the frame of Config.HoldFailed.
+	holdFailed []byte
 	conns      map[*Conn]struct{}
-	network    int
-	closed     bool
-	dedup      *dedup
-	serving    sync.WaitGroup
-	shutdown   chan struct{}
+	// connList is conns as a slice, for Broadcast and PublishUser to walk,
+	// made again after conns changes (nil then), rather than for each
+	// broadcast; it is never changed once made.
+	connList []*Conn
+	network  int
+	closed   bool
+	dedup    *dedup
+	serving  sync.WaitGroup
+	shutdown chan struct{}
 }
 
 // Config is what a Server serves with besides its Backend: the handlers
@@ -129,8 +138,8 @@ type Config struct {
 	DedupSize  int
 	DedupUsers int
 	// DedupBytes bounds what the requests kept for each user cost, and
-	// DedupTotalBytes what those of every user cost together: their ids
-	// and encoded results, and an estimate of the memory each takes
+	// DedupTotalBytes what those of every user cost together: their ids,
+	// params, and encoded results, and an estimate of the memory each takes
 	// besides; 1 MiB and 64 MiB by default. Over DedupBytes, the user's
 	// oldest requests are forgotten first, and over DedupTotalBytes, those
 	// of the users least recently active. A result too large to fit is not
@@ -179,8 +188,30 @@ func New(backend Backend, config Config) *Server {
 		dedup:      dedup,
 		shutdown:   make(chan struct{}),
 	}
-	s.methods = s.builtins()
+	s.methods.Store(newMethodTable(s.builtins()))
+	e := config.HoldFailed
+	if e == nil {
+		e = internalError()
+	}
+	s.holdFailed, _ = core.Marshal(&core.ReplyFrame{Error: e})
 	return s
+}
+
+// methodTable is every method a Server serves, and their capabilities, by
+// the methods' names.
+type methodTable struct {
+	methods      map[string]method
+	capabilities []string
+}
+
+func newMethodTable(methods map[string]method) *methodTable {
+	t := &methodTable{methods: methods}
+	for _, name := range slices.Sorted(maps.Keys(methods)) {
+		if capability := methods[name].capability; capability != "" && !slices.Contains(t.capabilities, capability) {
+			t.capabilities = append(t.capabilities, capability)
+		}
+	}
+	return t
 }
 
 // made panics for a Server that New did not make, such as a zero
@@ -243,7 +274,9 @@ func (s *Server) register(name string, m method) {
 		panic("apron: method " + strconv.Quote(name) + " registered twice")
 	}
 	s.registered[name] = m
-	s.methods[name] = m
+	methods := maps.Clone(s.methods.Load().methods)
+	methods[name] = m
+	s.methods.Store(newMethodTable(methods))
 }
 
 func (s *Server) logger() *slog.Logger {
@@ -273,15 +306,6 @@ func (s *Server) pingInterval() time.Duration {
 	return orDefault(s.config.PingInterval, 30*time.Second)
 }
 func (s *Server) pingTimeout() time.Duration { return orDefault(s.config.PingTimeout, 10*time.Second) }
-
-func (s *Server) holdFailed() []byte {
-	e := s.config.HoldFailed
-	if e == nil {
-		e = internalError()
-	}
-	frame, _ := core.Marshal(map[string]any{"error": e})
-	return frame
-}
 
 // ServeHTTP accepts a WebSocket and serves it until it closes.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -356,7 +380,7 @@ func (s *Server) ServeTransport(ctx context.Context, t Transport, remote net.Add
 		info := s.complete(s.backend.Hello(ctx, c))
 		c.opened(info)
 		if frame, err := apron.Encode(info); err == nil {
-			c.rt.Send(frame)
+			c.rt.SendFrame(frame)
 		}
 		// An error about the connection as a whole omits id (§1.1).
 		c.CloseWithError(apron.RetryAfter("Server at capacity; try again shortly", 30*time.Second))
@@ -382,7 +406,7 @@ func (s *Server) ServeTransport(ctx context.Context, t Transport, remote net.Add
 				info := s.complete(s.backend.Hello(ctx, c))
 				c.opened(info)
 				if frame, err := apron.Encode(info); err == nil {
-					c.rt.Send(frame)
+					c.rt.SendFrame(frame)
 				}
 				c.CloseWithError(e)
 				s.waitClosed(c)
@@ -411,12 +435,12 @@ func (s *Server) ServeTransport(ctx context.Context, t Transport, remote net.Add
 		s.disconnected(c)
 		return
 	}
-	s.conns[c] = struct{}{}
+	s.addConn(c)
 	s.mu.Unlock()
 	defer func() {
 		c.Close()
 		s.mu.Lock()
-		delete(s.conns, c)
+		s.forgetConn(c)
 		s.mu.Unlock()
 		s.disconnected(c)
 	}()
@@ -424,7 +448,7 @@ func (s *Server) ServeTransport(ctx context.Context, t Transport, remote net.Add
 	// The server frame goes first, before any frame is read (§3.1), then
 	// what the backend sent meanwhile.
 	c.opened(info)
-	c.rt.Send(frame)
+	c.rt.SendFrame(frame)
 	c.release(false)
 	// Frames are processed in order, each to completion before the next,
 	// which makes auth a barrier (§3.2.2), by a worker of the connection's
@@ -442,7 +466,7 @@ func (s *Server) newConn(ctx context.Context, cancel context.CancelFunc, w core.
 		WriteTimeout: s.writeTimeout(),
 		PingInterval: s.pingInterval(),
 		PingTimeout:  s.pingTimeout(),
-		FenceFailed:  s.holdFailed(),
+		FenceFailed:  s.holdFailed,
 		OnStop:       cancel,
 		OnFellBehind: func() {
 			if fellBehind != nil {
@@ -489,28 +513,33 @@ func (s *Server) complete(info apron.ServerInfo) apron.ServerInfo {
 }
 
 // capabilities are those of the methods the Server handles, by the methods'
-// names.
-func (s *Server) capabilities() []string {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	var capabilities []string
-	for _, name := range slices.Sorted(maps.Keys(s.methods)) {
-		if capability := s.methods[name].capability; capability != "" && !slices.Contains(capabilities, capability) {
-			capabilities = append(capabilities, capability)
-		}
-	}
-	return capabilities
-}
+// names, which the caller does not change.
+func (s *Server) capabilities() []string { return s.methods.Load().capabilities }
 
-// openConns returns the open connections, Local ones included.
+// openConns returns the open connections, Local ones included, which the
+// caller does not change.
 func (s *Server) openConns() []*Conn {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	conns := make([]*Conn, 0, len(s.conns))
-	for c := range s.conns {
-		conns = append(conns, c)
+	if s.connList == nil && len(s.conns) > 0 {
+		s.connList = make([]*Conn, 0, len(s.conns))
+		for c := range s.conns {
+			s.connList = append(s.connList, c)
+		}
 	}
-	return conns
+	return s.connList
+}
+
+// addConn adds an open connection, with s.mu held.
+func (s *Server) addConn(c *Conn) {
+	s.conns[c] = struct{}{}
+	s.connList = nil
+}
+
+// forgetConn forgets a connection that ended, with s.mu held.
+func (s *Server) forgetConn(c *Conn) {
+	delete(s.conns, c)
+	s.connList = nil
 }
 
 // Broadcast sends a frame to every signed-in connection for which to
@@ -519,12 +548,66 @@ func (s *Server) openConns() []*Conn {
 // the change the frame describes, so that every connection gets such
 // frames in the order of the changes. to is called in the caller's
 // goroutine, so it may read what that lock guards.
+//
+// Broadcast walks every open connection, and calls to on each: a frame
+// for a room's members, among many connections, costs every connection.
+// A backend that keeps each room's members sends to them with SendAll,
+// which walks only those.
 func (s *Server) Broadcast(frame apron.Frame, to func(*Conn) bool) {
+	var w waker
+	defer w.wake()
 	for _, c := range s.openConns() {
 		if c.UserID() != "" && (to == nil || to(c)) {
-			c.Send(frame)
+			w.add(c.sendDeferred(frame))
 		}
 	}
+}
+
+// A waker wakes the writers of the connections a broadcast queued frames
+// to (core.Conn.SendFrameDeferred), once it has queued them all, and on a
+// goroutine of its own when they are many: so that what a broadcast does
+// while its caller holds its lock, as a backend's does, is queue the
+// frames, and not wake each writer too, which costs more than queuing.
+// The order of each connection's frames is fixed as they are queued.
+type waker struct{ conns *[]*core.Conn }
+
+// wakeInline is the most writers a waker wakes itself, rather than on a
+// goroutine of its own, which costs about as much as waking a few.
+const wakeInline = 8
+
+var wakeLists = sync.Pool{New: func() any { return new([]*core.Conn) }}
+
+func (w *waker) add(c *core.Conn) {
+	if c == nil {
+		return
+	}
+	if w.conns == nil {
+		w.conns = wakeLists.Get().(*[]*core.Conn)
+	}
+	*w.conns = append(*w.conns, c)
+}
+
+// wake wakes the writers, also when what queued the frames panicked, as a
+// filter may: a writer left waiting would never write them.
+func (w *waker) wake() {
+	conns := w.conns
+	if conns == nil {
+		return
+	}
+	w.conns = nil
+	wakeAll := func() {
+		for i, c := range *conns {
+			c.Wake()
+			(*conns)[i] = nil
+		}
+		*conns = (*conns)[:0]
+		wakeLists.Put(conns)
+	}
+	if len(*conns) <= wakeInline {
+		wakeAll()
+		return
+	}
+	go wakeAll()
 }
 
 // ForgetUser forgets the requests kept for a user's deduplication (§1.2),

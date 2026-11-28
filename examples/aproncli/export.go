@@ -84,13 +84,13 @@ func export(ctx context.Context, c *cli, args []string) error {
 	}
 	you := conn.User()
 	w, err := archive.NewWriter(c.stdout, archive.Header{
-		Server: c.url, ExportedAt: archive.FormatTime(time.Now()), You: &you, Media: media(c.url, conn.Hello()),
+		Server: c.url, ExportedAt: archive.FormatTime(time.Now()), You: you, Media: media(c.url, conn.Hello()),
 	})
 	if err != nil {
 		return err
 	}
 	if old != nil {
-		if old.Header.You != nil && old.Header.You.UserID != you.UserID {
+		if old.Header.You.UserID != "" && old.Header.You.UserID != you.UserID {
 			fmt.Fprintf(c.stderr, "aproncli: %s was written as %s, and this export as %s\n", *resume, old.Header.You.UserID, you.UserID)
 		}
 		if err := copyArchive(w, *resume); err != nil {

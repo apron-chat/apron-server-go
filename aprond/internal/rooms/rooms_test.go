@@ -6,8 +6,10 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/apron-chat/apron-server-go/aprond/internal/roomlog"
+	"github.com/apron-chat/apron-server-go/store"
 )
 
 type user struct {
@@ -15,9 +17,10 @@ type user struct {
 	scope *Scope
 }
 
-func (u *user) MemberID() string     { return u.id }
-func (u *user) MemberScope() *Scope  { return u.scope }
-func (u *user) from() roomlog.Author { return roomlog.Author{UserID: u.id} }
+func (u *user) MemberID() string           { return u.id }
+func (u *user) MemberScope() *Scope        { return u.scope }
+func (u *user) from() roomlog.Author       { return roomlog.Author{UserID: u.id} }
+func (u *user) MemberFrom() roomlog.Author { return u.from() }
 
 func newTable() *Table[*user, *Message] { return NewTable[*user](roomlog.NewLog(), (*Message).Kept) }
 
@@ -223,5 +226,137 @@ func TestThreadTitle(t *testing.T) {
 		if got := ThreadTitle(description); got != want {
 			t.Errorf("ThreadTitle(%q) = %q, want %q", description, got, want)
 		}
+	}
+}
+
+// A large room's entry lags behind its latest_log_id, activity, and read
+// cursors for EntryDelay, but never behind its members or its record, and
+// Entries takes it at once.
+func TestLargeRoomEntryLags(t *testing.T) {
+	table := newTable()
+	big := table.Create("big", nil, false, "", roomlog.RoomRecord{})
+	small := table.Create("small", nil, false, "", roomlog.RoomRecord{})
+	var members []*user
+	for i := range LaterMembers {
+		members = append(members, &user{id: "u" + strings.Repeat("x", i)})
+	}
+	join(t, table, big, members...)
+	join(t, table, small, members[0])
+	ids := func(entries []store.Entry) []string {
+		var ids []string
+		for _, e := range entries {
+			if e.Kind == EntryKind {
+				ids = append(ids, e.ID)
+			}
+		}
+		slices.Sort(ids)
+		return ids
+	}
+	start := time.Now()
+	if got := ids(table.EntriesDue(start)); !slices.Equal(got, []string{"big", "small"}) {
+		t.Fatalf("joins stored %v at once, want both rooms", got)
+	}
+	post := func(r *Room[*user], logID int64) {
+		m := table.NewMessage(roomlog.FormatID(logID), members[0].from(), members[0].id)
+		table.Snapshot(m, &roomlog.Message{MessageID: roomlog.FormatID(logID), LogID: roomlog.FormatID(logID), RoomID: r.ID()}, logID)
+	}
+	post(big, table.log.NextID())
+	post(small, table.log.NextID())
+	table.Read(big, members[1].id, Cursor{MessageID: "1", ID: 1})
+	if got := ids(table.EntriesDue(start)); !slices.Equal(got, []string{"small"}) {
+		t.Fatalf("posts stored %v at once, want only the small room", got)
+	}
+	if due, lagging := table.Lagging(); !lagging || due.Before(start.Add(EntryDelay)) {
+		t.Fatalf("lagging until %v (%v), want at least %v", due, lagging, EntryDelay)
+	}
+	if got := ids(table.EntriesDue(start.Add(EntryDelay / 2))); got != nil {
+		t.Fatalf("stored %v before the delay", got)
+	}
+	if got := ids(table.EntriesDue(start.Add(EntryDelay))); !slices.Equal(got, []string{"big"}) {
+		t.Fatalf("stored %v after the delay, want the big room", got)
+	}
+	if _, lagging := table.Lagging(); lagging {
+		t.Fatal("still lagging")
+	}
+	// A join lags too; a room record does not, and Entries takes it all.
+	post(big, table.log.NextID())
+	join(t, table, big, &user{id: "late"})
+	if got := ids(table.EntriesDue(start)); got != nil {
+		t.Fatalf("a join stored %v at once", got)
+	}
+	table.Update(big, roomlog.RoomRecord{Title: "Big"})
+	if got := ids(table.EntriesDue(start)); !slices.Equal(got, []string{"big"}) {
+		t.Fatalf("a room record stored %v, want the big room", got)
+	}
+	post(big, table.log.NextID())
+	if got := ids(table.Entries()); !slices.Equal(got, []string{"big"}) {
+		t.Fatalf("Entries stored %v, want the big room", got)
+	}
+}
+
+// A large room restored from an entry that lags behind its memberships
+// has the members its records joined and left since, with their activity.
+func TestLargeRoomMembersRestored(t *testing.T) {
+	table := newTable()
+	big := table.Create("big", nil, false, "", roomlog.RoomRecord{})
+	var members []*user
+	for i := range LaterMembers + 1 {
+		members = append(members, &user{id: "u" + strings.Repeat("x", i)})
+	}
+	join(t, table, big, members...)
+	stale := Entry(big)
+	late := &user{id: "late"}
+	join(t, table, big, late)
+	table.Leave(big, members[0], members[0].from())
+	table.Leave(big, members[1], members[1].from())
+	join(t, table, big, members[1])
+	want := Entry(big).Value
+	records := make(map[string]jsontext.Value)
+	for _, e := range table.log.Entries() {
+		records[e.ID] = e.Value
+	}
+	for name, entry := range map[string]jsontext.Value{"lagging": stale.Value, "current": want} {
+		restored := newTable()
+		if err := restored.Restore(map[string]jsontext.Value{"big": entry}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := restored.log.Restore(records, func(id string) *roomlog.Timeline { return restored.Get(id).Log() }); err != nil {
+			t.Fatal(err)
+		}
+		if err := restored.RestoreMembers(func(_ *Room[*user], id string) (*user, bool) { return &user{id: id}, true }); err != nil {
+			t.Fatal(err)
+		}
+		if got := Entry(restored.Get("big")).Value; !bytes.Equal(got, want) {
+			t.Errorf("restored from the %s entry as\n%s\nwant\n%s", name, got, want)
+		}
+	}
+}
+
+// A room's listed members are kept until its members change, or, when
+// the listing is truncated, their activity does.
+func TestListedMembersKept(t *testing.T) {
+	table := newTable()
+	r := table.Create("r", nil, false, "", roomlog.RoomRecord{})
+	ada, bob, cy := &user{id: "ada"}, &user{id: "bob"}, &user{id: "cy"}
+	join(t, table, r, ada, bob)
+	first, _ := r.ListedMemberIDs(0)
+	if again, _ := r.ListedMemberIDs(0); &again[0] != &first[0] {
+		t.Error("the listing was not kept")
+	}
+	join(t, table, r, cy)
+	if ids, _ := r.ListedMemberIDs(0); !slices.Equal(ids, []string{"ada", "bob", "cy"}) {
+		t.Fatalf("after a join, listed %v", ids)
+	}
+	table.Posted(r, "ada", r.Log().Latest()+1)
+	if ids, truncated := r.ListedMemberIDs(1); !truncated || !slices.Equal(ids, []string{"ada"}) {
+		t.Fatalf("listed %v %v, want the most recently active", ids, truncated)
+	}
+	table.Posted(r, "cy", r.Log().Latest()+2)
+	if ids, _ := r.ListedMemberIDs(1); !slices.Equal(ids, []string{"cy"}) {
+		t.Fatalf("after a post, listed %v, want cy", ids)
+	}
+	table.Leave(r, cy, cy.from())
+	if ids, _ := r.ListedMemberIDs(0); !slices.Equal(ids, []string{"ada", "bob"}) {
+		t.Fatalf("after a leave, listed %v", ids)
 	}
 }

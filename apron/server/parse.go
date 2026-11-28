@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json/v2"
 	"fmt"
+	"reflect"
 	"slices"
 
 	"github.com/apron-chat/apron-server-go/apron"
@@ -21,9 +22,13 @@ type messageFields struct {
 	messageID apron.LogID
 	roomID    string
 	deleted   bool
-	body      *apron.Body
-	replyTo   *apron.MessageRef
-	ext       apron.Ext
+	// body and replyTo are values, with whether the request has each, so
+	// that parsing a message allocates neither.
+	body     apron.Body
+	hasBody  bool
+	replyTo  apron.MessageRef
+	hasReply bool
+	ext      apron.Ext
 }
 
 // edit reports whether the request saves an existing message.
@@ -37,7 +42,8 @@ func parseMessageFields(r *Request) (messageFields, error) {
 	m := messageFields{
 		roomID:    d.ID("room_id", Optional),
 		messageID: d.MessageID("message_id", Optional),
-		replyTo:   IfPresent(d, "reply_to", d.MessageRef),
+		replyTo:   d.MessageRef("reply_to", Optional),
+		hasReply:  d.Has("reply_to"),
 		deleted:   d.Bool("deleted", Optional),
 		ext:       d.Ext("ext", Optional),
 	}
@@ -45,23 +51,32 @@ func parseMessageFields(r *Request) (messageFields, error) {
 		// A deletion leaves no body (§4.4): what it sends is ignored.
 		return parsed(m, d)
 	}
-	if d.Object("body", Optional) != nil {
-		body, err := apron.ParseBody(r.fields["body"])
+	// ParseBody refuses a body that is no object as the Decoder's Object
+	// does, without decoding it twice.
+	if raw, ok := r.fields.Get("body"); ok && d.Err() == nil {
+		body, err := apron.ParseBody(raw)
 		d.Fail(err)
-		m.body = body
+		m.body, m.hasBody = body, err == nil
 	}
 	return parsed(m, d)
 }
 
 func (m messageFields) editParams() apron.EditParams {
-	return apron.EditParams{MessageID: m.messageID, RoomID: m.roomID, Deleted: m.deleted, Body: m.body, ReplyTo: m.replyTo, Ext: m.ext}
+	p := apron.EditParams{MessageID: m.messageID, RoomID: m.roomID, Deleted: m.deleted, Ext: m.ext}
+	if m.hasBody {
+		p.Body = new(m.body)
+	}
+	if m.hasReply {
+		p.ReplyTo = new(m.replyTo)
+	}
+	return p
 }
 
 // parseCommand reads a command's params (§4.1): a message's, but for
 // message_id and deleted, and with a body.
 func parseCommand(r *Request) (apron.CommandParams, error) {
 	for _, name := range []string{"message_id", "deleted"} {
-		if _, ok := r.fields[name]; ok {
+		if _, ok := r.fields.Get(name); ok {
 			return apron.CommandParams{}, apron.InvalidParams("A command has no " + name + "; send it as a message instead")
 		}
 	}
@@ -69,7 +84,7 @@ func parseCommand(r *Request) (apron.CommandParams, error) {
 	if err != nil {
 		return apron.CommandParams{}, err
 	}
-	if m.body == nil {
+	if !m.hasBody {
 		return apron.CommandParams{}, apron.InvalidParams("A command needs a body")
 	}
 	return apron.CommandParams{RoomID: m.roomID, Body: m.body, ReplyTo: m.replyTo, Ext: m.ext}, nil
@@ -181,7 +196,7 @@ func parseStatus(r *Request) (apron.StatusParams, error) {
 	d := r.Decoder()
 	p := apron.StatusParams{RoomID: d.ID("room_id", Optional)}
 	scoped := d.Has("room_id")
-	if raw, ok := r.fields["idle"]; ok && d.Err() == nil {
+	if raw, ok := r.fields.Get("idle"); ok && d.Err() == nil {
 		var seconds int64
 		switch raw := bytes.TrimSpace(raw); {
 		case bytes.Equal(raw, []byte("false")):
@@ -192,7 +207,7 @@ func parseStatus(r *Request) (apron.StatusParams, error) {
 			d.Fail(apron.InvalidParams("idle must be false or a non-negative whole number of seconds"))
 		}
 	}
-	if raw, ok := r.fields["mute"]; ok && d.Err() == nil {
+	if raw, ok := r.fields.Get("mute"); ok && d.Err() == nil {
 		var mute apron.Mute
 		if mute.UnmarshalJSON(raw) != nil {
 			d.Fail(apron.InvalidParams("mute must be true, false, or a positive whole number of seconds"))
@@ -211,7 +226,7 @@ func parseStatus(r *Request) (apron.StatusParams, error) {
 func parseReact(r *Request) (apron.ReactParams, error) {
 	d := r.Decoder()
 	p := apron.ReactParams{MessageID: d.MessageID("message_id", Required)}
-	raw, ok := r.fields["emojis"]
+	raw, ok := r.fields.Get("emojis")
 	switch {
 	case d.Err() != nil:
 	case !ok:
@@ -231,14 +246,14 @@ func parseReact(r *Request) (apron.ReactParams, error) {
 func parseActivity(r *Request) (apron.ActivityParams, error) {
 	d := r.Decoder()
 	p := apron.ActivityParams{RoomID: d.ID("room_id", Optional)}
-	if raw, ok := r.fields["typing"]; ok && d.Err() == nil {
+	if raw, ok := r.fields.Get("typing"); ok && d.Err() == nil {
 		var typing int
 		if core.IsNull(raw) || json.Unmarshal(raw, &typing) != nil || typing < 0 {
 			d.Fail(apron.InvalidParams("typing must be a non-negative integer"))
 		}
 		p.Typing = &typing
 	}
-	p.ReadMessageID = IfPresent(d, "read_message_id", d.MessageID)
+	p.ReadMessageID = d.MessageID("read_message_id", Optional)
 	return parsed(p, d)
 }
 
@@ -271,7 +286,7 @@ func replyFor[T any](r *Request, params any) Reply[T] {
 		if r.Method == "auth" {
 			p.check = checkAuth
 			p.apply = func(result *apron.AuthResult) {
-				if result.You != nil {
+				if result.You.UserID != "" {
 					r.c.SetUser(result.You.User)
 				}
 			}
@@ -283,7 +298,8 @@ func replyFor[T any](r *Request, params any) Reply[T] {
 // checkAuth checks an auth result: one that signs in has a valid user_id,
 // and Extra names no field of its own.
 func checkAuth(result *apron.AuthResult) (any, error) {
-	if result.You != nil && !apron.ValidID(result.You.UserID) {
+	// A You with anything in it signs in, and so has a user_id.
+	if !reflect.ValueOf(result.You).IsZero() && !apron.ValidID(result.You.UserID) {
 		return nil, fmt.Errorf("auth assigned an invalid user_id %q", result.You.UserID)
 	}
 	for _, name := range []string{"you", "token"} {

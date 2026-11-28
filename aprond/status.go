@@ -232,23 +232,19 @@ func (s *Server) sendAfterAuthLocked(c *client) {
 			frames = append(frames, muteFrame(id, mute, now))
 		}
 	}
-	listed := make(map[string]*userState)
+	// Only the members shown other than offline or "" are sent, so only
+	// they are told apart and sorted: in a large room, often a few.
+	shown := make(map[string]*userState)
 	for _, r := range u.joined {
 		ids, _ := r.ListedMemberIDs(s.config.MaxListedMembers)
 		for _, id := range ids {
-			if id != u.id {
-				listed[id] = r.Member(id)
+			if other := r.Member(id); id != u.id && other.Presence.Status != statusOffline && other.Presence.Status != statusNone {
+				shown[id] = other
 			}
 		}
 	}
-	var shown []*userState
-	for _, id := range slices.Sorted(maps.Keys(listed)) {
-		if other := listed[id]; other.Presence.Status != statusOffline && other.Presence.Status != statusNone {
-			shown = append(shown, other)
-		}
-	}
-	for _, other := range shown {
-		frames = append(frames, statusFrame(other))
+	for _, id := range slices.Sorted(maps.Keys(shown)) {
+		frames = append(frames, statusFrame(shown[id]))
 	}
 	if len(frames) > 0 {
 		c.enqueueBatch(frames...)
@@ -401,17 +397,22 @@ func (s *Server) statusDue(u *userState) {
 // status, such as those of a room u just joined, who share it with u for
 // the first time.
 func (s *Server) sendStatusLocked(u *userState, users []*userState) {
-	frame := statusFrame(u)
-	for _, other := range users {
-		other.send(frame)
-	}
+	server.SendAll(apron.Frame(statusFrame(u)), usersConns(slices.Values(users)))
 }
 
 // statusFrame is the `user` notification of u's published shown status:
-// `{new: {user_id, status}}`, with seen when it is offline (§4.5.2).
+// `{new: {user_id, status}}`, with seen when it is offline (§4.5.2). It is
+// rendered once for each status and seen, as every sign-in sends it of
+// each member listed in the user's rooms. Called holding s.mu.
 func statusFrame(u *userState) jsontext.Value {
+	status, seen := u.Presence.Status, u.Presence.Seen
+	if cached := u.shownFrame; cached.frame != nil && cached.status == status && cached.seen == seen {
+		return cached.frame
+	}
 	shown := u.shownObject()
-	return notification("user", apron.UserUpdate{New: &shown})
+	frame := notification("user", apron.UserUpdate{New: shown})
+	u.shownFrame = shownFrame{status: status, seen: seen, frame: frame}
+	return frame
 }
 
 // announceJoinStatusLocked tells the other members of r the published

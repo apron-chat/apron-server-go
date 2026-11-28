@@ -1,6 +1,8 @@
 package server
 
 import (
+	"iter"
+
 	"github.com/apron-chat/apron-server-go/apron"
 	"github.com/apron-chat/apron-server-go/apron/internal/core"
 )
@@ -86,7 +88,84 @@ type UserChange struct {
 // backend holds the lock of the change, so that every connection gets a
 // user's changes in the order they were made; shares is called in the
 // caller's goroutine, so it may read what that lock guards.
+//
+// PublishUser walks every open connection, and calls shares on each: a
+// change of a user in a room of few, among many connections, costs every
+// connection. A backend that keeps each room's members, and each user's
+// connections, tells the change to them with PublishUserTo, which walks
+// only those.
 func (s *Server) PublishUser(change UserChange, shares func(*Conn) bool) bool {
+	p, changed := s.publication(change)
+	if !changed {
+		return false
+	}
+	var w waker
+	defer w.wake()
+	for _, c := range s.openConns() {
+		switch {
+		case c.UserID() == "", c == change.Except:
+		case p.own(c):
+			p.sendOwn(c, &w)
+		case p.others != nil && (shares == nil || shares(c)):
+			p.sendOthers(c, &w)
+		}
+	}
+	return true
+}
+
+// PublishUserTo announces a change of a user as PublishUser does, to the
+// connections the backend names rather than to those a filter picks of
+// every open connection: own, the user's own connections, and others,
+// those that share a room with the user, such as from the backend's own
+// lists of each room's members. A backend that keeps them so tells each
+// change to those it concerns, without walking every connection, as
+// SendAll sends a frame.
+//
+// Of own, the connections signed in as New's user_id or Old's, but
+// Except, get New as their identity and are sent the patch of their view;
+// of others, the signed-in connections that are not the user's own, but
+// Except, are sent the patch of theirs. Either may be nil, for none. A
+// connection named twice is sent the patch twice: others are once each,
+// such as from a set. Like PublishUser, it does nothing at all when
+// nothing changed, never blocks, and is meant to be called while the
+// backend holds the lock of the change.
+func (s *Server) PublishUserTo(change UserChange, own, others iter.Seq[*Conn]) bool {
+	p, changed := s.publication(change)
+	if !changed {
+		return false
+	}
+	var w waker
+	defer w.wake()
+	if own != nil {
+		for c := range own {
+			if p.own(c) {
+				p.sendOwn(c, &w)
+			}
+		}
+	}
+	if others != nil {
+		for c := range others {
+			if !p.own(c) {
+				p.sendOthers(c, &w)
+			}
+		}
+	}
+	return true
+}
+
+// publication is a change of a user as its audiences are sent it: you,
+// for the user's own connections, when their view changed, and others,
+// for everyone else's, when theirs did, each nil when it did not, or
+// could not be encoded.
+type publication struct {
+	change      UserChange
+	you, others apron.Frame
+	youChanged  bool
+}
+
+// publication encodes a change of a user for its audiences, and reports
+// whether either view of it changed.
+func (s *Server) publication(change UserChange) (publication, bool) {
 	old, cur := change.Old, change.New
 	oldShown, curShown := old, cur
 	if change.NewShown.UserID != "" {
@@ -96,37 +175,50 @@ func (s *Server) PublishUser(change UserChange, shares func(*Conn) bool) bool {
 	yours, youChanged := cur.Patch(old)
 	theirs, othersChanged := curShown.Patch(oldShown)
 	if !youChanged && !othersChanged {
-		return false
+		return publication{}, false
 	}
-	var you, others apron.Frame
+	p := publication{change: change, youChanged: youChanged}
 	var err error
 	if youChanged {
-		you, err = apron.Encode(apron.UserUpdate{You: &yours})
+		p.you, err = apron.Encode(apron.UserUpdate{You: yours})
 	}
 	if othersChanged && err == nil {
-		update := apron.UserUpdate{New: &theirs}
+		update := apron.UserUpdate{New: theirs}
 		if old.UserID != "" && old.UserID != cur.UserID {
-			update.Old = &apron.CurrentUser{User: cloneUser(oldShown)}
+			update.Old = apron.CurrentUser{User: cloneUser(oldShown)}
 		}
-		others, err = apron.Encode(update)
+		p.others, err = apron.Encode(update)
 	}
 	if err != nil {
 		s.logger().Error("apron: encoding a user notification", "user_id", cur.UserID, "error", err)
-		you, others = nil, nil
+		p.you, p.others = nil, nil
 	}
-	for _, c := range s.openConns() {
-		switch id := c.UserID(); {
-		case id == "", c == change.Except:
-		case id == cur.UserID || id == old.UserID:
-			if youChanged {
-				c.SetUser(cur)
-				if you != nil {
-					c.Send(you)
-				}
-			}
-		case others != nil && (shares == nil || shares(c)):
-			c.Send(others)
+	return p, true
+}
+
+// own reports whether c is one of the user's own connections: signed in
+// as New's user_id or Old's, and not Except, which is sent nothing.
+func (p *publication) own(c *Conn) bool {
+	id := c.UserID()
+	return id != "" && c != p.change.Except && (id == p.change.New.UserID || id == p.change.Old.UserID)
+}
+
+// sendOwn gives one of the user's own connections its identity, and
+// sends it its view's patch, when that view changed.
+func (p *publication) sendOwn(c *Conn, w *waker) {
+	if p.youChanged {
+		c.SetUser(p.change.New)
+		if p.you != nil {
+			w.add(c.sendDeferred(p.you))
 		}
 	}
-	return true
+}
+
+// sendOthers sends a connection that is not the user's own the patch of
+// others' view, when it changed, and the connection is signed in, and not
+// Except.
+func (p *publication) sendOthers(c *Conn, w *waker) {
+	if p.others != nil && c != p.change.Except && c.UserID() != "" {
+		w.add(c.sendDeferred(p.others))
+	}
 }

@@ -17,11 +17,10 @@ import (
 	"testing/synctest"
 	"time"
 
-	"github.com/coder/websocket"
-
 	"github.com/apron-chat/apron-server-go/apron"
 	"github.com/apron-chat/apron-server-go/apron/aprontest"
 	"github.com/apron-chat/apron-server-go/apron/server"
+	"github.com/coder/websocket"
 )
 
 // backend is a test Backend: guests sign in as guest_<n>, with a notice
@@ -47,7 +46,7 @@ func (b *backend) Auth(_ context.Context, c *server.Conn, p apron.AuthParams, re
 	if err != nil {
 		return err
 	}
-	return reply.Send(apron.AuthResult{You: you})
+	return reply.Send(apron.AuthResult{You: *you})
 }
 
 // guest is who Auth signs a connection in as.
@@ -178,7 +177,7 @@ func quiet(t *testing.T, c *aprontest.Client) {
 func signIn(t *testing.T, c *aprontest.Client) string {
 	t.Helper()
 	result, err := c.Auth(wait(t), map[string]any{"scheme": "guest", "name": "Ada"})
-	if err != nil || result.You == nil {
+	if err != nil || result.You.UserID == "" {
 		t.Fatalf("auth: %+v %v", result, err)
 	}
 	if f := next(t, c); f.Method != "message" {
@@ -311,8 +310,8 @@ func TestAuthBarrier(t *testing.T) {
 		if f := next(t, c); f.ID != "m" || fields(f)["message_id"] == nil {
 			t.Fatalf("got %s, want the message result", f.Raw)
 		}
-		if conn.UserID() != "guest_1" || conn.User().Name != "Ada" {
-			t.Fatalf("conn user = %v", conn.User())
+		if conn.UserID() != "guest_1" || userOf(conn).Name != "Ada" {
+			t.Fatalf("conn user = %v", userOf(conn))
 		}
 	})
 }
@@ -407,127 +406,6 @@ func TestHandle(t *testing.T) {
 	}
 	if _, err := c.Call(wait(t), "fail", nil); apron.CodeOf(err) != apron.CodeInternalError || strings.Contains(err.Error(), "secret") {
 		t.Fatalf("got %v, want an internal error that says nothing", err)
-	}
-}
-
-func TestDedup(t *testing.T) {
-	b := &backend{}
-	c := aprontest.Connect(t, wired(b, server.Config{}))
-	signIn(t, c)
-	send(t, c, `{"method":"message","id":"d","params":{"room_id":"r","body":{"text":"hi"}}}`)
-	first := next(t, c)
-	// The same params in another key order are the same request (§1.2).
-	send(t, c, `{"id":"d","params":{"body":{"text":"hi"},"room_id":"r"},"method":"message"}`)
-	second := next(t, c)
-	if fields(first)["message_id"] == nil || string(first.Raw) != string(second.Raw) {
-		t.Fatalf("a retry got %s, the original %s", second.Raw, first.Raw)
-	}
-	if n := b.messages.Load(); n != 1 {
-		t.Fatalf("the backend saw %d messages, want 1", n)
-	}
-	send(t, c, `{"method":"message","id":"d","params":{"body":{"text":"other"}}}`)
-	if f := next(t, c); code(f) != apron.CodeInvalidParams || f.ID != "d" {
-		t.Fatalf("got %s, want invalid_params for a reused id", f.Raw)
-	}
-	// A failed request is not kept: a retry runs again.
-	send(t, c, `{"method":"message","id":"bad","params":{"room_id":"has space","body":{"text":"x"}}}`)
-	if f := next(t, c); code(f) != apron.CodeInvalidParams {
-		t.Fatalf("got %s", f.Raw)
-	}
-	send(t, c, `{"method":"message","id":"bad","params":{"body":{"text":"x"}}}`)
-	if f := next(t, c); fields(f)["message_id"] == nil {
-		t.Fatalf("got %s, want the retry to run", f.Raw)
-	}
-}
-
-// returning is a backend whose calls, its commands and the test's "read"
-// requests, come in pairs, an original and its retry: each fails or
-// replies, and the original then does not return until the test ends.
-type returning struct {
-	oneUser
-	calls     atomic.Int64
-	returning chan struct{}
-}
-
-func (b *returning) Command(_ context.Context, _ *server.Conn, _ apron.CommandParams, reply server.Reply[apron.CommandResult]) error {
-	n := b.calls.Add(1)
-	_ = reply.Fail(apron.Denied(fmt.Sprintf("call %d", n)))
-	b.stall(n)
-	return nil
-}
-
-// stall holds up call n, after its reply, if it is an original.
-func (b *returning) stall(n int64) {
-	if n%2 == 1 {
-		<-b.returning
-	}
-}
-
-// A request whose outcome is not kept, a read or a failure, is forgotten
-// before its reply is sent: a retry sent once the reply arrives, here on
-// another connection of the same user, runs again, even while the
-// original's handler is still returning, rather than wait for it and get
-// its outcome.
-func TestDedupForgetsBeforeTheReply(t *testing.T) {
-	b := &returning{returning: make(chan struct{})}
-	s := wired(b, server.Config{})
-	s.Handle("read", server.Handler{NoDedup: true, Serve: func(_ context.Context, _ *server.Conn, r *server.Request, reply server.Reply[any]) error {
-		n := b.calls.Add(1)
-		_ = reply.Send(map[string]any{"call": n})
-		b.stall(n)
-		return nil
-	}})
-	// Each original holds up its connection, so each pair of requests
-	// has its own connections, which end after the originals return.
-	conns := []*aprontest.Client{aprontest.Connect(t, s), aprontest.Connect(t, s), aprontest.Connect(t, s), aprontest.Connect(t, s)}
-	t.Cleanup(func() { close(b.returning) })
-	for _, c := range conns {
-		signIn(t, c)
-	}
-	for i, request := range []struct{ raw, first, retry string }{
-		{`{"method":"read","id":"r","params":{}}`, `{"id":"r","result":{"call":1}}`, `{"id":"r","result":{"call":2}}`},
-		{`{"method":"command","id":"f","params":{"body":{"text":"/fail"}}}`,
-			`{"error":{"code":-32001,"message":"call 3"},"id":"f"}`, `{"error":{"code":-32001,"message":"call 4"},"id":"f"}`},
-	} {
-		c1, c2 := conns[2*i], conns[2*i+1]
-		send(t, c1, request.raw)
-		if f := next(t, c1); string(f.Raw) != request.first {
-			t.Fatalf("got %s, want %s", f.Raw, request.first)
-		}
-		send(t, c2, request.raw)
-		if f := next(t, c2); string(f.Raw) != request.retry {
-			t.Fatalf("a retry after the reply got %s, want %s", f.Raw, request.retry)
-		}
-	}
-}
-
-func TestDedupPerUser(t *testing.T) {
-	b := &backend{}
-	s := wired(b, server.Config{})
-	c1, c2 := aprontest.Connect(t, s), aprontest.Connect(t, s)
-	signIn(t, c1)
-	signIn(t, c2)
-	// Different users: the same id is a different request.
-	send(t, c1, `{"method":"message","id":"x","params":{"body":{"text":"one"}}}`)
-	send(t, c2, `{"method":"message","id":"x","params":{"body":{"text":"two"}}}`)
-	if fields(next(t, c1))["message_id"] == nil || fields(next(t, c2))["message_id"] == nil {
-		t.Fatal("a request failed")
-	}
-	if n := b.messages.Load(); n != 2 {
-		t.Fatalf("the backend saw %d messages, want 2", n)
-	}
-}
-
-func TestDedupOff(t *testing.T) {
-	b := &backend{}
-	c := aprontest.Connect(t, wired(b, server.Config{DedupSize: -1}))
-	signIn(t, c)
-	for range 2 {
-		send(t, c, `{"method":"message","id":"d","params":{"body":{"text":"hi"}}}`)
-		next(t, c)
-	}
-	if n := b.messages.Load(); n != 2 {
-		t.Fatalf("the backend saw %d messages, want 2", n)
 	}
 }
 
@@ -830,17 +708,127 @@ func (b *fencingBackend) Auth(_ context.Context, c *server.Conn, p apron.AuthPar
 		return err
 	}
 	c.HoldUntil(b.fence)
-	return reply.Send(apron.AuthResult{You: you})
+	return reply.Send(apron.AuthResult{You: *you})
 }
 
-func TestMaxConnections(t *testing.T) {
-	s := wired(&backend{}, server.Config{MaxConnections: 1})
-	c1, c2 := aprontest.Connect(t, s), aprontest.Connect(t, s)
-	if f := next(t, c2); code(f) != apron.CodeRetryAfter || f.ID != "" {
-		t.Fatalf("got %s, want retry_after", f.Raw)
+// Notification methods run with or without an id, only once signed in, and
+// are never answered.
+func TestNotificationMethod(t *testing.T) {
+	s := wired(&backend{}, server.Config{})
+	got := make(chan string, 4)
+	s.HandleNotification("activity", server.NotificationHandler{Capability: "activity", Serve: func(_ context.Context, _ *server.Conn, r *server.Request) {
+		v, _ := r.Fields().Get("typing")
+		got <- string(v)
+	}})
+	c := aprontest.Connect(t, s)
+	if capabilities := c.Hello().Capabilities; !slices.Contains(capabilities, "activity") {
+		t.Fatalf("capabilities: %v", capabilities)
 	}
-	expectClosed(t, c2)
-	if err := c1.Sync(wait(t)); err != nil {
+	send(t, c, `{"method":"activity","params":{"typing":1}}`) // Before sign-in: ignored.
+	signIn(t, c)
+	send(t, c, `{"method":"activity","params":{"typing":2}}`)
+	send(t, c, `{"method":"activity","id":"x","params":{"typing":3}}`)
+	if err := c.Sync(wait(t)); err != nil {
 		t.Fatal(err)
 	}
+	if a, b := <-got, <-got; a != "2" || b != "3" || len(got) != 0 {
+		t.Fatalf("handled %s %s, %d more", a, b, len(got))
+	}
+}
+
+type anyScheme struct{ backend }
+
+func (*anyScheme) CheckScheme(_ context.Context, _ *server.Conn, p apron.AuthParams) error {
+	if p.Scheme == "secret" {
+		return nil
+	}
+	return apron.Denied("no")
+}
+
+func TestCheckScheme(t *testing.T) {
+	b := &anyScheme{}
+	c := aprontest.Connect(t, wired(b, server.Config{CheckScheme: b.CheckScheme}))
+	if _, err := c.Auth(wait(t), map[string]any{"scheme": "guest"}); apron.CodeOf(err) != apron.CodeDenied {
+		t.Fatalf("got %v", err)
+	}
+	if result, err := c.Auth(wait(t), map[string]any{"scheme": "secret"}); err != nil || result.You.UserID == "" {
+		t.Fatalf("got %+v %v", result, err)
+	}
+}
+
+func TestAnnounce(t *testing.T) {
+	s := wired(&backend{}, server.Config{})
+	s.Handle("ext:thing", server.Handler{Capability: "ext:thing", Serve: func(context.Context, *server.Conn, *server.Request, server.Reply[any]) error { return nil }})
+	c := aprontest.Connect(t, s)
+	signIn(t, c)
+	conn := onlyConn(t, s)
+	conn.Announce(apron.ServerInfo{Auth: []string{"guest"}, Title: "Revealed"})
+	f := next(t, c)
+	var info apron.ServerInfo
+	if err := f.Decode(&info); err != nil || f.Method != "server" || info.Title != "Revealed" || info.Apron != apron.Version ||
+		!slices.Contains(info.Capabilities, "ext:thing") {
+		t.Fatalf("got %s", f.Raw)
+	}
+	if conn.ServerInfo().Title != "Revealed" {
+		t.Fatalf("Info: %+v", conn.ServerInfo())
+	}
+	conn.SignOut()
+	if _, err := c.Call(wait(t), "message", params(`{"body":{"text":"x"}}`)); apron.CodeOf(err) != apron.CodeDenied {
+		t.Fatalf("after SignOut: %v", err)
+	}
+}
+
+// A server frame announced while a network connection opens, once
+// OnConnect has told the backend of it, goes after the one it opens with,
+// and is the connection's ServerInfo.
+func TestAnnounceWhileOpening(t *testing.T) {
+	conns := make(chan *server.Conn, 1)
+	s := wired(&backend{}, server.Config{OnConnect: func(_ context.Context, c *server.Conn) error {
+		c.Announce(apron.ServerInfo{Title: "Revealed"})
+		conns <- c
+		return nil
+	}})
+	c := aprontest.Connect(t, s)
+	if title := c.Hello().Title; title == "Revealed" {
+		t.Fatalf("the first server frame is the announced one")
+	}
+	f := next(t, c)
+	var info apron.ServerInfo
+	if err := f.Decode(&info); err != nil || f.Method != "server" || info.Title != "Revealed" {
+		t.Fatalf("got %s, want the announced server frame", f.Raw)
+	}
+	if conn := <-conns; conn.ServerInfo().Title != "Revealed" {
+		t.Fatalf("ServerInfo: %+v", conn.ServerInfo())
+	}
+}
+
+// OnDisconnect follows a network connection OnConnect refused, with an
+// *Error or any other error, so that the backend undoes what OnConnect did
+// in one place.
+func TestDisconnectAfterRefusal(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		for _, refusal := range []error{apron.Denied("No"), errors.New("no")} {
+			b := &backend{}
+			var config server.Config
+			config.OnConnect = func(_ context.Context, c *server.Conn) error {
+				c.SetData("half done")
+				return refusal
+			}
+			s := wired(b, config)
+			client := aprontest.Connect(t, s)
+			for {
+				// The server frame and the error, for an *Error.
+				if _, err := client.Next(wait(t)); err != nil {
+					if !errors.Is(err, apron.ErrClosed) {
+						t.Fatalf("refused with %v: %v", refusal, err)
+					}
+					break
+				}
+			}
+			synctest.Wait()
+			if d := b.disconnectedConns(); len(d) != 1 || d[0].Data() != "half done" {
+				t.Fatalf("refused with %v: disconnected %v", refusal, d)
+			}
+		}
+	})
 }

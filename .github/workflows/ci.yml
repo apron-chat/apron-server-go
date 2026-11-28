@@ -43,6 +43,8 @@ jobs:
             apron/go.sum
       - run: make install
       - run: make check test build
+      # Each Go benchmark once, so that they keep building and running; PROFILING.md says how to measure with them.
+      - run: make bench-smoke
       # Both Chromium builds: the headless shell for most tests and the
       # conformance checks' passkey portal, and full Chromium (channel:
       # 'chromium') for push.spec.ts, as the shell denies notifications.

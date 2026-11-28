@@ -30,7 +30,12 @@ func TestLimits(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			chat := &limited{maxText: test.maxText, keep: test.keep}
-			chat.server = server.New(chat, server.Config{Messages: chat, History: chat, Logger: slog.New(slog.DiscardHandler)})
+			// The burst's poster gets each of its 512 messages back, and its
+			// reply: this backend, which only appends them, posts them faster
+			// than the check reads them, so the default queue of 128 would
+			// drop the poster as a reader that fell behind, about one run in
+			// two. The queue holds the whole burst.
+			chat.server = server.New(chat, server.Config{Messages: chat, History: chat, Logger: slog.New(slog.DiscardHandler), OutgoingQueue: 2 * slowBurst})
 			r := &run{config: Config{Server: chat.server}, order: map[orderKey]int64{}, violations: map[string]map[string]bool{}}
 			for _, item := range checks {
 				if !slices.Contains(reported, item.id) {
@@ -75,7 +80,7 @@ func (l *limited) Auth(_ context.Context, _ *server.Conn, p apron.AuthParams, re
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.guests++
-	return reply.Send(apron.AuthResult{You: &apron.CurrentUser{UserID: fmt.Sprintf("guest_%d", l.guests), Name: p.Name}})
+	return reply.Send(apron.AuthResult{You: apron.CurrentUser{UserID: fmt.Sprintf("guest_%d", l.guests), Name: p.Name}})
 }
 
 func (l *limited) Message(_ context.Context, c *server.Conn, p apron.MessageParams, reply server.Reply[apron.MessageResult]) error {
@@ -90,11 +95,12 @@ func (l *limited) Message(_ context.Context, c *server.Conn, p apron.MessagePara
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if p.ReplyTo != nil && !slices.ContainsFunc(l.log, func(r apron.Record) bool { return r.LogID == p.ReplyTo.MessageID }) {
+	if p.ReplyTo.MessageID != 0 && !slices.ContainsFunc(l.log, func(r apron.Record) bool { return r.LogID == p.ReplyTo.MessageID }) {
 		return apron.InvalidParams("reply_to names no message")
 	}
 	id := l.clock.Next()
-	m := apron.Message{MessageID: id, LogID: id, RoomID: "general", From: *c.User(), Body: p.Body, ReplyTo: p.ReplyTo}
+	from, _ := c.Identity()
+	m := apron.Message{MessageID: id, LogID: id, RoomID: "general", From: from, Body: p.Body, ReplyTo: p.ReplyTo}
 	frame, err := apron.Encode(m)
 	if err != nil {
 		return err

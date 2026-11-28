@@ -58,8 +58,9 @@ type Header struct {
 	// ExportedAt is when the archive was written, in ISO 8601, as
 	// FormatTime writes it.
 	ExportedAt string `json:"exported_at,omitempty"`
-	// You is who the archive was written as, or nil, signed out.
-	You *apron.User `json:"you,omitzero"`
+	// You is who the archive was written as, or the zero User, which is
+	// left out, signed out.
+	You apron.User `json:"you,omitzero"`
 	// Media are the origins that the archive's media loads from (§5), such
 	// as https://chat.example: the server's own, and its ext:media origins.
 	Media []string `json:"media,omitempty"`
@@ -138,9 +139,8 @@ func NewWriter(w io.Writer, h Header) (*Writer, error) {
 	if h.Archive == 0 {
 		h.Archive = Version
 	}
-	if h.You != nil {
-		you := moment(*h.You)
-		h.You = &you
+	if h.You.UserID != "" {
+		h.You = moment(h.You)
 	}
 	aw := &Writer{w}
 	return aw, aw.line(h)
@@ -188,6 +188,7 @@ type Reader struct {
 	Header Header
 
 	r       *bufio.Reader
+	buf     []byte
 	skipped int
 }
 
@@ -222,7 +223,7 @@ func NewReader(r io.Reader) (*Reader, error) {
 	_ = json.Unmarshal(members["exported_at"], &ar.Header.ExportedAt)
 	var you apron.User
 	if json.Unmarshal(members["you"], &you) == nil && apron.ValidID(you.UserID) {
-		ar.Header.You = &you
+		ar.Header.You = you
 	}
 	_ = json.Unmarshal(members["media"], &ar.Header.Media)
 	for _, name := range []string{"apron_archive", "server", "exported_at", "you", "media"} {
@@ -237,7 +238,19 @@ func NewReader(r io.Reader) (*Reader, error) {
 // line returns the next line that is not blank, without its line ending.
 func (r *Reader) line() ([]byte, error) {
 	for {
-		line, err := r.r.ReadBytes('\n')
+		// The line is read into a buffer of the Reader's, which the next
+		// line reuses: what a part keeps of its line is decoded from it.
+		r.buf = r.buf[:0]
+		var err error
+		for {
+			var fragment []byte
+			fragment, err = r.r.ReadSlice('\n')
+			r.buf = append(r.buf, fragment...)
+			if err != bufio.ErrBufferFull {
+				break
+			}
+		}
+		line := r.buf
 		if err != nil && (err != io.EOF || len(line) == 0) {
 			return nil, err
 		}
@@ -289,19 +302,54 @@ func decode[T any](r *Reader, array jsontext.Value, list *[]T, valid func(*T, js
 	if array == nil {
 		return
 	}
-	var raws []jsontext.Value
-	if json.Unmarshal(array, &raws) != nil {
+	if array.Kind() != '[' {
 		r.skipped++
 		return
 	}
-	for _, raw := range raws {
-		var record T
-		if json.Unmarshal(raw, &record) != nil || !valid(&record, raw) {
-			r.skipped++
-			continue
-		}
-		*list = append(*list, record)
+	// The records are read in place, one at a time, rather than copied
+	// out of the array first (a decoder of a bytes.Buffer reads it where
+	// it is); the array is valid JSON, a member of a line that decoded.
+	dec := jsontext.NewDecoder(bytes.NewBuffer(array))
+	if _, err := dec.ReadToken(); err != nil {
+		r.skipped++
+		return
 	}
+	// The list grows once, by the records the array has: counting them
+	// costs less than growing it as they are decoded.
+	*list = slices.Grow(*list, count(array))
+	for dec.PeekKind() != ']' {
+		raw, err := dec.ReadValue()
+		if err != nil {
+			r.skipped++
+			return
+		}
+		// Each record is decoded in its place in the list, which it
+		// leaves when it is not valid.
+		var zero T
+		*list = append(*list, zero)
+		record := &(*list)[len(*list)-1]
+		if json.Unmarshal(raw, record) != nil || !valid(record, raw) {
+			*list = (*list)[:len(*list)-1]
+			r.skipped++
+		}
+	}
+}
+
+// count returns how many values a JSON array has, or 0 for one that is
+// not valid.
+func count(array jsontext.Value) int {
+	dec := jsontext.NewDecoder(bytes.NewBuffer(array))
+	if _, err := dec.ReadToken(); err != nil {
+		return 0
+	}
+	n := 0
+	for dec.PeekKind() != ']' {
+		if dec.SkipValue() != nil {
+			return 0
+		}
+		n++
+	}
+	return n
 }
 
 // validView checks a listed room, and keeps a history_log_id of null,

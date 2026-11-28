@@ -115,7 +115,7 @@ func (c *Chat) Auth(_ context.Context, _ *server.Conn, p apron.AuthParams, reply
 	}
 	// The welcome goes right after the result (§3.2.2). you is complete
 	// (§3.3.1): this server publishes user_id and name, and both are set.
-	return reply.Send(apron.AuthResult{You: &apron.CurrentUser{UserID: id, Name: name}}, welcome)
+	return reply.Send(apron.AuthResult{You: apron.CurrentUser{UserID: id, Name: name}}, welcome)
 }
 
 func (c *Chat) Message(_ context.Context, conn *server.Conn, p apron.MessageParams, reply server.Reply[apron.MessageResult]) error {
@@ -127,12 +127,14 @@ func (c *Chat) Message(_ context.Context, conn *server.Conn, p apron.MessagePara
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if p.ReplyTo != nil && !c.messages[p.ReplyTo.MessageID] {
+	if p.ReplyTo.MessageID != 0 && !c.messages[p.ReplyTo.MessageID] {
 		return apron.InvalidParams("reply_to names no message")
 	}
 	id := c.clock.Next()
+	// The sender as its connection keeps it, which is only read.
+	from, _ := conn.Identity()
 	frame, err := apron.Encode(apron.Message{
-		MessageID: id, LogID: id, RoomID: room, From: *conn.User(), Body: p.Body, ReplyTo: p.ReplyTo,
+		MessageID: id, LogID: id, RoomID: room, From: from, Body: p.Body, ReplyTo: p.ReplyTo,
 	})
 	if err != nil {
 		return err
@@ -151,7 +153,8 @@ func (c *Chat) Message(_ context.Context, conn *server.Conn, p apron.MessagePara
 func (c *Chat) Me(_ context.Context, conn *server.Conn, p apron.MeParams, reply server.Reply[apron.CurrentUser]) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	old := *conn.User()
+	// ApplyMe changes a copy of the identity.
+	old, _ := conn.Identity()
 	you := server.ApplyMe(old, p)
 	you.Name = strings.TrimSpace(you.Name)
 	c.Server.PublishUser(server.UserChange{Old: old, New: you, Except: conn}, nil)
@@ -166,7 +169,9 @@ func (c *Chat) nick(_ context.Context, call *commands.Call) error {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	old := *call.Conn.User()
+	// The new identity shares the old's roles and ext, which neither
+	// changes.
+	old, _ := call.Conn.Identity()
 	you := old
 	you.Name = call.Args
 	c.Server.PublishUser(server.UserChange{Old: old, New: you}, nil)

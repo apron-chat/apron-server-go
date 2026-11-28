@@ -1,6 +1,7 @@
 package rooms
 
 import (
+	"cmp"
 	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"fmt"
@@ -24,8 +25,9 @@ type Message struct {
 	owner string
 	// room is the room_id of the room it is in, and logID its current
 	// snapshot's log_id; both are empty before its first snapshot.
-	room      string
-	logID     int64
+	room  string
+	logID int64
+	// reactions is nil until the first reaction: most messages have none.
 	reactions map[string]roomlog.Reaction
 	// records are every logged snapshot, for redaction; the last is current.
 	records []*roomlog.Record
@@ -44,7 +46,7 @@ type MessageHolder interface {
 func (m *Message) Kept() *Message { return m }
 
 func newMessage(id string, from roomlog.Author, owner string) *Message {
-	return &Message{id: id, from: from, owner: owner, reactions: make(map[string]roomlog.Reaction)}
+	return &Message{id: id, from: from, owner: owner}
 }
 
 // NewMessage keeps a new message named id, which owner sends as from,
@@ -132,13 +134,41 @@ func (m *Message) Reactions() []roomlog.Reaction {
 // when emojis is empty, and logs the change as a reactions record in the
 // message's room, which it returns with the room.
 func (t *Table[U, M]) React(m *Message, from roomlog.Author, emojis []string) (*roomlog.Record, *Room[U]) {
-	t.dirtyMessages[m.id] = m
 	if len(emojis) == 0 {
 		delete(m.reactions, from.UserID)
 	} else {
-		m.reactions[from.UserID] = roomlog.Reaction{From: from, Emojis: emojis}
+		m.react(roomlog.Reaction{From: from, Emojis: emojis})
 	}
+	t.touchMessageLater(m)
 	return t.LogReactions(m, []roomlog.Reaction{{From: from, Emojis: slices.Clone(emojis)}})
+}
+
+// react keeps set as its user's.
+func (m *Message) react(set roomlog.Reaction) {
+	if m.reactions == nil {
+		m.reactions = make(map[string]roomlog.Reaction)
+	}
+	m.reactions[set.From.UserID] = set
+}
+
+// LaterReactions is the count of reaction sets from which a message's
+// entry, which holds every set, is rendered at most once every EntryDelay
+// for a reaction (EntriesDue), as a large room's is for a message: so that
+// each reaction to a message many react to does not cost as much as all
+// of them.
+const LaterReactions = 64
+
+// touchMessageLater marks m as changed in its reactions, which its entry
+// may lag behind for a while when it has many: their records are stored at
+// once, and restoreMessage applies those after the entry's.
+func (t *Table[U, M]) touchMessageLater(m *Message) {
+	if len(m.reactions) < LaterReactions {
+		t.dirtyMessages[m.id] = m
+		return
+	}
+	if _, now := t.dirtyMessages[m.id]; !now {
+		t.laterMessages[m.id] = m
+	}
 }
 
 // LogReactions logs a reactions record of the given sets in the message's
@@ -147,7 +177,7 @@ func (t *Table[U, M]) React(m *Message, from roomlog.Author, emojis []string) (*
 func (t *Table[U, M]) LogReactions(m *Message, reactions []roomlog.Reaction) (*roomlog.Record, *Room[U]) {
 	r := t.rooms[m.room]
 	record := roomlog.NewReactions(t.log.NextID(), m.id, m.room, reactions)
-	t.Append(record, r)
+	t.appendLater(record, r)
 	return record, r
 }
 
@@ -182,7 +212,7 @@ func (t *Table[U, M]) Snapshot(m *Message, snapshot *roomlog.Message, logID int6
 	t.dirtyMessages[m.id] = m
 	record = roomlog.NewMessage(logID, snapshot)
 	m.records = append(m.records, record)
-	t.Append(record, rooms...)
+	t.appendLater(record, rooms...)
 	return record, rooms, moved
 }
 
@@ -237,8 +267,12 @@ func MessageEntry(m *Message) store.Entry {
 // the rooms and the log are restored. A message none of whose records is
 // kept cannot be served, and is left out.
 func (t *Table[U, M]) RestoreMessages(entries map[string]jsontext.Value, records map[int64]*roomlog.Record) error {
+	reactions, err := reactionRecords(records)
+	if err != nil {
+		return err
+	}
 	for id, raw := range entries {
-		m, err := restoreMessage(id, raw, records)
+		m, err := restoreMessage(id, raw, records, reactions[id])
 		if err != nil {
 			return err
 		}
@@ -252,15 +286,29 @@ func (t *Table[U, M]) RestoreMessages(entries map[string]jsontext.Value, records
 // restoreMessage rebuilds the message named id from its store entry, with
 // the snapshots among records. It returns nil for a message none of whose
 // records is kept.
-func restoreMessage(id string, raw jsontext.Value, records map[int64]*roomlog.Record) (*Message, error) {
+func restoreMessage(id string, raw jsontext.Value, records map[int64]*roomlog.Record, reactions []loggedReactions) (*Message, error) {
 	var s storedMessage
 	if err := json.Unmarshal(raw, &s); err != nil {
 		return nil, fmt.Errorf("stored %s %q: %w", MessageEntryKind, id, err)
 	}
 	m := newMessage(id, s.From, s.Owner)
 	m.logID, m.room = s.LogID, s.RoomID
-	for userID, set := range s.Reactions {
-		m.reactions[userID] = roomlog.Reaction{From: set.From, Emojis: set.Emojis}
+	for _, set := range s.Reactions {
+		m.react(roomlog.Reaction{From: set.From, Emojis: set.Emojis})
+	}
+	// The entry may lag behind the message's reactions records
+	// (touchMessageLater), so they are applied over it, in order, each set
+	// replacing its user's: a record's sets are what its users' became, so
+	// each user ends with the set of their latest record, which an entry
+	// that is up to date holds already.
+	for _, logged := range reactions {
+		for _, set := range logged.sets {
+			if len(set.Emojis) == 0 {
+				delete(m.reactions, set.From.UserID)
+			} else {
+				m.react(set)
+			}
+		}
 	}
 	for _, logID := range s.Records {
 		if record := records[logID]; record != nil {
@@ -272,4 +320,31 @@ func restoreMessage(id string, raw jsontext.Value, records map[int64]*roomlog.Re
 		return nil, nil
 	}
 	return m, nil
+}
+
+// loggedReactions is a reactions record of a message: its log_id, and the
+// sets it logged.
+type loggedReactions struct {
+	id   int64
+	sets []roomlog.Reaction
+}
+
+// reactionRecords returns the reactions records among records by the
+// message_id they name, each message's in log_id order.
+func reactionRecords(records map[int64]*roomlog.Record) (map[string][]loggedReactions, error) {
+	byMessage := make(map[string][]loggedReactions)
+	for id, record := range records {
+		if record.Kind != roomlog.KindReactions {
+			continue
+		}
+		var r roomlog.Reactions
+		if err := json.Unmarshal(record.Raw, &r); err != nil {
+			return nil, fmt.Errorf("stored reactions record %d: %w", id, err)
+		}
+		byMessage[r.MessageID] = append(byMessage[r.MessageID], loggedReactions{id: id, sets: r.Reactions})
+	}
+	for _, logged := range byMessage {
+		slices.SortFunc(logged, func(a, b loggedReactions) int { return cmp.Compare(a.id, b.id) })
+	}
+	return byMessage, nil
 }

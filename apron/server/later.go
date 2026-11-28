@@ -17,9 +17,10 @@ type later struct {
 	stop func() bool
 	// closed is set when the connection ended before the reply.
 	closed bool
-	// finish, once the handler has returned, finishes the request's
-	// deduplication entry with its outcome, as its reply is queued.
-	finish func(dedupOutcome)
+	// finish is set once the handler has returned, for the request's
+	// deduplication entry to be finished with its outcome as its reply is
+	// queued.
+	finish bool
 }
 
 // state reports whether the request has its reply, and whether it is to
@@ -42,6 +43,13 @@ func (r *Request) answerLater() error {
 	if r.replied || r.notification || r.later != nil {
 		return nil
 	}
+	r.answerLaterLocked()
+	return nil
+}
+
+// answerLaterLocked marks the request, with r.mu held, as answered after
+// its handler returns.
+func (r *Request) answerLaterLocked() {
 	r.later = &later{}
 	if r.entry != nil {
 		r.entry.Later.Store(true)
@@ -49,7 +57,46 @@ func (r *Request) answerLater() error {
 	if r.c != nil {
 		r.later.stop = context.AfterFunc(r.c.ctx, r.abandon)
 	}
+}
+
+// reserve fixes the place of the request's reply among its connection's
+// frames (Reply.Reserve), and marks it answered later, unless it has its
+// reply, or is a notification; a place reserved already stays.
+func (r *Request) reserve() error {
+	if r.Method == "auth" {
+		return errLaterAuth
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.replied || r.notification || r.slot != nil {
+		return nil
+	}
+	if r.later == nil {
+		r.answerLaterLocked()
+	}
+	if r.c != nil {
+		// Nil when the connection is closing: the reply then is not
+		// queued, as it would not be without a place.
+		r.slot = r.c.rt.Reserve()
+		r.reserved = true
+	}
 	return nil
+}
+
+// queue queues the request's reply, with r.mu held: in its reserved place,
+// if it has one, or else after what is queued.
+func (r *Request) queue(frames ...[]byte) bool {
+	switch {
+	case r.slot != nil:
+		// A slot of a connection that stopped is written by no one.
+		r.slot.Fill(frames...)
+		return !r.c.rt.Stopped()
+	case r.reserved:
+		return false
+	case len(frames) == 1:
+		return r.c.rt.SendFrame(frames[0])
+	}
+	return r.c.rt.Send(frames...)
 }
 
 // abandon ends a request answered later whose connection ended before its
@@ -78,21 +125,21 @@ func (r *Request) settleLocked() {
 	if l.stop != nil {
 		l.stop()
 	}
-	if finish := l.finish; finish != nil {
-		l.finish = nil
-		finish(r.outcome)
+	if l.finish {
+		l.finish = false
+		r.finishDedup(r.outcome)
 	}
 }
 
 // finishOrDefer returns the request's outcome, for its deduplication entry
 // to be finished with, once its handler has returned; for a request still
-// to be answered later, done is false, and finish runs as its reply is
-// queued, or its connection ends.
-func (r *Request) finishOrDefer(finish func(dedupOutcome)) (outcome dedupOutcome, done bool) {
+// to be answered later, done is false, and the entry is finished as its
+// reply is queued, or its connection ends.
+func (r *Request) finishOrDefer() (outcome dedupOutcome, done bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.later != nil && !r.replied {
-		r.later.finish = finish
+		r.later.finish = true
 		return dedupOutcome{}, false
 	}
 	return r.outcome, true

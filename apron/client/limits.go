@@ -1,6 +1,7 @@
 package client
 
 import (
+	"bytes"
 	"context"
 	"encoding/json/jsontext"
 	"encoding/json/v2"
@@ -68,6 +69,11 @@ func keys(method string, params jsontext.Value) []string {
 // newUpload reports whether a message's or command's params carry a new
 // upload embed: one of kind upload without an embed_id yet (§4.8.2).
 func newUpload(params jsontext.Value) bool {
+	// Most messages have no embeds: they are not decoded to tell, as a
+	// member named embeds is written so, or with an escape.
+	if !bytes.Contains(params, []byte(`"embeds"`)) && !bytes.Contains(params, []byte(`\u`)) {
+		return false
+	}
 	var p struct {
 		Body struct {
 			Embeds []struct {

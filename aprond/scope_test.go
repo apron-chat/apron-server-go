@@ -95,7 +95,7 @@ func TestAScopedBotSeesOnlyItsRooms(t *testing.T) {
 	c.expectError(t, "room_join", "add", map[string]any{"room_id": other, "user_id": "agent"}, CodeDenied)
 
 	// Taking threads in lets it read and start them.
-	if err := host.SetScope(ctx, "agent", &RoomScope{Rooms: []string{defaultRoomID}, Threads: true}); err != nil {
+	if err := host.SetScope(ctx, "agent", RoomScope{Rooms: []string{defaultRoomID}, Threads: true}); err != nil {
 		t.Fatal(err)
 	}
 	if history, err := bot.History(ctx, thread, HistoryOptions{}); err != nil || len(history) != 1 {
@@ -106,20 +106,23 @@ func TestAScopedBotSeesOnlyItsRooms(t *testing.T) {
 	}
 
 	// A scope without general takes the bot out of it.
-	if err := host.SetScope(ctx, "agent", &RoomScope{Rooms: []string{other}}); err != nil {
+	if err := host.SetScope(ctx, "agent", RoomScope{Rooms: []string{other}}); err != nil {
 		t.Fatal(err)
 	}
 	app.mu.RLock()
 	_, inGeneral := app.users.Get("agent").joined[defaultRoomID]
 	app.mu.RUnlock()
-	if inGeneral || host.Scope("agent").Rooms[0] != other {
-		t.Fatalf("still in general: %v, scope %#v", inGeneral, host.Scope("agent"))
+	if scope, ok := host.Scope("agent"); inGeneral || !ok || scope.Rooms[0] != other {
+		t.Fatalf("still in general: %v, scope %#v", inGeneral, scope)
 	}
 	if err := bot.Join(ctx, other); err != nil {
 		t.Fatal(err)
 	}
-	if err := host.SetScope(ctx, "agent", nil); err != nil || host.Scope("agent") != nil {
-		t.Fatalf("lifting the scope: %v", err)
+	if err := host.ClearScope(ctx, "agent"); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := host.Scope("agent"); ok {
+		t.Fatal("the scope is still there")
 	}
 	if err := bot.Join(ctx, defaultRoomID); err != nil {
 		t.Fatal(err)

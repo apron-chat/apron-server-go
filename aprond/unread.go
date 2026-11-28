@@ -168,7 +168,7 @@ func (s *Server) messageUnreadLocked(m *messageState, previous *roomlog.Message,
 		if room == nil {
 			continue
 		}
-		for _, u := range room.Members() {
+		for u := range s.pushedMembersLocked(room) {
 			add(u)
 		}
 	}

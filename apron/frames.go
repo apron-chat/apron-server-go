@@ -99,16 +99,20 @@ type MessageRef struct {
 // Message is a message snapshot, or a transient notice when MessageID is
 // 0 (§3.5).
 type Message struct {
-	MessageID  LogID       `json:"message_id,omitzero"`
-	LogID      LogID       `json:"log_id,omitzero"`
-	RoomID     string      `json:"room_id,omitempty"`
-	From       User        `json:"from"`
-	Body       *Body       `json:"body,omitzero"`
-	ReplyTo    *MessageRef `json:"reply_to,omitempty"`
-	PrevLogID  LogID       `json:"prev_log_id,omitzero"`
-	PrevRoomID string      `json:"prev_room_id,omitempty"`
-	Deleted    bool        `json:"deleted,omitzero"`
-	Ext        Ext         `json:"ext,omitempty"`
+	MessageID LogID  `json:"message_id,omitzero"`
+	LogID     LogID  `json:"log_id,omitzero"`
+	RoomID    string `json:"room_id,omitempty"`
+	From      User   `json:"from"`
+	// Body is the zero Body for a message without one, such as a
+	// tombstone (§4.4), which is left out.
+	Body Body `json:"body,omitzero"`
+	// ReplyTo is the message this one replies to, the zero MessageRef for
+	// none, which is left out.
+	ReplyTo    MessageRef `json:"reply_to,omitzero"`
+	PrevLogID  LogID      `json:"prev_log_id,omitzero"`
+	PrevRoomID string     `json:"prev_room_id,omitempty"`
+	Deleted    bool       `json:"deleted,omitzero"`
+	Ext        Ext        `json:"ext,omitempty"`
 	// Unknown holds the members this package has no field for, as they
 	// arrived, and is sent after the others.
 	Unknown jsontext.Value `json:",embed"`
@@ -121,7 +125,7 @@ func (Message) Method() string { return "message" }
 // Notice is a transient ~private notice with text, shown in roomID, or
 // wherever the client likes when roomID is empty.
 func Notice(roomID, text string) Message {
-	return Message{RoomID: roomID, From: PrivateNotice, Body: &Body{Text: text}}
+	return Message{RoomID: roomID, From: PrivateNotice, Body: Body{Text: text}}
 }
 
 // AuthParams are the params of auth (§3.2). A scheme whose fields are not
@@ -136,23 +140,24 @@ type AuthParams struct {
 	Ext    Ext    `json:"ext,omitempty"`
 }
 
-// AuthResult is the result of auth (§3.2). A result with You nil
-// authenticated nothing, such as the begin step of a ceremony; with You, the
-// connection is signed in as You.
+// AuthResult is the result of auth (§3.2). A result whose You has no
+// user_id, the zero CurrentUser, which is left out, authenticated nothing,
+// such as the begin step of a ceremony; with You, the connection is signed
+// in as You.
 //
 // You is complete (§3.3.1): it carries every profile field the server
 // publishes, those the user has empty too, named in its Cleared, such as a
 // status of "" with capability status (§4.5.2). So a sign-in's You is the
 // user, u, with Cleared naming the fields the server publishes that u has
-// empty: &CurrentUser{User: u}, for a server that publishes no field u
+// empty: CurrentUser{User: u}, for a server that publishes no field u
 // can have empty, such as one of user_id and name alone, or
-// &CurrentUser{User: u, Cleared: []string{"status"}} for a user without a
+// CurrentUser{User: u, Cleared: []string{"status"}} for a user without a
 // status. User.Complete is for a client that keeps the user already, as a
 // me result's does: a signing-in client keeps nothing, and
 // u.Complete(User{}) is CurrentUser{User: u}, which clears nothing.
 type AuthResult struct {
-	You   *CurrentUser `json:"you,omitzero"`
-	Token string       `json:"token,omitempty"`
+	You   CurrentUser `json:"you,omitzero"`
+	Token string      `json:"token,omitempty"`
 	// Extra holds more result fields, sent beside you and token, such as
 	// a webauthn begin's options. It names neither of them: a result that
 	// does is error/internal_error.
@@ -165,10 +170,11 @@ type AuthResult struct {
 type MessageParams struct {
 	// RoomID is the room, or "" for the default room.
 	RoomID string `json:"room_id,omitempty"`
-	// Body is never nil. Its Unknown holds the fields this package does
-	// not know, for a backend that keeps them.
-	Body    *Body       `json:"body,omitzero"`
-	ReplyTo *MessageRef `json:"reply_to,omitempty"`
+	// Body is the message's, which a request has: its Unknown holds the
+	// fields this package does not know, for a backend that keeps them.
+	Body Body `json:"body,omitzero"`
+	// ReplyTo is the message this one replies to, or the zero MessageRef.
+	ReplyTo MessageRef `json:"reply_to,omitzero"`
 	// Ext is the message's ext (§4.13); nil when left out.
 	Ext Ext `json:"ext,omitempty"`
 }
@@ -199,10 +205,10 @@ type CommandParams struct {
 	// which the backend names (§3.6.3): with package apron/server/commands, in its
 	// Router.Before.
 	RoomID string `json:"room_id,omitempty"`
-	// Body is never nil.
-	Body    *Body       `json:"body,omitzero"`
-	ReplyTo *MessageRef `json:"reply_to,omitempty"`
-	Ext     Ext         `json:"ext,omitempty"`
+	// Body is the command's, whose text is the command line.
+	Body    Body       `json:"body,omitzero"`
+	ReplyTo MessageRef `json:"reply_to,omitzero"`
+	Ext     Ext        `json:"ext,omitempty"`
 }
 
 // CommandResult is the result of a command (§4.1): empty, or the write
@@ -256,6 +262,25 @@ type MeParams struct {
 // being encoded again.
 type Frame []byte
 
+// FrameHead is what a frame says of itself (§1.1): its method, "" for a
+// reply, and its id, params, result, and error, raw, each nil when the
+// frame has none, and "null" when it is null. The values are parts of the
+// frame, not copies: they are valid while it is, and are not changed.
+type FrameHead struct {
+	Method                    string
+	ID, Params, Result, Error jsontext.Value
+}
+
+// Head reads the frame's head, without decoding or copying its values: a
+// client that handles every frame it receives, such as a bot, reads the
+// method of each, and decodes only the params of those it handles. Its
+// error is that of a frame that is not a JSON object, or whose method is
+// not a string, which decoding it into a FrameHead would refuse too.
+func (f Frame) Head() (FrameHead, error) {
+	h, err := core.ReadHead(f)
+	return FrameHead{Method: h.Method, ID: h.ID, Params: h.Params, Result: h.Result, Error: h.Error}, err
+}
+
 // Notification is the params of a notification the server sends, which
 // names its method, such as a Message ("message"), a UserUpdate ("user"),
 // or a RoomUpdate ("room_update"). An extension's own notification is a
@@ -276,7 +301,7 @@ func Encode(n Notification) (Frame, error) {
 
 // encodeRaw renders a notification frame of any method and params.
 func encodeRaw(method string, params any) (Frame, error) {
-	return marshal(map[string]any{"method": method, "params": params})
+	return marshal(&core.NotificationFrame{Method: method, Params: params})
 }
 
 // Marshal encodes a value as JSON as every frame is encoded:

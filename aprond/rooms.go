@@ -4,6 +4,7 @@ import (
 	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"fmt"
+	"iter"
 	"maps"
 	"slices"
 
@@ -28,6 +29,9 @@ func (u *userState) MemberID() string { return u.id }
 
 // MemberScope is the rooms u is limited to, nil for none (rooms.Member).
 func (u *userState) MemberScope() *rooms.Scope { return u.Scope }
+
+// MemberFrom is u as records carry it (rooms.Member).
+func (u *userState) MemberFrom() roomlog.Author { return u.from() }
 
 // privateRooms counts the top-level private rooms u is in, which
 // Config.MaxPrivateRooms bounds. Their threads are not counted: only their
@@ -85,11 +89,19 @@ func (s *Server) cursorFramesLocked(u *userState, r *roomState) []apron.Frame {
 // roomViewOfLocked is a room's current record with its delivery fields
 // (§4.2): its log head, and the inclusive lower bound of retained history.
 // The Go server retains every record, so history always starts at the
-// room's creation record. The view shares nothing with the room, so it may
-// be encoded after s.mu is released.
+// room's creation record. The record is the room's, encoded as an
+// apron.Room, kept while it is the same (rooms.Room.EncodedRecord), and
+// sent as it is (RoomView.Raw); it is never changed, so the view may be
+// encoded after s.mu is released.
 func (s *Server) roomViewOfLocked(r *roomState) apron.RoomView {
-	created := apron.LogID(r.Log().Created())
-	return apron.RoomView{Room: decodeRecord[apron.Room](encodeJSON(r.Record())), LatestLogID: apron.LogID(r.Log().Latest()), HistoryLogID: &created}
+	created := apron.LogID(r.Log().HistoryID())
+	return apron.RoomView{Raw: r.EncodedRecord(encodeRoom), LatestLogID: apron.LogID(r.Log().Latest()), HistoryLogID: &created}
+}
+
+// encodeRoom encodes a room record as an apron.Room, which keeps any
+// member it has no field for (Unknown), so that it encodes as the record.
+func encodeRoom(record roomlog.RoomRecord) jsontext.Value {
+	return encodeJSON(decodeRecord[apron.Room](encodeJSON(record)))
 }
 
 // decodeRecord decodes a logged record, which the server encoded, as the
@@ -105,13 +117,34 @@ func decodeRecord[T any](raw jsontext.Value) T {
 // deliverLocked sends a frame to every connection of every member of the
 // given rooms, once per connection. The frame is encoded once for all of them.
 func (s *Server) deliverLocked(frame any, rooms ...*roomState) {
-	frame = render(frame)
-	seen := make(map[string]bool)
-	for _, r := range rooms {
-		for id, member := range r.Members() {
-			if !seen[id] {
-				seen[id] = true
-				member.send(frame)
+	server.SendAll(apron.Frame(render(frame)), membersConns(rooms, nil))
+}
+
+// membersConns yields the connections of the members of rooms but except,
+// each member's once: those of one room are each one member, and only
+// several rooms' are told apart.
+func membersConns(rooms []*roomState, except *userState) iter.Seq[*server.Conn] {
+	return func(yield func(*server.Conn) bool) {
+		var seen map[string]bool
+		if len(rooms) > 1 {
+			seen = make(map[string]bool)
+		}
+		for _, r := range rooms {
+			for id, member := range r.Members() {
+				if member == except {
+					continue
+				}
+				if seen != nil {
+					if seen[id] {
+						continue
+					}
+					seen[id] = true
+				}
+				for c := range member.clients {
+					if !yield(c.conn) {
+						return
+					}
+				}
 			}
 		}
 	}
@@ -136,12 +169,8 @@ func encodeNotification(n apron.Notification) jsontext.Value {
 // but u, as room_update memberships (§4.2.3); u's connections receive it
 // with the room_update that tells them of the change.
 func (s *Server) deliverMembershipLocked(membership apron.Membership, r *roomState, u *userState) {
-	frame := encodeNotification(apron.RoomUpdate{Memberships: []apron.Membership{membership}})
-	for id, member := range r.Members() {
-		if id != u.id {
-			member.send(frame)
-		}
-	}
+	frame := apron.Frame(encodeNotification(apron.RoomUpdate{Memberships: []apron.Membership{membership}}))
+	server.SendAll(frame, membersConns([]*roomState{r}, u))
 }
 
 // joinedLocked makes u a member of r and logs the membership
@@ -189,7 +218,11 @@ func (s *Server) joinLocked(u *userState, r *roomState) bool {
 	if !added {
 		return false
 	}
-	u.send(s.joinedUpdateLocked(r, membership))
+	// The room_update lists the room's members: one with no connection to
+	// send it to, such as an account an invitation makes, is not rendered.
+	if len(u.clients) > 0 {
+		u.send(s.joinedUpdateLocked(r, membership))
+	}
 	return true
 }
 
@@ -214,11 +247,11 @@ func (s *Server) addMembersLocked(view *apron.RoomView, r *roomState) map[string
 		view.MemberCount = r.MemberCount()
 	}
 	listed := make(map[string]*userState, len(ids))
-	view.Members = make([]apron.CurrentUser, len(ids))
+	view.MembersRaw = make([]jsontext.Value, len(ids))
 	for i, id := range ids {
 		member := r.Member(id)
 		listed[id] = member
-		view.Members[i] = member.shownObject()
+		view.MembersRaw[i] = member.shownRaw()
 	}
 	return listed
 }
@@ -458,7 +491,12 @@ func (s *Server) listRooms(c *client, p apron.RoomListParams, reply server.Reply
 	}
 
 	s.mu.RLock()
-	defer s.mu.RUnlock()
+	locked := true
+	defer func() {
+		if locked {
+			s.mu.RUnlock()
+		}
+	}()
 	u := c.user
 	var candidates []*roomState
 	switch {
@@ -489,9 +527,9 @@ func (s *Server) listRooms(c *client, p apron.RoomListParams, reply server.Reply
 			view := s.roomViewOfLocked(r)
 			switch {
 			case withMembers && hasUser:
-				view.Members = []apron.CurrentUser{}
+				view.MembersRaw = []jsontext.Value{}
 				if m := r.Member(onlyUser); m != nil {
-					view.Members = append(view.Members, m.shownObject())
+					view.MembersRaw = append(view.MembersRaw, m.shownRaw())
 					users[onlyUser] = m
 				}
 			case withMembers:
@@ -510,12 +548,18 @@ func (s *Server) listRooms(c *client, p apron.RoomListParams, reply server.Reply
 		}
 	}
 	if withMembers {
-		result.Users = profiles(users)
+		result.UsersRaw = profilesRaw(users)
 	}
 	var cursors []apron.Frame
 	for _, r := range slices.Concat(joined, others) {
 		cursors = append(cursors, s.cursorFramesLocked(u, r)...)
 	}
+	// The result shares nothing with the server's state: its place among
+	// the connection's frames is fixed now, and it is encoded, which a
+	// listing with members spends most of its time on, without the lock.
+	_ = reply.Reserve()
+	s.mu.RUnlock()
+	locked = false
 	_ = reply.Send(result, cursors...)
 	return nil
 }
@@ -526,6 +570,16 @@ func profiles(users map[string]*userState) []apron.CurrentUser {
 	list := make([]apron.CurrentUser, 0, len(users))
 	for _, id := range slices.Sorted(maps.Keys(users)) {
 		list = append(list, users[id].profile())
+	}
+	return list
+}
+
+// profilesRaw is profiles encoded, each kept while the user is the same
+// (userState.profileRaw), for a room_list's users (RoomListResult.UsersRaw).
+func profilesRaw(users map[string]*userState) []jsontext.Value {
+	list := make([]jsontext.Value, 0, len(users))
+	for _, id := range slices.Sorted(maps.Keys(users)) {
+		list = append(list, users[id].profileRaw())
 	}
 	return list
 }
@@ -623,8 +677,8 @@ func (s *Server) leaveRoom(c *client, p apron.RoomLeaveParams, reply server.Repl
 // receive, as one log, so a client catches up on all its rooms with one
 // request. limit counts records of every kind; the slice is partitioned into
 // rooms, messages, reactions, and membership, each omitted when empty. The
-// server retains all records and does not compact, and it discards no
-// prefix, so it never appends a full-member record.
+// server does not compact; it retains every record unless history
+// retention discards the start of rooms' logs (retention.go).
 //
 // A move snapshot is in both rooms' logs and names the source room in
 // prev_room_id, so a window bounded to one log_id (after == before) in the
@@ -646,7 +700,12 @@ func (s *Server) history(c *client, p apron.HistoryParams, reply server.Reply[ap
 	}
 
 	s.mu.RLock()
-	defer s.mu.RUnlock()
+	locked := true
+	defer func() {
+		if locked {
+			s.mu.RUnlock()
+		}
+	}()
 	var rooms []*roomState
 	if hasRoom {
 		r := s.visibleRoomLocked(c.user, roomID)
@@ -667,18 +726,24 @@ func (s *Server) history(c *client, p apron.HistoryParams, reply server.Reply[ap
 		logs[i] = r.Log()
 		latest = max(latest, r.Log().Latest())
 	}
+	// With room_id, the room's log starts at its history_log_id: its
+	// creation, or past what retention discarded of it. Without it, the
+	// log of the joined rooms starts where the server's does, whoever is in
+	// which room, so the lower bound never moves back (§4.3.3): at the
+	// default room's creation, or past what retention discarded of any room,
+	// and the records of rooms that kept more are left out; for a user in
+	// no rooms it is empty, ending just before.
+	created := max(s.rooms.Get(defaultRoomID).Log().Created(), s.logFloor)
+	var floor int64
+	if hasRoom {
+		created = rooms[0].Log().HistoryID()
+	} else if s.logFloor > 0 {
+		floor = created
+	}
 	matching, more := roomlog.Page(logs, roomlog.Query{
 		After: after, HasAfter: hasAfter, Before: before, HasBefore: hasBefore,
-		Limit: limit, MaxBytes: maxHistoryReplyBytes,
+		Limit: limit, MaxBytes: maxHistoryReplyBytes, Floor: floor,
 	})
-	// With room_id, the room's log starts at its creation. Without it, the
-	// log of the joined rooms starts where the server's does, at the default
-	// room's creation, whoever is in which room, so the lower bound never
-	// moves (§4.3.3); for a user in no rooms it is empty, ending just before.
-	created := s.rooms.Get(defaultRoomID).Log().Created()
-	if hasRoom {
-		created = rooms[0].Log().Created()
-	}
 	if len(rooms) == 0 {
 		latest = created - 1
 	}
@@ -690,18 +755,28 @@ func (s *Server) history(c *client, p apron.HistoryParams, reply server.Reply[ap
 	if len(matching) > 0 {
 		result.FirstLogID, result.LastLogID = apron.LogID(matching[0].ID), apron.LogID(matching[len(matching)-1].ID)
 	}
+	// The records go as the log keeps them, as their broadcasts did, without
+	// decoding them for the result's typed arrays to encode again: their
+	// members are in the order of their names, as every frame of a record
+	// carries them, which a typed record's encoding is not (JSON equal).
 	for _, record := range matching {
 		switch record.Kind {
 		case roomlog.KindRoom:
-			result.Rooms = append(result.Rooms, decodeRecord[apron.Room](record.Raw))
+			result.Raw.Rooms = append(result.Raw.Rooms, record.Raw)
 		case roomlog.KindMessage:
-			result.Messages = append(result.Messages, decodeRecord[apron.Message](record.Raw))
+			result.Raw.Messages = append(result.Raw.Messages, record.Raw)
 		case roomlog.KindReactions:
-			result.Reactions = append(result.Reactions, decodeRecord[apron.Reactions](record.Raw))
+			result.Raw.Reactions = append(result.Raw.Reactions, record.Raw)
 		case roomlog.KindMembership:
-			result.Memberships = append(result.Memberships, decodeRecord[apron.Membership](record.Raw))
+			result.Raw.Memberships = append(result.Raw.Memberships, record.Raw)
 		}
 	}
+	// A record's Raw is replaced, never modified (roomlog): the page's
+	// bytes stay as they are, and are encoded without the lock, in the
+	// place its result has among the connection's frames now.
+	_ = reply.Reserve()
+	s.mu.RUnlock()
+	locked = false
 	_ = reply.Send(result)
 	return nil
 }
@@ -718,7 +793,7 @@ func (s *Server) activity(c *client, p apron.ActivityParams) *Error {
 		roomID = defaultRoomID
 	}
 	typing := p.Typing
-	readID, hasRead := "", p.ReadMessageID != nil
+	readID, hasRead := "", p.ReadMessageID != 0
 	if hasRead {
 		readID = p.ReadMessageID.String()
 	}
@@ -748,19 +823,19 @@ func (s *Server) activity(c *client, p apron.ActivityParams) *Error {
 	}
 	relay := apron.Activity{RoomID: roomID, From: u.from().User(), Typing: typing}
 	if hasRead {
-		id := int64(*p.ReadMessageID)
+		id := int64(p.ReadMessageID)
 		if s.rooms.Read(r, u.id, rooms.Cursor{From: u.from(), MessageID: readID, ID: id}) {
 			if u.joined[r.ID()] == nil {
 				// A cursor for a room the user has not joined still syncs
 				// across their own connections.
-				u.send(encodeNotification(apron.Activity{RoomID: roomID, From: u.from().User(), ReadMessageID: *p.ReadMessageID}))
+				u.send(encodeNotification(apron.Activity{RoomID: roomID, From: u.from().User(), ReadMessageID: p.ReadMessageID}))
 				if id >= r.Log().Latest() {
 					// Read to the end: no earlier mention there counts.
 					delete(u.Pings, r.ID())
 					s.users.Touch(u.id)
 				}
 			}
-			relay.ReadMessageID = *p.ReadMessageID
+			relay.ReadMessageID = p.ReadMessageID
 		}
 	}
 	read := relay.ReadMessageID != 0

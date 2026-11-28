@@ -12,7 +12,7 @@ import (
 func user(id string) apron.User { return apron.User{UserID: id, Name: id} }
 
 func snapshot(messageID, logID apron.LogID, text string) apron.Message {
-	return apron.Message{MessageID: messageID, LogID: logID, RoomID: "general", From: user("ada"), Body: &apron.Body{Text: text}}
+	return apron.Message{MessageID: messageID, LogID: logID, RoomID: "general", From: user("ada"), Body: apron.Body{Text: text}}
 }
 
 // replayLog is a log with every kind of record, and keys that change.
@@ -62,8 +62,11 @@ func checkReplayed(t *testing.T, r *apron.Replay) {
 	}
 }
 
-// Replay ends in the same state whatever the order of the records.
-func TestReplayOrder(t *testing.T) {
+// Replay ends in the same state whatever the order of the records, and
+// applying them again changes nothing. Its records are a compacted log,
+// which leaves the same state, and encode alike whatever order the Replay
+// was built in.
+func TestReplayRecords(t *testing.T) {
 	log := replayLog()
 	for range 20 {
 		var r apron.Replay
@@ -71,20 +74,13 @@ func TestReplayOrder(t *testing.T) {
 			r.Apply(log[i])
 		}
 		checkReplayed(t, &r)
-		// Applying it all again changes nothing.
 		for _, rec := range log {
 			if r.Apply(rec) {
 				t.Fatalf("applied %+v again", rec)
 			}
 		}
 	}
-}
-
-// Records are a compacted log, which leaves the same state, and encode
-// alike whatever order the Replay was built in.
-func TestReplayRecords(t *testing.T) {
 	var forward, backward apron.Replay
-	log := replayLog()
 	for i := range log {
 		forward.Apply(log[i])
 		backward.Apply(log[len(log)-1-i])
@@ -145,5 +141,51 @@ func TestReplayTombstoneWins(t *testing.T) {
 	var r apron.Replay
 	if r.ApplyMessage(apron.Notice("general", "hi")) || len(r.Messages("")) != 0 {
 		t.Fatal("installed a notice")
+	}
+}
+
+// Snapshots applied raw, some or all, in any order with the rest, leave
+// the state they leave decoded, and decode as they were when read.
+func TestReplayRaw(t *testing.T) {
+	log := replayLog()
+	for i := range 40 {
+		var r apron.Replay
+		for _, j := range rand.Perm(len(log)) {
+			rec := log[j]
+			if rec.Message != nil && (i%2 == 0 || j%2 == 0) {
+				raw, err := apron.Marshal(rec.Message)
+				if err != nil {
+					t.Fatal(err)
+				}
+				r.ApplyRawMessage(raw)
+				continue
+			}
+			r.Apply(rec)
+		}
+		checkReplayed(t, &r)
+		for _, rec := range log {
+			if rec.Message == nil {
+				continue
+			}
+			raw, _ := apron.Marshal(rec.Message)
+			if r.ApplyRawMessage(raw) || r.Apply(rec) {
+				t.Fatalf("applied %+v again", rec.Message)
+			}
+		}
+		var typed apron.Replay
+		for _, rec := range log {
+			typed.Apply(rec)
+		}
+		got, _ := apron.Marshal(r.Records())
+		want, _ := apron.Marshal(typed.Records())
+		if string(got) != string(want) {
+			t.Fatalf("records\n got %s\nwant %s", got, want)
+		}
+	}
+	var r apron.Replay
+	for _, bad := range []string{`{`, `{"log_id":"5"}`, `{"message_id":"5"}`, `[]`} {
+		if r.ApplyRawMessage([]byte(bad)) {
+			t.Errorf("applied %s", bad)
+		}
 	}
 }

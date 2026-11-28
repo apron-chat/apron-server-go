@@ -138,7 +138,7 @@ func TestHoldBackUpload(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		ctx := timeout(t)
 		_, conn := limited(t, 1, refusal(2, apron.LimitUpload), client.HoldBack(time.Minute))
-		upload := apron.MessageParams{Body: &apron.Body{Text: "file", Embeds: []jsontext.Value{jsontext.Value(`{"kind":"upload","title":"a.txt"}`)}}}
+		upload := apron.MessageParams{Body: apron.Body{Text: "file", Embeds: []jsontext.Value{jsontext.Value(`{"kind":"upload","title":"a.txt"}`)}}}
 		start := time.Now()
 		var wg sync.WaitGroup
 		wg.Go(func() {

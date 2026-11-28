@@ -1,7 +1,9 @@
 package roomlog
 
 import (
+	"encoding/json/jsontext"
 	"encoding/json/v2"
+	"github.com/apron-chat/apron-server-go/apron"
 	"slices"
 	"testing"
 )
@@ -128,4 +130,118 @@ func TestShapesKeepUnknownMembers(t *testing.T) {
 	if string(m.Raw) != `{"log_id":"9","members":[{"joined":false,"user":{"user_id":"ada"}}],"room_id":"a"}` {
 		t.Fatalf("membership %s", m.Raw)
 	}
+}
+
+// A room whose entry lags behind its records is restored with the
+// latest_log_id of its latest record.
+func TestRestoreLatest(t *testing.T) {
+	l, _, _ := twoRooms()
+	entries := make(map[string][]byte)
+	for _, e := range l.Entries() {
+		entries[e.ID] = e.Value
+	}
+	restored := NewLog()
+	// a's entry was stored at its record 3, b's at its latest.
+	a, b := NewTimeline("a", 1, 3), NewTimeline("b", 2, 5)
+	values := make(map[string]jsontext.Value, len(entries))
+	for id, v := range entries {
+		values[id] = v
+	}
+	if _, err := restored.Restore(values, func(id string) *Timeline {
+		return map[string]*Timeline{"a": a, "b": b}[id]
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if a.Latest() != 6 || b.Latest() != 5 {
+		t.Fatalf("restored latest %d %d, want 6 5", a.Latest(), b.Latest())
+	}
+}
+
+// bodyByMap is how a Body encoded before it read its members back without
+// a map, which it must still encode as.
+func bodyByMap(t *testing.T, b Body) []byte {
+	t.Helper()
+	raw, err := json.Marshal(b.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var members map[string]jsontext.Value
+	if err := json.Unmarshal(raw, &members); err != nil {
+		t.Fatal(err)
+	}
+	out, err := apron.Marshal(members)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
+
+// A body encodes its members sorted by name, those it has no field for
+// among them, and leaves out those it left out, as a map of them did.
+func TestBodyEncoding(t *testing.T) {
+	for _, raw := range []string{
+		`{"text":"hi"}`,
+		`{}`,
+		`{"text":"","mentions":[],"embeds":[]}`,
+		`{"format":"markdown","mentions":["bob"],"text":"**hi** <&>"}`,
+		`{"zeta":1,"text":"x","alpha":{"b":[1,2]},"embeds":[{"type":"upload","url":"https://e.com/f"}],"mid":null}`,
+		`{"text":"a é \"q\" \\ \n","é":"x","format":""}`,
+	} {
+		var b Body
+		if err := json.Unmarshal([]byte(raw), &b); err != nil {
+			t.Fatal(err)
+		}
+		got, err := apron.Marshal(b)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if want := bodyByMap(t, b); string(got) != string(want) {
+			t.Errorf("%s encodes as\n%s\nwant\n%s", raw, got, want)
+		}
+	}
+	built, err := apron.Marshal(Body{apron.Body{Text: "go", Mentions: []string{"a"}}})
+	if err != nil || string(built) != `{"mentions":["a"],"text":"go"}` {
+		t.Errorf("a body built in Go encodes as %s, %v", built, err)
+	}
+}
+
+// BenchmarkMessageRecord encodes a message snapshot's record, as each save
+// does.
+func BenchmarkMessageRecord(b *testing.B) {
+	snapshot := &Message{
+		Body:  &Body{apron.Body{Text: "the quick brown fox jumps over the lazy dog", Format: "markdown", Mentions: []string{"bob"}}},
+		From:  Author{UserID: "ada", Name: "Ada"},
+		LogID: "1795817355191", MessageID: "1795817355191", RoomID: "general",
+	}
+	b.ReportAllocs()
+	for range b.N {
+		NewMessage(1795817355191, snapshot)
+	}
+}
+
+// A move snapshot that one of its rooms discarded is restored only into
+// the other, which keeps it.
+func TestRestoreDiscardedMove(t *testing.T) {
+	l, a, b := twoRooms()
+	// a keeps from 5 on; 4, the move, is b's alone now.
+	a.Discard(5)
+	entries := make(map[string]jsontext.Value)
+	for _, e := range l.Entries() {
+		entries[e.ID] = e.Value
+	}
+	restored := NewLog()
+	ra, rb := NewTimeline("a", 1, 6), NewTimeline("b", 2, 5)
+	ra.RestoreRetained(a.Retained())
+	if _, err := restored.Restore(entries, func(id string) *Timeline {
+		return map[string]*Timeline{"a": ra, "b": rb}[id]
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got := ids(ra.Since(0, 10)); !slices.Equal(got, []int64{6}) {
+		t.Errorf("a restored %v, want [6]", got)
+	}
+	if got := ids(rb.Since(0, 10)); !slices.Equal(got, []int64{2, 4, 5}) {
+		t.Errorf("b restored %v, want [2 4 5]", got)
+	}
+	_ = b
 }

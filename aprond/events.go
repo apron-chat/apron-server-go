@@ -1,8 +1,10 @@
 package aprond
 
 import (
+	"cmp"
 	"context"
 	"encoding/json/jsontext"
+	"encoding/json/v2"
 	"errors"
 	"fmt"
 	"slices"
@@ -45,17 +47,24 @@ type Event struct {
 	// LogID orders the events (§2.1): each is greater than the last.
 	LogID int64
 	// Rooms are the rooms whose logs hold the record: one, or both rooms
-	// of a move (§4.3.1).
+	// of a move (§4.3.1). They are the log's own, shared with every
+	// follower: read them, and copy them to change them (slices.Clone).
 	Rooms []string
 	// Record is the record as clients receive it, in history and as it is
 	// broadcast, which PROTOCOL.md defines. A deletion redacts the
 	// message's earlier records (§4.4): an event read after it carries the
 	// redacted record.
+	//
+	// Record is the log's own bytes, shared with every follower and with
+	// the frames sent of it, which are never changed: read it, and copy it
+	// to change it (slices.Clone).
 	Record jsontext.Value
 }
 
+// eventOf is the event of a record, which shares its rooms and bytes: a
+// record's are replaced, never changed (roomlog).
 func eventOf(r *roomlog.Record) Event {
-	return Event{Kind: eventKinds[r.Kind], LogID: r.ID, Rooms: slices.Clone(r.Rooms), Record: slices.Clone(r.Raw)}
+	return Event{Kind: eventKinds[r.Kind], LogID: r.ID, Rooms: r.Rooms, Record: r.Raw}
 }
 
 // LastLogID is the log_id of the latest record, 0 for none.
@@ -96,7 +105,8 @@ func (r *Registrar) OnEventFrom(after int64, fn func(ctx context.Context, e Even
 // Follow calls fn with each record logged, in order, on one goroutine of
 // its own, and keeps the log_id of the last one it handled in the store, so
 // that it sees every event at least once across restarts, as a bridge
-// needs. It starts from the latest record the first time the extension
+// needs: every event history retention has not discarded before it was
+// handled (Config.HistoryRecords, HistoryMaxAge), which is logged. It starts from the latest record the first time the extension
 // follows the log. Errors are retried as with OnEventFrom. An extension
 // follows the log at most once.
 func (r *Registrar) Follow(fn func(ctx context.Context, e Event) error) {
@@ -146,9 +156,17 @@ func (r *Registrar) follow(what string, after int64, deliver func(ctx context.Co
 	position := s.followers.add(fmt.Sprintf("extension %s's %s", r.name, what), after)
 	h.Go(func(ctx context.Context) {
 		cursor := after
+		warned := false
 		for {
 			s.mu.RLock()
 			records, changed := s.log.After(cursor, eventBatch)
+			// A follower that keeps its place across restarts is told once
+			// when history retention discarded records it had not handled
+			// (Config.HistoryRecords, HistoryMaxAge).
+			if discarded := s.log.Discarded(); handled != nil && !warned && cursor > 0 && cursor < discarded {
+				warned = true
+				h.logger.Warn("history retention discarded events before this follower handled them", "after", cursor, "through", discarded)
+			}
 			batch := make([]Event, 0, len(records))
 			for _, r := range records {
 				batch = append(batch, eventOf(r))
@@ -298,9 +316,53 @@ type Message struct {
 	ReplyTo string
 	// Mentions are the user_ids its body mentions (§3.5.5).
 	Mentions []string
-	// Body is the whole body, and Ext the message's ext (§4.12).
-	Body map[string]any
-	Ext  map[string]jsontext.Value
+	// Ext is the message's ext (§4.12).
+	Ext map[string]jsontext.Value
+	// body is the whole body as it was encoded, which Body decodes, nil
+	// for none.
+	body jsontext.Value
+}
+
+// Body is the whole body decoded, those of its members that Message has
+// no field for too, nil for a tombstone or a Message made without one: a
+// new map each time, which the caller may change. Most code reads Text,
+// Format, and Mentions, which need no decoding.
+func (m Message) Body() map[string]any {
+	if m.body == nil {
+		return nil
+	}
+	var body map[string]any
+	if json.Unmarshal(m.body, &body) != nil {
+		return nil
+	}
+	return body
+}
+
+// recordBody is a record's body as decodeMessageRecord reads it: kept as
+// it was encoded, with its text, format, and mentions read from it.
+type recordBody struct {
+	raw      jsontext.Value
+	text     string
+	format   string
+	mentions []string
+}
+
+func (b *recordBody) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
+	raw, err := dec.ReadValue()
+	if err != nil {
+		return err
+	}
+	b.raw = slices.Clone(raw)
+	var fields struct {
+		Text     string   `json:"text"`
+		Format   string   `json:"format"`
+		Mentions []string `json:"mentions"`
+	}
+	if err := json.Unmarshal(b.raw, &fields); err != nil {
+		return err
+	}
+	b.text, b.format, b.mentions = fields.Text, fields.Format, fields.Mentions
+	return nil
 }
 
 // Sender is who a record is from.
@@ -324,13 +386,28 @@ func DecodeMessage(e Event) (Message, bool) {
 }
 
 // decodeMessageRecord decodes a message record, as history and broadcasts
-// carry it.
-func decodeMessageRecord(raw []byte) (Message, bool) {
-	snapshot := roomlog.DecodeMessage(raw)
-	if snapshot == nil {
+// carry it: its body's text, format, and mentions, and the body kept as it
+// is, for Body to decode only when asked.
+func decodeMessageRecord(record []byte) (Message, bool) {
+	var snapshot struct {
+		Body       *recordBody    `json:"body"`
+		Deleted    bool           `json:"deleted"`
+		Ext        apron.Ext      `json:"ext"`
+		From       roomlog.Author `json:"from"`
+		LogID      string         `json:"log_id"`
+		MessageID  string         `json:"message_id"`
+		PrevLogID  string         `json:"prev_log_id"`
+		PrevRoomID string         `json:"prev_room_id"`
+		ReplyTo    *roomlog.Ref   `json:"reply_to"`
+		RoomID     string         `json:"room_id"`
+	}
+	if json.Unmarshal(record, &snapshot) != nil || snapshot.MessageID == "" {
 		return Message{}, false
 	}
 	id := func(value string) int64 {
+		if value == "" {
+			return 0
+		}
 		n, _ := strconv.ParseInt(value, 10, 64)
 		return n
 	}
@@ -338,15 +415,14 @@ func decodeMessageRecord(raw []byte) (Message, bool) {
 		ID: snapshot.MessageID, LogID: id(snapshot.LogID), RoomID: snapshot.RoomID,
 		PrevLogID: id(snapshot.PrevLogID), PrevRoomID: snapshot.PrevRoomID,
 		From:    Sender{UserID: snapshot.From.UserID, Name: snapshot.From.Name},
-		Deleted: snapshot.Deleted, ReplyTo: snapshot.ReplyID(), Ext: snapshot.Ext,
+		Deleted: snapshot.Deleted, Ext: snapshot.Ext,
+	}
+	if snapshot.ReplyTo != nil {
+		m.ReplyTo = snapshot.ReplyTo.MessageID
 	}
 	if body := snapshot.Body; body != nil {
-		m.Body = bodyObject(&body.Body)
-		m.Text, m.Format = body.Text, body.Format
-		if m.Format == "" {
-			m.Format = apron.Plain
-		}
-		m.Mentions = body.Mentions
+		m.body = body.raw
+		m.Text, m.Format, m.Mentions = body.text, cmp.Or(body.format, apron.Plain), body.mentions
 	}
 	return m, true
 }

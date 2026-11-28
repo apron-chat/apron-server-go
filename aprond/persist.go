@@ -35,11 +35,19 @@ import (
 // VAPID key the server made (webpush), and the server's profile (profile).
 // When the lock is released, unlock has each render what it marked, and
 // the counters if they moved, into one batch, and the store writer
-// (durable) applies batches to the store in order, off the lock. At start,
-// Open rebuilds the state from the store.
+// (durable) applies batches to the store in order, off the lock. A large
+// room's entry, which lists every member, their activity, and their read
+// cursors, is the one exception: what changes with each message and read
+// is rendered at most once every rooms.EntryDelay, and at once when a fence
+// waits (Sync) or the store closes, while its records go at once (rooms);
+// so is the entry of a message with many reactions, whose reactions
+// records restoring applies over it; and a large room's for joins and
+// leaves, whose membership records restoring applies over its members.
+// At start, Open rebuilds the state from the store.
 //
 // Entry kinds and IDs:
 //
+//	meta     "format"     the store's format version (format.go)
 //	meta     "counters"   log_id, guest, embed, and upload sequences
 //	meta     "vapid"      the webpush VAPID private key the server made
 //	                      (§4.9, webpush)
@@ -100,10 +108,24 @@ func userID(u *userState) string { return u.id }
 // with the fences waiting for it. Once the writer is stopped, the batch is
 // dropped (durable.Writer.Queue), but the changes are still taken.
 func (s *Server) flushLocked() {
+	// A large room's entry, which lists every member, lags behind what
+	// changes with each message for a moment (rooms.EntryDelay), unless a
+	// fence waits for every change so far, or the store is closing.
+	var roomEntries []store.Entry
+	if s.store.Fenced() || s.closingStore || s.flushAll {
+		s.flushAll = false
+		roomEntries = s.rooms.Entries()
+	} else {
+		roomEntries = s.rooms.EntriesDue(time.Now())
+		if due, lagging := s.rooms.Lagging(); lagging && s.roomEntryTimer == nil && !s.closed {
+			s.roomEntryTimer = time.AfterFunc(time.Until(due), s.flushRoomEntries)
+		}
+	}
 	batch := slices.Concat(
+		s.formatEntryLocked(),
 		s.ids.Entries(),
 		s.log.Entries(),
-		s.rooms.Entries(),
+		roomEntries,
 		s.users.Entries(avatarEmbedID),
 		s.pushes.Entries(),
 		s.extData.Entries(),
@@ -123,6 +145,14 @@ func (s *Server) flushLocked() {
 	s.store.Queue(batch)
 }
 
+// flushRoomEntries writes the entries of the large rooms that lag behind,
+// once they are due (rooms.Table.EntriesDue).
+func (s *Server) flushRoomEntries() {
+	s.mu.Lock()
+	s.roomEntryTimer = nil
+	s.unlock()
+}
+
 // avatarEmbedID names the hosted embed behind a user's avatar in what the
 // store keeps, "" for none.
 func avatarEmbedID(u *userState) string {
@@ -137,6 +167,11 @@ func avatarEmbedID(u *userState) string {
 func (s *Server) closeStoreLocked() {
 	if s.store.Stopped() {
 		return
+	}
+	s.closingStore = true
+	if s.roomEntryTimer != nil {
+		s.roomEntryTimer.Stop()
+		s.roomEntryTimer = nil
 	}
 	s.flushLocked()
 	s.store.Stop()
@@ -157,6 +192,9 @@ func (s *Server) restoreLocked() (map[string]bool, error) {
 		return nil
 	})
 	if err != nil {
+		return nil, err
+	}
+	if err := s.checkFormatLocked(entries); err != nil {
 		return nil, err
 	}
 	if raw, ok := entries[entryMeta]["counters"]; ok {
@@ -203,13 +241,15 @@ func (s *Server) restoreLocked() (map[string]bool, error) {
 	if err != nil {
 		return nil, err
 	}
-	s.rooms.RestoreMembers(func(r *roomState, id string) (*userState, bool) {
+	if err := s.rooms.RestoreMembers(func(r *roomState, id string) (*userState, bool) {
 		u := s.users.Get(id)
 		if u != nil {
 			u.joined[r.ID()] = r
 		}
 		return u, u != nil
-	})
+	}); err != nil {
+		return nil, err
+	}
 
 	files, err := s.embeds.Restore(entries[embeds.EntryKind], func(e embeds.Embed, avatarFor string) *embedState {
 		return &embedState{Embed: e, avatarFor: s.users.Get(avatarFor), started: e.Finished}

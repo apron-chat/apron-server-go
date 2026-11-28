@@ -24,6 +24,12 @@ import (
 	"github.com/apron-chat/apron-server-go/apron/server/commands"
 )
 
+// identity is a connection's identity, its user once signed in.
+func identity(c *server.Conn) apron.User {
+	u, _ := c.Identity()
+	return u
+}
+
 // *client.Conn is the network bot.Conn.
 var _ bot.Conn = (*client.Conn)(nil)
 
@@ -58,7 +64,7 @@ func newChat(config server.Config) *chat {
 	c := &chat{release: make(chan struct{})}
 	c.commands.MustAdd(commands.Command{Name: "rename", Run: func(_ context.Context, call *commands.Call) error {
 		c.mu.Lock()
-		old := *call.Conn.User()
+		old := identity(call.Conn)
 		renamed := old
 		renamed.Name = call.Args
 		c.server.PublishUser(server.UserChange{Old: old, New: renamed}, nil)
@@ -153,7 +159,7 @@ func (c *chat) Auth(_ context.Context, _ *server.Conn, p apron.AuthParams, reply
 	case p.Token != "ada":
 		return apron.Denied("Unknown token")
 	}
-	return reply.Send(apron.AuthResult{You: &apron.CurrentUser{User: you}})
+	return reply.Send(apron.AuthResult{You: apron.CurrentUser{User: you}})
 }
 
 func (c *chat) Message(_ context.Context, conn *server.Conn, p apron.MessageParams, reply server.Reply[apron.MessageResult]) error {
@@ -165,7 +171,7 @@ func (c *chat) Message(_ context.Context, conn *server.Conn, p apron.MessagePara
 		return c.refusal
 	}
 	id := c.clock.Next()
-	m := apron.Message{MessageID: id, LogID: id, RoomID: "general", From: *conn.User(), Body: p.Body, ReplyTo: p.ReplyTo}
+	m := apron.Message{MessageID: id, LogID: id, RoomID: "general", From: identity(conn), Body: p.Body, ReplyTo: p.ReplyTo}
 	frame, err := apron.Encode(m)
 	if err != nil {
 		return err
@@ -225,7 +231,7 @@ func (rooms) RoomSet(context.Context, *server.Conn, apron.RoomSetParams, server.
 func (c *chat) Me(_ context.Context, conn *server.Conn, p apron.MeParams, reply server.Reply[apron.CurrentUser]) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	old := *conn.User()
+	old := identity(conn)
 	cur := server.ApplyMe(old, p)
 	c.server.PublishUser(server.UserChange{Old: old, New: cur, Except: conn}, nil)
 	return reply.Send(cur.Complete(old))
@@ -279,7 +285,7 @@ func dial(t *testing.T, url string, auth apron.AuthParams, opts ...client.Option
 }
 
 func text(s string) apron.MessageParams {
-	return apron.MessageParams{Body: &apron.Body{Text: s}}
+	return apron.MessageParams{Body: apron.Body{Text: s}}
 }
 
 func TestRequests(t *testing.T) {
@@ -319,7 +325,7 @@ func TestRequests(t *testing.T) {
 	if e, ok := errors.AsType[*apron.Error](err); !ok || e.Code != apron.CodeUnsupported {
 		t.Fatalf("unknown method: %v", err)
 	}
-	if _, err := ada.Command(ctx, apron.CommandParams{Body: &apron.Body{Text: "/nonsense"}}); err == nil {
+	if _, err := ada.Command(ctx, apron.CommandParams{Body: apron.Body{Text: "/nonsense"}}); err == nil {
 		t.Fatal("unknown command: no error")
 	}
 
@@ -352,10 +358,10 @@ func TestUser(t *testing.T) {
 		t.Fatalf("me: %+v %v; user %+v", you, err, ada.User())
 	}
 	// A change the server makes is a patch, which merges.
-	if _, err := ada.Command(ctx, apron.CommandParams{Body: &apron.Body{Text: "/rename Ada L"}}); err != nil {
+	if _, err := ada.Command(ctx, apron.CommandParams{Body: apron.Body{Text: "/rename Ada L"}}); err != nil {
 		t.Fatal(err)
 	}
-	update := next(t, got, func(u apron.UserUpdate) bool { return u.You != nil })
+	update := next(t, got, func(u apron.UserUpdate) bool { return u.You.UserID != "" })
 	if update.You.Avatar != "" {
 		t.Fatalf("patch %+v carries the avatar", update.You)
 	}
@@ -448,7 +454,7 @@ func TestServerEnds(t *testing.T) {
 		conn := dial(t, url, apron.AuthParams{Scheme: "guest"}, memory)
 		failed := make(chan error, 1)
 		go func() {
-			_, err := conn.Command(ctx, apron.CommandParams{Body: &apron.Body{Text: "/wait"}})
+			_, err := conn.Command(ctx, apron.CommandParams{Body: apron.Body{Text: "/wait"}})
 			failed <- err
 		}()
 		synctest.Wait() // The command waits.
@@ -478,7 +484,7 @@ func TestCallContext(t *testing.T) {
 		conn := dial(t, url, apron.AuthParams{Scheme: "guest"}, memory)
 		short, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 		defer cancel()
-		if _, err := conn.Command(short, apron.CommandParams{Body: &apron.Body{Text: "/wait"}}); !errors.Is(err, context.DeadlineExceeded) {
+		if _, err := conn.Command(short, apron.CommandParams{Body: apron.Body{Text: "/wait"}}); !errors.Is(err, context.DeadlineExceeded) {
 			t.Fatalf("call: %v", err)
 		}
 		close(c.release)
@@ -502,7 +508,7 @@ func TestCallFromOnFrame(t *testing.T) {
 		var m struct {
 			Params apron.Message `json:"params"`
 		}
-		if json.Unmarshal(frame, &m) != nil || m.Params.Body == nil || m.Params.From.UserID == echo.User().UserID {
+		if json.Unmarshal(frame, &m) != nil || m.Params.Body.IsZero() || m.Params.From.UserID == echo.User().UserID {
 			return
 		}
 		_, err := echo.Post(ctx, text("echo: "+m.Params.Body.Text))
@@ -639,7 +645,7 @@ func TestBot(t *testing.T) {
 		t.Fatal(err)
 	}
 	reply := next(t, got, func(m apron.Message) bool { return m.From.UserID == echo.UserID() })
-	if reply.Body.Text != "You said: echo: hi" || reply.ReplyTo == nil || reply.ReplyTo.MessageID != sent.MessageID {
+	if reply.Body.Text != "You said: echo: hi" || reply.ReplyTo.MessageID == 0 || reply.ReplyTo.MessageID != sent.MessageID {
 		t.Fatalf("reply %+v", reply)
 	}
 }

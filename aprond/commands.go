@@ -59,7 +59,7 @@ func clientOf(wc *server.Conn) (*client, *Error) {
 
 // replyIDOf is the message_id a command replies to, or "".
 func replyIDOf(p apron.CommandParams) string {
-	if p.ReplyTo == nil {
+	if p.ReplyTo.MessageID == 0 {
 		return ""
 	}
 	return p.ReplyTo.MessageID.String()
@@ -290,10 +290,10 @@ func (s *Server) visibleRoomsLocked(u *userState) []Room {
 // live text, and they make their own embed: a terminal or append embed in a
 // command is invalid_params.
 func (s *Server) command(c *client, p apron.CommandParams, reply server.Reply[apron.CommandResult]) *Error {
-	if err := messages.CheckBody(p.Body); err != nil {
+	if err := messages.CheckBody(&p.Body); err != nil {
 		return err
 	}
-	body := bodyObject(p.Body)
+	body := bodyObject(&p.Body)
 	// The name ends at the first whitespace, a line break too, as in
 	// "/embed-append\n# Plan". Names are case-sensitive (ext:command_list):
 	// /Kick is not /kick. A line that is no command is the Router's to
@@ -384,7 +384,7 @@ func (s *Server) runCoreCommand(c *client, call *commands.Call, run coreRun) *Er
 	case r == nil:
 		return invalidParams("Unknown room %q", call.Params.RoomID)
 	}
-	result, err := run(s, c, r, bodyObject(call.Params.Body), call.Args, replyID)
+	result, err := run(s, c, r, bodyObject(&call.Params.Body), call.Args, replyID)
 	if err != nil {
 		return err
 	}
@@ -406,7 +406,7 @@ func privateNotice(roomID, text string) jsontext.Value {
 	return encodeNotification(apron.Message{
 		RoomID: roomID,
 		From:   privateNoticeFrom,
-		Body:   &apron.Body{Text: text, Format: apron.Markdown},
+		Body:   apron.Body{Text: text, Format: apron.Markdown},
 	})
 }
 

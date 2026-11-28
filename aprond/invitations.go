@@ -318,7 +318,7 @@ func (s *Server) joinInvitedLocked(user *userState, inv *invitation) {
 }
 
 // mustString is a string param that parsing found already.
-func mustString(params map[string]jsontext.Value, name string) string {
+func mustString(params server.Fields, name string) string {
 	value, _ := parseString(params, name, required)
 	return value
 }

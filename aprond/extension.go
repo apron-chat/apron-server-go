@@ -498,7 +498,7 @@ func commandResult(name string, result map[string]any) (apron.CommandResult, err
 // commandCall is the run of an extension's command as aprond sees it, in
 // the room the Router's Before checked, unless it has gone since.
 func (s *Server) commandCall(c *client, call *commands.Call) (*CommandCall, *Error) {
-	body := bodyObject(call.Params.Body)
+	body := bodyObject(&call.Params.Body)
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	r := s.visibleRoomLocked(c.user, call.Params.RoomID)
@@ -515,8 +515,10 @@ func (s *Server) commandCall(c *client, call *commands.Call) (*CommandCall, *Err
 type MethodCall struct {
 	// User sent the request.
 	User User
-	// Params are the request's params, raw.
-	Params map[string]jsontext.Value
+	// Params are the request's params object, raw, as it was sent ({}
+	// when it had none): the call's own copy, which the extension may
+	// keep.
+	Params jsontext.Value
 }
 
 // decodeOptions match JSON names to Go fields ignoring case, as
@@ -526,7 +528,7 @@ var decodeOptions = json.MatchCaseInsensitiveNames(true)
 // Decode decodes the params into a struct, as with encoding/json, or
 // returns a CodeInvalidParams error.
 func (m *MethodCall) Decode(into any) error {
-	if err := json.Unmarshal(encodeJSON(m.Params), into, decodeOptions); err != nil {
+	if err := json.Unmarshal(m.Params, into, decodeOptions); err != nil {
 		return InvalidParams("Invalid params: " + err.Error())
 	}
 	return nil
@@ -559,7 +561,7 @@ func (r *Registrar) Method(name string, fn MethodFunc) {
 			s.mu.RLock()
 			user := userViewOf(c.user)
 			s.mu.RUnlock()
-			result, err := fn(s.requestContext(c), &MethodCall{User: user, Params: r.Fields()})
+			result, err := fn(s.requestContext(c), &MethodCall{User: user, Params: slices.Clone(r.Params())})
 			if err != nil {
 				return h.protocolError(err)
 			}
@@ -862,6 +864,22 @@ func (h *Host) Visible(u User, roomID string) bool {
 	defer h.s.mu.RUnlock()
 	r, user := h.s.rooms.Get(roomID), h.s.users.Get(u.ID)
 	return r != nil && user != nil && r.VisibleTo(user)
+}
+
+// HistoryLogID is the room's history_log_id (§4.3.3): where its retained
+// history starts, its creation unless history retention discarded the
+// start of it (Config.HistoryRecords, HistoryMaxAge), and false when there
+// is no such room. An extension that keeps messages of its own, such as an
+// index of them, lets go of those of a room before it, which history no
+// longer has: a message whose LogID, its latest snapshot's, is before it.
+func (h *Host) HistoryLogID(roomID string) (int64, bool) {
+	h.s.mu.RLock()
+	defer h.s.mu.RUnlock()
+	r := h.s.rooms.Get(roomID)
+	if r == nil {
+		return 0, false
+	}
+	return r.Log().HistoryID(), true
 }
 
 // Public reports whether anyone may see the room, without an account: it

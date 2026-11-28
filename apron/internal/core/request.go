@@ -5,6 +5,10 @@ import (
 	"crypto/sha256"
 	"encoding/json/jsontext"
 	"encoding/json/v2"
+	"errors"
+	"io"
+	"sync"
+	"unsafe"
 )
 
 // Error codes of a frame that is not a valid request (§1.1).
@@ -33,9 +37,9 @@ type Request struct {
 	ID    string
 	HasID bool
 	// Params are the params as they arrived, {} when absent; Fields are
-	// the same decoded, never nil once parsed.
+	// their members, in the order they arrived.
 	Params jsontext.Value
-	Fields map[string]jsontext.Value
+	Fields []Field
 }
 
 // NotificationOnly are the methods clients send only as notifications
@@ -54,6 +58,14 @@ func ParseRequest(payload []byte) (Request, *ParseError) {
 	if !jsontext.Value(payload).IsValid() {
 		return Request{}, &ParseError{codeParseError, "Parse error"}
 	}
+	if req, ok := parseWellFormed(payload); ok {
+		return req, nil
+	}
+	return parseAny(payload)
+}
+
+// parseAny parses a valid frame, whatever it holds.
+func parseAny(payload []byte) (Request, *ParseError) {
 	var object map[string]jsontext.Value
 	if err := json.Unmarshal(payload, &object); err != nil || object == nil {
 		return Request{}, &ParseError{codeInvalidRequest, "Invalid request"}
@@ -79,26 +91,436 @@ func ParseRequest(payload []byte) (Request, *ParseError) {
 	}
 
 	req.Params = jsontext.Value("{}")
-	req.Fields = make(map[string]jsontext.Value)
 	if raw, ok := object["params"]; ok {
-		if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) || json.Unmarshal(raw, &req.Fields) != nil || req.Fields == nil {
-			req.Fields = nil
+		fields, isObject := Members(raw)
+		if !isObject {
 			return req, &ParseError{codeInvalidParams, "Params must be an object"}
 		}
-		req.Params = raw
+		req.Params, req.Fields = raw, fields
 	}
 	return req, nil
 }
 
 // Fingerprint identifies a request for deduplication (§1.2): a hash of its
-// method and params, whatever the order of their object keys.
+// method and params, whatever the order of their object keys, and however
+// their strings and numbers are written, as RFC 8785 canonicalizes them.
 func Fingerprint(method string, params jsontext.Value) [32]byte {
-	canonical := []byte(params)
-	var value any
-	if json.Unmarshal(params, &value) == nil {
-		if encoded, err := Marshal(value); err == nil {
-			canonical = encoded
+	// One buffer holds the method, a NUL, and the params, canonicalized
+	// in place.
+	buf := make([]byte, 0, len(method)+1+len(params))
+	buf = append(append(buf, method...), 0)
+	canonical := jsontext.Value(append(buf[len(buf):], params...))
+	if canonical.Canonicalize() != nil {
+		canonical = append(canonical[:0], params...)
+	}
+	return sha256.Sum256(append(buf, canonical...))
+}
+
+// decoders are the decoders parseWellFormed reads frames with, each
+// reading one in place (jsontext.NewDecoder of a bytes.Buffer), so that
+// what it returns of the frame are parts of it, not copies.
+var decoders = sync.Pool{New: func() any { return new(frameDecoder) }}
+
+// frameDecoder is a decoder, and the buffer of the frame it reads.
+type frameDecoder struct {
+	jsontext.Decoder
+	frame bytes.Buffer
+}
+
+// noInput is what a decoder in the pool reads, so that it keeps no frame.
+var noInput = new(bytes.Buffer)
+
+// inPlace returns a pooled decoder of payload, which reads it in place,
+// for release once done.
+func inPlace(payload []byte) *frameDecoder {
+	fd := decoders.Get().(*frameDecoder)
+	fd.frame = *bytes.NewBuffer(payload)
+	fd.Reset(&fd.frame)
+	return fd
+}
+
+func release(fd *frameDecoder) {
+	fd.Reset(noInput)
+	fd.frame = bytes.Buffer{}
+	decoders.Put(fd)
+}
+
+// DecodeInPlace runs read with a pooled decoder of payload, which reads it
+// in place: what it returns of payload (ReadValue) are parts of it, valid
+// as long as payload is, and the decoder is not kept past read. It
+// returns what read does.
+func DecodeInPlace(payload []byte, read func(dec *jsontext.Decoder) bool) bool {
+	fd := inPlace(payload)
+	defer release(fd)
+	return read(&fd.Decoder)
+}
+
+// Part returns the value dec read last (ReadValue) as the part of
+// payload it is, its capacity clipped, for a decoder of DecodeInPlace.
+func Part(dec *jsontext.Decoder, payload []byte, value jsontext.Value) jsontext.Value {
+	end := dec.InputOffset()
+	return jsontext.Value(payload[end-int64(len(value)) : end : end])
+}
+
+// parseWellFormed parses a valid frame that is a well-formed request, or
+// notification, as ParseRequest does, but in one pass, as most frames
+// are: a JSON object with a method, an id that is a string, if any, and
+// params that are an object, if any. For any other frame it reports
+// false, and ParseRequest tells what is wrong with it.
+//
+// The request's Params, and its Fields' values, are parts of payload,
+// which the caller keeps as it is (Transport.Read).
+func parseWellFormed(payload []byte) (req Request, ok bool) {
+	if jsontext.Value(payload).Kind() != '{' {
+		return Request{}, false
+	}
+	fd := inPlace(payload)
+	defer release(fd)
+	dec := &fd.Decoder
+	if _, err := dec.ReadToken(); err != nil {
+		return Request{}, false
+	}
+	var rawID jsontext.Value
+	for dec.PeekKind() != '}' {
+		name, err := dec.ReadValue()
+		if err != nil {
+			return Request{}, false
+		}
+		switch unquotedName(name) {
+		case "method":
+			raw, err := dec.ReadValue()
+			if err != nil || raw.Kind() != '"' {
+				return Request{}, false
+			}
+			if req.Method = methodName(raw); req.Method == "" {
+				return Request{}, false
+			}
+		case "id":
+			if rawID, err = dec.ReadValue(); err != nil {
+				return Request{}, false
+			}
+		case "params":
+			if dec.PeekKind() != '{' {
+				return Request{}, false
+			}
+			if req.Params, req.Fields, ok = members(dec, payload); !ok {
+				return Request{}, false
+			}
+		default:
+			if dec.SkipValue() != nil {
+				return Request{}, false
+			}
 		}
 	}
-	return sha256.Sum256(append([]byte(method+"\x00"), canonical...))
+	if req.Method == "" {
+		return Request{}, false
+	}
+	if rawID != nil && !NotificationOnly[req.Method] {
+		if rawID.Kind() != '"' || json.Unmarshal(rawID, &req.ID) != nil {
+			return Request{}, false
+		}
+		req.HasID = true
+	}
+	if req.Params == nil {
+		req.Params = jsontext.Value("{}")
+	}
+	return req, true
+}
+
+// members reads the object dec is at, a part of payload, and returns it,
+// and its members, each a part of payload too.
+func members(dec *jsontext.Decoder, payload []byte) (object jsontext.Value, fields []Field, ok bool) {
+	if _, err := dec.ReadToken(); err != nil {
+		return nil, nil, false
+	}
+	start := dec.InputOffset() - 1
+	if fields, ok = readMembers(dec, payload); !ok {
+		return nil, nil, false
+	}
+	end := dec.InputOffset()
+	return jsontext.Value(payload[start:end:end]), fields, true
+}
+
+// A Field is a member of a JSON object, such as a request's params: its
+// name, unquoted, and its value, as it arrived.
+type Field struct {
+	Name  string
+	Value jsontext.Value
+}
+
+// Members returns the members of a JSON object, as parts of it, its names
+// too where they have no escapes: the object is kept as it is, and its
+// members read with it. It reports false for a value that is not an
+// object, null included, or not valid JSON.
+func Members(object jsontext.Value) ([]Field, bool) {
+	if object.Kind() != '{' {
+		return nil, false
+	}
+	var fields []Field
+	ok := DecodeInPlace(object, func(dec *jsontext.Decoder) bool {
+		if _, err := dec.ReadToken(); err != nil {
+			return false
+		}
+		var ok bool
+		if fields, ok = readMembers(dec, object); !ok {
+			return false
+		}
+		_, err := dec.ReadToken()
+		return err == io.EOF
+	})
+	return fields, ok
+}
+
+// readMembers reads the members of the object dec is in, after its '{',
+// to its '}', which it reads too, as parts of payload, the decoder's.
+func readMembers(dec *jsontext.Decoder, payload []byte) ([]Field, bool) {
+	fields := make([]Field, 0, 4)
+	for dec.PeekKind() != '}' {
+		name, err := dec.ReadValue()
+		if err != nil {
+			return nil, false
+		}
+		name = Part(dec, payload, name)
+		value, err := dec.ReadValue()
+		if err != nil {
+			return nil, false
+		}
+		fields = append(fields, Field{Name: memberName(name), Value: Part(dec, payload, value)})
+	}
+	if _, err := dec.ReadToken(); err != nil {
+		return nil, false
+	}
+	return fields, true
+}
+
+// memberName returns a member's name, quoted as it arrived, unquoted: a
+// string of the same bytes, which are never changed, for one without
+// escapes, and else a new string.
+func memberName(quoted jsontext.Value) string {
+	if bytes.IndexByte(quoted, '\\') < 0 {
+		if len(quoted) == 2 {
+			return ""
+		}
+		return unsafe.String(&quoted[1], len(quoted)-2)
+	}
+	name, err := jsontext.AppendUnquote(nil, quoted)
+	if err != nil {
+		return ""
+	}
+	return string(name)
+}
+
+// unquotedName returns a member's name of a request's envelope, quoted as
+// it arrived, unquoted when it is one a request has, and else "".
+func unquotedName(quoted jsontext.Value) string {
+	switch string(quoted) {
+	case `"method"`:
+		return "method"
+	case `"id"`:
+		return "id"
+	case `"params"`:
+		return "params"
+	}
+	if bytes.IndexByte(quoted, '\\') < 0 {
+		return ""
+	}
+	name, err := jsontext.AppendUnquote(nil, quoted)
+	if err != nil {
+		return ""
+	}
+	return unquotedName(jsontext.Value(`"` + string(name) + `"`))
+}
+
+// methodName returns a method's name, quoted as it arrived, unquoted: one
+// of the protocol's without allocating.
+func methodName(quoted jsontext.Value) string {
+	if bytes.IndexByte(quoted, '\\') < 0 {
+		switch name := quoted[1 : len(quoted)-1]; string(name) {
+		case "message":
+			return "message"
+		case "history":
+			return "history"
+		case "me":
+			return "me"
+		case "auth":
+			return "auth"
+		case "ping":
+			return "ping"
+		case "activity":
+			return "activity"
+		case "status":
+			return "status"
+		case "reactions":
+			return "reactions"
+		case "command":
+			return "command"
+		case "room_list":
+			return "room_list"
+		case "room_join":
+			return "room_join"
+		case "room_leave":
+			return "room_leave"
+		case "room_set":
+			return "room_set"
+		case "user":
+			return "user"
+		case "server":
+			return "server"
+		case "room_update":
+			return "room_update"
+		case "pong":
+			return "pong"
+		default:
+			return string(name)
+		}
+	}
+	var name string
+	if json.Unmarshal(quoted, &name) != nil {
+		return ""
+	}
+	return name
+}
+
+// ParseReply reads a reply as a Server writes one, in place, without
+// decoding it whole: {"id":...,"result":...}, or {"error":...,"id":...},
+// with an id of plain characters, which it returns unquoted, and its
+// result or error, an object, as parts of payload. It reports false for
+// any other frame, which its caller decodes whole, to tell what it is.
+func ParseReply(payload []byte) (id []byte, result, rawError jsontext.Value, ok bool) {
+	ok = DecodeInPlace(payload, func(dec *jsontext.Decoder) bool {
+		if tok, err := dec.ReadToken(); err != nil || tok.Kind() != '{' {
+			return false
+		}
+		var rawID jsontext.Value
+		for dec.PeekKind() != '}' {
+			name, err := dec.ReadValue()
+			if err != nil {
+				return false
+			}
+			value, err := dec.ReadValue()
+			if err != nil {
+				return false
+			}
+			switch string(name) {
+			case `"id"`:
+				rawID = value
+			case `"result"`:
+				result = Part(dec, payload, value)
+			case `"error"`:
+				rawError = Part(dec, payload, value)
+			default:
+				return false
+			}
+		}
+		if rawID.Kind() != '"' || bytes.IndexByte(rawID, '\\') >= 0 || rawError != nil && rawError.Kind() != '{' {
+			return false
+		}
+		id = rawID[1 : len(rawID)-1]
+		return true
+	})
+	if !ok {
+		return nil, nil, nil, false
+	}
+	return id, result, rawError, true
+}
+
+// Head is what a frame's members say of it, as decoding them into a
+// struct of a string Method and raw values would: a member present is
+// not nil, null too; each value is part of the frame.
+type Head struct {
+	Method                    string
+	ID, Params, Result, Error jsontext.Value
+}
+
+// errNotObject is the error of a frame that is not a JSON object.
+var errNotObject = errors.New("apron: a frame is a JSON object")
+
+// ReadHead reads a frame's head in place, without copying its values: an
+// error for a frame that is not valid JSON, not an object, or whose method
+// is neither a string nor null, as decoding it would refuse.
+func ReadHead(payload []byte) (h Head, err error) {
+	ok := DecodeInPlace(payload, func(dec *jsontext.Decoder) bool {
+		tok, e := dec.ReadToken()
+		if e != nil || tok.Kind() != '{' {
+			if e == nil {
+				e = errNotObject
+			}
+			err = e
+			return false
+		}
+		for dec.PeekKind() != '}' {
+			name, e := dec.ReadValue()
+			if e != nil {
+				err = e
+				return false
+			}
+			value, e := dec.ReadValue()
+			if e != nil {
+				err = e
+				return false
+			}
+			value = Part(dec, payload, value)
+			switch headMember(name) {
+			case "method":
+				switch value.Kind() {
+				case 'n':
+					h.Method = ""
+				case '"':
+					h.Method = methodName(value)
+				default:
+					err = errors.New("apron: a frame's method is a string")
+					return false
+				}
+			case "id":
+				h.ID = value
+			case "params":
+				h.Params = value
+			case "result":
+				h.Result = value
+			case "error":
+				h.Error = value
+			}
+		}
+		if _, e := dec.ReadToken(); e != nil {
+			err = e
+			return false
+		}
+		if _, e := dec.ReadToken(); e != io.EOF {
+			err = errors.New("apron: a frame is one JSON value")
+			return false
+		}
+		return true
+	})
+	if !ok {
+		if err == nil {
+			err = errNotObject
+		}
+		return Head{}, err
+	}
+	return h, nil
+}
+
+// headMember returns a frame member's name, quoted as it arrived,
+// unquoted when it is one Head has, and else "".
+func headMember(quoted jsontext.Value) string {
+	switch string(quoted) {
+	case `"method"`:
+		return "method"
+	case `"id"`:
+		return "id"
+	case `"params"`:
+		return "params"
+	case `"result"`:
+		return "result"
+	case `"error"`:
+		return "error"
+	}
+	if bytes.IndexByte(quoted, '\\') < 0 {
+		return ""
+	}
+	name, err := jsontext.AppendUnquote(nil, quoted)
+	if err != nil {
+		return ""
+	}
+	return headMember(jsontext.Value(`"` + string(name) + `"`))
 }

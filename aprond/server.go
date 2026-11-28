@@ -199,8 +199,25 @@ type Server struct {
 
 	// store writes the changes made under mu, in batches, in the
 	// background (persist.go); storedMeta are the counters it last wrote.
-	store      *durable.Writer
-	storedMeta storedMeta
+	// roomEntryTimer writes the entries of large rooms that lag behind
+	// once they are due, and closingStore makes the last batch write them
+	// all (flushLocked).
+	store          *durable.Writer
+	storedMeta     storedMeta
+	roomEntryTimer *time.Timer
+	closingStore   bool
+	// flushAll makes the next batch write every entry that lags behind
+	// (flushLocked), as one that discards history does (retention.go);
+	// logFloor is where the log of several rooms starts once history was
+	// discarded, 0 before.
+	flushAll bool
+	logFloor int64
+	// formatDue is set until the store's format is stored (format.go);
+	// retention is what history retention did, and sweeping its sweep,
+	// which Shutdown waits for (retention.go).
+	formatDue bool
+	retention RetentionStatus
+	sweeping  sync.WaitGroup
 	// pushes are the users' push registrations (push.go).
 	pushes   *push.Table
 	closed   bool
@@ -395,6 +412,9 @@ func Open(config Config) (*Server, error) {
 		s.mu.Unlock()
 		return fail(fmt.Errorf("restoring the stored state: %w", err))
 	}
+	// What retention discarded before the restart (retention.go).
+	s.logFloor = s.logFloorLocked()
+	s.log.RestoreDiscarded(s.logFloor - 1)
 	if s.rooms.Get(defaultRoomID) == nil {
 		// The seeded default room has a logged creation record like any
 		// other room, so its history_log_id is never null.
@@ -403,6 +423,13 @@ func Open(config Config) (*Server, error) {
 	s.files.RemoveStale(files)
 	s.unlock()
 	go s.sweepPushes()
+	if s.retaining() {
+		s.mu.Lock()
+		backlog := s.retainLocked(time.Now())
+		s.unlock()
+		s.sweeping.Add(1)
+		go s.sweepHistory(nextPass(backlog))
+	}
 	err = s.initExtensions(config.Extensions)
 	if err == nil {
 		s.handler, err = s.buildHandler(s.routes)
@@ -544,6 +571,7 @@ func (s *Server) Shutdown(ctx context.Context) error {
 			_ = s.srv.Shutdown(ctx)
 		}
 		s.pushes.Wait()
+		s.sweeping.Wait()
 		s.push.Wait()
 		s.schemeWork.Wait()
 		// Extensions may keep values as they stop, so the store closes

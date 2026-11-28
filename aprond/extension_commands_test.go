@@ -90,29 +90,6 @@ func TestExtensionCommandForms(t *testing.T) {
 	}
 }
 
-func TestExtensionCommandsRegistrationErrors(t *testing.T) {
-	run := func(context.Context, *CommandCall) (map[string]any, error) { return nil, nil }
-	for name, command := range map[string]Command{
-		"no Run":           {Name: "x"},
-		"form without Run": {Name: "x", Forms: []Form{{}}},
-		"Run and Forms":    {Name: "x", Run: run, Forms: []Form{{Run: run}}},
-		"core command":     {Name: "kick", Run: run},
-		"bad name":         {Name: "Bad", Run: run},
-		"bad form":         {Name: "x", Forms: []Form{{Name: "y", Run: run}}},
-		"form twice":       {Name: "x", Forms: []Form{{Run: run}, {Name: "x", Run: run}}},
-		"bad field":        {Name: "x", Uses: []string{"embeds"}, Run: run},
-		"bad group":        {Name: "x", Group: "admins", Run: run},
-	} {
-		_, err := Open(extensionConfig(testExtension{"demo", func(r *Registrar) error {
-			r.Command(command)
-			return nil
-		}}))
-		if err == nil {
-			t.Errorf("%s: Open succeeded", name)
-		}
-	}
-}
-
 // aprond's Field and Group constants are package commands', which checks
 // them.
 func TestCommandConstants(t *testing.T) {

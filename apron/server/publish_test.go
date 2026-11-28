@@ -54,7 +54,7 @@ func TestPublishUser(t *testing.T) {
 	expect(ada, `{"method":"user","params":{"you":{"user_id":"ada","roles":[]}}}`)
 	expect(ada2, `{"method":"user","params":{"you":{"user_id":"ada","roles":[]}}}`)
 	expect(bob, `{"method":"user","params":{"new":{"user_id":"ada","roles":[]}}}`)
-	if u := ada2.l.Conn().User(); len(u.Roles) != 0 {
+	if u := userOf(ada2.l.Conn()); len(u.Roles) != 0 {
 		t.Fatalf("the connection's user is %+v", u)
 	}
 	// Unchanged: nothing is done at all, so bob's next frame is eve's
@@ -66,7 +66,7 @@ func TestPublishUser(t *testing.T) {
 	if s.PublishUser(server.UserChange{Old: apron.User{UserID: "ada"}, New: same}, func(*server.Conn) bool { t.Error("shares called with no change"); return true }) {
 		t.Fatal("PublishUser reported a change where there was none")
 	}
-	if u := ada.l.Conn().User(); u.Name != "Stale" {
+	if u := userOf(ada.l.Conn()); u.Name != "Stale" {
 		t.Fatalf("an unchanged PublishUser set the connection's user: %+v", u)
 	}
 	if !s.PublishUser(server.UserChange{Old: apron.User{UserID: "eve"}, New: apron.User{UserID: "eve", Name: "Eve"}}, nil) {
@@ -93,13 +93,13 @@ func (b *typed) Auth(_ context.Context, c *server.Conn, p apron.AuthParams, repl
 	if err != nil {
 		return err
 	}
-	return reply.Send(apron.AuthResult{You: you, Extra: b.extra})
+	return reply.Send(apron.AuthResult{You: *you, Extra: b.extra})
 }
 
 func (b *typed) Message(_ context.Context, _ *server.Conn, p apron.MessageParams, reply server.Reply[apron.MessageResult]) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	b.bodies = append(b.bodies, *p.Body)
+	b.bodies = append(b.bodies, p.Body)
 	return reply.Send(apron.MessageResult{MessageID: 1})
 }
 

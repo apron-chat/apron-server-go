@@ -61,7 +61,7 @@ func normalizeRoomList(p apron.RoomListParams, result apron.RoomListResult) apro
 		result.Joined = nil
 	}
 	if !p.Members {
-		result.Users = nil
+		result.Users, result.UsersRaw = nil, nil
 		// Copies, so that the backend's own slices stay as they are.
 		for _, list := range []*[]apron.RoomView{&result.Joined, &result.NotJoined} {
 			if *list == nil {
@@ -69,7 +69,7 @@ func normalizeRoomList(p apron.RoomListParams, result apron.RoomListResult) apro
 			}
 			*list = slices.Clone(*list)
 			for i := range *list {
-				(*list)[i].Members, (*list)[i].MemberCount = nil, 0
+				(*list)[i].Members, (*list)[i].MembersRaw, (*list)[i].MemberCount = nil, nil, 0
 			}
 		}
 	}

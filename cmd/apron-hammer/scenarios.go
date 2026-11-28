@@ -673,10 +673,8 @@ func writeLive(ctx context.Context, p *peer, messages chan []byte, kind string, 
 	if err != nil {
 		return err
 	}
-	liveURL, err := awaitLiveURL(ctx, messages, written.MessageID)
-	if err != nil {
-		return err
-	}
+	// The live text's url is published once its write starts (§4.8.5), so
+	// the write starts first.
 	body, writer := io.Pipe()
 	request, _ := http.NewRequestWithContext(ctx, http.MethodPut, written.Embeds[0].WriteURL, body)
 	request.Header.Set("Content-Type", "text/plain")
@@ -691,6 +689,12 @@ func writeLive(ctx context.Context, p *peer, messages chan []byte, kind string, 
 		}
 		posted <- err
 	}()
+	liveURL, err := awaitLiveURL(ctx, messages, written.MessageID)
+	if err != nil {
+		writer.CloseWithError(err)
+		<-posted
+		return err
+	}
 	chunk := []byte(text(size))
 	sent := 0
 	var readErr error
@@ -982,4 +986,104 @@ func runSignIn(h *hammer, st *stats) {
 			}
 		}
 	})
+}
+
+// runBigRoom has a few clients post to general while many more only read
+// it: one room well past the size from which the server stores its entry
+// at most every so often (64 members), where each post is a fan-out to
+// every reader.
+func runBigRoom(h *hammer, st *stats) {
+	readers := max(200, 4*h.clients)
+	posters := max(1, h.clients/5)
+	var received atomic.Int64
+	listeners := connect(h, readers, "reader", func(int) dialOptions {
+		return dialOptions{notify: func(method string, _ []byte) {
+			if method == "message" {
+				received.Add(1)
+			}
+		}}
+	})
+	defer closeAll(listeners)
+	peers := connect(h, posters, "poster", nil)
+	defer closeAll(peers)
+	body := text(h.bodySize)
+	var acked atomic.Int64
+	ctx, cancel := st.window()
+	run(len(peers), func(i int) {
+		for ctx.Err() == nil && peers[i].alive() {
+			if measure(ctx, st, "message", func() error {
+				_, err := postMessage(ctx, peers[i], generalRoom, body)
+				return err
+			}) == nil {
+				acked.Add(1)
+			}
+		}
+	})
+	cancel()
+	st.finish()
+	time.Sleep(500 * time.Millisecond)
+	alive := 0
+	for _, p := range listeners {
+		if p.alive() {
+			alive++
+		}
+	}
+	st.note("%d posts to a room of %d readers; each of %d live readers received %.1f%% of them on average",
+		acked.Load(), len(listeners), alive, 100*float64(received.Load())/float64(max(1, acked.Load()*int64(len(listeners)))))
+}
+
+// reactionPace is how often each client of reactions changes its set: past
+// the server's burst, at about its refill.
+const reactionPace = 400 * time.Millisecond
+
+// runReactions has every client, and at least 100, react to one hot
+// message, again and again: each change is a reactions record for everyone
+// in general, and a change of a message with as many sets as there are
+// clients.
+func runReactions(h *hammer, st *stats) {
+	var received atomic.Int64
+	// At least 100, past the 64 sets from which aprond stores a message's
+	// entry at most every so often.
+	peers := connect(h, max(100, h.clients), "reactor", func(int) dialOptions {
+		return dialOptions{notify: func(method string, _ []byte) {
+			if method == "reactions" {
+				received.Add(1)
+			}
+		}}
+	})
+	defer closeAll(peers)
+	if len(peers) == 0 {
+		return
+	}
+	setup, done := context.WithTimeout(context.Background(), 30*time.Second)
+	defer done()
+	hot, err := postMessage(setup, peers[0], generalRoom, "react to me")
+	if err != nil {
+		fmt.Printf("   !! post the hot message: %v\n", err)
+		return
+	}
+	sets := [][]string{{"👍"}, {"👍", "🎉"}}
+	var acked atomic.Int64
+	ctx, cancel := st.window()
+	run(len(peers), func(i int) {
+		tick := time.NewTicker(reactionPace)
+		defer tick.Stop()
+		for n := 0; ctx.Err() == nil && peers[i].alive(); n++ {
+			if measure(ctx, st, "reactions", func() error {
+				_, err := peers[i].call(ctx, "reactions", map[string]any{"message_id": hot, "emojis": sets[n%2]})
+				return err
+			}) == nil {
+				acked.Add(1)
+			}
+			select {
+			case <-tick.C:
+			case <-ctx.Done():
+			}
+		}
+	})
+	cancel()
+	st.finish()
+	time.Sleep(500 * time.Millisecond)
+	st.note("%d reaction changes to one message; clients received %.1f%% of their broadcasts on average",
+		acked.Load(), 100*float64(received.Load())/float64(max(1, acked.Load()*int64(len(peers)))))
 }

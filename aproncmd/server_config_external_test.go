@@ -43,58 +43,10 @@ func TestServerConfigForCustomRunner(t *testing.T) {
 	if config.Store != nil {
 		t.Fatal("configuration conversion must not open a store")
 	}
-}
-
-func TestServerConfigPreservesValidation(t *testing.T) {
-	var options aproncmd.Options
-	options.PublicURL = "https://chat.example.test"
+	// The exported function validates as aprond does.
+	options = aproncmd.Options{PublicURL: "https://chat.example.test"}
 	options.Push.AllowInsecure = true
 	if _, err := aproncmd.ServerConfig(options); err == nil {
 		t.Fatal("custom runners must retain insecure-push validation")
-	}
-}
-
-func TestServerConfigNamesAnExternalIssuer(t *testing.T) {
-	var options aproncmd.Options
-	parser := flags.NewParser(&options, flags.None)
-	if _, err := parser.ParseArgs([]string{"--external.issuer", "https://id.example", "--external.scope", "openid profile"}); err != nil {
-		t.Fatal(err)
-	}
-	config, err := aproncmd.ServerConfig(options)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if issuer := config.ExternalIssuer; issuer == nil || issuer.Issuer != "https://id.example" || issuer.Scope != "openid profile" {
-		t.Fatalf("ExternalIssuer = %#v", config.ExternalIssuer)
-	}
-}
-
-func TestServerConfigSignalsUnknownPasskeysWhenAsked(t *testing.T) {
-	var options aproncmd.Options
-	parser := flags.NewParser(&options, flags.None)
-	if _, err := parser.ParseArgs([]string{"--webauthn.signal-unknown"}); err != nil {
-		t.Fatal(err)
-	}
-	config, err := aproncmd.ServerConfig(options)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !config.SignalUnknownPasskeys {
-		t.Fatal("--webauthn.signal-unknown did not reach the server's config")
-	}
-}
-
-func TestServerConfigPasskeysGuestFirstWhenAsked(t *testing.T) {
-	var options aproncmd.Options
-	parser := flags.NewParser(&options, flags.None)
-	if _, err := parser.ParseArgs([]string{"--webauthn.guest-first"}); err != nil {
-		t.Fatal(err)
-	}
-	config, err := aproncmd.ServerConfig(options)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !config.GuestFirstPasskeys {
-		t.Fatal("--webauthn.guest-first did not reach the server's config")
 	}
 }

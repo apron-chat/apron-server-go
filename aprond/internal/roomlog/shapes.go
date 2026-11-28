@@ -1,8 +1,12 @@
 package roomlog
 
 import (
+	"bytes"
 	"encoding/json/jsontext"
 	"encoding/json/v2"
+	"slices"
+	"strings"
+	"sync"
 
 	"github.com/apron-chat/apron-server-go/apron"
 )
@@ -45,6 +49,17 @@ type Member struct {
 }
 
 // NewMembership is the record of user joining or leaving room.
+// NewMembers is the membership record of every current member of room,
+// each joined (§4.3.3), which goes before a part of its log that holds
+// memberships is discarded.
+func NewMembers(id int64, room string, users []Author) *Record {
+	members := make([]Member, len(users))
+	for i, user := range users {
+		members[i] = Member{User: user, Joined: true}
+	}
+	return New(id, KindMembership, Membership{LogID: FormatID(id), RoomID: room, Members: members})
+}
+
 func NewMembership(id int64, room string, user Author, joined bool) *Record {
 	return New(id, KindMembership, Membership{
 		LogID: FormatID(id), RoomID: room, Members: []Member{{User: user, Joined: joined}},
@@ -148,15 +163,81 @@ func (m *Message) Mentions() []string {
 // did.
 type Body struct{ apron.Body }
 
-// MarshalJSONTo writes the body's members, sorted by name.
+// MarshalJSONTo writes the body's members, sorted by name: those
+// apron.Body writes, read back as they are and written again in order,
+// without a map of them.
 func (b Body) MarshalJSONTo(enc *jsontext.Encoder) error {
 	raw, err := json.Marshal(b.Body)
 	if err != nil {
 		return err
 	}
-	var members map[string]jsontext.Value
-	if err := json.Unmarshal(raw, &members); err != nil {
+	r := bodyReaders.Get().(*bodyReader)
+	defer bodyReaders.Put(r)
+	members, err := r.members(raw)
+	if err != nil {
 		return err
 	}
-	return json.MarshalEncode(enc, members, json.Deterministic(true))
+	slices.SortFunc(members, func(a, b bodyMember) int { return strings.Compare(a.name, b.name) })
+	if err := enc.WriteToken(jsontext.BeginObject); err != nil {
+		return err
+	}
+	for _, m := range members {
+		if err := enc.WriteToken(jsontext.String(m.name)); err != nil {
+			return err
+		}
+		if err := enc.WriteValue(m.value); err != nil {
+			return err
+		}
+	}
+	return enc.WriteToken(jsontext.EndObject)
+}
+
+// bodyMember is a member of an encoded body: its name, and its value as
+// encoded.
+type bodyMember struct {
+	name  string
+	value jsontext.Value
+}
+
+// bodyReader reads the members of an encoded body; bodyReaders keeps them
+// for reuse, as every message snapshot encodes a body.
+type bodyReader struct {
+	in   bytes.Reader
+	dec  *jsontext.Decoder
+	list []bodyMember
+}
+
+var bodyReaders = sync.Pool{New: func() any {
+	r := new(bodyReader)
+	r.dec = jsontext.NewDecoder(&r.in)
+	return r
+}}
+
+// members returns the members of the object raw, in order, their values
+// slices of raw. They are valid until the next call.
+func (r *bodyReader) members(raw []byte) ([]bodyMember, error) {
+	r.in.Reset(raw)
+	r.dec.Reset(&r.in)
+	r.list = r.list[:0]
+	if _, err := r.dec.ReadToken(); err != nil {
+		return nil, err
+	}
+	for r.dec.PeekKind() == '"' {
+		token, err := r.dec.ReadToken()
+		if err != nil {
+			return nil, err
+		}
+		name := token.String()
+		start := r.dec.InputOffset()
+		if _, err := r.dec.ReadValue(); err != nil {
+			return nil, err
+		}
+		// The value follows the name's colon, and any space around it.
+		value := bytes.TrimLeft(raw[start:r.dec.InputOffset()], ": \t\r\n")
+		r.list = append(r.list, bodyMember{name: name, value: value})
+	}
+	if _, err := r.dec.ReadToken(); err != nil {
+		return nil, err
+	}
+	return r.list, nil
 }

@@ -60,10 +60,11 @@ type Conn interface {
 	// *apron.Error. Once the connection has ended, its error wraps
 	// apron.ErrClosed, or tells why it ended.
 	Call(ctx context.Context, method string, params any) (jsontext.Value, error)
-	// User is who the connection is signed in as: the user it asked for,
-	// or the one the server made it, such as by a rename since; the zero
-	// User once it is signed out.
-	User() apron.User
+	// Identity is who the connection is signed in as: the user it asked
+	// for, or the one the server made it, such as by a rename since, as
+	// the connection keeps it, without a copy, and whether it is signed
+	// in. Its Roles, Ext, and Unknown are shared, and not changed.
+	Identity() (apron.User, bool)
 	// Done is closed once the connection has ended.
 	Done() <-chan struct{}
 	// Close ends the connection.
@@ -172,10 +173,11 @@ func Start(dial Dialer, options Options) (*Bot, error) {
 	return b, nil
 }
 
-// User is who the bot is: its connection's user (Conn.User), which the
-// server may have made another than the Dialer asked for as it opened,
-// such as one with a user_id of its own, or the name normalized, and which
-// a rename changes.
+// User is who the bot is: its connection's user (Conn.Identity), which
+// the server may have made another than the Dialer asked for as it
+// opened, such as one with a user_id of its own, or the name normalized,
+// and which a rename changes. It is not copied: its Roles, Ext, and
+// Unknown are the connection's, and are not changed.
 func (b *Bot) User() apron.User {
 	b.mu.Lock()
 	conn := b.conn
@@ -183,7 +185,8 @@ func (b *Bot) User() apron.User {
 	if conn == nil {
 		return apron.User{}
 	}
-	return conn.User()
+	u, _ := conn.Identity()
+	return u
 }
 
 // UserID is the bot's user_id, its User's.
@@ -217,7 +220,8 @@ func (b *Bot) Conn() (Conn, error) {
 	conn, err := b.dial(b.ctx, onFrame)
 	if r != nil {
 		if err == nil {
-			r.self, r.open = conn.User().UserID, true
+			u, _ := conn.Identity()
+			r.self, r.open = u.UserID, true
 		}
 		close(r.opened)
 	}
@@ -286,22 +290,20 @@ func (r *receiver) receive(frame apron.Frame) {
 		// The Dialer failed: the connection is not the bot's.
 		return
 	}
-	var head struct {
-		Method string         `json:"method"`
-		ID     jsontext.Value `json:"id"`
-		Params jsontext.Value `json:"params"`
-	}
-	if json.Unmarshal(frame, &head) != nil || head.ID != nil {
+	// Only the head is read of every frame, and the params only of those
+	// the bot handles, in place.
+	head, err := frame.Head()
+	if err != nil || head.ID != nil {
 		head.Method = ""
 	}
 	switch head.Method {
 	case "user":
 		var update struct {
-			You *struct {
+			You struct {
 				UserID string `json:"user_id"`
 			} `json:"you"`
 		}
-		if json.Unmarshal(head.Params, &update) == nil && update.You != nil && update.You.UserID != "" {
+		if json.Unmarshal(head.Params, &update) == nil && update.You.UserID != "" {
 			r.self = update.You.UserID
 		}
 	case "message":
@@ -343,7 +345,7 @@ func (b *Bot) Addressed(m apron.Message) bool {
 // fresh reports whether m is a new message, with a body, from another
 // than self.
 func fresh(m apron.Message, self string) bool {
-	return m.MessageID != 0 && m.PrevLogID == 0 && !m.Deleted && m.From.UserID != self && m.Body != nil
+	return m.MessageID != 0 && m.PrevLogID == 0 && !m.Deleted && m.From.UserID != self && !m.Body.Empty()
 }
 
 // Addresses reports whether text addresses name as people do in plain
@@ -431,9 +433,9 @@ func (b *Bot) Post(ctx context.Context, p apron.MessageParams) (apron.MessageRes
 // Reply posts text in the room of the message to, as a reply to it
 // (§3.5.4), or, for a notice, which has no message_id, after it.
 func (b *Bot) Reply(ctx context.Context, to apron.Message, text string) (apron.MessageResult, error) {
-	p := apron.MessageParams{RoomID: to.RoomID, Body: &apron.Body{Text: text}}
+	p := apron.MessageParams{RoomID: to.RoomID, Body: apron.Body{Text: text}}
 	if to.MessageID != 0 {
-		p.ReplyTo = &apron.MessageRef{MessageID: to.MessageID}
+		p.ReplyTo = apron.MessageRef{MessageID: to.MessageID}
 	}
 	return b.Post(ctx, p)
 }

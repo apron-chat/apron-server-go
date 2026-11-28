@@ -121,7 +121,31 @@ func connect(s *server.Server) transport {
 		defer close(served)
 		s.ServeTransport(context.Background(), server.LineTransport(serverEnd, int(limit)), nil, nil)
 	}()
-	return &pipeTransport{conn: client, lines: bufio.NewReader(client), served: served}
+	p := &pipeTransport{conn: client, lines: bufio.NewReader(client), served: served, frames: make(chan []byte, pipeBuffer)}
+	go p.buffer()
+	return p
+}
+
+// pipeBuffer is how many frames the client's end of a net.Pipe takes
+// before the reader does, as a socket's receive buffer does: a net.Pipe
+// has none, so without it a client whose reader works on each frame as it
+// comes, as a check's does, is slower than a server that reads a burst
+// in memory, and falls behind it, where it would not on a network.
+const pipeBuffer = 256
+
+// buffer reads the frames from the pipe as they come, until it ends.
+func (p *pipeTransport) buffer() {
+	defer close(p.frames)
+	for {
+		line, err := p.lines.ReadBytes('\n')
+		if err != nil {
+			p.err = err
+			return
+		}
+		if line = line[:len(line)-1]; len(line) > 0 {
+			p.frames <- line
+		}
+	}
 }
 
 // pipeTransport is the client's end of a LineTransport.
@@ -130,18 +154,18 @@ type pipeTransport struct {
 	lines  *bufio.Reader
 	served chan struct{}
 	mu     sync.Mutex
+	// frames are the frames read from the pipe (buffer), and err why
+	// reading it ended, once frames is closed.
+	frames chan []byte
+	err    error
 }
 
 func (p *pipeTransport) read() ([]byte, error) {
-	for {
-		line, err := p.lines.ReadBytes('\n')
-		if err != nil {
-			return nil, err
-		}
-		if line = line[:len(line)-1]; len(line) > 0 {
-			return line, nil
-		}
+	frame, ok := <-p.frames
+	if !ok {
+		return nil, p.err
 	}
+	return frame, nil
 }
 
 func (p *pipeTransport) write(ctx context.Context, frame []byte) error {

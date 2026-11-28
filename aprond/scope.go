@@ -41,48 +41,57 @@ func newRoomScope(scope *RoomScope) *roomScope {
 	return rooms.NewScope(scope.Rooms, scope.Threads)
 }
 
-func publicScope(sc *roomScope) *RoomScope {
-	if sc == nil {
-		return nil
-	}
-	return &RoomScope{Rooms: sc.Rooms(), Threads: sc.Threads()}
+// SetScope limits an account to the rooms scope lists, and returns once
+// that is stored. The account leaves the rooms and threads it is in that
+// the scope leaves out, and its writes into them end. It does not join the
+// rooms the scope lists; a bot joins them with Bot.Join. The zero
+// RoomScope lists no room; ClearScope lifts the limit.
+func (s *Server) SetScope(ctx context.Context, userID string, scope RoomScope) error {
+	return s.storeScope(ctx, userID, rooms.NewScope(scope.Rooms, scope.Threads))
 }
 
-// SetScope limits an account to the rooms scope lists, or, with nil, lifts
-// its limit, and returns once that is stored. The account leaves the rooms
-// and threads it is in that the scope leaves out, and its writes into them
-// end. It does not join the rooms the scope lists; a bot joins them with
-// Bot.Join.
-func (s *Server) SetScope(ctx context.Context, userID string, scope *RoomScope) error {
+// ClearScope lifts an account's limit to some rooms, and returns once that
+// is stored.
+func (s *Server) ClearScope(ctx context.Context, userID string) error {
+	return s.storeScope(ctx, userID, nil)
+}
+
+func (s *Server) storeScope(ctx context.Context, userID string, scope *roomScope) error {
 	s.mu.Lock()
 	u := s.users.Get(userID)
 	if u == nil {
 		s.unlock()
 		return errors.New("apron: no such user")
 	}
-	s.setScopeLocked(u, newRoomScope(scope))
+	s.setScopeLocked(u, scope)
 	f := s.newFenceLocked()
 	s.unlock()
 	return f.Wait(ctx)
 }
 
 // SetScope limits an account to some rooms; see Server.SetScope.
-func (h *Host) SetScope(ctx context.Context, userID string, scope *RoomScope) error {
+func (h *Host) SetScope(ctx context.Context, userID string, scope RoomScope) error {
 	return h.s.SetScope(ctx, userID, scope)
 }
 
-// Scope returns the rooms an account is limited to, nil when it is not.
-func (s *Server) Scope(userID string) *RoomScope {
+// ClearScope lifts an account's limit; see Server.ClearScope.
+func (h *Host) ClearScope(ctx context.Context, userID string) error {
+	return h.s.ClearScope(ctx, userID)
+}
+
+// Scope returns the rooms an account is limited to, and whether it is
+// limited: false for an account with no scope, or no such account.
+func (s *Server) Scope(userID string) (RoomScope, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	if u := s.users.Get(userID); u != nil {
-		return publicScope(u.Scope)
+	if u := s.users.Get(userID); u != nil && u.Scope != nil {
+		return RoomScope{Rooms: u.Scope.Rooms(), Threads: u.Scope.Threads()}, true
 	}
-	return nil
+	return RoomScope{}, false
 }
 
 // Scope returns the rooms an account is limited to; see Server.Scope.
-func (h *Host) Scope(userID string) *RoomScope { return h.s.Scope(userID) }
+func (h *Host) Scope(userID string) (RoomScope, bool) { return h.s.Scope(userID) }
 
 // setScopeLocked sets u's scope, and takes u out of what it leaves out.
 func (s *Server) setScopeLocked(u *userState, scope *roomScope) {

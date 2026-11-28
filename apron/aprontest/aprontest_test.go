@@ -59,14 +59,15 @@ func (c *chat) Auth(_ context.Context, _ *server.Conn, p apron.AuthParams, reply
 	if err != nil {
 		return err
 	}
-	return reply.Send(apron.AuthResult{You: &apron.CurrentUser{UserID: fmt.Sprintf("guest_%d", c.guests)}}, welcome)
+	return reply.Send(apron.AuthResult{You: apron.CurrentUser{UserID: fmt.Sprintf("guest_%d", c.guests)}}, welcome)
 }
 
 func (c *chat) Message(_ context.Context, conn *server.Conn, p apron.MessageParams, reply server.Reply[apron.MessageResult]) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	id := c.clock.Next()
-	m := apron.Message{MessageID: id, LogID: id, From: *conn.User(), Body: p.Body}
+	from, _ := conn.Identity()
+	m := apron.Message{MessageID: id, LogID: id, From: from, Body: p.Body}
 	frame, err := apron.Encode(m)
 	if err != nil {
 		return err
@@ -122,7 +123,7 @@ func TestNewReply(t *testing.T) {
 		t.Fatalf("me: %+v %s", you.Result(), you.Raw())
 	}
 	auth, signedIn := aprontest.NewReply[apron.AuthResult](aprontest.NewRequest("auth", map[string]any{"scheme": "guest"}))
-	if err := auth.Send(apron.AuthResult{You: &apron.CurrentUser{UserID: "not valid"}}); apron.CodeOf(err) != apron.CodeInternalError || apron.CodeOf(signedIn.Err()) != apron.CodeInternalError {
+	if err := auth.Send(apron.AuthResult{You: apron.CurrentUser{UserID: "not valid"}}); apron.CodeOf(err) != apron.CodeInternalError || apron.CodeOf(signedIn.Err()) != apron.CodeInternalError {
 		t.Fatalf("an invalid auth result: %v, recorded %v", err, signedIn.Err())
 	}
 }
@@ -167,7 +168,7 @@ func testClient(t *testing.T, c *chat, client *aprontest.Client) {
 		t.Fatalf("a refused auth: %v", err)
 	}
 	result, err := client.Auth(ctx, map[string]any{"scheme": "guest"})
-	if err != nil || result.You == nil || !strings.HasPrefix(result.You.UserID, "guest_") {
+	if err != nil || result.You.UserID == "" || !strings.HasPrefix(result.You.UserID, "guest_") {
 		t.Fatalf("auth: %+v %v", result, err)
 	}
 	if f, err := client.Next(ctx); err != nil || f.Method != "message" {
@@ -207,18 +208,36 @@ func testClient(t *testing.T, c *chat, client *aprontest.Client) {
 	}
 }
 
-func TestConnect(t *testing.T) {
-	c := newChat()
-	client := aprontest.Connect(t, c.server)
-	testClient(t, c, client)
-	if err := client.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if n := c.disconnected.Load(); n != 1 {
-		t.Fatalf("%d disconnected after Close", n)
-	}
-	if _, err := client.Next(timeout(t)); !errors.Is(err, apron.ErrClosed) {
-		t.Fatalf("Next after Close: %v", err)
+// A Client works the same in memory (Connect) and over a WebSocket (Dial),
+// and Close ends its connection.
+func TestConnectAndDial(t *testing.T) {
+	for _, way := range []string{"Connect", "Dial"} {
+		t.Run(way, func(t *testing.T) {
+			c := newChat()
+			var client *aprontest.Client
+			if way == "Connect" {
+				client = aprontest.Connect(t, c.server)
+			} else {
+				ts := httptest.NewServer(c.server)
+				defer ts.Close()
+				var err error
+				if client, err = aprontest.Dial(timeout(t), "ws"+strings.TrimPrefix(ts.URL, "http")); err != nil {
+					t.Fatal(err)
+				}
+			}
+			testClient(t, c, client)
+			if err := client.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := client.Next(timeout(t)); !errors.Is(err, apron.ErrClosed) {
+				t.Fatalf("Next after Close: %v", err)
+			}
+			if way == "Connect" {
+				if n := c.disconnected.Load(); n != 1 {
+					t.Fatalf("%d disconnected after Close", n)
+				}
+			}
+		})
 	}
 }
 
@@ -242,20 +261,6 @@ func TestSignIn(t *testing.T) {
 		if err != nil || f.Method == "" {
 			t.Fatalf("Next once the test ended: %+v %v", f, err)
 		}
-	}
-}
-
-func TestDial(t *testing.T) {
-	c := newChat()
-	ts := httptest.NewServer(c.server)
-	defer ts.Close()
-	client, err := aprontest.Dial(timeout(t), "ws"+strings.TrimPrefix(ts.URL, "http"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	testClient(t, c, client)
-	if err := client.Close(); err != nil {
-		t.Fatal(err)
 	}
 }
 
@@ -410,7 +415,7 @@ func TestLater(t *testing.T) {
 	ctx := timeout(t)
 	s := newSlow()
 	reply, sent := aprontest.NewReply[apron.CommandResult](aprontest.NewRequest("command", nil))
-	if err := s.Command(ctx, nil, apron.CommandParams{Body: &apron.Body{Text: "/slow"}}, reply); err != nil || sent.Sent() {
+	if err := s.Command(ctx, nil, apron.CommandParams{Body: apron.Body{Text: "/slow"}}, reply); err != nil || sent.Sent() {
 		t.Fatalf("command: %v, sent %v; want it answered later", err, sent.Sent())
 	}
 	waiting, cancel := context.WithTimeout(ctx, 10*time.Millisecond)

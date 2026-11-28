@@ -5,6 +5,7 @@ import (
 	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"errors"
+	"maps"
 	"slices"
 
 	"github.com/apron-chat/apron-server-go/apron/internal/core"
@@ -37,9 +38,9 @@ var userFields = []struct{ name, empty string }{
 // MarshalJSONTo writes u as one object: User's fields, then each cleared
 // field as its empty value.
 func (u CurrentUser) MarshalJSONTo(enc *jsontext.Encoder) error {
-	if len(u.Cleared) == 0 {
-		return json.MarshalEncode(enc, u.User)
-	}
+	// Written token by token, as encoding the User, with each cleared
+	// field left out, then each as its empty value, did, without what that
+	// allocated: a room's members are hundreds of these.
 	user := u.User
 	for _, name := range u.Cleared {
 		switch name {
@@ -59,26 +60,105 @@ func (u CurrentUser) MarshalJSONTo(enc *jsontext.Encoder) error {
 			user.Ext = nil
 		}
 	}
-	raw, err := json.Marshal(user, enc.Options())
-	if err != nil {
+	if err := enc.WriteToken(jsontext.BeginObject); err != nil {
 		return err
 	}
-	// raw is an object with user_id, so never {}.
-	raw = raw[:len(raw)-1]
+	if err := writeUserMembers(enc, &user); err != nil {
+		return err
+	}
 	for _, name := range u.Cleared {
 		empty := `""`
 		if i := slices.IndexFunc(userFields, func(f struct{ name, empty string }) bool { return f.name == name }); i >= 0 {
 			empty = userFields[i].empty
 		}
-		raw = append(raw, ',')
-		raw, err = jsontext.AppendQuote(raw, name)
-		if err != nil {
+		if err := enc.WriteToken(jsontext.String(name)); err != nil {
 			return err
 		}
-		raw = append(raw, ':')
-		raw = append(raw, empty...)
+		if err := enc.WriteValue(jsontext.Value(empty)); err != nil {
+			return err
+		}
 	}
-	return enc.WriteValue(append(raw, '}'))
+	return enc.WriteToken(jsontext.EndObject)
+}
+
+// writeUserMembers writes the members of a user object as encoding a User
+// does: user_id, each other field that is not empty, then the members it
+// has no field for (Unknown).
+func writeUserMembers(enc *jsontext.Encoder, u *User) error {
+	member := func(name, value string) error {
+		if err := enc.WriteToken(jsontext.String(name)); err != nil {
+			return err
+		}
+		return enc.WriteToken(jsontext.String(value))
+	}
+	if err := member("user_id", u.UserID); err != nil {
+		return err
+	}
+	for _, f := range []struct{ name, value string }{{"name", u.Name}, {"avatar", u.Avatar}} {
+		if f.value != "" {
+			if err := member(f.name, f.value); err != nil {
+				return err
+			}
+		}
+	}
+	if len(u.Roles) > 0 {
+		if err := enc.WriteToken(jsontext.String("roles")); err != nil {
+			return err
+		}
+		if err := enc.WriteToken(jsontext.BeginArray); err != nil {
+			return err
+		}
+		for _, role := range u.Roles {
+			if err := enc.WriteToken(jsontext.String(role)); err != nil {
+				return err
+			}
+		}
+		if err := enc.WriteToken(jsontext.EndArray); err != nil {
+			return err
+		}
+	}
+	for _, f := range []struct{ name, value string }{{"status", u.Status}, {"seen", u.Seen}} {
+		if f.value != "" {
+			if err := member(f.name, f.value); err != nil {
+				return err
+			}
+		}
+	}
+	if len(u.Ext) > 0 {
+		if err := enc.WriteToken(jsontext.String("ext")); err != nil {
+			return err
+		}
+		if err := enc.WriteToken(jsontext.BeginObject); err != nil {
+			return err
+		}
+		// In the order of their keys, as Marshal writes a map.
+		for _, key := range slices.Sorted(maps.Keys(u.Ext)) {
+			if err := enc.WriteToken(jsontext.String(key)); err != nil {
+				return err
+			}
+			if err := enc.WriteValue(u.Ext[key]); err != nil {
+				return err
+			}
+		}
+		if err := enc.WriteToken(jsontext.EndObject); err != nil {
+			return err
+		}
+	}
+	if len(u.Unknown) > 0 && u.Unknown.Kind() != 'n' {
+		members, ok := core.Members(u.Unknown)
+		if !ok {
+			return errors.New("apron: a user's Unknown is not a JSON object")
+		}
+		for _, m := range members {
+			if err := enc.WriteToken(jsontext.String(m.Name)); err != nil {
+				return err
+			}
+			if err := enc.WriteValue(m.Value); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 // UnmarshalJSONFrom reads a current user object, noting in Cleared each of
@@ -203,11 +283,13 @@ func emptyOf(kept jsontext.Value) jsontext.Value {
 
 // UserUpdate is a user notification (§3.3.3): You to the user's own
 // connections, New to others who share a room with the user, and Old with
-// New when the account's user_id changed.
+// New when the account's user_id changed. Each is the zero CurrentUser,
+// which is left out, when the notification does not carry it: one with a
+// user_id is one that does.
 type UserUpdate struct {
-	You *CurrentUser `json:"you,omitzero"`
-	New *CurrentUser `json:"new,omitzero"`
-	Old *CurrentUser `json:"old,omitzero"`
+	You CurrentUser `json:"you,omitzero"`
+	New CurrentUser `json:"new,omitzero"`
+	Old CurrentUser `json:"old,omitzero"`
 }
 
 // Method makes a UserUpdate a Notification.

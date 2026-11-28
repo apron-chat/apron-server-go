@@ -20,6 +20,12 @@ import (
 	"github.com/apron-chat/apron-server-go/apron/server/commands"
 )
 
+// identity is a connection's identity, its user once signed in.
+func identity(c *server.Conn) apron.User {
+	u, _ := c.Identity()
+	return u
+}
+
 // chat is a test backend: guests, one room whose messages everyone gets,
 // history, a /ping command, and no room requests.
 type chat struct {
@@ -52,7 +58,7 @@ func newChat() *chat {
 				c.connected = append(c.connected, data)
 			}
 			if c.rename != nil && conn.Local() {
-				conn.SetUser(c.rename(*conn.User()))
+				conn.SetUser(c.rename(identity(conn)))
 			}
 			return nil
 		},
@@ -68,14 +74,14 @@ func (c *chat) Auth(_ context.Context, _ *server.Conn, _ apron.AuthParams, reply
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.guests++
-	return reply.Send(apron.AuthResult{You: &apron.CurrentUser{UserID: fmt.Sprintf("guest_%d", c.guests)}})
+	return reply.Send(apron.AuthResult{You: apron.CurrentUser{UserID: fmt.Sprintf("guest_%d", c.guests)}})
 }
 
 func (c *chat) Message(_ context.Context, conn *server.Conn, p apron.MessageParams, reply server.Reply[apron.MessageResult]) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	id := c.clock.Next()
-	m := apron.Message{MessageID: id, LogID: id, RoomID: "general", From: *conn.User(), Body: p.Body, ReplyTo: p.ReplyTo}
+	m := apron.Message{MessageID: id, LogID: id, RoomID: "general", From: identity(conn), Body: p.Body, ReplyTo: p.ReplyTo}
 	frame, err := apron.Encode(m)
 	if err != nil {
 		return err
@@ -139,15 +145,15 @@ func TestMentions(t *testing.T) {
 		t.Cleanup(func() { echo.Close() })
 		ctx := timeout(t)
 		client, _ := aprontest.SignIn(t, c.server, map[string]any{"scheme": "guest"})
-		if _, err := client.Post(ctx, apron.MessageParams{Body: &apron.Body{Text: "hi all"}}); err != nil {
+		if _, err := client.Post(ctx, apron.MessageParams{Body: apron.Body{Text: "hi all"}}); err != nil {
 			t.Fatal(err)
 		}
-		asked, err := client.Post(ctx, apron.MessageParams{Body: &apron.Body{Text: "@echo hello", Mentions: []string{"echo"}}})
+		asked, err := client.Post(ctx, apron.MessageParams{Body: apron.Body{Text: "@echo hello", Mentions: []string{"echo"}}})
 		if err != nil {
 			t.Fatal(err)
 		}
 		reply, err := aprontest.Expect(ctx, client, func(m apron.Message) bool { return m.From.UserID == "echo" })
-		if err != nil || reply.Body.Text != "You said: @echo hello" || reply.ReplyTo == nil || reply.ReplyTo.MessageID != asked.MessageID {
+		if err != nil || reply.Body.Text != "You said: @echo hello" || reply.ReplyTo.MessageID == 0 || reply.ReplyTo.MessageID != asked.MessageID {
 			t.Fatalf("reply %+v: %v", reply, err)
 		}
 		// The bot was told of the message that did not mention it, not of
@@ -180,14 +186,14 @@ func TestRequests(t *testing.T) {
 	if conn.UserID() != "helper" {
 		t.Errorf("UserID %q", conn.UserID())
 	}
-	posted, err := conn.Post(ctx, apron.MessageParams{Body: &apron.Body{Text: "one", Format: apron.Markdown}})
+	posted, err := conn.Post(ctx, apron.MessageParams{Body: apron.Body{Text: "one", Format: apron.Markdown}})
 	if err != nil || posted.MessageID == 0 {
 		t.Fatalf("Post: %+v %v", posted, err)
 	}
-	if _, err := conn.Command(ctx, apron.CommandParams{Body: &apron.Body{Text: "/ping"}}); err != nil {
+	if _, err := conn.Command(ctx, apron.CommandParams{Body: apron.Body{Text: "/ping"}}); err != nil {
 		t.Fatalf("Command: %v", err)
 	}
-	if _, err := conn.Command(ctx, apron.CommandParams{Body: &apron.Body{Text: "/pong"}}); apron.CodeOf(err) != apron.CodeInvalidParams {
+	if _, err := conn.Command(ctx, apron.CommandParams{Body: apron.Body{Text: "/pong"}}); apron.CodeOf(err) != apron.CodeInvalidParams {
 		t.Fatalf("an unknown command: %v", err)
 	}
 	if err := conn.Join(ctx, "general"); apron.CodeOf(err) != apron.CodeUnsupported {
@@ -199,7 +205,7 @@ func TestRequests(t *testing.T) {
 		t.Fatalf("History: %+v %v", page, err)
 	}
 	conn.Close()
-	if _, err := conn.Post(ctx, apron.MessageParams{Body: &apron.Body{Text: "two"}}); !errors.Is(err, apron.ErrClosed) {
+	if _, err := conn.Post(ctx, apron.MessageParams{Body: apron.Body{Text: "two"}}); !errors.Is(err, apron.ErrClosed) {
 		t.Fatalf("Post after Close: %v", err)
 	}
 }
@@ -217,7 +223,7 @@ func TestReopen(t *testing.T) {
 		first, _ := quiet.Conn()
 		first.(*server.Local).Conn().Close()
 		<-first.Done()
-		if _, err := quiet.Post(ctx, apron.MessageParams{Body: &apron.Body{Text: "back"}}); err != nil {
+		if _, err := quiet.Post(ctx, apron.MessageParams{Body: apron.Body{Text: "back"}}); err != nil {
 			t.Fatalf("Post after the server closed the connection: %v", err)
 		}
 		if second, _ := quiet.Conn(); second == first {
@@ -237,7 +243,7 @@ func TestReopen(t *testing.T) {
 		// It opens again after a second (minReopen), by the bubble's clock:
 		// not before.
 		time.Sleep(time.Second - time.Nanosecond)
-		if _, err := quiet.Post(ctx, apron.MessageParams{Body: &apron.Body{Text: "early"}}); err != nil {
+		if _, err := quiet.Post(ctx, apron.MessageParams{Body: apron.Body{Text: "early"}}); err != nil {
 			t.Fatal(err)
 		}
 		synctest.Wait()
@@ -248,7 +254,7 @@ func TestReopen(t *testing.T) {
 		}
 		time.Sleep(time.Nanosecond)
 		synctest.Wait()
-		if _, err := quiet.Post(ctx, apron.MessageParams{Body: &apron.Body{Text: "anyone?"}}); err != nil {
+		if _, err := quiet.Post(ctx, apron.MessageParams{Body: apron.Body{Text: "anyone?"}}); err != nil {
 			t.Fatal(err)
 		}
 		synctest.Wait()
@@ -263,7 +269,7 @@ func TestReopen(t *testing.T) {
 
 		listener.Close()
 		quiet.Close()
-		if _, err := quiet.Post(ctx, apron.MessageParams{Body: &apron.Body{Text: "gone"}}); !errors.Is(err, apron.ErrClosed) {
+		if _, err := quiet.Post(ctx, apron.MessageParams{Body: apron.Body{Text: "gone"}}); !errors.Is(err, apron.ErrClosed) {
 			t.Fatalf("Post after Close: %v", err)
 		}
 		if err := c.server.Shutdown(ctx); err != nil {
@@ -327,7 +333,7 @@ func say(t *testing.T, c *chat, text string, mentions ...string) (*aprontest.Cli
 	t.Helper()
 	ctx := timeout(t)
 	client, _ := aprontest.SignIn(t, c.server, map[string]any{"scheme": "guest"})
-	result, err := client.Post(ctx, apron.MessageParams{Body: &apron.Body{Text: text, Mentions: mentions}})
+	result, err := client.Post(ctx, apron.MessageParams{Body: apron.Body{Text: text, Mentions: mentions}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -359,7 +365,7 @@ func TestUserFromBackend(t *testing.T) {
 					Method string           `json:"method"`
 					Params apron.UserUpdate `json:"params"`
 				}
-				if json.Unmarshal(f, &n) == nil && n.Method == "user" && n.Params.You != nil {
+				if json.Unmarshal(f, &n) == nil && n.Method == "user" && n.Params.You.UserID != "" {
 					you <- n.Params.You.UserID + " " + n.Params.You.Name
 				}
 			},
@@ -382,7 +388,7 @@ func TestUserFromBackend(t *testing.T) {
 		client, asked := say(t, c, "@b1", "b1")
 		if _, err := client.Expect(timeout(t), func(f aprontest.Frame) bool {
 			var m apron.Message
-			return f.Method == "message" && f.Decode(&m) == nil && m.From.UserID == "b1" && m.ReplyTo != nil && m.ReplyTo.MessageID == asked
+			return f.Method == "message" && f.Decode(&m) == nil && m.From.UserID == "b1" && m.ReplyTo.MessageID == asked
 		}); err != nil {
 			t.Fatal(err)
 		}

@@ -75,7 +75,7 @@ func TestSignInWithGitHub(t *testing.T) {
 		t.Fatalf("after GitHub = %d %s", page.Status, page.Body)
 	}
 	result, err := app.Redeem(app.Press(page, "allow"))
-	if err != nil || result.You == nil {
+	if err != nil || result.You.UserID == "" {
 		t.Fatalf("redeeming the code: %v", err)
 	}
 	if you := result.You; you.UserID != "octocat" || you.Name != "The Octocat" || result.Token == "" || !slices.Contains(you.Roles, aprond.RoleAdmin) {

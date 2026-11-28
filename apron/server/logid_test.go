@@ -14,8 +14,7 @@ import (
 // greater one as error/invalid_params, and a Clock never issues one.
 func TestLogIDBound(t *testing.T) {
 	const atMax, past = `"9007199254740991"`, `"9007199254740992"`
-	f := Fields{"max": jsontext.Value(atMax), "past": jsontext.Value(past), "huge": jsontext.Value(`"18446744073709551616"`),
-		"ref": jsontext.Value(`{"message_id":` + past + `}`)}
+	f, _ := ParseFields(jsontext.Value(`{"max":` + atMax + `,"past":` + past + `,"huge":"18446744073709551616","ref":{"message_id":` + past + `}}`))
 	for _, read := range []func(string) (apron.LogID, bool, error){f.logIDParam, f.messageIDParam} {
 		if id, _, err := read("max"); id != apron.MaxLogID || err != nil {
 			t.Errorf("max: %v, %v", id, err)
@@ -30,7 +29,8 @@ func TestLogIDBound(t *testing.T) {
 		t.Errorf("ref: %v", err)
 	}
 	for _, ref := range []string{`null`, `{}`, `{"message_id":"0"}`, `{"message_id":"x"}`, `{"message_id":5}`} {
-		if _, _, err := (Fields{"ref": jsontext.Value(ref)}).messageRefParam("ref"); err == nil || err.(*apron.Error).Message != "ref.message_id must be a positive decimal string" {
+		fields, _ := ParseFields(jsontext.Value(`{"ref":` + ref + `}`))
+		if _, _, err := fields.messageRefParam("ref"); err == nil || err.(*apron.Error).Message != "ref.message_id must be a positive decimal string" {
 			t.Errorf("ref %s: %v", ref, err)
 		}
 	}
@@ -123,7 +123,7 @@ func TestLogIDParams(t *testing.T) {
 	}
 
 	p, err := parseMessageFields(req(`{"message_id":"7","body":{"text":"x"},"reply_to":{"message_id":"3"}}`))
-	if err != nil || p.messageID != 7 || p.replyTo == nil || p.replyTo.MessageID != 3 {
+	if err != nil || p.messageID != 7 || !p.hasReply || p.replyTo.MessageID != 3 || !p.hasBody || p.body.Text != "x" {
 		t.Errorf("message: %+v %v", p, err)
 	}
 	for _, bad := range []string{`{"message_id":"0"}`, `{"message_id":"07"}`, `{"message_id":7}`, `{"reply_to":{"message_id":"0"}}`, `{"reply_to":{}}`, `{"reply_to":"3"}`} {
@@ -137,7 +137,7 @@ func TestLogIDParams(t *testing.T) {
 	if _, err := parseReact(req(`{"message_id":"x","emojis":[]}`)); apron.CodeOf(err) != apron.CodeInvalidParams {
 		t.Errorf("reactions with a bad message_id: %v", err)
 	}
-	if p, err := parseActivity(req(`{"read_message_id":"11"}`)); err != nil || p.ReadMessageID == nil || *p.ReadMessageID != 11 {
+	if p, err := parseActivity(req(`{"read_message_id":"11"}`)); err != nil || p.ReadMessageID != 11 {
 		t.Errorf("activity: %+v %v", p, err)
 	}
 	if _, err := parseActivity(req(`{"read_message_id":""}`)); err == nil {

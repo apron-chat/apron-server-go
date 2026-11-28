@@ -92,79 +92,87 @@ func TestPrintedConfigLoadsBack(t *testing.T) {
 	}
 }
 
-func TestTLSDomainIsThePublicURL(t *testing.T) {
-	options, _ := parse(t, "--tls.domain", "chat.example", "--webauthn.rp-id", "")
-	config, err := serverConfig(*options)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if config.PublicURL != "https://chat.example" || config.WebAuthn != nil {
-		t.Fatalf("config: public URL %q, passkeys %v", config.PublicURL, config.WebAuthn != nil)
-	}
-}
-
-func TestVAPIDSettings(t *testing.T) {
-	options, _ := parse(t, "--push.vapid-private-key", "key", "--push.vapid-subject", "mailto:ops@chat.example")
-	config, err := serverConfig(*options)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if config.VAPIDPrivateKey != "key" || config.VAPIDSubject != "mailto:ops@chat.example" {
-		t.Fatalf("VAPID settings: %q %q", config.VAPIDPrivateKey, config.VAPIDSubject)
-	}
-	for _, subject := range []string{"ops@chat.example", "http://chat.example"} {
-		options, _ := parse(t, "--push.vapid-subject", subject)
-		if _, err := serverConfig(*options); err == nil {
-			t.Errorf("VAPID subject %q accepted", subject)
+// The flags reach the server's configuration: each case parses its
+// arguments and reads the fields they set.
+func TestServerConfig(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		args []string
+		got  func(aprond.Config) any
+		want any
+	}{
+		{"tls domain is the public URL", []string{"--tls.domain", "chat.example", "--webauthn.rp-id", ""},
+			func(c aprond.Config) any { return []any{c.PublicURL, c.WebAuthn == nil} }, []any{"https://chat.example", true}},
+		{"VAPID", []string{"--push.vapid-private-key", "key", "--push.vapid-subject", "mailto:ops@chat.example"},
+			func(c aprond.Config) any { return []string{c.VAPIDPrivateKey, c.VAPIDSubject} }, []string{"key", "mailto:ops@chat.example"}},
+		{"insecure push", []string{"--push.allow-insecure"}, func(c aprond.Config) any { return c.AllowInsecurePush }, true},
+		{"welcome", []string{"--welcome", "Sign in with **email**."}, func(c aprond.Config) any { return c.Welcome }, "Sign in with **email**."},
+		{"roles", []string{"--role", "admin=ada", "--role", "Moderator = bob", "--role", "admin=carol"},
+			func(c aprond.Config) any { return c.Roles }, map[string][]string{"admin": {"ada", "carol"}, "moderator": {"bob"}}},
+		{"identity", []string{"--title", " Example chat ", "--description", "Talk about *examples*.", "--avatar", "https://chat.example/icon.png"},
+			func(c aprond.Config) any { return []string{c.Title, c.Description, c.Avatar} },
+			[]string{"Example chat", "Talk about *examples*.", "https://chat.example/icon.png"}},
+		{"live text defaults", nil,
+			func(c aprond.Config) any {
+				return []any{c.LiveTextMaxDuration, c.LiveTextMaxBytes, c.TerminalKeepBytes, c.AppendMaxBytes, c.TerminalViewerURL}
+			},
+			[]any{time.Hour, int64(16 << 20), 64 << 10, 64 << 10, "https://terminal.apron.chat/"}},
+		{"live text set", []string{"--live.max-minutes", "2", "--live.max-mb", "1", "--live.terminal-keep-kb", "8", "--live.append-max-kb", "256"},
+			func(c aprond.Config) any {
+				return []any{c.LiveTextMaxDuration, c.LiveTextMaxBytes, c.TerminalKeepBytes, c.AppendMaxBytes}
+			},
+			[]any{2 * time.Minute, int64(1 << 20), 8 << 10, 256 << 10}},
+		{"terminal viewer", []string{"--live.terminal-viewer", "https://terminal.example/view"},
+			func(c aprond.Config) any { return c.TerminalViewerURL }, "https://terminal.example/view"},
+		{"no terminal viewer", []string{"--live.terminal-viewer", ""}, func(c aprond.Config) any { return c.TerminalViewerURL }, ""},
+		{"external issuer", []string{"--external.issuer", "https://id.example", "--external.scope", "openid profile"},
+			func(c aprond.Config) any {
+				if c.ExternalIssuer == nil {
+					return nil
+				}
+				return []string{c.ExternalIssuer.Issuer, c.ExternalIssuer.Scope}
+			},
+			[]string{"https://id.example", "openid profile"}},
+		{"signal unknown passkeys", []string{"--webauthn.signal-unknown"}, func(c aprond.Config) any { return c.SignalUnknownPasskeys }, true},
+		{"guest-first passkeys", []string{"--webauthn.guest-first"}, func(c aprond.Config) any { return c.GuestFirstPasskeys }, true},
+	} {
+		options, _ := parse(t, test.args...)
+		config, err := serverConfig(*options)
+		if err != nil {
+			t.Errorf("%s: %q: %v", test.name, test.args, err)
+		} else if got := test.got(config); !reflect.DeepEqual(got, test.want) {
+			t.Errorf("%s: %q gives %#v, want %#v", test.name, test.args, got, test.want)
 		}
 	}
 }
 
-func TestInsecurePushIsForTestsOnly(t *testing.T) {
-	options, _ := parse(t, "--push.allow-insecure")
-	if config, err := serverConfig(*options); err != nil || !config.AllowInsecurePush {
-		t.Fatalf("allow insecure %v, error %v", config.AllowInsecurePush, err)
-	}
-	// A public server refuses it, as it lets clients reach internal addresses.
+// Flags that would make a broken or unsafe server are refused.
+func TestServerConfigRefuses(t *testing.T) {
 	for _, args := range [][]string{
+		{"--push.vapid-subject", "ops@chat.example"},
+		{"--push.vapid-subject", "http://chat.example"},
+		// A public server refuses insecure push, as it lets clients reach
+		// internal addresses.
 		{"--push.allow-insecure", "--public-url", "https://chat.example"},
 		{"--push.allow-insecure", "--tls.domain", "chat.example"},
+		{"--role", "admin"}, {"--role", "=ada"}, {"--role", "admin="},
+		// An append is part of a message's text, which a request carries.
+		{"--live.append-max-kb", "257"},
+		{"--live.terminal-viewer", "terminal.apron.chat"},
+		{"--live.terminal-viewer", "javascript:alert(1)"},
+		{"--live.terminal-viewer", "https://terminal.example/#stream="},
+		{"--live.terminal-viewer", "https://user@terminal.example/"},
+		// The log sender is for development: a public server refuses it.
+		{"--email.enable", "--email.sender", "log", "--public-url", "https://chat.example"},
+		{"--email.enable", "--email.sender", "log", "--tls.domain", "chat.example"},
+		// smtp, the default sender, needs its server and sender address.
+		{"--email.enable", "--email.from", "chat@example.com"},
+		{"--email.enable", "--email.smtp-addr", "smtp.example:587"},
 	} {
 		options, _ := parse(t, args...)
 		if _, err := serverConfig(*options); err == nil {
-			t.Errorf("accepted %v", args)
+			t.Errorf("accepted %q", args)
 		}
-	}
-}
-
-func TestWelcomeAndRoles(t *testing.T) {
-	options, _ := parse(t, "--welcome", "Sign in with **email**.", "--role", "admin=ada", "--role", "Moderator = bob", "--role", "admin=carol")
-	config, err := serverConfig(*options)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if config.Welcome != "Sign in with **email**." {
-		t.Fatalf("welcome: %q", config.Welcome)
-	}
-	if want := map[string][]string{"admin": {"ada", "carol"}, "moderator": {"bob"}}; !reflect.DeepEqual(config.Roles, want) {
-		t.Fatalf("roles: %v", config.Roles)
-	}
-	for _, grant := range []string{"admin", "=ada", "admin="} {
-		options, _ := parse(t, "--role", grant)
-		if _, err := serverConfig(*options); err == nil {
-			t.Errorf("accepted --role %q", grant)
-		}
-	}
-}
-
-func TestServerIdentity(t *testing.T) {
-	options, _ := parse(t, "--title", " Example chat ", "--description", "Talk about *examples*.", "--avatar", "https://chat.example/icon.png")
-	config, err := serverConfig(*options)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if config.Title != "Example chat" || config.Description != "Talk about *examples*." || config.Avatar != "https://chat.example/icon.png" {
-		t.Fatalf("title %q, description %q, avatar %q", config.Title, config.Description, config.Avatar)
 	}
 }
 
@@ -188,16 +196,6 @@ func TestEmailSenders(t *testing.T) {
 	if config, err := serverConfig(*options); err != nil || config.EmailSender != (aprond.LogEmailSender{}) || config.EmailLinkURL != "" {
 		t.Fatalf("log sender %T, link %q, error %v", config.EmailSender, config.EmailLinkURL, err)
 	}
-	// The log sender is for development: a public server refuses it.
-	for _, args := range [][]string{
-		{"--email.enable", "--email.sender", "log", "--public-url", "https://chat.example"},
-		{"--email.enable", "--email.sender", "log", "--tls.domain", "chat.example"},
-	} {
-		options, _ := parse(t, args...)
-		if _, err := serverConfig(*options); err == nil {
-			t.Errorf("accepted %v", args)
-		}
-	}
 	// smtp is the default sender.
 	options, _ = parse(t, "--email.enable", "--email.smtp-addr", "smtp.example:587", "--email.from", "Apron <chat@example.com>", "--public-url", "https://chat.example/")
 	config, err := serverConfig(*options)
@@ -206,63 +204,6 @@ func TestEmailSenders(t *testing.T) {
 	}
 	if sender, ok := config.EmailSender.(*smtpSender); !ok || sender.addr != "smtp.example:587" || sender.insecure || config.EmailLinkURL != "https://chat.example/" {
 		t.Fatalf("smtp sender %#v, link %q", config.EmailSender, config.EmailLinkURL)
-	}
-	for _, args := range [][]string{
-		{"--email.enable", "--email.from", "chat@example.com"},
-		{"--email.enable", "--email.smtp-addr", "smtp.example:587"},
-	} {
-		options, _ := parse(t, args...)
-		if _, err := serverConfig(*options); err == nil {
-			t.Errorf("accepted %v", args)
-		}
-	}
-}
-
-func TestLiveTextSettings(t *testing.T) {
-	options, _ := parse(t)
-	config, err := serverConfig(*options)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if config.LiveTextMaxDuration != time.Hour || config.LiveTextMaxBytes != 16<<20 ||
-		config.TerminalKeepBytes != 64<<10 || config.AppendMaxBytes != 64<<10 {
-		t.Fatalf("defaults: %v %d %d %d", config.LiveTextMaxDuration, config.LiveTextMaxBytes, config.TerminalKeepBytes, config.AppendMaxBytes)
-	}
-	options, _ = parse(t, "--live.max-minutes", "2", "--live.max-mb", "1", "--live.terminal-keep-kb", "8", "--live.append-max-kb", "256")
-	if config, err = serverConfig(*options); err != nil {
-		t.Fatal(err)
-	}
-	if config.LiveTextMaxDuration != 2*time.Minute || config.LiveTextMaxBytes != 1<<20 ||
-		config.TerminalKeepBytes != 8<<10 || config.AppendMaxBytes != 256<<10 {
-		t.Fatalf("set: %v %d %d %d", config.LiveTextMaxDuration, config.LiveTextMaxBytes, config.TerminalKeepBytes, config.AppendMaxBytes)
-	}
-	// An append is part of a message's text, which a request carries.
-	options, _ = parse(t, "--live.append-max-kb", "257")
-	if _, err := serverConfig(*options); err == nil {
-		t.Fatal("accepted an append larger than a request")
-	}
-}
-
-func TestTerminalViewerSetting(t *testing.T) {
-	for _, c := range []struct {
-		args []string
-		want string
-	}{
-		{nil, "https://terminal.apron.chat/"},
-		{[]string{"--live.terminal-viewer", "https://terminal.example/view"}, "https://terminal.example/view"},
-		{[]string{"--live.terminal-viewer", ""}, ""},
-	} {
-		options, _ := parse(t, c.args...)
-		config, err := serverConfig(*options)
-		if err != nil || config.TerminalViewerURL != c.want {
-			t.Errorf("%v: %q, %v", c.args, config.TerminalViewerURL, err)
-		}
-	}
-	for _, viewer := range []string{"terminal.apron.chat", "javascript:alert(1)", "https://terminal.example/#stream=", "https://user@terminal.example/"} {
-		options, _ := parse(t, "--live.terminal-viewer", viewer)
-		if _, err := serverConfig(*options); err == nil {
-			t.Errorf("accepted --live.terminal-viewer %q", viewer)
-		}
 	}
 }
 

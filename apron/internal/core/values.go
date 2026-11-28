@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"encoding/json/jsontext"
 	"errors"
-	"strconv"
 )
 
 // IsNull reports whether raw is the JSON null.
@@ -23,18 +22,22 @@ var (
 // number, without a sign or leading zeros, of at most MaxLogID. It tells a
 // string that is no number (ErrNotLogID) from a number past MaxLogID
 // (ErrLogIDRange).
-func ParseLogID(s string) (int64, error) {
-	if s == "" || s[0] == '0' && len(s) > 1 {
+func ParseLogID[S string | []byte](s S) (int64, error) {
+	if len(s) == 0 || s[0] == '0' && len(s) > 1 {
 		return 0, ErrNotLogID
 	}
+	var n int64
 	for i := 0; i < len(s); i++ {
 		if s[i] < '0' || s[i] > '9' {
 			return 0, ErrNotLogID
 		}
+		// MaxLogID has 16 digits: a number of more is past it, and is
+		// not added up, where it could overflow.
+		if i < 16 {
+			n = 10*n + int64(s[i]-'0')
+		}
 	}
-	n, err := strconv.ParseInt(s, 10, 64)
-	if err != nil || n > MaxLogID {
-		// Only a number too large for an int64 is not parsed.
+	if len(s) > 16 || n > MaxLogID {
 		return 0, ErrLogIDRange
 	}
 	return n, nil

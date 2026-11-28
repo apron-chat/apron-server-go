@@ -1,6 +1,10 @@
 package apron
 
-import "errors"
+import (
+	"encoding/json/jsontext"
+	"encoding/json/v2"
+	"errors"
+)
 
 // HistoryParams are the params of history (§4.3): an empty RoomID is every
 // room the connection receives; After and Before are inclusive log_id
@@ -57,6 +61,61 @@ type HistoryResult struct {
 	// HistoryLogID is the inclusive lower bound of what is retrievable, or
 	// 0 for nothing, which is sent as null: every result has it (§4.3.3).
 	HistoryLogID LogID `json:"history_log_id"`
+	// Raw, unless it is the zero RawRecords, holds the result's records
+	// encoded, which take the place of Rooms, Messages, Reactions, and
+	// Memberships as it is sent: for a server that keeps its log encoded,
+	// which then sends its records as they are rather than decode each to
+	// have it encoded again. A result decoded has none: its records are in
+	// their arrays.
+	Raw RawRecords `json:"-"`
+}
+
+// RawRecords are the records of a history result (HistoryResult.Raw)
+// encoded, each a JSON object that a client decodes into the record of its
+// type, such as a Message, as it would decode the one Marshal encodes: the
+// same members and values, in any order, such as a log's stored bytes or
+// the frames a server sent live. They are in the order of the arrays they
+// stand for, ascending log_id (§4.3.2).
+// The values are sent as they are, checked to be valid JSON, and are not
+// changed: a server shares them with the log it keeps them in.
+type RawRecords struct {
+	Rooms, Messages, Reactions, Memberships []jsontext.Value
+}
+
+// IsZero reports whether r holds no arrays at all, as a result's Raw
+// that is not used; one with an array, empty too, is used, and nil is not.
+// Its pointer receiver spares encoding a copy of r to call it.
+func (r *RawRecords) IsZero() bool {
+	return r == nil || r.Rooms == nil && r.Messages == nil && r.Reactions == nil && r.Memberships == nil
+}
+
+// historyResultJSON is a HistoryResult as encoding/json encodes one,
+// without its MarshalJSONTo.
+type historyResultJSON HistoryResult
+
+// rawHistoryJSON is a HistoryResult with its records raw.
+type rawHistoryJSON struct {
+	Rooms        []jsontext.Value `json:"rooms,omitempty"`
+	Messages     []jsontext.Value `json:"messages,omitempty"`
+	Reactions    []jsontext.Value `json:"reactions,omitempty"`
+	Memberships  []jsontext.Value `json:"memberships,omitempty"`
+	FirstLogID   LogID            `json:"first_log_id,omitzero"`
+	LastLogID    LogID            `json:"last_log_id,omitzero"`
+	More         bool             `json:"more"`
+	LatestLogID  LogID            `json:"latest_log_id,omitzero"`
+	HistoryLogID LogID            `json:"history_log_id"`
+}
+
+// MarshalJSONTo writes the result, with Raw's records in place of its
+// arrays' when it has them.
+func (h *HistoryResult) MarshalJSONTo(enc *jsontext.Encoder) error {
+	if h.Raw.IsZero() {
+		return json.MarshalEncode(enc, (*historyResultJSON)(h))
+	}
+	return json.MarshalEncode(enc, &rawHistoryJSON{
+		Rooms: h.Raw.Rooms, Messages: h.Raw.Messages, Reactions: h.Raw.Reactions, Memberships: h.Raw.Memberships,
+		FirstLogID: h.FirstLogID, LastLogID: h.LastLogID, More: h.More, LatestLogID: h.LatestLogID, HistoryLogID: h.HistoryLogID,
+	})
 }
 
 // Record is one logged record, for server.Page: exactly one of Room, Message,

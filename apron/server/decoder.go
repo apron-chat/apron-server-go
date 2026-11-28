@@ -60,7 +60,7 @@ func (d *Decoder) Fail(err error) {
 
 // Has reports whether the params have the field, null included.
 func (d *Decoder) Has(name string) bool {
-	_, ok := d.fields[name]
+	_, ok := d.fields.Get(name)
 	return ok
 }
 
@@ -98,9 +98,15 @@ func (d *Decoder) Bool(name string, r Requirement) bool {
 	return read(d, name, r, d.fields.boolParam)
 }
 
-// Object reads an object param, with its values raw.
-func (d *Decoder) Object(name string, r Requirement) Fields {
-	return read(d, name, r, d.fields.objectParam)
+// Object reads an object param, with its values raw, and reports whether
+// the params have it: false when it is left out, or d has an error, with
+// the zero Fields, an empty object; an empty object sent is true.
+func (d *Decoder) Object(name string, r Requirement) (Fields, bool) {
+	object := read(d, name, r, d.fields.objectParam)
+	if d.err != nil || !d.Has(name) {
+		return Fields{}, false
+	}
+	return object, true
 }
 
 // Ext reads an ext param (§4.13): an object whose values are any JSON,

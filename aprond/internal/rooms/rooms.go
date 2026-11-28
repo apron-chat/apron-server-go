@@ -24,8 +24,11 @@ import (
 	"fmt"
 	"iter"
 	"maps"
+	"math"
 	"slices"
 	"strings"
+	"sync/atomic"
+	"time"
 
 	"github.com/apron-chat/apron-server-go/apron"
 	"github.com/apron-chat/apron-server-go/aprond/internal/roomlog"
@@ -39,6 +42,8 @@ type Member interface {
 	MemberID() string
 	// MemberScope is the rooms the user is limited to, nil for none.
 	MemberScope() *Scope
+	// MemberFrom is the user as records carry it: user_id and name.
+	MemberFrom() roomlog.Author
 }
 
 // Room is a room's current record, its log, and its members. Every room,
@@ -56,6 +61,10 @@ type Room[U Member] struct {
 	// record holds the latest logged room record.
 	record      roomlog.RoomRecord
 	recordLogID int64
+	// encoded is the latest record as EncodedRecord last encoded it, for
+	// the record of its log_id: replaced, never changed, so that readers
+	// under a read lock share it.
+	encoded atomic.Pointer[encodedRecord]
 	// log is the room's log, from its creation record.
 	log     *roomlog.Timeline
 	members map[string]U
@@ -68,6 +77,11 @@ type Room[U Member] struct {
 	creator string
 	// reads holds each user's latest read cursor (§4.6).
 	reads map[string]Cursor
+	// listed is the latest ListedMemberIDs, nil once it may have changed.
+	listed atomic.Pointer[listing]
+	// membersRecord is the record of every member that Retain logged
+	// last, 0 for none since the server started.
+	membersRecord int64
 }
 
 // Cursor is a user's read cursor in a room (§4.6): the message they read
@@ -93,6 +107,26 @@ func (r *Room[U]) Private() bool { return r.private }
 
 // Record is r's latest room record.
 func (r *Room[U]) Record() roomlog.RoomRecord { return r.record }
+
+// encodedRecord is a room record as encode made it, of the record of
+// logID.
+type encodedRecord struct {
+	logID int64
+	raw   jsontext.Value
+}
+
+// EncodedRecord returns r's latest room record as encode makes it, kept
+// from the last call while the record is the same, for a listing that
+// sends it as it is (apron.RoomView.Raw). The caller does not change it.
+// It may be called while the caller holds a read lock, as others do.
+func (r *Room[U]) EncodedRecord(encode func(roomlog.RoomRecord) jsontext.Value) jsontext.Value {
+	if e := r.encoded.Load(); e != nil && e.logID == r.recordLogID {
+		return e.raw
+	}
+	raw := encode(r.record)
+	r.encoded.Store(&encodedRecord{r.recordLogID, raw})
+	return raw
+}
 
 // Log is r's log.
 func (r *Room[U]) Log() *roomlog.Timeline { return r.log }
@@ -205,8 +239,13 @@ func (r *Room[U]) RevealsTo(to *Room[U]) bool {
 
 // ListedMemberIDs returns the user_ids of the members that r lists
 // (§4.2.1), ordered by user_id: all of them, or, past limit when it is
-// positive, the most recently active, and then truncated is set.
+// positive, the most recently active, and then truncated is set. The
+// caller does not modify them: they are kept until the members, or, when
+// truncated, their activity, change, as every sign-in lists them.
 func (r *Room[U]) ListedMemberIDs(limit int) (ids []string, truncated bool) {
+	if l := r.listed.Load(); l != nil && l.limit == limit {
+		return l.ids, l.truncated
+	}
 	ids = slices.Collect(maps.Keys(r.members))
 	if limit > 0 && len(ids) > limit {
 		slices.SortFunc(ids, func(a, b string) int {
@@ -215,7 +254,17 @@ func (r *Room[U]) ListedMemberIDs(limit int) (ids []string, truncated bool) {
 		ids, truncated = ids[:limit], true
 	}
 	slices.Sort(ids)
+	// Listings run holding the server's lock for reading, so several may
+	// keep one at once: each is the same.
+	r.listed.Store(&listing{limit: limit, ids: slices.Clip(ids), truncated: truncated})
 	return ids, truncated
+}
+
+// listing is a ListedMemberIDs result kept.
+type listing struct {
+	limit     int
+	ids       []string
+	truncated bool
 }
 
 // Listing selects what room_list lists of some rooms to a user (§4.2.1).
@@ -349,6 +398,16 @@ type Table[U Member, M MessageHolder] struct {
 	// Entries last took them.
 	dirty         map[string]struct{}
 	dirtyMessages map[string]*Message
+	// forgottenMessages are the messages Forget let go of since Entries
+	// last took them, whose entries are deleted.
+	forgottenMessages []string
+	// later are the large rooms changed since Entries last took them only
+	// in what their entry may lag behind (touchLater), since laterSince.
+	// laterMessages are the messages with many reactions changed since
+	// then only in their reactions (touchMessageLater).
+	later         map[string]struct{}
+	laterMessages map[string]*Message
+	laterSince    time.Time
 	// restoring are the stored members of each room, from Restore until
 	// RestoreMembers.
 	restoring map[string][]string
@@ -360,6 +419,7 @@ func NewTable[U Member, M MessageHolder](log *roomlog.Log, hold func(*Message) M
 	return &Table[U, M]{
 		log: log, rooms: make(map[string]*Room[U]), messages: make(map[string]M), hold: hold,
 		dirty: make(map[string]struct{}), dirtyMessages: make(map[string]*Message),
+		later: make(map[string]struct{}), laterMessages: make(map[string]*Message),
 	}
 }
 
@@ -383,6 +443,34 @@ func (t *Table[U, M]) All() []*Room[U] {
 
 // Touch marks r as changed, for a change the table does not make itself.
 func (t *Table[U, M]) Touch(r *Room[U]) { t.dirty[r.id] = struct{}{} }
+
+// LaterMembers is the size, in members and read cursors, from which a
+// room's entry is rendered at most once every EntryDelay for what it may
+// lag behind (EntriesDue): the entry lists every member, their activity,
+// and their read cursors, so rendering it for each message in a large room
+// costs as much as the room is large, and the server's lock is held while
+// it is rendered.
+const LaterMembers = 64
+
+// EntryDelay is how long a large room's entry may lag behind its
+// latest_log_id, its members' activity, and their read cursors.
+const EntryDelay = 200 * time.Millisecond
+
+// touchLater marks r as changed in its latest_log_id, a member's activity
+// (§4.2.1), or a read cursor (§4.6): what its entry may lag behind for a
+// while when the room is large, since the records that changed them are
+// stored at once. A room that lags so is restored with the latest_log_id
+// of its latest stored record (roomlog.Log.Restore), and with the activity
+// and cursors its entry last kept, as after a restart a moment earlier.
+func (t *Table[U, M]) touchLater(r *Room[U]) {
+	if len(r.members)+len(r.reads) < LaterMembers {
+		t.Touch(r)
+		return
+	}
+	if _, now := t.dirty[r.id]; !now {
+		t.later[r.id] = struct{}{}
+	}
+}
 
 // Create logs the creation record of a room holding the client fields of
 // fields: title, description, and ext. The room is named id, or by its
@@ -430,10 +518,21 @@ func (t *Table[U, M]) commit(r *Room[U], logID int64, fields roomlog.RoomRecord)
 // Append adds a committed record to the log of each room it belongs to,
 // whose latest_log_id it becomes.
 func (t *Table[U, M]) Append(record *roomlog.Record, rooms ...*Room[U]) {
+	t.appendRecord(record, t.Touch, rooms)
+}
+
+// appendLater is Append for a record that changes nothing of its rooms'
+// entries but their latest_log_id, such as a message snapshot or a
+// reactions record (touchLater).
+func (t *Table[U, M]) appendLater(record *roomlog.Record, rooms ...*Room[U]) {
+	t.appendRecord(record, t.touchLater, rooms)
+}
+
+func (t *Table[U, M]) appendRecord(record *roomlog.Record, touch func(*Room[U]), rooms []*Room[U]) {
 	logs := make([]*roomlog.Timeline, len(rooms))
 	for i, r := range rooms {
 		logs[i] = r.log
-		t.Touch(r)
+		touch(r)
 	}
 	t.log.Append(record, logs...)
 }
@@ -447,6 +546,7 @@ func (t *Table[U, M]) Join(r *Room[U], u U, from roomlog.Author) (*roomlog.Recor
 		return nil, false
 	}
 	r.members[id] = u
+	r.listed.Store(nil)
 	record := t.logMembership(r, from, true)
 	r.active[id] = record.ID
 	return record, true
@@ -462,6 +562,7 @@ func (t *Table[U, M]) Leave(r *Room[U], u U, from roomlog.Author) (*roomlog.Reco
 	}
 	record := t.logMembership(r, from, false)
 	delete(r.members, id)
+	r.listed.Store(nil)
 	delete(r.active, id)
 	return record, true
 }
@@ -471,7 +572,9 @@ func (t *Table[U, M]) Leave(r *Room[U], u U, from roomlog.Author) (*roomlog.Reco
 // recorded object: user_id and name.
 func (t *Table[U, M]) logMembership(r *Room[U], from roomlog.Author, joined bool) *roomlog.Record {
 	record := roomlog.NewMembership(t.log.NextID(), r.id, from, joined)
-	t.Append(record, r)
+	// Restoring applies memberships over the room's entry, which may lag
+	// behind them (RestoreMembers).
+	t.appendLater(record, r)
 	return record
 }
 
@@ -480,7 +583,10 @@ func (t *Table[U, M]) logMembership(r *Room[U], from roomlog.Author, joined bool
 func (t *Table[U, M]) Posted(r *Room[U], id string, logID int64) {
 	if _, member := r.members[id]; member {
 		r.active[id] = logID
-		t.Touch(r)
+		if l := r.listed.Load(); l != nil && l.truncated {
+			r.listed.Store(nil)
+		}
+		t.touchLater(r)
 	}
 }
 
@@ -491,7 +597,7 @@ func (t *Table[U, M]) Read(r *Room[U], id string, cursor Cursor) bool {
 		return false
 	}
 	r.reads[id] = cursor
-	t.Touch(r)
+	t.touchLater(r)
 	return true
 }
 
@@ -519,6 +625,9 @@ type stored struct {
 	Members     []string                `json:"members"`
 	Creator     string                  `json:"creator,omitzero"`
 	Reads       map[string]storedCursor `json:"reads,omitzero"`
+	// Retained is where the room's retained history starts once a part of
+	// its log was discarded (roomlog.Timeline.Discard).
+	Retained int64 `json:"retained_id,omitzero"`
 }
 
 type storedCursor struct {
@@ -539,6 +648,7 @@ func Entry[U Member](r *Room[U]) store.Entry {
 		Private:     r.private,
 		Active:      r.active,
 	}
+	s.Retained = r.log.Retained()
 	if r.parent != nil {
 		s.Parent = r.parent.id
 	}
@@ -555,10 +665,59 @@ func Entry[U Member](r *Room[U]) store.Entry {
 // Entries returns the entries of the rooms and messages changed since it
 // was last called.
 func (t *Table[U, M]) Entries() []store.Entry {
-	if len(t.dirty) == 0 && len(t.dirtyMessages) == 0 {
+	return t.entries(true)
+}
+
+// EntriesDue is Entries but for the large rooms that changed only in what
+// their entries may lag behind (touchLater), which it leaves out until
+// EntryDelay has passed since the first of them changed, as of now.
+func (t *Table[U, M]) EntriesDue(now time.Time) []store.Entry {
+	lagging := t.lagging()
+	if lagging && t.laterSince.IsZero() {
+		t.laterSince = now
+	}
+	return t.entries(lagging && now.Sub(t.laterSince) >= EntryDelay)
+}
+
+func (t *Table[U, M]) lagging() bool { return len(t.later) > 0 || len(t.laterMessages) > 0 }
+
+// Lagging reports when the entries EntriesDue leaves out are due, and
+// whether there are any.
+func (t *Table[U, M]) Lagging() (time.Time, bool) {
+	if !t.lagging() {
+		return time.Time{}, false
+	}
+	return t.laterSince.Add(EntryDelay), true
+}
+
+func (t *Table[U, M]) entries(withLater bool) []store.Entry {
+	if withLater {
+		for id := range t.later {
+			t.dirty[id] = struct{}{}
+		}
+		maps.Copy(t.dirtyMessages, t.laterMessages)
+		clear(t.later)
+		clear(t.laterMessages)
+		t.laterSince = time.Time{}
+	} else {
+		for id := range t.dirty {
+			delete(t.later, id)
+		}
+		for id := range t.dirtyMessages {
+			delete(t.laterMessages, id)
+		}
+		if !t.lagging() {
+			t.laterSince = time.Time{}
+		}
+	}
+	if len(t.dirty) == 0 && len(t.dirtyMessages) == 0 && len(t.forgottenMessages) == 0 {
 		return nil
 	}
-	entries := make([]store.Entry, 0, len(t.dirty)+len(t.dirtyMessages))
+	entries := make([]store.Entry, 0, len(t.dirty)+len(t.dirtyMessages)+len(t.forgottenMessages))
+	for _, id := range t.forgottenMessages {
+		entries = append(entries, store.Entry{Kind: MessageEntryKind, ID: id})
+	}
+	t.forgottenMessages = t.forgottenMessages[:0]
 	for id := range t.dirty {
 		if r := t.rooms[id]; r != nil {
 			entries = append(entries, Entry(r))
@@ -588,7 +747,7 @@ func (t *Table[U, M]) Restore(entries map[string]jsontext.Value) error {
 		}
 		r := &Room[U]{
 			id: id, record: s.Record, recordLogID: s.RecordLogID,
-			log:     roomlog.NewTimeline(id, s.CreatedID, s.LatestID),
+			log:     restoredTimeline(id, s),
 			creator: s.Creator, private: s.Private, active: s.Active,
 			members: make(map[string]U), reads: make(map[string]Cursor, len(s.Reads)),
 		}
@@ -612,13 +771,134 @@ func (t *Table[U, M]) Restore(entries map[string]jsontext.Value) error {
 // RestoreMembers adds each room's stored members, oldest room first, as
 // member returns them; one it reports false for, such as a user who is
 // gone, is left out.
-func (t *Table[U, M]) RestoreMembers(member func(r *Room[U], id string) (U, bool)) {
+//
+// A large room's entry may lag behind its memberships (touchLater), so
+// its membership records are applied over the members its entry lists, in
+// order, each join or leave replacing its user's: each user ends as their
+// latest record left them, which an entry that is up to date lists
+// already.
+func (t *Table[U, M]) RestoreMembers(member func(r *Room[U], id string) (U, bool)) error {
 	for _, r := range t.All() {
+		ids := make(map[string]bool, len(t.restoring[r.id]))
 		for _, id := range t.restoring[r.id] {
+			ids[id] = true
+		}
+		for _, record := range r.log.Since(0, math.MaxInt) {
+			if record.Kind != roomlog.KindMembership {
+				continue
+			}
+			var m roomlog.Membership
+			if err := json.Unmarshal(record.Raw, &m); err != nil {
+				return fmt.Errorf("stored membership record %d: %w", record.ID, err)
+			}
+			for _, change := range m.Members {
+				id := change.User.UserID
+				switch {
+				case change.Joined && !ids[id]:
+					ids[id] = true
+					r.active[id] = max(r.active[id], record.ID)
+				case !change.Joined && ids[id]:
+					delete(ids, id)
+					delete(r.active, id)
+				}
+			}
+		}
+		for _, id := range slices.Sorted(maps.Keys(ids)) {
 			if u, ok := member(r, id); ok {
 				r.members[id] = u
 			}
 		}
+		r.listed.Store(nil)
 	}
 	t.restoring = nil
+	return nil
+}
+
+// restoredTimeline is the log of a room as its entry keeps it, without
+// its records.
+func restoredTimeline(id string, s stored) *roomlog.Timeline {
+	t := roomlog.NewTimeline(id, s.CreatedID, s.LatestID)
+	t.RestoreRetained(s.Retained)
+	return t
+}
+
+// Retain discards the records of r's log before the log_id before, but
+// never its latest record (§4.3.3): r's history_log_id moves to before,
+// or to its latest record. When the part discarded holds memberships, one
+// membership record of every current member, each joined, is logged after
+// it, as it must be before such a part goes. It returns the records
+// discarded, which Forget takes out of the log once no room holds them.
+func (t *Table[U, M]) Retain(r *Room[U], before int64) []*roomlog.Record {
+	before = min(before, r.log.Latest())
+	discarded := r.log.Discard(before)
+	if len(discarded) == 0 {
+		return nil
+	}
+	t.Touch(r)
+	// A record of the members logged by an earlier Retain that the log
+	// still holds serves for this part too: from it on, the log has every
+	// change of who is in the room, as when retention discards in passes.
+	if len(r.members) > 0 && r.membersRecord < r.log.HistoryID() && slices.ContainsFunc(discarded, func(record *roomlog.Record) bool { return record.Kind == roomlog.KindMembership }) {
+		ids := slices.Sorted(maps.Keys(r.members))
+		users := make([]roomlog.Author, len(ids))
+		for i, id := range ids {
+			users[i] = r.members[id].MemberFrom()
+		}
+		record := roomlog.NewMembers(t.log.NextID(), r.id, users)
+		t.Append(record, r)
+		r.membersRecord = record.ID
+	}
+	return discarded
+}
+
+// Forget takes the records discarded from rooms' logs (Retain) that no
+// room holds any more out of the server's log and the store, and with
+// them the messages none of whose snapshots is held any more, which it
+// returns: the server lets go of what it keeps of them.
+func (t *Table[U, M]) Forget(discarded []*roomlog.Record) []M {
+	gone := make(map[*roomlog.Record]bool)
+	for _, record := range discarded {
+		held := false
+		for _, id := range record.Rooms {
+			if r := t.rooms[id]; r != nil && r.log.HistoryID() <= record.ID {
+				held = true
+				break
+			}
+		}
+		if !held {
+			gone[record] = true
+		}
+	}
+	t.log.Forget(gone)
+	var forgotten []M
+	for record := range gone {
+		if record.Kind != roomlog.KindMessage {
+			continue
+		}
+		holder, ok := t.messages[record.Message]
+		if !ok {
+			continue
+		}
+		m := holder.Kept()
+		goneOf := 0
+		for _, r := range m.records {
+			if gone[r] {
+				goneOf++
+			}
+		}
+		switch {
+		case goneOf == len(m.records):
+			// The message keeps its snapshots, for what the server lets
+			// go of with it, such as its uploads.
+			delete(t.messages, m.id)
+			delete(t.dirtyMessages, m.id)
+			delete(t.laterMessages, m.id)
+			t.forgottenMessages = append(t.forgottenMessages, m.id)
+			forgotten = append(forgotten, holder)
+		case goneOf > 0:
+			m.records = slices.DeleteFunc(m.records, func(r *roomlog.Record) bool { return gone[r] })
+			t.dirtyMessages[m.id] = m
+		}
+	}
+	return forgotten
 }

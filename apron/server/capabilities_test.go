@@ -92,6 +92,13 @@ func TestIDs(t *testing.T) {
 	}
 }
 
+func TestIDsZero(t *testing.T) {
+	var ids MessageIDs[string]
+	if a, b := ids.ID("a", time.UnixMilli(1000)), ids.ID("b", time.UnixMilli(1000)); a != 1000 || b != 1001 {
+		t.Fatalf("the zero MessageIDs: %s %s", a, b)
+	}
+}
+
 func TestParseStatus(t *testing.T) {
 	p, err := parseStatus(req(`{"idle": false, "mute": 3600, "room_id": "general"}`))
 	if err != nil || p.Idle == nil || !p.Idle.Attended || p.Mute == nil || !p.Mute.On || p.Mute.Seconds != 3600 || p.RoomID != "general" {
@@ -124,5 +131,16 @@ func TestParseHistory(t *testing.T) {
 		if _, err := parseHistory(req(bad)); err == nil {
 			t.Errorf("%s was accepted", bad)
 		}
+	}
+}
+
+// A room_list without members sends none, raw ones neither.
+func TestNormalizeRoomListRaw(t *testing.T) {
+	raw := []jsontext.Value{jsontext.Value(`{"user_id":"a"}`)}
+	result := normalizeRoomList(apron.RoomListParams{Filter: apron.RoomsJoined}, apron.RoomListResult{
+		Joined: []apron.RoomView{{Room: apron.Room{RoomID: "r"}, MembersRaw: raw, MemberCount: 1}}, UsersRaw: raw,
+	})
+	if result.UsersRaw != nil || result.Joined[0].MembersRaw != nil || result.Joined[0].MemberCount != 0 {
+		t.Fatalf("members left in %+v", result)
 	}
 }

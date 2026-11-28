@@ -2,9 +2,12 @@ package server
 
 import (
 	"context"
+	"iter"
 	"net"
 	"net/http"
+	"slices"
 	"sync"
+	"sync/atomic"
 
 	"github.com/apron-chat/apron-server-go/apron"
 	"github.com/apron-chat/apron-server-go/apron/internal/core"
@@ -20,8 +23,13 @@ type Conn struct {
 	ctx     context.Context
 	cancel  context.CancelFunc
 
-	mu   sync.Mutex
-	user *apron.User
+	// user is the connection's identity, nil before it signs in, and data
+	// the backend's value: each replaced, never changed, and read without
+	// a lock, as Broadcast and PublishUser read every connection's.
+	user atomic.Pointer[apron.User]
+	data atomic.Pointer[any]
+
+	mu sync.Mutex
 	// info is the last server frame the connection was sent, or is about
 	// to be; announced is set once Announce has replaced it, so that the
 	// frame a connection opens with, made before, does not (opened).
@@ -34,7 +42,6 @@ type Conn struct {
 	// or auth's result, is queued (§3.1, §3.2.2).
 	holding bool
 	held    [][]apron.Frame
-	data    any
 }
 
 // Pending is an outcome not decided yet, such as a change being stored,
@@ -45,26 +52,25 @@ type Pending interface {
 	Err() error
 }
 
-// User returns a copy of the connection's identity, its roles and ext
-// included, or nil before it signs in.
-func (c *Conn) User() *apron.User {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.user == nil {
-		return nil
+// Identity returns the connection's identity as the connection keeps it,
+// without copying it, and whether it is signed in, for a handler that
+// reads it, such as a message's sender, on every request. The identity is never changed once set (SetUser keeps a
+// copy of its own), but its Roles, Ext, and Unknown are shared with the
+// connection's: the caller does not change them, and copies them first
+// to change them.
+func (c *Conn) Identity() (apron.User, bool) {
+	if user := c.user.Load(); user != nil {
+		return *user, true
 	}
-	u := cloneUser(*c.user)
-	return &u
+	return apron.User{}, false
 }
 
 // UserID returns the connection's user_id, or "" before it signs in.
 func (c *Conn) UserID() string {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.user == nil {
-		return ""
+	if user := c.user.Load(); user != nil {
+		return user.UserID
 	}
-	return c.user.UserID
+	return ""
 }
 
 // SetUser changes the connection's identity, as after a sign-in or a
@@ -73,9 +79,7 @@ func (c *Conn) UserID() string {
 // changed in OnConnect, which the Server tells it of (Server.Local).
 func (c *Conn) SetUser(u apron.User) {
 	u = cloneUser(u)
-	c.mu.Lock()
-	c.user = &u
-	c.mu.Unlock()
+	c.user.Store(&u)
 }
 
 // SignOut leaves the connection without an identity: its requests are
@@ -83,7 +87,8 @@ func (c *Conn) SetUser(u apron.User) {
 // (SetDedupScope).
 func (c *Conn) SignOut() {
 	c.mu.Lock()
-	c.user, c.scope = nil, ""
+	c.user.Store(nil)
+	c.scope = ""
 	c.mu.Unlock()
 }
 
@@ -108,26 +113,22 @@ func (c *Conn) SetDedupScope(scope string) {
 func (c *Conn) dedupScope() (userID, scope string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.user == nil {
-		return "", c.scope
-	}
-	return c.user.UserID, c.scope
+	return c.UserID(), c.scope
 }
 
 // Data returns the value the backend keeps with the connection, which it
 // reads with a type assertion, such as c.Data().(*session).
 func (c *Conn) Data() any {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.data
+	if data := c.data.Load(); data != nil {
+		return *data
+	}
+	return nil
 }
 
 // SetData keeps a value with the connection, such as the backend's own
 // object for its user.
 func (c *Conn) SetData(v any) {
-	c.mu.Lock()
-	c.data = v
-	c.mu.Unlock()
+	c.data.Store(&v)
 }
 
 // ServerInfo returns the server frame the connection was last sent.
@@ -223,7 +224,9 @@ func (c *Conn) Send(frames ...apron.Frame) bool {
 	}
 	c.mu.Lock()
 	if c.holding {
-		c.held = append(c.held, frames)
+		// A copy, so that frames, the caller's, stays the caller's: Send
+		// of one frame allocates nothing.
+		c.held = append(c.held, slices.Clone(frames))
 		c.mu.Unlock()
 		return true
 	}
@@ -231,7 +234,44 @@ func (c *Conn) Send(frames ...apron.Frame) bool {
 	return c.enqueue(frames)
 }
 
+// SendAll sends one frame to each connection of conns, as Send does to
+// each, such as a room's members from the backend's own lists, as
+// Broadcast sends one to those its filter picks: it queues the frame to
+// every connection before it wakes their writers, which costs more than
+// queuing, so that a backend that sends while it holds its lock holds it
+// for less. Like Send, it never blocks.
+//
+//	server.SendAll(frame, maps.Keys(room.members))
+func SendAll(frame apron.Frame, conns iter.Seq[*Conn]) {
+	var w waker
+	defer w.wake()
+	for c := range conns {
+		w.add(c.sendDeferred(frame))
+	}
+}
+
+// sendDeferred queues a frame as Send does, but leaves its writer to be
+// woken (core.Conn.SendFrameDeferred): it returns the connection's
+// runtime when it is, else nil.
+func (c *Conn) sendDeferred(frame apron.Frame) *core.Conn {
+	c.mu.Lock()
+	if c.holding {
+		c.held = append(c.held, []apron.Frame{frame})
+		c.mu.Unlock()
+		return nil
+	}
+	c.mu.Unlock()
+	if _, wake := c.rt.SendFrameDeferred(frame); wake {
+		return c.rt
+	}
+	return nil
+}
+
+// enqueue queues frames as one batch.
 func (c *Conn) enqueue(frames []apron.Frame) bool {
+	if len(frames) == 1 {
+		return c.rt.SendFrame(frames[0])
+	}
 	return c.rt.Send(framesOf(frames)...)
 }
 
@@ -269,9 +309,13 @@ func (c *Conn) release(discard bool) {
 func (c *Conn) Close() { c.rt.Stop() }
 
 // CloseWithError sends an error about the connection as a whole, after the
-// frames already queued, then closes it (§1.1).
+// frames already queued, then closes it (§1.1). A nil e is sent as an
+// internal error, as the frame must carry one.
 func (c *Conn) CloseWithError(e *apron.Error) {
-	payload, err := core.Marshal(map[string]any{"error": e})
+	if e == nil {
+		e = internalError()
+	}
+	payload, err := core.Marshal(&core.ReplyFrame{Error: e})
 	if err != nil {
 		return
 	}

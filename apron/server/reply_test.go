@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json/jsontext"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -14,11 +15,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/coder/websocket"
-
 	"github.com/apron-chat/apron-server-go/apron"
 	"github.com/apron-chat/apron-server-go/apron/aprontest"
 	"github.com/apron-chat/apron-server-go/apron/server"
+	"github.com/coder/websocket"
 )
 
 // local opens a Local connection to s as ada, closed when the test ends.
@@ -191,7 +191,7 @@ func (b *broadcasting) Auth(_ context.Context, c *server.Conn, p apron.AuthParam
 	if p.UserID == "bad id" {
 		you.UserID = p.UserID
 	}
-	if err := reply.Send(apron.AuthResult{You: &apron.CurrentUser{User: you}}); err != nil {
+	if err := reply.Send(apron.AuthResult{You: apron.CurrentUser{User: you}}); err != nil {
 		return err
 	}
 	if c.UserID() != "ada" {
@@ -218,10 +218,10 @@ func TestAuthSendSignsIn(t *testing.T) {
 		t.Fatalf("got %s, want the broadcast after the result", f.Raw)
 	}
 	var update apron.UserUpdate
-	if f := next(t, c); f.Method != "user" || f.Decode(&update) != nil || update.You == nil || update.You.Name != "Ada L" {
+	if f := next(t, c); f.Method != "user" || f.Decode(&update) != nil || update.You.UserID == "" || update.You.Name != "Ada L" {
 		t.Fatalf("got %s, want the published user", f.Raw)
 	}
-	if u := onlyConn(t, b.s).User(); u == nil || u.Name != "Ada L" {
+	if u := userOf(onlyConn(t, b.s)); u == nil || u.Name != "Ada L" {
 		t.Fatalf("the connection's user is %+v", u)
 	}
 }
@@ -388,7 +388,7 @@ func TestCheckOrigin(t *testing.T) {
 type badLogIDs struct{ notified chan bool }
 
 func (h badLogIDs) serve(_ context.Context, c *server.Conn, _ *server.Request, reply server.Reply[any]) error {
-	h.notified <- c.Notify(apron.Message{LogID: apron.MaxLogID + 1, RoomID: "r", From: apron.User{UserID: "ada"}, Body: &apron.Body{Text: "x"}})
+	h.notified <- c.Notify(apron.Message{LogID: apron.MaxLogID + 1, RoomID: "r", From: apron.User{UserID: "ada"}, Body: apron.Body{Text: "x"}})
 	return reply.Send(map[string]any{"log_id": apron.LogID(-1)})
 }
 
@@ -411,5 +411,104 @@ func TestLogIDOutOfRangeNotSent(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Errorf("the log does not say %q: %s", want, out)
 		}
+	}
+}
+
+// A handler that replies itself, as a backend holding its own lock does,
+// gets its result and its frames out together, and nothing else.
+func TestReplyInHandler(t *testing.T) {
+	s := wired(&backend{}, server.Config{})
+	var mu sync.Mutex
+	s.Handle("snapshot", server.Handler{Serve: func(ctx context.Context, c *server.Conn, r *server.Request, reply server.Reply[any]) error {
+		mu.Lock()
+		defer mu.Unlock()
+		after, _ := server.EncodeRaw("cursor", map[string]any{"n": 1})
+		if reply.Send(map[string]any{"state": 1}, after) != nil {
+			t.Error("Reply failed")
+		}
+		if reply.Send(map[string]any{"state": 2}) == nil {
+			t.Error("a second Reply was sent")
+		}
+		return nil
+	}})
+	c := aprontest.Connect(t, s)
+	signIn(t, c)
+	send(t, c, `{"method":"snapshot","id":"s"}`)
+	if f := next(t, c); f.ID != "s" || fields(f)["state"] != float64(1) {
+		t.Fatalf("got %s", f.Raw)
+	}
+	if f := next(t, c); f.Method != "cursor" {
+		t.Fatalf("got %s, want the frame after the reply", f.Raw)
+	}
+	if err := c.Sync(wait(t)); err != nil || len(c.Pending()) != 0 {
+		t.Fatalf("sync: %v, %d frames more", err, len(c.Pending()))
+	}
+	// A duplicate gets the reply that was sent.
+	send(t, c, `{"method":"snapshot","id":"s"}`)
+	if f := next(t, c); fields(f)["state"] != float64(1) {
+		t.Fatalf("duplicate: %s", f.Raw)
+	}
+}
+
+type refreshing struct {
+	backend
+	version int
+	wrong   bool
+}
+
+// Refresh brings a me result up to date as the user's current object, and
+// any other method's as it likes; wrong brings me's up as a map, which a
+// me result may not be.
+func (b *refreshing) Refresh(_ context.Context, c *server.Conn, method string, _ jsontext.Value) any {
+	switch {
+	case method != "me":
+		return map[string]any{"method": method, "version": b.version}
+	case b.wrong:
+		return map[string]any{"you": map[string]any{"name": "wrong"}}
+	}
+	return &apron.CurrentUser{UserID: userOf(c).UserID, Name: fmt.Sprintf("v%d", b.version)}
+}
+
+func (b *refreshing) Me(_ context.Context, c *server.Conn, _ apron.MeParams, reply server.Reply[apron.CurrentUser]) error {
+	b.version++
+	return reply.Send(apron.CurrentUser{User: *userOf(c)})
+}
+
+// A duplicate's result brought up to date is sent as its method's result:
+// a me result's CurrentUser as {"you": ...}, and any other as it is. A me
+// result brought up to date as anything else is logged, and the duplicate
+// gets the original.
+func TestRefreshDuplicate(t *testing.T) {
+	var log logged
+	b := &refreshing{}
+	s := wired(b, server.Config{RefreshDuplicate: b.Refresh, Logger: log.logger()})
+	s.Handle("ext:count", server.Handler{Serve: func(_ context.Context, _ *server.Conn, r *server.Request, reply server.Reply[any]) error {
+		return reply.Send(map[string]any{"version": 0})
+	}})
+	c := aprontest.Connect(t, s)
+	userID := signIn(t, c)
+	send(t, c, `{"method":"me","id":"m","params":{"name":"x"}}`)
+	original := next(t, c)
+	b.version = 7
+	send(t, c, `{"method":"me","id":"m","params":{"name":"x"}}`)
+	var me struct {
+		You apron.CurrentUser `json:"you"`
+	}
+	if f := next(t, c); f.Decode(&me) != nil || me.You.Name != "v7" || me.You.UserID != userID || len(fields(f)) != 1 {
+		t.Fatalf("duplicate: %s", f.Raw)
+	}
+	b.wrong = true
+	send(t, c, `{"method":"me","id":"m","params":{"name":"x"}}`)
+	if f := next(t, c); string(f.Result) != string(original.Result) {
+		t.Fatalf("a duplicate brought up to date wrong got %s, want the original %s", f.Result, original.Result)
+	}
+	if out := log.String(); !strings.Contains(out, "level=ERROR") || !strings.Contains(out, "other than a CurrentUser") {
+		t.Fatalf("the wrong me result was not logged: %s", out)
+	}
+	send(t, c, `{"method":"ext:count","id":"n"}`)
+	next(t, c)
+	send(t, c, `{"method":"ext:count","id":"n"}`)
+	if f := fields(next(t, c)); f["version"] != float64(7) || f["method"] != "ext:count" {
+		t.Fatalf("duplicate: %v", f)
 	}
 }

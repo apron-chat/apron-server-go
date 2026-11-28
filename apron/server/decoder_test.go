@@ -146,7 +146,7 @@ func TestNewReply(t *testing.T) {
 		t.Fatalf("another method: %s", rec.raw)
 	}
 	rec = send("auth", `{"scheme":"guest"}`, func(r *Request) {
-		if err := replyFor[apron.AuthResult](r, nil).Send(apron.AuthResult{You: &apron.CurrentUser{UserID: "a b"}}); apron.CodeOf(err) != apron.CodeInternalError {
+		if err := replyFor[apron.AuthResult](r, nil).Send(apron.AuthResult{You: apron.CurrentUser{UserID: "a b"}}); apron.CodeOf(err) != apron.CodeInternalError {
 			t.Errorf("an invalid user_id: %v", err)
 		}
 	})
@@ -180,4 +180,25 @@ func TestFieldsShared(t *testing.T) {
 		})
 	}
 	wg.Wait()
+}
+
+// Object reports an object left out as not there, and an empty one as there.
+func TestDecoderObject(t *testing.T) {
+	f, _ := ParseFields(jsontext.Value(`{"empty":{},"full":{"a":1},"bad":[]}`))
+	d := f.Decoder()
+	if _, ok := d.Object("missing", Optional); ok {
+		t.Error("an object left out is there")
+	}
+	if empty, ok := d.Object("empty", Optional); !ok || empty.Len() != 0 {
+		t.Errorf("empty: %v, %v", empty, ok)
+	}
+	if full, ok := d.Object("full", Optional); !ok || full.Len() != 1 {
+		t.Errorf("full: %v, %v", full, ok)
+	}
+	if _, ok := d.Object("bad", Optional); ok || d.Err() == nil {
+		t.Error("an array is an object")
+	}
+	if _, ok := f.Decoder().Object("missing", Required); ok {
+		t.Error("a required object left out is there")
+	}
 }

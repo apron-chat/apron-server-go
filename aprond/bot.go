@@ -58,7 +58,7 @@ type BotOptions struct {
 	// Scope, if set, limits the bot to some rooms (Server.SetScope), from
 	// this start on: it sees no other, and leaves those it was in. A new
 	// bot joins the default room only if the scope lists it. Nil keeps the
-	// scope the bot had, if any; lift it with Host.SetScope.
+	// scope the bot had, if any; lift it with Host.ClearScope.
 	Scope *RoomScope
 }
 
@@ -465,7 +465,7 @@ func (r replyTo) applyPost(p *postRequest) {
 		p.replyErr = InvalidParams("reply_to.message_id must be a positive decimal string")
 		return
 	}
-	p.params.ReplyTo = &apron.MessageRef{MessageID: id}
+	p.params.ReplyTo = apron.MessageRef{MessageID: id}
 }
 
 func (r replyTo) applyStream(p *postRequest) { r.applyPost(p) }
@@ -526,7 +526,7 @@ func (b *Session) post(roomID, text string) *postRequest {
 // newPost starts a message with text to the room, whose WithExt writes
 // under extension's name.
 func newPost(roomID, text, extension string) *postRequest {
-	return &postRequest{params: apron.MessageParams{RoomID: roomID, Body: &apron.Body{Text: text}}, extension: extension}
+	return &postRequest{params: apron.MessageParams{RoomID: roomID, Body: apron.Body{Text: text}}, extension: extension}
 }
 
 // Join joins the room (§4.2.2).
@@ -572,7 +572,7 @@ func (b *Session) History(ctx context.Context, roomID string, options HistoryOpt
 // as a history page that Conn reads: the same snapshot, with its IDs as
 // Message has them, its body's text, format, and mentions in their own
 // fields, and the whole body, those of its members apron has no field for
-// too, decoded into Body. Host, Bot, Session, and DecodeMessage give
+// too, which Body decodes. Host, Bot, Session, and DecodeMessage give
 // Messages already.
 func MessageOf(m apron.Message) Message {
 	message := Message{
@@ -582,11 +582,11 @@ func MessageOf(m apron.Message) Message {
 	if m.MessageID != 0 {
 		message.ID = m.MessageID.String()
 	}
-	if m.ReplyTo != nil {
+	if m.ReplyTo.MessageID != 0 {
 		message.ReplyTo = m.ReplyTo.MessageID.String()
 	}
-	if body := m.Body; body != nil {
-		message.Body = bodyObject(body)
+	if body := m.Body; !body.IsZero() {
+		message.body = encodeJSON(body)
 		message.Text, message.Format = body.Text, cmp.Or(body.Format, apron.Plain)
 		message.Mentions = slices.Clone(body.Mentions)
 	}
@@ -604,16 +604,16 @@ func (m Message) Apron() apron.Message {
 	}
 	message.MessageID, _ = apron.ParseLogID(m.ID)
 	if id, err := apron.ParseLogID(m.ReplyTo); err == nil && id != 0 {
-		message.ReplyTo = &apron.MessageRef{MessageID: id}
+		message.ReplyTo = apron.MessageRef{MessageID: id}
 	}
 	switch {
-	case m.Body != nil:
+	case m.body != nil:
 		var body apron.Body
-		if json.Unmarshal(encodeJSON(m.Body), &body) == nil {
-			message.Body = &body
+		if json.Unmarshal(m.body, &body) == nil {
+			message.Body = body
 		}
 	case !m.Deleted:
-		message.Body = &apron.Body{Text: m.Text, Format: m.Format, Mentions: slices.Clone(m.Mentions)}
+		message.Body = apron.Body{Text: m.Text, Format: m.Format, Mentions: slices.Clone(m.Mentions)}
 	}
 	return message
 }

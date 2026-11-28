@@ -37,21 +37,6 @@ func errorCode(frame map[string]any) int {
 	return int(code)
 }
 
-func TestRequestIDsAreBounded(t *testing.T) {
-	_, httpServer := newTestServer(t, DefaultConfig())
-	c := dialTestClient(t, httpServer)
-	long := strings.Repeat("x", maxRequestIDBytes+1)
-	c.expectError(t, "me", long, map[string]any{}, CodeTooLarge)
-	c.result(t, "me", long[:maxRequestIDBytes], map[string]any{})
-}
-
-func TestRoomTitlesAreBounded(t *testing.T) {
-	_, httpServer := newTestServer(t, DefaultConfig())
-	c := dialTestClient(t, httpServer)
-	c.expectError(t, "room_set", "long", map[string]any{"room_id": "general", "title": strings.Repeat("x", maxTitleBytes+1)}, CodeTooLarge)
-	c.expectError(t, "room_set", "new", map[string]any{"title": strings.Repeat("x", maxTitleBytes+1)}, CodeTooLarge)
-}
-
 func TestActionsAreLimited(t *testing.T) {
 	app, httpServer := newTestServer(t, DefaultConfig())
 	c := dialTestClient(t, httpServer)

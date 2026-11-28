@@ -74,7 +74,7 @@ func notify(ctx context.Context, url string, auth apron.AuthParams, room, text s
 		return err
 	}
 	defer conn.Close()
-	if _, err := conn.Post(ctx, apron.MessageParams{RoomID: room, Body: &apron.Body{Text: text}}); err != nil {
+	if _, err := conn.Post(ctx, apron.MessageParams{RoomID: room, Body: apron.Body{Text: text}}); err != nil {
 		return fmt.Errorf("posting to %q: %w", room, err)
 	}
 	return nil

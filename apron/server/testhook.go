@@ -2,7 +2,6 @@ package server
 
 import (
 	"encoding/json/jsontext"
-	"encoding/json/v2"
 	"errors"
 
 	"github.com/apron-chat/apron-server-go/apron/internal/testhook"
@@ -31,8 +30,8 @@ func detachedRequest(method string, params jsontext.Value, rec testhook.Recorder
 	if len(params) == 0 {
 		params = jsontext.Value("{}")
 	}
-	var fields Fields
-	if err := json.Unmarshal(params, &fields); err != nil || fields == nil {
+	fields, err := ParseFields(params)
+	if err != nil {
 		return nil, errors.New("apron: params must be a JSON object")
 	}
 	return &Request{Method: method, params: params, fields: fields, hasID: true, rec: rec}, nil

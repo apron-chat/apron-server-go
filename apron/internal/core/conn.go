@@ -53,12 +53,46 @@ type Options struct {
 }
 
 // batch is one place in the queue: frames written one after another, with
-// nothing between them, or a fence.
+// nothing between them, or a fence. A batch of one frame, the most of
+// them, is that frame, one, without a slice of frames to allocate.
 type batch struct {
+	one    []byte
 	frames [][]byte
 	// last closes the connection once the frames are written.
 	last  bool
 	fence Fence
+	// slot, if set, is a place for frames to come (Reserve).
+	slot *Slot
+}
+
+// A Slot is a place in a connection's queue, kept for frames that are not
+// made yet, such as a result still being encoded: the writer waits there
+// until they are given (Fill), and writes them, then the frames queued
+// after the slot. A slot not filled within Options.WriteTimeout stops the
+// connection, as a write that takes longer does.
+type Slot struct {
+	frames [][]byte
+	once   sync.Once
+	filled chan struct{}
+}
+
+// Fill gives the slot its frames, written one after another, with nothing
+// between them; only the first Fill gives any.
+func (s *Slot) Fill(frames ...[]byte) {
+	s.once.Do(func() {
+		s.frames = frames
+		close(s.filled)
+	})
+}
+
+// Reserve queues a slot for frames to come, and returns it, or nil when
+// the connection is closing or stopped, or fell behind.
+func (c *Conn) Reserve() *Slot {
+	s := &Slot{filled: make(chan struct{})}
+	if !c.enqueue(batch{slot: s}) {
+		return nil
+	}
+	return s
 }
 
 // Conn is a connection's runtime: its bounded write queue, the writer and
@@ -67,9 +101,21 @@ type batch struct {
 type Conn struct {
 	t       Writer
 	options Options
-	out     chan batch
-	done    chan struct{}
-	stop    sync.Once
+	// queue is the batches waiting to be written, a ring that grows to
+	// Options.Queue, from head, of n of them, under qmu. idle is set while
+	// the writer waits for a batch, which whoever queues the next wakes
+	// it for, with a token on wake.
+	qmu   sync.Mutex
+	queue []batch
+	head  int
+	n     int
+	idle  bool
+	wake  chan struct{}
+	done  chan struct{}
+	stop  sync.Once
+	// stopped is set as done is closed, for enqueue to tell without a
+	// channel operation.
+	stopped atomic.Bool
 	// closing is set once the last batch is queued; nothing more is queued,
 	// and Serve's worker drops the frames still waiting.
 	closing atomic.Bool
@@ -77,12 +123,30 @@ type Conn struct {
 	// latest frame arrived, in Unix nanoseconds.
 	pinged    atomic.Bool
 	lastFrame atomic.Int64
+	// ctx is the writer's context, canceled as the connection stops.
+	ctx    context.Context
+	cancel context.CancelFunc
+	// timer bounds each write (Options.WriteTimeout), once for the
+	// connection rather than a context with a deadline for each frame:
+	// deadline is when the write under way must be done, in Unix
+	// nanoseconds, or 0 between writes, and armed is set while timer is.
+	timer    *time.Timer
+	deadline atomic.Int64
+	armed    atomic.Bool
+	// pinger fires each ping (Start), under pingMu.
+	pingMu sync.Mutex
+	pinger *time.Timer
 }
 
 // NewConn returns the runtime of a connection on t. Start starts it.
 func NewConn(t Writer, options Options) *Conn {
-	c := &Conn{t: t, options: options, out: make(chan batch, max(options.Queue, 1)), done: make(chan struct{})}
+	c := &Conn{t: t, options: options, wake: make(chan struct{}, 1), done: make(chan struct{})}
+	c.ctx, c.cancel = context.WithCancel(context.Background())
 	c.lastFrame.Store(time.Now().UnixNano())
+	if options.WriteTimeout > 0 {
+		c.timer = time.AfterFunc(options.WriteTimeout, c.writeExpired)
+		c.timer.Stop()
+	}
 	return c
 }
 
@@ -90,56 +154,154 @@ func NewConn(t Writer, options Options) *Conn {
 func (c *Conn) Start(ping bool) {
 	go c.writeLoop()
 	if ping && c.options.PingInterval > 0 {
-		go c.pingLoop()
+		// A timer, not a goroutine, waits for each ping: an idle
+		// connection keeps no goroutine for its pings.
+		t := time.AfterFunc(time.Hour, c.ping)
+		t.Stop()
+		c.pingMu.Lock()
+		c.pinger = t
+		c.pingMu.Unlock()
+		t.Reset(c.options.PingInterval)
 	}
 }
 
 // Done is closed once the connection stops.
 func (c *Conn) Done() <-chan struct{} { return c.done }
 
+// Stopped reports whether the connection stopped.
+func (c *Conn) Stopped() bool { return c.stopped.Load() }
+
 // Closing reports whether the connection's last batch is queued, or it
 // stopped.
 func (c *Conn) Closing() bool { return c.closing.Load() }
 
 // Queued is the number of batches waiting to be written.
-func (c *Conn) Queued() int { return len(c.out) }
+func (c *Conn) Queued() int {
+	c.qmu.Lock()
+	defer c.qmu.Unlock()
+	return c.n
+}
 
 // Send queues frames as one batch: written one after another, with no
 // other frame between them, in one place in the queue. A full queue stops
 // the connection. It reports false when the connection is closing or
 // stopped, or fell behind.
 func (c *Conn) Send(frames ...[]byte) bool {
-	if len(frames) == 0 {
+	switch len(frames) {
+	case 0:
 		return true
+	case 1:
+		return c.enqueue(batch{one: frames[0]})
 	}
 	return c.enqueue(batch{frames: frames})
 }
+
+// SendFrame queues one frame, as Send does, without a slice of frames.
+func (c *Conn) SendFrame(frame []byte) bool { return c.enqueue(batch{one: frame}) }
 
 // Fence holds the writer, and so every frame queued after it, until f is
 // done; see Fence.
 func (c *Conn) Fence(f Fence) bool { return c.enqueue(batch{fence: f}) }
 
 func (c *Conn) enqueue(b batch) bool {
-	if c.closing.Load() {
-		return false
+	queued, wake := c.enqueueDeferred(b)
+	if wake {
+		c.Wake()
 	}
-	// A stopped connection queues nothing, even when its queue has room: a
-	// select with both cases ready picks either.
+	return queued
+}
+
+// SendFrameDeferred queues one frame as SendFrame does, but leaves the
+// writer waiting for it, if it is: it reports whether the frame was
+// queued, and whether the writer is to be woken for it with Wake, which
+// the caller does once it has queued what else it queues, such as a
+// broadcast's frame to every connection: so that waking the writers is
+// not part of what it does while it holds a lock.
+func (c *Conn) SendFrameDeferred(frame []byte) (queued, wake bool) {
+	return c.enqueueDeferred(batch{one: frame})
+}
+
+// Wake wakes the writer for what SendFrameDeferred queued.
+func (c *Conn) Wake() {
 	select {
-	case <-c.done:
-		return false
+	case c.wake <- struct{}{}:
 	default:
 	}
-	select {
-	case c.out <- b:
-		return true
-	default:
+}
+
+func (c *Conn) enqueueDeferred(b batch) (queued, wake bool) {
+	// A connection closing or stopped queues nothing, even when its
+	// queue has room.
+	if c.closing.Load() || c.stopped.Load() {
+		return false, false
+	}
+	return c.push(b, c.options.OnFellBehind)
+}
+
+// push queues a batch, and reports whether the writer waits for it; a
+// full queue stops the connection, once fellBehind, if set, has run.
+func (c *Conn) push(b batch, fellBehind func()) (queued, wake bool) {
+	c.qmu.Lock()
+	if c.n == len(c.queue) && !c.grow() {
+		c.qmu.Unlock()
 		// A slow client holds up neither its sender nor anyone else's.
-		if c.options.OnFellBehind != nil {
-			c.options.OnFellBehind()
+		if fellBehind != nil {
+			fellBehind()
 		}
 		c.Stop()
+		return false, false
+	}
+	c.queue[(c.head+c.n)%len(c.queue)] = b
+	c.n++
+	wake = c.idle
+	c.idle = false
+	c.qmu.Unlock()
+	return true, wake
+}
+
+// initialQueue is the room a queue starts with: it grows, as batches pile
+// up, to Options.Queue, so that an idle connection, as most are, keeps
+// little.
+const initialQueue = 4
+
+// grow makes the queue's ring larger, with qmu held, up to Options.Queue,
+// and reports whether it did.
+func (c *Conn) grow() bool {
+	bound := max(c.options.Queue, 1)
+	if len(c.queue) >= bound {
 		return false
+	}
+	ring := make([]batch, min(max(2*len(c.queue), initialQueue), bound))
+	for i := range c.n {
+		ring[i] = c.queue[(c.head+i)%len(c.queue)]
+	}
+	c.queue, c.head = ring, 0
+	return true
+}
+
+// next returns the next batch to write, waiting for one, or reports false
+// once the connection stopped.
+func (c *Conn) next() (batch, bool) {
+	for {
+		if c.stopped.Load() {
+			return batch{}, false
+		}
+		c.qmu.Lock()
+		if c.n > 0 {
+			b := c.queue[c.head]
+			c.queue[c.head] = batch{}
+			c.head = (c.head + 1) % len(c.queue)
+			c.n--
+			c.qmu.Unlock()
+			return b, true
+		}
+		c.idle = true
+		c.qmu.Unlock()
+		select {
+		case <-c.done:
+			return batch{}, false
+		case <-c.wake:
+		}
 	}
 }
 
@@ -152,19 +314,30 @@ func (c *Conn) SendLast(frame []byte) bool {
 	if !c.closing.CompareAndSwap(false, true) {
 		return false
 	}
-	select {
-	case c.out <- batch{frames: [][]byte{frame}, last: true}:
-		return true
-	default:
-		c.Stop()
+	if c.stopped.Load() {
 		return false
 	}
+	queued, wake := c.push(batch{one: frame, last: true}, nil)
+	if wake {
+		c.Wake()
+	}
+	return queued
 }
 
 // Stop ends the connection at once.
 func (c *Conn) Stop() {
 	c.stop.Do(func() {
+		c.stopped.Store(true)
 		close(c.done)
+		c.pingMu.Lock()
+		if c.pinger != nil {
+			c.pinger.Stop()
+		}
+		c.pingMu.Unlock()
+		c.cancel()
+		if c.timer != nil {
+			c.timer.Stop()
+		}
 		if c.options.OnStop != nil {
 			c.options.OnStop()
 		}
@@ -175,84 +348,152 @@ func (c *Conn) Stop() {
 // Pong answers a liveness ping (§1), before sign-in too.
 func (c *Conn) Pong() {
 	c.pinged.Store(true)
-	c.Send(PongFrame)
+	c.SendFrame(PongFrame)
 }
 
+// write writes one frame, within Options.WriteTimeout: a write still under
+// way then stops the connection, which cancels the context the writer
+// has, and closes the transport.
 func (c *Conn) write(frame []byte) error {
-	ctx, cancel := context.WithTimeout(context.Background(), c.options.WriteTimeout)
-	defer cancel()
-	return c.t.Write(ctx, frame)
+	if c.timer == nil {
+		return c.t.Write(c.ctx, frame)
+	}
+	c.deadline.Store(time.Now().Add(c.options.WriteTimeout).UnixNano())
+	// The timer, once armed, stays armed while writes follow each other,
+	// and writeExpired arms it again for the write under way.
+	if c.armed.CompareAndSwap(false, true) {
+		c.timer.Reset(c.options.WriteTimeout)
+	}
+	err := c.t.Write(c.ctx, frame)
+	c.deadline.Store(0)
+	return err
+}
+
+// waitSlot waits for a slot to be filled, as long as a write may take,
+// and reports whether it was: else the write timer stops the connection.
+func (c *Conn) waitSlot(s *Slot) bool {
+	if c.timer != nil {
+		c.deadline.Store(time.Now().Add(c.options.WriteTimeout).UnixNano())
+		if c.armed.CompareAndSwap(false, true) {
+			c.timer.Reset(c.options.WriteTimeout)
+		}
+		defer c.deadline.Store(0)
+	}
+	select {
+	case <-c.done:
+		return false
+	case <-s.filled:
+		return true
+	}
+}
+
+// writeExpired runs when the write timer fires: it stops the connection
+// if the write under way is past its deadline, arms the timer again for
+// one that is not, and else leaves it unarmed until the next write.
+func (c *Conn) writeExpired() {
+	for {
+		if deadline := c.deadline.Load(); deadline != 0 {
+			if left := time.Until(time.Unix(0, deadline)); left > 0 {
+				c.timer.Reset(left)
+				return
+			}
+			c.Stop()
+			return
+		}
+		c.armed.Store(false)
+		// A write that began before armed was cleared found the timer
+		// armed, and left it to this.
+		if c.deadline.Load() == 0 || !c.armed.CompareAndSwap(false, true) {
+			return
+		}
+	}
 }
 
 func (c *Conn) writeLoop() {
 	for {
-		select {
-		case <-c.done:
+		b, ok := c.next()
+		if !ok {
 			return
-		case b := <-c.out:
-			if b.fence != nil {
-				select {
-				case <-c.done:
-					return
-				case <-b.fence.Done():
-				}
-				if b.fence.Err() != nil {
-					// What the frames behind it acknowledge did not happen:
-					// the connection closes rather than send them.
-					_ = c.write(c.options.FenceFailed)
-					c.Stop()
-					return
-				}
+		}
+		if b.slot != nil {
+			if !c.waitSlot(b.slot) {
+				return
+			}
+			b.frames = b.slot.frames
+			if b.frames == nil {
 				continue
 			}
-			for _, frame := range b.frames {
-				select {
-				case <-c.done:
-					return
-				default:
-				}
-				if err := c.write(frame); err != nil {
-					c.Stop()
-					return
-				}
+		}
+		if b.fence != nil {
+			select {
+			case <-c.done:
+				return
+			case <-b.fence.Done():
 			}
-			if b.last {
-				// The last frame explains the close; a close handshake
-				// would wait on a peer that may not be reading.
+			if b.fence.Err() != nil {
+				// What the frames behind it acknowledge did not happen:
+				// the connection closes rather than send them.
+				_ = c.write(c.options.FenceFailed)
 				c.Stop()
 				return
 			}
+			continue
+		}
+		if b.frames == nil {
+			if err := c.write(b.one); err != nil {
+				c.Stop()
+				return
+			}
+		}
+		for _, frame := range b.frames {
+			select {
+			case <-c.done:
+				return
+			default:
+			}
+			if err := c.write(frame); err != nil {
+				c.Stop()
+				return
+			}
+		}
+		if b.last {
+			// The last frame explains the close; a close handshake
+			// would wait on a peer that may not be reading.
+			c.Stop()
+			return
 		}
 	}
 }
 
-// pingLoop pings the transport, which finds dead ones, and closes a
-// connection whose client sent liveness pings (§1) and then fell silent
-// for three intervals: its page is frozen or gone even if the transport is
-// not. Three intervals leave room for background timer throttling.
-func (c *Conn) pingLoop() {
-	interval, timeout := c.options.PingInterval, c.options.PingTimeout
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-	silence := 3*interval + timeout
-	for {
-		select {
-		case <-c.done:
-			return
-		case <-ticker.C:
-			if c.pinged.Load() && time.Since(time.Unix(0, c.lastFrame.Load())) > silence {
-				c.Stop()
-				return
-			}
-			ctx, cancel := context.WithTimeout(context.Background(), timeout)
-			err := c.t.Ping(ctx)
-			cancel()
-			if err != nil {
-				c.Stop()
-				return
-			}
-		}
+// ping pings the transport, which finds dead ones, at each interval, and
+// closes a connection whose client sent liveness pings (§1) and then fell
+// silent for three intervals: its page is frozen or gone even if the
+// transport is not. Three intervals leave room for background timer
+// throttling. It runs on the pinger's own goroutine, as a ticker's
+// receiver did, and the next ping is an interval after this one began,
+// or at once when this one took longer.
+func (c *Conn) ping() {
+	if c.stopped.Load() {
+		return
 	}
+	interval, timeout := c.options.PingInterval, c.options.PingTimeout
+	start := time.Now()
+	if c.pinged.Load() && start.Sub(time.Unix(0, c.lastFrame.Load())) > 3*interval+timeout {
+		c.Stop()
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	err := c.t.Ping(ctx)
+	cancel()
+	if err != nil {
+		c.Stop()
+		return
+	}
+	c.pingMu.Lock()
+	if !c.stopped.Load() {
+		c.pinger.Reset(max(0, interval-time.Since(start)))
+	}
+	c.pingMu.Unlock()
 }
 
 // InboundQueue bounds the frames read from a connection and waiting for
@@ -311,7 +552,7 @@ var errBinaryFrame = errors.New("text frames required")
 
 // Read returns the next frame. A binary frame closes the WebSocket.
 func (t WebSocket) Read(ctx context.Context) ([]byte, error) {
-	kind, payload, err := t.Conn.Read(ctx)
+	kind, payload, err := ReadMessage(ctx, t.Conn)
 	if err != nil {
 		return nil, err
 	}
@@ -322,9 +563,12 @@ func (t WebSocket) Read(ctx context.Context) ([]byte, error) {
 	return payload, nil
 }
 
-// Write sends one text frame.
-func (t WebSocket) Write(ctx context.Context, frame []byte) error {
-	return t.Conn.Write(ctx, websocket.MessageText, frame)
+// Write sends one text frame. It writes without ctx, which websocket.Conn
+// would watch with a context.AfterFunc of each write: a Conn's own timer
+// bounds the write (Options.WriteTimeout), and closing the WebSocket, as
+// a Conn that stops does, ends a write under way.
+func (t WebSocket) Write(_ context.Context, frame []byte) error {
+	return t.Conn.Write(context.Background(), websocket.MessageText, frame)
 }
 
 // Ping pings at the WebSocket level.
@@ -332,3 +576,29 @@ func (t WebSocket) Ping(ctx context.Context) error { return t.Conn.Ping(ctx) }
 
 // Close closes the WebSocket without a handshake.
 func (t WebSocket) Close() error { return t.Conn.CloseNow() }
+
+// readBuffers are the buffers ReadMessage reads into.
+var readBuffers = sync.Pool{New: func() any { return new(bytes.Buffer) }}
+
+// ReadMessage reads the next message of a WebSocket, as Conn.Read does, into
+// a buffer of a pool, and returns a copy of the size it has: Conn.Read
+// grows a new buffer for each message, which for one of tens of kilobytes,
+// such as a page of history, allocates it several times over.
+func ReadMessage(ctx context.Context, ws *websocket.Conn) (websocket.MessageType, []byte, error) {
+	kind, r, err := ws.Reader(ctx)
+	if err != nil {
+		return 0, nil, err
+	}
+	buf := readBuffers.Get().(*bytes.Buffer)
+	defer func() {
+		// A buffer grown for a large message is not kept.
+		if buf.Cap() <= 1<<20 {
+			buf.Reset()
+			readBuffers.Put(buf)
+		}
+	}()
+	if _, err := buf.ReadFrom(r); err != nil {
+		return 0, nil, err
+	}
+	return kind, bytes.Clone(buf.Bytes()), nil
+}

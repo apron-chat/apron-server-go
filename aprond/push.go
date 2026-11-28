@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json/v2"
 	"fmt"
+	"iter"
 	"maps"
 	"net/http"
 	"regexp"
@@ -120,7 +121,7 @@ func (s *Server) registerPush(c *client, r *server.Request, reply server.Reply[a
 		token = ""
 	}
 	wake := defaultWake
-	if raw, has := r.Fields()["wake"]; has {
+	if raw, has := r.Fields().Get("wake"); has {
 		var names []string
 		if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) || json.Unmarshal(raw, &names) != nil || names == nil {
 			return invalidParams("wake must be an array of scope names")
@@ -152,11 +153,11 @@ func (s *Server) registerPush(c *client, r *server.Request, reply server.Reply[a
 // parseKeysParam reads a registration's optional keys (§4.9).
 func parseKeysParam(r *server.Request) (*webpush.Keys, *Error) {
 	d := r.Decoder()
-	raw := d.Object("keys", optional)
+	raw, ok := d.Object("keys", optional)
 	if d.Err() != nil {
 		return nil, invalidParams("keys must be an object with p256dh and auth")
 	}
-	if raw == nil {
+	if !ok {
 		return nil, nil
 	}
 	p256dh, err := parseString(raw, "p256dh", required)
@@ -256,10 +257,8 @@ func (s *Server) wakeLocked(m *messageState, snapshot, previous *roomlog.Message
 				reasons[target.Owner()] |= wakeReplies
 			}
 		}
-		for id := range r.Members() {
-			if s.pushes.Count(id) > 0 {
-				reasons[id] |= wakeJoined
-			}
+		for u := range s.pushedMembersLocked(r) {
+			reasons[u.id] |= wakeJoined
 		}
 		// private selects messages in the private rooms the user joined and
 		// in their threads (§4.9): those who can see a private room's
@@ -428,4 +427,26 @@ func pushPayload(pushID string, unread int, snapshot *roomlog.Message) []byte {
 		}
 	}
 	return payload
+}
+
+// pushedMembersLocked yields the members of r with push registrations: from
+// the room's members, or from the users with registrations when they are
+// fewer, so that a message in a large room costs what its members who
+// push cost, rather than a look at every member.
+func (s *Server) pushedMembersLocked(r *roomState) iter.Seq[*userState] {
+	return func(yield func(*userState) bool) {
+		if s.pushes.Users() < r.MemberCount() {
+			for id := range s.pushes.UserIDs() {
+				if u := r.Member(id); u != nil && !yield(u) {
+					return
+				}
+			}
+			return
+		}
+		for id, u := range r.Members() {
+			if s.pushes.Count(id) > 0 && !yield(u) {
+				return
+			}
+		}
+	}
 }

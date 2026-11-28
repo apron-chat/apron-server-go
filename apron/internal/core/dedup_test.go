@@ -6,9 +6,9 @@ import "testing"
 // once it is the oldest finished.
 func TestDedupKeepsRunning(t *testing.T) {
 	d := Dedup[string, int]{Size: 2}
-	running, _ := d.Claim("a", [32]byte{}, 0)
+	running, _ := d.Claim("a", "m", nil, 0)
 	for _, key := range []string{"b", "c", "d"} {
-		entry, prior := d.Claim(key, [32]byte{}, 0)
+		entry, prior := d.Claim(key, "m", nil, 0)
 		if prior != nil {
 			t.Fatalf("%s: a prior entry", key)
 		}
@@ -17,11 +17,11 @@ func TestDedupKeepsRunning(t *testing.T) {
 	if !d.Kept("a") || d.Kept("b") || d.Kept("c") || !d.Kept("d") {
 		t.Fatalf("kept a %v, b %v, c %v, d %v; want a, running, and d", d.Kept("a"), d.Kept("b"), d.Kept("c"), d.Kept("d"))
 	}
-	if _, prior := d.Claim("a", [32]byte{}, 0); prior != running {
+	if _, prior := d.Claim("a", "m", nil, 0); prior != running {
 		t.Fatal("a duplicate did not find the request still running")
 	}
 	d.Finish("a", running, 2, 0, false)
-	entry, _ := d.Claim("e", [32]byte{}, 0)
+	entry, _ := d.Claim("e", "m", nil, 0)
 	d.Finish("e", entry, 3, 0, false)
 	if d.Kept("a") || !d.Kept("d") || !d.Kept("e") || d.Len() != 2 {
 		t.Fatalf("kept a %v, d %v, e %v, %d in all; want the finished a forgotten", d.Kept("a"), d.Kept("d"), d.Kept("e"), len(d.entries))
@@ -35,7 +35,7 @@ func TestDedupMaxBytes(t *testing.T) {
 	d := Dedup[string, int]{Size: 100, MaxBytes: 3*DedupEntryBytes + 300}
 	finish := func(key string, bytes int) *DedupEntry[int] {
 		t.Helper()
-		entry, prior := d.Claim(key, [32]byte{}, len(key))
+		entry, prior := d.Claim(key, "m", nil, len(key))
 		if prior != nil {
 			t.Fatalf("%s: a prior entry", key)
 		}
@@ -61,15 +61,15 @@ func TestDedupMaxBytes(t *testing.T) {
 	}
 
 	// A request forgotten and claimed again is counted once.
-	entry, _ := d.Claim("f", [32]byte{}, 1)
+	entry, _ := d.Claim("f", "m", nil, 1)
 	d.Forget("f", entry)
-	again, _ := d.Claim("f", [32]byte{}, 1)
+	again, _ := d.Claim("f", "m", nil, 1)
 	d.Finish("f", entry, 0, 1000, false) // The forgotten one: not counted.
 	d.Finish("f", again, 0, 1, false)
 	total := 0
 	for _, key := range []string{"a", "b", "c", "d", "e", "f"} {
-		if element := d.entries[key]; element != nil {
-			total += element.Value.(*dedupNode[string, int]).bytes
+		if node := d.entries[key]; node != nil {
+			total += node.bytes
 		}
 	}
 	if total != d.Bytes() {
@@ -79,5 +79,31 @@ func TestDedupMaxBytes(t *testing.T) {
 	}
 	if d.Len() != 0 || d.Bytes() != 0 {
 		t.Fatalf("%d kept, %d bytes once all are evicted", d.Len(), d.Bytes())
+	}
+}
+
+// An Operation is the same as a request of its method with its params,
+// written as they were or otherwise, and no other; its params are its own.
+func TestOperationSame(t *testing.T) {
+	var d Dedup[string, int]
+	params := []byte(`{"a":1,"b":"é"}`)
+	entry, _ := d.Claim("k", "message", params, 1)
+	params[1] = 'x'
+	op := &entry.Operation
+	for _, tc := range []struct {
+		method, params string
+		same           bool
+	}{
+		{"message", `{"a":1,"b":"é"}`, true},
+		{"message", `{ "b" : "é", "a" : 1 }`, true},
+		{"message", `{"a":2,"b":"é"}`, false},
+		{"command", `{"a":1,"b":"é"}`, false},
+	} {
+		if got := op.Same(tc.method, []byte(tc.params)); got != tc.same {
+			t.Errorf("%s %s: same %v, want %v", tc.method, tc.params, got, tc.same)
+		}
+	}
+	if d.Bytes() != 1+len(params)+DedupEntryBytes {
+		t.Errorf("Bytes %d, want the key, the params, and the entry", d.Bytes())
 	}
 }

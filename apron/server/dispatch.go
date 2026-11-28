@@ -82,15 +82,21 @@ type Request struct {
 	// rec, for a request on no connection, made by package aprontest, gets
 	// its reply.
 	rec testhook.Recorder
-	// entry is the request's deduplication entry (§1.2), or nil, and
-	// unkept, for an entry, drops it as the reply is queued when its
-	// outcome is not to be kept.
-	entry  *dedupEntry
-	unkept func(dedupOutcome)
+	// entry is the request's deduplication entry (§1.2), or nil, kept
+	// for userID by key; noDedup is set when its outcome is not to be
+	// kept even when it succeeds (Handler.NoDedup).
+	entry   *dedupEntry
+	userID  string
+	key     dedupKey
+	noDedup bool
 
 	mu      sync.Mutex
 	replied bool
-	outcome dedupOutcome
+	// slot, once reserved is set, is the reply's place in its connection's
+	// queue (Reply.Reserve), nil when the connection was closing.
+	slot     *core.Slot
+	reserved bool
+	outcome  dedupOutcome
 	// later is set once the request is to be answered after its handler
 	// returns (Reply.Later).
 	later *later
@@ -125,40 +131,71 @@ func (r *Request) fail(e *apron.Error) {
 
 // encodeReply renders the reply to r: its result, or e.
 func (r *Request) encodeReply(result any, e *apron.Error) (frame apron.Frame, encoded jsontext.Value, _ *apron.Error) {
+	// canonical is set when encoded is as Marshal writes it, which
+	// encoding it again within the reply leaves as it is.
+	canonical := false
 	if e == nil {
 		switch v := result.(type) {
 		case jsontext.Value:
 			encoded = v
 		case nil:
-			encoded = jsontext.Value("{}")
+			encoded, canonical = jsontext.Value("{}"), true
 		default:
 			raw, err := core.Marshal(v)
 			if err == nil && string(raw) == "null" {
 				raw = []byte("{}") // A typed nil, such as a nil map.
 			}
-			if err != nil || !jsontext.Value(raw).IsValid() || raw[0] != '{' {
+			// What Marshal writes is valid JSON.
+			if err != nil || raw[0] != '{' {
 				r.logger().Error("apron: a result is not a JSON object", "method", r.Method, "error", err)
 				e = internalError()
 			} else {
-				encoded = raw
+				encoded, canonical = raw, true
 			}
 		}
 	}
-	reply := map[string]any{}
+	if e == nil && canonical {
+		// The reply is written around the result, rather than the result
+		// encoded again in it, which would copy it as it is: a page of
+		// history is tens of kilobytes.
+		if payload, ok := r.resultFrame(encoded); ok {
+			return payload, encoded, nil
+		}
+	}
+	var reply core.ReplyFrame
 	if e != nil {
-		reply["error"] = e
+		reply.Error = e
 		encoded = nil
 	} else {
-		reply["result"] = encoded
+		reply.Result = encoded
 	}
 	if r.hasID {
-		reply["id"] = r.ID
+		reply.ID = &r.ID
 	}
-	payload, err := core.Marshal(reply)
+	payload, err := core.Marshal(&reply)
 	if err != nil {
 		return nil, nil, e
 	}
 	return payload, encoded, e
+}
+
+// resultFrame writes the reply of a result as Marshal writes it, as
+// encoding a ReplyFrame of it does: {"id":...,"result":...}, the members in
+// the order of their names. It reports false for an id Marshal refuses,
+// which is not valid UTF-8.
+func (r *Request) resultFrame(result jsontext.Value) (apron.Frame, bool) {
+	frame := make([]byte, 0, len(`{"id":,"result":}`)+len(r.ID)+2+len(result))
+	frame = append(frame, '{')
+	if r.hasID {
+		var err error
+		frame, err = jsontext.AppendQuote(append(frame, `"id":`...), r.ID)
+		if err != nil {
+			return nil, false
+		}
+		frame = append(frame, ',')
+	}
+	frame = append(append(append(frame, `"result":`...), result...), '}')
+	return frame, true
 }
 
 // logger is the logger of the request's Server.
@@ -213,10 +250,7 @@ func (s *Server) afterReply(ctx context.Context, method string, err error) {
 // error/internal_error when the frame is a request; the connection goes on.
 func (s *Server) processFrame(ctx context.Context, c *Conn, payload []byte) {
 	parsed, failed := core.ParseRequest(payload)
-	fields := Fields(parsed.Fields)
-	if fields == nil {
-		fields = Fields{}
-	}
+	fields := Fields{parsed.Fields}
 	r := &Request{Method: parsed.Method, ID: parsed.ID, params: parsed.Params, fields: fields, c: c, notification: !parsed.HasID, hasID: parsed.HasID}
 	defer s.recoverFrame(r)
 	if failed != nil {
@@ -286,11 +320,10 @@ func (s *Server) processFrame(ctx context.Context, c *Conn, payload []byte) {
 	// original, even on another connection, and gets its outcome, brought up
 	// to date. Only a connection of the same deduplication scope has it
 	// (Conn.SetDedupScope), as no handler runs for it.
-	fingerprint := core.Fingerprint(r.Method, r.params)
 	key := dedupKey{scope: scope, id: r.ID}
-	entry, prior := s.dedup.claim(userID, key, fingerprint)
+	entry, prior := s.dedup.claim(userID, key, r.Method, r.params)
 	if prior != nil {
-		if prior.Fingerprint != fingerprint {
+		if !prior.Operation.Same(r.Method, r.params) {
 			r.fail(apron.InvalidParams(fmt.Sprintf("Request id %q was already used for another operation", r.ID)))
 			return
 		}
@@ -320,25 +353,24 @@ func (s *Server) processFrame(ctx context.Context, c *Conn, payload []byte) {
 	// again. Concurrent duplicates still share the outcome. Such a request
 	// is forgotten before its reply is queued, as the client may retry as
 	// soon as it has the reply, while the handler may still be returning.
-	kept := func(outcome dedupOutcome) bool { return outcome.err == nil && !m.noDedup }
-	r.entry = entry
-	if entry != nil {
-		r.unkept = func(outcome dedupOutcome) {
-			if !kept(outcome) {
-				s.dedup.forget(userID, key, entry)
-			}
-		}
-	}
+	r.entry, r.userID, r.key, r.noDedup = entry, userID, key, m.noDedup
 	s.serve(ctx, c, r, m)
 	if entry != nil {
-		finish := func(outcome dedupOutcome) {
-			s.dedup.finish(userID, key, entry, outcome, !kept(outcome))
-		}
 		// A request answered later finishes as its reply is queued.
-		if outcome, done := r.finishOrDefer(finish); done {
-			finish(outcome)
+		if outcome, done := r.finishOrDefer(); done {
+			r.finishDedup(outcome)
 		}
 	}
+}
+
+// kept reports whether a request's outcome is kept for deduplication: it
+// succeeded, and its method's outcomes are kept.
+func (r *Request) kept(outcome dedupOutcome) bool { return outcome.err == nil && !r.noDedup }
+
+// finishDedup finishes the request's deduplication entry with its
+// outcome, which its duplicates then get.
+func (r *Request) finishDedup(outcome dedupOutcome) {
+	r.c.server.dedup.finish(r.userID, r.key, r.entry, outcome, !r.kept(outcome))
 }
 
 // duplicate answers a duplicate with its original's outcome (§1.2), brought
@@ -405,9 +437,7 @@ func (s *Server) finish(ctx context.Context, r *Request, strict bool, err error)
 // method returns the handler of a method: one registered with Handle or
 // HandleNotification, or one of the Server's Config handlers.
 func (s *Server) method(name string) (method, bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	m, ok := s.methods[name]
+	m, ok := s.methods.Load().methods[name]
 	return m, ok
 }
 
@@ -490,7 +520,7 @@ func (s *Server) message(messages MessageHandler, edits EditHandler) func(contex
 			}
 			return edits.Edit(ctx, c, m.editParams(), reply)
 		}
-		if m.body == nil {
+		if !m.hasBody {
 			return apron.Missing("body")
 		}
 		if messages == nil {

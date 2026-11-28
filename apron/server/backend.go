@@ -75,7 +75,7 @@ type EditHandler interface {
 //	func (b *Backend) Me(ctx context.Context, c *server.Conn, p apron.MeParams, reply server.Reply[apron.CurrentUser]) error {
 //		b.mu.Lock()
 //		defer b.mu.Unlock()
-//		old := *c.User()
+//		old, _ := c.Identity()
 //		cur := server.ApplyMe(old, p)
 //		if len(cur.Name) > 64 {
 //			return apron.InvalidParams("A name is at most 64 bytes")
