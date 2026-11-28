@@ -158,3 +158,118 @@ func TestDedupScope(t *testing.T) {
 		}
 	}
 }
+
+// A retry of a request, by its user and id (§1.2), gets the original's
+// outcome, unless it failed; another user's request of the same id is
+// another request; and DedupSize -1 keeps nothing.
+func TestDedup(t *testing.T) {
+	b := &backend{}
+	s := wired(b, server.Config{})
+	c, other := aprontest.Connect(t, s), aprontest.Connect(t, s)
+	signIn(t, c)
+	signIn(t, other)
+	send(t, c, `{"method":"message","id":"d","params":{"room_id":"r","body":{"text":"hi"}}}`)
+	first := next(t, c)
+	// The same params in another key order are the same request (§1.2).
+	send(t, c, `{"id":"d","params":{"body":{"text":"hi"},"room_id":"r"},"method":"message"}`)
+	second := next(t, c)
+	if fields(first)["message_id"] == nil || string(first.Raw) != string(second.Raw) {
+		t.Fatalf("a retry got %s, the original %s", second.Raw, first.Raw)
+	}
+	if n := b.messages.Load(); n != 1 {
+		t.Fatalf("the backend saw %d messages, want 1", n)
+	}
+	send(t, c, `{"method":"message","id":"d","params":{"body":{"text":"other"}}}`)
+	if f := next(t, c); code(f) != apron.CodeInvalidParams || f.ID != "d" {
+		t.Fatalf("got %s, want invalid_params for a reused id", f.Raw)
+	}
+	// A failed request is not kept: a retry runs again.
+	send(t, c, `{"method":"message","id":"bad","params":{"room_id":"has space","body":{"text":"x"}}}`)
+	if f := next(t, c); code(f) != apron.CodeInvalidParams {
+		t.Fatalf("got %s", f.Raw)
+	}
+	send(t, c, `{"method":"message","id":"bad","params":{"body":{"text":"x"}}}`)
+	if f := next(t, c); fields(f)["message_id"] == nil {
+		t.Fatalf("got %s, want the retry to run", f.Raw)
+	}
+	// Another user's request with the same id and params runs.
+	send(t, other, `{"method":"message","id":"d","params":{"room_id":"r","body":{"text":"hi"}}}`)
+	if f := next(t, other); fields(f)["message_id"] == nil || fields(f)["message_id"] == fields(first)["message_id"] {
+		t.Fatalf("another user's request got %s, the first user's %s", f.Raw, first.Raw)
+	}
+	if n := b.messages.Load(); n != 3 {
+		t.Fatalf("the backend saw %d messages, want 3", n)
+	}
+
+	off := &backend{}
+	c = aprontest.Connect(t, wired(off, server.Config{DedupSize: -1}))
+	signIn(t, c)
+	for range 2 {
+		send(t, c, `{"method":"message","id":"d","params":{"body":{"text":"hi"}}}`)
+		next(t, c)
+	}
+	if n := off.messages.Load(); n != 2 {
+		t.Fatalf("with DedupSize -1 the backend saw %d messages, want 2", n)
+	}
+}
+
+// returning is a backend whose calls, its commands and the test's "read"
+// requests, come in pairs, an original and its retry: each fails or
+// replies, and the original then does not return until the test ends.
+type returning struct {
+	oneUser
+	calls     atomic.Int64
+	returning chan struct{}
+}
+
+func (b *returning) Command(_ context.Context, _ *server.Conn, _ apron.CommandParams, reply server.Reply[apron.CommandResult]) error {
+	n := b.calls.Add(1)
+	_ = reply.Fail(apron.Denied(fmt.Sprintf("call %d", n)))
+	b.stall(n)
+	return nil
+}
+
+// stall holds up call n, after its reply, if it is an original.
+func (b *returning) stall(n int64) {
+	if n%2 == 1 {
+		<-b.returning
+	}
+}
+
+// A request whose outcome is not kept, a read or a failure, is forgotten
+// before its reply is sent: a retry sent once the reply arrives, here on
+// another connection of the same user, runs again, even while the
+// original's handler is still returning, rather than wait for it and get
+// its outcome.
+func TestDedupForgetsBeforeTheReply(t *testing.T) {
+	b := &returning{returning: make(chan struct{})}
+	s := wired(b, server.Config{})
+	s.Handle("read", server.Handler{NoDedup: true, Serve: func(_ context.Context, _ *server.Conn, r *server.Request, reply server.Reply[any]) error {
+		n := b.calls.Add(1)
+		_ = reply.Send(map[string]any{"call": n})
+		b.stall(n)
+		return nil
+	}})
+	// Each original holds up its connection, so each pair of requests
+	// has its own connections, which end after the originals return.
+	conns := []*aprontest.Client{aprontest.Connect(t, s), aprontest.Connect(t, s), aprontest.Connect(t, s), aprontest.Connect(t, s)}
+	t.Cleanup(func() { close(b.returning) })
+	for _, c := range conns {
+		signIn(t, c)
+	}
+	for i, request := range []struct{ raw, first, retry string }{
+		{`{"method":"read","id":"r","params":{}}`, `{"id":"r","result":{"call":1}}`, `{"id":"r","result":{"call":2}}`},
+		{`{"method":"command","id":"f","params":{"body":{"text":"/fail"}}}`,
+			`{"error":{"code":-32001,"message":"call 3"},"id":"f"}`, `{"error":{"code":-32001,"message":"call 4"},"id":"f"}`},
+	} {
+		c1, c2 := conns[2*i], conns[2*i+1]
+		send(t, c1, request.raw)
+		if f := next(t, c1); string(f.Raw) != request.first {
+			t.Fatalf("got %s, want %s", f.Raw, request.first)
+		}
+		send(t, c2, request.raw)
+		if f := next(t, c2); string(f.Raw) != request.retry {
+			t.Fatalf("a retry after the reply got %s, want %s", f.Raw, request.retry)
+		}
+	}
+}

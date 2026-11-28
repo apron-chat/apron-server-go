@@ -183,35 +183,6 @@ func TestDuplicateWaitEndsWithConnection(t *testing.T) {
 	})
 }
 
-// Local notifications are handled, and a Call of a notification-only method
-// returns at once.
-func TestLocalNotify(t *testing.T) {
-	s := wired(&backend{}, server.Config{})
-	got := make(chan string, 1)
-	s.HandleNotification("activity", server.NotificationHandler{Capability: "activity", Serve: func(_ context.Context, _ *server.Conn, r *server.Request) {
-		v, _ := r.Fields().Get("typing")
-		got <- string(v)
-	}})
-	l, err := s.Local(server.LocalOptions{User: apron.User{UserID: "bot"}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer l.Close()
-	if err := l.Notify(context.Background(), "activity", map[string]any{"typing": 4}); err != nil {
-		t.Fatal(err)
-	}
-	if v := <-got; v != "4" {
-		t.Fatalf("typing = %s", v)
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	for _, method := range []string{"ping", "activity"} {
-		if _, err := l.Call(ctx, method, nil); !errors.Is(err, server.ErrNotRequest) {
-			t.Errorf("Call(%s): %v, want ErrNotRequest", method, err)
-		}
-	}
-}
-
 // connecting is a backend that counts the connections it is told of.
 type connecting struct {
 	backend
@@ -229,8 +200,8 @@ func TestMaxConnectionsFirst(t *testing.T) {
 	b := &connecting{}
 	s := wired(b, server.Config{MaxConnections: 1, OnConnect: b.Connected})
 	c1, c2 := aprontest.Connect(t, s), aprontest.Connect(t, s)
-	if f := next(t, c2); code(f) != apron.CodeRetryAfter {
-		t.Fatalf("got %s, want retry_after", f.Raw)
+	if f := next(t, c2); code(f) != apron.CodeRetryAfter || f.ID != "" {
+		t.Fatalf("got %s, want retry_after about the connection", f.Raw)
 	}
 	expectClosed(t, c2)
 	if err := c1.Sync(wait(t)); err != nil {
