@@ -62,8 +62,11 @@ func checkReplayed(t *testing.T, r *apron.Replay) {
 	}
 }
 
-// Replay ends in the same state whatever the order of the records.
-func TestReplayOrder(t *testing.T) {
+// Replay ends in the same state whatever the order of the records, and
+// applying them again changes nothing. Its records are a compacted log,
+// which leaves the same state, and encode alike whatever order the Replay
+// was built in.
+func TestReplayRecords(t *testing.T) {
 	log := replayLog()
 	for range 20 {
 		var r apron.Replay
@@ -71,20 +74,13 @@ func TestReplayOrder(t *testing.T) {
 			r.Apply(log[i])
 		}
 		checkReplayed(t, &r)
-		// Applying it all again changes nothing.
 		for _, rec := range log {
 			if r.Apply(rec) {
 				t.Fatalf("applied %+v again", rec)
 			}
 		}
 	}
-}
-
-// Records are a compacted log, which leaves the same state, and encode
-// alike whatever order the Replay was built in.
-func TestReplayRecords(t *testing.T) {
 	var forward, backward apron.Replay
-	log := replayLog()
 	for i := range log {
 		forward.Apply(log[i])
 		backward.Apply(log[len(log)-1-i])

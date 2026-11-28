@@ -263,12 +263,3 @@ func TestUserCopies(t *testing.T) {
 		t.Fatalf("the connection's user changed: %+v", again)
 	}
 }
-
-// Marshal encodes as frames are: keys sorted, nil as null, HTML characters
-// as they are.
-func TestMarshal(t *testing.T) {
-	got, err := apron.Marshal(map[string]any{"b": []string(nil), "a": "<&>"})
-	if err != nil || string(got) != `{"a":"<&>","b":null}` {
-		t.Fatalf("Marshal = %s, %v", got, err)
-	}
-}

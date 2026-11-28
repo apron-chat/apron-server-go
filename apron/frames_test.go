@@ -104,6 +104,11 @@ func TestEncode(t *testing.T) {
 	if _, err := apron.Encode(nil); err == nil {
 		t.Error("Encode(nil) succeeded")
 	}
+	// Marshal encodes as frames are: keys sorted, nil as null, HTML
+	// characters as they are.
+	if got, err := apron.Marshal(map[string]any{"b": []string(nil), "a": "<&>"}); err != nil || string(got) != `{"a":"<&>","b":null}` {
+		t.Errorf("Marshal = %s, %v", got, err)
+	}
 	var mute apron.Mute
 	for raw, want := range map[string]apron.Mute{"true": {On: true}, "false": {}, "60": {On: true, Seconds: 60}} {
 		if err := json.Unmarshal([]byte(raw), &mute); err != nil || mute != want {
