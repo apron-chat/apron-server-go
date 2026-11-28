@@ -46,6 +46,11 @@ type RoomView struct {
 	// encoded, which then sends them as they are rather than decode each
 	// to have it encoded again. A RoomView decoded has none.
 	Raw jsontext.Value `json:"-"`
+	// MembersRaw, if not nil, are Members encoded, each as Marshal encodes
+	// a CurrentUser, which are sent in their place, empty too, each as it
+	// is, once checked: for a server that keeps its members' objects
+	// encoded. A RoomView decoded has none.
+	MembersRaw []jsontext.Value `json:"-"`
 }
 
 // roomViewJSON is a RoomView as encoding/json encodes one, without its
@@ -55,8 +60,18 @@ type roomViewJSON RoomView
 // MarshalJSONTo writes the view: its Room, or Raw in its place, then its
 // delivery fields.
 func (v *RoomView) MarshalJSONTo(enc *jsontext.Encoder) error {
-	if v.Raw == nil {
+	if v.Raw == nil && v.MembersRaw == nil {
 		return json.MarshalEncode(enc, (*roomViewJSON)(v))
+	}
+	if v.Raw == nil {
+		// The room typed, and its members raw.
+		raw, err := json.Marshal(&v.Room, enc.Options())
+		if err != nil {
+			return err
+		}
+		view := *v
+		view.Raw = raw
+		return view.MarshalJSONTo(enc)
 	}
 	if v.Raw.Kind() != '{' {
 		return errors.New("apron: a RoomView's Raw is not a JSON object")
@@ -121,7 +136,11 @@ func (v *RoomView) MarshalJSONTo(enc *jsontext.Encoder) error {
 			return err
 		}
 	}
-	if v.Members != nil {
+	if v.MembersRaw != nil {
+		if err := writeRawArray(enc, "members", v.MembersRaw); err != nil {
+			return err
+		}
+	} else if v.Members != nil {
 		if err := enc.WriteToken(jsontext.String("members")); err != nil {
 			return err
 		}
@@ -235,6 +254,45 @@ type RoomListResult struct {
 	// the fields it carries empty, such as a status of "" (§4.5.2), in its
 	// Cleared; an empty slice sends [].
 	Users []CurrentUser `json:"users,omitzero"`
+	// UsersRaw, if not nil, are Users encoded, each as Marshal encodes a
+	// CurrentUser, which are sent in their place, empty too, each as it
+	// is, once checked: for a server that keeps its users' objects
+	// encoded. A result decoded has none.
+	UsersRaw []jsontext.Value `json:"-"`
+}
+
+// roomListResultJSON is a RoomListResult as encoding/json encodes one,
+// without its MarshalJSONTo.
+type roomListResultJSON RoomListResult
+
+// MarshalJSONTo writes the result, with UsersRaw in place of Users when
+// it has them.
+func (r *RoomListResult) MarshalJSONTo(enc *jsontext.Encoder) error {
+	if r.UsersRaw == nil {
+		return json.MarshalEncode(enc, (*roomListResultJSON)(r))
+	}
+	return json.MarshalEncode(enc, &struct {
+		Joined    []RoomView       `json:"joined,omitzero"`
+		NotJoined []RoomView       `json:"not_joined,omitzero"`
+		Left      []RoomRef        `json:"left,omitzero"`
+		Users     []jsontext.Value `json:"users"`
+	}{r.Joined, r.NotJoined, r.Left, r.UsersRaw})
+}
+
+// writeRawArray writes a member whose value is an array of values raw.
+func writeRawArray(enc *jsontext.Encoder, name string, values []jsontext.Value) error {
+	if err := enc.WriteToken(jsontext.String(name)); err != nil {
+		return err
+	}
+	if err := enc.WriteToken(jsontext.BeginArray); err != nil {
+		return err
+	}
+	for _, value := range values {
+		if err := enc.WriteValue(value); err != nil {
+			return err
+		}
+	}
+	return enc.WriteToken(jsontext.EndArray)
 }
 
 // RoomSetParams are the params of room_set (§4.2.4): a new room without

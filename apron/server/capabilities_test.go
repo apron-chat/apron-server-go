@@ -126,3 +126,14 @@ func TestParseHistory(t *testing.T) {
 		}
 	}
 }
+
+// A room_list without members sends none, raw ones neither.
+func TestNormalizeRoomListRaw(t *testing.T) {
+	raw := []jsontext.Value{jsontext.Value(`{"user_id":"a"}`)}
+	result := normalizeRoomList(apron.RoomListParams{Filter: apron.RoomsJoined}, apron.RoomListResult{
+		Joined: []apron.RoomView{{Room: apron.Room{RoomID: "r"}, MembersRaw: raw, MemberCount: 1}}, UsersRaw: raw,
+	})
+	if result.UsersRaw != nil || result.Joined[0].MembersRaw != nil || result.Joined[0].MemberCount != 0 {
+		t.Fatalf("members left in %+v", result)
+	}
+}

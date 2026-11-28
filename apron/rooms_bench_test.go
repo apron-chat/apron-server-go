@@ -31,7 +31,8 @@ func roomList(members bool) apron.RoomListResult {
 // without members (rooms) and with 10 each (members), as a server answers
 // room_list: each room typed (typed), each decoded first from the record
 // the server keeps encoded (decoded), as a server that keeps its rooms so
-// does without RoomView.Raw, or each sent as kept (raw, RoomView.Raw).
+// does without RoomView.Raw, or each sent as kept (raw, RoomView.Raw),
+// and its members too (allraw, RoomView.MembersRaw).
 func BenchmarkRoomListEncode(b *testing.B) {
 	for _, members := range []bool{false, true} {
 		name := "rooms"
@@ -40,10 +41,15 @@ func BenchmarkRoomListEncode(b *testing.B) {
 		}
 		r := roomList(members)
 		raws := make([]jsontext.Value, len(r.Joined))
+		memberRaws := make([][]jsontext.Value, len(r.Joined))
 		for i, v := range r.Joined {
 			raws[i], _ = apron.Marshal(v.Room)
+			for _, m := range v.Members {
+				raw, _ := apron.Marshal(m)
+				memberRaws[i] = append(memberRaws[i], raw)
+			}
 		}
-		for _, how := range []string{"typed", "decoded", "raw"} {
+		for _, how := range []string{"typed", "decoded", "raw", "allraw"} {
 			b.Run(name+"/"+how, func(b *testing.B) {
 				for b.Loop() {
 					result := r
@@ -57,10 +63,13 @@ func BenchmarkRoomListEncode(b *testing.B) {
 							}
 							result.Joined[i] = v
 						}
-					case "raw":
+					case "raw", "allraw":
 						result.Joined = make([]apron.RoomView, len(r.Joined))
 						for i, v := range r.Joined {
 							v.Room, v.Raw = apron.Room{}, raws[i]
+							if how == "allraw" && v.Members != nil {
+								v.Members, v.MembersRaw = nil, memberRaws[i]
+							}
 							result.Joined[i] = v
 						}
 					}

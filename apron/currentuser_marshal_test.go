@@ -97,3 +97,44 @@ func TestRoomViewRaw(t *testing.T) {
 		t.Error("a Raw that is no object")
 	}
 }
+
+// A room_list result with its members and users raw is the result with
+// them typed, the room raw or typed.
+func TestRoomListRaw(t *testing.T) {
+	h := LogID(1700000000000)
+	members := []CurrentUser{{User: User{UserID: "a", Status: "online"}}, {User: User{UserID: "b"}, Cleared: []string{"status"}}}
+	users := []CurrentUser{{User: User{UserID: "a", Name: "Ada", Roles: []string{"op"}, Status: "online"}}, {User: User{UserID: "b", Name: "B"}, Cleared: []string{"status", "roles"}}}
+	encode := func(us []CurrentUser) []jsontext.Value {
+		raw := make([]jsontext.Value, len(us))
+		for i, u := range us {
+			raw[i], _ = Marshal(u)
+		}
+		return raw
+	}
+	room := Room{RoomID: "general", LogID: 5, Title: "General"}
+	for _, typed := range []RoomListResult{
+		{Joined: []RoomView{{Room: room, LatestLogID: 9, HistoryLogID: &h, Members: members, MemberCount: 2}}, Users: users},
+		{Joined: []RoomView{{Room: room, Members: []CurrentUser{}}}, NotJoined: []RoomView{}, Users: []CurrentUser{}},
+	} {
+		want, err := Marshal(typed)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, rawRoom := range []bool{false, true} {
+			raw := typed
+			raw.Joined = slices.Clone(typed.Joined)
+			for i := range raw.Joined {
+				raw.Joined[i].MembersRaw, raw.Joined[i].Members = encode(raw.Joined[i].Members), nil
+				if rawRoom {
+					raw.Joined[i].Raw, _ = Marshal(raw.Joined[i].Room)
+					raw.Joined[i].Room = Room{}
+				}
+			}
+			raw.UsersRaw, raw.Users = encode(typed.Users), nil
+			got, err := Marshal(raw)
+			if err != nil || string(got) != string(want) {
+				t.Errorf("raw (room raw %v):\n got %s, %v\nwant %s", rawRoom, got, err, want)
+			}
+		}
+	}
+}
