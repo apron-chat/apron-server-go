@@ -755,41 +755,99 @@ func BenchmarkHistoryPageUnderWrites(b *testing.B) {
 		for i := range writers {
 			writers[i] = bs.guest()
 		}
-		stop := make(chan struct{})
-		var wg sync.WaitGroup
-		for _, w := range writers {
-			wg.Go(func() {
-				params := map[string]any{"body": map[string]any{"text": "written while others read"}}
-				for {
-					select {
-					case <-stop:
-						return
-					default:
-					}
-					w.call(b, "message", params)
-				}
-			})
-		}
 		var next atomic.Int64
-		runtime.GC()
-		b.ReportAllocs()
-		b.ResetTimer()
-		var readersDone sync.WaitGroup
-		for _, r := range readers {
-			readersDone.Go(func() {
-				for i := next.Add(1); i <= int64(b.N); i = next.Add(1) {
-					limit := 100
-					if i%2 == 0 {
-						limit = 1000
+		underWrites(b, writers, func() {
+			var readersDone sync.WaitGroup
+			for _, r := range readers {
+				readersDone.Go(func() {
+					for i := next.Add(1); i <= int64(b.N); i = next.Add(1) {
+						limit := 100
+						if i%2 == 0 {
+							limit = 1000
+						}
+						r.call(b, "history", map[string]any{"room_id": defaultRoomID, "limit": limit})
 					}
-					r.call(b, "history", map[string]any{"room_id": defaultRoomID, "limit": limit})
+				})
+			}
+			readersDone.Wait()
+		})
+	})
+}
+
+// underWrites runs the measured part of a benchmark while writers post to
+// general, one request in flight each, and reports how long a post took
+// meanwhile (writer-ns/post): what the benchmark's requests cost others
+// by the time they hold the server's lock.
+func underWrites(b *testing.B, writers []*benchClient, run func()) {
+	stop := make(chan struct{})
+	var measuring atomic.Bool
+	var posts, took atomic.Int64
+	var wg sync.WaitGroup
+	for _, w := range writers {
+		wg.Go(func() {
+			params := map[string]any{"body": map[string]any{"text": "written while others read"}}
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				start := time.Now()
+				w.call(b, "message", params)
+				if measuring.Load() {
+					posts.Add(1)
+					took.Add(int64(time.Since(start)))
+				}
+			}
+		})
+	}
+	runtime.GC()
+	b.ReportAllocs()
+	b.ResetTimer()
+	measuring.Store(true)
+	run()
+	measuring.Store(false)
+	b.StopTimer()
+	close(stop)
+	wg.Wait()
+	b.ReportMetric(float64(took.Load())/float64(max(1, posts.Load())), "writer-ns/post")
+}
+
+// BenchmarkRoomListUnderWrites lists rooms with their members, the joined
+// rooms of a member of rooms of many members, as clients do as they sign
+// in, while others post.
+func BenchmarkRoomListUnderWrites(b *testing.B) {
+	const rooms, members = 4, 500
+	bs := newBenchServer(b, Config{OutgoingQueue: 4096})
+	admin := bs.guest()
+	ids := make([]string, rooms)
+	for i := range ids {
+		ids[i] = stringField(admin.call(b, "room_set", map[string]any{"title": fmt.Sprintf("room %d", i)}), "room_id")
+	}
+	for i := range members {
+		bs.member(i, ids...)
+	}
+	listers := make([]*benchClient, 2)
+	for i := range listers {
+		_, token := bs.member(members+i, ids...)
+		listers[i] = bs.resume(token, true)
+	}
+	writers := make([]*benchClient, 2)
+	for i := range writers {
+		writers[i] = bs.guest()
+	}
+	params := map[string]any{"filter": "joined", "members": true}
+	var next atomic.Int64
+	underWrites(b, writers, func() {
+		var done sync.WaitGroup
+		for _, l := range listers {
+			done.Go(func() {
+				for next.Add(1) <= int64(b.N) {
+					l.call(b, "room_list", params)
 				}
 			})
 		}
-		readersDone.Wait()
-		b.StopTimer()
-		close(stop)
-		wg.Wait()
+		done.Wait()
 	})
 }
 
