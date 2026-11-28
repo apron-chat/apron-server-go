@@ -330,8 +330,9 @@ func TestForeignUnknownKidsFetchOnce(t *testing.T) {
 	}
 }
 
-// The server uses only the issuer's public signing keys, and no RSA key
-// under 2048 bits; Ed25519 keys verify EdDSA and Ed25519 tokens.
+// A token signed with an issuer's EC, RSA, or Ed25519 key verifies, and
+// Ed25519 keys verify EdDSA and Ed25519 tokens; which keys of a key set
+// are taken is TestSigningKey's.
 func TestForeignKeySet(t *testing.T) {
 	rsaKey := func(bits int) testKey {
 		key, err := rsa.GenerateKey(rand.Reader, bits)
@@ -342,16 +343,12 @@ func TestForeignKeySet(t *testing.T) {
 	}
 	public, private, _ := ed25519.GenerateKey(rand.Reader)
 	edKey := testKey{private, jose.EdDSA, jose.JSONWebKey{Key: public, KeyID: "k"}}
-	encryption := newTestKey(t, "k")
-	encryption.public.Use = "enc"
 	for name, test := range map[string]struct {
 		key testKey
 		ok  bool
 	}{
 		"EC P-256":    {newTestKey(t, "k"), true},
-		"EC, use enc": {encryption, false},
 		"RSA 2048":    {rsaKey(2048), true},
-		"RSA 1024":    {rsaKey(1024), false},
 		"Ed25519":     {edKey, true},
 		"Ed25519 alg": {testKey{private, algEd25519, edKey.public}, true},
 	} {

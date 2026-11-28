@@ -50,22 +50,20 @@ func TestApplyDefaults(t *testing.T) {
 	if err := ApplyDefaults(example{}); err == nil {
 		t.Fatal("applied defaults to a struct that is not a pointer")
 	}
-}
 
-// A pointer option is zero while nil: a pointer to zero is a value of its
-// own, which is kept.
-func TestApplyDefaultsToPointers(t *testing.T) {
+	// A pointer option is zero while nil: a pointer to zero is a value of
+	// its own, which is kept.
 	type pointers struct {
 		Limit *int           `long:"limit" default:"100"`
 		Every *time.Duration `long:"every" default:"1m"`
 	}
 	zero := 0
-	settings := pointers{Limit: &zero}
-	if err := ApplyDefaults(&settings); err != nil {
+	pointed := pointers{Limit: &zero}
+	if err := ApplyDefaults(&pointed); err != nil {
 		t.Fatal(err)
 	}
-	if settings.Limit != &zero || *settings.Limit != 0 || settings.Every == nil || *settings.Every != time.Minute {
-		t.Fatalf("limit %v, every %v", settings.Limit, settings.Every)
+	if pointed.Limit != &zero || *pointed.Limit != 0 || pointed.Every == nil || *pointed.Every != time.Minute {
+		t.Fatalf("limit %v, every %v", pointed.Limit, pointed.Every)
 	}
 }
 
